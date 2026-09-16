@@ -1,0 +1,5 @@
+id: intern
+label: Summer intern
+extends: base
+choices:
+  edu_neu.dates: v_dec2026

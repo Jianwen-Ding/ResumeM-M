@@ -1,0 +1,38 @@
+# Reusable answers to application questions, so the same question is never
+# written from scratch twice. The extension offers these when it recognises a
+# question on a form; variants let one answer have a short and a long form.
+- id: ans_why_interested
+  question: Why are you interested in this role?
+  default: v_generic
+  tags: [motivation]
+  variants:
+    - id: v_generic
+      label: Generic (edit per company)
+      text: >-
+        Replace this with your own answer. Keeping it here means the next
+        application starts from something you already wrote and liked, instead
+        of a blank box at 1am.
+
+- id: ans_sponsorship
+  question: Will you now or in the future require sponsorship for employment visa status?
+  default: v_no
+  tags: [logistics]
+  variants:
+    - id: v_no
+      label: No
+      text: "No"
+    - id: v_yes
+      label: Yes
+      text: "Yes"
+
+- id: ans_grad_date
+  question: What is your expected graduation date?
+  default: v_may2026
+  tags: [logistics]
+  variants:
+    - id: v_may2026
+      label: May 2026
+      text: May 2026
+    - id: v_dec2026
+      label: December 2026
+      text: December 2026

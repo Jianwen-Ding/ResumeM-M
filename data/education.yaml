@@ -1,0 +1,46 @@
+# Education entries. Note `dates`: one entry, two graduation dates, selected
+# per resume. This is the whole reason the variant system exists — switching
+# between new-grad and intern applications must not mean two copies of a file.
+- id: edu_neu
+  kind: education
+  title: Northeastern University
+  location: Boston, MA
+  subtitle:
+    default: v_bs_cs
+    variants:
+      - id: v_bs_cs
+        label: BS Computer Science
+        text: Bachelor of Science in Computer Science
+      - id: v_bs_cs_gpa
+        label: BS Computer Science + GPA
+        text: Bachelor of Science in Computer Science, GPA 3.8/4.0
+        tags: [gpa]
+        note: Use when the posting asks for GPA or is GPA-screened.
+  dates:
+    default: v_may2026
+    variants:
+      - id: v_may2026
+        label: May 2026 (new grad)
+        text: Sep. 2022 -- May 2026
+        tags: [newgrad]
+      - id: v_dec2026
+        label: Dec 2026 (intern)
+        text: Sep. 2022 -- Dec. 2026
+        tags: [intern]
+        note: Later date keeps intern eligibility for summer 2026.
+  bullets:
+    - id: b_edu_coursework
+      default: v_broad
+      variants:
+        - id: v_broad
+          label: Broad coursework
+          text: "**Relevant Coursework:** Algorithms, Object-Oriented Design, Computer Systems, Databases, Networks, Theory of Computation"
+          tags: [general]
+        - id: v_systems
+          label: Systems-leaning
+          text: "**Relevant Coursework:** Computer Systems, Operating Systems, Networks, Distributed Systems, Algorithms, Databases"
+          tags: [systems, backend, infrastructure]
+        - id: v_ml
+          label: ML-leaning
+          text: "**Relevant Coursework:** Machine Learning, Linear Algebra, Probability & Statistics, Algorithms, Data Mining"
+          tags: [ml, ai, data]

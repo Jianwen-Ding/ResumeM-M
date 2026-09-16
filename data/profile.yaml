@@ -1,0 +1,21 @@
+name: Jianwen Ding
+email: ding.jianw@northeastern.edu
+phone: (555) 555-5555
+linkedin: linkedin.com/in/your-handle
+github: github.com/Jianwen-Ding
+location: Boston, MA
+
+# Anything here is offered to the browser extension for form autofill, so the
+# same answer is never typed twice.
+autofill:
+  first_name: Jianwen
+  last_name: Ding
+  school: Northeastern University
+  degree: Bachelor of Science
+  major: Computer Science
+  gpa: "3.8"
+  work_authorization: "Authorized to work in the US"
+  requires_sponsorship: "No"
+  address_city: Boston
+  address_state: MA
+  address_country: United States

@@ -1,0 +1,32 @@
+{
+  "name": "resumem-m",
+  "version": "0.1.0",
+  "private": true,
+  "description": "YAML-backed resume store with per-bullet variants, Jake's-format rendering, strict one-page PDFs, and application tracking.",
+  "type": "module",
+  "bin": {
+    "rmm": "./bin/rmm.js"
+  },
+  "scripts": {
+    "dev": "tsx src/server/index.ts",
+    "serve": "tsx src/server/index.ts",
+    "rmm": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,21 @@
+latex:
+  # tectonic | latexmk | pdflatex. Leave unset to auto-detect in that order.
+  # tectonic is recommended: one binary, fetches its own packages.
+  engine:
+
+ai:
+  # The CLI to shell out to for feedback and tailoring. Whatever you have:
+  # claude, codex, agy, or any command that reads a prompt file.
+  command: claude
+  args: ["-p", "{prompt}"]
+  # Off by default. Turn on once you have confirmed the command above works;
+  # while off, the AI endpoints return the prompt they *would* have run.
+  enabled: false
+  timeoutMs: 180000
+
+git:
+  # Commit every change to data/ automatically, so the store has real history.
+  autoCommit: true
+
+output:
+  dir: out
