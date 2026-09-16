@@ -394,6 +394,16 @@ export interface StoreConfig {
     args: string[];
     /** When false, AI endpoints return the prompt instead of executing it. */
     enabled: boolean;
+    /**
+     * Let the AI look things up online while it works — what the company
+     * builds, what the team does, what was announced last month.
+     *
+     * Off by default, and its own switch rather than part of `enabled`,
+     * because it is a different decision: everything else here runs against
+     * text you supplied, and this is the one setting that lets the model go
+     * and read something you did not choose.
+     */
+    research?: boolean;
     timeoutMs: number;
   };
   git: {

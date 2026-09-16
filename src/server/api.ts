@@ -2,7 +2,7 @@ import express, { type Request, type Response, type Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { runAgent, extractJson, AgentError } from '../ai/agent.js';
+import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js';
 import {
   answerPrompt,
   bulletFeedbackPrompt,
@@ -12,12 +12,13 @@ import {
   tailorPrompt,
   type TailorContext,
 } from '../ai/prompts.js';
+import { AI_PRESETS } from '../ai/presets.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
-import { extractJob, jobPostingScore } from '../jobs/extract.js';
+import { classifyPage, extractJob, JOB_SHAPED, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
@@ -436,6 +437,13 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * The CLIs this knows how to drive, so the editor does not carry its own
+   * copy of a fact about three external programs — a preset fixed in one place
+   * and not the other is how a config ends up broken.
+   */
+  api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS })));
+
   api.put(
     '/config',
     handler(async (req, res) => {
@@ -846,6 +854,10 @@ export function createApi({ store, repo }: ApiDeps): Router {
     '/ai/tailor',
     handler(async (req, res) => {
       const { resumeId, job } = req.body as { resumeId: string; job: TailorContext };
+      // Without this, a missing `job` surfaced as "Cannot read properties of
+      // undefined (reading 'company')", which names nothing a caller can fix.
+      if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to tailor against');
+
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
       const result = await runAgent(data.config, tailorPrompt(data, resolved, job));
@@ -897,7 +909,9 @@ export function createApi({ store, repo }: ApiDeps): Router {
         coverLetterPrompt(data, resolved, job, prior),
       );
 
-      const body = result.executed ? result.output : '';
+      // Models sometimes introduce the letter before writing it. The letter
+      // starts at its salutation, so that is where it is taken from.
+      const body = result.executed ? trimToLetter(result.output) : '';
       let saved: CoverLetter | undefined;
       if (save && body.trim()) {
         saved = {
@@ -1027,18 +1041,34 @@ export function createApi({ store, repo }: ApiDeps): Router {
   api.post(
     '/extension/analyze',
     handler(async (req, res) => {
-      const { url, title, html, baseResumeId, useAi } = req.body as {
+      const { url, title, html, pages, baseResumeId, useAi } = req.body as {
         url?: string;
         title?: string;
-        html: string;
+        html?: string;
+        /** Every page of this application, oldest first. */
+        pages?: PageSource[];
         baseResumeId?: string;
         useAi?: boolean;
       };
-      if (!html) throw new Error('No page HTML supplied');
+
+      /*
+       * One application, however many pages it is spread across. The single
+       * page is the trail of length one: the description you read and the form
+       * you are filling in are usually two different pages on two different
+       * hosts, and writing a cover letter from whichever one happens to be
+       * open is why the letters came out thin.
+       */
+      const trail: PageSource[] = pages?.length ? pages : html ? [{ url, title, html }] : [];
+      if (trail.length === 0) throw new Error('No page HTML supplied');
 
       const data = store.load();
-      const job = extractJob(html, url, title);
-      const score = jobPostingScore(html, url);
+      const current = trail[trail.length - 1]!;
+      const job = mergeJobPages(trail);
+      // The verdict is about the page you are on; the description is about all
+      // of them. A form page is worth offering on even though it describes
+      // nothing, which is exactly the case a single score could not express.
+      const verdict = classifyPage(current.html, current.url);
+      const score = Math.max(verdict.score, ...trail.map((p) => classifyPage(p.html, p.url).score));
 
       const baseId = baseResumeId ?? defaultBaseId(data.resumes);
       if (!baseId) throw new Error('The store has no resumes to start from');
@@ -1113,9 +1143,14 @@ export function createApi({ store, repo }: ApiDeps): Router {
       }
 
       res.json({
-        isJobPosting: score >= 4,
+        isJobPosting: verdict.kind !== 'none' || score >= JOB_SHAPED,
         score,
+        kind: verdict.kind,
+        why: verdict.why,
         job,
+        // What each page contributed, so the card can show the trail and the
+        // user can drop a page that does not belong.
+        pages: job.pages,
         baseResumeId: baseId,
         baseLabel: base.label,
         spec,
@@ -1280,8 +1315,11 @@ export function createApi({ store, repo }: ApiDeps): Router {
       }
 
       const result = await buildBundle(store, body);
+      // The same files also go to the flat folder, which is the one a portal's
+      // file picker should be pointed at — the archive is for later.
+      const current = syncCurrent(store);
       if (autoCommit()) await repo.commitAll(`Apply: ${result.application.company} — ${result.application.role}`);
-      res.json(result);
+      res.json({ ...result, currentDir: current.dir });
     }),
   );
 
@@ -1576,7 +1614,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
               coverLetterPrompt(data, resolveResume(resumeId, data), job, prior),
             );
             if (agent.executed && agent.output.trim()) {
-              draft.coverLetter.body = agent.output.trim();
+              draft.coverLetter.body = trimToLetter(agent.output);
               notes.push('Cover letter drafted in your voice.');
             } else if (prior[0]) {
               draft.coverLetter.body = prior[0].body;
@@ -1713,7 +1751,14 @@ export function createApi({ store, repo }: ApiDeps): Router {
       }
 
       if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
-      res.json({ application: app, dir: result.dir, files: result.files, fits: result.fits, pages: result.pages });
+      res.json({
+        application: app,
+        dir: result.dir,
+        currentDir: syncCurrent(store).dir,
+        files: result.files,
+        fits: result.fits,
+        pages: result.pages,
+      });
     }),
   );
 

@@ -208,6 +208,42 @@ function clip(text: string, room: number): string {
   return clean.length > room ? `${clean.slice(0, room - 1).trimEnd()}…` : clean;
 }
 
+
+/**
+ * Permission to go and read about the company, and the line that must not be
+ * crossed with what comes back.
+ *
+ * Research is worth having: a letter that knows what the team actually ships
+ * reads differently from one that knows only the posting. But a model that has
+ * just read a company's marketing site is a model with a great deal of
+ * confident-sounding material to hand, and none of it is about the person
+ * applying. So what it finds may shape what of *their* experience is worth
+ * raising, and may be referred to as the company's, and may never become a
+ * claim about them.
+ */
+function mayLookThingsUp(data: StoreData, job?: { company?: string; jobTitle?: string }): string {
+  if (!data.config?.ai?.research) return '';
+
+  return [
+    '## You may look things up',
+    '',
+    `Read about ${job?.company ?? 'the company'} before you write: what they build, who`,
+    'it is for, how they describe themselves, anything they have announced recently.',
+    'The posting is the advertisement; the rest of the internet is how the place',
+    'actually talks about itself, and matching that is worth more than matching the',
+    'advertisement.',
+    '',
+    'Hard limits on anything you find:',
+    '- It never becomes a claim about this person. Nothing they did not do, nowhere',
+    '  they did not work, nothing they did not use.',
+    '- Do not name a fact you are unsure of. A letter that gets the product wrong is',
+    '  worse than one that never mentions it.',
+    '- Do not pad with what you read. One specific, correct sentence about the',
+    '  company beats a paragraph of their own copy repeated back to them.',
+    '',
+  ].join('\n');
+}
+
 /** The LaTeX and the fit report, so layout advice is about the real page. */
 function compiledEvidence(tex?: string, fit?: FeedbackContext['fit']): string {
   if (!tex && !fit) return '';
@@ -381,6 +417,7 @@ export function coverLetterPrompt(
     'Ground every claim in the resume; do not introduce experience that is not there.',
     'Three or four short paragraphs. No "I am writing to express my interest". No restating the resume line by line.',
     '',
+    mayLookThingsUp(data, { company: job.company, jobTitle: job.jobTitle }),
     // Their own letters and answers, in full. A letter that has to be written
     // from nothing every time drifts; one that starts from what was already
     // said well stays recognisably the same person.
@@ -417,6 +454,7 @@ export function answerPrompt(data: StoreData, question: string, job?: TailorCont
     'A cover letter below may already say it better than any of the answers do; take it from there if so.',
     'Keep it to the length the question implies. No filler.',
     '',
+    mayLookThingsUp(data, { company: job?.company, jobTitle: job?.jobTitle }),
     // The closest questions first, and the letters that went with this kind of
     // posting — the same material either way, ranked for this question.
     priorWork(data, { question, job: { company: job?.company, role: job?.jobTitle } }),

@@ -60,7 +60,13 @@ export async function startServer(opts: ServerOptions = {}) {
       ok: true,
       service: 'resumem-m',
       dataDir,
-      ai: { enabled: ai.enabled, command: ai.command },
+      ai: {
+        enabled: ai.enabled,
+        command: ai.command,
+        // Whether there is anything to turn on. "Off" and "not set up yet"
+        // need different words and a different button.
+        configured: Boolean(ai.command?.trim()),
+      },
     });
   });
 

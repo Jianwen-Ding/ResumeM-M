@@ -212,10 +212,20 @@ describe('master document', () => {
     expect(bullets.some((b) => b.text.includes('Operating Systems, Networks'))).toBe(true);
   });
 
-  it('marks which phrasing is the default', () => {
+  it('marks which phrasing is the default, by its label rather than its key', () => {
     const master = buildMaster(store([base]));
     const bullets = master.sections.flatMap((s) => s.entries.flatMap((e) => e.bullets));
-    expect(bullets.find((b) => b.variantId === 'v_broad')?.text).toMatch(/\(default\)/);
+    const line = bullets.find((b) => b.variantId === 'v_broad')?.text ?? '';
+    expect(line).toMatch(/\(default\)/);
+    expect(line).toContain('Broad');
+    expect(line).not.toContain('v_broad');
+  });
+
+  it('names a heading field the way the editor names it', () => {
+    const master = buildMaster(store([base]));
+    const lines = master.sections.flatMap((s) => s.entries.flatMap((e) => e.bullets)).map((b) => b.text);
+    expect(lines.some((l) => l.includes('*Dates*'))).toBe(true);
+    expect(lines.some((l) => l.includes('edu_neu.dates'))).toBe(false);
   });
 
   it('lifts the page limit, since it is an inventory and not a resume', () => {
@@ -291,13 +301,16 @@ describe('list bullets', () => {
     expect(r.sections[0]?.entries[0]?.bullets[0]?.text).toBe('**Coursework:** Algorithms');
   });
 
-  it('shows every item in the master document, with its id', () => {
+  it('shows every item in the master document, named as a reader would name it', () => {
     const master = buildMaster(listStore([listBase]));
     const text = master.sections
       .flatMap((s) => s.entries.flatMap((e) => e.bullets))
       .map((b) => b.text)
       .join(' ');
-    expect(text).toContain('Algorithms [c_a]');
-    expect(text).toContain('(list)');
+    expect(text).toContain('Algorithms');
+    expect(text).toContain('every item on this list');
+    // The store's keys stopped appearing in the interface; this was the last
+    // place they showed, and an inventory of text is what it is for.
+    expect(text).not.toContain('[c_a]');
   });
 });

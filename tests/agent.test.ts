@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AgentError, extractJson, runAgent } from '../src/ai/agent.js';
+import { AgentError, extractJson, runAgent, trimToLetter } from '../src/ai/agent.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 import { repairAiArgs } from '../src/model/store.js';
 
@@ -264,5 +264,41 @@ describe('repairing an AI command that cannot work', () => {
     ] as [string, string[]][]) {
       expect(repairAiArgs(command, args)).toBe(args);
     }
+  });
+});
+
+describe('taking the letter out of what the model wrapped it in', () => {
+  const LETTER = 'Dear Anthropic,\n\nClaude runs at a scale where a slow join shows up for someone.\n\nSincerely,\nJianwen';
+
+  it('leaves a letter that starts where it should', () => {
+    expect(trimToLetter(LETTER)).toBe(LETTER);
+  });
+
+  it('drops the sentence the model wrote before starting', () => {
+    // Observed from a real run: the rules say no preamble, and mostly that
+    // holds — "mostly" is not a contract, and the failure is visible.
+    const chatty = `I have grounded this only in the resume. Here is the draft:\n\n---\n\n${LETTER}`;
+    expect(trimToLetter(chatty)).toBe(LETTER);
+  });
+
+  it('keeps whatever the model added at the end', () => {
+    // Trimming the tail risks cutting a real sign-off, and a stray line at the
+    // bottom is visible where a missing signature is not.
+    const trailing = `${LETTER}\n\nLet me know if you would like it shorter.`;
+    expect(trimToLetter(trailing)).toContain('Let me know');
+  });
+
+  it('leaves alone a reply with no salutation to find', () => {
+    expect(trimToLetter('I would rather not write that.')).toBe('I would rather not write that.');
+  });
+
+  it('does not cut into a letter that quotes a salutation later on', () => {
+    const quoting = ['Some notes first.', '', ...Array(20).fill('A line of prose.'), 'Dear reader,'].join('\n');
+    expect(trimToLetter(quoting)).toContain('Some notes first.');
+  });
+
+  it('handles the salutations people actually use', () => {
+    expect(trimToLetter('Here you go:\n\nHi there,\n\nBody.')).toBe('Hi there,\n\nBody.');
+    expect(trimToLetter('Draft:\n\nTo whom it may concern\n\nBody.')).toContain('To whom it may concern');
   });
 });

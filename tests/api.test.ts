@@ -995,6 +995,30 @@ describe('adding files to the corpus', () => {
   });
 });
 
+describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, () => {
+  it('hands back the flat folder alongside the archive it just wrote', async () => {
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+
+    // The archive is one folder per application; the flat one is where a
+    // portal's file picker should be pointed.
+    expect(res.body.dir).toContain('applications/');
+    expect(res.body.currentDir).toMatch(/current$/);
+    expect(res.body.currentDir).not.toContain('applications/');
+    expect(fs.existsSync(path.join(res.body.currentDir, 'Test Person Resume Streamly.pdf'))).toBe(true);
+  });
+});
+
+describe('asking for something impossible', () => {
+  it('says what is missing rather than reporting an undefined property', async () => {
+    const res = await request(app).post('/api/ai/tailor').send({ resumeId: 'newgrad' }).expect(400);
+    expect(res.body.error).toMatch(/job description/i);
+    expect(res.body.error).not.toMatch(/undefined/);
+  });
+});
+
 describe('pinning', () => {
   it('pins an alternate on a bullet as the one everything falls back to', async () => {
     const res = await request(app)

@@ -172,22 +172,214 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
 }
 
 /**
- * Cheap confidence that a page is a job posting at all, so the extension can
- * stay quiet on the other 99% of the web.
+ * What kind of page this is, as far as applying for a job is concerned.
+ *
+ * "Is this a job posting" was too narrow a question. An application form often
+ * carries almost no description — it is the page after the one you read — and
+ * a board or a "who is hiring" thread is a job page too, in the sense that
+ * matters: you are about to apply, and the tool should be there. So the
+ * question became what kind of page it is, and the answer names all four.
+ */
+export type PageKind = 'posting' | 'application' | 'listing' | 'discussion' | 'none';
+
+export interface PageVerdict {
+  kind: PageKind;
+  /** Confidence, roughly comparable across kinds. */
+  score: number;
+  /** What the decision was made on, so a wrong one can be understood. */
+  why: string[];
+}
+
+const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|successfactors|brassring)\b/i;
+const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y|ies)|apply|application|hiring|req|requisition)(\/|$|[?#])/i;
+const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
+const FORUM = /\b(news\.ycombinator|reddit|lobste\.rs|discourse|forum|stackexchange|quora|levels\.fyi|blind)\b/i;
+
+/** Words that show up in the body of a posting, whatever the board. */
+const DESCRIPTION_WORDS = [
+  'apply now', 'job description', 'responsibilities', 'qualifications',
+  "what you'll do", 'what you will do', 'minimum qualifications', 'preferred qualifications',
+  'equal opportunity employer', 'submit application', 'years of experience',
+  'about the role', 'the role', 'we are looking for', "we're looking for", 'join our team',
+  'requirements', 'nice to have', 'benefits', 'compensation', 'salary range', 'base salary',
+  'full-time', 'part-time', 'internship', 'intern', 'new grad', 'entry level',
+  'employment type', 'job id', 'requisition', 'hybrid', 'remote', 'on-site', 'onsite',
+  'who you are', 'what we offer', 'your impact', 'day to day',
+];
+
+/** Words that mean a form is in front of you, not a description. */
+const FORM_WORDS = [
+  'upload your resume', 'attach your resume', 'attach resume', 'upload resume', 'upload cv',
+  'cover letter', 'first name', 'last name', 'phone number', 'linkedin profile',
+  'work authorization', 'require sponsorship', 'voluntary self-identification',
+  'submit application', 'application form', 'why do you want', 'tell us about',
+];
+
+/** Words that mean a list of postings rather than one. */
+const LISTING_WORDS = [
+  'open positions', 'open roles', 'all jobs', 'job openings', 'search jobs', 'filter by',
+  'results found', 'jobs found', 'sort by', 'view all openings', 'browse jobs',
+];
+
+/** Pages that look busy but are not about a job at all. */
+const AGAINST = [
+  'add to cart', 'checkout', 'privacy policy', 'terms of service', 'cookie preferences',
+  'page not found', 'sign in to continue', 'subscribe to our newsletter',
+];
+
+const countIn = (text: string, words: string[]): number => words.filter((w) => text.includes(w)).length;
+
+/**
+ * Classify a page. Cheap on purpose: string tests over the HTML and the
+ * stripped text, no parsing, because this runs on pages that are not job pages
+ * far more often than on ones that are.
+ */
+export function classifyPage(html: string, url?: string): PageVerdict {
+  const why: string[] = [];
+  const text = stripTags(html).toLowerCase().slice(0, 120_000);
+  const link = (url ?? '').toLowerCase();
+
+  let score = 0;
+  const add = (n: number, reason: string) => {
+    score += n;
+    why.push(reason);
+  };
+
+  if (/"@type"\s*:\s*"?JobPosting/i.test(html)) add(6, 'structured JobPosting data');
+  if (ATS.test(link)) add(4, 'applicant tracking system');
+  if (BOARD.test(link)) add(3, 'job board');
+  if (JOB_PATH.test(link)) add(2, 'job-shaped address');
+  if (companyFromUrl(url)) add(2, 'company careers page');
+
+  const described = countIn(text, DESCRIPTION_WORDS);
+  const formish = countIn(text, FORM_WORDS);
+  const listish = countIn(text, LISTING_WORDS);
+
+  // Each family is capped: a page that repeats one word fifty times is not
+  // fifty times more likely to be a posting.
+  if (described > 0) add(Math.min(described, 5), `${described} words a posting uses`);
+  if (formish > 0) add(Math.min(formish, 4), `${formish} words a form uses`);
+  if (listish > 0) add(Math.min(listish, 3), `${listish} words a list of roles uses`);
+
+  // A file input beside the word résumé is the clearest application-form
+  // signal there is, and it costs one regex.
+  const uploadsResume = /<input[^>]+type=["']?file/i.test(html) && /\b(resum|cv)\b/i.test(text);
+  if (uploadsResume) add(3, 'asks for a resume file');
+
+  const forumHiring = FORUM.test(link) && /\b(hiring|who is hiring|looking for|we are hiring)\b/i.test(text);
+  if (forumHiring) add(3, 'a hiring thread');
+
+  const against = countIn(text, AGAINST);
+  if (against > 0) add(-Math.min(against * 2, 6), 'looks like an ordinary page');
+
+  // Which kind, in the order that decides what the tool should offer. A form
+  // wins over a description, because the form is what you are about to fill
+  // in — and a page that is both is still, at this moment, the form.
+  let kind: PageKind = 'none';
+  if (formish >= 3 || uploadsResume) kind = 'application';
+  else if (described >= 3 || /"@type"\s*:\s*"?JobPosting/i.test(html)) kind = 'posting';
+  else if (listish >= 2) kind = 'listing';
+  else if (forumHiring) kind = 'discussion';
+  else if (score >= JOB_SHAPED) kind = 'posting';
+
+  if (score < JOB_SHAPED) kind = 'none';
+  return { kind, score, why };
+}
+
+/**
+ * The bar for saying anything at all.
+ *
+ * Deliberately low. The cost of offering on a page that turns out not to be a
+ * job is a card in the corner that gets dismissed; the cost of staying quiet
+ * on one that is, is the whole tool not being there when it was needed. The
+ * signals above are what keep that from meaning "every page".
+ */
+export const JOB_SHAPED = 3;
+
+/**
+ * Cheap confidence that a page is a job posting at all. Kept as the number,
+ * because callers compare it to a threshold.
  */
 export function jobPostingScore(html: string, url?: string): number {
-  let score = 0;
-  if (/"@type"\s*:\s*"?JobPosting/i.test(html)) score += 6;
-  if (companyFromUrl(url)) score += 3;
-  if (/\b(greenhouse|lever|workday|ashby|workable|smartrecruiters|icims|taleo)\b/i.test(url ?? '')) score += 2;
+  return classifyPage(html, url).score;
+}
 
-  const text = stripTags(html).toLowerCase();
-  const signals = [
-    'apply now', 'job description', 'responsibilities', 'qualifications',
-    'what you\'ll do', 'minimum qualifications', 'preferred qualifications',
-    'equal opportunity employer', 'submit application', 'years of experience',
-  ];
-  for (const s of signals) if (text.includes(s)) score += 1;
+/* ------------------------------------------------------------------ *
+ * One application, several pages                                      *
+ * ------------------------------------------------------------------ */
 
-  return score;
+/** One page visited while applying, as the extension sends it. */
+export interface PageSource {
+  url?: string;
+  title?: string;
+  html: string;
+}
+
+export interface MergedJob extends ExtractedJob {
+  /** What each page contributed, newest last, for the UI to show and prune. */
+  pages: { url?: string; title?: string; kind: PageKind; chars: number }[];
+}
+
+/**
+ * Read one application off the pages it is spread across.
+ *
+ * An application is rarely one page. You read the description on a careers
+ * site, follow "Apply" to a form on a different host, and the form is where
+ * the cover letter and the essay questions actually are — by which point the
+ * description that would answer them is on the page you just left. Writing
+ * from whichever page happens to be open is why the answers come out thin.
+ *
+ * So the pages are kept and read together. The most descriptive page decides
+ * the title and company; every page contributes its text, in the order they
+ * were visited, each under a heading saying where it came from. Nothing is
+ * deduplicated cleverly: an application form that repeats the description is
+ * repeating what the model would have wanted twice, which costs a little
+ * budget and confuses nothing.
+ */
+export function mergeJobPages(pages: PageSource[]): MergedJob {
+  const read = pages
+    .filter((p) => p?.html?.trim())
+    .map((p) => ({
+      page: p,
+      verdict: classifyPage(p.html, p.url),
+      job: extractJob(p.html, p.url, p.title),
+    }));
+
+  if (read.length === 0) {
+    return { description: '', source: 'heuristic', keywords: [], pages: [] };
+  }
+
+  // The page that best describes the role names it. A form page knows the
+  // company and often not much else, so length decides among equals.
+  const describing = [...read].sort((a, b) => {
+    const rank = (k: PageKind) => (k === 'posting' ? 2 : k === 'discussion' ? 1 : 0);
+    return rank(b.verdict.kind) - rank(a.verdict.kind) || b.job.description.length - a.job.description.length;
+  });
+  const best = describing[0]!;
+
+  const sections: string[] = [];
+  for (const { page, verdict, job } of read) {
+    const text = job.description.trim();
+    if (!text) continue;
+    const where = page.title?.trim() || page.url || 'A page';
+    sections.push(`## ${where} (${verdict.kind})\n${page.url ?? ''}\n\n${text}`);
+  }
+
+  const description = (sections.length > 1 ? sections.join('\n\n') : (read[0]?.job.description ?? '')).slice(0, 60_000);
+
+  return {
+    // Fields come from whichever page actually knew them, not from the last one.
+    title: read.map((r) => r.job.title).find(Boolean),
+    company: read.map((r) => r.job.company).find(Boolean),
+    location: read.map((r) => r.job.location).find(Boolean),
+    description,
+    source: best.job.source,
+    keywords: extractKeywords(description),
+    pages: read.map(({ page, verdict, job }) => ({
+      url: page.url,
+      title: page.title,
+      kind: verdict.kind,
+      chars: job.description.length,
+    })),
+  };
 }

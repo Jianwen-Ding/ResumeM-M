@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { companyFromUrl, extractJob, extractKeywords, jobPostingScore } from '../src/jobs/extract.js';
+import {
+  classifyPage,
+  companyFromUrl,
+  extractJob,
+  extractKeywords,
+  JOB_SHAPED,
+  jobPostingScore,
+  mergeJobPages,
+} from '../src/jobs/extract.js';
 import { matchVariants } from '../src/jobs/match.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
 
@@ -176,5 +184,133 @@ describe('variant matching', () => {
     const loose = matchVariants(data, base, { keywords: ['kafka'] });
     const strict = matchVariants(data, base, { keywords: ['kafka'], threshold: 99 });
     expect(Object.keys(strict.choices).length).toBeLessThanOrEqual(Object.keys(loose.choices).length);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * What kind of page is this                                           *
+ * ------------------------------------------------------------------ */
+
+const APPLICATION_FORM = `<html><head><title>Apply — Streamly</title></head><body>
+<h1>Submit application</h1>
+<form>
+  <label>First name<input name="first"></label>
+  <label>Last name<input name="last"></label>
+  <label>Phone number<input name="phone"></label>
+  <label>Resume<input type="file" name="resume"></label>
+  <label>Cover letter<textarea name="cover"></textarea></label>
+  <label>Why do you want to work here?<textarea></textarea></label>
+  <label>Will you now or in the future require sponsorship?<select></select></label>
+</form></body></html>`;
+
+const LISTING = `<html><head><title>Careers at Streamly</title></head><body>
+<h1>Open positions</h1><p>12 results found. Filter by team, sort by date.</p>
+<ul><li><a href="/jobs/1">Backend Engineer</a></li><li><a href="/jobs/2">Designer</a></li></ul>
+</body></html>`;
+
+const FORUM = `<html><head><title>Ask HN: Who is hiring? (September 2026)</title></head><body>
+<p>Streamly | Boston | Full-time | We are hiring a backend engineer. Kafka, Go.</p>
+</body></html>`;
+
+const SHOP = `<html><head><title>Sourdough starter</title></head><body>
+<h1>Sourdough starter</h1><p>Add to cart. Checkout. See our privacy policy and terms of service.</p>
+</body></html>`;
+
+describe('what kind of page this is', () => {
+  it('knows a posting from its structured data', () => {
+    const v = classifyPage(JSON_LD_PAGE, 'https://boards.greenhouse.io/streamly/jobs/1');
+    expect(v.kind).toBe('posting');
+    expect(v.why.join(' ')).toContain('structured JobPosting');
+  });
+
+  it('knows an application form, which describes almost nothing', () => {
+    const v = classifyPage(APPLICATION_FORM, 'https://jobs.lever.co/streamly/abc/apply');
+    expect(v.kind).toBe('application');
+    expect(v.score).toBeGreaterThanOrEqual(JOB_SHAPED);
+  });
+
+  it('knows a page listing roles from a page describing one', () => {
+    expect(classifyPage(LISTING, 'https://streamly.com/careers').kind).toBe('listing');
+  });
+
+  it('knows a hiring thread on a forum', () => {
+    expect(classifyPage(FORUM, 'https://news.ycombinator.com/item?id=1').kind).toBe('discussion');
+  });
+
+  it('stays quiet on an ordinary page', () => {
+    const v = classifyPage(SHOP, 'https://shop.example.com/starter');
+    expect(v.kind).toBe('none');
+    expect(v.score).toBeLessThan(JOB_SHAPED);
+  });
+
+  it('stays quiet on a blog post that merely mentions work', () => {
+    const blog = '<html><body><h1>Bread</h1><p>Sourdough notes from my kitchen.</p></body></html>';
+    expect(classifyPage(blog, 'https://blog.example.com/bread').kind).toBe('none');
+  });
+
+  it('offers on a bare careers URL with little text, rather than missing it', () => {
+    // The page a careers site renders before its JavaScript arrives.
+    const thin = '<html><head><title>Backend Engineer</title></head><body><p>Apply now</p></body></html>';
+    const v = classifyPage(thin, 'https://jobs.ashbyhq.com/streamly/apply');
+    expect(v.kind).not.toBe('none');
+  });
+
+  it('says what it decided on, so a wrong call can be understood', () => {
+    expect(classifyPage(APPLICATION_FORM, 'https://jobs.lever.co/x/apply').why.join(' ')).toMatch(/resume file|form/);
+  });
+});
+
+describe('one application across several pages', () => {
+  const DESCRIPTION = JSON_LD_PAGE;
+
+  it('reads a single page exactly as it always did', () => {
+    const merged = mergeJobPages([{ url: 'https://boards.greenhouse.io/streamly/jobs/1', html: DESCRIPTION }]);
+    const alone = extractJob(DESCRIPTION, 'https://boards.greenhouse.io/streamly/jobs/1');
+    expect(merged.description).toBe(alone.description);
+    expect(merged.pages).toHaveLength(1);
+  });
+
+  it('carries the description forward to the form, where the questions are', () => {
+    const merged = mergeJobPages([
+      { url: 'https://boards.greenhouse.io/streamly/jobs/1', title: 'Data Platform Intern', html: DESCRIPTION },
+      { url: 'https://jobs.lever.co/streamly/abc/apply', title: 'Apply — Streamly', html: APPLICATION_FORM },
+    ]);
+
+    // The thing the form page could never have said on its own.
+    expect(merged.description).toContain('Kafka');
+    // And the thing only the form knows.
+    expect(merged.description).toContain('Why do you want to work here?');
+    expect(merged.pages.map((p) => p.kind)).toEqual(['posting', 'application']);
+  });
+
+  it('takes the role and company from whichever page knew them', () => {
+    const merged = mergeJobPages([
+      { url: 'https://jobs.lever.co/streamly/abc/apply', html: APPLICATION_FORM },
+      { url: 'https://boards.greenhouse.io/streamly/jobs/1', html: DESCRIPTION },
+    ]);
+    expect(merged.company).toBe('Streamly');
+    expect(merged.title).toBeTruthy();
+  });
+
+  it('keeps the keywords of everything read, not just the last page', () => {
+    const merged = mergeJobPages([
+      { url: 'https://boards.greenhouse.io/streamly/jobs/1', html: DESCRIPTION },
+      { url: 'https://jobs.lever.co/streamly/abc/apply', html: APPLICATION_FORM },
+    ]);
+    expect(merged.keywords).toContain('kafka');
+  });
+
+  it('labels each page, so the trail can be shown and pruned', () => {
+    const merged = mergeJobPages([
+      { url: 'https://boards.greenhouse.io/streamly/jobs/1', title: 'The role', html: DESCRIPTION },
+      { url: 'https://jobs.lever.co/streamly/abc/apply', title: 'Apply', html: APPLICATION_FORM },
+    ]);
+    expect(merged.pages[0]).toMatchObject({ title: 'The role', kind: 'posting' });
+    expect(merged.pages[1]?.chars).toBeGreaterThan(0);
+  });
+
+  it('is unbothered by an empty trail, or one full of blanks', () => {
+    expect(mergeJobPages([]).description).toBe('');
+    expect(mergeJobPages([{ html: '   ' }]).pages).toEqual([]);
   });
 });

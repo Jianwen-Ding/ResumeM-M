@@ -1934,9 +1934,13 @@ async function loadApplications() {
       el('span', { className: 'mono-path', textContent: current?.dir ?? '' }),
       el('span', {
         className: 'hint',
+        // An empty folder with applications in flight is a different fact from
+        // an empty folder with nothing in flight, and the useful one to say.
         textContent: current?.files?.length
           ? `${plural(current.files.length, 'file')} from ${plural(current.applications, 'application')} still being sent.`
-          : 'Empty — nothing is mid-application.',
+          : current?.inFlight
+            ? `Empty — ${plural(current.inFlight, 'application')} in flight, none with a built folder yet.`
+            : 'Empty — nothing is mid-application.',
       }),
     );
   }
@@ -2860,6 +2864,10 @@ function wireVoiceDrop() {
 
   const open = () => input.click();
   zone.onclick = open;
+  // The toolbar button opens the same picker. Dropping is the gesture this is
+  // built around, but a button is what people look for first.
+  const button = $('#btn-add-files');
+  if (button) button.onclick = open;
   zone.onkeydown = (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -3104,37 +3112,20 @@ async function editSample(sample) {
  * directory, so even a CLI with no flags of its own cannot reach your files;
  * these flags are the second lock, not the only one.
  */
-const AI_PRESETS = [
-  {
-    label: 'Claude Code',
-    command: 'claude',
-    // No tools at all, and the only directory it knows about is the scratch one.
-    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch', '{prompt}'],
-  },
-  {
-    label: 'Codex CLI',
-    command: 'codex',
-    // Codex takes a sandbox mode directly; read-only is the strictest.
-    // --skip-git-repo-check because the scratch directory is deliberately not a
-    // repository: Codex otherwise refuses to start, since it assumes you want
-    // version control before it touches anything. Nothing here is touched.
-    args: [
-      'exec',
-      '--sandbox',
-      'read-only',
-      '--skip-git-repo-check',
-      '--cd',
-      '{sandbox}',
-      '{promptText}',
-    ],
-  },
-  {
-    label: 'Gemini CLI',
-    command: 'gemini',
-    args: ['-p', '{promptText}'],
-  },
-  { label: 'Custom…', command: '', args: [] },
-];
+/**
+ * The CLIs this knows how to drive. Fetched rather than hard-coded here: they
+ * are a fact about three external programs, and a preset fixed on the server
+ * but not in this file is how a config ends up broken.
+ */
+let AI_PRESETS = [];
+const CUSTOM_PRESET = { label: 'Custom…', command: '', args: [], note: '' };
+
+async function loadAiPresets() {
+  if (AI_PRESETS.length > 0) return AI_PRESETS;
+  const { presets } = await api('/ai/presets').catch(() => ({ presets: [] }));
+  AI_PRESETS = [...presets, CUSTOM_PRESET];
+  return AI_PRESETS;
+}
 
 /** Where the store lives, and whether it is backed up anywhere. */
 async function loadStoreSettings() {
@@ -3273,7 +3264,56 @@ async function loadSettings() {
       note ? el('div', { className: 'hint', textContent: note }) : null,
     ]);
 
+  await loadAiPresets();
+
+  /*
+   * The one switch that matters takes effect the moment it is flipped.
+   *
+   * It used to need the Save button below it, like the command and the
+   * arguments — so ticking it and walking away left the AI off, with nothing
+   * saying so. The command needs saving because a half-typed command is not a
+   * command; a checkbox is never half-ticked.
+   */
   const enabled = el('input', { type: 'checkbox', checked: config.ai.enabled });
+  const aiState = el('span', { className: 'chip' });
+
+  const showAiState = (on) => {
+    aiState.textContent = on ? `On — ${config.ai.command || 'no command set'}` : 'Off';
+    aiState.className = `chip ai-state ${on ? 'on' : 'off'}`;
+  };
+  showAiState(config.ai.enabled);
+
+  /*
+   * Looking things up is its own decision, not part of "use the AI".
+   * Everything else here runs against text the user supplied; this is the one
+   * setting that lets the model go and read something they did not choose.
+   */
+  const research = el('input', { type: 'checkbox', checked: Boolean(config.ai.research) });
+  research.onchange = async () => {
+    try {
+      await api('/config', { method: 'PUT', body: JSON.stringify({ ai: { research: research.checked } }) });
+      setStatus(
+        research.checked
+          ? 'The AI may look up the company while it writes'
+          : 'The AI works only from what you gave it',
+      );
+      loadSettings();
+    } catch (err) {
+      research.checked = !research.checked;
+      setStatus(err.message, true);
+    }
+  };
+
+  enabled.onchange = async () => {
+    try {
+      await api('/config', { method: 'PUT', body: JSON.stringify({ ai: { enabled: enabled.checked } }) });
+      showAiState(enabled.checked);
+      setStatus(enabled.checked ? 'AI on — it will run your command' : 'AI off — every action hands you the prompt');
+    } catch (err) {
+      enabled.checked = !enabled.checked;
+      setStatus(err.message, true);
+    }
+  };
   const command = el('input', { type: 'text', value: config.ai.command });
   const args = el('input', { type: 'text', value: (config.ai.args ?? []).join(' ') });
   const timeout = el('input', { type: 'text', value: String(Math.round(config.ai.timeoutMs / 1000)) });
@@ -3281,11 +3321,18 @@ async function loadSettings() {
   const preset = el('select');
   for (const p of AI_PRESETS) preset.append(el('option', { value: p.label, textContent: p.label }));
   const matching = AI_PRESETS.find(
-    (p) => p.command === config.ai.command && p.args.join(' ') === (config.ai.args ?? []).join(' '),
+    (p) => p.label !== 'Custom…' && p.command === config.ai.command && p.args.join(' ') === (config.ai.args ?? []).join(' '),
   );
   preset.value = matching?.label ?? 'Custom…';
+  const presetNote = el('div', { className: 'hint' });
+  const showPresetNote = () => {
+    presetNote.textContent = AI_PRESETS.find((p) => p.label === preset.value)?.note ?? '';
+  };
+  showPresetNote();
+
   preset.onchange = () => {
     const chosen = AI_PRESETS.find((p) => p.label === preset.value);
+    showPresetNote();
     if (!chosen || chosen.label === 'Custom…') return;
     command.value = chosen.command;
     args.value = chosen.args.join(' ');
@@ -3323,14 +3370,23 @@ async function loadSettings() {
 
   setChildren(
     box,
-    el('label', { className: 'check', style: 'margin-bottom:12px' }, [
-      enabled,
-      el('span', {}, 'Let the tool run the AI command'),
+    el('div', { className: 'ai-switch' }, [
+      el('label', { className: 'check' }, [enabled, el('span', {}, 'Let the tool run the AI command')]),
+      aiState,
     ]),
+    el('label', { className: 'check', style: 'margin-bottom:6px' }, [
+      research,
+      el('span', {}, 'Let it look up the company online'),
+    ]),
+    el('div', { className: 'hint', style: 'margin-bottom:12px' },
+      config.ai.research
+        ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
+        : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.'),
     config.overrides.ai
       ? el('div', { className: 'override', textContent: 'RMM_AI=0 is set, so the AI stays off whatever this says.' })
       : null,
     field('Preset', preset),
+    presetNote,
     field('Command', command, 'Must be on your PATH.'),
     field(
       'Arguments',
@@ -3827,11 +3883,22 @@ function showTab(name) {
  * that wants an essay moves from the browser to the editor in one click.
  */
 async function applyHash() {
-  const m = /^#workspace\/(.+)$/.exec(location.hash);
-  if (!m) return false;
-  showTab('workspace');
-  await openDraft(decodeURIComponent(m[1]));
-  return true;
+  const draft = /^#workspace\/(.+)$/.exec(location.hash);
+  if (draft) {
+    showTab('workspace');
+    await openDraft(decodeURIComponent(draft[1]));
+    return true;
+  }
+
+  // A bare `#voice` or `#applications` opens that tab. The extension links
+  // here when it needs to send someone to a setting, and a link that lands on
+  // the wrong tab is worse than no link.
+  const tab = /^#([a-z]+)$/.exec(location.hash)?.[1];
+  if (tab && document.querySelector(`#tabs button[data-tab="${tab}"]`)) {
+    showTab(tab);
+    return true;
+  }
+  return false;
 }
 
 function setupTabs() {
@@ -3912,6 +3979,16 @@ async function boot() {
 
   $('#btn-add-app').onclick = addApplication;
   $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
+  // The extension writes drafts from another tab, so there is something to
+  // refresh to — this list is not only changed from here.
+  $('#btn-refresh-drafts').onclick = async () => {
+    try {
+      await loadDrafts();
+      setStatus('Up to date');
+    } catch (e) {
+      setStatus(e.message, true);
+    }
+  };
   $('#btn-add-letter').onclick = addLetter;
   $('#btn-add-answer').onclick = addAnswer;
   $('#btn-master').onclick = async () => {

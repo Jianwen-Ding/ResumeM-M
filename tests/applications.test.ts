@@ -234,6 +234,18 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     expect(fs.readdirSync(after.dir)).toEqual([]);
   });
 
+  it('separates "nothing in flight" from "in flight but never built"', async () => {
+    // An empty folder means two different things, and only the count of
+    // in-flight applications tells them apart.
+    expect(syncCurrent(t.store)).toMatchObject({ files: [], applications: 0, inFlight: 0 });
+
+    t.store.upsertApplication({ id: 'a1', company: 'Acme', role: 'Intern', status: 'applying' });
+    const current = syncCurrent(t.store);
+    expect(current.files).toEqual([]);
+    expect(current.applications).toBe(0); // nothing built yet
+    expect(current.inFlight).toBe(1);
+  });
+
   it('keeps an application that is still being written', async () => {
     const result = await bundleFor('Streamly');
     advance(t.store, result.application.id, 'applying');
