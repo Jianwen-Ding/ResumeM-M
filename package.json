@@ -12,6 +12,9 @@
     "serve": "tsx src/server/index.ts",
     "rmm": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.json",
+    "mac:build": "python3 macos/build.py",
+    "mac:install": "python3 macos/build.py --install",
+    "mac:smoke": "node macos/smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

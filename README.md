@@ -44,6 +44,38 @@ npm run serve                # editor GUI at http://127.0.0.1:4600
 The sample store under `data/` is a working example. Replace it with your own
 content; the structure is the documentation.
 
+### Mac app
+
+On macOS, install a native app with its own window, Dock icon, and Spotlight entry:
+
+```bash
+npm run mac:install
+```
+
+Then press **⌘ Space**, search **ResumeM-M**, and open it. The installer puts
+`ResumeM-M.app` in `~/Applications`. You can also drag it onto the Dock.
+The app starts its local server automatically; Terminal does not need to stay open.
+Closing the window keeps the app and extension API available; **⌘ Q** quits the
+app and its server. If a matching server was already running, the app reuses it
+and leaves it running when you quit. JobHelper still connects on port 4600.
+
+The app uses your existing store (normally `~/.resumem-m/store`). If you use
+`RMM_DATA`, set it when installing to select that store. **File → Open Resume
+Store** opens it in Finder. No personal data is moved by the installer.
+
+Building requires macOS 12+, Xcode Command Line Tools, installed npm
+dependencies, and Node.js 20+. The installed app includes a snapshot of the
+editor and server, and uses the Node.js installation already on this Mac.
+LaTeX and any configured AI command also remain external tools. The installer
+preserves their command search path so they work when launched from Spotlight.
+Run `npm run mac:install` again after code updates or changing the Node location
+(quit the app first). This is a locally signed app for this Mac, not a notarized
+distribution for other machines.
+
+`npm run mac:build` builds `dist/macos/ResumeM-M.app` without installing it.
+`npm run mac:smoke` checks the packaged server using a disposable store.
+Startup errors are logged to `~/Library/Logs/ResumeM-M/server.log`.
+
 ### Required LaTeX packages
 
 The template uses `titlesec`, `enumitem`, `fancyhdr`, `tabularx`, `hyperref`,

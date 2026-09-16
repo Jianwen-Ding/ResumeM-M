@@ -74,18 +74,21 @@ export async function startServer(opts: ServerOptions = {}) {
   app.use('/pdf', createPdfRouter(store));
   app.use(express.static(path.join(projectRoot, 'web')));
 
-  return new Promise<{ close: () => Promise<void>; port: number }>((resolve) => {
+  return new Promise<{ close: () => Promise<void>; port: number }>((resolve, reject) => {
     const server = app.listen(port, host, () => {
-      console.log(`ResumeM-M → http://${host}:${port}`);
+      const address = server.address();
+      const actualPort = typeof address === 'object' && address ? address.port : port;
+      console.log(`ResumeM-M → http://${host}:${actualPort}`);
       console.log(`  store: ${dataDir}`);
       resolve({
-        port,
+        port: actualPort,
         close: () =>
           new Promise<void>((done) => {
             server.close(() => done());
           }),
       });
     });
+    server.once('error', reject);
   });
 }
 
