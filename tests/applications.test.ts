@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { advance, applicationId, buildBundle, bundleFileName, slug, stats } from '../src/model/applications.js';
+import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
 
@@ -184,5 +185,70 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       status: 'interested',
     });
     expect(result.application.status).toBe('interested');
+  });
+});
+
+describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_000 }, () => {
+  const bundleFor = (company: string, status?: string) =>
+    buildBundle(t.store, {
+      company,
+      role: 'Intern',
+      resumeId: 'intern',
+      coverLetter: 'Dear reader,',
+      ...(status ? { status: status as never } : {}),
+    });
+
+  it('collects the files of every application still being sent', async () => {
+    await bundleFor('Streamly');
+    await bundleFor('Northwind');
+
+    const current = syncCurrent(t.store);
+    expect(current.applications).toBe(2);
+    expect(current.files).toContain('Test Person Resume Streamly.pdf');
+    expect(current.files).toContain('Test Person Resume Northwind.pdf');
+    // All in one place, not one folder per application.
+    expect(fs.readdirSync(current.dir).length).toBe(current.files.length);
+  });
+
+  it('leaves the archived folders exactly as they were', async () => {
+    const result = await bundleFor('Streamly');
+    syncCurrent(t.store);
+    expect(fs.existsSync(path.join(result.dir, 'Test Person Resume Streamly.pdf'))).toBe(true);
+    expect(fs.existsSync(path.join(result.dir, 'source', 'resume.tex'))).toBe(true);
+  });
+
+  it('does not copy the archive material nobody uploads', async () => {
+    await bundleFor('Streamly');
+    const current = syncCurrent(t.store);
+    expect(current.files).not.toContain('source');
+    expect(fs.existsSync(path.join(current.dir, 'source'))).toBe(false);
+  });
+
+  it('takes an application out once it has moved past sending', async () => {
+    const result = await bundleFor('Streamly');
+    expect(syncCurrent(t.store).files.length).toBeGreaterThan(0);
+
+    advance(t.store, result.application.id, 'rejected');
+    const after = syncCurrent(t.store);
+    expect(after.files).toEqual([]);
+    expect(fs.readdirSync(after.dir)).toEqual([]);
+  });
+
+  it('keeps an application that is still being written', async () => {
+    const result = await bundleFor('Streamly');
+    advance(t.store, result.application.id, 'applying');
+    expect(syncCurrent(t.store).files.length).toBeGreaterThan(0);
+  });
+
+  it('is rebuilt from the tracker, so a stale file does not linger', async () => {
+    const result = await bundleFor('Streamly');
+    const current = syncCurrent(t.store);
+    fs.writeFileSync(path.join(current.dir, 'Something Else.pdf'), 'stale');
+
+    const after = syncCurrent(t.store);
+    expect(after.files).not.toContain('Something Else.pdf');
+    expect(fs.existsSync(path.join(current.dir, 'Something Else.pdf'))).toBe(false);
+    expect(after.files).toContain('Test Person Resume Streamly.pdf');
+    void result;
   });
 });

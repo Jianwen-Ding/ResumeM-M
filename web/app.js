@@ -1869,7 +1869,24 @@ const STATUSES = ['interested', 'applying', 'applied', 'oa', 'interview', 'offer
 let openApplicationId = null;
 
 async function loadApplications() {
-  const { applications, stats } = await api('/applications');
+  const { applications, stats, current } = await api('/applications');
+
+  // Where to point a file picker: everything still in flight, in one folder,
+  // already named the way portals want it.
+  const files = $('#current-files');
+  if (files) {
+    setChildren(
+      files,
+      el('span', { className: 'meta-label', textContent: 'Ready to upload' }),
+      el('span', { className: 'mono-path', textContent: current?.dir ?? '' }),
+      el('span', {
+        className: 'hint',
+        textContent: current?.files?.length
+          ? `${plural(current.files.length, 'file')} from ${plural(current.applications, 'application')} still being sent.`
+          : 'Empty — nothing is mid-application.',
+      }),
+    );
+  }
 
   $('#stats').replaceChildren(
     ...[
@@ -2400,6 +2417,27 @@ function renderDraft(draft) {
     el('div', { className: 'block' }, [
       el('div', { className: 'block-head' }, [el('h4', {}, 'Resume and notes')]),
       el('div', { className: 'toolbar' }, [el('span', { className: 'hint' }, 'Send'), resumeSelect]),
+      el('div', { className: 'toolbar' }, [
+        el('button', {
+          textContent: 'Tailor one for this posting',
+          title: draft.url
+            ? 'Read the posting and pick the phrasings that suit it'
+            : 'Works from the posting text; add a link to this draft to read it automatically',
+          onclick: () => tailorDraft(draft, notes, false),
+        }),
+        el('button', {
+          className: 'tiny',
+          textContent: 'Let the AI choose',
+          title: 'The AI reads the posting and decides which phrasings and bullets to use',
+          onclick: () => tailorDraft(draft, notes, true),
+        }),
+      ]),
+      el('div', {
+        className: 'hint',
+        textContent: draft.url
+          ? 'The posting is read from its link, the same way the extension reads the page you are on.'
+          : 'No link on this draft, so it works from whatever posting text it already has.',
+      }),
       notesBox,
     ]),
     el('div', { className: 'block' }, [
@@ -2427,6 +2465,41 @@ function renderDraft(draft) {
       notes,
     ]),
   );
+}
+
+/**
+ * Make a resume for this posting from inside the workspace — the same
+ * pipeline the extension runs, given a link instead of a page.
+ */
+async function tailorDraft(draft, notes, useAi) {
+  setChildren(notes, el('div', { textContent: useAi ? 'Reading the posting…' : 'Matching against the posting…' }));
+  try {
+    const res = await api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
+      method: 'POST',
+      body: JSON.stringify({ useAi, baseResumeId: draft.resumeId }),
+    });
+
+    const changed = (res.diff ?? []).filter((c) => c.kind !== 'none');
+    setChildren(
+      notes,
+      el('div', {
+        textContent: res.fetched
+          ? `Read the posting and made "${res.spec.label}".`
+          : `Made "${res.spec.label}" from the posting text on this draft.`,
+      }),
+      el('div', {
+        textContent: changed.length
+          ? `${plural(changed.length, 'change')} from the resume it started from${res.usedAi ? ', chosen by the AI' : ''}.`
+          : 'Nothing needed changing — the resume already suited it.',
+      }),
+      ...changed.slice(0, 6).map((c) => el('div', { className: 'hint', textContent: c.text })),
+    );
+
+    await loadStore();
+    await openDraft(draft.id);
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  }
 }
 
 async function generate(draft, what, notes) {

@@ -553,6 +553,11 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
   outline: 0;
 }
 
+/* The flat folder of what is in flight: a path you can paste into a file
+   picker, not a place to browse. */
+.current-files { display: inline-flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.current-files .mono-path { font-size: var(--t-sm); padding: 3px 8px; }
+
 /* Who you are: one block, no variants, above the sections it heads. */
 .profile-entry .title { font-size: var(--t-lg); font-weight: 500; }
 .profile-grid {

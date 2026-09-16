@@ -4,6 +4,7 @@ import YAML from 'yaml';
 import type { Store } from './store.js';
 import type { Application, ApplicationStatus, ResolvedResume } from './types.js';
 import { compileLetter, compileResume } from '../render/compile.js';
+import { syncCurrent } from './current.js';
 import { resolveResume } from './resolve.js';
 
 /**
@@ -137,6 +138,9 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     history: [{ at: now, status, note: 'Bundle created' }],
   };
   store.upsertApplication(application);
+  // The files also land in the flat folder, ready for the upload dialog that
+  // is probably already open.
+  syncCurrent(store);
 
   return {
     application,
@@ -157,6 +161,8 @@ export function advance(store: Store, id: string, status: ApplicationStatus, not
   app.status = status;
   app.history = [...(app.history ?? []), { at: new Date().toISOString(), status, note }];
   store.upsertApplication(app);
+  // An application that has moved past sending takes its files out of the way.
+  syncCurrent(store);
   return app;
 }
 

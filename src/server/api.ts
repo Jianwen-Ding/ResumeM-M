@@ -20,6 +20,7 @@ import { extractJob, jobPostingScore } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
+import { syncCurrent } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, resolveResume } from '../model/resolve.js';
@@ -118,6 +119,45 @@ function describeChange(
     };
   }
   return { ...change };
+}
+
+/**
+ * Fetch a job posting so a workspace opened by hand can be tailored the same
+ * way the extension tailors one it is already looking at.
+ *
+ * Narrow on purpose. This server has no authentication and sits on loopback,
+ * so anything it can be asked to fetch is worth constraining: http(s) only, a
+ * hard timeout, and a cap on what is read. It also cannot see anything behind
+ * a login — which is why failing to fetch is not treated as an error by the
+ * caller, just as less to work with.
+ */
+async function fetchPosting(url: string): Promise<string> {
+  const target = new URL(url);
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new Error('Only http and https links can be read');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(target, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: {
+        // Job boards serve very different markup to something that looks like
+        // a script; asking as a browser gets the posting rather than a shell.
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+    });
+    if (!res.ok) throw new Error(`the site replied ${res.status}`);
+
+    const text = await res.text();
+    return text.slice(0, 2_000_000);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
@@ -989,7 +1029,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
     '/applications',
     handler(async (_req, res) => {
       const apps = store.load().applications;
-      res.json({ applications: apps, stats: stats(apps) });
+      res.json({ applications: apps, stats: stats(apps), current: syncCurrent(store, apps) });
     }),
   );
 
@@ -1255,6 +1295,111 @@ export function createApi({ store, repo }: ApiDeps): Router {
       );
       if (!removed) throw new Error(`No draft "${id}"`);
       res.json({ ok: true });
+    }),
+  );
+
+  /**
+   * Make a resume for this posting, from inside the workspace.
+   *
+   * The extension does this with the page already in front of it; a draft
+   * opened by hand has only a link. So the server fetches the posting itself
+   * and runs the identical pipeline — the same extraction, the same matching,
+   * the same AI plan if it is enabled — rather than a second, lesser version
+   * of it that would drift.
+   */
+  api.post(
+    '/workspace/:id/tailor',
+    handler(async (req, res) => {
+      const draft = store.getDraft(String(req.params.id));
+      if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
+
+      const { useAi, baseResumeId } = req.body as { useAi?: boolean; baseResumeId?: string };
+      const data = store.load();
+
+      // The posting text: fetched from the link when there is one, falling
+      // back to whatever the draft already carries.
+      let html = draft.jobDescription ?? '';
+      let fetched = false;
+      if (draft.url) {
+        try {
+          html = await fetchPosting(draft.url);
+          fetched = true;
+        } catch (err) {
+          // A posting behind a login is common and is not a failure: carry on
+          // with whatever text the draft has.
+          if (!html) throw new Error(`Could not read ${draft.url}: ${(err as Error).message}`);
+        }
+      }
+      if (!html.trim()) throw new Error('This draft has no link and no posting text to work from');
+
+      const job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
+      const specId = `job-${slug(draft.company)}-${slug(draft.role)}`.slice(0, 60);
+
+      /*
+       * Tailoring twice must not make a resume that inherits from itself. The
+       * second run finds the draft already pointing at the tailored copy, so
+       * start from what that copy was built on rather than from the copy.
+       */
+      let baseId = baseResumeId ?? draft.resumeId ?? data.resumes.find((r) => r.id === 'newgrad')?.id ?? data.resumes[0]?.id;
+      if (baseId === specId) {
+        baseId = data.resumes.find((r) => r.id === specId)?.extends ?? data.resumes.find((r) => r.id === 'newgrad')?.id;
+      }
+      const base = data.resumes.find((r) => r.id === baseId);
+      if (!base) throw new Error('The store has no resume to start from');
+
+      const match = matchVariants(data, base, { keywords: job.keywords });
+
+      let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
+      if (useAi && data.config.ai.enabled) {
+        const agent = await runAgent(
+          data.config,
+          tailorPrompt(data, resolveResume(baseId!, data), {
+            jobTitle: draft.role,
+            company: draft.company,
+            jobDescription: job.description ?? html,
+            url: draft.url,
+          }),
+        );
+        try {
+          plan = sanitizeAiPlan(extractJson(agent.output), data);
+        } catch {
+          plan = null; // a malformed reply must not sink the deterministic match
+        }
+      }
+
+      const finalMatch = plan
+        ? { ...match, choices: { ...match.choices, ...plan.choices }, skills: { ...match.skills, ...plan.skills } }
+        : match;
+
+      const spec = deriveSpec(base, specId, `${draft.role} — ${draft.company}`, finalMatch, {
+        url: draft.url,
+        company: draft.company,
+        role: draft.role,
+      });
+      const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
+      if (inclusion) {
+        const bySkills = new Map((spec.sections ?? []).map((sec) => [sec.kind, sec]));
+        spec.sections = inclusion.map((sec) => ({ ...sec, ...(bySkills.get(sec.kind) ?? {}), entries: sec.entries, bullets: sec.bullets }));
+      }
+
+      await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => store.saveResume(spec));
+
+      // The draft now sends this one, and keeps the posting text for the
+      // letter and the answers to draw on.
+      draft.resumeId = spec.id;
+      draft.jobDescription = job.description || html.slice(0, 20_000);
+      draft.updatedAt = new Date().toISOString();
+      store.saveDraft(draft);
+
+      const after = store.load();
+      res.json({
+        draft,
+        spec,
+        fetched,
+        usedAi: Boolean(plan),
+        rejected: plan?.rejected ?? [],
+        diff: diffResumes(resolveResume(baseId!, data), resolveResume(spec, after), { ignoreLabel: true }),
+      });
     }),
   );
 
