@@ -58,6 +58,23 @@ export function tidy(text: string): string {
  * Zip, enough of it for a .docx                                       *
  * ------------------------------------------------------------------ */
 
+/*
+ * A ceiling on what one zip entry may inflate to.
+ *
+ * Deflate reaches ratios around 1000:1 on repetitive input, so the size of the
+ * file on disk says nothing about the size of it in memory. A 1.2 MB .docx
+ * holding a megabyte of spaces took 2.5 GB of resident memory before Node
+ * happened to refuse the string, and the user's reward was "Cannot create a
+ * string longer than 0x1fffffe8 characters". A slightly smaller one would have
+ * succeeded and simply eaten the machine — and this runs in the same process as
+ * the editor, so what dies is the app, with whatever was in flight.
+ *
+ * It does not take malice to get here: any corrupt file whose header lies about
+ * its contents lands in the same place. 32 MiB of document.xml is a document of
+ * several hundred pages, well past anything this reads for its words.
+ */
+const MAX_UNZIPPED = 32 * 1024 * 1024;
+
 /**
  * Read one named file out of a zip. Goes by the central directory rather than
  * scanning local headers, because a streamed zip leaves the sizes in the local
@@ -93,7 +110,22 @@ function unzipEntry(buf: Buffer, wanted: string): Buffer | null {
       const dataAt = localAt + 30 + buf.readUInt16LE(localAt + 26) + buf.readUInt16LE(localAt + 28);
       const data = buf.subarray(dataAt, dataAt + compressed);
       if (method === 0) return Buffer.from(data);
-      if (method === 8) return zlib.inflateRawSync(data);
+      if (method === 8) {
+        try {
+          return zlib.inflateRawSync(data, { maxOutputLength: MAX_UNZIPPED });
+        } catch (err) {
+          // Node reports the cap as ERR_BUFFER_TOO_LARGE, which tells the user
+          // nothing about the file they just dropped.
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'ERR_BUFFER_TOO_LARGE') {
+            throw new Error(
+              `That file says it holds more than ${Math.round(MAX_UNZIPPED / 1024 / 1024)} MB of ` +
+                `text inside ${wanted}. Either it is not really a document, or it is damaged.`,
+            );
+          }
+          throw new Error('That file is damaged — the compressed data inside it does not unpack.');
+        }
+      }
       return null; // some other compression method; not worth carrying a decoder
     }
 
