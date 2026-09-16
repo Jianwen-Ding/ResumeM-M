@@ -261,6 +261,66 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * The AI and engine settings, editable from the GUI so config.yaml is not
+   * the only way in. `args` is a template, so it is exposed verbatim.
+   */
+  api.get(
+    '/config',
+    handler(async (_req, res) => {
+      const c = store.loadConfig();
+      res.json({
+        ai: c.ai,
+        latex: c.latex,
+        git: c.git,
+        output: c.output,
+        // Environment overrides win over the file, so say when one is active
+        // rather than letting the GUI show a setting that is not in effect.
+        overrides: {
+          autoCommit: process.env.RMM_AUTOCOMMIT === '0',
+          ai: process.env.RMM_AI === '0',
+          engine: Boolean(process.env.RMM_LATEX_ENGINE),
+        },
+      });
+    }),
+  );
+
+  api.put(
+    '/config',
+    handler(async (req, res) => {
+      const patch = req.body as Parameters<typeof store.saveConfig>[0];
+      const saved = await withCommit(repo, autoCommit(), 'Update settings', () => store.saveConfig(patch));
+      res.json(saved);
+    }),
+  );
+
+  /** Run the configured AI command on a trivial prompt, to prove it works. */
+  api.post(
+    '/config/test-ai',
+    handler(async (_req, res) => {
+      const config = store.loadConfig();
+      if (!config.ai.enabled) {
+        res.json({ ok: false, reason: 'disabled', message: 'The AI is switched off.' });
+        return;
+      }
+      const started = Date.now();
+      try {
+        const result = await runAgent(
+          { ...config, ai: { ...config.ai, timeoutMs: Math.min(config.ai.timeoutMs, 60_000) } },
+          'Reply with exactly the word: ready',
+        );
+        res.json({
+          ok: true,
+          ms: Date.now() - started,
+          output: result.output.slice(0, 500),
+          command: config.ai.command,
+        });
+      } catch (err) {
+        res.json({ ok: false, reason: 'failed', message: (err as Error).message });
+      }
+    }),
+  );
+
   api.get(
     '/voice',
     handler(async (_req, res) => res.json({ voice: store.loadVoice() })),
@@ -768,7 +828,22 @@ export function createApi({ store, repo }: ApiDeps): Router {
 
   api.get(
     '/history',
-    handler(async (_req, res) => res.json(await repo.log(50))),
+    handler(async (req, res) => {
+      const limit = Number(req.query.limit ?? 60);
+      res.json({ commits: await repo.log(Number.isFinite(limit) ? limit : 60) });
+    }),
+  );
+
+  /** One commit in full: what it touched and the patch, for the history view. */
+  api.get(
+    '/history/:hash',
+    handler(async (req, res) => {
+      const hash = String(req.params.hash);
+      if (!/^[0-9a-fA-F]{4,40}$/.test(hash)) throw new Error(`"${hash}" is not a commit hash`);
+      const detail = await repo.commit(hash);
+      if (!detail) throw new Error(`No commit "${hash}" in the store's history`);
+      res.json(detail);
+    }),
   );
 
   return api;

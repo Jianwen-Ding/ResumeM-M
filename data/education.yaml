@@ -29,18 +29,24 @@
         tags: [intern]
         note: Later date keeps intern eligibility for summer 2026.
   bullets:
+    # A list bullet: the decision here is which courses to show, not how to
+    # word them, so the editor offers checkboxes rather than a dropdown and a
+    # resume stores its selection under `lists` instead of `choices`.
     - id: b_edu_coursework
-      default: v_broad
-      variants:
-        - id: v_broad
-          label: Broad coursework
-          text: "**Relevant Coursework:** Algorithms, Object-Oriented Design, Computer Systems, Databases, Networks, Theory of Computation"
-          tags: [general]
-        - id: v_systems
-          label: Systems-leaning
-          text: "**Relevant Coursework:** Computer Systems, Operating Systems, Networks, Distributed Systems, Algorithms, Databases"
-          tags: [systems, backend, infrastructure]
-        - id: v_ml
-          label: ML-leaning
-          text: "**Relevant Coursework:** Machine Learning, Linear Algebra, Probability & Statistics, Algorithms, Data Mining"
-          tags: [ml, ai, data]
+      default: v_list
+      prefix: "**Relevant Coursework:**"
+      separator: ", "
+      variants: []
+      items:
+        - { id: c_algorithms, text: Algorithms, tags: [general, systems, ml] }
+        - { id: c_ood, text: Object-Oriented Design, tags: [general, backend] }
+        - { id: c_systems, text: Computer Systems, tags: [systems, backend, infrastructure] }
+        - { id: c_os, text: Operating Systems, tags: [systems, infrastructure] }
+        - { id: c_databases, text: Databases, tags: [general, backend, data] }
+        - { id: c_networks, text: Networks, tags: [systems, distributed] }
+        - { id: c_distributed, text: Distributed Systems, tags: [distributed, systems] }
+        - { id: c_theory, text: Theory of Computation, tags: [general] }
+        - { id: c_ml, text: Machine Learning, tags: [ml, ai] }
+        - { id: c_linalg, text: Linear Algebra, tags: [ml, ai] }
+        - { id: c_prob, text: Probability & Statistics, tags: [ml, data] }
+        - { id: c_datamining, text: Data Mining, tags: [ml, data] }

@@ -10,6 +10,13 @@
 
 const $ = (sel) => document.querySelector(sel);
 
+/**
+ * Replace a node's children, dropping nulls. `replaceChildren(null)` renders
+ * the literal text "null", which is exactly the sort of thing that reaches a
+ * screenshot.
+ */
+const setChildren = (node, ...kids) => node.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+
 /** Build an element. `children` may contain strings, nodes, or null. */
 const el = (tag, props = {}, children = []) => {
   const node = Object.assign(document.createElement(tag), props);
@@ -24,8 +31,24 @@ const state = {
   choices: {},
   /** Unsaved skill-item selections, keyed by group id. */
   skillEdits: null,
+  /** Unsaved entry inclusion, keyed by section kind. */
+  entryEdits: null,
+  /** Unsaved bullet inclusion, keyed by entry id. */
+  bulletEdits: null,
+  /** Unsaved list-item selections on list bullets, keyed by bullet id. */
+  listEdits: null,
   dirty: false,
 };
+
+/** Forget every unsaved edit — used when switching resumes. */
+function clearEdits() {
+  state.choices = {};
+  state.skillEdits = null;
+  state.entryEdits = null;
+  state.bulletEdits = null;
+  state.listEdits = null;
+  state.dirty = false;
+}
 
 /* ------------------------------------------------------------------ *
  * Plumbing                                                            *
@@ -79,6 +102,30 @@ function markup(text) {
   return frag;
 }
 
+/**
+ * Display text for stored source. The store holds LaTeX-flavoured text — `--`
+ * for an en dash, `**bold**` — which is right for the renderer and looks like a
+ * typo everywhere else.
+ */
+function display(text) {
+  return String(text ?? '')
+    .replace(/\s--\s/g, ' \u2013 ')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/[`*]/g, '')
+    .trim();
+}
+
+/**
+ * What one option in a phrasing dropdown reads as: the wording that will be
+ * printed, with the store's markup stripped, truncated only when it would
+ * otherwise blow out the control.
+ */
+function optionText(variant) {
+  const text = display(variant.text);
+  const shown = text.length > 110 ? `${text.slice(0, 110).trimEnd()}…` : text;
+  return variant.suggested ? `${shown}  · unreviewed` : shown;
+}
+
 /** Turn a label into a usable id fragment. */
 function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
@@ -122,13 +169,55 @@ function resolveSections(id = state.resumeId) {
   return sections;
 }
 
-/** The spec to compile: the selected resume plus everything unsaved. */
+/** Which items a list bullet shows right now, including unsaved edits. */
+function listSelection(bullet) {
+  const saved = Object.assign({}, ...chain(state.resumeId).map((s) => s.lists ?? {}));
+  return state.listEdits?.[bullet.id] ?? saved[bullet.id] ?? bullet.items.map((i) => i.id);
+}
+
+/** Which entries a section shows right now, including unsaved edits. */
+function entrySelection(section) {
+  return state.entryEdits?.[section.kind] ?? section.entries ?? [];
+}
+
+/** Which bullets an entry shows right now, including unsaved edits. */
+function bulletSelection(section, entry) {
+  return (
+    state.bulletEdits?.[entry.id] ??
+    section.bullets?.[entry.id] ??
+    (entry.bullets ?? []).filter((b) => !b.archived).map((b) => b.id)
+  );
+}
+
+/**
+ * The spec to compile: the selected resume plus everything unsaved. Inclusion
+ * edits live on the sections, variant choices on `choices`, and list-item
+ * selections on `lists`.
+ */
 function currentSpec() {
   const base = resumeById(state.resumeId);
-  const spec = { ...base, choices: { ...(base.choices ?? {}), ...state.choices } };
-  if (state.skillEdits) {
-    const skills = resolveSections().find((s) => s.kind === 'skills');
-    if (skills) spec.sections = [{ ...skills, items: { ...(skills.items ?? {}), ...state.skillEdits } }];
+  const spec = {
+    ...base,
+    choices: { ...(base.choices ?? {}), ...state.choices },
+    lists: { ...(base.lists ?? {}), ...(state.listEdits ?? {}) },
+  };
+
+  const touchesSections = state.skillEdits || state.entryEdits || state.bulletEdits;
+  if (touchesSections) {
+    spec.sections = resolveSections().map((section) => {
+      if (section.kind === 'skills') {
+        return state.skillEdits
+          ? { ...section, items: { ...(section.items ?? {}), ...state.skillEdits } }
+          : section;
+      }
+      const entries = entrySelection(section);
+      const bullets = { ...(section.bullets ?? {}) };
+      for (const eid of entries) {
+        const entry = state.store.entries.find((e) => e.id === eid);
+        if (entry && state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
+      }
+      return { ...section, entries, bullets };
+    });
   }
   return spec;
 }
@@ -142,6 +231,24 @@ function fieldText(field, choices, key) {
   if (!isVariantField(field)) return String(field);
   const id = choices[key] ?? field.default;
   return String((field.variants.find((v) => v.id === id) ?? field.variants[0])?.text ?? '');
+}
+
+/** An entry's name as a person would say it, for dialog titles. */
+function entryName(entry) {
+  const title = fieldText(entry.title, effectiveChoices(), `${entry.id}.title`);
+  return title || entry.id;
+}
+
+/**
+ * A bullet named by its own opening words. Ids are how the store refers to
+ * things; they are not what belongs in a dialog title asking you to confirm a
+ * deletion.
+ */
+function bulletName(entry, bullet) {
+  const chosen = bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0];
+  const text = String(chosen?.text ?? '').replace(/[*`]/g, '').trim();
+  if (!text) return bullet.id;
+  return text.length > 44 ? `${text.slice(0, 44).trimEnd()}…` : text;
 }
 
 function markDirty(message = 'Changed — press Preview to recompile') {
@@ -192,11 +299,14 @@ const FIELD_LABELS = {
 function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alternate', extraActions = [], trailingActions = [] }) {
   const select = el('select');
   for (const v of field.variants) {
-    const tags = v.tags?.length ? ` · ${v.tags.join(', ')}` : '';
+    // Show the wording itself. A label like "Kafka-forward · streaming" tells
+    // you what the author meant; the sentence tells you what will be printed,
+    // which is the thing you are actually choosing between.
     select.append(
       el('option', {
         value: v.id,
-        textContent: `${v.label}${tags}${v.suggested ? ' · unreviewed' : ''}`,
+        textContent: optionText(v),
+        title: [v.label, v.tags?.join(', '), v.note].filter(Boolean).join(' — '),
         selected: v.id === current,
       }),
     );
@@ -229,57 +339,191 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
   return el('div', { className: 'variant-row' }, [select, actions]);
 }
 
+/** A checkbox that includes or excludes something from this variation. */
+function toggle({ on, title, onChange }) {
+  const cb = el('input', { type: 'checkbox', checked: on, title });
+  cb.onchange = () => {
+    onChange(cb.checked);
+    markDirty();
+    render();
+  };
+  return el('label', { className: 'toggle', title }, [cb]);
+}
+
+/** The courses/awards inside a list bullet, picked the way skills are. */
+function listItems(entry, bullet) {
+  const picked = listSelection(bullet);
+  const wrap = el('div', { className: 'chip-set' });
+
+  for (const item of bullet.items) {
+    const on = picked.includes(item.id);
+    const chip = el('label', { className: `chip-toggle${on ? ' on' : ''}` });
+    const cb = el('input', { type: 'checkbox', checked: on });
+    cb.onchange = () => {
+      // Preserve store order, so the printed list does not reshuffle as you
+      // click around.
+      const next = new Set(picked);
+      if (cb.checked) next.add(item.id);
+      else next.delete(item.id);
+      state.listEdits = {
+        ...(state.listEdits ?? {}),
+        [bullet.id]: bullet.items.filter((i) => next.has(i.id)).map((i) => i.id),
+      };
+      markDirty();
+      render();
+    };
+    chip.append(cb, item.text);
+    chip.append(
+      el('span', {
+        className: 'x',
+        textContent: '×',
+        title: 'Delete this item from the store',
+        onclick: (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          removeListItem(entry, bullet, item);
+        },
+      }),
+    );
+    wrap.append(chip);
+  }
+
+  wrap.append(
+    el('button', {
+      className: 'link',
+      textContent: '+ item',
+      onclick: () => addListItem(entry, bullet),
+    }),
+  );
+  return wrap;
+}
+
 /** Everything the user can do to one bullet, in one block. */
-function bulletBlock(entry, bullet, choices, included) {
+function bulletBlock(entry, section, bullet, choices) {
+  const included = bulletSelection(section, entry).includes(bullet.id);
+  const isList = Array.isArray(bullet.items) && bullet.items.length > 0;
+
+  const wrap = el('div', { className: `bullet${included ? '' : ' off'}` });
+
+  const head = el('div', { className: 'bullet-head' }, [
+    toggle({
+      on: included,
+      title: included ? 'Showing on this variation' : 'Hidden on this variation',
+      onChange: (checked) => {
+        const current = bulletSelection(section, entry);
+        const next = new Set(current);
+        if (checked) next.add(bullet.id);
+        else next.delete(bullet.id);
+        state.bulletEdits = {
+          ...(state.bulletEdits ?? {}),
+          // Keep store order so bullets do not jump around when re-enabled.
+          [entry.id]: (entry.bullets ?? []).filter((b) => next.has(b.id)).map((b) => b.id),
+        };
+      },
+    }),
+    el('div', { className: 'text' }, isList ? listPreview(bullet) : markup(String(currentText(bullet, choices) ?? ''))),
+  ]);
+  wrap.append(head);
+
+  if (isList) {
+    wrap.append(listItems(entry, bullet));
+    wrap.append(
+      el('div', { className: 'variant-row' }, [
+        el('span', { className: 'grow' }),
+        el('div', { className: 'actions' }, [
+          el('span', { className: 'chip count', textContent: `${listSelection(bullet).length}/${bullet.items.length} shown` }),
+          el('button', { className: 'tiny', textContent: 'Feedback', onclick: () => askBulletFeedback(entry, bullet) }),
+          el('button', { className: 'tiny danger', textContent: 'Remove', onclick: () => removeBullet(entry, bullet) }),
+        ]),
+      ]),
+    );
+    return wrap;
+  }
+
   const key = bullet.id;
   const chosenId = choices[key] ?? bullet.default;
   const chosen = bullet.variants.find((v) => v.id === chosenId) ?? bullet.variants[0];
 
-  const wrap = el('div', { className: `bullet${included ? '' : ' dim'}` });
-  const text = el('div', { className: 'text' });
-  text.append(chosen ? markup(String(chosen.text)) : '(no phrasings yet)');
-  wrap.append(text);
-
-  const row = variantPicker({
-    key,
-    field: bullet,
-    current: chosenId,
-    addLabel: '+ phrasing',
-    onAdd: () => addBulletVariant(entry, bullet),
-    onEdit: chosen ? () => editVariant(entry, bullet, chosen) : null,
-    extraActions: [
-      el('span', {
-        className: 'chip count',
-        textContent: plural(bullet.variants.length, 'phrasing'),
-        title: 'How many ways this point can be said',
-      }),
-      chosen?.suggested ? el('span', { className: 'chip suggested', textContent: 'unreviewed' }) : null,
-      key in state.choices ? el('span', { className: 'chip overridden', textContent: 'changed' }) : null,
-    ].filter(Boolean),
-    trailingActions: [
-      el('button', { className: 'tiny', textContent: 'Feedback', onclick: () => askBulletFeedback(entry.id, bullet.id) }),
-      el('button', {
-        className: 'tiny danger',
-        textContent: 'Remove',
-        title: 'Delete this bullet from the store',
-        onclick: () => removeBullet(entry, bullet),
-      }),
-    ],
-  });
-  wrap.append(row);
+  wrap.append(
+    variantPicker({
+      key,
+      field: bullet,
+      current: chosenId,
+      addLabel: '+ phrasing',
+      onAdd: () => addBulletVariant(entry, bullet),
+      onEdit: chosen ? () => editVariant(entry, bullet, chosen) : null,
+      extraActions: [
+        el('span', {
+          className: 'chip count',
+          textContent: plural(bullet.variants.length, 'phrasing'),
+          title: 'How many ways this point can be said',
+        }),
+        chosen?.suggested ? el('span', { className: 'chip suggested', textContent: 'unreviewed' }) : null,
+        key in state.choices ? el('span', { className: 'chip overridden', textContent: 'changed' }) : null,
+      ].filter(Boolean),
+      trailingActions: [
+        el('button', { className: 'tiny', textContent: 'Feedback', onclick: () => askBulletFeedback(entry, bullet) }),
+        el('button', {
+          className: 'tiny danger',
+          textContent: 'Remove',
+          title: 'Delete this bullet from the store',
+          onclick: () => removeBullet(entry, bullet),
+        }),
+      ],
+    }),
+  );
 
   if (chosen?.note) wrap.append(el('div', { className: 'note', textContent: chosen.note }));
   return wrap;
 }
 
-function entryBlock(entry, section, choices) {
-  const box = el('div', { className: 'entry' });
+/** The text a non-list bullet currently resolves to. */
+function currentText(bullet, choices) {
+  const chosen = bullet.variants.find((v) => v.id === (choices[bullet.id] ?? bullet.default)) ?? bullet.variants[0];
+  return chosen?.text ?? '(no phrasings yet)';
+}
 
+/** What a list bullet will print, given the current selection. */
+function listPreview(bullet) {
+  const picked = listSelection(bullet);
+  const chosen = bullet.items.filter((i) => picked.includes(i.id)).map((i) => i.text);
+  const body = chosen.join(bullet.separator ?? ', ') || '(nothing selected)';
+  return markup(bullet.prefix ? `${bullet.prefix} ${body}` : body);
+}
+
+function entryBlock(entry, section, choices) {
+  const box = el('div', {});
+
+  const included = entrySelection(section).includes(entry.id);
   const head = el('div', { className: 'entry-head' }, [
+    toggle({
+      on: included,
+      title: included ? 'Showing on this variation' : 'Hidden on this variation',
+      onChange: (checked) => {
+        const current = entrySelection(section);
+        const next = new Set(current);
+        if (checked) next.add(entry.id);
+        else next.delete(entry.id);
+        // Keep the section's own order rather than click order.
+        const ordered = (section.entries ?? []).filter((id) => next.has(id));
+        for (const id of next) if (!ordered.includes(id)) ordered.push(id);
+        state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+      },
+    }),
     el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || entry.id }),
     el('span', { className: 'id', textContent: entry.id }),
     el('span', { className: 'grow' }),
     el('div', { className: 'entry-actions' }, [
+      // The title has no meta-line row of its own, so its "give this
+      // alternates" action lives here beside the name it applies to.
+      isVariantField(entry.title)
+        ? null
+        : el('button', {
+            className: 'link',
+            textContent: '+ alt',
+            title: 'Give the title a second option',
+            onclick: () => addFieldAlternate(entry, 'title'),
+          }),
       el('button', { className: 'tiny', textContent: 'Edit', title: 'Edit this entry’s heading fields', onclick: () => editEntry(entry) }),
       el('button', { className: 'tiny danger', textContent: 'Delete', onclick: () => removeEntry(entry) }),
     ]),
@@ -323,9 +567,9 @@ function entryBlock(entry, section, choices) {
       continue;
     }
 
-    // The title already reads as the entry heading; repeating it as a row was
-    // the single biggest source of wasted height.
-    if (field == null) continue;
+    // The title already reads as the entry heading, so it never joins the
+    // meta line; its "+ alternate" lives in the header instead.
+    if (field == null || name === 'title') continue;
     plainFields.push({ name, text: String(field) });
   }
 
@@ -360,10 +604,9 @@ function entryBlock(entry, section, choices) {
     box.append(meta);
   }
 
-  const listed = section.bullets?.[entry.id];
   for (const bullet of entry.bullets ?? []) {
     if (bullet.archived) continue;
-    box.append(bulletBlock(entry, bullet, choices, listed ? listed.includes(bullet.id) : true));
+    box.append(bulletBlock(entry, section, bullet, choices));
   }
 
   box.append(
@@ -371,6 +614,7 @@ function entryBlock(entry, section, choices) {
       el('button', { className: 'link', textContent: '+ Add bullet', onclick: () => addBullet(entry) }),
     ]),
   );
+  box.className = `entry${included ? '' : ' off'}`;
   return box;
 }
 
@@ -466,9 +710,14 @@ function renderEditor() {
       continue;
     }
 
-    const entries = (section.entries ?? [])
-      .map((eid) => state.store.entries.find((e) => e.id === eid))
-      .filter(Boolean);
+    // Everything of this kind in the store, with the entries this resume
+    // already lists first. Showing only the included ones would make a
+    // toggled-off entry disappear, with no way to bring it back.
+    const listed = section.entries ?? [];
+    const entries = [
+      ...listed.map((eid) => state.store.entries.find((e) => e.id === eid)).filter(Boolean),
+      ...state.store.entries.filter((e) => e.kind === section.kind && !e.archived && !listed.includes(e.id)),
+    ];
 
     if (entries.length === 0) {
       editor.append(
@@ -533,7 +782,7 @@ async function addEntry(kind) {
 
 async function editEntry(entry) {
   const plainOrNote = (f) => (isVariantField(f) ? '' : (f ?? ''));
-  const answer = await form(`Edit ${entry.id}`, [
+  const answer = await form(`Edit ${entryName(entry)}`, [
     { name: 'title', label: FIELD_LABELS.title, value: plainOrNote(entry.title), disabled: isVariantField(entry.title) },
     { name: 'subtitle', label: FIELD_LABELS.subtitle, value: plainOrNote(entry.subtitle), disabled: isVariantField(entry.subtitle) },
     { name: 'dates', label: FIELD_LABELS.dates, value: plainOrNote(entry.dates), disabled: isVariantField(entry.dates) },
@@ -555,7 +804,7 @@ async function editEntry(entry) {
 }
 
 async function removeEntry(entry) {
-  if (!(await confirmModal(`Delete ${entry.id}?`, 'The entry and all of its phrasings are removed from the store. Resumes referencing it will warn until you remove the reference.'))) return;
+  if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the store. Resumes referencing it will warn until you remove the reference.'))) return;
   await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
 
   // Drop the reference too, so the next compile does not warn about it.
@@ -571,7 +820,7 @@ async function removeEntry(entry) {
 
 /** Add a new bullet to an entry, with its first phrasing. */
 async function addBullet(entry) {
-  const answer = await form(`New bullet on ${entry.id}`, [
+  const answer = await form(`New bullet — ${entryName(entry)}`, [
     { name: 'text', label: 'Text', value: '', multiline: true },
     { name: 'label', label: 'Label for this phrasing', value: 'Base' },
     { name: 'tags', label: 'Tags, comma separated', value: '' },
@@ -606,7 +855,7 @@ async function addBullet(entry) {
 }
 
 async function removeBullet(entry, bullet) {
-  if (!(await confirmModal(`Delete bullet ${bullet.id}?`, `All ${plural(bullet.variants.length, 'phrasing')} of it are removed from the store.`))) return;
+  if (!(await confirmModal(`Delete “${bulletName(entry, bullet)}”?`, `All ${plural(bullet.variants.length, 'phrasing')} of it are removed from the store.`))) return;
   await saveEntry({ ...entry, bullets: (entry.bullets ?? []).filter((b) => b.id !== bullet.id) }, `Deleted ${bullet.id}`);
   renderPreview();
 }
@@ -614,7 +863,7 @@ async function removeBullet(entry, bullet) {
 /** Add another phrasing of an existing bullet. */
 async function addBulletVariant(entry, bullet) {
   const current = bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0];
-  const answer = await form(`New phrasing for ${bullet.id}`, [
+  const answer = await form(`New phrasing — ${bulletName(entry, bullet)}`, [
     { name: 'label', label: 'Label', value: '' },
     { name: 'text', label: 'Text', value: current?.text ?? '', multiline: true },
     { name: 'tags', label: 'Tags, comma separated', value: '' },
@@ -695,7 +944,7 @@ async function addFieldAlternate(entry, name) {
     ? (existing.variants.find((v) => v.id === existing.default) ?? existing.variants[0])?.text ?? ''
     : String(field ?? '');
 
-  const answer = await form(`New alternate for ${FIELD_LABELS[name] ?? name}`, [
+  const answer = await form(`New alternate — ${FIELD_LABELS[name] ?? name} of ${entryName(entry)}`, [
     { name: 'label', label: 'Label', value: '' },
     { name: 'text', label: 'Text', value: currentText, multiline: false },
     { name: 'tags', label: 'Tags, comma separated', value: '' },
@@ -772,6 +1021,55 @@ async function editFieldVariant(entry, name, variant) {
 
   const nextDefault = variants.some((v) => v.id === field.default) ? field.default : variants[0].id;
   await saveEntry({ ...entry, [name]: { default: nextDefault, variants } }, 'Alternate updated');
+  renderPreview();
+}
+
+/* ---- List bullets ---- */
+
+async function addListItem(entry, bullet) {
+  const answer = await form(`Add to ${bullet.prefix?.replace(/[*:]/g, '').trim() || 'the list'}`, [
+    { name: 'text', label: 'Item', value: '' },
+    { name: 'tags', label: 'Tags, comma separated', value: '' },
+  ], 'Tags are what the extension matches against a job posting.');
+  if (!answer?.text?.trim()) return;
+
+  const id = `i_${slug(answer.text)}`;
+  const next = {
+    ...entry,
+    bullets: entry.bullets.map((b) =>
+      b.id !== bullet.id
+        ? b
+        : {
+            ...b,
+            items: [
+              ...b.items,
+              {
+                id,
+                text: answer.text.trim(),
+                ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
+              },
+            ],
+          },
+    ),
+  };
+  await saveEntry(next, 'Item added');
+
+  // A newly added item is shown by default; not doing so makes the click
+  // look like it failed.
+  state.listEdits = { ...(state.listEdits ?? {}), [bullet.id]: [...listSelection(bullet), id] };
+  markDirty();
+  render();
+  renderPreview();
+}
+
+async function removeListItem(entry, bullet, item) {
+  const next = {
+    ...entry,
+    bullets: entry.bullets.map((b) =>
+      b.id !== bullet.id ? b : { ...b, items: b.items.filter((i) => i.id !== item.id) },
+    ),
+  };
+  await saveEntry(next, `Removed ${item.text}`);
   renderPreview();
 }
 
@@ -907,21 +1205,21 @@ async function saveAsVariation() {
   ], `Inherits from "${state.resumeId}", so later edits there still reach it.`);
   if (!answer?.id?.trim()) return;
 
+  // A variation is the whole bundle: which entries and bullets are switched
+  // on, which phrasings are used, and which list items are shown. Saving only
+  // the phrasings would silently drop half of what you just did.
+  const built = currentSpec();
   const spec = {
     id: answer.id.trim(),
     label: answer.label?.trim() || answer.id.trim(),
     extends: state.resumeId,
     choices: { ...state.choices },
+    ...(state.listEdits ? { lists: { ...state.listEdits } } : {}),
+    ...(built.sections ? { sections: built.sections } : {}),
   };
-  if (state.skillEdits) {
-    const skills = resolveSections().find((s) => s.kind === 'skills');
-    if (skills) spec.sections = [{ ...skills, items: { ...(skills.items ?? {}), ...state.skillEdits } }];
-  }
 
   await saveResumeSpec(spec, `Saved ${spec.id}`);
-  state.choices = {};
-  state.skillEdits = null;
-  state.dirty = false;
+  clearEdits();
   state.resumeId = spec.id;
   render();
 }
@@ -939,12 +1237,17 @@ async function askFeedback() {
   }
 }
 
-async function askBulletFeedback(entryId, bulletId) {
+async function askBulletFeedback(entry, bullet) {
   showModal('Feedback', el('p', { className: 'hint', textContent: 'Asking the configured AI…' }));
   try {
-    const result = await api('/ai/feedback', { method: 'POST', body: JSON.stringify({ entryId, bulletId }) });
+    const result = await api('/ai/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ entryId: entry.id, bulletId: bullet.id }),
+    });
     showModal(
-      result.executed ? `Feedback on ${bulletId}` : 'AI is off — this is the prompt it would have run',
+      result.executed
+        ? `Feedback — ${bulletName(entry, bullet)}`
+        : 'AI is off — this is the prompt it would have run',
       el('pre', { textContent: result.output }),
     );
   } catch (err) {
@@ -1170,6 +1473,228 @@ async function editAnswer(item) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Settings                                                            *
+ * ------------------------------------------------------------------ */
+
+const AI_PRESETS = [
+  { label: 'Claude Code', command: 'claude', args: ['-p', '{prompt}'] },
+  { label: 'Codex CLI', command: 'codex', args: ['exec', '{promptText}'] },
+  { label: 'Gemini CLI', command: 'gemini', args: ['-p', '{promptText}'] },
+  { label: 'Custom…', command: '', args: [] },
+];
+
+async function loadSettings() {
+  const config = await api('/config');
+  const box = $('#settings');
+
+  const field = (labelText, input, note) =>
+    el('label', { className: 'f' }, [
+      el('div', { className: 'lbl', textContent: labelText }),
+      input,
+      note ? el('div', { className: 'hint', textContent: note }) : null,
+    ]);
+
+  const enabled = el('input', { type: 'checkbox', checked: config.ai.enabled });
+  const command = el('input', { type: 'text', value: config.ai.command });
+  const args = el('input', { type: 'text', value: (config.ai.args ?? []).join(' ') });
+  const timeout = el('input', { type: 'text', value: String(Math.round(config.ai.timeoutMs / 1000)) });
+
+  const preset = el('select');
+  for (const p of AI_PRESETS) preset.append(el('option', { value: p.label, textContent: p.label }));
+  const matching = AI_PRESETS.find(
+    (p) => p.command === config.ai.command && p.args.join(' ') === (config.ai.args ?? []).join(' '),
+  );
+  preset.value = matching?.label ?? 'Custom…';
+  preset.onchange = () => {
+    const chosen = AI_PRESETS.find((p) => p.label === preset.value);
+    if (!chosen || chosen.label === 'Custom…') return;
+    command.value = chosen.command;
+    args.value = chosen.args.join(' ');
+  };
+
+  const engine = el('select');
+  for (const e of ['', 'tectonic', 'latexmk', 'pdflatex']) {
+    engine.append(
+      el('option', { value: e, textContent: e || 'Auto-detect', selected: (config.latex.engine ?? '') === e }),
+    );
+  }
+
+  const autoCommit = el('input', { type: 'checkbox', checked: config.git.autoCommit });
+  const result = el('div', { className: 'result idle', textContent: 'Not tested yet.' });
+
+  const save = async () => {
+    const seconds = Number(timeout.value);
+    await api('/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        ai: {
+          enabled: enabled.checked,
+          command: command.value.trim(),
+          // The template is whitespace-separated; `{prompt}` becomes the path
+          // to a file holding the prompt, `{promptText}` the prompt itself.
+          args: args.value.split(/\s+/).filter(Boolean),
+          timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 180_000,
+        },
+        latex: { engine: engine.value || undefined },
+        git: { autoCommit: autoCommit.checked },
+      }),
+    });
+    setStatus('Settings saved');
+  };
+
+  setChildren(
+    box,
+    el('label', { className: 'check', style: 'margin-bottom:12px' }, [
+      enabled,
+      el('span', {}, 'Let the tool run the AI command'),
+    ]),
+    config.overrides.ai
+      ? el('div', { className: 'override', textContent: 'RMM_AI=0 is set, so the AI stays off whatever this says.' })
+      : null,
+    field('Preset', preset),
+    field('Command', command, 'Must be on your PATH.'),
+    field('Arguments', args, '{prompt} is a file holding the prompt; {promptText} inlines it.'),
+    field('Timeout, seconds', timeout),
+    field('LaTeX engine', engine, 'Auto-detect tries tectonic, then latexmk, then pdflatex.'),
+    el('label', { className: 'check', style: 'margin:12px 0' }, [
+      autoCommit,
+      el('span', {}, 'Commit every change to the store'),
+    ]),
+    config.overrides.autoCommit
+      ? el('div', { className: 'override', textContent: 'RMM_AUTOCOMMIT=0 is set, so nothing is committed.' })
+      : null,
+    el('div', { className: 'row' }, [
+      el('button', { className: 'primary', textContent: 'Save', onclick: () => save().catch((e) => setStatus(e.message, true)) }),
+      el('button', {
+        textContent: 'Save and test',
+        onclick: async () => {
+          try {
+            await save();
+            result.className = 'result idle';
+            result.textContent = 'Running…';
+            const test = await api('/config/test-ai', { method: 'POST' });
+            if (test.ok) {
+              result.className = 'result ok';
+              result.textContent = `${test.command} replied in ${(test.ms / 1000).toFixed(1)}s: ${test.output.slice(0, 160)}`;
+            } else {
+              result.className = 'result bad';
+              result.textContent = test.message;
+            }
+          } catch (err) {
+            result.className = 'result bad';
+            result.textContent = err.message;
+          }
+        },
+      }),
+    ]),
+    result,
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * History                                                             *
+ * ------------------------------------------------------------------ */
+
+let selectedCommit = null;
+
+async function loadHistory() {
+  const { commits } = await api('/history?limit=80');
+  const list = $('#commits');
+
+  if (commits.length === 0) {
+    list.replaceChildren(
+      el('div', { className: 'empty' }, [
+        el('b', {}, 'No history yet'),
+        'The store is not a git repository, or nothing has been committed. Run ',
+        el('code', {}, 'rmm serve'),
+        ' once and it will be initialised.',
+      ]),
+    );
+    return;
+  }
+
+  list.replaceChildren(
+    ...commits.map((c) =>
+      el(
+        'div',
+        {
+          className: `commit${c.hash === selectedCommit ? ' selected' : ''}`,
+          onclick: () => showCommit(c.hash),
+        },
+        [
+          el('div', { className: 'msg', textContent: c.message }),
+          el('div', {
+            className: 'meta',
+            textContent: `${c.hash.slice(0, 8)} · ${formatWhen(c.date)}`,
+          }),
+        ],
+      ),
+    ),
+  );
+}
+
+/** Dates in a history are read as "how long ago", not as timestamps. */
+function formatWhen(iso) {
+  if (!iso) return '';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return iso;
+  const mins = Math.round((Date.now() - then) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${plural(mins, 'minute')} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${plural(hours, 'hour')} ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${plural(days, 'day')} ago`;
+  return new Date(then).toISOString().slice(0, 10);
+}
+
+async function showCommit(hash) {
+  selectedCommit = hash;
+  const panel = $('#commit-detail');
+  panel.replaceChildren(el('p', { className: 'hint', textContent: 'Loading…' }));
+  await loadHistory();
+
+  try {
+    const c = await api(`/history/${encodeURIComponent(hash)}`);
+    setChildren(
+      panel,
+      el('h3', { textContent: c.message }),
+      el('div', {
+        className: 'sub',
+        textContent: `${c.hash.slice(0, 10)} · ${c.author} · ${formatWhen(c.date)}`,
+      }),
+      c.body ? el('p', { className: 'hint commit-body', textContent: c.body }) : null,
+      ...c.files.map((f) =>
+        el('div', { className: 'file-row' }, [
+          el('span', { className: 'add', textContent: f.added === null ? '—' : `+${f.added}` }),
+          el('span', { className: 'del', textContent: f.removed === null ? '—' : `−${f.removed}` }),
+          el('span', { textContent: f.path }),
+        ]),
+      ),
+      renderDiff(c.diff),
+    );
+  } catch (err) {
+    panel.replaceChildren(el('div', { className: 'err', textContent: err.message }));
+  }
+}
+
+/** A unified diff, coloured. Reading a patch as flat text is unpleasant. */
+function renderDiff(diff) {
+  if (!diff?.trim()) return el('p', { className: 'hint', textContent: 'No textual changes.' });
+
+  const pre = el('pre');
+  for (const line of diff.split('\n')) {
+    let cls = '';
+    if (line.startsWith('+') && !line.startsWith('+++')) cls = 'add';
+    else if (line.startsWith('-') && !line.startsWith('---')) cls = 'del';
+    else if (line.startsWith('@@')) cls = 'hunk';
+    else if (/^(diff |index |\+\+\+ |--- |new file|deleted file|similarity|rename )/.test(line)) cls = 'meta';
+    pre.append(el('div', { className: `line ${cls}`.trim(), textContent: line || ' ' }));
+  }
+  return el('div', { className: 'diff' }, [pre]);
+}
+
+/* ------------------------------------------------------------------ *
  * Modals                                                              *
  * ------------------------------------------------------------------ */
 
@@ -1293,7 +1818,11 @@ function setupTabs() {
       for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === `tab-${btn.dataset.tab}`);
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
-      if (btn.dataset.tab === 'voice') api('/voice').then(({ voice }) => ($('#voice').value = voice));
+      if (btn.dataset.tab === 'history') loadHistory().catch((e) => setStatus(e.message, true));
+      if (btn.dataset.tab === 'voice') {
+        api('/voice').then(({ voice }) => ($('#voice').value = voice));
+        loadSettings().catch((e) => setStatus(e.message, true));
+      }
     };
   }
 }
@@ -1306,9 +1835,7 @@ async function boot() {
 
   $('#resume-select').onchange = (e) => {
     state.resumeId = e.target.value;
-    state.choices = {};
-    state.skillEdits = null;
-    state.dirty = false;
+    clearEdits();
     render();
     renderPreview();
   };

@@ -14,7 +14,8 @@
     <button data-tab="master">Master</button>
     <button data-tab="applications">Applications</button>
     <button data-tab="letters">Letters &amp; answers</button>
-    <button data-tab="voice">Voice</button>
+    <button data-tab="history">History</button>
+    <button data-tab="voice">Voice &amp; AI</button>
   </nav>
   <span id="status" class="status"></span>
 </header>
@@ -96,14 +97,43 @@
     </div>
   </section>
 
-  <!-- Voice: the standing instructions every AI request carries. -->
-  <section id="tab-voice" class="tab">
+  <!-- History: what the store looked like at any point, from git. -->
+  <section id="tab-history" class="tab">
     <p class="hint">
-      These notes are prepended to every AI request, so you never paste the same
-      instructions into a fresh chat again. Describe how you write, not what you did.
+      Every change to the store is committed, so this is the record of what you
+      sent and when. Pick a commit to see exactly what moved.
     </p>
-    <textarea id="voice" spellcheck="false"></textarea>
-    <div class="toolbar"><button id="btn-save-voice" class="primary">Save</button></div>
+    <div class="history-split">
+      <div id="commits" class="commit-list"></div>
+      <div id="commit-detail" class="commit-detail">
+        <div class="empty"><b>Pick a commit</b>Its files and the exact change appear here.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Voice and AI: the standing instructions, and what runs them. -->
+  <section id="tab-voice" class="tab">
+    <div class="split-even">
+      <div>
+        <div class="toolbar"><h2>Voice</h2></div>
+        <p class="hint">
+          Prepended to every AI request, so you never paste the same instructions
+          into a fresh chat again. Describe how you write, not what you did.
+        </p>
+        <textarea id="voice" spellcheck="false"></textarea>
+        <div class="toolbar"><button id="btn-save-voice" class="primary">Save voice notes</button></div>
+      </div>
+
+      <div>
+        <div class="toolbar"><h2>AI command</h2></div>
+        <p class="hint">
+          Whatever coding-agent CLI you already have. Nothing is sent anywhere
+          else; this runs on your machine. Leave it off and every AI action hands
+          you the prompt instead.
+        </p>
+        <div id="settings" class="settings"></div>
+      </div>
+    </div>
   </section>
 </main>
 

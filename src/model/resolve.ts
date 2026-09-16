@@ -1,5 +1,6 @@
 import {
   DEFAULT_LAYOUT,
+  isListBullet,
   isVariantField,
   type Bullet,
   type Entry,
@@ -47,6 +48,7 @@ export function flattenSpec(spec: ResumeSpec, all: ResumeSpec[], seen = new Set<
     ...spec,
     sections,
     choices: { ...(base.choices ?? {}), ...(spec.choices ?? {}) },
+    lists: { ...(base.lists ?? {}), ...(spec.lists ?? {}) },
     layout: { ...(base.layout ?? {}), ...(spec.layout ?? {}) },
   };
 }
@@ -97,7 +99,28 @@ function pickBullet(
   bullet: Bullet,
   choices: Record<string, string>,
   warnings: string[],
+  lists: Record<string, string[]> = {},
 ): { variantId: string; text: string } | undefined {
+  // A list bullet is not worded, it is assembled: prefix plus whichever items
+  // this resume keeps, in store order.
+  if (isListBullet(bullet)) {
+    const wantedIds = lists[bullet.id];
+    const items = wantedIds
+      ? wantedIds
+          .map((id) => {
+            const item = bullet.items!.find((i) => i.id === id);
+            if (!item) warnings.push(`Bullet "${bullet.id}" lists item "${id}", which does not exist.`);
+            return item;
+          })
+          .filter((i): i is NonNullable<typeof i> => Boolean(i))
+      : bullet.items!;
+
+    if (items.length === 0) return undefined;
+    const sep = bullet.separator ?? ', ';
+    const body = items.map((i) => String(i.text)).join(sep);
+    return { variantId: '__list__', text: bullet.prefix ? `${bullet.prefix} ${body}` : body };
+  }
+
   const wanted = choices[bullet.id];
   if (wanted) {
     const hit = bullet.variants.find((v) => v.id === wanted);
@@ -117,6 +140,7 @@ function resolveEntry(
   section: SectionSpec,
   choices: Record<string, string>,
   warnings: string[],
+  lists: Record<string, string[]> = {},
 ): ResolvedEntry {
   const wantedBullets = section.bullets?.[entry.id];
   const available = (entry.bullets ?? []).filter((b) => !b.archived);
@@ -140,7 +164,7 @@ function resolveEntry(
     location: pickField(entry.location, `${entry.id}.location`, choices, warnings),
     bullets: ordered
       .map((b) => {
-        const picked = pickBullet(b, choices, warnings);
+        const picked = pickBullet(b, choices, warnings, lists);
         return picked ? { id: b.id, ...picked } : undefined;
       })
       .filter((b): b is NonNullable<typeof b> => Boolean(b)),
@@ -158,6 +182,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   const warnings: string[] = [];
   const flat = flattenSpec(spec, data.resumes);
   const choices = flat.choices ?? {};
+  const lists = flat.lists ?? {};
 
   const sections: ResolvedSection[] = (flat.sections ?? []).map((section) => {
     const entries: ResolvedEntry[] = [];
@@ -185,7 +210,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
           warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);
           continue;
         }
-        entries.push(resolveEntry(entry, section, choices, warnings));
+        entries.push(resolveEntry(entry, section, choices, warnings, lists));
       }
     }
 
@@ -275,13 +300,25 @@ export function buildMaster(data: StoreData): ResolvedResume {
         bullets: [
           ...fieldLines,
           ...(entry.bullets ?? []).flatMap((b) =>
-            b.variants.map((v) => ({
-              id: b.id,
-              variantId: v.id,
-              text: `${v.text}   — ${b.id}/${v.id}${v.id === b.default ? ' (default)' : ''}${
-                v.suggested ? ' (AI-suggested, unreviewed)' : ''
-              }`,
-            })),
+            // A list bullet has items rather than phrasings; the inventory
+            // question for it is "what could go in this list?".
+            isListBullet(b)
+              ? [
+                  {
+                    id: b.id,
+                    variantId: '__list__',
+                    text: `${b.prefix ?? ''} ${b.items!.map((i) => `${i.text} [${i.id}]`).join(
+                      b.separator ?? ', ',
+                    )}   — ${b.id} (list)`.trim(),
+                  },
+                ]
+              : b.variants.map((v) => ({
+                  id: b.id,
+                  variantId: v.id,
+                  text: `${v.text}   — ${b.id}/${v.id}${v.id === b.default ? ' (default)' : ''}${
+                    v.suggested ? ' (AI-suggested, unreviewed)' : ''
+                  }`,
+                })),
           ),
         ],
       } satisfies ResolvedEntry;

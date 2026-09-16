@@ -32,13 +32,37 @@ export interface VariantField {
 /** A field that is either a plain string or a set of alternates. */
 export type MaybeVariant = string | VariantField;
 
-/** One bullet point, with all of its phrasings. */
+/** A single selectable item inside a list bullet, e.g. one course. */
+export interface ListItem {
+  id: string;
+  text: string;
+  tags?: string[];
+}
+
+/**
+ * One bullet point.
+ *
+ * Most bullets are a sentence with several phrasings. A few are really a list —
+ * relevant coursework, awards — where the decision is which items to show, not
+ * how to word them. Those carry `items` and are picked with checkboxes, the
+ * same way skills are.
+ */
 export interface Bullet {
   id: string;
   default: string;
   variants: Variant[];
+  /** Present on list bullets. When set, `variants` is unused for rendering. */
+  items?: ListItem[];
+  /** Text printed before the list, e.g. "**Relevant Coursework:**". */
+  prefix?: string;
+  /** Separator between items. Defaults to ", ". */
+  separator?: string;
   /** Bullets can be omitted from a resume but kept in the store. */
   archived?: boolean;
+}
+
+export function isListBullet(b: Bullet): boolean {
+  return Array.isArray(b.items) && b.items.length > 0;
 }
 
 export type EntryKind = 'education' | 'experience' | 'project' | 'skills' | 'custom';
@@ -122,6 +146,11 @@ export interface ResumeSpec {
    * (`edu_neu.dates`). Values are variant ids. Merged over the parent's.
    */
   choices?: Record<string, string>;
+  /**
+   * Which items to show on a list bullet, keyed by bullet id. Absent means all
+   * of them. Merged over the parent's, per bullet.
+   */
+  lists?: Record<string, string[]>;
   /** Rendering knobs; merged over defaults and the parent's. */
   layout?: Partial<LayoutOptions>;
   notes?: string;

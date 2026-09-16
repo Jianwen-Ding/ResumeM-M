@@ -70,7 +70,14 @@ nav button.active { background: var(--accent-soft); color: var(--accent); font-w
 }
 
 .pane { min-width: 0; }
-.pane-right { position: sticky; top: 62px; height: calc(100vh - 78px); }
+/* `align-self: start` is what makes sticky work here: a grid item stretches to
+   the full row height by default, leaving it nothing to stick within. */
+.pane-right {
+  position: sticky;
+  top: 62px;
+  align-self: start;
+  height: calc(100vh - 78px);
+}
 
 /* The PDF preview. Chrome's viewer chrome is hidden via URL parameters; the
    frame supplies the page-like surround instead. */
@@ -227,6 +234,40 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
   margin-bottom: 3px;
 }
 
+/* Include / exclude switches. A variation is a bundle of these plus the
+   phrasings chosen, so they carry real weight and are always visible. */
+.toggle { display: inline-flex; align-items: center; cursor: pointer; flex: 0 0 auto; }
+.toggle input { width: 15px; height: 15px; margin: 0; cursor: pointer; accent-color: var(--accent); }
+
+.entry.off { opacity: .58; background: #fbfbfc; }
+.entry.off .entry-head .title { text-decoration: line-through; text-decoration-color: var(--faint); }
+.bullet.off { opacity: .5; }
+.bullet.off .text { text-decoration: line-through; text-decoration-color: var(--faint); }
+
+.bullet-head { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 5px; }
+.bullet-head .text { flex: 1 1 auto; margin: 0; }
+
+/* Selectable items inside a list bullet — coursework, awards — picked the
+   same way skills are. */
+.chip-set { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 2px 0 6px 23px; }
+.chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 2px 9px;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+  background: var(--panel);
+  color: var(--muted);
+}
+.chip-toggle.on { background: var(--accent-soft); border-color: #c6d4f2; color: var(--accent); }
+.chip-toggle input { display: none; }
+.chip-toggle .x { color: var(--faint); font-size: 13px; line-height: 1; }
+.chip-toggle .x:hover { color: var(--bad); }
+
 .bullet .text { margin-bottom: 5px; }
 .bullet .text strong { font-weight: 650; }
 .bullet .text .mono {
@@ -238,9 +279,11 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 }
 .bullet.dim .text { opacity: .45; }
 
-.variant-row { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
-.variant-row select { flex: 1 1 200px; min-width: 0; }
-.variant-row .actions { display: flex; gap: 2px; margin-left: auto; }
+/* The dropdown now holds a whole sentence, so it gets the full width and the
+   actions sit underneath rather than squeezing it into a corner. */
+.variant-row { display: flex; gap: 5px 6px; align-items: center; flex-wrap: wrap; }
+.variant-row select { flex: 1 1 100%; min-width: 0; text-overflow: ellipsis; }
+.variant-row .actions { display: flex; gap: 3px; align-items: center; margin-left: auto; flex-wrap: wrap; }
 
 .chip {
   display: inline-block;
@@ -362,3 +405,67 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 }
 .form-label { font-size: 12px; color: var(--muted); margin: 10px 0 3px; }
 .form-label:first-child { margin-top: 0; }
+
+/* ---- History ---- */
+
+.history-split { display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 16px; align-items: start; }
+@media (max-width: 1000px) { .history-split { grid-template-columns: 1fr; } }
+
+.commit-list { display: grid; gap: 5px; max-height: calc(100vh - 190px); overflow: auto; }
+.commit {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.commit:hover { border-color: #c9c9d1; }
+.commit.selected { border-left-color: var(--accent); background: var(--accent-soft); }
+.commit .msg { font-size: 13px; line-height: 1.35; }
+.commit .meta { color: var(--faint); font-size: 11px; margin-top: 3px; font-family: ui-monospace, Menlo, monospace; }
+
+.commit-detail {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+}
+.commit-detail h3 { margin: 0 0 3px; font-size: 14px; }
+.commit-detail .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+/* Commit bodies are written with deliberate line breaks; keep them. */
+.commit-detail .commit-body { white-space: pre-wrap; margin: 0 0 12px; line-height: 1.55; }
+.file-row {
+  display: flex; align-items: center; gap: 8px;
+  font-family: ui-monospace, Menlo, monospace; font-size: 11.5px;
+  padding: 3px 0; border-bottom: 1px solid var(--line-soft);
+}
+.file-row .add { color: var(--good); }
+.file-row .del { color: var(--bad); }
+
+/* A diff is only readable with the added and removed lines actually coloured. */
+.diff { margin-top: 12px; border: 1px solid var(--line-soft); border-radius: 6px; overflow: hidden; }
+.diff pre { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.5; }
+.diff .line { padding: 0 9px; white-space: pre-wrap; word-break: break-word; }
+.diff .line.add { background: #eaf7ef; color: #14612f; }
+.diff .line.del { background: #fdeeed; color: #8f1d17; }
+.diff .line.hunk { background: #eef2fb; color: #3a5ea8; }
+.diff .line.meta { color: var(--faint); }
+
+/* ---- Settings ---- */
+
+.settings { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.settings .row { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+.settings .row:last-child { margin-bottom: 0; }
+.settings label.f { display: block; margin-bottom: 11px; }
+.settings .lbl { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+.settings input[type=text], .settings select { width: 100%; }
+.settings .check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.settings .check input { width: 15px; height: 15px; accent-color: var(--accent); }
+.settings .result { font-size: 12px; padding: 7px 9px; border-radius: 6px; margin-top: 10px; }
+.settings .result.ok { background: var(--good-bg); border: 1px solid var(--good-line); color: var(--good); }
+.settings .result.bad { background: var(--bad-bg); border: 1px solid var(--bad-line); color: var(--bad); }
+.settings .result.idle { background: #fafafb; border: 1px solid var(--line-soft); color: var(--muted); }
+.settings .override { color: var(--warn); font-size: 11px; margin-top: 4px; }

@@ -71,12 +71,38 @@ export class Store {
 
   loadConfig(): StoreConfig {
     const raw = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
-    return {
+    const config: StoreConfig = {
       latex: { ...DEFAULT_CONFIG.latex, ...(raw.latex ?? {}) },
       ai: { ...DEFAULT_CONFIG.ai, ...(raw.ai ?? {}) },
       git: { ...DEFAULT_CONFIG.git, ...(raw.git ?? {}) },
       output: { ...DEFAULT_CONFIG.output, ...(raw.output ?? {}) },
     };
+
+    // Escape hatches for automated runs. A test suite driving a real server
+    // should be able to leave no commits behind without editing config.yaml.
+    if (process.env.RMM_AUTOCOMMIT === '0') config.git.autoCommit = false;
+    if (process.env.RMM_AI === '0') config.ai.enabled = false;
+    if (process.env.RMM_LATEX_ENGINE) {
+      config.latex.engine = process.env.RMM_LATEX_ENGINE as StoreConfig['latex']['engine'];
+    }
+    return config;
+  }
+
+  /**
+   * Write config.yaml. Only the fields the caller supplies are changed, so a
+   * GUI that knows about the AI settings cannot clobber the LaTeX ones.
+   */
+  saveConfig(patch: Partial<StoreConfig>): StoreConfig {
+    const current = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
+    const merged: Partial<StoreConfig> = {
+      ...current,
+      ...(patch.latex ? { latex: { ...current.latex, ...patch.latex } } : {}),
+      ...(patch.ai ? { ai: { ...current.ai, ...patch.ai } } : {}),
+      ...(patch.git ? { git: { ...current.git, ...patch.git } } : {}),
+      ...(patch.output ? { output: { ...current.output, ...patch.output } } : {}),
+    };
+    this.writeYaml('config.yaml', merged);
+    return this.loadConfig();
   }
 
   loadVoice(): string {

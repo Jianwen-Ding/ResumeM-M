@@ -18,3 +18,5 @@ layout:
   spacing: 1
   maxPages: 1
   autoFit: true
+lists:
+  b_edu_coursework: [c_algorithms, c_ood, c_systems, c_databases, c_networks, c_theory]
