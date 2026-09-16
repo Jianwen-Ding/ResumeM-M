@@ -12,13 +12,102 @@ import {
   type TailorContext,
 } from '../ai/prompts.js';
 import { Repo, withCommit } from '../git/repo.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { extractJob, jobPostingScore } from '../jobs/extract.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
 import { buildMaster, resolveResume } from '../model/resolve.js';
 import type { Store } from '../model/store.js';
-import type { Application, Entry, Profile, ResumeSpec, SkillGroup, Variant } from '../model/types.js';
+import { isVariantField } from '../model/types.js';
+import type {
+  Application,
+  CoverLetter,
+  Entry,
+  Profile,
+  ResumeSpec,
+  SkillGroup,
+  StoreData,
+  Variant,
+  VariantField,
+} from '../model/types.js';
 import { compileResume, OverflowError } from '../render/compile.js';
+
+interface DescribedChange {
+  key: string;
+  from: string;
+  to: string;
+  because: string[];
+  /** Which entry the change belongs to, in words. */
+  where?: string;
+  /** What kind of thing changed: a bullet, or a heading field. */
+  what?: string;
+  fromLabel?: string;
+  toLabel?: string;
+  fromText?: string;
+  toText?: string;
+}
+
+const FIELD_WORDS: Record<string, string> = {
+  title: 'title',
+  dates: 'dates',
+  subtitle: 'role',
+  location: 'location',
+};
+
+/**
+ * Resolve a raw `{key, from, to}` change into the human words it swaps, so the
+ * extension can say "Coursework: Broad → Systems-leaning" instead of
+ * "b_edu_coursework → v_systems".
+ */
+function describeChange(
+  change: { key: string; from: string; to: string; because: string[] },
+  data: StoreData,
+): DescribedChange {
+  const plainTitle = (e: Entry): string => {
+    if (!isVariantField(e.title)) return String(e.title ?? e.id);
+    const chosen = e.title.variants.find((v) => v.id === (e.title as VariantField).default) ?? e.title.variants[0];
+    return String(chosen?.text ?? e.id);
+  };
+
+  const dot = change.key.indexOf('.');
+  if (dot > 0) {
+    const entryId = change.key.slice(0, dot);
+    const fieldName = change.key.slice(dot + 1);
+    const entry = data.entries.find((e) => e.id === entryId);
+    const field = entry?.[fieldName as 'title' | 'dates' | 'subtitle' | 'location'];
+    if (entry && field && typeof field !== 'string') {
+      const from = field.variants.find((v) => v.id === change.from);
+      const to = field.variants.find((v) => v.id === change.to);
+      return {
+        ...change,
+        where: plainTitle(entry),
+        what: FIELD_WORDS[fieldName] ?? fieldName,
+        fromLabel: from?.label,
+        toLabel: to?.label,
+        fromText: from?.text,
+        toText: to?.text,
+      };
+    }
+    return { ...change };
+  }
+
+  for (const entry of data.entries) {
+    const bullet = (entry.bullets ?? []).find((b) => b.id === change.key);
+    if (!bullet) continue;
+    const from = bullet.variants.find((v) => v.id === change.from);
+    const to = bullet.variants.find((v) => v.id === change.to);
+    return {
+      ...change,
+      where: plainTitle(entry),
+      what: 'bullet',
+      fromLabel: from?.label,
+      toLabel: to?.label,
+      fromText: from?.text,
+      toText: to?.text,
+    };
+  }
+  return { ...change };
+}
 
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
 function handler(fn: (req: Request, res: Response) => Promise<unknown>) {
@@ -293,25 +382,145 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Draft a cover letter for a posting, grounded in previous letters.
+   *
+   * Works with the AI off: it still returns the most relevant previous letters,
+   * which is the thing you would actually start from. "Generated from previous
+   * responses" should not require a model to be installed.
+   */
   api.post(
     '/ai/cover-letter',
     handler(async (req, res) => {
-      const { resumeId, job } = req.body as { resumeId: string; job: TailorContext };
+      const { resumeId, job, save } = req.body as {
+        resumeId: string;
+        job: TailorContext;
+        save?: boolean;
+      };
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
-      const prior = data.coverLetters.map((l) => l.body);
-      const result = await runAgent(data.config, coverLetterPrompt(data, resolved, job, prior));
-      res.json(result);
+      const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
+
+      const result = await runAgent(
+        data.config,
+        coverLetterPrompt(data, resolved, job, prior.map((l) => l.body)),
+      );
+
+      const body = result.executed ? result.output : '';
+      let saved: CoverLetter | undefined;
+      if (save && body.trim()) {
+        saved = {
+          id: letterId(job.company, job.jobTitle),
+          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? 'Unknown'}`,
+          company: job.company,
+          role: job.jobTitle,
+          createdAt: new Date().toISOString(),
+          body,
+        };
+        const letter = saved;
+        await withCommit(repo, autoCommit(), `Add cover letter "${letter.id}"`, () =>
+          store.saveCoverLetter(letter),
+        );
+      }
+
+      res.json({
+        ...result,
+        body,
+        saved,
+        // Always useful, and the whole answer when the AI is off.
+        priorLetters: prior.map((l) => ({
+          id: l.id,
+          title: l.title,
+          company: l.company,
+          role: l.role,
+          createdAt: l.createdAt,
+          body: l.body,
+        })),
+      });
     }),
   );
 
+  /**
+   * Match page questions against the answer bank with no AI call at all. This
+   * is the offline path: a question you have answered before comes back
+   * answered.
+   */
+  api.post(
+    '/answers/match',
+    handler(async (req, res) => {
+      const { questions, threshold } = req.body as { questions: string[]; threshold?: number };
+      if (!Array.isArray(questions)) throw new Error('questions must be an array');
+      const data = store.load();
+      res.json({
+        matches: matchAnswers(questions, data.answers, threshold),
+        bankSize: data.answers.length,
+      });
+    }),
+  );
+
+  /**
+   * Answer a question. Reuses a stored answer outright when one plainly covers
+   * it, and only reaches for the AI when nothing does — or when asked to adapt
+   * the stored answer to this specific posting.
+   */
   api.post(
     '/ai/answer',
     handler(async (req, res) => {
-      const { question, job } = req.body as { question: string; job?: TailorContext };
+      const { question, job, force } = req.body as {
+        question: string;
+        job?: TailorContext;
+        force?: boolean;
+      };
       const data = store.load();
+      const match = matchAnswer(question, data.answers);
+
+      if (match.confident && !force) {
+        res.json({
+          output: match.answer,
+          executed: false,
+          source: 'answer-bank',
+          match,
+        });
+        return;
+      }
+
       const result = await runAgent(data.config, answerPrompt(data, question, job));
-      res.json(result);
+      res.json({ ...result, source: result.executed ? 'ai' : 'prompt', match });
+    }),
+  );
+
+  /** Save an answer back to the bank, so the next form starts from it. */
+  api.post(
+    '/answers/save',
+    handler(async (req, res) => {
+      const { question, answer, label, itemId } = req.body as {
+        question: string;
+        answer: string;
+        label?: string;
+        itemId?: string;
+      };
+      if (!question?.trim() || !answer?.trim()) throw new Error('question and answer are required');
+
+      const answers = store.load().answers;
+      const existing = itemId ? answers.find((a) => a.id === itemId) : undefined;
+
+      if (existing) {
+        // A new phrasing of a question already in the bank, not a new question.
+        const id = `v_${slug(label ?? new Date().toISOString().slice(0, 10))}` || `v_${Date.now()}`;
+        const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
+        existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
+        existing.default = unique;
+      } else {
+        answers.push({
+          id: `ans_${slug(question).slice(0, 40) || Date.now()}`,
+          question: question.trim(),
+          default: 'v_1',
+          variants: [{ id: 'v_1', label: label ?? 'Saved', text: answer.trim() }],
+        });
+      }
+
+      await withCommit(repo, autoCommit(), 'Update answer bank', () => store.saveAnswers(answers));
+      res.json({ ok: true, answers });
     }),
   );
 
@@ -391,7 +600,12 @@ export function createApi({ store, repo }: ApiDeps): Router {
         job,
         baseResumeId: baseId,
         spec,
-        rationale: finalMatch.rationale,
+        // Ids are how the store refers to things; they are not how a person
+        // reads a diff. Resolve each change to the words it actually swaps.
+        rationale: finalMatch.rationale.map((r) => describeChange(r, data)),
+        entryByBullet: Object.fromEntries(
+          data.entries.flatMap((e) => (e.bullets ?? []).map((b) => [b.id, e.id])),
+        ),
         suggestions: (aiParsed as { suggestions?: unknown[] } | null)?.suggestions ?? [],
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),

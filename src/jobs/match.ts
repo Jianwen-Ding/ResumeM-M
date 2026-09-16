@@ -20,7 +20,12 @@ function norm(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9+#]/g, '');
 }
 
-function scoreVariant(v: Variant, keywords: Set<string>, jdText: string): { score: number; hits: string[] } {
+/**
+ * `keywords` maps the normalised form back to the wording the posting used, so
+ * a match can be explained as "distributed systems" rather than the
+ * "distributedsystems" the comparison runs on.
+ */
+function scoreVariant(v: Variant, keywords: Map<string, string>): { score: number; hits: string[] } {
   const hits: string[] = [];
   let score = 0;
 
@@ -33,13 +38,13 @@ function scoreVariant(v: Variant, keywords: Set<string>, jdText: string): { scor
 
   // A variant that names a technology the posting names is relevant even when
   // nobody remembered to tag it.
-  for (const kw of keywords) {
-    if (kw.length >= 3 && norm(v.text).includes(kw)) {
+  const text = norm(v.text);
+  for (const [key, original] of keywords) {
+    if (key.length >= 3 && text.includes(key)) {
       score += 1;
-      if (!hits.includes(kw)) hits.push(kw);
+      if (!hits.includes(original)) hits.push(original);
     }
   }
-  void jdText;
   return { score, hits };
 }
 
@@ -55,7 +60,7 @@ export interface MatchOptions {
 }
 
 export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOptions): MatchResult {
-  const keywords = new Set(opts.keywords.map(norm));
+  const keywords = new Map(opts.keywords.map((k) => [norm(k), k]));
   const threshold = opts.threshold ?? 3;
   const exclude = new Set((opts.excludeTags ?? ['short']).map(norm));
 
@@ -68,7 +73,7 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
     const selectable = variants.filter((v) => !(v.tags ?? []).some((t) => exclude.has(norm(t))));
     if (selectable.length < 2) return;
 
-    const scored = selectable.map((v) => ({ v, ...scoreVariant(v, keywords, '') }));
+    const scored = selectable.map((v) => ({ v, ...scoreVariant(v, keywords) }));
     const currentScore = scored.find((s) => s.v.id === currentId)?.score ?? 0;
     const best = scored.reduce((a, b) => (b.score > a.score ? b : a));
 
