@@ -134,10 +134,19 @@ function firstTexError(log: string): string | undefined {
  * only available to the .aux on the run after the one that recorded them.
  */
 export async function compileFast(resume: ResolvedResume, layout: LayoutOptions): Promise<RawCompile> {
-  const fmt = await getFormat(layout.paper);
+  return compileFastBody(renderLatexFastBody({ ...resume, layout }), layout.paper);
+}
+
+/**
+ * The same path for any document body written against the stable preamble —
+ * a resume or a cover letter. Both are set from the same template, so both
+ * load the same precompiled format.
+ */
+export async function compileFastBody(body: string, paper: LayoutOptions['paper']): Promise<RawCompile> {
+  const fmt = await getFormat(paper);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-fast-'));
   const texFile = path.join(dir, 'resume.tex');
-  fs.writeFileSync(texFile, renderLatexFastBody({ ...resume, layout }), 'utf8');
+  fs.writeFileSync(texFile, body, 'utf8');
 
   try {
     for (let pass = 0; pass < 2; pass++) {

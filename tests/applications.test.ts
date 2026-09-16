@@ -152,7 +152,14 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       answers: [{ question: 'Why us?', answer: 'Because.' }],
     });
 
+    // A typeset PDF for the portals that take an upload, and the plain text
+    // for the ones with a paste-it-in box.
+    expect(result.files).toContain('Test Person Cover Letter Streamly.pdf');
     expect(result.files).toContain('Test Person Cover Letter Streamly.txt');
+    const letterPdf = fs.readFileSync(path.join(result.dir, 'Test Person Cover Letter Streamly.pdf'));
+    expect(letterPdf.subarray(0, 4).toString()).toBe('%PDF');
+    expect(fs.existsSync(path.join(result.dir, 'source', 'cover-letter.tex'))).toBe(true);
+
     expect(result.files).toContain('application-answers.md');
     const qa = fs.readFileSync(path.join(result.dir, 'application-answers.md'), 'utf8');
     expect(qa).toContain('## Why us?');

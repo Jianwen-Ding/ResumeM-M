@@ -233,6 +233,42 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .fit.idle { background: var(--panel); border-color: var(--line); border-left-color: var(--line); color: var(--muted); font-weight: 400; }
 .fit .adj { color: var(--warn); }
 
+/* The preview recompiles on its own, so the toolbar says whether what you are
+   looking at is current rather than offering a button to make it current. */
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  font-size: var(--t-sm);
+  font-weight: 560;
+  cursor: default;
+  user-select: none;
+  background: var(--good-bg);
+  color: var(--good);
+  box-shadow: inset 0 0 0 1px var(--good-line);
+}
+.live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.live.working {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-line, transparent);
+}
+.live.working::before { animation: live-pulse 1s ease-in-out infinite; }
+.live.bad { background: var(--bad-bg); color: var(--bad); box-shadow: inset 0 0 0 1px var(--bad-line); }
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.72); }
+}
+
 .warnings { font-size: 12px; margin-bottom: 10px; }
 .warnings div {
   background: var(--warn-bg);
@@ -677,7 +713,22 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .draft-editor .block-head { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
 .draft-editor .block-head h4 { margin: 0; font-size: 13.5px; }
 .draft-editor textarea { min-height: 110px; width: 100%; font-family: inherit; font-size: 13.5px; line-height: 1.6; }
-.draft-editor textarea.letter { min-height: 260px; }
+.draft-editor textarea.letter { min-height: 380px; }
+
+/* Write on the left, see the typeset letter on the right. The letter is a real
+   document set like the resume, so it is worth looking at while you write it. */
+.letter-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+.letter-split textarea.letter { margin: 0; }
+.letter-preview { min-height: 380px; height: auto; }
+@media (max-width: 1100px) {
+  .letter-split { grid-template-columns: minmax(0, 1fr); }
+  .letter-preview { min-height: 300px; }
+}
 .draft-editor .q-label { font-size: 13px; font-weight: 600; margin-bottom: 5px; }
 
 .badge {
@@ -849,6 +900,31 @@ tbody tr { cursor: pointer; }
   padding-left: 10px;
   border-left: 2px solid var(--line-soft);
 }
-.version-card .changes .c.entry, .version-card .changes .c.bullet { color: var(--muted); }
 .version-card .changes .c.created { color: var(--good); border-left-color: var(--good-line); }
+.version-card .changes .c.added { border-left-color: var(--good-line); }
+.version-card .changes .c.removed { border-left-color: var(--bad-line); }
+.version-card .changes .c.reworded,
+.version-card .changes .c.changed { border-left-color: var(--accent-line); }
+.version-card .changes .c.moved { color: var(--muted); }
+
+/* Where it happened, then what it used to say and what it says now — a
+   tracked change, not a patch. */
+.version-card .c-where { display: block; font-weight: 600; color: var(--ink); }
+.version-card .c-diff { display: grid; gap: 2px; margin-top: 3px; }
+.version-card .c-diff del,
+.version-card .c-diff ins {
+  display: block;
+  line-height: 1.45;
+  text-decoration: none;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.version-card .c-diff del {
+  color: var(--muted);
+  background: var(--bad-bg);
+  text-decoration: line-through;
+  text-decoration-color: var(--bad-line);
+}
+.version-card .c-diff ins { color: var(--ink); background: var(--good-bg); }
+
 .version-card .actions-row { margin-top: 9px; display: flex; gap: 6px; align-items: center; }

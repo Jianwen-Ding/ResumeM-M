@@ -182,6 +182,35 @@ export class Repo {
       });
   }
 
+  /**
+   * Every file in the repo at one commit, as path → blob id.
+   *
+   * Reading a *resume* as it was at some commit is not enough to know what the
+   * resume said: its bullets, its dates, and the resume it inherits from all
+   * live in other files. Answering "what did this resume look like then"
+   * means reading the whole store as it was then.
+   */
+  async treeAt(hash: string): Promise<Map<string, string>> {
+    const out = await this.git(['ls-tree', '-r', '-z', hash]).catch(() => '');
+    const files = new Map<string, string>();
+    for (const record of out.split('\0')) {
+      if (!record) continue;
+      // "<mode> <type> <object>\t<path>"
+      const tab = record.indexOf('\t');
+      if (tab < 0) continue;
+      const meta = record.slice(0, tab).split(/\s+/);
+      const objectId = meta[2];
+      const file = record.slice(tab + 1);
+      if (objectId && meta[1] === 'blob') files.set(file, objectId);
+    }
+    return files;
+  }
+
+  /** One blob's contents. Blobs are content-addressed, so callers can cache. */
+  async blob(objectId: string): Promise<string> {
+    return this.git(['cat-file', 'blob', objectId]).catch(() => '');
+  }
+
   /* ---- Remotes ---------------------------------------------------- *
    * The store is a local repository by default and stays that way unless you
    * ask otherwise. Pushing it somewhere private is an option, not a step.
