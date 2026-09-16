@@ -17,6 +17,28 @@ import {
 } from './types.js';
 
 /**
+ * Repair an AI command that cannot work as configured.
+ *
+ * The agent always runs in an empty scratch directory — that confinement is
+ * the point — and `codex exec` refuses to start outside a git repository
+ * unless told not to care. A config saved before that was understood fails
+ * every time with "Not inside a trusted directory", which looks like a bug in
+ * this tool rather than a missing flag.
+ *
+ * Only this one case is repaired, and only by adding a flag that cannot change
+ * what the command does to anything outside the scratch directory: the
+ * read-only sandbox stays exactly as configured.
+ */
+export function repairAiArgs(command: string, args: string[]): string[] {
+  const isCodex = /(^|[\\/])codex(\.exe)?$/i.test(command.trim());
+  if (!isCodex || !args.includes('exec') || args.includes('--skip-git-repo-check')) return args;
+
+  const out = [...args];
+  out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
+  return out;
+}
+
+/**
  * The store is a directory of YAML files under git. It is deliberately dumb:
  * read everything, hand out plain objects, write back whole files. A resume
  * store is a few hundred kilobytes; there is no reason for an index or a
@@ -81,6 +103,8 @@ export class Store {
       git: { ...DEFAULT_CONFIG.git, ...(raw.git ?? {}) },
       output: { ...DEFAULT_CONFIG.output, ...(raw.output ?? {}) },
     };
+
+    config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
 
     // Escape hatches for automated runs. A test suite driving a real server
     // should be able to leave no commits behind without editing config.yaml.
