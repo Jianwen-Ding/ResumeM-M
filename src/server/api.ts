@@ -1280,8 +1280,11 @@ export function createApi({ store, repo }: ApiDeps): Router {
       }
 
       const result = await buildBundle(store, body);
+      // The same files also go to the flat folder, which is the one a portal's
+      // file picker should be pointed at — the archive is for later.
+      const current = syncCurrent(store);
       if (autoCommit()) await repo.commitAll(`Apply: ${result.application.company} — ${result.application.role}`);
-      res.json(result);
+      res.json({ ...result, currentDir: current.dir });
     }),
   );
 
@@ -1713,7 +1716,14 @@ export function createApi({ store, repo }: ApiDeps): Router {
       }
 
       if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
-      res.json({ application: app, dir: result.dir, files: result.files, fits: result.fits, pages: result.pages });
+      res.json({
+        application: app,
+        dir: result.dir,
+        currentDir: syncCurrent(store).dir,
+        files: result.files,
+        fits: result.fits,
+        pages: result.pages,
+      });
     }),
   );
 

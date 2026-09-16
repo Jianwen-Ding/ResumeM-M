@@ -25,7 +25,15 @@ export const CURRENT_DIR = 'current';
 export interface CurrentFolder {
   dir: string;
   files: string[];
+  /** In-flight applications whose files are in the folder. */
   applications: number;
+  /**
+   * In-flight applications altogether, built or not. An empty folder means
+   * something different when two applications are in flight and neither has
+   * been built than when none is in flight at all, and only the caller with
+   * both numbers can say which.
+   */
+  inFlight: number;
 }
 
 /**
@@ -69,5 +77,6 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
     dir,
     files: [...wanted.keys()].sort(),
     applications: apps.filter((a) => IN_FLIGHT.includes(a.status) && a.snapshotDir).length,
+    inFlight: apps.filter((a) => IN_FLIGHT.includes(a.status)).length,
   };
 }

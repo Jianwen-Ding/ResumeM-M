@@ -720,7 +720,18 @@ td.mono { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: v
 }
 .mini-card .row1 { display: flex; align-items: baseline; gap: 8px; }
 .mini-card .row1 b { font-size: 13px; }
-.mini-card .body { color: var(--muted); font-size: 12px; margin-top: 4px; max-height: 3.2em; overflow: hidden; }
+/* A preview is a first glance, not the text. Clipped flat it reads as a bug —
+   a sentence that stops mid-word — so the last line fades out instead, which
+   is the one shape everyone reads as "there is more of this". */
+.mini-card .body {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+  max-height: 3.2em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent 100%);
+}
 
 textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
 #tab-voice textarea { max-width: 900px; }

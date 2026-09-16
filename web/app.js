@@ -1934,9 +1934,13 @@ async function loadApplications() {
       el('span', { className: 'mono-path', textContent: current?.dir ?? '' }),
       el('span', {
         className: 'hint',
+        // An empty folder with applications in flight is a different fact from
+        // an empty folder with nothing in flight, and the useful one to say.
         textContent: current?.files?.length
           ? `${plural(current.files.length, 'file')} from ${plural(current.applications, 'application')} still being sent.`
-          : 'Empty — nothing is mid-application.',
+          : current?.inFlight
+            ? `Empty — ${plural(current.inFlight, 'application')} in flight, none with a built folder yet.`
+            : 'Empty — nothing is mid-application.',
       }),
     );
   }
