@@ -1,4 +1,4 @@
-import type { LayoutOptions, Profile } from '../model/types.js';
+import type { LayoutOptions, ResolvedProfile } from '../model/types.js';
 import { inlineTex, runtimeSetup, stablePreamble, tex } from './latex.js';
 
 /**
@@ -15,7 +15,8 @@ import { inlineTex, runtimeSetup, stablePreamble, tex } from './latex.js';
  */
 
 export interface LetterContent {
-  profile: Profile;
+  /** Already resolved: by the time a letter is typeset the name is one name. */
+  profile: ResolvedProfile;
   /** Who it is addressed to, when known. */
   company?: string;
   role?: string;
@@ -57,7 +58,7 @@ function hasSignOff(body: string, name: string): boolean {
 }
 
 /** The sender block: identical to the resume header, so the pair matches. */
-function header(p: Profile, spacing: number): string {
+function header(p: ResolvedProfile, spacing: number): string {
   const bits: string[] = [];
   if (p.phone) bits.push(tex(p.phone));
   if (p.email) bits.push(`\\href{mailto:${p.email}}{\\underline{${tex(p.email)}}}`);

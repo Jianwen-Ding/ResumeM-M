@@ -1,3 +1,4 @@
+import { resolveProfile } from './resolve.js';
 import type { ResolvedEntry, ResolvedResume, ResolvedSection } from './types.js';
 
 /**
@@ -215,8 +216,12 @@ export function diffResumes(
     out.push({ kind: 'moved', text: 'Reordered' });
   }
 
-  if (before.profile.name !== after.profile.name) {
-    out.push({ kind: 'changed', from: before.profile.name, to: after.profile.name, text: `Name changed to ${after.profile.name}` });
+  // As pinned, since that is the name the document shows. Switching which
+  // alternate a resume uses is a choice, and shows up as one.
+  const wasNamed = resolveProfile(before.profile, {}, []).name;
+  const nowNamed = resolveProfile(after.profile, {}, []).name;
+  if (wasNamed !== nowNamed) {
+    out.push({ kind: 'changed', from: wasNamed, to: nowNamed, text: `Name changed to ${nowNamed}` });
   }
 
   return out;

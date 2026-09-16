@@ -1143,6 +1143,42 @@ describe('pinning', () => {
     expect(typeof entry?.dates === 'object' && entry.dates.default).toBe('v_dec2026');
   });
 
+  it('pins a form of your name, which lives on the profile rather than an entry', async () => {
+    // The name is a field like any other, so it pins through the same route —
+    // which knew only about entries and told you your name was "not in the
+    // store any more".
+    await request(app)
+      .put('/api/profile')
+      .send({
+        name: {
+          default: 'v_legal',
+          variants: [
+            { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
+            { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+          ],
+        },
+        email: 'test@example.com',
+      })
+      .expect(200);
+
+    await request(app).put('/api/defaults/profile.name').send({ variantId: 'v_known' }).expect(200);
+    const profile = t.store.load().profile;
+    expect(typeof profile.name === 'object' && profile.name.default).toBe('v_known');
+
+    // And the resume prints it, with no choice of its own.
+    const resolved = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
+    expect(resolved.profile.name).toBe('Jason Ding');
+
+    // The form-filling data the extension reads is a name, not a set of them.
+    const autofill = (await request(app).get('/api/autofill').expect(200)).body;
+    expect(autofill.fields.full_name).toBe('Jason Ding');
+  });
+
+  it('says a name with no alternates has none to pin', async () => {
+    const res = await request(app).put('/api/defaults/profile.name').send({ variantId: 'v_any' }).expect(400);
+    expect(res.body.error).toMatch(/no alternates/i);
+  });
+
   it('refuses an alternate that does not exist', async () => {
     const res = await request(app).put('/api/defaults/b_pipeline').send({ variantId: 'v_ghost' }).expect(400);
     expect(res.body.error).toMatch(/No such alternate/);

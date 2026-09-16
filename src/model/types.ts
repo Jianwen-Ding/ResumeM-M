@@ -100,7 +100,15 @@ export interface SkillItem {
 }
 
 export interface Profile {
-  name: string;
+  /**
+   * What goes at the top of the page.
+   *
+   * Alternates, like every other field, because a name is not one fixed thing:
+   * the name on your degree, the name people call you, and the initialled form
+   * that buys a line back on a full page are all yours, and which one belongs
+   * on a given application is a decision worth being able to pin.
+   */
+  name: MaybeVariant;
   phone?: string;
   email?: string;
   linkedin?: string;
@@ -227,10 +235,13 @@ export interface ResolvedSection {
   skillGroups: ResolvedSkillGroup[];
 }
 
+/** A profile with its choices made: the name is one name by the time it prints. */
+export type ResolvedProfile = Omit<Profile, 'name'> & { name: string };
+
 export interface ResolvedResume {
   id: string;
   label: string;
-  profile: Profile;
+  profile: ResolvedProfile;
   sections: ResolvedSection[];
   layout: LayoutOptions;
   /** Non-fatal problems: dangling ids, choices that matched nothing. */

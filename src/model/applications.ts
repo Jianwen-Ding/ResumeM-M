@@ -67,7 +67,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const dir = path.join(store.outDir(), 'applications', id);
   fs.mkdirSync(dir, { recursive: true });
 
-  const resumeName = bundleFileName(data.profile.name, req.company, 'Resume');
+  const resumeName = bundleFileName(resolved.profile.name, req.company, 'Resume');
   const pdfPath = path.join(dir, resumeName);
   const compiled = await compileResume(resolved, {
     pdfPath,
@@ -77,7 +77,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const files = [resumeName];
 
   if (req.coverLetter?.trim()) {
-    const letterName = bundleFileName(data.profile.name, req.company, 'Cover Letter');
+    const letterName = bundleFileName(resolved.profile.name, req.company, 'Cover Letter');
 
     // Typeset to match the resume, with the trusted engine — this is a file
     // that gets uploaded, so it never takes the preview shortcut. The plain
@@ -85,7 +85,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     // into a box as want one attached.
     await compileLetter(
       {
-        profile: data.profile,
+        profile: resolved.profile,
         company: req.company,
         role: req.role,
         body: req.coverLetter,

@@ -28,7 +28,7 @@ import { byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
-import { buildMaster, resolveResume } from '../model/resolve.js';
+import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import type { Store } from '../model/store.js';
 import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
 import type {
@@ -387,6 +387,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!variantId) throw new Error('Name the alternate to pin');
 
       const data = store.load();
+
+      // The name on the page lives on the profile rather than on an entry, and
+      // pins the same way everything else does.
+      if (key === PROFILE_NAME_KEY) {
+        const field = data.profile.name;
+        if (typeof field === 'string') throw new Error('Your name has no alternates to pin');
+        if (!field.variants.some((v) => v.id === variantId)) throw new Error('No such alternate');
+        const label = field.variants.find((v) => v.id === variantId)?.label ?? variantId;
+        await withCommit(repo, autoCommit(), `Pin "${label}" as the default`, () =>
+          store.saveProfile({ ...data.profile, name: { ...field, default: variantId } }),
+        );
+        res.json({ key, variantId });
+        return;
+      }
+
       const dot = key.indexOf('.');
       const entry = dot > 0
         ? data.entries.find((e) => e.id === key.slice(0, dot))
@@ -728,14 +743,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const pdfPath = path.join(store.outDir(), `letter-${name}.pdf`);
 
       // The letter is set to match the resume it will be sent with, so the
-      // pair looks like one document rather than two.
-      const layout = body.resumeId
-        ? resolveResume(String(body.resumeId), data).layout
-        : DEFAULT_LAYOUT;
+      // pair looks like one document rather than two — which now includes the
+      // name at the top, since that is a choice the resume makes.
+      const sentWith = body.resumeId ? resolveResume(String(body.resumeId), data) : undefined;
+      const layout = sentWith?.layout ?? DEFAULT_LAYOUT;
 
       const result = await compileLetter(
         {
-          profile: data.profile,
+          profile: sentWith?.profile ?? resolveProfile(data.profile, {}, []),
           company: body.company,
           role: body.role,
           body: body.body ?? '',
@@ -1207,7 +1222,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/autofill',
     handler(async (_req, res) => {
       const data = store.load();
-      const p = data.profile;
+      // Resolved: a form field takes a name, not a set of them.
+      const p = resolveProfile(data.profile, {}, []);
       res.json({
         fields: {
           full_name: p.name,

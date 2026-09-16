@@ -19,7 +19,7 @@ import {
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
 import { applyResearch, repairAiArgs } from '../ai/presets.js';
-import { normalizeAnswers, normalizeEntries, normalizeEntry } from './normalize.js';
+import { normalizeAnswers, normalizeEntries, normalizeEntry, normalizeProfile } from './normalize.js';
 export { repairAiArgs };
 
 /**
@@ -60,7 +60,7 @@ export class Store {
   load(): StoreData {
     const config = this.loadConfig();
     return {
-      profile: this.readYaml<Profile>('profile.yaml', { name: 'Your Name' }),
+      profile: normalizeProfile(this.readYaml<Profile>('profile.yaml', { name: 'Your Name' })),
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.
@@ -209,7 +209,7 @@ export class Store {
   }
 
   saveProfile(profile: Profile): void {
-    this.writeYaml('profile.yaml', profile);
+    this.writeYaml('profile.yaml', normalizeProfile(profile));
   }
 
   saveApplications(apps: Application[]): void {

@@ -234,6 +234,9 @@ function isVariantField(f) {
   return f && typeof f === 'object' && Array.isArray(f.variants);
 }
 
+/** The choice key for the name on the page. Mirrors PROFILE_NAME_KEY on the server. */
+const PROFILE_NAME_KEY = 'profile.name';
+
 function fieldText(field, choices, key) {
   if (field == null) return '';
   if (!isVariantField(field)) return String(field);
@@ -1140,16 +1143,7 @@ function profileBlock() {
   const profile = state.store.profile ?? {};
   const box = el('div', { className: 'entry profile-entry' });
 
-  box.append(
-    el('div', { className: 'head' }, [
-      editableLine(profile.name || 'Your Name', {
-        className: 'title',
-        title: 'Double-click to edit. This is the name at the top of every resume.',
-        onCommit: (text) => saveProfileField('name', text),
-      }),
-      el('span', { className: 'id', textContent: 'prints at the top of every resume' }),
-    ]),
-  );
+  box.append(el('div', { className: 'head' }, nameHead(profile)));
 
   const grid = el('div', { className: 'profile-grid' });
   for (const [key, label] of PROFILE_FIELDS) {
@@ -1208,6 +1202,137 @@ function profileBlock() {
   );
 
   return box;
+}
+
+/**
+ * The name at the top of the page, with its alternates.
+ *
+ * A name is not one fixed thing — the one on your degree, the one people call
+ * you, the initialled form that buys back a line on a full page. It is a field
+ * like a graduation date, so it gets the field's controls rather than its own:
+ * the same picker, the same stepper, the same pin.
+ */
+function nameHead(profile) {
+  const field = profile.name;
+  const said = 'prints at the top of every resume';
+
+  if (!isVariantField(field)) {
+    return [
+      editableLine(String(field ?? '') || 'Your Name', {
+        className: 'title',
+        title: 'Double-click to edit. This is the name at the top of every resume.',
+        onCommit: (text) => saveProfileField('name', text),
+      }),
+      el('button', {
+        className: 'link meta-add',
+        textContent: '+ alt',
+        title: 'Give your name a second form — the name people call you, or an initialled one',
+        onclick: () => addNameAlternate(),
+      }),
+      el('span', { className: 'id', textContent: said }),
+    ];
+  }
+
+  const key = PROFILE_NAME_KEY;
+  const current = state.choices[key] ?? field.default;
+  const chosen = field.variants.find((v) => v.id === current);
+
+  return [
+    editableLine(String(chosen?.text ?? ''), {
+      className: 'title',
+      title: 'Double-click to edit this form of your name.',
+      onCommit: (text) => saveNameText(current, text),
+    }),
+    alternateStepper(key, field, current),
+    variantPicker({
+      key,
+      field,
+      current,
+      addLabel: '+ alternate',
+      onAdd: () => addNameAlternate(),
+      onEdit: null,
+      extraActions: [
+        el('span', { className: 'chip count', textContent: plural(field.variants.length, 'alternate') }),
+        current !== field.default
+          ? el('span', {
+              className: 'chip overridden',
+              textContent: 'changed',
+              title: 'This resume uses a different form of your name from the pinned default',
+            })
+          : null,
+      ].filter(Boolean),
+    }),
+    el('span', { className: 'id', textContent: said }),
+  ].filter(Boolean);
+}
+
+/** Rewrite one form of the name, leaving the others alone. */
+async function saveNameText(variantId, text) {
+  const field = state.store.profile.name;
+  const next = {
+    ...field,
+    variants: field.variants.map((v) => (v.id !== variantId ? v : { ...v, text: undisplay(text) })),
+  };
+  await saveProfileName(next, 'Name updated');
+}
+
+/**
+ * Give the name another form. The name as it stands is kept as the default, so
+ * adding a second one never changes what any existing resume prints.
+ */
+async function addNameAlternate() {
+  const field = state.store.profile.name;
+  const existing = isVariantField(field) ? field : null;
+  const currentText = existing
+    ? (existing.variants.find((v) => v.id === existing.default) ?? existing.variants[0])?.text ?? ''
+    : String(field ?? '');
+
+  const answer = await form('New form of your name', [
+    { name: 'label', label: 'Label', value: '' },
+    { name: 'text', label: 'Name', value: currentText, multiline: false },
+    { name: 'note', label: 'Note to self (optional)', value: '' },
+    ...(!state.masterView ? [{ name: 'useNow', label: 'Use it in this resume straight away', type: 'checkbox', value: true }] : []),
+  ], existing ? null : `"${currentText || '(empty)'}" is kept as the default.`);
+  if (!answer?.text?.trim()) return;
+
+  let id = `v_${slug(answer.label || answer.text)}` || `v_${Date.now()}`;
+  const taken = new Set((existing?.variants ?? []).map((v) => v.id));
+  let n = 2;
+  while (taken.has(id)) id = `v_${slug(answer.label || answer.text)}_${n++}`;
+
+  const added = {
+    id,
+    label: answer.label?.trim() || answer.text.trim().slice(0, 24),
+    text: answer.text.trim(),
+    ...(answer.note?.trim() ? { note: answer.note.trim() } : {}),
+  };
+
+  const next = existing
+    ? { ...existing, variants: [...existing.variants, added] }
+    : {
+        default: 'v_base',
+        variants: [
+          { id: 'v_base', label: currentText.slice(0, 24) || 'Default', text: currentText },
+          added,
+        ],
+      };
+
+  await saveProfileName(next, 'Added another form of your name');
+  if (!state.masterView && answer.useNow) {
+    state.choices[PROFILE_NAME_KEY] = id;
+    markDirty();
+    render();
+  }
+}
+
+async function saveProfileName(name, message) {
+  const profile = { ...state.store.profile, name };
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  state.store.profile = profile;
+  setStatus(message);
+  render();
+  scheduleRender();
+  scheduleCommit();
 }
 
 async function saveProfileField(key, text) {

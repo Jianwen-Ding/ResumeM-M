@@ -9,6 +9,8 @@ import {
   type MaybeVariant,
   type ResolvedBullet,
   type ResolvedEntry,
+  type Profile,
+  type ResolvedProfile,
   type ResolvedResume,
   type ResolvedSection,
   type ResumeSpec,
@@ -64,6 +66,24 @@ function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpe
     if (!out.some((s) => s.kind === o.kind)) out.push(o);
   }
   return out;
+}
+
+/**
+ * The choice key for the name on the page.
+ *
+ * Shaped like every other field path — owner, then field — so a resume pins it
+ * with the same mechanism, the editor lists it with the same code, and nothing
+ * had to learn that the profile is a special case.
+ */
+export const PROFILE_NAME_KEY = 'profile.name';
+
+/** The profile with its name decided. */
+export function resolveProfile(
+  profile: Profile,
+  choices: Record<string, string>,
+  warnings: string[],
+): ResolvedProfile {
+  return { ...profile, name: pickField(profile.name, PROFILE_NAME_KEY, choices, warnings) ?? '' };
 }
 
 /**
@@ -225,6 +245,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   // Flag choices that matched nothing — usually a renamed id, and silently
   // ignoring them is how a resume quietly reverts to the wrong grad date.
   const knownKeys = new Set<string>();
+  if (isVariantField(data.profile.name)) knownKeys.add(PROFILE_NAME_KEY);
   for (const e of data.entries) {
     for (const f of ['title', 'dates', 'subtitle', 'location'] as const) {
       if (isVariantField(e[f])) knownKeys.add(`${e.id}.${f}`);
@@ -244,7 +265,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   return {
     id: flat.id,
     label: flat.label ?? flat.id,
-    profile: data.profile,
+    profile: resolveProfile(data.profile, choices, warnings),
     sections,
     layout,
     warnings,
@@ -340,7 +361,8 @@ export function buildMaster(data: StoreData): ResolvedResume {
   return {
     id: '__master__',
     label: 'Master document — everything in the store',
-    profile: data.profile,
+    // The master shows the pinned name; it is the store, not a selection.
+    profile: resolveProfile(data.profile, {}, warnings),
     sections: [
       entrySection('education'),
       entrySection('experience'),

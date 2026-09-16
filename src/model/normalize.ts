@@ -1,4 +1,4 @@
-import type { AnswerBankItem, Bullet, Entry, MaybeVariant, Variant, VariantField } from './types.js';
+import type { AnswerBankItem, Bullet, Entry, MaybeVariant, Profile, Variant, VariantField } from './types.js';
 
 /**
  * Making the store's shape true before anything reads it.
@@ -106,4 +106,14 @@ export function normalizeAnswers(answers: unknown): AnswerBankItem[] {
         default: settleDefault(variants, item.default),
       } as AnswerBankItem;
     });
+}
+
+/**
+ * The name can carry alternates now, which means it can also arrive malformed —
+ * `name: {default: v_legal}` with no variants under it — from the same
+ * hand-edited YAML that motivated everything above. Same treatment: keep what
+ * is there, make the shape true, let the resolver warn.
+ */
+export function normalizeProfile(profile: Profile): Profile {
+  return { ...profile, name: normalizeField(profile.name) ?? '' };
 }
