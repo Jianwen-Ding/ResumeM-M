@@ -26,10 +26,21 @@ export const AI_PRESETS: AiPreset[] = [
   {
     label: 'Claude Code',
     command: 'claude',
-    // `-p` prints and exits. The prompt is passed as a file path because these
-    // prompts run to tens of kilobytes; every tool that could touch anything is
-    // disallowed, and the only directory it is told about is the scratch one.
-    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch', '{prompt}'],
+    /*
+     * `-p` prints and exits. The prompt goes in on stdin and is named by no
+     * argument at all, which is not a stylistic choice: `--disallowedTools`
+     * takes a list, so it swallows whatever follows it, and a prompt passed
+     * positionally after it became a deny rule —
+     *
+     *   Permission deny rule "/tmp/rmm-ai-xxx/prompt.md" matches no known tool
+     *   Error: Input must be provided either through stdin or as a prompt
+     *          argument when using --print
+     *
+     * — which is what "the AI does nothing" looked like from the outside.
+     * Stdin also has no length limit, and these prompts run to tens of
+     * kilobytes.
+     */
+    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch'],
     note: 'Runs with every file-touching and network tool disallowed.',
   },
   {
@@ -75,10 +86,27 @@ export function matchPreset(command: string, args: string[]): AiPreset | undefin
  * read-only sandbox stays exactly as configured.
  */
 export function repairAiArgs(command: string, args: string[]): string[] {
-  const isCodex = /(^|[\\/])codex(\.exe)?$/i.test(command.trim());
-  if (!isCodex || !args.includes('exec') || args.includes('--skip-git-repo-check')) return args;
+  const named = (re: RegExp) => re.test(command.trim());
 
-  const out = [...args];
-  out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
-  return out;
+  // Codex: refuses to start outside a git repository unless told not to check.
+  if (named(/(^|[\\/])codex(\.exe)?$/i) && args.includes('exec') && !args.includes('--skip-git-repo-check')) {
+    const out = [...args];
+    out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
+    return out;
+  }
+
+  /*
+   * Claude Code: a prompt placed after `--disallowedTools` is read as another
+   * tool to deny, and the prompt then never arrives — so the command fails
+   * every time, having been configured from a preset that looked reasonable.
+   * Dropping the token leaves the prompt to stdin, which is where it should
+   * have gone.
+   */
+  if (named(/(^|[\\/])claude(\.exe)?$/i) && args.includes('--disallowedTools')) {
+    const after = args.slice(args.indexOf('--disallowedTools') + 2);
+    if (after.length === 1 && (after[0] === '{prompt}' || after[0] === '{promptText}')) {
+      return args.slice(0, -1);
+    }
+  }
+  return args;
 }

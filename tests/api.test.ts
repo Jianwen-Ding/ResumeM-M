@@ -1011,6 +1011,14 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
   });
 });
 
+describe('asking for something impossible', () => {
+  it('says what is missing rather than reporting an undefined property', async () => {
+    const res = await request(app).post('/api/ai/tailor').send({ resumeId: 'newgrad' }).expect(400);
+    expect(res.body.error).toMatch(/job description/i);
+    expect(res.body.error).not.toMatch(/undefined/);
+  });
+});
+
 describe('pinning', () => {
   it('pins an alternate on a bullet as the one everything falls back to', async () => {
     const res = await request(app)

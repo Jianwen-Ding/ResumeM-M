@@ -854,6 +854,10 @@ export function createApi({ store, repo }: ApiDeps): Router {
     '/ai/tailor',
     handler(async (req, res) => {
       const { resumeId, job } = req.body as { resumeId: string; job: TailorContext };
+      // Without this, a missing `job` surfaced as "Cannot read properties of
+      // undefined (reading 'company')", which names nothing a caller can fix.
+      if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to tailor against');
+
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
       const result = await runAgent(data.config, tailorPrompt(data, resolved, job));

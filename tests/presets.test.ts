@@ -44,16 +44,31 @@ const PROMPT = 'Task: say something.\nThe prompt runs to several lines.\n';
  */
 const CLAUDE = `
 const argv = process.argv.slice(2);
-const fs = require('node:fs');
 if (!argv.includes('-p')) throw new Error('claude: expected -p');
 const addDir = argv[argv.indexOf('--add-dir') + 1];
-const disallowed = argv[argv.indexOf('--disallowedTools') + 1] ?? '';
-const promptPath = argv[argv.length - 1];
-if (!fs.existsSync(promptPath)) throw new Error('claude: last argument is not a readable file');
-const prompt = fs.readFileSync(promptPath, 'utf8');
-process.stdout.write(JSON.stringify({
-  cli: 'claude', addDir, disallowed, cwd: process.cwd(), promptPath, prompt,
-}));
+
+/*
+ * --disallowedTools takes a list, so it consumes everything after it. The real
+ * CLI rejected a prompt passed positionally here with 'Permission deny rule
+ * "..." matches no known tool', then 'Input must be provided either through
+ * stdin or as a prompt argument'. The stand-in does the same.
+ */
+const after = argv.slice(argv.indexOf('--disallowedTools') + 1);
+const disallowed = after.join(' ');
+if (after.length > 1) {
+  process.stderr.write('Permission deny rule "' + after[1] + '" matches no known tool');
+  process.exit(1);
+}
+
+let prompt = '';
+process.stdin.on('data', (d) => { prompt += d; });
+process.stdin.on('end', () => {
+  if (!prompt) {
+    process.stderr.write('Input must be provided either through stdin or as a prompt argument when using --print');
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify({ cli: 'claude', addDir, disallowed, cwd: process.cwd(), prompt }));
+});
 `;
 
 /*
@@ -113,17 +128,37 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
     });
   }
 
-  it('gives Claude Code the prompt as a file, inside the sandbox it was told about', async () => {
+  it('gives Claude Code the prompt on stdin, and names the sandbox it may see', async () => {
     const preset = AI_PRESETS.find((p) => p.label === 'Claude Code')!;
     const { command, prefix } = stub('claude', CLAUDE);
     const result = await runAgent(config(command, [...prefix, ...preset.args]), PROMPT);
     const seen = JSON.parse(result.output) as Record<string, string>;
 
-    expect(seen.promptPath).toBe(path.join(seen.addDir ?? '', 'prompt.md'));
     expect(seen.addDir).toBe(seen.cwd);
     for (const tool of ['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch']) {
       expect(seen.disallowed).toContain(tool);
     }
+  });
+
+  it('fails the way the real Claude Code failed, with the prompt after the deny list', async () => {
+    const { command, prefix } = stub('claude', CLAUDE);
+    const broken = ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write', '{prompt}'];
+    await expect(runAgent(config(command, [...prefix, ...broken]), PROMPT)).rejects.toThrow(
+      /matches no known tool/,
+    );
+  });
+
+  it('repairs a config saved with that prompt argument still on the end', () => {
+    const broken = ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit', '{prompt}'];
+    expect(repairAiArgs('claude', broken)).toEqual(broken.slice(0, -1));
+    expect(repairAiArgs('/usr/local/bin/claude', broken)).toEqual(broken.slice(0, -1));
+    // A custom set-up that puts the prompt somewhere workable is left alone.
+    expect(repairAiArgs('claude', ['-p', '{promptText}', '--disallowedTools', 'Bash'])).toEqual([
+      '-p',
+      '{promptText}',
+      '--disallowedTools',
+      'Bash',
+    ]);
   });
 
   it('gets past Codex’s git check, and does not hang on its stdin', { timeout: 30_000 }, async () => {
