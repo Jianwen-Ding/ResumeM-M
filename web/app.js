@@ -1245,6 +1245,62 @@ function scheduleRender({ delay = LIVE_DELAY_MS } = {}) {
   }, delay);
 }
 
+/**
+ * Show a PDF in a double-buffered preview frame, without a flash.
+ *
+ * Pointing one iframe at a new URL tears the old document down before the new
+ * one paints, and for the fraction of a second in between you see the empty
+ * pane — a blink on every keystroke, which is worse than a stale page. So each
+ * frame holds two iframes: the new PDF loads in the hidden one, and only when
+ * it reports itself loaded does it become the visible one.
+ *
+ * The `load` event is the signal, with a timeout as a backstop: a viewer that
+ * never fires it must not leave the preview frozen on an old page.
+ */
+function showPdf(frame, url) {
+  const iframes = [...frame.querySelectorAll('iframe')];
+  const front = iframes.find((f) => f.classList.contains('front')) ?? iframes[0];
+  const back = iframes.find((f) => f !== front) ?? front;
+
+  const promote = () => {
+    if (back === front) return;
+    back.classList.add('front');
+    front.classList.remove('front');
+    // The id follows the visible frame, so `#preview` always names what is
+    // actually on screen.
+    if (front.id) {
+      back.id = front.id;
+      front.id = '';
+    }
+    frame.classList.add('loaded');
+  };
+
+  // Only the newest request may promote: a burst of edits can leave earlier
+  // loads still in flight, and an older one must not win.
+  const seq = (frame.dataset.seq = String(Number(frame.dataset.seq ?? 0) + 1));
+  let settled = false;
+  const settle = () => {
+    if (settled || frame.dataset.seq !== seq) return;
+    settled = true;
+    clearTimeout(timer);
+    // One frame of grace: `load` fires as the viewer starts drawing, and
+    // promoting in the same tick can still show a white page.
+    requestAnimationFrame(() => setTimeout(promote, 60));
+  };
+
+  back.addEventListener('load', settle, { once: true });
+  const timer = setTimeout(settle, 1500);
+  back.src = url;
+}
+
+/** The viewer parameters that make a PDF look like a page, not an app. */
+function pdfView(url) {
+  // Chrome's viewer otherwise fills the pane with its own dark toolbar and a
+  // thumbnail rail. `zoom=page-fit` shows the whole page, which is the only
+  // view that answers "does this fit, and how does it look" at a glance.
+  return `${url}#toolbar=0&navpanes=0&scrollbar=0&zoom=page-fit`;
+}
+
 /** The "is what I see current?" indicator that replaced the Preview button. */
 function setLive(mode) {
   const chip = $('#live-state');
@@ -1264,11 +1320,7 @@ async function renderPreview() {
     if (token !== renderToken) return;
     setLive('ok');
 
-    // Chrome's viewer otherwise fills the pane with its own dark toolbar and a
-    // thumbnail rail. `zoom=page-fit` shows the whole page, which is the only
-    // view that answers "does this fit, and how does it look" at a glance.
-    $('#preview').src = `${result.pdfUrl}#toolbar=0&navpanes=0&scrollbar=0&zoom=page-fit`;
-    $('#preview').closest('.preview-frame').classList.add('loaded');
+    showPdf($('#preview').closest('.preview-frame'), pdfView(result.pdfUrl));
 
     fit.className = result.fits ? 'fit' : 'fit bad';
     fit.replaceChildren(
@@ -1654,12 +1706,15 @@ function renderDraft(draft) {
       placeholder: 'Write the letter here, or press Draft to start from your previous ones.',
     });
 
-    const letterFrame = el('iframe', { title: 'Cover letter preview' });
+    // Two frames, double-buffered by showPdf(), so retypesetting mid-sentence
+    // does not blink the letter away while the new PDF loads.
+    const letterFrame = el('iframe', { className: 'front', title: 'Cover letter preview' });
+    const letterBuffer = el('iframe', { title: 'Cover letter preview (loading)', tabIndex: -1 });
     const letterEmpty = el('div', {
       className: 'preview-empty',
       textContent: 'Type a first sentence and it appears here, set like your resume.',
     });
-    const letterPane = el('div', { className: 'preview-frame letter-preview' }, [letterFrame, letterEmpty]);
+    const letterPane = el('div', { className: 'preview-frame letter-preview' }, [letterFrame, letterBuffer, letterEmpty]);
     const letterFit = el('div', { className: 'fit idle', textContent: 'Not compiled yet.' });
     const liveChip = el('span', { className: 'live ok', textContent: 'Live' });
 
@@ -1687,8 +1742,7 @@ function renderDraft(draft) {
           }),
         });
         if (token !== letterToken) return; // a newer keystroke already asked
-        letterFrame.src = `${r.pdfUrl}#toolbar=0&navpanes=0&scrollbar=0&zoom=page-fit`;
-        letterPane.classList.add('loaded');
+        showPdf(letterPane, pdfView(r.pdfUrl));
         liveChip.className = 'live ok';
         liveChip.textContent = 'Live';
         letterFit.className = r.fits ? 'fit' : 'fit bad';
@@ -2876,8 +2930,7 @@ async function boot() {
     try {
       const r = await api('/render', { method: 'POST', body: JSON.stringify({ master: true }) });
       // The master document is for reading, so fit the width instead.
-      $('#master-preview').src = `${r.pdfUrl}#toolbar=0&navpanes=0&zoom=page-width`;
-      $('#master-preview').closest('.preview-frame').classList.add('loaded');
+      showPdf($('#master-preview').closest('.preview-frame'), `${r.pdfUrl}#toolbar=0&navpanes=0&zoom=page-width`);
       setStatus(`Master document: ${plural(r.pages, 'page')}`);
     } catch (err) {
       setStatus(err.message, true);
