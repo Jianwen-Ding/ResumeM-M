@@ -15,6 +15,11 @@ export interface CommitDetail {
   diff: string;
 }
 
+export interface PendingChange {
+  path: string;
+  state: 'added' | 'modified' | 'deleted' | 'renamed';
+}
+
 export interface RemoteStatus {
   /** Configured push url, if any. */
   url?: string;
@@ -133,6 +138,32 @@ export class Repo {
       ...targets,
     ]);
     return (await this.git(['rev-parse', 'HEAD'])).trim();
+  }
+
+  /**
+   * What is changed but not yet committed, within scope.
+   *
+   * With auto-commit on this is normally empty. It is not always: auto-commit
+   * can be off, and the store is plain YAML that people edit by hand, which is
+   * half the reason it is plain YAML. Knowing there is unsaved work is what
+   * makes an explicit save worth offering.
+   */
+  async pending(): Promise<PendingChange[]> {
+    if (!(await this.isRepo())) return [];
+    const out = await this.git(['status', '--porcelain', '-z', '--', ...this.scope]).catch(() => '');
+
+    const records = out.split('\0');
+    const changes: PendingChange[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      if (!record) continue;
+      const code = record.slice(0, 2);
+      const file = record.slice(3);
+      // A rename or copy carries its old path in the following record.
+      if (code[0] === 'R' || code[0] === 'C') i++;
+      changes.push({ path: file, state: stateOf(code) });
+    }
+    return changes.sort((a, b) => a.path.localeCompare(b.path));
   }
 
   async log(limit = 30): Promise<{ hash: string; date: string; message: string }[]> {
@@ -320,6 +351,16 @@ export class Repo {
       diff: diff.length > 200_000 ? `${diff.slice(0, 200_000)}\n… diff truncated` : diff,
     };
   }
+}
+
+/** Read a porcelain status code as one word. Untracked counts as added. */
+function stateOf(code: string): PendingChange['state'] {
+  if (code === '??') return 'added';
+  const letters = code.replace(/\s/g, '');
+  if (letters.includes('D')) return 'deleted';
+  if (letters.includes('R') || letters.includes('C')) return 'renamed';
+  if (letters.includes('A')) return 'added';
+  return 'modified';
 }
 
 /**

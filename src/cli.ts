@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
 import { Repo } from './git/repo.js';
+import { saveStore } from './git/save.js';
 import { resolveStoreDir, seedStore } from './model/location.js';
 import { buildBundle, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
@@ -26,6 +27,7 @@ const USAGE = `rmm — resume mix-and-match
   rmm apply <id> --company C --role R [--url U]
                                   Build a named application bundle and track it
   rmm track                       Show the application tracker
+  rmm save [-m "why"] [--push]    Commit everything in the store to git
   rmm serve [--port 4600]         Start the editor GUI and extension API
 
 Environment:
@@ -39,6 +41,16 @@ Environment:
 function arg(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 ? argv[i + 1] : undefined;
+}
+
+/** `-m "message"`, because every other tool that commits accepts it. */
+function shortFlag(argv: string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${n === 1 ? word : `${word}s`}`;
 }
 
 function fmtFit(r: { pages: number; fits: boolean; overflowPt: number; overflowLines: number; adjustments: string[] }): string {
@@ -171,6 +183,42 @@ async function main(argv: string[]): Promise<number> {
       for (const a of [...apps].sort((x, y) => (y.appliedAt ?? '').localeCompare(x.appliedAt ?? ''))) {
         const when = a.appliedAt?.slice(0, 10) ?? '          ';
         console.log(`  ${when}  ${a.status.padEnd(10)} ${a.company} — ${a.role}`);
+      }
+      return 0;
+    }
+
+    /**
+     * "Put everything into git", as one command. Auto-commit covers edits made
+     * through the app; this covers everything else — hand-edited YAML, a store
+     * that is not a repository yet, auto-commit switched off — and pushes if
+     * asked.
+     */
+    case 'save': {
+      const result = await saveStore(repo, {
+        message: arg(rest, 'message') ?? arg(rest, 'm') ?? shortFlag(rest, '-m'),
+        push: rest.includes('--push'),
+      });
+
+      if (result.initialised) console.log(`Initialised a git repository at ${dataDir}`);
+
+      if (result.saved) {
+        console.log(`Saved ${plural(result.files.length, 'file')} — ${result.message}  [${result.hash?.slice(0, 8)}]`);
+        const MARK = { added: '+', modified: 'M', deleted: '−', renamed: '→' };
+        for (const f of result.files.slice(0, 20)) console.log(`  ${MARK[f.state]} ${f.path}`);
+        if (result.files.length > 20) console.log(`  … and ${result.files.length - 20} more`);
+      } else {
+        console.log('Everything is already saved — nothing had changed.');
+      }
+
+      if (result.pushed) {
+        console.log(result.pushed.ok ? result.pushed.output : `Push failed: ${result.pushed.output}`);
+        if (!result.pushed.ok) return 1;
+      } else if (!result.remote.url) {
+        console.log(`Stored locally in ${dataDir} (no remote configured).`);
+      } else if (!result.remote.tracked) {
+        console.log(`${result.remote.url} has never been pushed to — \`rmm save --push\` sends everything.`);
+      } else if (result.remote.ahead > 0) {
+        console.log(`${plural(result.remote.ahead, 'commit')} not yet pushed to ${result.remote.url} — \`rmm save --push\` sends them.`);
       }
       return 0;
     }

@@ -2299,6 +2299,18 @@ async function loadStoreSettings() {
     result.textContent = text;
   };
 
+  const pending = info.pending ?? [];
+  const unsaved = el('div', {
+    className: pending.length > 0 ? 'result idle' : 'result ok',
+    textContent:
+      pending.length > 0
+        ? `${plural(pending.length, 'file')} changed since the last save: ${pending
+            .slice(0, 4)
+            .map((f) => f.path)
+            .join(', ')}${pending.length > 4 ? '…' : ''}`
+        : 'Everything is saved.',
+  });
+
   setChildren(
     box,
     el('div', { className: 'lbl', textContent: 'Location' }),
@@ -2310,6 +2322,36 @@ async function loadStoreSettings() {
         ? `Its own git repository, ${plural(info.commits, 'commit')} so far.`
         : 'Not a git repository yet — it becomes one the first time you save.',
     }),
+
+    // Edits made here are committed as they happen; this is for everything
+    // else — YAML edited by hand, or auto-commit switched off.
+    el('div', { className: 'row' }, [
+      el('button', {
+        className: 'primary',
+        textContent: 'Save everything to git',
+        onclick: async () => {
+          unsaved.className = 'result idle';
+          unsaved.textContent = 'Saving…';
+          try {
+            const res = await api('/store/save', { method: 'POST', body: JSON.stringify({}) });
+            unsaved.className = 'result ok';
+            unsaved.textContent = res.saved
+              ? `Saved ${plural(res.files.length, 'file')} — ${res.message}`
+              : 'Everything was already saved.';
+            setStatus(res.saved ? 'Saved to git' : 'Already saved');
+            loadStoreSettings().catch(() => {});
+          } catch (err) {
+            unsaved.className = 'result bad';
+            unsaved.textContent = err.message;
+          }
+        },
+      }),
+      el('span', {
+        className: 'hint',
+        textContent: 'Edits made here are committed as you make them. This catches anything else.',
+      }),
+    ]),
+    unsaved,
     el('label', { className: 'f' }, [
       el('div', { className: 'lbl', textContent: 'Backup remote (optional)' }),
       remote,

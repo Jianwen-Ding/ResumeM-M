@@ -187,6 +187,7 @@ rmm feedback <id> [--focus "…"]   Ask the configured AI for a critique
 rmm apply <id> --company C --role R [--url U]
                                   Named bundle + tracker entry + snapshot
 rmm track                         The tracker
+rmm save [-m "why"] [--push]      Commit the whole store to git
 rmm serve [--port 4600]           Editor GUI and the extension's API
 ```
 
@@ -237,6 +238,23 @@ and records the application in `applications.yaml` with its status history. The
 snapshot is the point: six weeks later, when they ask about "the pipeline
 project", the file that went out is still there, byte for byte.
 
+### Saving
+
+Every mutation made through the app is auto-committed to git, scoped to the
+store directory. For everything else — YAML you edited by hand, a store that is
+not a repository yet, auto-commit switched off — there is one command:
+
+```bash
+rmm save                              # commit everything in the store
+rmm save -m "Before the Streamly interview"
+rmm save --push                       # and send it to the remote
+```
+
+It prints what it saved, derives a message from what changed ("Save: 2 resumes,
+the answer bank") when you do not give one, and says so plainly rather than
+making an empty commit when there was nothing to save. The same operation is a
+button in **Voice & AI → Your store**, and `POST /api/store/save`.
+
 ### Version history
 
 Every mutation is auto-committed to git, scoped to the store directory. The
@@ -269,6 +287,7 @@ local tool. Do not expose it; CORS is open so the extension can reach it from a
 | `GET /api/store` | Everything, for the GUI |
 | `POST /api/render` | Compile a stored resume, an ad-hoc spec, or the master |
 | `POST /api/render/letter` | Typeset a cover letter, set to match the resume |
+| `POST /api/store/save` | Commit the whole store to git (optionally push) |
 | `GET /api/resumes/:id/history` | That resume's versions, and what changed between them |
 | `POST /api/extension/analyze` | Page HTML → proposed tailored spec |
 | `GET /api/autofill` | Profile fields and the answer bank |

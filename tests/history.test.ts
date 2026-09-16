@@ -171,6 +171,36 @@ describe('a resume version history', () => {
   });
 });
 
+describe('POST /store/save', () => {
+  it('commits work that was changed outside the app', async () => {
+    t.write('voice.md', '# Voice\n\nEdited by hand in an editor.\n');
+
+    const before = await request(app).get('/api/config/store').expect(200);
+    expect(before.body.pending.map((f: { path: string }) => f.path)).toContain('voice.md');
+
+    const res = await request(app).post('/api/store/save').send({}).expect(200);
+    expect(res.body.saved).toBe(true);
+    expect(res.body.files.map((f: { path: string }) => f.path)).toContain('voice.md');
+    expect(res.body.message).toBe('Save: voice notes');
+
+    const after = await request(app).get('/api/config/store').expect(200);
+    expect(after.body.pending).toEqual([]);
+  });
+
+  it('takes a message when one is given', async () => {
+    t.write('answers.yaml', '[]\n');
+    const res = await request(app).post('/api/store/save').send({ message: 'Tidied the bank' }).expect(200);
+    expect(res.body.message).toBe('Tidied the bank');
+  });
+
+  it('reports having nothing to do without making an empty commit', async () => {
+    await request(app).post('/api/store/save').send({}).expect(200);
+    const res = await request(app).post('/api/store/save').send({}).expect(200);
+    expect(res.body.saved).toBe(false);
+    expect(res.body.files).toEqual([]);
+  });
+});
+
 describe('restoring a version', () => {
   it('rolls the resume back to what that version said', async () => {
     const first = await history();
