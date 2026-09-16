@@ -1320,3 +1320,6 @@ tbody tr { cursor: pointer; }
   border-radius: var(--radius);
 }
 .way-back button { background: #fff; }
+
+/* The badge and its actions on one line, above an answer box. */
+.row-tight { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

@@ -1143,6 +1143,84 @@ describe('pinning', () => {
     expect(typeof entry?.dates === 'object' && entry.dates.default).toBe('v_dec2026');
   });
 
+  it('critiques an application\'s cover letter and one of its answers', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Altair Labs',
+        role: 'Platform Engineer',
+        source: 'by hand',
+        coverLetterRequired: true,
+        questions: [{ question: 'Why do you want to work here?', required: true }],
+      })
+      .expect(200);
+    const draft = made.body.draft;
+
+    // Something to review. Feedback on an empty box is not feedback.
+    draft.coverLetter.body = 'Dear Altair Labs, I have run Kafka in production for two years.';
+    draft.questions[0].answer = 'Because you publish your infrastructure work.';
+    await request(app).put(`/api/workspace/${draft.id}`).send(draft).expect(200);
+
+    // With the AI off the prompt comes back, which is what lets these assert
+    // what the model would have been shown.
+    const letter = await request(app).post('/api/ai/feedback').send({ draftId: draft.id }).expect(200);
+    expect(letter.body.executed).toBe(false);
+    expect(letter.body.output).toContain('I have run Kafka in production');
+    expect(letter.body.output).toContain('Altair Labs');
+    expect(letter.body.output).toMatch(/do not rewrite/i);
+
+    const answer = await request(app)
+      .post('/api/ai/feedback')
+      .send({ draftId: draft.id, questionId: draft.questions[0].id })
+      .expect(200);
+    expect(answer.body.executed).toBe(false);
+    expect(answer.body.output).toContain('Because you publish your infrastructure work.');
+    expect(answer.body.output).toMatch(/do not rewrite/i);
+  });
+
+  it('will not take the application and the resume as one target', async () => {
+    const res = await request(app)
+      .post('/api/ai/feedback')
+      .send({ draftId: 'whatever', resumeId: 'base' })
+      .expect(400);
+    expect(res.body.error).toMatch(/not both/);
+  });
+
+  it('drafts one answer on request rather than every empty one', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Vireo',
+        role: 'Data Scientist',
+        source: 'by hand',
+        questions: [{ question: 'Why this team?' }, { question: 'Describe a hard bug.' }],
+      })
+      .expect(200);
+    const draft = made.body.draft;
+    const [first, second] = draft.questions;
+
+    const res = await request(app)
+      .post(`/api/workspace/${draft.id}/generate`)
+      .send({ what: 'questions', questionId: second.id })
+      .expect(200);
+
+    // The one asked for was considered; the other was not touched.
+    expect(res.body.draft.questions[0].answer).toBe(first.answer);
+    expect(res.body.notes.join(' ')).toMatch(/Answer drafted/);
+  });
+
+  it('says so when the question asked about has gone', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Vireo', role: 'Analyst', source: 'by hand', questions: [{ question: 'Why?' }] })
+      .expect(200);
+    const res = await request(app)
+      .post(`/api/workspace/${made.body.draft.id}/generate`)
+      .send({ what: 'questions', questionId: 'q-gone' })
+      .expect(400);
+    expect(res.body.error).toMatch(/not on this application/);
+  });
+
   it('starts a plain variation for an application, and says where to go to edit it', async () => {
     const made = await request(app)
       .post('/api/workspace')

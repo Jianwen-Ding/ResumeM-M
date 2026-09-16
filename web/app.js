@@ -2728,8 +2728,16 @@ function renderDraft(draft) {
           el('span', { className: 'grow', style: 'flex:1' }),
           el('button', {
             className: 'tiny',
-            textContent: 'Draft from previous letters',
+            textContent: 'Draft it',
+            title: 'Write a first draft from the posting and the letters you have written before',
             onclick: () => generate(draft, 'letter', notes),
+          }),
+          el('button', {
+            className: 'tiny',
+            textContent: 'Ask for feedback',
+            title: 'The AI reads what you have written and says what is weak — it does not rewrite it',
+            disabled: !draft.coverLetter.body.trim(),
+            onclick: () => askDraftFeedback(draft, {}, notes),
           }),
         ]),
         el('div', { className: 'letter-split' }, [letter, letterPane]),
@@ -2762,10 +2770,24 @@ function renderDraft(draft) {
             document.createTextNode(q.question),
             q.required ? el('span', { className: 'badge required', style: 'margin-left:6px', textContent: 'required' }) : null,
           ]),
-          el('div', { style: 'margin-bottom:5px' }, [
+          el('div', { className: 'row-tight', style: 'margin-bottom:5px' }, [
             el('span', {
               className: `badge ${q.edited ? 'human' : (q.source ?? 'empty')}`,
               textContent: q.edited ? SOURCE_LABEL.human : (SOURCE_LABEL[q.source] ?? SOURCE_LABEL.empty),
+            }),
+            el('span', { style: 'flex:1' }),
+            el('button', {
+              className: 'link',
+              textContent: 'Draft this one',
+              title: 'Write an answer from the posting and the answers you have given before',
+              onclick: () => generate(draft, 'questions', notes, { questionId: q.id }),
+            }),
+            el('button', {
+              className: 'link',
+              textContent: 'Feedback',
+              title: 'The AI reads this answer and says what is weak — it does not rewrite it',
+              disabled: !q.answer?.trim(),
+              onclick: () => askDraftFeedback(draft, { questionId: q.id }, notes),
             }),
           ]),
           box,
@@ -2956,12 +2978,12 @@ async function tailorDraft(draft, notes, useAi) {
   }
 }
 
-async function generate(draft, what, notes) {
+async function generate(draft, what, notes, extra = {}) {
   setChildren(notes, el('div', { textContent: 'Working…' }));
   try {
     const res = await api(`/workspace/${encodeURIComponent(draft.id)}/generate`, {
       method: 'POST',
-      body: JSON.stringify({ what }),
+      body: JSON.stringify({ what, ...extra }),
     });
     renderDraft(res.draft);
     const panel = $('#draft-editor .gen-notes');
@@ -2969,6 +2991,40 @@ async function generate(draft, what, notes) {
     setStatus('Draft updated');
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  }
+}
+
+/**
+ * Ask the AI what is wrong with what you have written.
+ *
+ * The letter and the answers were the one part of an application it could
+ * write but never read back — which is the wrong way round, because reviewing
+ * your own prose is the thing it is best at and the thing you least want to do
+ * at midnight.
+ *
+ * It runs as a background job like resume feedback does, and lands in the same
+ * results panel, because a critique takes as long here as it does there and
+ * nobody should watch a spinner for it.
+ */
+async function askDraftFeedback(draft, target, notes) {
+  try {
+    setChildren(notes, el('div', { textContent: 'Reading it…' }));
+    const { job } = await api('/ai/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ draftId: draft.id, ...target, background: true }),
+    });
+    await openJob(job);
+    setChildren(
+      notes,
+      el('div', {
+        textContent: 'Reading it — the feedback will appear in the results indicator, and this keeps working while you write.',
+      }),
+    );
+    watchJobs();
+    return job;
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+    return null;
   }
 }
 

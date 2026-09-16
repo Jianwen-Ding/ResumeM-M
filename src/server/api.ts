@@ -9,6 +9,8 @@ import {
   coverLetterPrompt,
   entryFeedbackPrompt,
   feedbackPrompt,
+  letterFeedbackPrompt,
+  answerFeedbackPrompt,
   phraseFeedbackPrompt,
   shortenPrompt,
   tailorPrompt,
@@ -782,26 +784,53 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/feedback',
     handler(async (req, res) => {
-      const { resumeId, focus, bulletId, entryId, variantId, fieldName, background, master } = req.body as {
-        master?: boolean;
-        resumeId?: string;
-        focus?: string;
-        bulletId?: string;
-        entryId?: string;
-        variantId?: string;
-        fieldName?: 'title' | 'subtitle' | 'dates' | 'location';
-        /** Return a job to collect later instead of holding the request open. */
-        background?: boolean;
-      };
+      const { resumeId, focus, bulletId, entryId, variantId, fieldName, background, master, draftId, questionId } =
+        req.body as {
+          master?: boolean;
+          resumeId?: string;
+          focus?: string;
+          bulletId?: string;
+          entryId?: string;
+          variantId?: string;
+          fieldName?: 'title' | 'subtitle' | 'dates' | 'location';
+          /** An application's cover letter, or one of its questions. */
+          draftId?: string;
+          questionId?: string;
+          /** Return a job to collect later instead of holding the request open. */
+          background?: boolean;
+        };
       const data = store.load();
 
-      if (master && (resumeId || bulletId || entryId || variantId || fieldName)) throw new Error('Choose master feedback or a specific resume/bullet, not both');
+      const resumeTarget = resumeId || bulletId || entryId || variantId || fieldName;
+      if (master && resumeTarget) throw new Error('Choose master feedback or a specific resume/bullet, not both');
+      if (draftId && (master || resumeTarget)) throw new Error('Choose the application or the resume, not both');
+      if (questionId && !draftId) throw new Error('An application is required for feedback on one of its questions');
       if ((resumeId && (entryId || bulletId || variantId || fieldName)) || (bulletId && fieldName)) throw new Error('Choose one feedback target');
       if ((bulletId || fieldName || variantId) && !entryId) throw new Error('An entry is required for phrase or bullet feedback');
       if (variantId && !bulletId && !fieldName) throw new Error('Choose a bullet or heading field for this phrasing');
       let prompt: string;
       let about: string;
-      if (entryId) {
+
+      /*
+       * The letter and the answers were the one part of an application the AI
+       * could write but never read back. Reviewing your own prose is the thing
+       * it is best at and the thing you least want to do at midnight, so they
+       * critique through the same route, the same background jobs, and the
+       * same panel as a resume does.
+       */
+      if (draftId) {
+        const draft = store.getDraft(draftId);
+        if (!draft) throw new Error(`No draft "${draftId}"`);
+        if (questionId) {
+          const question = draft.questions.find((q) => q.id === questionId);
+          if (!question) throw new Error('That question is not on this application any more');
+          prompt = answerFeedbackPrompt(data, draft, question);
+          about = `Answer: ${question.question.slice(0, 60)}`;
+        } else {
+          prompt = letterFeedbackPrompt(data, draft, relevantLetters(data.coverLetters, { company: draft.company, role: draft.role }));
+          about = `Cover letter — ${draft.company}`;
+        }
+      } else if (entryId) {
         const entry = data.entries.find((e) => e.id === entryId);
         if (!entry) throw new Error(`No entry "${entryId}"`);
         if (fieldName) {
@@ -1696,7 +1725,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const draft = store.getDraft(id);
       if (!draft) throw new Error(`No draft "${id}"`);
 
-      const { what = 'all', force = false } = req.body as { what?: 'letter' | 'questions' | 'all'; force?: boolean };
+      const { what = 'all', force = false, questionId } = req.body as {
+        what?: 'letter' | 'questions' | 'all';
+        force?: boolean;
+        /** Just this one question, rather than every empty answer. */
+        questionId?: string;
+      };
       const data = store.load();
       const job: TailorContext = {
         company: draft.company,
@@ -1732,12 +1766,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       if (what === 'questions' || what === 'all') {
-        for (const q of draft.questions) {
-          if (q.edited && !force) continue;
-          if (q.answer.trim() && q.source === 'bank' && !force) continue;
+        /*
+         * One question, when asked for one. "Fill in what is empty" is the
+         * right bulk action and the wrong one when you are looking at a single
+         * answer you want redone — and redoing that one has to be allowed to
+         * overwrite it, since you asked.
+         */
+        const wanted = questionId ? draft.questions.filter((q) => q.id === questionId) : draft.questions;
+        if (questionId && wanted.length === 0) throw new Error('That question is not on this application any more');
+        const overwrite = force || Boolean(questionId);
+
+        for (const q of wanted) {
+          if (q.edited && !overwrite) continue;
+          if (q.answer.trim() && q.source === 'bank' && !overwrite) continue;
 
           const match = matchAnswer(q.question, data.answers);
-          if (match.confident && !force) {
+          if (match.confident && !overwrite) {
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item?.id;
             q.source = 'bank';
@@ -1754,7 +1798,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           }
         }
         const written = draft.questions.filter((q) => q.answer.trim()).length;
-        notes.push(`${written} of ${draft.questions.length} questions have an answer.`);
+        notes.push(
+          questionId
+            ? `Answer drafted. ${written} of ${draft.questions.length} questions have one.`
+            : `${written} of ${draft.questions.length} questions have an answer.`,
+        );
       }
 
       const saved = await withCommit(repo, autoCommit(), `Draft answers for ${draft.company}`, () =>
