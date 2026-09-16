@@ -21,6 +21,7 @@ import { extractJob, jobPostingScore } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
+import { byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
@@ -205,9 +206,38 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Bases first. Everything that offers "start from…" wants the two or three
+   * resumes you actually build from at the top, not whatever sorted first.
+   */
   api.get(
     '/resumes',
-    handler(async (_req, res) => res.json(store.loadResumes())),
+    handler(async (_req, res) => res.json(byBaseFirst(store.loadResumes()))),
+  );
+
+  /**
+   * Pin a resume as a base, or unpin it. Its own toggle rather than part of
+   * the whole-spec save: this is a decision about how the store is organised,
+   * and it should not ride along with an unrelated edit.
+   */
+  api.put(
+    '/resumes/:id/base',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const base = (req.body as { base?: boolean }).base !== false;
+      const spec = store.loadResumes().find((r) => r.id === id);
+      if (!spec) throw new Error(`No resume "${id}"`);
+
+      // Absent rather than false: an unpinned resume should look untouched in
+      // YAML, not carry a field explaining that it is ordinary.
+      if (base) spec.base = true;
+      else delete spec.base;
+
+      await withCommit(repo, autoCommit(), `${base ? 'Pin' : 'Unpin'} "${spec.label}" as a base`, () =>
+        store.saveResume(spec),
+      );
+      res.json(spec);
+    }),
   );
 
   api.get(
@@ -313,6 +343,42 @@ export function createApi({ store, repo }: ApiDeps): Router {
         store.saveEntry(entry),
       );
       res.json(variant);
+    }),
+  );
+
+  /**
+   * Pin an alternate as the one used when a resume expresses no preference.
+   *
+   * Choosing a wording on one resume is a decision about that resume; deciding
+   * a wording is simply the better one is a decision about the store, and
+   * until now there was no way to say the second without editing YAML. The key
+   * is the same key `choices` uses — a bullet id, or `entryId.field` — so
+   * "pinned here" and "chosen there" are the same idea at two scopes.
+   */
+  api.put(
+    '/defaults/:key',
+    handler(async (req, res) => {
+      const key = String(req.params.key);
+      const { variantId } = req.body as { variantId?: string };
+      if (!variantId) throw new Error('Name the alternate to pin');
+
+      const data = store.load();
+      const dot = key.indexOf('.');
+      const entry = dot > 0
+        ? data.entries.find((e) => e.id === key.slice(0, dot))
+        : data.entries.find((e) => (e.bullets ?? []).some((b) => b.id === key));
+      if (!entry) throw new Error('That line is not in the store any more');
+
+      const target = dot > 0
+        ? entry[key.slice(dot + 1) as 'title' | 'dates' | 'subtitle' | 'location']
+        : (entry.bullets ?? []).find((b) => b.id === key);
+      if (!target || typeof target === 'string') throw new Error('That line has no alternates to pin');
+      if (!target.variants.some((v) => v.id === variantId)) throw new Error('No such alternate');
+
+      target.default = variantId;
+      const label = target.variants.find((v) => v.id === variantId)?.label ?? variantId;
+      await withCommit(repo, autoCommit(), `Pin "${label}" as the default`, () => store.saveEntry(entry));
+      res.json({ key, variantId });
     }),
   );
 
@@ -953,7 +1019,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
       const job = extractJob(html, url, title);
       const score = jobPostingScore(html, url);
 
-      const baseId = baseResumeId ?? data.resumes.find((r) => r.id === 'newgrad')?.id ?? data.resumes[0]?.id;
+      const baseId = baseResumeId ?? defaultBaseId(data.resumes);
       if (!baseId) throw new Error('The store has no resumes to start from');
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error(`No resume "${baseId}"`);
@@ -1392,9 +1458,9 @@ export function createApi({ store, repo }: ApiDeps): Router {
        * second run finds the draft already pointing at the tailored copy, so
        * start from what that copy was built on rather than from the copy.
        */
-      let baseId = baseResumeId ?? draft.resumeId ?? data.resumes.find((r) => r.id === 'newgrad')?.id ?? data.resumes[0]?.id;
+      let baseId = baseResumeId ?? draft.resumeId ?? defaultBaseId(data.resumes);
       if (baseId === specId) {
-        baseId = data.resumes.find((r) => r.id === specId)?.extends ?? data.resumes.find((r) => r.id === 'newgrad')?.id;
+        baseId = data.resumes.find((r) => r.id === specId)?.extends ?? defaultBaseId(data.resumes);
       }
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');

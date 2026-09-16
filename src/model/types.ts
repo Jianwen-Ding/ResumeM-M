@@ -140,6 +140,13 @@ export interface ResumeSpec {
   label: string;
   /** Id of another resume to inherit sections and choices from. */
   extends?: string;
+  /**
+   * Pinned as a starting point. A store accumulates one-off resumes tailored
+   * for postings that have long since closed; a handful of them are the ones
+   * you actually build from. Marking those keeps the pickers honest about
+   * which is which, instead of guessing from the id.
+   */
+  base?: boolean;
   sections?: SectionSpec[];
   /**
    * Variant selection. Keys are either a bullet id (`b_kafka`) or a field path

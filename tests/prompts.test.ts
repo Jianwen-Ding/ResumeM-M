@@ -138,7 +138,14 @@ describe('cover letter prompt', () => {
 
   it('names the company a letter went to, so the model can tell them apart', () => {
     const p = coverLetterPrompt(data, resolved, { jobDescription: 'job' }, [
-      { id: 'l1', title: 'x', body: 'A letter body long enough to matter.', company: 'Northwind', role: 'Intern' },
+      {
+        id: 'l1',
+        title: 'x',
+        body: 'A letter body long enough to matter.',
+        company: 'Northwind',
+        role: 'Intern',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
     ]);
     expect(p).toContain('Northwind — Intern');
   });

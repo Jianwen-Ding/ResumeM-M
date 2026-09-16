@@ -994,3 +994,78 @@ describe('adding files to the corpus', () => {
     expect(res.body.items.every((i: { by: string }) => i.by === 'rules')).toBe(true);
   });
 });
+
+describe('pinning', () => {
+  it('pins an alternate on a bullet as the one everything falls back to', async () => {
+    const res = await request(app)
+      .put('/api/defaults/b_pipeline')
+      .send({ variantId: 'v_kafka' })
+      .expect(200);
+    expect(res.body).toEqual({ key: 'b_pipeline', variantId: 'v_kafka' });
+
+    const entry = t.store.load().entries.find((e) => e.id === 'exp_acme');
+    expect(entry?.bullets?.find((b) => b.id === 'b_pipeline')?.default).toBe('v_kafka');
+  });
+
+  it('changes what a resume renders when that resume chose nothing', async () => {
+    const before = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
+    expect(JSON.stringify(before)).not.toContain('`Kafka` pipeline');
+
+    await request(app).put('/api/defaults/b_pipeline').send({ variantId: 'v_kafka' }).expect(200);
+
+    const after = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
+    expect(JSON.stringify(after)).toContain('`Kafka` pipeline');
+  });
+
+  it('pins an alternate on a heading field, which uses the dotted key', async () => {
+    await request(app).put('/api/defaults/edu_neu.dates').send({ variantId: 'v_dec2026' }).expect(200);
+    const entry = t.store.load().entries.find((e) => e.id === 'edu_neu');
+    expect(typeof entry?.dates === 'object' && entry.dates.default).toBe('v_dec2026');
+  });
+
+  it('refuses an alternate that does not exist', async () => {
+    const res = await request(app).put('/api/defaults/b_pipeline').send({ variantId: 'v_ghost' }).expect(400);
+    expect(res.body.error).toMatch(/No such alternate/);
+  });
+
+  it('says so when the line has no alternates, or is gone', async () => {
+    expect((await request(app).put('/api/defaults/b_ghost').send({ variantId: 'v' }).expect(400)).body.error)
+      .toMatch(/not in the store/);
+    expect((await request(app).put('/api/defaults/edu_neu.title').send({ variantId: 'v' }).expect(400)).body.error)
+      .toMatch(/no alternates/);
+  });
+
+  it('needs to be told which alternate', async () => {
+    expect((await request(app).put('/api/defaults/b_pipeline').send({}).expect(400)).body.error)
+      .toMatch(/Name the alternate/);
+  });
+
+  it('pins a resume as a base, and unpins it without leaving a field behind', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.base).toBe(true);
+
+    await request(app).put('/api/resumes/intern/base').send({ base: false }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')).not.toHaveProperty('base');
+  });
+
+  it('lists the bases first, so a picker opens on what you build from', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    const ids = (await request(app).get('/api/resumes').expect(200)).body.map((r: { id: string }) => r.id);
+    expect(ids[0]).toBe('intern');
+    expect(ids).toHaveLength(t.store.loadResumes().length);
+  });
+
+  it('names a resume that is not there', async () => {
+    expect((await request(app).put('/api/resumes/ghost/base').send({ base: true }).expect(400)).body.error)
+      .toMatch(/No resume "ghost"/);
+  });
+
+  it('starts a tailored draft from the pinned base rather than a guessed name', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, url: 'https://example.com/job' })
+      .expect(200);
+    expect(res.body.spec.extends).toBe('intern');
+  });
+});

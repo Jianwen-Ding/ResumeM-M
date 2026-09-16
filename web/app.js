@@ -431,6 +431,7 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
   // wording, add another), then the incidental actions.
   const actions = el('div', { className: 'actions' });
   for (const a of extraActions) actions.append(a);
+  if (field.variants.length > 1) actions.append(pinControl(key, field, current));
   if (choose) actions.append(choose);
   if (onEdit) {
     actions.append(
@@ -455,6 +456,44 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
   for (const a of trailingActions) actions.append(a);
 
   return el('div', { className: 'variant-row' }, [el('span', { className: 'grow' }), actions]);
+}
+
+/**
+ * Pin this wording as the one used wherever nothing else is chosen.
+ *
+ * Choosing a wording on one resume says "here"; pinning says "unless told
+ * otherwise, everywhere". The difference is worth a control of its own —
+ * without it, deciding a phrasing is simply the better one meant editing YAML.
+ */
+function pinControl(key, field, current) {
+  const isDefault = current === field.default;
+  if (isDefault) {
+    return el('span', {
+      className: 'chip pinned',
+      textContent: 'Default',
+      title: 'Used by every resume that does not choose otherwise',
+    });
+  }
+  return el('button', {
+    className: 'tiny',
+    textContent: 'Make default',
+    title: 'Use this wording wherever a resume does not choose otherwise',
+    onclick: () => pinDefault(key, current),
+  });
+}
+
+async function pinDefault(key, variantId) {
+  try {
+    await api(`/defaults/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ variantId }),
+    });
+    await loadStore();
+    setStatus('Pinned as the default everywhere');
+    render();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
 }
 
 /** Pick from every wording at once, for fields with more than a few. */
@@ -712,7 +751,15 @@ function bulletBlock(entry, section, bullet, choices) {
           title: 'How many ways this point can be said',
         }),
         chosen?.suggested ? el('span', { className: 'chip suggested', textContent: 'unreviewed' }) : null,
-        key in state.choices ? el('span', { className: 'chip overridden', textContent: 'changed' }) : null,
+        // Differs from what the store falls back to — not merely "was touched",
+        // since pinning this wording as the default settles the difference.
+        chosenId !== bullet.default
+          ? el('span', {
+              className: 'chip overridden',
+              textContent: 'changed',
+              title: 'This resume uses a different wording from the pinned default',
+            })
+          : null,
       ].filter(Boolean),
       trailingActions: [
         el('button', { className: 'tiny', textContent: 'Feedback', onclick: () => askBulletFeedback(entry, bullet) }),
@@ -829,7 +876,13 @@ function entryBlock(entry, section, choices) {
         onEdit: chosen ? () => editFieldVariant(entry, name, chosen) : null,
         extraActions: [
           el('span', { className: 'chip count', textContent: plural(field.variants.length, 'alternate') }),
-          key in state.choices ? el('span', { className: 'chip overridden', textContent: 'changed' }) : null,
+          current !== field.default
+            ? el('span', {
+                className: 'chip overridden',
+                textContent: 'changed',
+                title: 'This resume uses a different alternate from the pinned default',
+              })
+            : null,
         ].filter(Boolean),
       });
       if (chosen?.note) control.append(el('div', { className: 'note', textContent: chosen.note }));
@@ -3661,19 +3714,66 @@ function form(title, fields, note) {
 
 function render() {
   const select = $('#resume-select');
+  const option = (r) => el('option', { value: r.id, textContent: r.label, selected: r.id === state.resumeId });
+
+  // Bases in their own group. A store fills up with resumes tailored for one
+  // posting each; the two or three you actually build from should not have to
+  // be found among them.
+  const bases = state.store.resumes.filter((r) => r.base);
+  const rest = state.store.resumes.filter((r) => !r.base);
   select.replaceChildren(
-    ...state.store.resumes.map((r) =>
-      el('option', { value: r.id, textContent: r.label, selected: r.id === state.resumeId }),
-    ),
+    ...(bases.length > 0
+      ? [
+          el('optgroup', { label: 'Bases' }, bases.map(option)),
+          rest.length > 0 ? el('optgroup', { label: 'Variations' }, rest.map(option)) : null,
+        ].filter(Boolean)
+      : state.store.resumes.map(option)),
   );
   select.value = state.resumeId;
+  renderBaseButton();
   renderEditor();
+}
+
+/** The pin itself: what this resume is, and the one click that changes it. */
+function renderBaseButton() {
+  const btn = $('#btn-base');
+  if (!btn) return;
+  const spec = state.store.resumes.find((r) => r.id === state.resumeId);
+  const pinned = Boolean(spec?.base);
+
+  btn.textContent = pinned ? '★ Base' : '☆ Pin as base';
+  btn.className = pinned ? 'tiny pinned' : 'tiny';
+  btn.title = pinned
+    ? 'New resumes and tailored drafts start from this one. Click to unpin.'
+    : 'Pin this as a starting point for new resumes and tailored drafts';
+  btn.disabled = !spec;
+  btn.onclick = async () => {
+    try {
+      await api(`/resumes/${encodeURIComponent(state.resumeId)}/base`, {
+        method: 'PUT',
+        body: JSON.stringify({ base: !pinned }),
+      });
+      await loadStore();
+      setStatus(pinned ? 'No longer a base' : 'Pinned as a base');
+      render();
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  };
 }
 
 async function loadStore() {
   state.store = await api('/store');
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
-    state.resumeId = state.store.resumes.find((r) => r.id === 'newgrad')?.id ?? state.store.resumes[0]?.id ?? null;
+    // A pinned base is what this store says it starts from; the old
+    // conventional id is only the guess for a store that has never said.
+    const resumes = state.store.resumes;
+    state.resumeId =
+      resumes.find((r) => r.base)?.id ??
+      resumes.find((r) => r.id === 'newgrad')?.id ??
+      resumes.find((r) => !r.extends)?.id ??
+      resumes[0]?.id ??
+      null;
   }
 }
 

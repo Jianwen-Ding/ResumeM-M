@@ -624,6 +624,14 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .chip.count { background: var(--line-soft); color: var(--muted); }
 .chip.overridden { background: var(--accent-soft); color: var(--accent); }
 .chip.suggested { background: var(--warn-bg); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn-line); }
+/* Pinned: what the store falls back to, and the resumes you build from. */
+.chip.pinned { background: var(--accent-soft); color: #174ea6; font-weight: 550; }
+button.tiny.pinned {
+  background: var(--accent-soft);
+  border-color: #c6d4f2;
+  color: #174ea6;
+  font-weight: 550;
+}
 
 .note { color: var(--muted); font-size: 12px; margin-top: 4px; font-style: italic; }
 
