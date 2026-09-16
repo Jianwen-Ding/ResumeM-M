@@ -884,3 +884,113 @@ describe('work you walked away from', () => {
     expect(res.body.output).toContain('Task: critique');
   });
 });
+
+describe('adding files to the corpus', () => {
+  const LETTERS = [
+    'Dear Streamly,',
+    '',
+    'I am writing about the data platform internship. I have spent two years on pipelines that mostly stayed up, and I would like to keep doing that.',
+    '',
+    'Sincerely,',
+    'Test Person',
+    '',
+    'Why do you want to work here?',
+    '',
+    'Because I have read the code you publish, and it is written the way I like to write.',
+  ].join('\n');
+
+  const send = (body: Record<string, unknown>) => request(app).post('/api/voice/ingest').send(body);
+
+  it('reads a file and says what is in it, without saving anything yet', async () => {
+    const res = await send({ name: 'old-applications.txt', text: LETTERS }).expect(200);
+
+    expect(res.body.items.map((i: { kind: string }) => i.kind)).toEqual(['letter', 'answer']);
+    expect(res.body.items[0].text).toContain('Sincerely,');
+    expect(res.body.usedAi).toBe(false); // AI is off in the fixture
+    // Nothing is in the corpus until the proposals are accepted.
+    expect((await request(app).get('/api/voice').expect(200)).body.samples).toHaveLength(0);
+  });
+
+  it('takes a file as base64, which is how the browser sends one', async () => {
+    const res = await send({
+      name: 'letter.txt',
+      data: Buffer.from(LETTERS, 'utf8').toString('base64'),
+    }).expect(200);
+    expect(res.body.items[0].kind).toBe('letter');
+    expect(res.body.via).toBe('text');
+  });
+
+  it('refuses a file it cannot read, naming what it can', async () => {
+    const res = await send({
+      name: 'shot.png',
+      data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13]).toString('base64'),
+    }).expect(400);
+    expect(res.body.error).toMatch(/not text/);
+    expect(res.body.error).toMatch(/\.pdf/);
+  });
+
+  it('refuses an empty file rather than proposing nothing', async () => {
+    expect((await send({ name: 'empty.txt', text: '' }).expect(400)).body.error).toMatch(/nothing in/i);
+  });
+
+  it('says so when a file has no readable text', async () => {
+    expect((await send({ name: 'blank.txt', text: '   \n\n  \t ' }).expect(400)).body.error).toMatch(
+      /no readable text/,
+    );
+  });
+
+  it('keeps what was accepted, with the kinds as confirmed', async () => {
+    const { body } = await send({ name: 'old-applications.txt', text: LETTERS }).expect(200);
+
+    const accepted = await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({
+        items: body.items.map((i: { kind: string; title: string; text: string }) => ({ ...i })),
+        source: 'old-applications.txt',
+      })
+      .expect(200);
+    expect(accepted.body.added).toBe(2);
+
+    const voice = (await request(app).get('/api/voice').expect(200)).body;
+    expect(voice.samples).toHaveLength(2);
+    expect(voice.samples.map((s: { kind: string }) => s.kind).sort()).toEqual(['answer', 'letter']);
+    // Where it came from is recorded, so a bad import can be found again.
+    expect(voice.samples[0].tags).toContain('from:old-applications.txt');
+    expect(voice.preview).toContain('I have read the code you publish');
+  });
+
+  it('honours a kind the user corrected, over the one that was proposed', async () => {
+    const { body } = await send({ name: 'notes.txt', text: LETTERS }).expect(200);
+    await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({ items: [{ ...body.items[0], kind: 'other' }] })
+      .expect(200);
+
+    const voice = (await request(app).get('/api/voice').expect(200)).body;
+    expect(voice.samples[0].kind).toBe('other');
+  });
+
+  it('files an unknown kind as other rather than writing it into the store', async () => {
+    await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({ items: [{ kind: 'manifesto', title: 'x', text: 'y'.repeat(60) }] })
+      .expect(200);
+    expect((await request(app).get('/api/voice').expect(200)).body.samples[0].kind).toBe('other');
+  });
+
+  it('declines an empty acceptance instead of writing blank samples', async () => {
+    const res = await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({ items: [{ kind: 'other', title: 'x', text: '   ' }] })
+      .expect(400);
+    expect(res.body.error).toMatch(/Nothing was selected/);
+  });
+
+  it('hands back the prompt instead of guessing when the AI is off but asked for', async () => {
+    // AI is disabled in the fixture, so `useAi` cannot make one appear: the
+    // rules answer, and the response says no AI was used.
+    const res = await send({ name: 'notes.txt', text: LETTERS, useAi: true }).expect(200);
+    expect(res.body.usedAi).toBe(false);
+    expect(res.body.items.every((i: { by: string }) => i.by === 'rules')).toBe(true);
+  });
+});

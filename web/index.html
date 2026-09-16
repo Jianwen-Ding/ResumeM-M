@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ResumeM-M</title>
+<!-- The same rounded mark as the header, inline: one fewer request, and no
+     404 in the console for a file that was never going to be interesting. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='3' width='26' height='26' rx='8' fill='%231a73e8'/%3E%3Crect x='7' y='7' width='18' height='18' rx='5' fill='none' stroke='white' stroke-width='3' stroke-opacity='.55'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -160,7 +163,8 @@
         <div class="toolbar">
           <h2>Your writing</h2>
           <span class="grow"></span>
-          <button id="btn-add-sample" class="primary">+ Add a sample</button>
+          <button id="btn-add-sample">+ Add a sample</button>
+          <button id="btn-add-files" class="primary">+ Add files</button>
         </div>
         <p class="hint">
           Your voice is taken from things you have actually written, not from a
@@ -169,6 +173,19 @@
           application. Letters you send and answers you save are included
           automatically.
         </p>
+
+        <!-- Drop anything in: what it holds is worked out for you. -->
+        <div id="voice-drop" class="dropzone" tabindex="0" role="button">
+          <b>Drop files here</b>
+          <span class="faint">
+            PDF, Word, Markdown, LaTeX, plain text — a file with four old cover
+            letters in it is split into four. Nothing is saved until you have
+            looked at it.
+          </span>
+        </div>
+        <input id="voice-files" type="file" multiple hidden
+               accept=".txt,.md,.markdown,.text,.rtf,.pdf,.docx,.html,.htm,.tex,.json,.yaml,.yml,.csv" />
+
         <div id="voice-budget" class="voice-budget"></div>
         <div id="samples" class="card-list"></div>
 

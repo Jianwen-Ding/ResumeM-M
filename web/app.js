@@ -2791,6 +2791,196 @@ async function loadVoice() {
   );
 }
 
+/* ------------------------------------------------------------------ *
+ * Adding files to the corpus                                          *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The drop zone. Dragging a file onto a page is the one gesture everyone
+ * already knows, so it is the main way in; the click and the keyboard are
+ * there because a gesture nobody can reach is not an affordance.
+ */
+function wireVoiceDrop() {
+  const zone = $('#voice-drop');
+  const input = $('#voice-files');
+  if (!zone || !input) return;
+
+  const open = () => input.click();
+  zone.onclick = open;
+  zone.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
+  };
+  input.onchange = () => {
+    const files = [...input.files];
+    input.value = ''; // so the same file can be dropped again
+    if (files.length) ingestFiles(files).catch((e) => setStatus(e.message, true));
+  };
+
+  for (const type of ['dragenter', 'dragover']) {
+    zone.addEventListener(type, (e) => {
+      e.preventDefault();
+      zone.classList.add('over');
+    });
+  }
+  for (const type of ['dragleave', 'drop']) {
+    zone.addEventListener(type, () => zone.classList.remove('over'));
+  }
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length) ingestFiles(files).catch((err) => setStatus(err.message, true));
+  });
+}
+
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '');
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Read each file, ask the server what is in it, then show the lot for review. */
+async function ingestFiles(files) {
+  const zone = $('#voice-drop');
+  zone.classList.add('busy');
+
+  const proposals = [];
+  const failed = [];
+  try {
+    for (const [n, file] of files.entries()) {
+      setChildren(
+        zone,
+        el('b', { textContent: `Reading ${file.name}…` }),
+        el('span', {
+          className: 'faint',
+          textContent:
+            files.length > 1
+              ? `File ${n + 1} of ${files.length}. Sorting what is inside it.`
+              : 'Sorting what is inside it.',
+        }),
+        el('div', { className: 'bar indeterminate' }, [el('span')]),
+      );
+
+      try {
+        const result = await api('/voice/ingest', {
+          method: 'POST',
+          body: JSON.stringify({ name: file.name, data: await readAsBase64(file) }),
+        });
+        for (const item of result.items) proposals.push({ ...item, source: file.name });
+        if (result.aiError) setStatus(`Sorted ${file.name} without AI: ${result.aiError}`, true);
+      } catch (err) {
+        failed.push(`${file.name}: ${err.message}`);
+      }
+    }
+  } finally {
+    zone.classList.remove('busy');
+    resetVoiceDrop();
+  }
+
+  if (failed.length) setStatus(failed.join(' · '), true);
+  if (proposals.length === 0) {
+    if (!failed.length) setStatus('Nothing in those files looked like writing', true);
+    return;
+  }
+  await reviewProposals(proposals);
+}
+
+function resetVoiceDrop() {
+  setChildren(
+    $('#voice-drop'),
+    el('b', {}, 'Drop files here'),
+    el('span', {
+      className: 'faint',
+      textContent:
+        'PDF, Word, Markdown, LaTeX, plain text — a file with four old cover letters in it is split into four. Nothing is saved until you have looked at it.',
+    }),
+  );
+}
+
+const PROPOSAL_NOTE =
+  'Each of these was taken from the file as it stands — nothing was rewritten. Correct anything filed wrongly, untick what you do not want, then add them.';
+
+/**
+ * What was found, before it is kept. Everything is ticked and ready; the work
+ * left is glancing down the list, which is the point.
+ */
+async function reviewProposals(proposals) {
+  const rows = [];
+  const content = el('div', { className: 'proposals' });
+
+  const counts = {};
+  for (const p of proposals) counts[p.kind] = (counts[p.kind] ?? 0) + 1;
+  const summary = SAMPLE_KINDS.filter((k) => counts[k.value])
+    .map((k) => `${counts[k.value]} × ${k.label.toLowerCase()}`)
+    .join(', ');
+
+  content.append(
+    el('p', {
+      className: 'hint',
+      textContent: `${plural(proposals.length, 'piece')} of writing from ${plural(
+        new Set(proposals.map((p) => p.source)).size,
+        'file',
+      )}${summary ? `: ${summary}` : ''}.`,
+    }),
+  );
+
+  for (const p of proposals) {
+    const keep = el('input', { type: 'checkbox', checked: true });
+    const title = el('input', { type: 'text', value: p.title, className: 'proposal-title' });
+    const kind = el('select');
+    for (const k of SAMPLE_KINDS) {
+      kind.append(el('option', { value: k.value, textContent: k.label, selected: k.value === p.kind }));
+    }
+
+    const body = el('div', { className: 'body sample', textContent: p.text });
+    const row = el('div', { className: 'proposal' }, [
+      el('div', { className: 'row1' }, [
+        keep,
+        title,
+        kind,
+        el('span', {
+          className: 'faint',
+          textContent: `${p.source} · ${p.by === 'ai' ? 'sorted by AI' : 'sorted by rules'}`,
+        }),
+      ]),
+      body,
+    ]);
+
+    // Untick and the row recedes, so what will be kept reads at a glance.
+    keep.onchange = () => row.classList.toggle('dropped', !keep.checked);
+    content.append(row);
+    rows.push({ p, keep, title, kind });
+  }
+
+  const ok = await showModal('Add these to your writing?', content, {
+    note: PROPOSAL_NOTE,
+    okLabel: 'Add them',
+    showCancel: true,
+  });
+  if (!ok) return;
+
+  const items = rows
+    .filter((r) => r.keep.checked)
+    .map((r) => ({ kind: r.kind.value, title: r.title.value, text: r.p.text }));
+  if (items.length === 0) {
+    setStatus('Nothing added');
+    return;
+  }
+
+  const sources = [...new Set(proposals.map((p) => p.source))];
+  const result = await api('/voice/ingest/accept', {
+    method: 'POST',
+    body: JSON.stringify({ items, source: sources.length === 1 ? sources[0] : `${sources.length} files` }),
+  });
+  setStatus(`Added ${plural(result.added, 'sample')} to your writing`);
+  loadVoice();
+}
+
 async function addSample() {
   const answer = await form('Add a writing sample', [
     { name: 'title', label: 'What is it?', value: '' },
@@ -3597,6 +3787,7 @@ async function boot() {
     }
   };
   $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
+  wireVoiceDrop();
   $('#btn-save-voice').onclick = async () => {
     await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: $('#voice').value }) });
     setStatus('Notes saved');

@@ -13,6 +13,7 @@ import {
   type TailorContext,
 } from '../ai/prompts.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
+import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
@@ -491,6 +492,57 @@ export function createApi({ store, repo }: ApiDeps): Router {
       );
       if (!removed) throw new Error(`No sample "${id}"`);
       res.json({ ok: true });
+    }),
+  );
+
+  /**
+   * Read a file and propose what is in it, without saving anything.
+   *
+   * Two steps rather than one: a model sorting someone's old letters into the
+   * wrong drawers silently would be worse than not offering the feature, so
+   * the proposal is shown before it becomes part of the corpus.
+   */
+  api.post(
+    '/voice/ingest',
+    handler(async (req, res) => {
+      const body = req.body as { name?: string; data?: string; text?: string; useAi?: boolean };
+      const name = String(body.name ?? '').trim();
+
+      const bytes = body.data
+        ? Buffer.from(body.data, 'base64')
+        : Buffer.from(String(body.text ?? ''), 'utf8');
+
+      res.json(await ingestFile(store.loadConfig(), name, bytes, { useAi: body.useAi !== false }));
+    }),
+  );
+
+  /** Take the proposals the user kept and put them in the corpus, in one commit. */
+  api.post(
+    '/voice/ingest/accept',
+    handler(async (req, res) => {
+      const body = req.body as { items?: { kind?: string; title?: string; text?: string }[]; source?: string };
+      const wanted = (body.items ?? []).filter((i) => i.text?.trim());
+      if (wanted.length === 0) throw new Error('Nothing was selected');
+
+      const stamp = Date.now().toString(36);
+      const saved: WritingSample[] = wanted.map((item, n) => ({
+        id: `${slug(item.title ?? '') || 'sample'}-${stamp}-${n}`,
+        title: item.title?.trim() || 'Untitled',
+        kind: (['letter', 'answer', 'resume', 'other'].includes(String(item.kind)) ? item.kind : 'other') as WritingSample['kind'],
+        text: item.text!.trim(),
+        createdAt: new Date().toISOString(),
+        tags: body.source ? [`from:${body.source}`] : undefined,
+      }));
+
+      await withCommit(
+        repo,
+        autoCommit(),
+        `Add ${saved.length} writing sample${saved.length === 1 ? '' : 's'}${body.source ? ` from ${body.source}` : ''}`,
+        () => {
+          for (const sample of saved) store.saveSample(sample);
+        },
+      );
+      res.json({ added: saved.length, samples: saved });
     }),
   );
 
