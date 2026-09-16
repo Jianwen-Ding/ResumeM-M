@@ -106,15 +106,26 @@ describe('project folders', () => {
     } finally { release?.(); await upload; await server.close(); }
   });
 
-  it('starts with no save, suggests existing data without exposing it, and closes without deleting data', async () => {
+  /*
+   * The empty-handed case: nothing recorded, and nothing at the default
+   * location either. A save already sitting there is opened rather than
+   * offered — see "choosing a save at startup" in server.test.ts — so what is
+   * left here is the machine with no save on it at all, which has to refuse
+   * every route that needs one rather than half-working.
+   */
+  it('starts with no save when there is none to open, and closes without deleting data', async () => {
     const { t, dir } = setup();
     const prefs = path.join(dir, 'prefs.json');
-    let server = await startServer({ port: 0, dataDir: t.dir, requireProjectSelection: true, preferencesFile: prefs });
+    const nowhere = path.join(dir, 'no-save-here');
+    fs.mkdirSync(nowhere, { recursive: true });
+    let server = await startServer({ port: 0, dataDir: nowhere, requireProjectSelection: true, preferencesFile: prefs });
     let base = `http://127.0.0.1:${server.port}`;
     const send = (route: string, body: unknown = {}) => fetch(`${base}/api${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     try {
       expect(await fetch(`${base}/health`).then(r => r.json())).toMatchObject({ projectOpen: false, dataDir: null, ai: { enabled: false } });
-      expect(await fetch(`${base}/api/projects`).then(r => r.json())).toMatchObject({ current: null, suggested: t.dir });
+      expect(await fetch(`${base}/api/projects`).then(r => r.json())).toMatchObject({ current: null, suggested: null });
+      // And nothing was conjured into the empty folder to avoid saying so.
+      expect(fs.readdirSync(nowhere)).toEqual([]);
       for (const route of ['/api/store', '/api/assets', '/api/applications', '/pdf/test.pdf']) {
         expect((await fetch(`${base}${route}`)).status).toBe(409);
       }

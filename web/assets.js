@@ -36,15 +36,36 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     $('#project-mode').querySelector('[value="move"]').disabled = !open;
     setChildren($('#project-recents'), el('option', { value: '', textContent: 'Recent Saves…' }),
       project.recent.filter(p => p !== project.current).map(p => el('option', { value: p, textContent: p })));
-    setChildren($('#project-existing'), project.suggested ? [
-      el('p', { textContent: 'Existing data was found in this folder. Open it as a save to continue working with it.' }),
-      el('p', { className: 'mono-path', textContent: project.suggested }),
-      el('button', { className: 'primary', textContent: 'Open Existing Save', onclick: action(async () => {
-        $('#project-path').value = project.suggested;
-        $('#project-mode').value = 'open';
-        await changeProject();
-      }) }),
-    ] : el('p', { className: 'hint', textContent: 'Choose Open Existing Save or Create Blank Save on the left.' }));
+    /*
+     * There are two ways to have no save open, and they want different things
+     * said. One is a machine with saves on it that simply has not been pointed
+     * at one yet — that wants a list to pick from. The other is a machine with
+     * nothing at all, where a chooser offering nothing to choose reads as a
+     * fault: that one wants to be told plainly that there is no save yet and
+     * offered the one thing that will help, which is making one.
+     */
+    const knownSaves = [project.suggested, ...project.recent].filter(Boolean);
+    const nothingAtAll = !open && knownSaves.length === 0;
+    $('#project-welcome-title').textContent = nothingAtAll ? 'No Save Yet' : 'No Save Open';
+    $('#project-welcome-message').textContent = nothingAtAll
+      ? 'There is nothing to open on this computer yet. Create a save and it becomes the home for your resumes, applications, imported files, and settings.'
+      : 'Open a save folder or create a blank save to begin. Resumes, applications, imported files, and settings belong to that save.';
+
+    setChildren($('#project-existing'), nothingAtAll
+      ? el('button', { className: 'primary', textContent: 'Create a Save…', onclick: () => {
+          $('#project-mode').value = 'create';
+          $('#project-switch').textContent = 'Create Save';
+          $('#project-path').focus();
+        } })
+      : project.suggested ? [
+        el('p', { textContent: 'Existing data was found in this folder. Open it as a save to continue working with it.' }),
+        el('p', { className: 'mono-path', textContent: project.suggested }),
+        el('button', { className: 'primary', textContent: 'Open Existing Save', onclick: action(async () => {
+          $('#project-path').value = project.suggested;
+          $('#project-mode').value = 'open';
+          await changeProject();
+        }) }),
+      ] : el('p', { className: 'hint', textContent: 'Choose Open Existing Save or Create Blank Save on the left.' }));
     $('#project-override').textContent = project.environmentOverride
       ? 'Opened from launch settings. A terminal launched with RMM_DATA will use that folder again.' : '';
     const defaults = [...new Set([project.current, project.defaultFolder, ...project.recent].filter(Boolean))];

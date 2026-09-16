@@ -1286,8 +1286,11 @@ tbody tr { cursor: pointer; }
 #tabs { min-width: 0; overflow-x: auto; }
 #tabs button { white-space: nowrap; }
 #tabs button:disabled { opacity: .4; cursor: default; }
-.project-welcome { max-width: 700px; margin: 35px auto; padding: 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.project-welcome { max-width: 700px; margin: 35px auto; padding: 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); text-align: center; }
 .project-welcome h2 { font-size: 24px; }
+.project-welcome-art { display: block; width: 120px; height: 88px; margin: 4px auto 18px; }
+.project-welcome #project-existing { margin-top: 18px; }
+.project-welcome #project-existing .mono-path { margin: 6px 0 14px; }
 .project-welcome .mono-path { overflow-wrap: anywhere; }
 .project-backup { margin-top: 28px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
 .project-backup > summary { cursor: pointer; font-weight: 650; }

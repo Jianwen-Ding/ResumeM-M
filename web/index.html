@@ -102,8 +102,17 @@
       </aside>
       <div>
         <div id="project-welcome" class="project-welcome">
-          <h2>No Save Open</h2>
-          <p>Open a save folder or create a blank save to begin. Resumes, applications, imported files, and settings belong to that save.</p>
+          <!-- An empty folder with a plus on it. Drawn rather than photographed
+               so it stays sharp at any size and needs no network. -->
+          <svg class="project-welcome-art" viewBox="0 0 120 88" role="img" aria-labelledby="project-welcome-art-title">
+            <title id="project-welcome-art-title">An empty save folder</title>
+            <path d="M8 22a8 8 0 0 1 8-8h27l9 10h60a8 8 0 0 1 8 8v40a8 8 0 0 1-8 8H16a8 8 0 0 1-8-8Z"
+                  fill="var(--accent-soft)" stroke="var(--accent-line)" stroke-width="2" />
+            <path d="M8 34h104" stroke="var(--accent-line)" stroke-width="2" />
+            <path d="M60 44v22M49 55h22" stroke="var(--accent)" stroke-width="4" stroke-linecap="round" />
+          </svg>
+          <h2 id="project-welcome-title">No Save Open</h2>
+          <p id="project-welcome-message">Open a save folder or create a blank save to begin. Resumes, applications, imported files, and settings belong to that save.</p>
           <div id="project-existing"></div>
         </div>
         <div data-project-required hidden>
