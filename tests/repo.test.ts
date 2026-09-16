@@ -68,35 +68,44 @@ describe('committing', () => {
 });
 
 describe('scoping', () => {
-  it('commits only the store directory, leaving other work alone', async () => {
-    // The motivating case: a store that lives alongside its own source code.
+  it('keeps the store history entirely out of the surrounding repository', async () => {
+    // The motivating case: a store that lives alongside the application's code.
     git(['init']);
-    fs.mkdirSync(path.join(root, 'data'));
+    const dataDir = path.join(root, 'data');
+    fs.mkdirSync(dataDir);
     fs.mkdirSync(path.join(root, 'src'));
-    fs.writeFileSync(path.join(root, 'data', 'profile.yaml'), 'name: A\n');
+    fs.writeFileSync(path.join(dataDir, 'profile.yaml'), 'name: A\n');
     fs.writeFileSync(path.join(root, 'src', 'code.ts'), 'export const x = 1;\n');
 
-    const repo = Repo.forStore(path.join(root, 'data'));
+    const repo = Repo.forStore(dataDir);
     await repo.ensure();
 
-    fs.writeFileSync(path.join(root, 'data', 'profile.yaml'), 'name: B\n');
+    fs.writeFileSync(path.join(dataDir, 'profile.yaml'), 'name: B\n');
     fs.writeFileSync(path.join(root, 'src', 'code.ts'), 'export const x = 2;\n');
     await repo.commitAll('Update profile');
 
-    const committed = git(['show', '--name-only', '--pretty=format:', 'HEAD']).trim();
-    expect(committed).toContain('data/profile.yaml');
-    expect(committed).not.toContain('src/code.ts');
-    // The unrelated edit is still sitting in the working tree, untracked.
-    // (git reports a wholly-untracked directory as `?? src/`.)
-    expect(git(['status', '--porcelain'])).toMatch(/\?\?\s+src\//);
+    // The store's own history holds the change…
+    const committed = git(['show', '--name-only', '--pretty=format:', 'HEAD'], dataDir).trim();
+    expect(committed).toContain('profile.yaml');
+    expect(committed).not.toContain('code.ts');
+
+    // …and the surrounding repository has no commits from it at all.
+    expect(() => git(['rev-parse', 'HEAD'], root)).toThrow();
   });
 
-  it('finds the enclosing repo when the store is a subdirectory', async () => {
+  it('does not adopt an enclosing repository as its own', async () => {
+    // A store placed inside the application's checkout must not report the
+    // source repository as its own and commit resume history into it.
     git(['init']);
-    fs.mkdirSync(path.join(root, 'nested', 'data'), { recursive: true });
-    const repo = Repo.forStore(path.join(root, 'nested', 'data'));
-    expect(repo.root).toBe(fs.realpathSync(root));
-    expect(repo.scope).toEqual([path.join('nested', 'data')]);
+    const nested = path.join(root, 'nested', 'data');
+    fs.mkdirSync(nested, { recursive: true });
+
+    const repo = Repo.forStore(nested);
+    expect(repo.root).toBe(nested);
+    expect(await repo.isRepo()).toBe(false);
+
+    await repo.ensure();
+    expect(fs.existsSync(path.join(nested, '.git'))).toBe(true);
   });
 
   it('treats the store as its own root when no repo encloses it', () => {
@@ -254,5 +263,100 @@ describe('commit detail', () => {
     const detail = await repo.commit(hash!);
     expect(detail!.diff.length).toBeLessThanOrEqual(200_100);
     expect(detail!.diff).toContain('diff truncated');
+  });
+});
+
+describe('store repositories are their own', () => {
+  it('roots at the store directory, never the repo above it', () => {
+    // The motivating case: the store must not end up sharing history with the
+    // application's source tree.
+    git(['init']);
+    const dataDir = path.join(root, 'data');
+    fs.mkdirSync(dataDir);
+
+    const repo = Repo.forStore(dataDir);
+    expect(repo.root).toBe(dataDir);
+    expect(repo.scope).toEqual(['.']);
+  });
+
+  it('initialises a repository inside the store itself', async () => {
+    const dataDir = path.join(root, 'store');
+    fs.mkdirSync(dataDir);
+    const repo = Repo.forStore(dataDir);
+    await repo.ensure();
+    expect(fs.existsSync(path.join(dataDir, '.git'))).toBe(true);
+  });
+});
+
+describe('remotes', () => {
+  it('reports a store with no remote as local only', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    const status = await repo.remoteStatus();
+    expect(status.url).toBeUndefined();
+    expect(status.tracked).toBe(false);
+  });
+
+  it('adds, updates, and removes a remote', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+
+    await repo.setRemote('https://example.com/a.git');
+    expect(await repo.getRemote()).toBe('https://example.com/a.git');
+
+    await repo.setRemote('https://example.com/b.git');
+    expect(await repo.getRemote()).toBe('https://example.com/b.git');
+
+    await repo.setRemote('');
+    expect(await repo.getRemote()).toBeUndefined();
+  });
+
+  it('refuses to set a remote outside a repository', async () => {
+    await expect(new Repo(path.join(root, 'nope')).setRemote('x')).rejects.toThrow(/not a git repository/);
+  });
+
+  it('refuses to push with no remote configured', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await expect(repo.push()).rejects.toThrow(/No remote/);
+  });
+
+  it('reports a failed push rather than throwing', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await repo.setRemote(path.join(root, 'definitely-not-a-repo'));
+    const result = await repo.push();
+    expect(result.ok).toBe(false);
+    expect(result.output.length).toBeGreaterThan(0);
+  });
+
+  it('pushes to a real remote and then reports itself up to date', async () => {
+    const remoteDir = path.join(root, 'remote.git');
+    execFileSync('git', ['init', '--bare', '-q', remoteDir]);
+
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: A\n');
+    await repo.commitAll('add a profile');
+    await repo.setRemote(remoteDir);
+
+    const pushed = await repo.push();
+    expect(pushed.ok).toBe(true);
+
+    const status = await repo.remoteStatus();
+    expect(status.tracked).toBe(true);
+    expect(status.ahead).toBe(0);
+    expect(status.behind).toBe(0);
+
+    // A later change shows as waiting to be pushed.
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: B\n');
+    await repo.commitAll('rename');
+    expect((await repo.remoteStatus()).ahead).toBe(1);
+  });
+
+  it('names the current branch', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    expect(await repo.currentBranch()).toBeTruthy();
   });
 });

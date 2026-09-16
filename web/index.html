@@ -87,7 +87,12 @@
     <div class="toolbar">
       <button id="btn-add-app" class="primary">Record an application</button>
     </div>
-    <div id="apps-wrap"></div>
+    <div class="apps-split">
+      <div id="apps-wrap"></div>
+      <div id="app-detail" class="app-detail">
+        <div class="empty"><b>Pick an application</b>Everything you sent — resume, letter, and answers — appears here.</div>
+      </div>
+    </div>
   </section>
 
   <!-- Letters and reusable answers. -->
@@ -126,7 +131,16 @@
       Every change to the store is committed, so this is the record of what you
       sent and when. Pick a commit to see exactly what moved.
     </p>
-    <div class="history-split">
+    <div class="toolbar">
+      <select id="history-resume" title="Whose version history to show"></select>
+      <span class="hint">Every version this resume has been, newest first.</span>
+      <span class="grow"></span>
+      <button id="btn-raw-history" class="tiny">Show raw git log instead</button>
+    </div>
+
+    <div id="resume-timeline" class="timeline-list"></div>
+
+    <div id="raw-history" class="history-split" style="display:none">
       <div id="commits" class="commit-list"></div>
       <div id="commit-detail" class="commit-detail">
         <div class="empty"><b>Pick a commit</b>Its files and the exact change appear here.</div>
@@ -138,13 +152,33 @@
   <section id="tab-voice" class="tab">
     <div class="split-even">
       <div>
-        <div class="toolbar"><h2>Voice</h2></div>
+        <div class="toolbar">
+          <h2>Your writing</h2>
+          <span class="grow"></span>
+          <button id="btn-add-sample" class="primary">+ Add a sample</button>
+        </div>
         <p class="hint">
-          Prepended to every AI request, so you never paste the same instructions
-          into a fresh chat again. Describe how you write, not what you did.
+          Your voice is taken from things you have actually written, not from a
+          description of it. Paste in an old resume, a cover letter you were
+          pleased with, or an answer you gave — they need not belong to any
+          application. Letters you send and answers you save are included
+          automatically.
         </p>
-        <textarea id="voice" spellcheck="false"></textarea>
-        <div class="toolbar"><button id="btn-save-voice" class="primary">Save voice notes</button></div>
+        <div id="voice-budget" class="voice-budget"></div>
+        <div id="samples" class="card-list"></div>
+
+        <details id="voice-extras" class="voice-extras">
+          <summary>Notes and the exact text the AI receives</summary>
+          <p class="hint">
+            Notes are optional and secondary to the samples above. Use them only
+            for something the samples cannot show — a word you never want used,
+            say.
+          </p>
+          <textarea id="voice" spellcheck="false"></textarea>
+          <div class="toolbar"><button id="btn-save-voice">Save notes</button></div>
+          <p class="hint">This is exactly what gets prepended to every request:</p>
+          <pre id="voice-preview" class="voice-preview"></pre>
+        </details>
       </div>
 
       <div>
@@ -155,6 +189,15 @@
           you the prompt instead.
         </p>
         <div id="settings" class="settings"></div>
+
+        <div class="toolbar" style="margin-top:20px"><h2>Your store</h2></div>
+        <p class="hint">
+          Everything you write lives in its own git repository, separate from
+          this application's code. It stays on your machine unless you choose
+          to push it somewhere — and a resume store belongs in a private
+          repository if you do.
+        </p>
+        <div id="store-settings" class="settings"></div>
       </div>
     </div>
   </section>

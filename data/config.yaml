@@ -5,9 +5,16 @@ latex:
 
 ai:
   # The CLI to shell out to for feedback and tailoring. Whatever you have:
-  # claude, codex, agy, or any command that reads a prompt file.
+  # claude, codex, gemini, or any command that reads a prompt file.
+  #
+  # The child always runs in an empty scratch directory containing nothing but
+  # the prompt — not your store, not your home directory, not this source tree.
+  # These flags add each CLI's own read-only mode on top of that.
+  #   {prompt}      path to a file holding the prompt
+  #   {promptText}  the prompt inline, for CLIs that insist on an argument
+  #   {sandbox}     the scratch directory, for CLIs that take an allow-list
   command: claude
-  args: ["-p", "{prompt}"]
+  args: ["-p", "--add-dir", "{sandbox}", "--disallowedTools", "Bash,Write,Edit,WebFetch,WebSearch", "{prompt}"]
   # Off by default. Turn on once you have confirmed the command above works;
   # while off, the AI endpoints return the prompt they *would* have run.
   enabled: false

@@ -19,6 +19,19 @@ export interface AgentResult {
  * Shells out to whichever coding-agent CLI is configured. The prompt goes to a
  * file rather than the command line: prompts here run to tens of kilobytes,
  * past what an argv can hold, and a file keeps quoting out of the picture.
+ *
+ * ## Confinement
+ *
+ * These CLIs are agents: left alone they can read and write whatever their
+ * working directory gives them. None of these tasks needs a filesystem at all —
+ * every prompt already carries the text it is reasoning about — so the child
+ * runs in a fresh empty temp directory holding nothing but the prompt. That
+ * alone is the guarantee, independent of whatever sandbox flags a particular
+ * CLI happens to offer; `{sandbox}` in the argument template expands to that
+ * directory for CLIs that want it named explicitly.
+ *
+ * What this stops: an agent that decides to "look around the project" ending up
+ * in your source tree, your store, or your home directory.
  */
 export async function runAgent(config: StoreConfig, prompt: string): Promise<AgentResult> {
   if (!config.ai.enabled) {
@@ -30,9 +43,10 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
   fs.writeFileSync(promptFile, prompt, 'utf8');
 
   // `{prompt}` is the prompt file path; `{promptText}` inlines it for CLIs that
-  // insist on an argument.
+  // insist on an argument; `{sandbox}` is the directory the child is confined
+  // to, for CLIs that take an explicit allow-list.
   const args = config.ai.args.map((a) =>
-    a.replace('{prompt}', promptFile).replace('{promptText}', prompt),
+    a.replace('{prompt}', promptFile).replace('{promptText}', prompt).replace('{sandbox}', dir),
   );
   const usesFile = config.ai.args.some((a) => a.includes('{prompt}') && !a.includes('{promptText}'));
 
@@ -40,6 +54,16 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
     const { stdout, stderr } = await run(config.ai.command, args, {
       timeout: config.ai.timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
+      // The confinement: an empty directory with only the prompt in it, never
+      // the server's own working directory.
+      cwd: dir,
+      env: {
+        ...process.env,
+        // Some CLIs treat these as "the project"; point them at the sandbox so
+        // a stray relative path cannot escape it.
+        PWD: dir,
+        TMPDIR: dir,
+      },
       // CLIs that take the prompt on stdin get it there; harmless otherwise.
       ...(usesFile ? {} : { input: prompt } as object),
     });

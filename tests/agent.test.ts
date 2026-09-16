@@ -123,3 +123,52 @@ describe('runAgent', () => {
     expect(fs.existsSync(promptPath)).toBe(false);
   });
 });
+
+describe('confinement', () => {
+  it('runs the command in an empty scratch directory, not the server’s own', async () => {
+    // An agent CLI that "looks around the project" must find nothing but the
+    // prompt. This is the guarantee that does not depend on any particular
+    // CLI's sandbox flags.
+    const result = await runAgent(
+      config({
+        enabled: true,
+        command: process.execPath,
+        args: [
+          '-e',
+          'const fs=require("fs");process.stdout.write(JSON.stringify({cwd:process.cwd(),files:fs.readdirSync(".")}))',
+          '{prompt}',
+        ],
+      }),
+      'prompt body',
+    );
+
+    const seen = JSON.parse(result.output) as { cwd: string; files: string[] };
+    expect(seen.files).toEqual(['prompt.md']);
+    expect(seen.cwd).not.toBe(process.cwd());
+    expect(seen.cwd).toContain('rmm-ai-');
+  });
+
+  it('expands {sandbox} to that directory for CLIs that want it named', async () => {
+    const result = await runAgent(
+      config({
+        enabled: true,
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write(process.argv[1])', '{sandbox}'],
+      }),
+      'p',
+    );
+    expect(result.output).toContain('rmm-ai-');
+  });
+
+  it('points the working-directory environment at the sandbox too', async () => {
+    const result = await runAgent(
+      config({
+        enabled: true,
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write(process.env.PWD ?? "")', '{prompt}'],
+      }),
+      'p',
+    );
+    expect(result.output).toContain('rmm-ai-');
+  });
+});

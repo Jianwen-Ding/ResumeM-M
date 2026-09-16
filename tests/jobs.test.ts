@@ -125,6 +125,7 @@ const data: StoreData = {
   applications: [],
   coverLetters: [],
   drafts: [],
+  samples: [],
   answers: [],
   voice: '',
   config: DEFAULT_CONFIG,

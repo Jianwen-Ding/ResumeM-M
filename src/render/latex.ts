@@ -60,22 +60,23 @@ function n(x: number, places = 3): string {
   return x.toFixed(places).replace(/\.?0+$/, '') || '0';
 }
 
-/**
- * The preamble. Three things are interpolated: base font size (via scrextend's
- * \changefontsizes, since `article` only offers 10/11/12pt), the margin, and a
- * spacing multiplier applied to every vertical adjustment in the template.
+/*
+ * The preamble is split in two.
+ *
+ * `stablePreamble` never changes: document class, packages, and the command
+ * definitions. Because it is byte-identical across every compile, it can be
+ * dumped to a precompiled format once and reloaded in milliseconds, which is
+ * what makes the live preview feel live.
+ *
+ * `runtimeSetup` carries the numbers — font size, margins, spacing — and runs
+ * inside each document. Every vertical adjustment is written as a multiple of
+ * `\rmmunit`, a length set at run time, so the spacing knob works without the
+ * command definitions having to change.
  */
-function preamble(layout: LayoutOptions): string {
-  const sp = layout.spacing;
-  // Jake's template hard-codes 0.5in margins by fiddling \oddsidemargin etc.
-  // The offsets below reproduce that arithmetic for an arbitrary margin.
-  const side = layout.marginIn - 1.0; // \oddsidemargin is relative to a 1in origin
-  const top = layout.marginIn - 1.0;
-  const textwidth = (layout.paper === 'a4' ? 8.27 : 8.5) - layout.marginIn * 2;
-  const textheight = (layout.paper === 'a4' ? 11.69 : 11) - layout.marginIn * 2;
-  const v = (base: number) => n(base * sp, 2);
 
-  return `\\documentclass[${PAPER[layout.paper]},11pt]{article}
+/** Byte-identical across every compile, so it can be precompiled. */
+export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string {
+  return `\\documentclass[${PAPER[paper]},11pt]{article}
 
 \\usepackage{latexsym}
 \\usepackage[empty]{fullpage}
@@ -98,11 +99,9 @@ function preamble(layout: LayoutOptions): string {
 \\zref@addprop{savepos}{abspage}
 \\makeatother
 
-% Continuous control over the base size; \`article\` only offers 10/11/12pt.
-% The leading is clamped at just above the font size: KOMA rejects a
-% \\baselineskip smaller than the type, and a tighter setting is unreadable
-% anyway. Below that floor, \`spacing\` keeps working on the block gaps.
-\\changefontsizes[${n(layout.fontSizePt * Math.max(1.02, 1.2 * sp), 2)}pt]{${n(layout.fontSizePt, 2)}pt}
+% Every vertical adjustment below is a multiple of this, set per document.
+\\newlength{\\rmmunit}
+\\setlength{\\rmmunit}{1pt}
 
 \\pagestyle{fancy}
 \\fancyhf{}
@@ -110,13 +109,8 @@ function preamble(layout: LayoutOptions): string {
 \\renewcommand{\\headrulewidth}{0pt}
 \\renewcommand{\\footrulewidth}{0pt}
 
-\\setlength{\\oddsidemargin}{${n(side)}in}
-\\setlength{\\evensidemargin}{${n(side)}in}
-\\setlength{\\textwidth}{${n(textwidth)}in}
-\\setlength{\\topmargin}{${n(top)}in}
 \\setlength{\\headheight}{0pt}
 \\setlength{\\headsep}{0pt}
-\\setlength{\\textheight}{${n(textheight)}in}
 
 \\urlstyle{same}
 \\raggedbottom
@@ -124,31 +118,31 @@ function preamble(layout: LayoutOptions): string {
 \\setlength{\\tabcolsep}{0in}
 
 \\titleformat{\\section}{%
-  \\vspace{-${v(4)}pt}\\scshape\\raggedright\\large
-}{}{0em}{}[\\color{black}\\titlerule \\vspace{-${v(5)}pt}]
+  \\vspace{-4\\rmmunit}\\scshape\\raggedright\\large
+}{}{0em}{}[\\color{black}\\titlerule \\vspace{-5\\rmmunit}]
 
 % Make the generated PDF machine readable so ATS parsers get real text.
 \\pdfgentounicode=1
 
 \\newcommand{\\resumeItem}[1]{%
   \\item\\small{%
-    {#1 \\vspace{-${v(2)}pt}}%
+    {#1 \\vspace{-2\\rmmunit}}%
   }%
 }
 
 \\newcommand{\\resumeSubheading}[4]{%
-  \\vspace{-${v(2)}pt}\\item
+  \\vspace{-2\\rmmunit}\\item
     \\begin{tabular*}{0.97\\textwidth}[t]{l@{\\extracolsep{\\fill}}r}
       \\textbf{#1} & #2 \\\\
       \\textit{\\small#3} & \\textit{\\small #4} \\\\
-    \\end{tabular*}\\vspace{-${v(7)}pt}%
+    \\end{tabular*}\\vspace{-7\\rmmunit}%
 }
 
 \\newcommand{\\resumeProjectHeading}[2]{%
     \\item
     \\begin{tabular*}{0.97\\textwidth}{l@{\\extracolsep{\\fill}}r}
       \\small#1 & #2 \\\\
-    \\end{tabular*}\\vspace{-${v(7)}pt}%
+    \\end{tabular*}\\vspace{-7\\rmmunit}%
 }
 
 \\renewcommand\\labelitemii{$\\vcenter{\\hbox{\\tiny$\\bullet$}}$}
@@ -156,16 +150,41 @@ function preamble(layout: LayoutOptions): string {
 \\newcommand{\\resumeSubHeadingListStart}{\\begin{itemize}[leftmargin=0.15in, label={}]}
 \\newcommand{\\resumeSubHeadingListEnd}{\\end{itemize}}
 \\newcommand{\\resumeItemListStart}{\\begin{itemize}}
-\\newcommand{\\resumeItemListEnd}{\\end{itemize}\\vspace{-${v(5)}pt}}
+\\newcommand{\\resumeItemListEnd}{\\end{itemize}\\vspace{-5\\rmmunit}}
 
-% Records where the final line of content landed, so the fit checker can say
-% "over by three lines" instead of only "two pages".
+% Records where the first and last lines of content landed, so the fit checker
+% can say "over by three lines" rather than only "two pages".
 \\AtEndDocument{\\zsavepos{rmmend}}
-
-% Baseline leading, written to the log so overflow can be reported in lines
-% rather than in points.
 \\AtBeginDocument{\\typeout{RMM-BASELINESKIP: \\the\\baselineskip}}
 `;
+}
+
+/** The numbers for one particular layout, run inside the document. */
+export function runtimeSetup(layout: LayoutOptions): string {
+  const sp = layout.spacing;
+  // Jake's template hard-codes 0.5in margins by fiddling \oddsidemargin etc.
+  // The offsets below reproduce that arithmetic for an arbitrary margin.
+  const side = layout.marginIn - 1.0;
+  const top = layout.marginIn - 1.0;
+  const paper = layout.paper === 'a4' ? { w: 8.27, h: 11.69 } : { w: 8.5, h: 11 };
+
+  return `\\setlength{\\rmmunit}{${n(sp, 4)}pt}
+\\setlength{\\oddsidemargin}{${n(side)}in}
+\\setlength{\\evensidemargin}{${n(side)}in}
+\\setlength{\\textwidth}{${n(paper.w - layout.marginIn * 2)}in}
+\\setlength{\\topmargin}{${n(top)}in}
+\\setlength{\\textheight}{${n(paper.h - layout.marginIn * 2)}in}
+
+% Continuous control over the base size; \`article\` only offers 10/11/12pt.
+% The leading is clamped at just above the font size: KOMA rejects a
+% \\baselineskip smaller than the type, and a tighter setting is unreadable
+% anyway. Below that floor, \`spacing\` keeps working on the block gaps.
+\\changefontsizes[${n(layout.fontSizePt * Math.max(1.02, 1.2 * sp), 2)}pt]{${n(layout.fontSizePt, 2)}pt}
+`;
+}
+
+function preamble(layout: LayoutOptions): string {
+  return `${stablePreamble(layout.paper)}\n${runtimeSetup(layout)}`;
 }
 
 function header(r: ResolvedResume): string {
@@ -234,11 +253,15 @@ ${body}
   \\resumeSubHeadingListEnd`;
 }
 
-/** Full .tex source for a resolved resume. */
-export function renderLatex(r: ResolvedResume): string {
+/**
+ * Everything after the preamble: the part that differs between resumes and
+ * therefore can never be baked into a precompiled format. Shared by the full
+ * document and the fast path, which supplies its own preamble via a
+ * precompiled `.fmt` instead of `stablePreamble`.
+ */
+function documentBody(r: ResolvedResume): string {
   const sections = r.sections.map(section).filter(Boolean).join('\n\n');
-  return `${preamble(r.layout)}
-\\begin{document}
+  return `\\begin{document}
 \\zsavepos{rmmstart}
 
 ${header(r)}
@@ -247,4 +270,18 @@ ${sections}
 
 \\end{document}
 `;
+}
+
+/** Full .tex source for a resolved resume: preamble plus body. */
+export function renderLatex(r: ResolvedResume): string {
+  return `${preamble(r.layout)}\n${documentBody(r)}`;
+}
+
+/**
+ * Just the numbers and the body — no document class, no packages, no command
+ * definitions. Valid input only when preloaded against a format dumped from
+ * `stablePreamble` for the same paper size; see fastCompile.ts.
+ */
+export function renderLatexFastBody(r: ResolvedResume): string {
+  return `${runtimeSetup(r.layout)}\n${documentBody(r)}`;
 }

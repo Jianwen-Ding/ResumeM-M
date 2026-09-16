@@ -15,15 +15,16 @@ export interface CommitDetail {
   diff: string;
 }
 
-/** Walk up from `dir` looking for the enclosing git repository. */
-function findRepoRoot(dir: string): string | undefined {
-  let cur = path.resolve(dir);
-  for (;;) {
-    if (fs.existsSync(path.join(cur, '.git'))) return cur;
-    const parent = path.dirname(cur);
-    if (parent === cur) return undefined;
-    cur = parent;
-  }
+export interface RemoteStatus {
+  /** Configured push url, if any. */
+  url?: string;
+  branch?: string;
+  /** Commits made locally that the remote does not have. */
+  ahead: number;
+  /** Commits on the remote that are not local. */
+  behind: number;
+  /** False when the remote has never been contacted. */
+  tracked: boolean;
 }
 
 /**
@@ -45,12 +46,17 @@ export class Repo {
     this.scope = scope.length > 0 ? scope : ['.'];
   }
 
-  /** A repo whose auto-commits only ever touch the store directory. */
+  /**
+   * The repository for a store.
+   *
+   * The store is always its own repository, rooted at the store directory —
+   * deliberately *not* the repository the application's source happens to live
+   * in. Your resume history is yours, it has a different lifetime from the
+   * tool's code, and it is the thing you might one day push to a private
+   * GitHub repo. Sharing a repo with the source would entangle all three.
+   */
   static forStore(storeDir: string): Repo {
-    const abs = path.resolve(storeDir);
-    const root = findRepoRoot(abs) ?? abs;
-    const rel = path.relative(root, abs) || '.';
-    return new Repo(root, [rel]);
+    return new Repo(path.resolve(storeDir), ['.']);
   }
 
   private async git(args: string[]): Promise<string> {
@@ -58,10 +64,19 @@ export class Repo {
     return stdout;
   }
 
+  /**
+   * Is *this directory* the root of a repository?
+   *
+   * Deliberately not "is it inside one". A store placed inside the
+   * application's checkout would otherwise report the source repository as its
+   * own and commit your resume history into it. The store owns its root or it
+   * does not have one yet.
+   */
   async isRepo(): Promise<boolean> {
     try {
-      await this.git(['rev-parse', '--git-dir']);
-      return true;
+      const top = (await this.git(['rev-parse', '--show-toplevel'])).trim();
+      if (!top) return false;
+      return fs.realpathSync(top) === fs.realpathSync(this.root);
     } catch {
       return false;
     }
@@ -139,6 +154,94 @@ export class Repo {
   /** Contents of a file at a past commit, for recovering an old phrasing. */
   async show(hash: string, relPath: string): Promise<string> {
     return this.git(['show', `${hash}:${relPath}`]);
+  }
+
+  /**
+   * Commits that touched one file, oldest problem first for this class of
+   * question: "how has this specific resume changed over time?" A version
+   * history that means anything is scoped to one file, not the whole store —
+   * a commit that only touched a bullet in `experience.yaml` is not a change
+   * to `resumes/newgrad.yaml`, even though newgrad references that bullet.
+   */
+  async logForPath(relPath: string, limit = 50): Promise<{ hash: string; date: string; message: string }[]> {
+    if (!(await this.isRepo())) return [];
+    const out = await this.git([
+      'log',
+      `-${limit}`,
+      '--follow',
+      '--pretty=format:%H%aI%s',
+      '--',
+      relPath,
+    ]).catch(() => '');
+    return out
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [hash = '', date = '', message = ''] = line.split('');
+        return { hash, date, message };
+      });
+  }
+
+  /* ---- Remotes ---------------------------------------------------- *
+   * The store is a local repository by default and stays that way unless you
+   * ask otherwise. Pushing it somewhere private is an option, not a step.
+   * ------------------------------------------------------------------ */
+
+  async getRemote(): Promise<string | undefined> {
+    if (!(await this.isRepo())) return undefined;
+    const url = await this.git(['remote', 'get-url', 'origin']).catch(() => '');
+    return url.trim() || undefined;
+  }
+
+  /** Point `origin` at a url, adding it if it is not there yet. */
+  async setRemote(url: string): Promise<void> {
+    if (!(await this.isRepo())) throw new Error('The store is not a git repository yet');
+    if (!url.trim()) {
+      await this.git(['remote', 'remove', 'origin']).catch(() => undefined);
+      return;
+    }
+    const existing = await this.getRemote();
+    await this.git(existing ? ['remote', 'set-url', 'origin', url] : ['remote', 'add', 'origin', url]);
+  }
+
+  async currentBranch(): Promise<string | undefined> {
+    const name = await this.git(['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => '');
+    const trimmed = name.trim();
+    return trimmed && trimmed !== 'HEAD' ? trimmed : undefined;
+  }
+
+  /** How the local store compares with its remote, without contacting it. */
+  async remoteStatus(): Promise<RemoteStatus> {
+    const url = await this.getRemote();
+    const branch = await this.currentBranch();
+    if (!url || !branch) return { url, branch, ahead: 0, behind: 0, tracked: false };
+
+    const counts = await this.git([
+      'rev-list',
+      '--left-right',
+      '--count',
+      `origin/${branch}...${branch}`,
+    ]).catch(() => '');
+
+    const [behind = '0', ahead = '0'] = counts.trim().split(/\s+/);
+    return { url, branch, ahead: Number(ahead) || 0, behind: Number(behind) || 0, tracked: Boolean(counts.trim()) };
+  }
+
+  /**
+   * Push the store to its remote. Returns git's own output, since an auth
+   * failure or a rejected push is something the user has to read.
+   */
+  async push(): Promise<{ ok: boolean; output: string }> {
+    const url = await this.getRemote();
+    if (!url) throw new Error('No remote is configured for the store');
+    const branch = (await this.currentBranch()) ?? 'main';
+    try {
+      const out = await this.git(['push', '-u', 'origin', branch]);
+      return { ok: true, output: out.trim() || `Pushed ${branch} to origin.` };
+    } catch (err) {
+      const e = err as { stderr?: string; stdout?: string; message?: string };
+      return { ok: false, output: (e.stderr ?? e.stdout ?? e.message ?? 'Push failed').trim() };
+    }
   }
 
   /**

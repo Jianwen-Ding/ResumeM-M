@@ -1,25 +1,20 @@
-# Voice
+# Notes (optional)
 
-Edit this file. It is prepended to every AI request the tool makes, which is
-what stops you re-explaining yourself to a fresh chat every time.
+Your voice is taken from your writing, not from this file. Anything in
+`corpus/`, every cover letter in `letters/`, every saved answer, and the bullets
+on your resume are read directly and shown to the AI as examples.
 
-Describe how you write, not what you have done — the store already holds what
-you have done.
+This file is for the few things samples cannot show. Leave it empty if you have
+none. Some examples of what belongs here:
 
-## How I write
+- Words you never want used about you.
+- A spelling convention, if your samples are inconsistent.
+- A constraint that is about you rather than about your prose.
 
-- Plain and direct. Short sentences. No throat-clearing.
-- Concrete nouns and verbs. "Built", "cut", "measured" — not "leveraged",
-  "spearheaded", "utilized".
-- Every claim carries an outcome or a number where one honestly exists, and
-  none where one does not.
-- No superlatives about myself. No "passionate", "driven", "rockstar".
-- British/American spelling: American.
+## Hard rules already enforced elsewhere
 
-## What I do not want
+You do not need to restate these; every request carries them:
 
-- Do not rewrite my bullets unless I explicitly ask for a rewrite. Give me
-  feedback I can act on and let me write the words.
-- Do not invent metrics, dates, technologies, or scope.
-- Do not make me sound more senior than a student. Precision reads better than
-  inflation.
+- Never invent experience, employers, dates, technologies, or metrics.
+- Never inflate a number.
+- Feedback means critique, not a rewrite.

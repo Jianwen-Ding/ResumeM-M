@@ -11,6 +11,7 @@ import {
   type Profile,
   type ResumeSpec,
   type SkillGroup,
+  type WritingSample,
   type StoreConfig,
   type StoreData,
 } from './types.js';
@@ -65,6 +66,7 @@ export class Store {
       applications: this.readYaml<Application[]>('applications.yaml', []),
       coverLetters: this.loadCoverLetters(),
       drafts: this.loadDrafts(),
+      samples: this.loadSamples(),
       answers: this.readYaml<AnswerBankItem[]>('answers.yaml', []),
       voice: this.loadVoice(),
       config,
@@ -243,6 +245,51 @@ export class Store {
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
     fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${body}`, 'utf8');
+  }
+
+  /**
+   * The writing corpus: markdown files with a front-matter header, the same
+   * shape as cover letters, because they are the same kind of thing — your
+   * words, kept so they can be read back.
+   */
+  loadSamples(): WritingSample[] {
+    const dir = this.file('corpus');
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => {
+        const raw = fs.readFileSync(path.join(dir, f), 'utf8');
+        const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
+        const id = path.basename(f, '.md');
+        if (!m) return { id, title: id, kind: 'other' as const, text: raw, createdAt: '' };
+        const meta = (YAML.parse(m[1] ?? '') ?? {}) as Partial<WritingSample>;
+        return {
+          id,
+          title: meta.title ?? id,
+          kind: meta.kind ?? 'other',
+          createdAt: meta.createdAt ?? '',
+          writtenAt: meta.writtenAt,
+          tags: meta.tags,
+          archived: meta.archived,
+          text: m[2] ?? '',
+        } satisfies WritingSample;
+      });
+  }
+
+  saveSample(sample: WritingSample): void {
+    const { text, id, ...meta } = sample;
+    const dir = this.file('corpus');
+    fs.mkdirSync(dir, { recursive: true });
+    const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
+    fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${text}`, 'utf8');
+  }
+
+  deleteSample(id: string): boolean {
+    const f = this.file('corpus', `${id}.md`);
+    if (!fs.existsSync(f)) return false;
+    fs.unlinkSync(f);
+    return true;
   }
 
   /**

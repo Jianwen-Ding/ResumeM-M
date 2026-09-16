@@ -259,6 +259,10 @@ export interface Application {
   notes?: string;
   /** Free-form per-application answers, useful when a company re-asks. */
   answers?: { question: string; answer: string }[];
+  /** The cover letter as sent, so the record is the whole submission. */
+  coverLetter?: string;
+  /** Id of the letter in `letters/`, when one was filed there too. */
+  letterId?: string;
   history?: { at: string; status: ApplicationStatus; note?: string }[];
 }
 
@@ -306,6 +310,29 @@ export interface DraftQuestion {
   edited?: boolean;
 }
 
+/**
+ * A piece of the user's own writing, kept so the AI can match their voice by
+ * reading it rather than by being told about it.
+ *
+ * Describing your own writing is a bad way to convey it — people are poor
+ * witnesses to their own style, and "plain and direct" means something
+ * different to everyone. Three paragraphs you actually wrote say it exactly.
+ * Samples need not belong to any application; an old resume or a letter you
+ * were pleased with is the point.
+ */
+export interface WritingSample {
+  id: string;
+  title: string;
+  kind: 'resume' | 'letter' | 'answer' | 'other';
+  text: string;
+  createdAt: string;
+  /** Roughly when it was written, if that differs from when it was added. */
+  writtenAt?: string;
+  tags?: string[];
+  /** Excluded from the voice context without being deleted. */
+  archived?: boolean;
+}
+
 export interface CoverLetter {
   id: string;
   title: string;
@@ -314,6 +341,8 @@ export interface CoverLetter {
   createdAt: string;
   body: string;
   tags?: string[];
+  /** The application this was written for, when it was written for one. */
+  applicationId?: string;
 }
 
 /** A reusable answer to an application question, written in the user's voice. */
@@ -334,6 +363,7 @@ export interface StoreData {
   applications: Application[];
   coverLetters: CoverLetter[];
   drafts: Draft[];
+  samples: WritingSample[];
   answers: AnswerBankItem[];
   /** Contents of voice.md — the writing-voice instructions handed to any AI. */
   voice: string;

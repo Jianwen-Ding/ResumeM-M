@@ -54,6 +54,7 @@ function store(resumes: ResumeSpec[]): StoreData {
     applications: [],
     coverLetters: [],
     drafts: [],
+  samples: [],
     answers: [],
     voice: '',
     config: DEFAULT_CONFIG,

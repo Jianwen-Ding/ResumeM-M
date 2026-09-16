@@ -1,23 +1,23 @@
+import { buildVoiceContext, renderVoiceContext } from './voice.js';
 import type { Bullet, Entry, ResolvedResume, StoreData } from '../model/types.js';
 
 /**
- * The standing instructions that get prepended to every request, so the rules
- * you would otherwise retype into a fresh chat every time live in the repo
- * instead. `voice.md` is yours to edit; everything here is structural.
+ * The standing instructions prepended to every request, so the rules you would
+ * otherwise retype into a fresh chat live in the repo instead.
+ *
+ * The voice section is not a description — it is the person's own writing,
+ * assembled from their corpus, their sent letters, their past answers, and
+ * their resume. Showing a model how someone writes works; telling it does not.
  */
 function preamble(data: StoreData): string {
-  const voice = data.voice.trim();
   return [
     'You are helping with a resume and job-search assistant. Follow these rules exactly.',
     '',
-    '## Voice',
-    voice ||
-      '(No voice notes recorded yet. Write plainly, in first person implied — no "I" — with concrete nouns and verbs.)',
-    '',
+    renderVoiceContext(buildVoiceContext(data)),
     '## Hard rules',
     '- Never invent experience, employers, dates, technologies, or metrics. Work only from what you are given.',
     '- Never inflate a number. If a claim has no metric, do not add one.',
-    '- Match the existing register. Do not make text sound more corporate or more enthusiastic than the source.',
+    '- Match the register of the writing above. Do not make text sound more corporate or more enthusiastic than it is.',
     '- Output only what the task asks for. No preamble, no sign-off, no restating the task.',
   ].join('\n');
 }
