@@ -14,6 +14,7 @@ import {
 } from '../ai/prompts.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { Repo, withCommit } from '../git/repo.js';
+import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { extractJob, jobPostingScore } from '../jobs/extract.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
@@ -319,7 +320,21 @@ export function createApi({ store, repo }: ApiDeps): Router {
         isRepo: await repo.isRepo(),
         commits: (await repo.log(1)).length,
         remote,
+        pending: await repo.pending(),
       });
+    }),
+  );
+
+  /**
+   * Save everything to git, in one deliberate act — the same operation
+   * `rmm save` runs. Auto-commit covers edits made here; this covers the rest,
+   * including a store that is not a repository yet.
+   */
+  api.post(
+    '/store/save',
+    handler(async (req, res) => {
+      const { message, push } = req.body as { message?: string; push?: boolean };
+      res.json(await saveStore(repo, { message, push: Boolean(push) }));
     }),
   );
 
