@@ -407,33 +407,40 @@ const FIELD_LABELS = {
  * The dropdown that picks a phrasing, plus the affordances for adding to and
  * editing the set it is picking from.
  */
+/**
+ * The row under a line: what else it could say, and what you can do to it.
+ *
+ * The chosen wording is not repeated here — it is the line itself, editable in
+ * place, with a stepper beside it. Showing the same sentence twice was how
+ * this read before, and it made the page twice as long for no extra
+ * information. Stepping covers two or three alternates; past that, "choose"
+ * lists them all at once.
+ */
 function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alternate', extraActions = [], trailingActions = [] }) {
-  const select = el('select');
-  for (const v of field.variants) {
-    // Show the wording itself. A label like "Kafka-forward · streaming" tells
-    // you what the author meant; the sentence tells you what will be printed,
-    // which is the thing you are actually choosing between.
-    select.append(
-      el('option', {
-        value: v.id,
-        textContent: optionText(v),
-        title: [v.label, v.tags?.join(', '), v.note].filter(Boolean).join(' — '),
-        selected: v.id === current,
-      }),
-    );
-  }
-  select.onchange = () => {
-    state.choices[key] = select.value;
-    markDirty();
-    render();
-  };
+  const choose =
+    field.variants.length > 3
+      ? el('button', {
+          className: 'tiny',
+          textContent: 'Choose…',
+          title: 'Pick from all the ways this can be said',
+          onclick: () => chooseVariant(key, field, current),
+        })
+      : null;
 
   // Order matters: status chips, then the two things you do most (edit the
   // wording, add another), then the incidental actions.
   const actions = el('div', { className: 'actions' });
   for (const a of extraActions) actions.append(a);
+  if (choose) actions.append(choose);
   if (onEdit) {
-    actions.append(el('button', { className: 'tiny', textContent: 'Edit', title: 'Edit this wording', onclick: onEdit }));
+    actions.append(
+      el('button', {
+        className: 'tiny',
+        textContent: 'Details',
+        title: 'Label, tags, and a note to yourself — the text itself is editable on the line above',
+        onclick: onEdit,
+      }),
+    );
   }
   if (onAdd) {
     actions.append(
@@ -447,7 +454,111 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
   }
   for (const a of trailingActions) actions.append(a);
 
-  return el('div', { className: 'variant-row' }, [select, actions]);
+  return el('div', { className: 'variant-row' }, [el('span', { className: 'grow' }), actions]);
+}
+
+/** Pick from every wording at once, for fields with more than a few. */
+async function chooseVariant(key, field, current) {
+  const answer = await form(
+    'Choose a wording',
+    [
+      {
+        name: 'id',
+        label: 'Wordings',
+        type: 'select',
+        value: current,
+        options: field.variants.map((v) => ({ value: v.id, label: optionText(v) })),
+      },
+    ],
+    'Only this resume changes; the wordings themselves stay as they are.',
+  );
+  if (!answer?.id || answer.id === current) return;
+  state.choices[key] = answer.id;
+  markDirty();
+  render();
+}
+
+/**
+ * A line you can edit where it sits.
+ *
+ * Double-click to edit, Enter or click away to keep it, Escape to put it back.
+ * Editing the wording is the most common thing anyone does here, and routing it
+ * through a dialog made the quickest action the most ceremonious one.
+ *
+ * The text belongs to the store, not to this resume: editing it here changes it
+ * everywhere it appears, which is the whole point of keeping one copy.
+ */
+function editableLine(text, { onCommit, className = 'text' }) {
+  const node = el('div', {
+    // `editable` is what carries the affordance in CSS: a line that merely
+    // looks like this one — a list bullet's preview, say — must not invite a
+    // double-click that does nothing.
+    className: `${className} editable`,
+    title: 'Double-click to edit. This wording is shared by every resume using it.',
+  });
+  node.append(markup(display(text)));
+
+  let editing = false;
+  const stop = (commit) => {
+    if (!editing) return;
+    editing = false;
+    node.contentEditable = 'false';
+    node.classList.remove('editing');
+    const next = node.textContent.trim();
+    if (commit && next && next !== display(text)) {
+      onCommit(next);
+    } else {
+      // Put the markup back: the raw text is what gets edited, the rendered
+      // form is what gets shown.
+      node.replaceChildren(markup(display(text)));
+    }
+  };
+
+  node.ondblclick = () => {
+    if (editing) return;
+    editing = true;
+    node.contentEditable = 'plaintext-only';
+    node.classList.add('editing');
+    node.textContent = display(text); // edit the sentence, not the markup
+    node.focus();
+    // Put the caret where the pointer was, rather than at the start.
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount === 0) node.textContent = node.textContent;
+  };
+  node.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      stop(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      stop(false);
+    }
+  };
+  node.onblur = () => stop(true);
+  return node;
+}
+
+/**
+ * Step through the alternates from beside the line, without opening the list.
+ * Most fields have two or three; clicking through them is faster than reading
+ * a dropdown, and you see each one typeset in the preview as you go.
+ */
+function alternateStepper(key, field, currentId) {
+  const ids = field.variants.map((v) => v.id);
+  const at = Math.max(0, ids.indexOf(currentId));
+  if (ids.length < 2) return null;
+
+  const go = (delta) => {
+    state.choices[key] = ids[(at + delta + ids.length) % ids.length];
+    markDirty();
+    render();
+  };
+
+  return el('div', { className: 'stepper', title: 'Other ways to say this' }, [
+    el('button', { className: 'step', textContent: '‹', title: 'Previous wording', onclick: () => go(-1) }),
+    el('span', { className: 'count', textContent: `${at + 1}/${ids.length}` }),
+    el('button', { className: 'step', textContent: '›', title: 'Next wording', onclick: () => go(1) }),
+  ]);
 }
 
 /** A checkbox that includes or excludes something from this variation. */
@@ -558,8 +669,13 @@ function bulletBlock(entry, section, bullet, choices) {
       title: 'Showing on this variation',
       onChange: (checked) => setBulletIncluded(entry, section, bullet, checked),
     }),
-    el('div', { className: 'text' }, isList ? listPreview(bullet) : markup(String(currentText(bullet, choices) ?? ''))),
-  ]);
+    isList
+      ? el('div', { className: 'text' }, listPreview(bullet))
+      : editableLine(String(currentText(bullet, choices) ?? ''), {
+          onCommit: (text) => saveVariantText(entry, bullet, choices[bullet.id] ?? bullet.default, text),
+        }),
+    isList ? null : alternateStepper(bullet.id, bullet, choices[bullet.id] ?? bullet.default),
+  ].filter(Boolean));
   wrap.append(head);
 
   if (isList) {
@@ -722,6 +838,13 @@ function entryBlock(entry, section, choices) {
       box.append(
         el('div', { className: 'field' }, [
           el('div', { className: 'field-label' }, FIELD_LABELS[name] ?? name),
+          el('div', { className: 'field-line' }, [
+            editableLine(String(chosen?.text ?? ''), {
+              className: 'text field-text',
+              onCommit: (text) => saveFieldText(entry, name, current, text),
+            }),
+            alternateStepper(key, field, current),
+          ].filter(Boolean)),
           control,
         ]),
       );
@@ -740,7 +863,10 @@ function entryBlock(entry, section, choices) {
       meta.append(
         el('span', { className: 'meta-item' }, [
           f.name === 'title' ? null : el('span', { className: 'meta-label', textContent: FIELD_LABELS[f.name] }),
-          el('span', { textContent: f.text }),
+          editableLine(f.text, {
+            className: 'meta-value',
+            onCommit: (text) => savePlainField(entry, f.name, text),
+          }),
           el('button', {
             className: 'link meta-add',
             textContent: '+ alt',
@@ -1057,6 +1183,57 @@ async function addBulletVariant(entry, bullet) {
 }
 
 /** Edit an existing phrasing in place — it changes everywhere it is used. */
+/**
+ * Write an inline edit back to the store. Only the text changes: the label,
+ * tags and note belong to the fuller editor, and nobody retypes those while
+ * fixing a sentence.
+ */
+async function saveVariantText(entry, bullet, variantId, text) {
+  const raw = undisplay(text);
+  const next = {
+    ...entry,
+    bullets: entry.bullets.map((b) =>
+      b.id !== bullet.id
+        ? b
+        : {
+            ...b,
+            variants: b.variants.map((v) =>
+              // Editing it is the review: a suggested phrasing you have
+              // touched is no longer unreviewed.
+              v.id !== variantId ? v : { ...v, text: raw, suggested: undefined },
+            ),
+          },
+    ),
+  };
+  await saveEntry(next, 'Wording updated');
+  scheduleRender();
+}
+
+/** The same, for one alternate of a heading field. */
+async function saveFieldText(entry, name, variantId, text) {
+  const field = entry[name];
+  const next = {
+    ...entry,
+    [name]: {
+      ...field,
+      variants: field.variants.map((v) => (v.id !== variantId ? v : { ...v, text: undisplay(text) })),
+    },
+  };
+  await saveEntry(next, `${FIELD_LABELS[name] ?? name} updated`);
+  scheduleRender();
+}
+
+/** And for a field that is a plain string rather than a set of alternates. */
+async function savePlainField(entry, name, text) {
+  await saveEntry({ ...entry, [name]: undisplay(text) }, `${FIELD_LABELS[name] ?? name} updated`);
+  scheduleRender();
+}
+
+/** The inverse of `display()`: back to the store's LaTeX-flavoured text. */
+function undisplay(text) {
+  return String(text ?? '').replace(/\s–\s/g, ' -- ');
+}
+
 async function editVariant(entry, bullet, variant) {
   const answer = await form(`Edit "${variant.label}"`, [
     { name: 'label', label: 'Label', value: variant.label },
