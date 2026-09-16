@@ -287,3 +287,69 @@ describe('feedback sees the whole picture', () => {
     }
   });
 });
+
+describe('stores that are not shaped like the example', () => {
+  const bare = (over: Partial<typeof data> = {}) => ({ ...data, coverLetters: [], answers: [], ...over });
+
+  it('renders an entry with no subtitle and no dates', () => {
+    const text = resumeAsText({
+      ...resolved,
+      sections: [
+        {
+          kind: 'project',
+          heading: 'Projects',
+          skillGroups: [],
+          entries: [{ id: 'p', title: 'A thing', bullets: [] }],
+        },
+      ],
+    } as typeof resolved);
+    // No stray "— " or "()" where the optional halves of the heading would be.
+    expect(text).toContain('### A thing [entry:p]');
+    expect(text.split('\n').find((l) => l.startsWith('### '))).toBe('### A thing [entry:p]');
+  });
+
+  it('leaves the previous-work section out rather than printing an empty heading', () => {
+    expect(answerPrompt(bare(), 'Q?')).not.toContain('What you have already written');
+  });
+
+  it('skips a letter with nothing in it and an answer with no phrasings', () => {
+    const data2 = bare({
+      coverLetters: [{ id: 'l', title: 'Empty', body: '   ', createdAt: '2026-01-01T00:00:00Z' }],
+      answers: [{ id: 'a', question: 'Why?', default: 'v', variants: [] }],
+    });
+    expect(answerPrompt(data2, 'Why?')).not.toContain('What you have already written');
+  });
+
+  it('stops adding previous work once the budget is spent', () => {
+    const long = 'A sentence that goes on. '.repeat(500);
+    const data2 = bare({
+      answers: Array.from({ length: 12 }, (_, n) => ({
+        id: `a${n}`,
+        question: `Question ${n}?`,
+        default: 'v',
+        variants: [{ id: 'v', label: 'l', text: long }],
+      })),
+    });
+    const prompt = answerPrompt(data2, 'Question 0?');
+    // Everything is not an option: the section is cut, not unbounded.
+    expect(prompt.length).toBeLessThan(40_000);
+    expect(prompt).not.toContain('Question 11?');
+  });
+
+  it('answers a question with no posting attached', () => {
+    expect(answerPrompt(data, 'Why this role?')).not.toContain('## Posting');
+  });
+
+  it('leaves an archived entry and an archived bullet out of what the AI may pick from', () => {
+    const entries = data.entries.map((e, n) =>
+      n === 0
+        ? { ...e, archived: true }
+        : { ...e, bullets: (e.bullets ?? []).map((b, i) => (i === 0 ? { ...b, archived: true } : b)) },
+    );
+    const prompt = tailorPrompt({ ...data, entries }, resolved, { jobDescription: 'Kafka' });
+    // The resume itself still shows what it shows; the inventory is what the
+    // AI may pick from, and an archived thing is not on offer there.
+    expect(prompt).not.toContain('[entry:edu_neu] kind=education');
+    expect(prompt).not.toContain('bullet b_pipeline:');
+  });
+});

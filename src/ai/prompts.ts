@@ -204,7 +204,8 @@ function priorWork(data: StoreData, { question, job, letters }: PriorWork): stri
 function clip(text: string, room: number): string {
   const clean = text.trim();
   if (room <= 0) return '';
-  return clean.length > room ? `${clean.slice(0, room).trimEnd()}…` : clean;
+  // The ellipsis counts against the room, so a clip never exceeds what it was given.
+  return clean.length > room ? `${clean.slice(0, room - 1).trimEnd()}…` : clean;
 }
 
 /** The LaTeX and the fit report, so layout advice is about the real page. */

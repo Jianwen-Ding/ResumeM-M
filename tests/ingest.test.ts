@@ -6,6 +6,8 @@ import { execFileSync } from 'node:child_process';
 import zlib from 'node:zlib';
 import { extractText, reflow, tidy } from '../src/ingest/text.js';
 import { ingestPrompt, readIngestPlan, segment, sortByRules } from '../src/ingest/sort.js';
+import { ingestFile } from '../src/ingest/index.js';
+import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 import { hasLatex } from './helpers.js';
 
 const latex = await hasLatex();
@@ -296,7 +298,7 @@ describe('sorting blocks with a model', () => {
   it('shortens a title the model let run away with itself', () => {
     const reply = JSON.stringify({ items: [{ blocks: [0], kind: 'other', title: 'x'.repeat(200) }] });
     const title = readIngestPlan(reply, 'letters.txt', blocks)[0]?.title ?? '';
-    expect(title.length).toBeLessThanOrEqual(71);
+    expect(title.length).toBeLessThanOrEqual(70);
   });
 
   it('says so when the model did not answer with json at all', () => {
@@ -315,7 +317,7 @@ describe('sorting blocks with a model', () => {
  * ------------------------------------------------------------------ */
 
 /** A minimal zip, so the docx reader is tested against a real archive. */
-function makeZip(name: string, contents: Buffer, { store = false } = {}): Buffer {
+function makeZip(name: string, contents: Buffer, { store = false, method = store ? 0 : 8 } = {}): Buffer {
   const nameBuf = Buffer.from(name, 'utf8');
   const data = store ? contents : zlib.deflateRawSync(contents);
   const crc = crc32(contents);
@@ -323,7 +325,7 @@ function makeZip(name: string, contents: Buffer, { store = false } = {}): Buffer
   const local = Buffer.alloc(30);
   local.writeUInt32LE(0x0403_4b50, 0);
   local.writeUInt16LE(20, 4);
-  local.writeUInt16LE(store ? 0 : 8, 8);
+  local.writeUInt16LE(method, 8);
   local.writeUInt32LE(crc, 14);
   local.writeUInt32LE(data.length, 18);
   local.writeUInt32LE(contents.length, 22);
@@ -333,7 +335,7 @@ function makeZip(name: string, contents: Buffer, { store = false } = {}): Buffer
   const central = Buffer.alloc(46);
   central.writeUInt32LE(0x0201_4b50, 0);
   central.writeUInt16LE(20, 6);
-  central.writeUInt16LE(store ? 0 : 8, 10);
+  central.writeUInt16LE(method, 10);
   central.writeUInt32LE(crc, 16);
   central.writeUInt32LE(data.length, 20);
   central.writeUInt32LE(contents.length, 24);
@@ -375,3 +377,186 @@ function compilePdf(dir: string): void {
   }
   throw new Error('no LaTeX engine produced a PDF');
 }
+
+/* ------------------------------------------------------------------ *
+ * The whole job, as both doors call it                                *
+ * ------------------------------------------------------------------ */
+
+describe('reading a file and sorting it, in one call', () => {
+  const FILE = Buffer.from(
+    'Dear Streamly,\n\nI am writing about the internship, having spent two years on pipelines that mostly stayed up.\n\nSincerely,\nJianwen Ding\n',
+  );
+
+  /** A stand-in CLI: whatever is passed on argv is what it "replies". */
+  const saying = (reply: string): StoreConfig => ({
+    ...DEFAULT_CONFIG,
+    ai: {
+      ...DEFAULT_CONFIG.ai,
+      enabled: true,
+      command: process.execPath,
+      args: ['-e', `process.stdin.resume();process.stdin.on("end",()=>{});process.stdout.write(${JSON.stringify(reply)});process.exit(0)`],
+      timeoutMs: 10_000,
+    },
+  });
+
+  const off: StoreConfig = { ...DEFAULT_CONFIG, ai: { ...DEFAULT_CONFIG.ai, enabled: false } };
+
+  it('uses the rules when there is no AI to ask', async () => {
+    const out = await ingestFile(off, 'letter.txt', FILE);
+    expect(out.usedAi).toBe(false);
+    expect(out.aiError).toBeUndefined();
+    expect(out.items[0]?.by).toBe('rules');
+    expect(out.via).toBe('text');
+    expect(out.blocks).toBeGreaterThan(0);
+  });
+
+  it('uses the AI when there is one, and says that it did', async () => {
+    const out = await ingestFile(saying('{"items":[{"blocks":[0,1,2],"kind":"letter","title":"To Streamly"}]}'), 'letter.txt', FILE);
+    expect(out.usedAi).toBe(true);
+    expect(out.items).toHaveLength(1);
+    expect(out.items[0]?.title).toBe('To Streamly');
+    expect(out.items[0]?.by).toBe('ai');
+  });
+
+  it('keeps the file when the AI answers with nonsense, and says what happened', async () => {
+    const out = await ingestFile(saying('I would rather not.'), 'letter.txt', FILE);
+    expect(out.usedAi).toBe(false);
+    expect(out.aiError).toMatch(/did not reply with JSON/);
+    expect(out.items[0]?.by).toBe('rules');
+    expect(out.items[0]?.text).toContain('Sincerely,');
+  });
+
+  it('keeps the file when the AI command cannot be run at all', async () => {
+    const broken: StoreConfig = {
+      ...DEFAULT_CONFIG,
+      ai: { ...DEFAULT_CONFIG.ai, enabled: true, command: 'definitely-not-a-command', args: ['{promptText}'], timeoutMs: 5000 },
+    };
+    const out = await ingestFile(broken, 'letter.txt', FILE);
+    expect(out.usedAi).toBe(false);
+    expect(out.aiError).toBeTruthy();
+    expect(out.items.length).toBeGreaterThan(0);
+  });
+
+  it('leaves the AI out when the caller asks it to, however it is configured', async () => {
+    const out = await ingestFile(saying('{"items":[]}'), 'letter.txt', FILE, { useAi: false });
+    expect(out.usedAi).toBe(false);
+    expect(out.aiError).toBeUndefined();
+    expect(out.items[0]?.by).toBe('rules');
+  });
+
+  it('refuses an empty file, and one with no words in it', async () => {
+    await expect(ingestFile(off, 'empty.txt', Buffer.alloc(0))).rejects.toThrow(/nothing in/i);
+    await expect(ingestFile(off, 'blank.txt', Buffer.from('  \n\n  '))).rejects.toThrow(/no readable text/);
+  });
+
+  it('names the file it could not read, even when it has no name', async () => {
+    await expect(ingestFile(off, '', Buffer.alloc(0))).rejects.toThrow(/that file/);
+  });
+});
+
+describe('files that are not shaped like the examples', () => {
+  it('survives a file that ends on a heading with nothing under it', () => {
+    const blocks = segment('A paragraph that says something.\n\nAppendix');
+    expect(blocks.map((b) => b.text)).toEqual(['A paragraph that says something.', 'Appendix']);
+  });
+
+  it('treats a long passage ending in a question mark as prose, not a question', () => {
+    // A question is a heading for what follows. A page of prose that happens to
+    // end by asking something is not.
+    const essay = `${'This is a long reflection on the work. '.repeat(20)}So what did I learn?`;
+    const items = sortByRules('essay.md', segment(essay));
+    expect(items[0]?.kind).toBe('other');
+  });
+
+  it('recognises a resume by its bullets when it has no headings at all', () => {
+    const text = [
+      '- Built a streaming pipeline that stayed up.',
+      '- Raised test coverage from 41% to 88%.',
+      '- Onboarded two co-ops and wrote the runbook.',
+    ].join('\n');
+    expect(sortByRules('bullets.txt', segment(text))[0]?.kind).toBe('resume');
+  });
+
+  it('has a name for writing that arrived without a file name', () => {
+    const items = sortByRules('', segment('A paragraph of some substance, long enough to be worth keeping.'));
+    expect(items[0]?.title).toContain('A paragraph');
+    expect(ingestPrompt('', segment('x\n\ny'))).toContain('pasted text');
+  });
+
+  it('starts a new letter at the next salutation when the first never signed off', () => {
+    const text = 'Dear Streamly,\n\nI would like to apply for the internship you posted.\n\nDear Northwind,\n\nI would like to apply for yours as well.';
+    const items = sortByRules('letters.txt', segment(text));
+    expect(items).toHaveLength(2);
+    expect(items[0]?.text).not.toContain('Northwind');
+  });
+
+  it('shows the model an opening, not a whole block, for a long one', () => {
+    const long = 'x'.repeat(900);
+    const prompt = ingestPrompt('big.txt', segment(long));
+    expect(prompt).toContain('(900 chars)');
+    expect(prompt).toContain('…');
+    expect(prompt).not.toContain('x'.repeat(400));
+  });
+});
+
+describe('a model that answers badly', () => {
+  const blocks = segment('Dear Streamly,\n\nI am applying for the internship, which I would like very much.\n\nSincerely,\nJianwen Ding');
+
+  it('ignores a reply whose items are not a list', () => {
+    const items = readIngestPlan('{"items":"all of them"}', 'f.txt', blocks);
+    expect(items.every((i) => i.by === 'rules')).toBe(true);
+  });
+
+  it('steps over a null or a string where an item should be', () => {
+    const reply = '{"items":[null,"letter",{"blocks":[0,1,2],"kind":"letter","title":"To Streamly"}]}';
+    expect(readIngestPlan(reply, 'f.txt', blocks)[0]?.by).toBe('ai');
+  });
+
+  it('ignores an item that names no blocks it could use', () => {
+    const items = readIngestPlan('{"items":[{"kind":"letter","title":"x"},{"blocks":[99],"kind":"letter"}]}', 'f.txt', blocks);
+    expect(items.every((i) => i.by === 'rules')).toBe(true);
+  });
+
+  it('accepts block numbers written as strings, which models do', () => {
+    const items = readIngestPlan('{"items":[{"blocks":["0","1","2"],"kind":"letter","title":"To Streamly"}]}', 'f.txt', blocks);
+    expect(items[0]?.by).toBe('ai');
+    expect(items[0]?.blocks).toEqual([0, 1, 2]);
+  });
+
+  it('falls back to a title of its own when the model sent something that is not one', () => {
+    const items = readIngestPlan('{"items":[{"blocks":[0,1,2],"kind":"letter","title":{"a":1}}]}', 'f.txt', blocks);
+    expect(items[0]?.title).toBe('Letter to Streamly');
+  });
+
+  it('reads the JSON after a code fence that held something else', () => {
+    const reply = '```\nnot json at all\n```\n{"items":[{"blocks":[0,1,2],"kind":"letter","title":"To Streamly"}]}';
+    expect(readIngestPlan(reply, 'f.txt', blocks)[0]?.by).toBe('ai');
+  });
+});
+
+describe('the awkward bytes', () => {
+  it('decodes numeric character references, decimal and hex', async () => {
+    const out = await extractText('page.html', Buffer.from('<p>&#65;&#x42; &nope; &amp;</p>'));
+    expect(out.text).toBe('AB &nope; &');
+  });
+
+  it('reads a page number off the top of a page as well as the bottom', () => {
+    expect(reflow(['Page 2 of 7', 'The text itself.', '3'])).toBe('Page 2 of 7\n\nThe text itself.\n\n3');
+  });
+
+  it('refuses a zip that is not a zip', async () => {
+    const notAZip = Buffer.concat([Buffer.from('PK'), Buffer.alloc(200, 0x41)]);
+    await expect(extractText('broken.docx', notAZip)).rejects.toThrow(/no readable document/);
+  });
+
+  it('refuses a docx whose entry uses a compression nobody uses', async () => {
+    // Method 6 is "imploded": legal in a zip, and not worth carrying a
+    // decoder for. Saying so beats pretending the file was empty.
+    const zip = makeZip('word/document.xml', Buffer.from('<w:t>hi</w:t>'), { method: 6 });
+    await expect(extractText('odd.docx', zip)).rejects.toThrow(/no readable document/);
+  });
+
+  it('says "that file" when it was handed bytes with no name', async () => {
+    await expect(extractText('', Buffer.from([0, 1, 2, 3]))).rejects.toThrow(/that file/);
+  });
+});

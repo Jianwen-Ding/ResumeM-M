@@ -101,7 +101,7 @@ function looksLikeResume(text: string): boolean {
 
 function titleFrom(text: string, fallback: string): string {
   const first = (text.split('\n').find((l) => l.trim()) ?? '').trim();
-  const short = first.length > 70 ? `${first.slice(0, 70).trimEnd()}…` : first;
+  const short = first.length > 70 ? `${first.slice(0, 69).trimEnd()}…` : first;
   return short || fallback;
 }
 
@@ -159,25 +159,31 @@ export function sortByRules(fileName: string, blocks: Block[]): Proposal[] {
     // under the sign-off with it.
     if (SALUTATION.test(block.text)) {
       const run = [block];
-      let j = i + 1;
-      for (; j < blocks.length; j++) {
-        run.push(blocks[j]!);
-        if (SIGN_OFF.test(blocks[j]!.text)) {
+      // `end` is the first block the letter does not contain, so the outer
+      // loop picks up exactly where this one left off.
+      let end = i + 1;
+      for (; end < blocks.length; end++) {
+        // A letter that never signed off ends where the next one begins, and
+        // that salutation belongs to the next letter, not to this one.
+        if (SALUTATION.test(blocks[end]!.text)) break;
+
+        run.push(blocks[end]!);
+        if (SIGN_OFF.test(blocks[end]!.text)) {
           // The name under "Sincerely," is part of the letter — but the next
           // letter's salutation is short too, and is not.
-          const next = blocks[j + 1];
+          const next = blocks[end + 1];
           if (next && next.text.length < 60 && !SALUTATION.test(next.text) && !isQuestion(next.text)) {
             run.push(next);
-            j++;
+            end++;
           }
+          end++;
           break;
         }
-        if (SALUTATION.test(blocks[j]!.text)) break; // the next letter starts here
       }
       flush();
       const made = build('letter', run, labelFor('letter', block.text, `${base} — letter`), 'rules');
       if (made) out.push(made);
-      i = j;
+      i = end - 1;
       continue;
     }
 
@@ -235,7 +241,7 @@ export function ingestPrompt(fileName: string, blocks: Block[]): string {
   ];
 
   for (const b of blocks) {
-    const text = b.text.length > PREVIEW ? `${b.text.slice(0, PREVIEW).trimEnd()}…` : b.text;
+    const text = b.text.length > PREVIEW ? `${b.text.slice(0, PREVIEW - 1).trimEnd()}…` : b.text;
     parts.push(`### Block ${b.index} (${b.text.length} chars)`, text, '');
   }
 
@@ -299,7 +305,7 @@ export function readIngestPlan(output: string, fileName: string, blocks: Block[]
     picked.sort((a, b) => a.index - b.index);
 
     const rawTitle = typeof item.title === 'string' ? item.title.replace(/\s+/g, ' ').trim() : '';
-    const title = (rawTitle.length > 70 ? `${rawTitle.slice(0, 70).trimEnd()}…` : rawTitle)
+    const title = (rawTitle.length > 70 ? `${rawTitle.slice(0, 69).trimEnd()}…` : rawTitle)
       || labelFor(kind, picked[0]!.text, base);
 
     const made = build(kind, picked, title, 'ai');
