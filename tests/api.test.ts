@@ -376,6 +376,39 @@ describe('tracking', () => {
   });
 });
 
+describe('application detail', () => {
+  it('combines the application, its resume, and its cover letter in one view', async () => {
+    const created = await request(app)
+      .post('/api/applications')
+      .send({ company: 'Streamly', role: 'Intern', url: 'https://x', resumeId: 'newgrad' })
+      .expect(200);
+
+    const detail = await request(app).get(`/api/applications/${created.body.id}`).expect(200);
+    expect(detail.body.application.id).toBe(created.body.id);
+    expect(detail.body.resume?.id).toBe('newgrad');
+    expect(detail.body.letter).toBeNull();
+    expect(detail.body.files).toEqual([]);
+  });
+
+  it('falls back to an inline cover letter when no saved letter record exists', async () => {
+    const created = await request(app)
+      .post('/api/applications')
+      .send({ company: 'Streamly', role: 'Intern', url: 'https://x' })
+      .expect(200);
+    t.store.saveApplications(
+      t.store.load().applications.map((a) => (a.id === created.body.id ? { ...a, coverLetter: 'Dear team,' } : a)),
+    );
+
+    const detail = await request(app).get(`/api/applications/${created.body.id}`).expect(200);
+    expect(detail.body.letter).toEqual({ id: null, body: 'Dear team,', title: 'As sent' });
+  });
+
+  it('404s in spirit — 400s — for an application that does not exist', async () => {
+    const res = await request(app).get('/api/applications/ghost').expect(400);
+    expect(res.body.error).toMatch(/ghost/);
+  });
+});
+
 describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
   it('compiles a stored resume and reports the fit', async () => {
     const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
