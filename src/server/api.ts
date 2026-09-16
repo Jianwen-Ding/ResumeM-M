@@ -830,12 +830,30 @@ export function createApi({ store, repo }: ApiDeps): Router {
         role: job.title,
       });
 
+      // What the tailoring actually did to the document, in the same words the
+      // version history uses: the sentence it replaced and the one it chose.
+      // The extension shows this as the before/after; a list of variant ids
+      // is not something anyone can check at a glance.
+      let diff: ReturnType<typeof diffResumes> = [];
+      try {
+        diff = diffResumes(
+          resolveResume(baseId, data),
+          resolveResume(spec, { ...data, resumes: [...data.resumes, spec] }),
+          { ignoreLabel: true },
+        );
+      } catch {
+        // A proposal that will not resolve is still worth returning; the card
+        // falls back to listing the changes it knows about.
+      }
+
       res.json({
         isJobPosting: score >= 4,
         score,
         job,
         baseResumeId: baseId,
+        baseLabel: base.label,
         spec,
+        diff,
         // Ids are how the store refers to things; they are not how a person
         // reads a diff. Resolve each change to the words it actually swaps.
         rationale: finalMatch.rationale.map((r) => describeChange(r, data)),

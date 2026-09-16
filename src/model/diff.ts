@@ -147,7 +147,20 @@ function diffSkills(before: ResolvedResume, after: ResolvedResume, out: DocChang
  * The differences between two versions of the same resume, as a reader of the
  * PDF would describe them. `before` absent means this is the first version.
  */
-export function diffResumes(before: ResolvedResume | undefined, after: ResolvedResume): DocChange[] {
+export interface DiffOptions {
+  /**
+   * Skip the "renamed to" line. A tailored copy is always named after the
+   * posting, so when diffing a base against a proposal that rename is an
+   * artefact of the naming, not a change anyone made.
+   */
+  ignoreLabel?: boolean;
+}
+
+export function diffResumes(
+  before: ResolvedResume | undefined,
+  after: ResolvedResume,
+  opts: DiffOptions = {},
+): DocChange[] {
   if (!before) {
     return [
       {
@@ -159,7 +172,7 @@ export function diffResumes(before: ResolvedResume | undefined, after: ResolvedR
 
   const out: DocChange[] = [];
 
-  if (before.label !== after.label) {
+  if (before.label !== after.label && !opts.ignoreLabel) {
     out.push({ kind: 'changed', from: before.label, to: after.label, text: `Renamed to "${after.label}"` });
   }
 
