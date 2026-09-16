@@ -3,7 +3,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import type { Store } from './store.js';
 import type { Application, ApplicationStatus, ResolvedResume } from './types.js';
-import { compileResume } from '../render/compile.js';
+import { compileLetter, compileResume } from '../render/compile.js';
 import { resolveResume } from './resolve.js';
 
 /**
@@ -76,9 +76,27 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const files = [resumeName];
 
   if (req.coverLetter?.trim()) {
-    const letterPath = path.join(dir, bundleFileName(data.profile.name, req.company, 'Cover Letter').replace(/\.pdf$/, '.txt'));
-    fs.writeFileSync(letterPath, req.coverLetter, 'utf8');
-    files.push(path.basename(letterPath));
+    const letterName = bundleFileName(data.profile.name, req.company, 'Cover Letter');
+
+    // Typeset to match the resume, with the trusted engine — this is a file
+    // that gets uploaded, so it never takes the preview shortcut. The plain
+    // text goes alongside it, because as many portals want a letter pasted
+    // into a box as want one attached.
+    await compileLetter(
+      {
+        profile: data.profile,
+        company: req.company,
+        role: req.role,
+        body: req.coverLetter,
+      },
+      resolved.layout,
+      { pdfPath: path.join(dir, letterName), texPath: path.join(dir, 'source', 'cover-letter.tex') },
+    );
+    files.push(letterName);
+
+    const textPath = path.join(dir, letterName.replace(/\.pdf$/, '.txt'));
+    fs.writeFileSync(textPath, req.coverLetter, 'utf8');
+    files.push(path.basename(textPath));
   }
 
   if (req.answers?.length) {

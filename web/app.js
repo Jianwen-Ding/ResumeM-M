@@ -251,9 +251,17 @@ function bulletName(entry, bullet) {
   return text.length > 44 ? `${text.slice(0, 44).trimEnd()}…` : text;
 }
 
-function markDirty(message = 'Changed — press Preview to recompile') {
+/**
+ * Record an unsaved change — and start recompiling it.
+ *
+ * Every edit path in the editor goes through here, which is what makes the
+ * preview live: there is no way to change something and be left looking at a
+ * stale page, and nothing to press to catch up.
+ */
+function markDirty(message = 'Changed') {
   state.dirty = true;
   setStatus(message);
+  scheduleRender();
 }
 
 /* ------------------------------------------------------------------ *
@@ -827,7 +835,7 @@ async function addEntry(kind) {
   if (!sections.some((s) => s.kind === kind)) sections.push({ kind, entries: [id] });
   await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   render();
-  renderPreview();
+  scheduleRender();
 }
 
 async function editEntry(entry) {
@@ -850,7 +858,7 @@ async function editEntry(entry) {
   }
   next.tags = answer.tags ? answer.tags.split(',').map((t) => t.trim()).filter(Boolean) : undefined;
   await saveEntry(next);
-  renderPreview();
+  scheduleRender();
 }
 
 async function removeEntry(entry) {
@@ -865,7 +873,7 @@ async function removeEntry(entry) {
   }));
   await saveResumeSpec({ ...root, sections }, `Deleted ${entry.id}`);
   render();
-  renderPreview();
+  scheduleRender();
 }
 
 /** Add a new bullet to an entry, with its first phrasing. */
@@ -901,13 +909,13 @@ async function addBullet(entry) {
     ],
   };
   await saveEntry(next, `Added bullet ${id}`);
-  renderPreview();
+  scheduleRender();
 }
 
 async function removeBullet(entry, bullet) {
   if (!(await confirmModal(`Delete “${bulletName(entry, bullet)}”?`, `All ${plural(bullet.variants.length, 'phrasing')} of it are removed from the store.`))) return;
   await saveEntry({ ...entry, bullets: (entry.bullets ?? []).filter((b) => b.id !== bullet.id) }, `Deleted ${bullet.id}`);
-  renderPreview();
+  scheduleRender();
 }
 
 /** Add another phrasing of an existing bullet. */
@@ -942,7 +950,7 @@ async function addBulletVariant(entry, bullet) {
   setStatus(`Added phrasing "${variant.label}"`);
   await loadStore();
   render();
-  if (answer.useNow) renderPreview();
+  if (answer.useNow) scheduleRender();
 }
 
 /** Edit an existing phrasing in place — it changes everywhere it is used. */
@@ -979,7 +987,7 @@ async function editVariant(entry, bullet, variant) {
     ),
   };
   await saveEntry(next, 'Phrasing updated');
-  renderPreview();
+  scheduleRender();
 }
 
 /**
@@ -1032,7 +1040,7 @@ async function addFieldAlternate(entry, name) {
     state.choices[key] = id;
     markDirty();
     render();
-    renderPreview();
+    scheduleRender();
   }
 }
 
@@ -1071,7 +1079,7 @@ async function editFieldVariant(entry, name, variant) {
 
   const nextDefault = variants.some((v) => v.id === field.default) ? field.default : variants[0].id;
   await saveEntry({ ...entry, [name]: { default: nextDefault, variants } }, 'Alternate updated');
-  renderPreview();
+  scheduleRender();
 }
 
 /* ---- List bullets ---- */
@@ -1109,7 +1117,7 @@ async function addListItem(entry, bullet) {
   state.listEdits = { ...(state.listEdits ?? {}), [bullet.id]: [...listSelection(bullet), id] };
   markDirty();
   render();
-  renderPreview();
+  scheduleRender();
 }
 
 async function removeListItem(entry, bullet, item) {
@@ -1120,7 +1128,7 @@ async function removeListItem(entry, bullet, item) {
     ),
   };
   await saveEntry(next, `Removed ${item.text}`);
-  renderPreview();
+  scheduleRender();
 }
 
 /* ---- Skills ---- */
@@ -1151,7 +1159,7 @@ async function addSkill(group) {
   setStatus('Skill added');
   await loadStore();
   render();
-  renderPreview();
+  scheduleRender();
 }
 
 async function removeSkill(group, item) {
@@ -1162,7 +1170,7 @@ async function removeSkill(group, item) {
   setStatus(`Removed ${item.text}`);
   await loadStore();
   render();
-  renderPreview();
+  scheduleRender();
 }
 
 async function addSkillGroup() {
@@ -1194,7 +1202,7 @@ async function addSkillGroup() {
   if (!sections.some((s) => s.kind === 'skills')) sections.push({ kind: 'skills', entries: [], groups: [id] });
   await saveResumeSpec({ ...root, sections }, 'Skill group added');
   render();
-  renderPreview();
+  scheduleRender();
 }
 
 async function removeSkillGroup(group) {
@@ -1209,19 +1217,52 @@ async function removeSkillGroup(group) {
   );
   await saveResumeSpec({ ...root, sections }, 'Group deleted');
   render();
-  renderPreview();
+  scheduleRender();
 }
 
 /* ------------------------------------------------------------------ *
  * Compiling and feedback                                              *
  * ------------------------------------------------------------------ */
 
+/* ---- Live preview -------------------------------------------------- *
+ * Nothing in the editor should require pressing a button to see. Every
+ * change schedules a recompile; the debounce keeps a burst of toggles (or a
+ * run of keystrokes) to one compile, and the token discards any answer that
+ * arrives after a newer one has already been asked for — without it, a slow
+ * early compile can land last and put a stale page on screen.
+ * -------------------------------------------------------------------- */
+
+const LIVE_DELAY_MS = 350;
+let renderTimer = null;
+let renderToken = 0;
+
+function scheduleRender({ delay = LIVE_DELAY_MS } = {}) {
+  clearTimeout(renderTimer);
+  setLive('working');
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    renderPreview();
+  }, delay);
+}
+
+/** The "is what I see current?" indicator that replaced the Preview button. */
+function setLive(mode) {
+  const chip = $('#live-state');
+  if (!chip) return;
+  chip.className = `live ${mode}`;
+  chip.textContent = mode === 'working' ? 'Updating…' : mode === 'bad' ? 'Compile failed' : 'Live';
+}
+
 async function renderPreview() {
+  const token = ++renderToken;
   const fit = $('#fit');
-  fit.className = 'fit idle';
-  fit.textContent = 'Compiling…';
+  setLive('working');
+  if (fit.classList.contains('idle')) fit.textContent = 'Compiling…';
   try {
     const result = await api('/render', { method: 'POST', body: JSON.stringify({ spec: currentSpec() }) });
+    // A newer edit already asked for a newer compile; this answer is stale.
+    if (token !== renderToken) return;
+    setLive('ok');
 
     // Chrome's viewer otherwise fills the pane with its own dark toolbar and a
     // thumbnail rail. `zoom=page-fit` shows the whole page, which is the only
@@ -1243,6 +1284,8 @@ async function renderPreview() {
 
     $('#warnings').replaceChildren(...(result.warnings ?? []).map((w) => el('div', { textContent: w })));
   } catch (err) {
+    if (token !== renderToken) return;
+    setLive('bad');
     fit.className = 'fit bad';
     fit.textContent = err.message;
   }
@@ -1573,6 +1616,12 @@ async function openDraft(id) {
 
 const SOURCE_LABEL = { bank: 'from your answer bank', ai: 'drafted by AI', human: 'written by you', empty: 'not answered' };
 
+/* The letter preview gets the same treatment as the resume's: debounce a burst
+ * of typing into one compile, and ignore any answer that a newer keystroke has
+ * already superseded. */
+let letterTimer = null;
+let letterToken = 0;
+
 function renderDraft(draft) {
   const panel = $('#draft-editor');
   if (!draft) {
@@ -1597,16 +1646,77 @@ function renderDraft(draft) {
 
   const blocks = [];
 
-  /* Cover letter */
+  /* Cover letter — written on the left, typeset on the right, live. */
   if (draft.coverLetter.required) {
     const letter = el('textarea', {
       className: 'letter',
       value: draft.coverLetter.body,
       placeholder: 'Write the letter here, or press Draft to start from your previous ones.',
     });
+
+    const letterFrame = el('iframe', { title: 'Cover letter preview' });
+    const letterEmpty = el('div', {
+      className: 'preview-empty',
+      textContent: 'Type a first sentence and it appears here, set like your resume.',
+    });
+    const letterPane = el('div', { className: 'preview-frame letter-preview' }, [letterFrame, letterEmpty]);
+    const letterFit = el('div', { className: 'fit idle', textContent: 'Not compiled yet.' });
+    const liveChip = el('span', { className: 'live ok', textContent: 'Live' });
+
+    const compile = async () => {
+      if (!draft.coverLetter.body.trim()) {
+        letterPane.classList.remove('loaded');
+        letterFit.className = 'fit idle';
+        letterFit.textContent = 'Nothing written yet.';
+        liveChip.className = 'live ok';
+        liveChip.textContent = 'Live';
+        return;
+      }
+      const token = ++letterToken;
+      liveChip.className = 'live working';
+      liveChip.textContent = 'Updating…';
+      try {
+        const r = await api('/render/letter', {
+          method: 'POST',
+          body: JSON.stringify({
+            body: draft.coverLetter.body,
+            company: draft.company,
+            role: draft.role,
+            draftId: draft.id,
+            resumeId: draft.resumeId,
+          }),
+        });
+        if (token !== letterToken) return; // a newer keystroke already asked
+        letterFrame.src = `${r.pdfUrl}#toolbar=0&navpanes=0&scrollbar=0&zoom=page-fit`;
+        letterPane.classList.add('loaded');
+        liveChip.className = 'live ok';
+        liveChip.textContent = 'Live';
+        letterFit.className = r.fits ? 'fit' : 'fit bad';
+        letterFit.textContent = r.fits
+          ? 'Fits on one page.'
+          : `${plural(r.pages, 'page')} — about ${plural(r.overflowLines, 'line')} too long for one.`;
+      } catch (err) {
+        if (token !== letterToken) return;
+        liveChip.className = 'live bad';
+        liveChip.textContent = 'Compile failed';
+        letterFit.className = 'fit bad';
+        letterFit.textContent = err.message;
+      }
+    };
+
+    // Longer than the resume's debounce: this one fires on every keystroke,
+    // and recompiling mid-word is wasted work.
+    const scheduleLetter = () => {
+      clearTimeout(letterTimer);
+      liveChip.className = 'live working';
+      liveChip.textContent = 'Updating…';
+      letterTimer = setTimeout(compile, 700);
+    };
+
     letter.oninput = () => {
       draft.coverLetter.body = letter.value;
       draft.coverLetter.edited = true;
+      scheduleLetter();
     };
     letter.onblur = () => save();
 
@@ -1618,6 +1728,7 @@ function renderDraft(draft) {
             className: `badge ${draft.coverLetter.body.trim() ? 'done' : 'required'}`,
             textContent: draft.coverLetter.body.trim() ? 'written' : 'required',
           }),
+          liveChip,
           el('span', { className: 'grow', style: 'flex:1' }),
           el('button', {
             className: 'tiny',
@@ -1625,9 +1736,13 @@ function renderDraft(draft) {
             onclick: () => generate(draft, 'letter', notes),
           }),
         ]),
-        letter,
+        el('div', { className: 'letter-split' }, [letter, letterPane]),
+        letterFit,
       ]),
     );
+
+    // Show the letter as it stands the moment the draft opens.
+    queueMicrotask(compile);
   }
 
   /* Questions */
@@ -2413,7 +2528,7 @@ async function restoreResumeVersion(hash) {
     if (historyResumeId === state.resumeId) {
       clearEdits();
       render();
-      renderPreview();
+      scheduleRender();
     }
     await loadResumeHistory();
   } catch (err) {
@@ -2705,9 +2820,11 @@ async function boot() {
     state.resumeId = e.target.value;
     clearEdits();
     render();
-    renderPreview();
+    scheduleRender();
   };
-  $('#btn-render').onclick = renderPreview;
+  // The preview keeps itself current; this is only for the rare "recompile it
+  // anyway" — after changing the LaTeX engine, say.
+  $('#live-state').onclick = renderPreview;
   $('#btn-save-as').onclick = saveAsVariation;
   $('#btn-feedback').onclick = askFeedback;
   $('#btn-add-entry').onclick = async () => {

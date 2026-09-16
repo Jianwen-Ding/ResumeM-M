@@ -20,7 +20,7 @@ import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
 import { buildMaster, resolveResume } from '../model/resolve.js';
 import type { Store } from '../model/store.js';
-import { isVariantField } from '../model/types.js';
+import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
 import type {
   Application,
   CoverLetter,
@@ -35,7 +35,7 @@ import type {
   VariantField,
   WritingSample,
 } from '../model/types.js';
-import { compileResume, OverflowError } from '../render/compile.js';
+import { compileLetter, compileResume, OverflowError } from '../render/compile.js';
 
 interface DescribedChange {
   key: string;
@@ -579,7 +579,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
         texPath: pdfPath.replace(/\.pdf$/, '.tex'),
         strict: body.strict ?? false,
         engine: store.loadConfig().latex.engine,
-        // This endpoint only ever backs the editor's Preview button, the
+        // This endpoint only ever backs the editor's live preview, the
         // master-document view, and the extension's "build resume" step —
         // never a file that gets attached to an application, so the fast
         // preview path is safe to use here. It falls back to the trusted
@@ -598,6 +598,61 @@ export function createApi({ store, repo }: ApiDeps): Router {
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         warnings: result.warnings,
+        pdfUrl: `/pdf/${path.basename(pdfPath)}?t=${Date.now()}`,
+      });
+    }),
+  );
+
+  /**
+   * Typeset a cover letter, so the letter is a real document set like the
+   * resume rather than a .txt afterthought. Preview-mode by default: the file
+   * that actually gets attached to an application is compiled by the trusted
+   * engine in buildBundle().
+   */
+  api.post(
+    '/render/letter',
+    handler(async (req, res) => {
+      const body = req.body as {
+        body?: string;
+        company?: string;
+        role?: string;
+        letterId?: string;
+        draftId?: string;
+        resumeId?: string;
+      };
+      const data = store.load();
+
+      const name = slug(body.draftId ?? body.letterId ?? body.company ?? 'letter') || 'letter';
+      const pdfPath = path.join(store.outDir(), `letter-${name}.pdf`);
+
+      // The letter is set to match the resume it will be sent with, so the
+      // pair looks like one document rather than two.
+      const layout = body.resumeId
+        ? resolveResume(String(body.resumeId), data).layout
+        : DEFAULT_LAYOUT;
+
+      const result = await compileLetter(
+        {
+          profile: data.profile,
+          company: body.company,
+          role: body.role,
+          body: body.body ?? '',
+        },
+        layout,
+        {
+          pdfPath,
+          texPath: pdfPath.replace(/\.pdf$/, '.tex'),
+          engine: store.loadConfig().latex.engine,
+          mode: 'preview',
+        },
+      );
+
+      res.json({
+        pages: result.pages,
+        fits: result.fits,
+        overflowLines: result.overflowLines,
+        engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
+        fastPath: result.fastPath,
         pdfUrl: `/pdf/${path.basename(pdfPath)}?t=${Date.now()}`,
       });
     }),

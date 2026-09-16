@@ -376,6 +376,28 @@ describe('tracking', () => {
   });
 });
 
+describe.skipIf(!latex)('letter rendering', { timeout: 180_000 }, () => {
+  it('typesets a cover letter and serves the PDF', async () => {
+    const res = await request(app)
+      .post('/api/render/letter')
+      .send({ body: 'I would like to work on ingest.', company: 'Streamly', role: 'Intern', resumeId: 'newgrad' })
+      .expect(200);
+
+    expect(res.body.pages).toBe(1);
+    expect(res.body.fits).toBe(true);
+    expect(res.body.pdfUrl).toMatch(/^\/pdf\/letter-streamly\.pdf/);
+
+    const name = res.body.pdfUrl.split('/').pop().split('?')[0];
+    const pdf = await request(app).get(`/pdf/${name}`).expect(200);
+    expect(pdf.body.subarray(0, 4).toString()).toBe('%PDF');
+  });
+
+  it('renders an empty letter rather than failing on one', async () => {
+    const res = await request(app).post('/api/render/letter').send({ company: 'Streamly' }).expect(200);
+    expect(res.body.pages).toBe(1);
+  });
+});
+
 describe('application detail', () => {
   it('combines the application, its resume, and its cover letter in one view', async () => {
     const created = await request(app)

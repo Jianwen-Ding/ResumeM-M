@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LayoutOptions, ResolvedResume } from '../model/types.js';
-import { compileFast, hasFastPath } from './fastCompile.js';
+import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
 import { renderLatex } from './latex.js';
+import { renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
 
 const run = promisify(execFile);
 
@@ -422,4 +423,74 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
 function readBaseline(log: string): number | undefined {
   const m = /RMM-BASELINESKIP:\s*([\d.]+)pt/.exec(log);
   return m ? Number(m[1]) : undefined;
+}
+
+export interface LetterCompileResult {
+  pdfPath?: string;
+  texPath?: string;
+  tex: string;
+  engine: Engine;
+  pages: number;
+  /** A cover letter that runs past one page is a mistake worth naming. */
+  fits: boolean;
+  overflowLines: number;
+  fastPath: boolean;
+  log?: string;
+}
+
+/**
+ * Compile a cover letter.
+ *
+ * Deliberately not run through the resume's auto-fit loop: shrinking a
+ * letter's type to claw back two lines is the wrong fix — the fix is cutting a
+ * sentence — so this compiles the layout as asked and reports honestly whether
+ * it fit.
+ */
+export async function compileLetter(
+  letter: LetterContent,
+  layout: LayoutOptions,
+  opts: Omit<CompileOptions, 'strict' | 'maxAttempts'> = {},
+): Promise<LetterCompileResult> {
+  const engine = await detectEngine(opts.engine);
+  const tex = renderLetterLatex(letter, layout);
+
+  let raw: RawCompile | undefined;
+  let usedFast = false;
+
+  if (opts.mode === 'preview' && (await hasFastPath())) {
+    try {
+      raw = await compileFastBody(renderLetterFastBody(letter, layout), layout.paper);
+      usedFast = true;
+    } catch {
+      raw = undefined; // fall back to the trusted engine
+    }
+  }
+  if (!raw) raw = await compileOnce(tex, engine);
+
+  const m = measure(raw.aux, layout, 1);
+  const availablePt = textHeightIn(layout) * PT_PER_IN * Math.max(1, layout.maxPages);
+  const baselinePt = readBaseline(raw.log) ?? layout.fontSizePt * 1.2;
+  const fits = m.pages <= Math.max(1, layout.maxPages);
+  const overflowPt = fits ? Math.min(m.usedPt - availablePt, 0) : Math.max(m.usedPt - availablePt, 0);
+
+  if (opts.pdfPath) {
+    fs.mkdirSync(path.dirname(opts.pdfPath), { recursive: true });
+    fs.writeFileSync(opts.pdfPath, raw.pdf);
+  }
+  if (opts.texPath) {
+    fs.mkdirSync(path.dirname(opts.texPath), { recursive: true });
+    fs.writeFileSync(opts.texPath, tex, 'utf8');
+  }
+
+  return {
+    pdfPath: opts.pdfPath,
+    texPath: opts.texPath,
+    tex,
+    engine,
+    pages: m.pages,
+    fits,
+    overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),
+    fastPath: usedFast,
+    log: tail(raw.log, 30),
+  };
 }

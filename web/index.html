@@ -28,7 +28,7 @@
       <div class="pane pane-left">
         <div class="toolbar sticky-toolbar">
           <select id="resume-select" title="Which resume to edit"></select>
-          <button id="btn-render" class="primary">Preview</button>
+          <span id="live-state" class="live ok" title="The preview recompiles itself whenever you change something. Click to force one.">Live</span>
           <button id="btn-save-as">Save as variation…</button>
           <button id="btn-feedback">Feedback</button>
           <span class="grow"></span>
@@ -41,7 +41,7 @@
       <div class="pane pane-right">
         <div class="preview-frame">
           <iframe id="preview" title="Resume preview"></iframe>
-          <div id="preview-empty" class="preview-empty">Press <b>Preview</b> to compile.</div>
+          <div id="preview-empty" class="preview-empty">Compiling your resume…</div>
         </div>
       </div>
     </div>
