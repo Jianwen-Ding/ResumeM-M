@@ -371,3 +371,48 @@ describe('alternates for the name', () => {
     expect(resolveResume('base', data).profile.name).toBe('Test Person');
   });
 });
+
+
+/*
+ * Archiving a bullet means "keep the text, never print it". That held for a
+ * resume which says nothing about bullets, and not for one that lists them —
+ * and AI tailoring writes an explicit list every time it hides anything, so
+ * the moment you tailored a resume, every bullet you had retired in that entry
+ * came back onto the copy you send.
+ */
+describe('an archived bullet stays archived', () => {
+  const withArchived = (): StoreData => {
+    const data = store([{ id: 'base', label: 'Base', sections: [] }]);
+    data.entries = [
+      {
+        id: 'e1',
+        kind: 'experience',
+        title: 'Acme',
+        bullets: [
+          { id: 'b_keep', default: 'v', variants: [{ id: 'v', label: 'a', text: 'Kept bullet' }] },
+          { id: 'b_old', archived: true, default: 'v', variants: [{ id: 'v', label: 'a', text: 'RETIRED — never print' }] },
+        ],
+      },
+    ];
+    return data;
+  };
+
+  const textOf = (data: StoreData) =>
+    resolveResume('base', data).sections.flatMap((s) => s.entries).flatMap((e) => e.bullets).map((b) => b.text);
+
+  it('is left out when the resume says nothing about bullets', () => {
+    const data = withArchived();
+    data.resumes[0]!.sections = [{ kind: 'experience', entries: ['e1'] }];
+    expect(textOf(data)).toEqual(['Kept bullet']);
+  });
+
+  it('is left out even when the resume names it outright', () => {
+    const data = withArchived();
+    data.resumes[0]!.sections = [{ kind: 'experience', entries: ['e1'], bullets: { e1: ['b_keep', 'b_old'] } }];
+    const out = resolveResume('base', data);
+    expect(out.sections.flatMap((s) => s.entries).flatMap((e) => e.bullets).map((b) => b.text)).toEqual(['Kept bullet']);
+    // Said out loud, because a resume asking for a bullet it cannot have is
+    // worth knowing about rather than silently trimming.
+    expect(out.warnings.join(' ')).toMatch(/b_old/);
+  });
+});

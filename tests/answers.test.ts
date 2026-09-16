@@ -180,6 +180,20 @@ describe('the same question, asked by another system', () => {
     expect(reuses('Tell us about a project you are proud of.', 'Describe a technical project you are proud of.')).toBe(true);
   });
 
+  it('does not answer a vague question with a specific one', () => {
+    /*
+     * The raw-word fallback was meant only to let a question made of ordinary
+     * words recognise itself. Applied when *either* side emptied out, it made
+     * a short all-stop-word question fully "covered" by any longer question
+     * containing those words — and coverage is weighted 0.7, so these came
+     * back confident, which is not advisory: a confident match is written
+     * straight into the draft as the answer.
+     */
+    expect(reuses('Tell us about you.', 'Tell us about a time you had to learn something quickly.')).toBe(false);
+    expect(reuses('How would you describe it?', 'How would you describe your ideal team?')).toBe(false);
+    expect(reuses('What do you do?', 'Why do you want to work at this company?')).toBe(false);
+  });
+
   it('keeps sponsorship and work authorization apart, which have opposite answers', () => {
     expect(reuses('Are you legally authorized to work in the United States?', 'Will you now or in the future require sponsorship?')).toBe(false);
     expect(reuses('Will you now or in the future require sponsorship?', 'Are you legally authorized to work in the United States?')).toBe(false);

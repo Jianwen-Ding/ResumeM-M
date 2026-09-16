@@ -136,7 +136,10 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
 
   /** Which bullets a section shows for an entry, defaulting to all of them. */
   const shown = (section: (typeof sections)[number], entryId: string): string[] =>
-    section.bullets?.[entryId] ?? (entryById.get(entryId)?.bullets ?? []).map((b) => b.id);
+    section.bullets?.[entryId] ??
+    // Archived bullets are not "all of them": materialising them into an
+    // explicit list is what resurrected retired text onto a tailored resume.
+    (entryById.get(entryId)?.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
 
   for (const id of plan.disable) {
     const entry = entryById.get(id);

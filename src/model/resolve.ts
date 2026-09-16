@@ -165,11 +165,25 @@ function resolveEntry(
   const wantedBullets = section.bullets?.[entry.id];
   const available = (entry.bullets ?? []).filter((b) => !b.archived);
 
+  /*
+   * Archiving means "keep the text, never print it", and that has to hold
+   * however the resume asks for the bullet. It held for the branch below, which
+   * filters, and not for this one — and tailoring writes an explicit list every
+   * time it hides anything, so tailoring a resume brought every bullet you had
+   * retired in that entry back onto the copy you send.
+   */
   const ordered: Bullet[] = wantedBullets
     ? wantedBullets
         .map((id) => {
           const b = (entry.bullets ?? []).find((x) => x.id === id);
-          if (!b) warnings.push(`Entry "${entry.id}" lists bullet "${id}", which does not exist.`);
+          if (!b) {
+            warnings.push(`Entry "${entry.id}" lists bullet "${id}", which does not exist.`);
+            return undefined;
+          }
+          if (b.archived) {
+            warnings.push(`Entry "${entry.id}" lists bullet "${id}", which is archived; leaving it out.`);
+            return undefined;
+          }
           return b;
         })
         .filter((b): b is Bullet => Boolean(b))

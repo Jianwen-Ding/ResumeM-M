@@ -1346,7 +1346,15 @@ function nameHead(profile) {
   }
 
   const key = PROFILE_NAME_KEY;
-  const current = state.choices[key] ?? field.default;
+  /*
+   * `effectiveChoices()`, not `state.choices` — which is only what is unsaved.
+   * Every other field renderer uses the merged view; this one did not, so the
+   * moment a name choice was saved or inherited the editor stopped seeing it:
+   * the line showed the pinned name while the PDF printed the chosen one, with
+   * nothing on screen to say which would be sent. Worse, double-clicking to
+   * fix it then edited the *pinned* form, changing it for every other resume.
+   */
+  const current = effectiveChoices()[key] ?? field.default;
   const chosen = field.variants.find((v) => v.id === current);
 
   return [
@@ -2975,6 +2983,14 @@ function renderDraft(draft) {
       }
     };
 
+    const letterFeedbackBtn = el('button', {
+      className: 'tiny',
+      textContent: 'Ask for feedback',
+      title: 'The AI reads what you have written and says what is weak — it does not rewrite it',
+      disabled: !draft.coverLetter.body.trim(),
+      onclick: () => askDraftFeedback(draft, {}, notes),
+    });
+
     // Longer than the resume's debounce: this one fires on every keystroke,
     // and recompiling mid-word is wasted work.
     const scheduleLetter = () => {
@@ -2987,6 +3003,10 @@ function renderDraft(draft) {
     letter.oninput = () => {
       draft.coverLetter.body = letter.value;
       draft.coverLetter.edited = true;
+      // The button that reviews this is disabled while there is nothing to
+      // review, and nothing else re-renders the header — so writing a letter
+      // left it dead until the draft was closed and reopened.
+      letterFeedbackBtn.disabled = !letter.value.trim();
       scheduleLetter();
     };
     letter.onblur = () => save();
@@ -3007,13 +3027,7 @@ function renderDraft(draft) {
             title: 'Write a first draft from the posting and the letters you have written before',
             onclick: () => generate(draft, 'letter', notes),
           }),
-          el('button', {
-            className: 'tiny',
-            textContent: 'Ask for feedback',
-            title: 'The AI reads what you have written and says what is weak — it does not rewrite it',
-            disabled: !draft.coverLetter.body.trim(),
-            onclick: () => askDraftFeedback(draft, {}, notes),
-          }),
+          letterFeedbackBtn,
         ]),
         el('div', { className: 'letter-split' }, [letter, letterPane]),
         letterFit,
@@ -3032,10 +3046,19 @@ function renderDraft(draft) {
         value: q.answer,
         placeholder: 'No stored answer yet — what you write here is saved for next time.',
       });
+      const answerFeedbackBtn = el('button', {
+        className: 'link',
+        textContent: 'Feedback',
+        title: 'The AI reads this answer and says what is weak — it does not rewrite it',
+        disabled: !q.answer?.trim(),
+        onclick: () => askDraftFeedback(draft, { questionId: q.id }, notes),
+      });
+
       box.oninput = () => {
         q.answer = box.value;
         q.edited = true;
         q.source = 'human';
+        answerFeedbackBtn.disabled = !box.value.trim();
       };
       box.onblur = () => save();
 
@@ -3057,13 +3080,7 @@ function renderDraft(draft) {
               title: 'Write an answer from the posting and the answers you have given before',
               onclick: () => generate(draft, 'questions', notes, { questionId: q.id }),
             }),
-            el('button', {
-              className: 'link',
-              textContent: 'Feedback',
-              title: 'The AI reads this answer and says what is weak — it does not rewrite it',
-              disabled: !q.answer?.trim(),
-              onclick: () => askDraftFeedback(draft, { questionId: q.id }, notes),
-            }),
+            answerFeedbackBtn,
           ]),
           box,
         ]),
@@ -4307,6 +4324,12 @@ async function restoreResumeVersion(hash) {
     return;
   }
   try {
+    /*
+     * Before the restore, not after: you reach for an old version precisely
+     * when there are selections on screen, and discarding them silently is
+     * the opposite of what the version history is for.
+     */
+    if (historyResumeId === state.resumeId) await flushEdits();
     await api(`/resumes/${encodeURIComponent(historyResumeId)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });
@@ -4314,6 +4337,7 @@ async function restoreResumeVersion(hash) {
     await loadStore();
     if (historyResumeId === state.resumeId) {
       clearEdits();
+      setSaveState('saved');
       render();
       scheduleRender();
     }
@@ -4695,9 +4719,19 @@ async function applyHash() {
     state.fromDraft = null;
     showTab('resumes');
     if (state.store.resumes.some((r) => r.id === wanted)) {
+      /*
+       * Write what is pending before moving. The resume dropdown has always
+       * been careful about this; the hash route was not, so following the way
+       * back — or pressing the browser's own Back button — inside the
+       * auto-save debounce dropped the edit and left the save chip reading
+       * "Unsaved changes" forever, with nothing unsaved and nothing that would
+       * ever save it.
+       */
+      await flushEdits();
       state.masterView = false;
       state.resumeId = wanted;
       clearEdits();
+      setSaveState('saved');
     } else {
       setStatus(`No resume "${wanted}" — it may have been deleted.`, true);
     }

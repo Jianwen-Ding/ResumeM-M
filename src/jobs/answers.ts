@@ -50,12 +50,19 @@ export function questionSimilarity(a: string, b: string): number {
    * never be found again, because the next "Why us?" did not match the last
    * one.
    *
-   * So when either side empties out, both are compared as written instead.
-   * That is enough for the same question to recognise itself without letting it
-   * match a different one: "Why us?" against "What are your salary
-   * expectations?" still shares nothing at all.
+   * So when *both* sides empty out, they are compared as written instead. Both,
+   * not either: the first version of this fired whenever one side emptied, and
+   * then a short question of ordinary words was fully "covered" by any longer
+   * question containing them. Coverage carries most of the weight, so "Tell us
+   * about you." matched "Tell us about a time you had to learn something
+   * quickly." at 0.81 — over the confidence line, and a confident match is not
+   * advisory: it is written into the application as the answer.
+   *
+   * Requiring both keeps what this was for. "Why us?" recognises "Why us?",
+   * and against a question with any substance of its own it goes back to
+   * scoring nothing, which is the honest answer.
    */
-  if (ta.size === 0 || tb.size === 0) {
+  if (ta.size === 0 && tb.size === 0) {
     ta = words(a);
     tb = words(b);
   }
