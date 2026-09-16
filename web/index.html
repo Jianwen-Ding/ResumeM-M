@@ -39,11 +39,9 @@
         <div id="editor"></div>
       </div>
       <div class="pane pane-right">
-        <!-- Two frames, so a recompile loads out of sight and the page you are
-             looking at never blinks. See showPdf() in app.js. -->
-        <div class="preview-frame">
-          <iframe id="preview" class="front" title="Resume preview"></iframe>
-          <iframe title="Resume preview (loading)" aria-hidden="true" tabindex="-1"></iframe>
+        <!-- Drawn by pdf.js into canvases, so a recompile swaps a finished
+             page in rather than blinking. See preview.js. -->
+        <div id="preview-pane" class="preview-frame">
           <div id="preview-empty" class="preview-empty">Compiling your resume…</div>
         </div>
       </div>
@@ -56,9 +54,7 @@
       <button id="btn-master" class="primary">Rebuild master document</button>
       <span class="hint">Everything in the store, labelled with its id. Not a resume — an inventory.</span>
     </div>
-    <div class="preview-frame tall">
-      <iframe id="master-preview" class="front" title="Master document"></iframe>
-      <iframe title="Master document (loading)" aria-hidden="true" tabindex="-1"></iframe>
+    <div id="master-pane" class="preview-frame tall">
       <div id="master-empty" class="preview-empty">Press <b>Rebuild</b> to compile the master document.</div>
     </div>
   </section>

@@ -51,7 +51,17 @@ export async function startServer(opts: ServerOptions = {}) {
   });
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true, service: 'resumem-m', dataDir });
+    // The AI state belongs here: the extension has its own "use the AI" switch,
+    // and without knowing this one it cannot tell the user whether anything
+    // will actually happen when they flip it. Read per request, so toggling it
+    // in the GUI is reflected without a restart.
+    const ai = store.loadConfig().ai;
+    res.json({
+      ok: true,
+      service: 'resumem-m',
+      dataDir,
+      ai: { enabled: ai.enabled, command: ai.command },
+    });
   });
 
   app.use('/api', createApi({ store, repo }));
