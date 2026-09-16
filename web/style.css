@@ -324,10 +324,46 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .toggle { display: inline-flex; align-items: center; cursor: pointer; flex: 0 0 auto; }
 .toggle input { width: 15px; height: 15px; margin: 0; cursor: pointer; accent-color: var(--accent); }
 
-.entry.off { opacity: .58; background: #fbfbfc; }
-.entry.off .entry-head .title { text-decoration: line-through; text-decoration-color: var(--faint); }
-.bullet.off { opacity: .5; }
-.bullet.off .text { text-decoration: line-through; text-decoration-color: var(--faint); }
+/* Off collapses to a single compact row — no fields, no bullets, no picker —
+   so the space goes back to whatever is still switched on. Clicking the row
+   (not just the checkbox) turns it back on and expands it. */
+.entry.off.collapsed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel-sunk);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin-bottom: 5px;
+  cursor: pointer;
+  opacity: .72;
+}
+.entry.off.collapsed:hover { opacity: 1; border-color: #ccced6; }
+.entry.off.collapsed .title { text-decoration: line-through; text-decoration-color: var(--faint); font-weight: 600; }
+.entry.off.collapsed .id { margin-left: auto; }
+
+.bullet.off {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--line-soft);
+  cursor: pointer;
+  opacity: .68;
+}
+.bullet.off:hover { opacity: 1; }
+.bullet.off .text.collapsed {
+  flex: 1 1 auto;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+  font-size: var(--t-sm);
+  color: var(--muted);
+}
 
 .bullet-head { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 5px; }
 .bullet-head .text { flex: 1 1 auto; margin: 0; }

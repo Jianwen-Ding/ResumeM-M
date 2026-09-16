@@ -398,28 +398,54 @@ function listItems(entry, bullet) {
   return wrap;
 }
 
+/** Flip a bullet's inclusion in `section`, keeping the entry's store order. */
+function setBulletIncluded(entry, section, bullet, checked) {
+  const current = bulletSelection(section, entry);
+  const next = new Set(current);
+  if (checked) next.add(bullet.id);
+  else next.delete(bullet.id);
+  state.bulletEdits = {
+    ...(state.bulletEdits ?? {}),
+    [entry.id]: (entry.bullets ?? []).filter((b) => next.has(b.id)).map((b) => b.id),
+  };
+}
+
 /** Everything the user can do to one bullet, in one block. */
 function bulletBlock(entry, section, bullet, choices) {
   const included = bulletSelection(section, entry).includes(bullet.id);
   const isList = Array.isArray(bullet.items) && bullet.items.length > 0;
 
-  const wrap = el('div', { className: `bullet${included ? '' : ' off'}` });
+  // Off is collapsed to a single line: no picker, no list chips, no per-item
+  // controls. That space is the whole point of turning something off, and
+  // ticking the box back on brings the full editor straight back.
+  if (!included) {
+    const preview = isList ? listPreview(bullet) : markup(String(currentText(bullet, choices) ?? ''));
+    const row = el('div', { className: 'bullet off' }, [
+      toggle({
+        on: false,
+        title: 'Hidden on this variation — click to show',
+        onChange: (checked) => setBulletIncluded(entry, section, bullet, checked),
+      }),
+      el('div', { className: 'text collapsed' }, [preview]),
+    ]);
+    // The row itself is also a click target, so re-enabling does not require
+    // aiming at the small checkbox.
+    row.onclick = (ev) => {
+      if (ev.target.closest('input')) return;
+      setBulletIncluded(entry, section, bullet, true);
+      markDirty();
+      render();
+    };
+    return row;
+  }
+
+  const wrap = el('div', { className: 'bullet' });
 
   const head = el('div', { className: 'bullet-head' }, [
     toggle({
       on: included,
-      title: included ? 'Showing on this variation' : 'Hidden on this variation',
-      onChange: (checked) => {
-        const current = bulletSelection(section, entry);
-        const next = new Set(current);
-        if (checked) next.add(bullet.id);
-        else next.delete(bullet.id);
-        state.bulletEdits = {
-          ...(state.bulletEdits ?? {}),
-          // Keep store order so bullets do not jump around when re-enabled.
-          [entry.id]: (entry.bullets ?? []).filter((b) => next.has(b.id)).map((b) => b.id),
-        };
-      },
+      title: 'Showing on this variation',
+      onChange: (checked) => setBulletIncluded(entry, section, bullet, checked),
     }),
     el('div', { className: 'text' }, isList ? listPreview(bullet) : markup(String(currentText(bullet, choices) ?? ''))),
   ]);
@@ -491,24 +517,48 @@ function listPreview(bullet) {
   return markup(bullet.prefix ? `${bullet.prefix} ${body}` : body);
 }
 
-function entryBlock(entry, section, choices) {
-  const box = el('div', {});
+/** Flip an entry's inclusion in `section`, keeping the section's own order. */
+function setEntryIncluded(section, entry, checked) {
+  const current = entrySelection(section);
+  const next = new Set(current);
+  if (checked) next.add(entry.id);
+  else next.delete(entry.id);
+  const ordered = (section.entries ?? []).filter((id) => next.has(id));
+  for (const id of next) if (!ordered.includes(id)) ordered.push(id);
+  state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+}
 
+function entryBlock(entry, section, choices) {
   const included = entrySelection(section).includes(entry.id);
+
+  // Off collapses to one line — no fields, no bullets — so a variation with
+  // several entries switched off does not cost you a screen of scrolling to
+  // reach the ones that are on.
+  if (!included) {
+    const row = el('div', { className: 'entry off collapsed' }, [
+      toggle({
+        on: false,
+        title: 'Hidden on this variation — click to show',
+        onChange: (checked) => setEntryIncluded(section, entry, checked),
+      }),
+      el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || entry.id }),
+      el('span', { className: 'id', textContent: entry.id }),
+    ]);
+    row.onclick = (ev) => {
+      if (ev.target.closest('input')) return;
+      setEntryIncluded(section, entry, true);
+      markDirty();
+      render();
+    };
+    return row;
+  }
+
+  const box = el('div', {});
   const head = el('div', { className: 'entry-head' }, [
     toggle({
       on: included,
-      title: included ? 'Showing on this variation' : 'Hidden on this variation',
-      onChange: (checked) => {
-        const current = entrySelection(section);
-        const next = new Set(current);
-        if (checked) next.add(entry.id);
-        else next.delete(entry.id);
-        // Keep the section's own order rather than click order.
-        const ordered = (section.entries ?? []).filter((id) => next.has(id));
-        for (const id of next) if (!ordered.includes(id)) ordered.push(id);
-        state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
-      },
+      title: 'Showing on this variation',
+      onChange: (checked) => setEntryIncluded(section, entry, checked),
     }),
     el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || entry.id }),
     el('span', { className: 'id', textContent: entry.id }),
@@ -614,7 +664,7 @@ function entryBlock(entry, section, choices) {
       el('button', { className: 'link', textContent: '+ Add bullet', onclick: () => addBullet(entry) }),
     ]),
   );
-  box.className = `entry${included ? '' : ' off'}`;
+  box.className = 'entry';
   return box;
 }
 
