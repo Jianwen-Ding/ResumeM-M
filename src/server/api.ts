@@ -1134,6 +1134,24 @@ export function createApi({ store, repo }: ApiDeps): Router {
       const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
         store.saveDraft(draft),
       );
+
+      // An application being written is already an application. Track it as
+      // "applying" so the tracker shows what is in flight, not only what has
+      // been sent — completing the draft moves it to "applied".
+      const tracked = data.applications.find((a) => a.id === id);
+      if (!tracked) {
+        store.upsertApplication({
+          id,
+          company: draft.company,
+          role: draft.role,
+          url: draft.url,
+          status: 'applying',
+          resumeId: draft.resumeId,
+          source: draft.source,
+          history: [{ at: now, status: 'applying', note: 'Workspace opened' }],
+        });
+      }
+
       res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });
     }),
   );

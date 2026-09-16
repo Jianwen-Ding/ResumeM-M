@@ -641,6 +641,31 @@ describe('workspace', () => {
         ...patch,
       });
 
+  it('tracks the application as "applying" the moment a workspace opens', async () => {
+    await open().expect(200);
+
+    const { body } = await request(app).get('/api/applications').expect(200);
+    const tracked = body.applications.find((a: { company: string }) => a.company === 'Streamly');
+    expect(tracked.status).toBe('applying');
+    expect(tracked.history[0].note).toBe('Workspace opened');
+
+    // Not sent, so it cannot drag the response rate down.
+    expect(body.stats.responseRate).toBe(0);
+    expect(body.stats.byStatus.applying).toBe(1);
+  });
+
+  it('does not overwrite an application that is already being tracked', async () => {
+    const created = await request(app)
+      .post('/api/applications')
+      .send({ company: 'Streamly', role: 'Data Platform Intern', status: 'interview' })
+      .expect(200);
+
+    await open().expect(200);
+    const { body } = await request(app).get('/api/applications').expect(200);
+    const tracked = body.applications.find((a: { id: string }) => a.id === created.body.id);
+    expect(tracked.status).toBe('interview'); // left alone
+  });
+
   it('pre-fills what the answer bank already covers', async () => {
     const res = await open().expect(200);
     const draft = res.body.draft;

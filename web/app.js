@@ -1649,7 +1649,7 @@ async function askBulletFeedback(entry, bullet) {
  * Applications                                                        *
  * ------------------------------------------------------------------ */
 
-const STATUSES = ['interested', 'applied', 'oa', 'interview', 'offer', 'rejected', 'ghosted', 'withdrawn'];
+const STATUSES = ['interested', 'applying', 'applied', 'oa', 'interview', 'offer', 'rejected', 'ghosted', 'withdrawn'];
 
 let openApplicationId = null;
 
@@ -1898,6 +1898,67 @@ async function loadDrafts() {
   );
 
   if (!openDraftId && drafts[0]) openDraft(drafts[0].id);
+}
+
+/**
+ * Start a workspace by hand, for a posting that did not come through the
+ * extension — a referral, an email, a job board the extension does not read.
+ * Everything is optional except who it is for: the questions can be pasted in
+ * one per line, straight from the form.
+ */
+async function newDraft() {
+  const answer = await form(
+    'New application',
+    [
+      { name: 'company', label: 'Company', value: '' },
+      { name: 'role', label: 'Role', value: '' },
+      { name: 'url', label: 'Posting url (optional)', value: '' },
+      {
+        name: 'resumeId',
+        label: 'Resume to send',
+        type: 'select',
+        value: state.resumeId,
+        options: state.store.resumes.map((r) => ({ value: r.id, label: r.label })),
+      },
+      { name: 'coverLetter', label: 'It asks for a cover letter', type: 'checkbox', value: false },
+      {
+        name: 'questions',
+        label: 'Questions it asks, one per line',
+        value: '',
+        multiline: true,
+      },
+      { name: 'jobDescription', label: 'Posting text (optional — used when drafting)', value: '', multiline: true },
+    ],
+    'Anything your answer bank already covers arrives filled in.',
+  );
+  if (!answer?.company?.trim() || !answer?.role?.trim()) {
+    if (answer) setStatus('A company and a role are needed', true);
+    return;
+  }
+
+  const questions = String(answer.questions ?? '')
+    .split('\n')
+    .map((q) => q.trim())
+    .filter(Boolean)
+    .map((question) => ({ question, required: false }));
+
+  const created = await api('/workspace', {
+    method: 'POST',
+    body: JSON.stringify({
+      company: answer.company.trim(),
+      role: answer.role.trim(),
+      url: answer.url?.trim() || undefined,
+      resumeId: answer.resumeId,
+      source: 'by hand',
+      jobDescription: answer.jobDescription?.trim() || undefined,
+      coverLetterRequired: Boolean(answer.coverLetter),
+      questions,
+    }),
+  });
+
+  setStatus(`Workspace opened for ${created.draft.company}`);
+  await loadDrafts();
+  await openDraft(created.draft.id);
 }
 
 async function openDraft(id) {
@@ -3231,6 +3292,7 @@ async function boot() {
     if (answer?.kind) addEntry(answer.kind);
   };
   $('#btn-add-app').onclick = addApplication;
+  $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
   $('#btn-add-letter').onclick = addLetter;
   $('#btn-add-answer').onclick = addAnswer;
   $('#btn-master').onclick = async () => {

@@ -236,6 +236,8 @@ export interface ResolvedResume {
 
 export type ApplicationStatus =
   | 'interested'
+  /** Being worked on — the letter written, the answers drafted — but not sent. */
+  | 'applying'
   | 'applied'
   | 'oa'
   | 'interview'
