@@ -299,7 +299,7 @@ describe('stores that are not shaped like the example', () => {
           kind: 'project',
           heading: 'Projects',
           skillGroups: [],
-          entries: [{ id: 'p', title: 'A thing', bullets: [] }],
+          entries: [{ id: 'p', kind: 'project' as const, title: 'A thing', bullets: [] }],
         },
       ],
     } as typeof resolved);

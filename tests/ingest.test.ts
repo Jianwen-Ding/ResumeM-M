@@ -317,7 +317,12 @@ describe('sorting blocks with a model', () => {
  * ------------------------------------------------------------------ */
 
 /** A minimal zip, so the docx reader is tested against a real archive. */
-function makeZip(name: string, contents: Buffer, { store = false, method = store ? 0 : 8 } = {}): Buffer {
+function makeZip(
+  name: string,
+  contents: Buffer,
+  { store = false, method }: { store?: boolean; method?: number } = {},
+): Buffer {
+  const how = method ?? (store ? 0 : 8);
   const nameBuf = Buffer.from(name, 'utf8');
   const data = store ? contents : zlib.deflateRawSync(contents);
   const crc = crc32(contents);
@@ -325,7 +330,7 @@ function makeZip(name: string, contents: Buffer, { store = false, method = store
   const local = Buffer.alloc(30);
   local.writeUInt32LE(0x0403_4b50, 0);
   local.writeUInt16LE(20, 4);
-  local.writeUInt16LE(method, 8);
+  local.writeUInt16LE(how, 8);
   local.writeUInt32LE(crc, 14);
   local.writeUInt32LE(data.length, 18);
   local.writeUInt32LE(contents.length, 22);
@@ -335,7 +340,7 @@ function makeZip(name: string, contents: Buffer, { store = false, method = store
   const central = Buffer.alloc(46);
   central.writeUInt32LE(0x0201_4b50, 0);
   central.writeUInt16LE(20, 6);
-  central.writeUInt16LE(method, 10);
+  central.writeUInt16LE(how, 10);
   central.writeUInt32LE(crc, 16);
   central.writeUInt32LE(data.length, 20);
   central.writeUInt32LE(contents.length, 24);

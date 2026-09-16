@@ -2025,7 +2025,7 @@ async function loadApplications() {
 async function openApplication(id) {
   openApplicationId = id;
   const panel = $('#app-detail');
-  setChildren(panel, el('p', { className: 'hint', textContent: 'Loading…' }));
+  setChildren(panel, skeleton('detail', 3));
 
   try {
     const { application: a, resume, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
@@ -2966,21 +2966,28 @@ async function reviewProposals(proposals) {
   const rows = [];
   const content = el('div', { className: 'proposals' });
 
-  const counts = {};
-  for (const p of proposals) counts[p.kind] = (counts[p.kind] ?? 0) + 1;
-  const summary = SAMPLE_KINDS.filter((k) => counts[k.value])
-    .map((k) => `${counts[k.value]} × ${k.label.toLowerCase()}`)
-    .join(', ');
+  const files = new Set(proposals.map((p) => p.source)).size;
+  const summaryLine = el('p', { className: 'hint' });
 
-  content.append(
-    el('p', {
-      className: 'hint',
-      textContent: `${plural(proposals.length, 'piece')} of writing from ${plural(
-        new Set(proposals.map((p) => p.source)).size,
-        'file',
-      )}${summary ? `: ${summary}` : ''}.`,
-    }),
-  );
+  // What will actually be added, recounted as boxes are ticked: the button
+  // says "Add them", and this is the sentence that says what "them" is.
+  const retally = () => {
+    const kept = rows.filter((r) => r.keep.checked);
+    const counts = {};
+    for (const r of kept) counts[r.kind.value] = (counts[r.kind.value] ?? 0) + 1;
+    const byKind = SAMPLE_KINDS.filter((k) => counts[k.value])
+      .map((k) => `${counts[k.value]} × ${k.label.toLowerCase()}`)
+      .join(', ');
+
+    const skipped = rows.length - kept.length;
+    summaryLine.textContent = kept.length === 0
+      ? `Nothing ticked — all ${plural(rows.length, 'piece')} from ${plural(files, 'file')} will be left out.`
+      : `${plural(kept.length, 'piece')} of writing from ${plural(files, 'file')}${
+          byKind ? `: ${byKind}` : ''
+        }${skipped > 0 ? `. ${skipped} left out.` : '.'}`;
+  };
+
+  content.append(summaryLine);
 
   for (const p of proposals) {
     const keep = el('input', { type: 'checkbox', checked: true });
@@ -3005,10 +3012,16 @@ async function reviewProposals(proposals) {
     ]);
 
     // Untick and the row recedes, so what will be kept reads at a glance.
-    keep.onchange = () => row.classList.toggle('dropped', !keep.checked);
+    keep.onchange = () => {
+      row.classList.toggle('dropped', !keep.checked);
+      retally();
+    };
+    kind.onchange = retally;
     content.append(row);
     rows.push({ p, keep, title, kind });
   }
+
+  retally();
 
   const ok = await showModal('Add these to your writing?', content, {
     note: PROPOSAL_NOTE,
@@ -3397,13 +3410,36 @@ async function loadResumeHistory() {
     return;
   }
 
-  timeline.replaceChildren(el('p', { className: 'hint', textContent: 'Loading…' }));
+  timeline.replaceChildren(skeleton('versions', 4));
   try {
     const { versions } = await api(`/resumes/${encodeURIComponent(historyResumeId)}/history`);
     renderResumeTimeline(versions);
   } catch (err) {
     timeline.replaceChildren(el('div', { className: 'err', textContent: err.message }));
   }
+}
+
+
+/**
+ * A placeholder shaped like the thing being fetched.
+ *
+ * "Loading…" in the middle of an empty page tells you only that nothing is
+ * there. Rebuilding a long version history takes a second or two the first
+ * time, and a few grey rows in the shape of the list say what is coming and
+ * roughly how much of it — which is the question you are actually asking
+ * while you wait.
+ */
+function skeleton(kind, rows = 3) {
+  return el(
+    'div',
+    { className: `skeleton ${kind}`, 'aria-busy': 'true', 'aria-label': 'Loading' },
+    Array.from({ length: rows }, () =>
+      el('div', { className: 'sk-row' }, [
+        el('span', { className: 'sk-line wide' }),
+        el('span', { className: 'sk-line' }),
+      ]),
+    ),
+  );
 }
 
 /**
@@ -3413,6 +3449,9 @@ async function loadResumeHistory() {
  */
 function changeRow(c) {
   const where = c.where ? el('span', { className: 'c-where', textContent: c.where }) : null;
+  // `text` is a self-contained sentence, so it names the place it happened —
+  // and the place is already the label beside it.
+  const detail = c.where && c.text?.startsWith(`${c.where}: `) ? c.text.slice(c.where.length + 2) : c.text;
 
   if (c.from && c.to) {
     return el('div', { className: `c ${c.kind}` }, [
@@ -3429,7 +3468,7 @@ function changeRow(c) {
   if (c.kind === 'removed' && c.from) {
     return el('div', { className: 'c removed' }, [where, el('div', { className: 'c-diff' }, [el('del', { textContent: c.from })])]);
   }
-  return el('div', { className: `c ${c.kind}`, textContent: c.text });
+  return el('div', { className: `c ${c.kind}` }, [where, el('span', { className: 'c-plain', textContent: detail })]);
 }
 
 function renderResumeTimeline(versions) {
@@ -3570,7 +3609,7 @@ function formatWhen(iso) {
 async function showCommit(hash) {
   selectedCommit = hash;
   const panel = $('#commit-detail');
-  panel.replaceChildren(el('p', { className: 'hint', textContent: 'Loading…' }));
+  panel.replaceChildren(skeleton('detail', 3));
   await loadHistory();
 
   try {

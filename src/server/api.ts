@@ -192,6 +192,27 @@ export function createApi({ store, repo }: ApiDeps): Router {
   // Work the user started and walked away from.
   const jobs = new Jobs();
 
+  /**
+   * What a resume resolved to at a given commit.
+   *
+   * Version history is the one page that has to look at the whole store dozens
+   * of times over — once per commit — and a commit's contents are fixed
+   * forever, so the document it produced is too. Remembering them turns the
+   * second visit to a long history into no work at all. Bounded, because a
+   * history of a thousand commits is not worth a thousand resolved documents
+   * in memory; the oldest go first, and recomputing one costs a blob read.
+   */
+  const documentCache = new Map<string, ResolvedResume | null>();
+  const MAX_REMEMBERED = 400;
+  const rememberDocument = (key: string, doc: ResolvedResume | null): void => {
+    documentCache.set(key, doc);
+    while (documentCache.size > MAX_REMEMBERED) {
+      const oldest = documentCache.keys().next().value;
+      if (oldest === undefined) break;
+      documentCache.delete(oldest);
+    }
+  };
+
   /* ---------------------------------------------------------------- *
    * Store reads                                                       *
    * ---------------------------------------------------------------- */
@@ -1785,6 +1806,11 @@ export function createApi({ store, repo }: ApiDeps): Router {
         return;
       }
 
+      // A commit's contents cannot change, so the document it produced cannot
+      // either: resolving one is worth doing exactly once per process. The
+      // first visit to a long history pays; every visit after it is free.
+      const live = store.load();
+
       // Blobs are content-addressed, so the same unchanged file across fifty
       // commits is read exactly once.
       const blobs = new Map<string, string>();
@@ -1809,15 +1835,21 @@ export function createApi({ store, repo }: ApiDeps): Router {
       let previous: ResolvedResume | undefined;
 
       for (const c of chronological) {
-        const snapshot = await readSnapshot(c.hash);
-        if (!snapshot) continue;
+        const key = `${id}@${c.hash}`;
+        let resolved = documentCache.get(key);
 
-        let resolved: ResolvedResume;
-        try {
-          resolved = resolveResume(id, { ...store.load(), ...snapshot });
-        } catch {
-          continue; // the resume did not exist yet, or was broken at this commit
+        if (resolved === undefined) {
+          const snapshot = await readSnapshot(c.hash);
+          try {
+            // `null` is a real answer — the resume did not exist yet, or was
+            // broken at this commit — and worth remembering as one.
+            resolved = snapshot ? resolveResume(id, { ...live, ...snapshot }) : null;
+          } catch {
+            resolved = null;
+          }
+          rememberDocument(key, resolved);
         }
+        if (!resolved) continue;
 
         // Unchanged document: not a version of this resume.
         if (previous && sameDocument(previous, resolved)) continue;

@@ -1109,7 +1109,14 @@ tbody tr { cursor: pointer; }
 
 /* ---- Resume version timeline (Google-Docs-style history) ---- */
 
-.timeline-list { display: grid; gap: 10px; max-width: 760px; }
+/* A version history is one column of documents. It reads at a single measure
+   rather than the full width of the window, and the toolbar shares that
+   measure so the two have the same edges. 760px left a third of a wide window
+   conspicuously empty; 980 is still a comfortable line length for the diffs. */
+#tab-history > .hint,
+#tab-history > .toolbar,
+.timeline-list { max-width: 980px; }
+.timeline-list { display: grid; gap: 10px; }
 .version-card {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1154,6 +1161,7 @@ tbody tr { cursor: pointer; }
 /* Where it happened, then what it used to say and what it says now — a
    tracked change, not a patch. */
 .version-card .c-where { display: block; font-weight: 600; color: var(--ink); }
+.version-card .c-plain { display: block; margin-top: 3px; color: var(--ink-soft); }
 .version-card .c-diff { display: grid; gap: 2px; margin-top: 3px; }
 .version-card .c-diff del,
 .version-card .c-diff ins {
@@ -1172,3 +1180,38 @@ tbody tr { cursor: pointer; }
 .version-card .c-diff ins { color: var(--ink); background: var(--good-bg); }
 
 .version-card .actions-row { margin-top: 9px; display: flex; gap: 6px; align-items: center; }
+
+/* ------------------------------------------------------------------ *
+ * Waiting                                                             *
+ * ------------------------------------------------------------------ */
+
+/* Grey rows in the shape of what is coming. The shimmer is slow on purpose:
+   a fast one reads as an error state rather than as work in progress. */
+.skeleton { display: flex; flex-direction: column; gap: 10px; }
+.sk-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+.sk-line {
+  height: 10px;
+  width: 42%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--line-soft) 25%, var(--line) 37%, var(--line-soft) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+.sk-line.wide { width: 72%; }
+.skeleton.detail .sk-row { padding: 10px 11px; }
+@keyframes shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-line { animation: none; }
+  .dropzone .bar.indeterminate span { animation: none; width: 100%; }
+}
