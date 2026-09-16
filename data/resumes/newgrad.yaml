@@ -1,0 +1,7 @@
+# Issue #1, solved: switching between new-grad and intern applications is a
+# one-line difference, not a second copy of the resume.
+id: newgrad
+label: New grad
+extends: base
+choices:
+  edu_neu.dates: v_may2026

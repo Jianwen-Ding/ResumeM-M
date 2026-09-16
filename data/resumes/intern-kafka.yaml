@@ -1,0 +1,20 @@
+# Issue #2, solved: a posting-specific mix is a handful of overrides, not a new
+# document. This one leans the same bullets toward streaming work and swaps the
+# skills list to match, while inheriting everything else from `intern`.
+id: intern-kafka
+label: Summer intern — streaming/distributed
+extends: intern
+choices:
+  b_ec_pipeline: v_kafka
+  b_ec_testing: v_ci
+  b_edu_coursework: v_systems
+sections:
+  - kind: skills
+    groups: [sk_languages, sk_frameworks, sk_tools]
+    items:
+      sk_languages: [s_python, s_go, s_java, s_sql]
+      sk_frameworks: [s_kafka, s_postgres, s_node]
+      sk_tools: [s_git, s_docker, s_k8s, s_aws]
+notes: >
+  Drafted for streaming-heavy backend postings. Drops TypeScript/React from the
+  skills list so the relevant items are not buried.

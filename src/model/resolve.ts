@@ -1,0 +1,291 @@
+import {
+  DEFAULT_LAYOUT,
+  isVariantField,
+  type Bullet,
+  type Entry,
+  type EntryKind,
+  type LayoutOptions,
+  type MaybeVariant,
+  type ResolvedEntry,
+  type ResolvedResume,
+  type ResolvedSection,
+  type ResumeSpec,
+  type SectionSpec,
+  type StoreData,
+} from './types.js';
+
+const DEFAULT_HEADINGS: Record<EntryKind, string> = {
+  education: 'Education',
+  experience: 'Experience',
+  project: 'Projects',
+  skills: 'Technical Skills',
+  custom: 'Additional',
+};
+
+/**
+ * Flatten a resume's `extends` chain. Child choices win over parent choices;
+ * child sections replace the parent's section of the same kind entirely, since
+ * a half-merged section ordering is never what anyone means.
+ */
+export function flattenSpec(spec: ResumeSpec, all: ResumeSpec[], seen = new Set<string>()): ResumeSpec {
+  if (seen.has(spec.id)) {
+    throw new Error(`Resume inheritance cycle at "${spec.id}"`);
+  }
+  seen.add(spec.id);
+  if (!spec.extends) return spec;
+
+  const parent = all.find((r) => r.id === spec.extends);
+  if (!parent) {
+    throw new Error(`Resume "${spec.id}" extends "${spec.extends}", which does not exist`);
+  }
+  const base = flattenSpec(parent, all, seen);
+
+  const sections = mergeSections(base.sections ?? [], spec.sections ?? []);
+  return {
+    ...base,
+    ...spec,
+    sections,
+    choices: { ...(base.choices ?? {}), ...(spec.choices ?? {}) },
+    layout: { ...(base.layout ?? {}), ...(spec.layout ?? {}) },
+  };
+}
+
+function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpec[] {
+  if (override.length === 0) return base;
+  const out = base.map((s) => {
+    const o = override.find((x) => x.kind === s.kind);
+    return o ? o : s;
+  });
+  // Sections the parent never had are appended in the child's order.
+  for (const o of override) {
+    if (!out.some((s) => s.kind === o.kind)) out.push(o);
+  }
+  return out;
+}
+
+/**
+ * Pick the text of a possibly-varying field.
+ * `choices` is keyed by `${ownerId}.${fieldName}` — e.g. `edu_neu.dates`.
+ */
+function pickField(
+  field: MaybeVariant | undefined,
+  key: string,
+  choices: Record<string, string>,
+  warnings: string[],
+): string | undefined {
+  if (field === undefined) return undefined;
+  // YAML happily turns `dates: 2026` into a number, so normalise here rather
+  // than making every consumer defensive about it.
+  if (!isVariantField(field)) return String(field);
+
+  const wanted = choices[key];
+  if (wanted) {
+    const hit = field.variants.find((v) => v.id === wanted);
+    if (hit) return String(hit.text);
+    warnings.push(`Choice "${key}" asked for variant "${wanted}", which does not exist; using default.`);
+  }
+  const def = field.variants.find((v) => v.id === field.default) ?? field.variants[0];
+  if (!def) {
+    warnings.push(`Field "${key}" has no variants.`);
+    return undefined;
+  }
+  return String(def.text);
+}
+
+function pickBullet(
+  bullet: Bullet,
+  choices: Record<string, string>,
+  warnings: string[],
+): { variantId: string; text: string } | undefined {
+  const wanted = choices[bullet.id];
+  if (wanted) {
+    const hit = bullet.variants.find((v) => v.id === wanted);
+    if (hit) return { variantId: hit.id, text: String(hit.text) };
+    warnings.push(`Bullet "${bullet.id}" asked for variant "${wanted}", which does not exist; using default.`);
+  }
+  const def = bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0];
+  if (!def) {
+    warnings.push(`Bullet "${bullet.id}" has no variants and was dropped.`);
+    return undefined;
+  }
+  return { variantId: def.id, text: String(def.text) };
+}
+
+function resolveEntry(
+  entry: Entry,
+  section: SectionSpec,
+  choices: Record<string, string>,
+  warnings: string[],
+): ResolvedEntry {
+  const wantedBullets = section.bullets?.[entry.id];
+  const available = (entry.bullets ?? []).filter((b) => !b.archived);
+
+  const ordered: Bullet[] = wantedBullets
+    ? wantedBullets
+        .map((id) => {
+          const b = (entry.bullets ?? []).find((x) => x.id === id);
+          if (!b) warnings.push(`Entry "${entry.id}" lists bullet "${id}", which does not exist.`);
+          return b;
+        })
+        .filter((b): b is Bullet => Boolean(b))
+    : available;
+
+  return {
+    id: entry.id,
+    kind: entry.kind,
+    title: pickField(entry.title, `${entry.id}.title`, choices, warnings) ?? entry.id,
+    dates: pickField(entry.dates, `${entry.id}.dates`, choices, warnings),
+    subtitle: pickField(entry.subtitle, `${entry.id}.subtitle`, choices, warnings),
+    location: pickField(entry.location, `${entry.id}.location`, choices, warnings),
+    bullets: ordered
+      .map((b) => {
+        const picked = pickBullet(b, choices, warnings);
+        return picked ? { id: b.id, ...picked } : undefined;
+      })
+      .filter((b): b is NonNullable<typeof b> => Boolean(b)),
+  };
+}
+
+/** Turn a resume spec plus the store into something the renderer can print. */
+export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): ResolvedResume {
+  const spec =
+    typeof specOrId === 'string'
+      ? data.resumes.find((r) => r.id === specOrId)
+      : specOrId;
+  if (!spec) throw new Error(`No resume named "${String(specOrId)}"`);
+
+  const warnings: string[] = [];
+  const flat = flattenSpec(spec, data.resumes);
+  const choices = flat.choices ?? {};
+
+  const sections: ResolvedSection[] = (flat.sections ?? []).map((section) => {
+    const entries: ResolvedEntry[] = [];
+    const skillGroups: ResolvedSection['skillGroups'] = [];
+
+    if (section.kind === 'skills') {
+      for (const gid of section.groups ?? []) {
+        const group = data.skillGroups.find((g) => g.id === gid);
+        if (!group) {
+          warnings.push(`Skills group "${gid}" does not exist.`);
+          continue;
+        }
+        const wanted = section.items?.[gid];
+        const items = wanted
+          ? wanted
+              .map((iid) => group.items.find((i) => i.id === iid)?.text)
+              .filter((t): t is string => Boolean(t))
+          : group.items.map((i) => i.text);
+        skillGroups.push({ id: group.id, name: group.name, items });
+      }
+    } else {
+      for (const eid of section.entries ?? []) {
+        const entry = data.entries.find((e) => e.id === eid);
+        if (!entry) {
+          warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);
+          continue;
+        }
+        entries.push(resolveEntry(entry, section, choices, warnings));
+      }
+    }
+
+    return {
+      kind: section.kind,
+      heading: section.heading ?? DEFAULT_HEADINGS[section.kind],
+      entries,
+      skillGroups,
+    };
+  });
+
+  // Flag choices that matched nothing — usually a renamed id, and silently
+  // ignoring them is how a resume quietly reverts to the wrong grad date.
+  const knownKeys = new Set<string>();
+  for (const e of data.entries) {
+    for (const f of ['title', 'dates', 'subtitle', 'location'] as const) {
+      if (isVariantField(e[f])) knownKeys.add(`${e.id}.${f}`);
+    }
+    for (const b of e.bullets ?? []) knownKeys.add(b.id);
+  }
+  for (const key of Object.keys(choices)) {
+    if (!knownKeys.has(key)) warnings.push(`Choice "${key}" does not match any field or bullet in the store.`);
+  }
+
+  const layout: LayoutOptions = {
+    ...DEFAULT_LAYOUT,
+    ...(flat.layout ?? {}),
+    fitBounds: { ...DEFAULT_LAYOUT.fitBounds, ...(flat.layout?.fitBounds ?? {}) },
+  };
+
+  return {
+    id: flat.id,
+    label: flat.label ?? flat.id,
+    profile: data.profile,
+    sections,
+    layout,
+    warnings,
+  };
+}
+
+/**
+ * The master document: every entry, every bullet, every variant, on one long
+ * page. Not a resume — a browsable inventory of what you have to say.
+ */
+export function buildMaster(data: StoreData): ResolvedResume {
+  const byKind = (kind: EntryKind) => data.entries.filter((e) => e.kind === kind && !e.archived);
+  const warnings: string[] = [];
+
+  const entrySection = (kind: EntryKind): ResolvedSection => ({
+    kind,
+    heading: DEFAULT_HEADINGS[kind],
+    skillGroups: [],
+    entries: byKind(kind).map((entry) => {
+      // Every variant of every field is shown inline, labelled, so the master
+      // doc answers "what could this line say?" without opening YAML.
+      const label = (f: MaybeVariant | undefined): string | undefined => {
+        if (f === undefined) return undefined;
+        if (!isVariantField(f)) return f;
+        return f.variants.map((v) => `${v.text}  [${v.id}]`).join('  |  ');
+      };
+      return {
+        id: entry.id,
+        kind: entry.kind,
+        title: label(entry.title) ?? entry.id,
+        dates: label(entry.dates),
+        subtitle: label(entry.subtitle),
+        location: label(entry.location),
+        bullets: (entry.bullets ?? []).flatMap((b) =>
+          b.variants.map((v) => ({
+            id: b.id,
+            variantId: v.id,
+            text: `${v.text}   — ${b.id}/${v.id}${v.id === b.default ? ' (default)' : ''}${
+              v.suggested ? ' (AI-suggested, unreviewed)' : ''
+            }`,
+          })),
+        ),
+      } satisfies ResolvedEntry;
+    }),
+  });
+
+  return {
+    id: '__master__',
+    label: 'Master document — everything in the store',
+    profile: data.profile,
+    sections: [
+      entrySection('education'),
+      entrySection('experience'),
+      entrySection('project'),
+      {
+        kind: 'skills' as const,
+        heading: 'Technical Skills',
+        entries: [],
+        skillGroups: data.skillGroups.map((g) => ({
+          id: g.id,
+          name: g.name,
+          items: g.items.map((i) => String(i.text)),
+        })),
+      } satisfies ResolvedSection,
+      entrySection('custom'),
+    ].filter((s) => s.entries.length > 0 || s.skillGroups.length > 0),
+    layout: { ...DEFAULT_LAYOUT, maxPages: 99, autoFit: false },
+    warnings,
+  };
+}

@@ -1,0 +1,29 @@
+# Skills are individually selectable so a resume can drop the noise a given
+# posting does not care about, without deleting anything from the store.
+- id: sk_languages
+  name: Languages
+  items:
+    - { id: s_python, text: Python, tags: [python, backend, ml] }
+    - { id: s_ts, text: TypeScript, tags: [typescript, frontend, fullstack] }
+    - { id: s_java, text: Java, tags: [java, backend] }
+    - { id: s_go, text: Go, tags: [go, backend, distributed] }
+    - { id: s_c, text: C, tags: [systems] }
+    - { id: s_sql, text: SQL, tags: [data, backend] }
+
+- id: sk_frameworks
+  name: Frameworks
+  items:
+    - { id: s_react, text: React, tags: [frontend, react] }
+    - { id: s_node, text: Node.js, tags: [backend, node] }
+    - { id: s_flask, text: Flask, tags: [python, backend] }
+    - { id: s_postgres, text: PostgreSQL, tags: [data, backend] }
+    - { id: s_kafka, text: Kafka, tags: [kafka, streaming, distributed] }
+
+- id: sk_tools
+  name: Developer Tools
+  items:
+    - { id: s_git, text: Git, tags: [general] }
+    - { id: s_docker, text: Docker, tags: [devops, infrastructure] }
+    - { id: s_k8s, text: Kubernetes, tags: [devops, infrastructure] }
+    - { id: s_gha, text: GitHub Actions, tags: [ci, devops] }
+    - { id: s_aws, text: AWS, tags: [cloud, infrastructure] }

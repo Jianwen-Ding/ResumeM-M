@@ -1,0 +1,20 @@
+# The shared skeleton. `newgrad` and `intern` extend this and differ only by
+# the choices they override — which is the point: one edit here reaches both.
+id: base
+label: Base resume
+sections:
+  - kind: education
+    entries: [edu_neu]
+  - kind: experience
+    entries: [exp_example_co]
+  - kind: project
+    entries: [proj_resumemm, proj_jobhelper]
+  - kind: skills
+    groups: [sk_languages, sk_frameworks, sk_tools]
+choices: {}
+layout:
+  fontSizePt: 11
+  marginIn: 0.5
+  spacing: 1
+  maxPages: 1
+  autoFit: true

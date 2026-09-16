@@ -1,0 +1,46 @@
+# Replace this with your real experience. The shape is what matters:
+# every bullet keeps all of its phrasings in one place, so tailoring a resume
+# is choosing among them rather than copying the entry into a new file.
+- id: exp_example_co
+  kind: experience
+  title: Example Co.
+  subtitle: Software Engineer Co-op
+  location: Boston, MA
+  dates: Jul. 2024 -- Dec. 2024
+  tags: [backend, python, distributed]
+  bullets:
+    - id: b_ec_pipeline
+      default: v_base
+      variants:
+        - id: v_base
+          label: Neutral
+          text: Built an event-processing pipeline handling **2M events/day**, cutting median end-to-end latency from 900ms to 180ms
+          tags: [backend, performance]
+        - id: v_kafka
+          label: Kafka-forward
+          text: Built a `Kafka`-backed event-processing pipeline handling **2M events/day**, cutting median end-to-end latency from 900ms to 180ms
+          tags: [kafka, streaming, distributed]
+          note: Use when the posting names Kafka or streaming explicitly.
+        - id: v_short
+          label: Short (one line)
+          text: Built an event pipeline handling **2M events/day**, cutting median latency 900ms to 180ms
+          tags: [short]
+          note: For when the resume is one line over. Same claim, tighter.
+    - id: b_ec_testing
+      default: v_base
+      variants:
+        - id: v_base
+          label: Neutral
+          text: Raised service test coverage from 41% to 88% and wired the suite into CI, catching **12 regressions** before release
+          tags: [testing, quality]
+        - id: v_ci
+          label: CI/infra-forward
+          text: Wired a `pytest` suite into GitHub Actions CI and raised coverage 41% to 88%, catching **12 regressions** before release
+          tags: [ci, devops, infrastructure]
+    - id: b_ec_mentoring
+      default: v_base
+      variants:
+        - id: v_base
+          label: Neutral
+          text: Onboarded two incoming co-ops and wrote the team's service runbook, cutting first-PR time from two weeks to four days
+          tags: [leadership, communication]

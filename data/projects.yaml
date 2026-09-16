@@ -1,0 +1,47 @@
+- id: proj_resumemm
+  kind: project
+  title: ResumeM-M
+  subtitle: TypeScript, Node, LaTeX
+  dates: 2026
+  tags: [fullstack, typescript, tooling]
+  bullets:
+    - id: b_rmm_store
+      default: v_base
+      variants:
+        - id: v_base
+          label: Neutral
+          text: Built a YAML-backed resume store where every bullet holds all of its phrasings, so tailoring a resume is selecting variants rather than forking files
+          tags: [tooling, design]
+        - id: v_short
+          label: Short
+          text: Built a YAML-backed resume store with per-bullet variants, replacing a folder of forked resume files
+          tags: [short]
+    - id: b_rmm_render
+      default: v_base
+      variants:
+        - id: v_base
+          label: Neutral
+          text: Compiled selections into Jake's LaTeX template and enforced a strict one-page limit by measuring typeset height from `zref` positions and auto-shrinking within bounds
+          tags: [latex, tooling]
+
+- id: proj_jobhelper
+  kind: project
+  title: JobHelper
+  subtitle: Chrome Extension, MV3
+  dates: 2026
+  tags: [frontend, chrome, automation]
+  bullets:
+    - id: b_jh_scan
+      default: v_base
+      variants:
+        - id: v_base
+          label: Neutral
+          text: Wrote a Chrome extension that detects job postings from JSON-LD and DOM heuristics, then offers a tailored resume without leaving the page
+          tags: [frontend, automation]
+    - id: b_jh_autofill
+      default: v_base
+      variants:
+        - id: v_base
+          label: Neutral
+          text: Autofilled Greenhouse, Lever, and Workday application forms from a single stored profile, removing repeated manual entry
+          tags: [automation, frontend]
