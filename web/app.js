@@ -1559,6 +1559,12 @@ function renderMasterEditor(editor) {
       el('span', { className: 'name', textContent: SECTION_LABELS[kind] ?? kind }),
       el('span', { className: 'rule' }),
       el('button', { className: 'link', textContent: '+ Add Entry', onclick: () => addEntry(kind) }),
+      el('button', {
+        className: 'link',
+        textContent: '+ Draft with AI',
+        title: 'Paste a repository link, or say a line about it, and get a first draft to edit',
+        onclick: () => draftEntryWithAi(kind),
+      }),
     ]));
     if (!entries.length) editor.append(el('p', { className: 'hint', textContent: 'No source entries yet.' }));
     for (const entry of entries) {
@@ -1599,6 +1605,12 @@ function renderMasterEditor(editor) {
           ]));
           row.append(el('div', { className: 'toolbar' }, [
             el('button', { className: 'tiny', textContent: '+ Phrasing', onclick: () => addBulletVariant(entry, bullet) }),
+            el('button', {
+              className: 'tiny',
+              textContent: 'Draft one',
+              title: 'Ask the AI for another way to say this line — same claim, different wording',
+              onclick: () => draftPhrasings(entry, { bulletId: bullet.id }),
+            }),
             el('button', { className: 'tiny', textContent: 'Compare Phrasings', onclick: () => askBulletFeedback(entry, bullet) }),
           ]));
         }
@@ -1622,6 +1634,79 @@ function renderMasterEditor(editor) {
 /* ------------------------------------------------------------------ *
  * Adding and editing                                                  *
  * ------------------------------------------------------------------ */
+
+/**
+ * Draft an entry from a repository, or from a line of notes.
+ *
+ * The case this is for: you built something, the code is the record of it, and
+ * turning that into three bullets from memory is the part of writing a resume
+ * people put off for weeks. The repository is evidence, so working from it is
+ * not invention — but nothing is written until it has been read, which is why
+ * this shows the draft and asks.
+ */
+async function draftEntryWithAi(kind) {
+  const asked = await form(`New ${kind} entry, drafted`, [
+    { name: 'repoUrl', label: 'Repository link (optional)', value: '' },
+    { name: 'notes', label: 'Or say a little about it', value: '', multiline: true },
+  ], 'Nothing is saved until you have read it. Drafted wordings stay marked unreviewed.');
+  if (!asked || (!asked.repoUrl?.trim() && !asked.notes?.trim())) return;
+
+  setStatus('Reading and drafting…');
+  let result;
+  try {
+    result = await api('/ai/draft-entry', {
+      method: 'POST',
+      body: JSON.stringify({ repoUrl: asked.repoUrl, notes: asked.notes, kind }),
+    });
+  } catch (err) {
+    showModal('Could not draft it', el('pre', { textContent: err.message }));
+    setStatus(err.message, true);
+    return;
+  }
+
+  if (!result.executed) {
+    showModal(
+      'The AI is switched off',
+      el('div', {}, [
+        el('p', { textContent: 'Turn it on in Voice & AI to draft entries. This is the prompt it would have been given:' }),
+        el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+      ]),
+    );
+    setStatus('AI is off');
+    return;
+  }
+
+  await reviewDraftedEntry(result.entry, result.repo, kind);
+}
+
+/** Show what came back and let it be edited before anything is written. */
+async function reviewDraftedEntry(entry, repo, kind) {
+  const lines = (entry.bullets ?? []).flatMap((b) => b.variants.map((v) => `${v.label}: ${v.text}`));
+  const accepted = await showModal(
+    'Draft entry',
+    el('div', {}, [
+      el('p', { className: 'hint', textContent: repo ? `From ${repo.owner}/${repo.name}.` : 'From what you wrote.' }),
+      el('h3', { textContent: entry.title }),
+      el('p', {
+        className: 'hint',
+        textContent: [entry.subtitle, entry.dates, entry.location].filter(Boolean).join(' · '),
+      }),
+      el('ul', {}, lines.map((t) => el('li', { textContent: t }))),
+      el('p', { className: 'hint', textContent: 'Every wording is saved unreviewed, so you can see at a glance what you have not read yet.' }),
+    ]),
+    { okLabel: 'Add it', showCancel: true },
+  );
+  if (!accepted) return;
+
+  // Ids are assigned by the server, but the store is the client's to keep
+  // unique — another entry may have been added since.
+  let id = entry.id;
+  for (let n = 2; state.store.entries.some((e) => e.id === id); n++) id = `${entry.id}_${n}`;
+
+  describeNext(`drafting "${entry.title}"`);
+  await saveEntry({ ...entry, id, kind: entry.kind ?? kind }, `Added "${entry.title}"`);
+  setStatus(`Added "${entry.title}" — every wording is unreviewed`);
+}
 
 async function addEntry(kind) {
   const answer = await form(`New ${kind} entry`, [
@@ -1756,6 +1841,89 @@ async function removeBullet(entry, bullet) {
 }
 
 /** Add another phrasing of an existing bullet. */
+/**
+ * Ask for other ways to say a line that already exists.
+ *
+ * Different from drafting an entry: the fact is settled and only the wording
+ * is in question. The failure mode is an alternate that quietly claims more
+ * than the original — hard to catch precisely because it reads better — so
+ * each one is shown against the line it came from before anything is kept,
+ * and kept marked unreviewed after.
+ */
+async function draftPhrasings(entry, target) {
+  const asked = await form('Draft another wording', [
+    { name: 'angle', label: 'Anything to aim for? (optional)', value: '' },
+    { name: 'count', label: 'How many', value: '2' },
+  ], 'Same claim, different wording. Nothing is saved until you have read it.');
+  if (!asked) return;
+
+  setStatus('Drafting…');
+  let result;
+  try {
+    result = await api('/ai/draft-phrasing', {
+      method: 'POST',
+      body: JSON.stringify({ entryId: entry.id, ...target, angle: asked.angle, count: Number(asked.count) || 2 }),
+    });
+  } catch (err) {
+    showModal('Could not draft it', el('pre', { textContent: err.message }));
+    setStatus(err.message, true);
+    return;
+  }
+
+  if (!result.executed) {
+    showModal('The AI is switched off', el('div', {}, [
+      el('p', { textContent: 'Turn it on in Voice & AI to draft wordings. This is the prompt it would have been given:' }),
+      el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+    ]));
+    return;
+  }
+
+  const field = target.fieldName ? entry[target.fieldName] : entry.bullets.find((b) => b.id === target.bulletId);
+  const current = isVariantField(field)
+    ? (field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? ''
+    : String(field ?? '');
+
+  const keep = new Set(result.variants.map((_, i) => i));
+  const accepted = await showModal(
+    'Drafted wordings',
+    el('div', {}, [
+      el('p', { className: 'hint', textContent: 'The line as it stands:' }),
+      el('p', { textContent: current }),
+      el('p', { className: 'hint', textContent: 'Untick anything that says more than that one does.' }),
+      ...result.variants.map((v, i) =>
+        el('label', { className: 'row' }, [
+          el('input', {
+            type: 'checkbox',
+            checked: true,
+            onchange: (e) => (e.target.checked ? keep.add(i) : keep.delete(i)),
+          }),
+          el('span', {}, `${v.label}: ${v.text}`),
+        ]),
+      ),
+    ]),
+    { okLabel: 'Add them', showCancel: true },
+  );
+  if (!accepted || keep.size === 0) return;
+
+  const chosen = result.variants.filter((_, i) => keep.has(i));
+  const existing = isVariantField(field) ? field : { default: 'v_base', variants: [{ id: 'v_base', label: current.slice(0, 24) || 'Default', text: current }] };
+  const taken = new Set(existing.variants.map((v) => v.id));
+  const added = chosen.map((v) => {
+    let id = `v_${slug(v.label || v.text)}`;
+    for (let n = 2; taken.has(id); n++) id = `v_${slug(v.label || v.text)}_${n}`;
+    taken.add(id);
+    return { id, label: v.label, text: v.text, suggested: true };
+  });
+
+  const nextField = { ...existing, variants: [...existing.variants, ...added] };
+  const next = target.fieldName
+    ? { ...entry, [target.fieldName]: nextField }
+    : { ...entry, bullets: entry.bullets.map((b) => (b.id === target.bulletId ? { ...b, ...nextField } : b)) };
+
+  describeNext(`drafting ${plural(added.length, 'wording')}`);
+  await saveEntry(next, `Added ${plural(added.length, 'drafted wording')}`);
+}
+
 async function addBulletVariant(entry, bullet) {
   const current = bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0];
   const answer = await form(`New phrasing — ${bulletName(entry, bullet)}`, [

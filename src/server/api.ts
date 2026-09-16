@@ -11,6 +11,8 @@ import {
   feedbackPrompt,
   letterFeedbackPrompt,
   answerFeedbackPrompt,
+  entryDraftPrompt,
+  phrasingDraftPrompt,
   phraseFeedbackPrompt,
   shortenPrompt,
   tailorPrompt,
@@ -31,14 +33,18 @@ import { syncCurrent } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
+import { readRepo } from '../ingest/repo.js';
 import type { Store } from '../model/store.js';
 import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
 import type {
   Application,
+  Bullet,
   CoverLetter,
   Draft,
   DraftQuestion,
   Entry,
+  EntryKind,
+  MaybeVariant,
   Profile,
   ResolvedResume,
   ResumeSpec,
@@ -188,6 +194,69 @@ export interface ApiDeps {
   store: Store;
   repo: Repo;
   jobs?: Jobs;
+}
+
+/**
+ * A drafted entry, made safe to show.
+ *
+ * Whatever the model returned is shaped into the store's own types here — ids
+ * assigned, unknown fields dropped, kind forced to one this understands — so
+ * that nothing downstream has to treat a proposal differently from an entry,
+ * and so a malformed reply cannot smuggle a field in. It is still only a
+ * proposal: the caller saves it or throws it away.
+ */
+function draftedEntry(raw: unknown): Entry {
+  const draft = (raw ?? {}) as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const kinds = ['education', 'experience', 'project', 'skills', 'custom'] as const;
+  const kind = kinds.includes(draft.kind as (typeof kinds)[number]) ? (draft.kind as EntryKind) : 'project';
+  const title = text(draft.title) ?? 'Untitled';
+
+  const bullets: Bullet[] = [];
+  for (const [i, b] of (Array.isArray(draft.bullets) ? draft.bullets : []).entries()) {
+    const list = Array.isArray((b as Record<string, unknown>)?.variants) ? ((b as Record<string, unknown>).variants as unknown[]) : [];
+    const variants: Variant[] = [];
+    for (const [j, v] of list.entries()) {
+      const item = (v ?? {}) as Record<string, unknown>;
+      const body = text(item.text);
+      if (!body) continue;
+      variants.push({
+        id: `v_${slug(String(item.label ?? body).slice(0, 24)) || `alt${j + 1}`}`,
+        label: text(item.label) ?? body.slice(0, 24),
+        text: body,
+        // Drafted, not reviewed — the editor already has a way of showing that.
+        suggested: true,
+      });
+    }
+    if (variants.length === 0) continue;
+    // Ids have to be unique within the bullet, and a model repeating a label
+    // is ordinary rather than exceptional.
+    const seen = new Set<string>();
+    for (const v of variants) {
+      let id = v.id;
+      for (let n = 2; seen.has(id); n++) id = `${v.id}_${n}`;
+      v.id = id;
+      seen.add(id);
+    }
+    bullets.push({ id: `b_${slug(title).slice(0, 20)}_${i + 1}`, default: variants[0]!.id, variants });
+  }
+
+  return {
+    id: `e_${slug(title).slice(0, 40) || Date.now()}`,
+    kind,
+    title,
+    ...(text(draft.subtitle) ? { subtitle: text(draft.subtitle)! } : {}),
+    ...(text(draft.dates) ? { dates: text(draft.dates)! } : {}),
+    ...(text(draft.location) ? { location: text(draft.location)! } : {}),
+    bullets,
+  };
+}
+
+/** The pinned wording of a field that may carry alternates. */
+function plainText(field: MaybeVariant | undefined): string {
+  if (field === undefined) return '';
+  if (typeof field === 'string') return field;
+  return String((field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? '');
 }
 
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
@@ -902,6 +971,97 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const result = await runAgent(data.config, prompt);
       res.json(result);
+    }),
+  );
+
+  /**
+   * Draft a new entry, from a repository link or a few lines of notes.
+   *
+   * Proposed, never saved. The store is the thing this tool protects, and a
+   * model writing straight into it is how you end up with a resume that says
+   * something you did not do — so this hands back a draft and the editor asks.
+   */
+  api.post(
+    '/ai/draft-entry',
+    handler(async (req, res) => {
+      const { repoUrl, notes, kind } = req.body as { repoUrl?: string; notes?: string; kind?: string };
+      if (!repoUrl?.trim() && !notes?.trim()) throw new Error('Give a repository link or say a little about it');
+
+      const data = store.load();
+      // Read the repository first: a failure there is about the link, and
+      // saying so beats a vague failure after a minute of the AI thinking.
+      const repo = repoUrl?.trim() ? await readRepo(repoUrl.trim()) : undefined;
+
+      const prompt = entryDraftPrompt(data, { repo, notes, kind });
+      const agent = await runAgent(data.config, prompt);
+      if (!agent.executed) {
+        res.json({ executed: false, prompt: agent.output, repo, entry: null });
+        return;
+      }
+
+      let entry: unknown;
+      try {
+        entry = extractJson(agent.output);
+      } catch {
+        throw new Error('The AI did not return an entry this could read. Try again, or write it by hand.');
+      }
+      res.json({ executed: true, repo, entry: draftedEntry(entry), raw: agent.output });
+    }),
+  );
+
+  /** Another way to say a line that already exists. Proposed, never saved. */
+  api.post(
+    '/ai/draft-phrasing',
+    handler(async (req, res) => {
+      const { entryId, bulletId, fieldName, angle, count } = req.body as {
+        entryId?: string;
+        bulletId?: string;
+        fieldName?: 'title' | 'subtitle' | 'dates' | 'location';
+        angle?: string;
+        count?: number;
+      };
+      if (!entryId) throw new Error('Say which line to rephrase');
+      if (Boolean(bulletId) === Boolean(fieldName)) throw new Error('Choose a bullet or a heading field, not both');
+
+      const data = store.load();
+      const entry = data.entries.find((e) => e.id === entryId);
+      if (!entry) throw new Error(`No entry "${entryId}"`);
+
+      const field = fieldName ? entry[fieldName] : entry.bullets?.find((b) => b.id === bulletId);
+      if (!field) throw new Error('That line is not in the store any more');
+      const texts = typeof field === 'string'
+        ? [field]
+        : (field.variants ?? []).map((v) => String(v.text));
+      if (texts.length === 0) throw new Error('That line has no wording to work from');
+
+      const pinned = typeof field === 'string' ? field
+        : texts[Math.max(0, (field.variants ?? []).findIndex((v: Variant) => v.id === field.default))] ?? texts[0]!;
+
+      const prompt = phrasingDraftPrompt(data, {
+        entryTitle: plainText(entry.title) || entry.id,
+        current: pinned,
+        siblings: texts.filter((t) => t !== pinned),
+        angle,
+        count,
+      });
+      const agent = await runAgent(data.config, prompt);
+      if (!agent.executed) {
+        res.json({ executed: false, prompt: agent.output, variants: [] });
+        return;
+      }
+
+      let parsed: { variants?: { label?: string; text?: string }[] };
+      try {
+        parsed = extractJson(agent.output);
+      } catch {
+        throw new Error('The AI did not return wordings this could read. Try again, or write one by hand.');
+      }
+      const variants = (parsed.variants ?? [])
+        .filter((v) => typeof v?.text === 'string' && v.text.trim())
+        .slice(0, 5)
+        .map((v) => ({ label: String(v.label ?? '').trim() || v.text!.trim().slice(0, 24), text: v.text!.trim() }));
+      if (variants.length === 0) throw new Error('The AI came back with nothing usable.');
+      res.json({ executed: true, variants, raw: agent.output });
     }),
   );
 

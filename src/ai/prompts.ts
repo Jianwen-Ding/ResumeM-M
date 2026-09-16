@@ -764,3 +764,137 @@ export function answerFeedbackPrompt(data: StoreData, draft: Draft, question: Dr
     .filter(Boolean)
     .join('\n');
 }
+
+/* ------------------------------------------------------------------ *
+ * Drafting new source material                                        *
+ * ------------------------------------------------------------------ */
+
+/**
+ * What a drafted entry has to come back as.
+ *
+ * JSON, because this becomes structured content in the store rather than prose
+ * on a page — an entry with headings, bullets, and alternates for each bullet.
+ * The shape is stated once here and parsed once on the way back, so the two
+ * cannot drift.
+ */
+const ENTRY_SHAPE = [
+  '```json',
+  '{',
+  '  "kind": "project" | "experience" | "education",',
+  '  "title": "the name of the project, employer, or school",',
+  '  "subtitle": "role, degree, or the stack — omit if there is nothing true to say",',
+  '  "dates": "e.g. Jan 2025 -- Jun 2025, or omit",',
+  '  "location": "omit unless you actually know it",',
+  '  "bullets": [',
+  '    {',
+  '      "variants": [',
+  '        { "label": "short name for this phrasing", "text": "the bullet" },',
+  '        { "label": "another angle", "text": "the same point, said differently" }',
+  '      ]',
+  '    }',
+  '  ]',
+  '}',
+  '```',
+].join('\n');
+
+/**
+ * Draft a whole entry from a repository, or from a few lines of notes.
+ *
+ * The case this exists for: you built something, the code is the record of it,
+ * and turning that into three resume bullets from memory is the part of writing
+ * a resume that people put off for weeks. The repository is evidence, so
+ * working from it is not inventing — but it is also full of things that are not
+ * yours and not achievements, which is most of what the rules below are about.
+ */
+export function entryDraftPrompt(
+  data: StoreData,
+  source: { repo?: RepoSummary; notes?: string; kind?: string },
+): string {
+  const repo = source.repo;
+  return [
+    preamble(data),
+    '',
+    '## Task: draft one resume entry',
+    'Return only the JSON object below. No commentary before or after it.',
+    '',
+    ENTRY_SHAPE,
+    '',
+    '## Rules for this task',
+    '- Two or three bullets, and two alternates for each: one that leads with what was built, one that leads with the effect it had. If you cannot honestly say what the effect was, make the second alternate a shorter version instead of inventing an outcome.',
+    '- Every bullet must be something the evidence below actually supports. A dependency in the manifest is not an achievement; a badge is not a metric; a generated scaffold is not work.',
+    '- No metrics that are not stated. Not "improved performance by 40%" unless the number is written down somewhere here.',
+    '- Say what the person did, not what the software is. A README describes a product; a resume describes work.',
+    '- Plain past tense, no adjectives doing the work of evidence, and nothing that sounds like a brochure.',
+    repo
+      ? [
+          '',
+          '## The repository',
+          `Name: ${repo.name}`,
+          repo.description ? `Description: ${clip(repo.description, 400)}` : '',
+          repo.languages?.length ? `Languages, most used first: ${repo.languages.slice(0, 8).join(', ')}` : '',
+          repo.topics?.length ? `Topics: ${repo.topics.slice(0, 12).join(', ')}` : '',
+          repo.pushedAt ? `Last pushed: ${repo.pushedAt}` : '',
+          repo.readme ? ['', '### README', clip(repo.readme, 14_000)].join('\n') : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : '',
+    source.notes?.trim() ? ['', '## What the applicant says about it', clip(source.notes, 4000)].join('\n') : '',
+    source.kind ? `\nDraft it as a "${source.kind}" entry.` : '',
+    '',
+    storeEvidence(data),
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** The parts of a repository a prompt can use. Mirrors `RepoFacts` loosely. */
+export interface RepoSummary {
+  name: string;
+  description?: string;
+  readme?: string;
+  languages?: string[];
+  topics?: string[];
+  pushedAt?: string;
+}
+
+/**
+ * Another way to say a line that already exists.
+ *
+ * Different from drafting an entry: the fact is settled and only the wording is
+ * in question, so the model is given the line, its siblings, and an explicit
+ * instruction not to change what is being claimed. Alternates that quietly say
+ * something stronger than the original are the failure mode here, and they are
+ * hard to spot precisely because they read better.
+ */
+export function phrasingDraftPrompt(
+  data: StoreData,
+  context: { entryTitle: string; current: string; siblings: string[]; angle?: string; count?: number },
+): string {
+  const count = Math.min(Math.max(context.count ?? 2, 1), 5);
+  return [
+    preamble(data),
+    '',
+    `## Task: write ${count} more ${count === 1 ? 'way' : 'ways'} of saying one line`,
+    'Return only this JSON. No commentary.',
+    '',
+    '```json',
+    '{ "variants": [ { "label": "short name", "text": "the line" } ] }',
+    '```',
+    '',
+    '## Rules for this task',
+    '- Same claim, different wording. Do not make it stronger, broader, or more senior than the line you were given.',
+    '- No new facts: no technologies, numbers, scale, or outcomes that are not already in it.',
+    '- Each one should be usefully different — a different emphasis or length, not a synonym swap. If you cannot find a real second angle, return fewer.',
+    '- Keep it to one line. These sit in a bullet list on one page.',
+    context.angle?.trim() ? `- The applicant asked for: ${clip(context.angle, 300)}` : '',
+    '',
+    `## The line, from "${clip(context.entryTitle, 120)}"`,
+    clip(context.current, 1200),
+    context.siblings.length > 0
+      ? ['', '## Ways it is already said, which yours must not duplicate', ...context.siblings.map((s) => `- ${clip(s, 300)}`)].join('\n')
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}

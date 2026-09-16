@@ -1323,3 +1323,6 @@ tbody tr { cursor: pointer; }
 
 /* The badge and its actions on one line, above an answer box. */
 .row-tight { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* A prompt shown when the AI is off, so you can see what it would have asked. */
+.prompt-dump { max-height: 40vh; overflow: auto; white-space: pre-wrap; font-size: var(--t-sm); background: var(--panel-sunk); padding: 12px; border-radius: var(--radius-sm); }
