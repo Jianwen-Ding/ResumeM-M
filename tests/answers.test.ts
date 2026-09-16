@@ -135,3 +135,67 @@ describe('letterId', () => {
     expect(letterId(undefined, undefined, new Date('2026-03-04T00:00:00Z'))).toBe('2026-03-04');
   });
 });
+
+/*
+ * The questions applicant tracking systems actually ask, in the wordings they
+ * actually use.
+ *
+ * The premise of the bank is that application questions repeat, so the point is
+ * whether a stored answer is found again when the next system asks the same
+ * thing in its own words — and, just as much, whether it is kept away from a
+ * question that merely looks similar. Sponsorship and work authorization are
+ * the pair that matters: they share a subject, they have opposite answers, and
+ * confusing them puts a false declaration on an application.
+ */
+describe('the same question, asked by another system', () => {
+  const ask = (question: string, stored: string) =>
+    matchAnswer(question, [
+      { id: 'a', question: stored, variants: [{ id: 'v', text: 'The stored answer.' }], default: 'v' },
+    ] as never);
+
+  const reuses = (question: string, stored: string) => Boolean(ask(question, stored).answer);
+
+  it('finds the answer again when the same question comes back word for word', () => {
+    for (const question of [
+      'Why do you want to work here?',
+      'Why us?',
+      'Describe a technical project you are proud of.',
+      'Will you now or in the future require sponsorship?',
+    ]) {
+      expect(reuses(question, question), question).toBe(true);
+    }
+  });
+
+  it('finds it through the wording each system puts round it', () => {
+    expect(reuses('Why do you want to work at Acme?', 'Why do you want to work here?')).toBe(true);
+    expect(
+      reuses(
+        'Will you now or in the future require sponsorship for employment visa status?',
+        'Will you now or in the future require sponsorship?',
+      ),
+    ).toBe(true);
+    expect(
+      reuses('Do you require visa sponsorship now or in the future?', 'Will you now or in the future require sponsorship?'),
+    ).toBe(true);
+    expect(reuses('Tell us about a project you are proud of.', 'Describe a technical project you are proud of.')).toBe(true);
+  });
+
+  it('keeps sponsorship and work authorization apart, which have opposite answers', () => {
+    expect(reuses('Are you legally authorized to work in the United States?', 'Will you now or in the future require sponsorship?')).toBe(false);
+    expect(reuses('Will you now or in the future require sponsorship?', 'Are you legally authorized to work in the United States?')).toBe(false);
+  });
+
+  it('does not answer a question it has never been asked', () => {
+    expect(reuses('What are your salary expectations?', 'Why do you want to work here?')).toBe(false);
+    expect(reuses('Describe a time you failed.', 'Describe a technical project you are proud of.')).toBe(false);
+  });
+
+  it('only calls it confident when the question is near enough to send as-is', () => {
+    expect(ask('Why do you want to work here?', 'Why do you want to work here?').confident).toBe(true);
+    // Matched, so it is offered — but the company is named in one and not the
+    // other, which is exactly the sort of thing to read before sending.
+    const loose = ask('Why do you want to work at Acme?', 'Why do you want to work here?');
+    expect(loose.answer).toBeTruthy();
+    expect(loose.confident).toBe(false);
+  });
+});

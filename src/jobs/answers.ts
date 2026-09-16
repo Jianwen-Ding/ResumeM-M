@@ -15,6 +15,16 @@ const STOP = new Set([
   'how', 'would', 'will', 'can', 'please', 'describe', 'tell', 'us', 'if', 'any', 'have', 'has',
 ]);
 
+/** Every word, common ones included: the fallback when filtering leaves nothing. */
+function words(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .split(/[^a-z0-9+#]+/)
+      .filter(Boolean),
+  );
+}
+
 function terms(s: string): Set<string> {
   return new Set(
     s
@@ -30,8 +40,25 @@ function terms(s: string): Set<string> {
  * plain intersection-over-union would punish it for the length difference.
  */
 export function questionSimilarity(a: string, b: string): number {
-  const ta = terms(a);
-  const tb = terms(b);
+  let ta = terms(a);
+  let tb = terms(b);
+
+  /*
+   * A question made entirely of ordinary words reduces to nothing, and scored
+   * zero against everything — including itself. "Why us?" is the standing
+   * example and a question real forms really ask: an answer stored for it could
+   * never be found again, because the next "Why us?" did not match the last
+   * one.
+   *
+   * So when either side empties out, both are compared as written instead.
+   * That is enough for the same question to recognise itself without letting it
+   * match a different one: "Why us?" against "What are your salary
+   * expectations?" still shares nothing at all.
+   */
+  if (ta.size === 0 || tb.size === 0) {
+    ta = words(a);
+    tb = words(b);
+  }
   if (ta.size === 0 || tb.size === 0) return 0;
 
   let shared = 0;
