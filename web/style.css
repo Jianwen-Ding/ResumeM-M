@@ -1,40 +1,52 @@
 /*
  * One visual system, shared with the browser extension's card and popup.
  *
- * The tool is a workbench: dense, quiet, and legible for a long session. So the
- * palette is mostly neutral, colour is reserved for state that matters (fits /
- * does not fit, included / excluded, where a sentence came from), and the type
- * scale is small and consistent rather than decorative.
+ * It follows Google's: the Workspace greys and blue, Material's shapes (pill
+ * buttons, 8px surfaces, 4px fields), state layers instead of colour changes
+ * on hover, and elevation as a pair of shadows rather than one soft blur. The
+ * point is not decoration — it is that this tool sits beside Docs and Drive
+ * all day, and should not look like a stranger next to them.
+ *
+ * The tool is still a workbench: dense, quiet, legible for a long session.
+ * Colour is reserved for state that matters (fits / does not fit, included /
+ * excluded, where a sentence came from).
  */
 
 :root {
-  /* Neutrals — a single slightly-cool ramp, so greys never clash. */
-  --bg: #f5f6f8;
+  /* Google's greys and accents: the Workspace palette, so the tool sits next
+     to Docs and Drive without looking like a stranger. */
+  --bg: #f8f9fa;
   --panel: #fff;
-  --panel-sunk: #fafbfc;
-  --ink: #17181c;
-  --ink-soft: #3d4049;
-  --muted: #676b77;
-  --faint: #969aa6;
-  --line: #e3e5ea;
-  --line-soft: #eef0f3;
+  --panel-sunk: #f8f9fa;
+  --ink: #202124;
+  --ink-soft: #3c4043;
+  --muted: #5f6368;
+  --faint: #80868b;
+  --line: #dadce0;
+  --line-soft: #f1f3f4;
 
-  --accent: #2f5fd0;
-  --accent-hover: #2650b4;
-  --accent-soft: #eaf0fd;
-  --accent-line: #c8d8f7;
+  --accent: #1a73e8;
+  --accent-hover: #1967d2;
+  --accent-soft: #e8f0fe;
+  --accent-line: #aecbfa;
 
-  --good: #146c3f;
-  --good-bg: #ecf7f0;
-  --good-line: #c6e3d2;
-  --bad: #a9231c;
-  --bad-bg: #fdeeec;
-  --bad-line: #f1cbc7;
-  --warn: #7d5700;
-  --warn-bg: #fff9ec;
-  --warn-line: #eddfba;
-  --human: #5b32a8;
-  --human-bg: #f3effc;
+  --good: #188038;
+  --good-bg: #e6f4ea;
+  --good-line: #ceead6;
+  --bad: #d93025;
+  --bad-bg: #fce8e6;
+  --bad-line: #f6aea9;
+  --warn: #b06000;
+  --warn-bg: #fef7e0;
+  --warn-line: #feefc3;
+  --human: #8430ce;
+  --human-bg: #f3e8fd;
+
+  /* Material state layers: hover and pressed are tints of the ink or the
+     accent, never a different colour. */
+  --state-hover: rgba(60, 64, 67, .08);
+  --state-press: rgba(60, 64, 67, .12);
+  --accent-hover-layer: rgba(26, 115, 232, .08);
 
   /* Type scale. Four sizes carry the whole interface. */
   --t-xs: 11px;
@@ -44,12 +56,14 @@
   --t-lg: 16px;
 
   --radius: 8px;
-  --radius-sm: 6px;
+  --radius-sm: 4px;
   --radius-pill: 999px;
 
-  --shadow-sm: 0 1px 2px rgba(20, 22, 30, .05);
-  --shadow-md: 0 4px 16px rgba(20, 22, 30, .10);
-  --shadow-lg: 0 18px 52px rgba(20, 22, 30, .22);
+  /* Material elevation: shadows are a pair — a tight key light and a wide
+     ambient one — not a single soft blur. */
+  --shadow-sm: 0 1px 2px 0 rgba(60, 64, 67, .30), 0 1px 3px 1px rgba(60, 64, 67, .15);
+  --shadow-md: 0 1px 2px 0 rgba(60, 64, 67, .30), 0 2px 6px 2px rgba(60, 64, 67, .15);
+  --shadow-lg: 0 4px 4px 0 rgba(60, 64, 67, .30), 0 8px 12px 6px rgba(60, 64, 67, .15);
 
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -58,8 +72,10 @@
 
 body {
   margin: 0;
-  font: var(--t-base)/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-        "Helvetica Neue", Arial, sans-serif;
+  /* Google Sans where it exists (Chrome OS, Workspace machines), Roboto next,
+     then the platform face. */
+  font: var(--t-base)/1.5 "Google Sans Text", "Google Sans", Roboto, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
   color: var(--ink);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -71,7 +87,7 @@ header {
   align-items: center;
   gap: 16px;
   padding: 0 18px;
-  height: 48px;
+  height: 56px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   position: sticky;
@@ -80,10 +96,11 @@ header {
 }
 
 h1 {
-  font-size: var(--t-md);
+  font-size: var(--t-lg);
   margin: 0;
-  letter-spacing: -.01em;
-  font-weight: 650;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--muted);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -100,19 +117,21 @@ h1::before {
 }
 h2 { font-size: var(--t-base); margin: 0; font-weight: 650; letter-spacing: -.01em; }
 
-nav { display: flex; gap: 2px; }
+/* Drive's navigation chips: pill-shaped, tinted when selected. */
+nav { display: flex; gap: 4px; }
 nav button {
   background: none;
   border: 0;
-  padding: 5px 11px;
-  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
   color: var(--muted);
   font-size: var(--t-md);
-  transition: background .12s, color .12s;
+  font-weight: 500;
+  transition: background .15s, color .15s;
 }
-nav button:hover { background: var(--line-soft); color: var(--ink-soft); }
-nav button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+nav button:hover { background: var(--state-hover); color: var(--ink-soft); }
+nav button.active { background: var(--accent-soft); color: #174ea6; }
 
 .status { margin-left: auto; color: var(--muted); font-size: 12px; max-width: 40ch; text-align: right; }
 .status.err { color: var(--bad); }
@@ -139,13 +158,14 @@ nav button.active { background: var(--accent-soft); color: var(--accent); font-w
 
 /* The PDF preview. Chrome's viewer chrome is hidden via URL parameters; the
    frame supplies the page-like surround instead. */
+/* Docs' canvas: a light grey field around a white page, not a dark lightbox. */
 .preview-frame {
   position: relative;
   height: 100%;
   min-height: 70vh;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #53535c;
+  border-radius: var(--radius);
+  background: #f1f3f4;
   overflow: hidden;
 }
 .preview-frame.tall { height: calc(100vh - 190px); }
@@ -165,25 +185,28 @@ nav button.active { background: var(--accent-soft); color: var(--accent); font-w
 .pdf-page {
   display: block;
   background: #fff;
-  border-radius: 2px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .18);
+  border-radius: 1px;
+  /* The page shadow Docs uses: present, but not a spotlight. */
+  box-shadow: 0 1px 3px 0 rgba(60, 64, 67, .30), 0 4px 8px 3px rgba(60, 64, 67, .15);
   max-width: 100%;
 }
-.preview-empty { z-index: 3; }
-.preview-frame.loaded .preview-empty { display: none; }
 .preview-empty {
   position: absolute;
   inset: 0;
+  z-index: 3;
   display: grid;
   place-items: center;
-  color: #d8d8de;
-  font-size: 13px;
+  color: var(--muted);
+  font-size: var(--t-md);
   pointer-events: none;
 }
 .preview-frame.loaded .preview-empty { display: none; }
 
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 .toolbar .grow { flex: 1 1 auto; }
+/* A document picker, not a paragraph: keep it to a readable width so the rest
+   of the toolbar fits on one line. */
+#resume-select, #history-resume { max-width: 260px; }
 .sticky-toolbar {
   position: sticky;
   top: 54px;
@@ -193,97 +216,129 @@ nav button.active { background: var(--accent-soft); color: var(--accent); font-w
   margin-bottom: 6px;
 }
 
-button, select, input[type=text], textarea {
+/* Material text fields: a quiet outline that thickens to the accent on focus,
+   rather than a glow around it. */
+select, input[type=text], textarea {
   font: inherit;
-  padding: 6px 10px;
+  padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel);
   color: var(--ink);
-  transition: border-color .12s, background .12s, box-shadow .12s;
+  transition: border-color .15s, box-shadow .15s;
 }
+input[type=text]:hover, textarea:hover, select:hover { border-color: var(--faint); }
 input[type=text]:focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 0;
-  border-color: var(--accent-line);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 select { padding-right: 26px; }
-button { cursor: pointer; white-space: nowrap; box-shadow: var(--shadow-sm); }
-button:hover { border-color: #ccced6; background: var(--panel-sunk); }
-button:active { transform: translateY(.5px); }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/*
+ * Material buttons. Shape carries the hierarchy: filled for the one action
+ * that matters, outlined for the rest, text for the incidental. Hover is a
+ * state layer over the surface — a tint, never a different colour — and the
+ * pill shape is what makes them read as Google's.
+ */
+button {
+  font: inherit;
+  font-weight: 500;
+  letter-spacing: .01em;
+  padding: 7px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative;
+  transition: background .15s, border-color .15s, box-shadow .15s;
+}
+button:hover { background: var(--accent-hover-layer); border-color: var(--line); }
+button:active { background: rgba(26, 115, 232, .12); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button.primary {
   background: var(--accent);
   color: #fff;
-  border-color: var(--accent);
-  font-weight: 550;
+  border-color: transparent;
+  box-shadow: var(--shadow-sm);
 }
-button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-button.danger:hover { color: var(--bad); border-color: var(--bad-line); background: var(--bad-bg); }
-button.tiny { padding: 3px 8px; font-size: var(--t-sm); color: var(--muted); box-shadow: none; }
-button.tiny:hover { color: var(--ink); }
+button.primary:hover { background: var(--accent-hover); box-shadow: var(--shadow-md); }
+button.danger { color: var(--bad); }
+button.danger:hover { background: rgba(217, 48, 37, .08); border-color: var(--line); }
+
+/* Text buttons: no container until you touch them. */
+button.tiny {
+  padding: 4px 10px;
+  font-size: var(--t-sm);
+  color: var(--muted);
+  border-color: transparent;
+  background: none;
+}
+button.tiny:hover { color: var(--ink); background: var(--state-hover); border-color: transparent; }
 button.link {
   border: 0;
   background: none;
   color: var(--accent);
-  padding: 3px 6px;
+  padding: 4px 8px;
   font-size: var(--t-sm);
-  box-shadow: none;
+  border-radius: var(--radius-pill);
   font-weight: 500;
 }
-button.link:hover { background: var(--accent-soft); }
-button:disabled { opacity: .42; cursor: default; }
-button:disabled:hover { background: var(--panel); border-color: var(--line); }
+button.link:hover { background: var(--accent-hover-layer); }
+button:disabled { opacity: .38; cursor: default; }
+button:disabled:hover { background: var(--panel); border-color: var(--line); box-shadow: none; }
+button.primary:disabled:hover { background: var(--accent); }
 
 .hint { color: var(--muted); font-size: 12px; margin: 0; }
 .faint { color: var(--faint); font-size: 11px; }
 code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; }
 
+/* Material banner: a tinted surface, no stripe down the side. */
 .fit {
-  padding: 8px 11px;
-  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  border-radius: var(--radius);
   margin-bottom: 10px;
   font-size: var(--t-md);
   background: var(--good-bg);
-  border: 1px solid var(--good-line);
-  border-left: 3px solid var(--good);
-  color: var(--good);
+  border: 1px solid transparent;
+  color: #0d652d;
   font-weight: 500;
 }
-.fit.bad { background: var(--bad-bg); border-color: var(--bad-line); border-left-color: var(--bad); color: var(--bad); }
-.fit.idle { background: var(--panel); border-color: var(--line); border-left-color: var(--line); color: var(--muted); font-weight: 400; }
+.fit.bad { background: var(--bad-bg); color: #b31412; }
+.fit.idle { background: var(--line-soft); color: var(--muted); font-weight: 400; }
 .fit .adj { color: var(--warn); }
 
 /* The preview recompiles on its own, so the toolbar says whether what you are
    looking at is current rather than offering a button to make it current. */
+/* Docs says "All changes saved in Drive" as quiet text, not as a badge. Same
+   here: the state matters, the decoration does not. */
 .live {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 4px 10px 4px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: var(--t-sm);
-  font-weight: 560;
+  font-weight: 500;
   cursor: default;
   user-select: none;
-  background: var(--good-bg);
-  color: var(--good);
-  box-shadow: inset 0 0 0 1px var(--good-line);
+  background: none;
+  color: var(--muted);
 }
+.live:hover { background: var(--state-hover); }
 .live::before {
   content: "";
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--good);
 }
-.live.working {
-  background: var(--accent-soft);
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent-line, transparent);
-}
-.live.working::before { animation: live-pulse 1s ease-in-out infinite; }
-.live.bad { background: var(--bad-bg); color: var(--bad); box-shadow: inset 0 0 0 1px var(--bad-line); }
+.live.working { color: var(--accent); }
+.live.working::before { background: currentColor; animation: live-pulse 1s ease-in-out infinite; }
+.live.bad { color: var(--bad); }
+.live.bad::before { background: currentColor; }
 
 @keyframes live-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -293,8 +348,7 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .warnings { font-size: 12px; margin-bottom: 10px; }
 .warnings div {
   background: var(--warn-bg);
-  border: 1px solid var(--warn-line);
-  border-left: 3px solid #d9a93a;
+  border: 1px solid transparent;
   color: var(--warn);
   padding: 6px 9px;
   border-radius: var(--radius-sm);
@@ -428,20 +482,26 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 /* Selectable items inside a list bullet — coursework, awards — picked the
    same way skills are. */
 .chip-set { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 2px 0 6px 23px; }
+/* Material filter chips: outlined when off, tinted and outlined in the accent
+   when on — the same shape Drive uses for its filters. */
 .chip-toggle {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 2px 9px;
-  font-size: 12.5px;
+  border-radius: 8px;
+  padding: 4px 11px;
+  font-size: var(--t-md);
+  font-weight: 500;
   cursor: pointer;
   user-select: none;
   background: var(--panel);
   color: var(--muted);
+  transition: background .15s, border-color .15s, color .15s;
 }
-.chip-toggle.on { background: var(--accent-soft); border-color: #c6d4f2; color: var(--accent); }
+.chip-toggle:hover { background: var(--state-hover); }
+.chip-toggle.on { background: var(--accent-soft); border-color: var(--accent-soft); color: #174ea6; }
+.chip-toggle.on:hover { background: #d2e3fc; }
 .chip-toggle input { display: none; }
 .chip-toggle .x { color: var(--faint); font-size: 13px; line-height: 1; }
 .chip-toggle .x:hover { color: var(--bad); }
@@ -628,8 +688,7 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .commit {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius);
   padding: 8px 10px;
   cursor: pointer;
 }
@@ -687,9 +746,8 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
   line-height: 1.55;
   color: var(--ink-soft);
   background: var(--good-bg);
-  border: 1px solid var(--good-line);
-  border-left: 3px solid var(--good);
-  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
   padding: 9px 11px;
   margin: -2px 0 12px;
 }
@@ -714,8 +772,7 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .draft-card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 10px 12px;
   cursor: pointer;
 }
