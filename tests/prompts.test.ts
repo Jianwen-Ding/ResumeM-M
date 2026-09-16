@@ -47,9 +47,16 @@ describe('every prompt', () => {
     }
   });
 
-  it('says what to do when there are no voice notes yet', () => {
-    const bare = { ...data, voice: '' };
-    expect(feedbackPrompt(bare, resolved)).toContain('No voice notes recorded yet');
+  it('falls back to generic guidance when there is no writing to learn from', () => {
+    const bare = { ...data, voice: '', coverLetters: [], answers: [], samples: [], entries: [] };
+    expect(feedbackPrompt(bare, resolved)).toContain('No samples of their writing are stored yet');
+  });
+
+  it('shows the person’s own writing instead of a self-description', () => {
+    // The point of the change: voice comes from what they actually wrote —
+    // a sent letter, here — not from a note describing their style.
+    expect(feedbackPrompt(data, resolved)).toContain('Dear Acme, here is a letter I wrote before');
+    expect(feedbackPrompt(data, resolved)).toContain('Match its register, sentence length');
   });
 });
 

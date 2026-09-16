@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
 import { Repo } from './git/repo.js';
+import { resolveStoreDir, seedStore } from './model/location.js';
 import { buildBundle, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
@@ -11,7 +12,8 @@ import { compileResume, OverflowError } from './render/compile.js';
 import { startServer } from './server/index.js';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dataDir = process.env.RMM_DATA ?? path.join(projectRoot, 'data');
+const dataDir = resolveStoreDir(projectRoot);
+seedStore(path.join(projectRoot, 'data'), dataDir);
 
 const USAGE = `rmm — resume mix-and-match
 
@@ -27,7 +29,11 @@ const USAGE = `rmm — resume mix-and-match
   rmm serve [--port 4600]         Start the editor GUI and extension API
 
 Environment:
-  RMM_DATA   Path to the store (default: ./data)
+  RMM_DATA           Where the store lives. Defaults to ~/.resumem-m/store,
+                     seeded from the bundled example on first run. The store is
+                     its own git repository, separate from this source tree.
+  RMM_AUTOCOMMIT=0   Do not commit store changes.
+  RMM_AI=0           Keep the AI off whatever config.yaml says.
 `;
 
 function arg(argv: string[], name: string): string | undefined {

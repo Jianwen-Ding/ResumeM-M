@@ -1261,6 +1261,8 @@ async function askBulletFeedback(entry, bullet) {
 
 const STATUSES = ['interested', 'applied', 'oa', 'interview', 'offer', 'rejected', 'ghosted', 'withdrawn'];
 
+let openApplicationId = null;
+
 async function loadApplications() {
   const { applications, stats } = await api('/applications');
 
@@ -1301,35 +1303,138 @@ async function loadApplications() {
         setStatus('Status updated');
         loadApplications();
       };
-      return el('tr', {}, [
+      const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
         el('td', { textContent: a.appliedAt?.slice(0, 10) ?? '' }),
         el('td', { textContent: a.company }),
         el('td', { textContent: a.role }),
         el('td', {}, [sel]),
-        el('td', { className: 'mono', textContent: a.resumeId ?? '' }),
-        el('td', { className: 'mono', textContent: a.snapshotDir ?? '' }),
+        el('td', {}, [
+          a.coverLetter ? el('span', { className: 'chip count', textContent: 'letter' }) : null,
+          a.answers?.length
+            ? el('span', { className: 'chip count', textContent: plural(a.answers.length, 'answer') })
+            : null,
+        ].filter(Boolean)),
         el('td', {}, [
           el('button', {
             className: 'tiny danger',
             textContent: 'Remove',
-            onclick: async () => {
+            onclick: async (ev) => {
+              ev.stopPropagation();
               if (!(await confirmModal(`Remove ${a.company}?`, 'The tracker row goes; the files on disk stay.'))) return;
               await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+              if (openApplicationId === a.id) openApplicationId = null;
               loadApplications();
             },
           }),
         ]),
       ]);
+
+      // Clicking the row opens the full record; the status dropdown and the
+      // remove button stop the event so they still work on their own.
+      row.onclick = () => openApplication(a.id);
+      sel.onclick = (ev) => ev.stopPropagation();
+      return row;
     });
 
   wrap.replaceChildren(
     el('table', {}, [
       el('thead', {}, [
-        el('tr', {}, ['Date', 'Company', 'Role', 'Status', 'Resume', 'Files', ''].map((h) => el('th', { textContent: h }))),
+        el('tr', {}, ['Date', 'Company', 'Role', 'Status', 'Sent', ''].map((h) => el('th', { textContent: h }))),
       ]),
       el('tbody', {}, rows),
     ]),
   );
+}
+
+/** Everything that was actually submitted for one application. */
+async function openApplication(id) {
+  openApplicationId = id;
+  const panel = $('#app-detail');
+  setChildren(panel, el('p', { className: 'hint', textContent: 'Loading…' }));
+
+  try {
+    const { application: a, resume, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
+
+    const sections = [];
+
+    sections.push(
+      el('div', { className: 'sect' }, [
+        el('h4', {}, 'Resume sent'),
+        el('div', { className: 'file', textContent: resume ? `${resume.label} (${resume.id})` : (a.resumeId ?? '—') }),
+        resume?.extends
+          ? el('div', { className: 'hint', textContent: `Built on ${resume.extends}.` })
+          : null,
+      ]),
+    );
+
+    if (letter?.body?.trim()) {
+      sections.push(
+        el('div', { className: 'sect' }, [
+          el('h4', {}, 'Cover letter'),
+          el('div', { className: 'prose', textContent: letter.body }),
+        ]),
+      );
+    }
+
+    if (a.answers?.length) {
+      sections.push(
+        el('div', { className: 'sect' }, [
+          el('h4', {}, `Answers (${a.answers.length})`),
+          ...a.answers.map((qa) =>
+            el('div', { className: 'qa' }, [
+              el('div', { className: 'q', textContent: qa.question }),
+              el('div', { className: 'prose', textContent: qa.answer }),
+            ]),
+          ),
+        ]),
+      );
+    }
+
+    if (files.length) {
+      sections.push(
+        el('div', { className: 'sect' }, [
+          el('h4', {}, 'Files'),
+          ...files.map((f) => el('div', { className: 'file', textContent: f })),
+        ]),
+      );
+    }
+
+    if (a.history?.length) {
+      sections.push(
+        el('div', { className: 'sect' }, [
+          el('h4', {}, 'History'),
+          el(
+            'div',
+            { className: 'timeline' },
+            a.history.map((h) =>
+              el('div', { className: 'tl' }, [
+                el('span', { className: 'when', textContent: h.at?.slice(0, 10) ?? '' }),
+                el('span', { textContent: `${h.status}${h.note ? ` — ${h.note}` : ''}` }),
+              ]),
+            ),
+          ),
+        ]),
+      );
+    }
+
+    if (a.notes?.trim()) {
+      sections.push(el('div', { className: 'sect' }, [el('h4', {}, 'Notes'), el('div', { className: 'prose', textContent: a.notes })]));
+    }
+
+    setChildren(
+      panel,
+      el('h3', { textContent: a.role }),
+      el('div', { className: 'sub' }, [
+        document.createTextNode(a.company),
+        a.url ? document.createTextNode(' · ') : null,
+        a.url ? el('a', { href: a.url, target: '_blank', textContent: 'posting' }) : null,
+      ]),
+      ...sections,
+    );
+  } catch (err) {
+    setChildren(panel, el('div', { className: 'err', textContent: err.message }));
+  }
+  loadApplications();
 }
 
 async function addApplication() {
@@ -1643,6 +1748,13 @@ async function completeDraft(draft, notes) {
 async function loadLetters() {
   const [letters, store] = await Promise.all([api('/letters'), api('/store')]);
 
+  // How often each stored question has actually gone out, so the bank shows
+  // which answers are pulling their weight.
+  const usedBy = {};
+  for (const app of store.applications ?? []) {
+    for (const qa of app.answers ?? []) usedBy[qa.question] = (usedBy[qa.question] ?? 0) + 1;
+  }
+
   $('#letters').replaceChildren(
     letters.length === 0
       ? el('div', { className: 'empty' }, [
@@ -1658,6 +1770,20 @@ async function loadLetters() {
                 el('b', { textContent: l.title }),
                 el('span', { className: 'faint', textContent: l.createdAt?.slice(0, 10) ?? '' }),
                 el('span', { style: 'flex:1' }),
+                // A letter written for an application belongs to it; say so,
+                // and link across rather than making the two lists be
+                // cross-read by eye.
+                l.applicationId
+                  ? el('button', {
+                      className: 'link',
+                      textContent: 'application',
+                      title: 'Open the application this was written for',
+                      onclick: () => {
+                        showTab('applications');
+                        openApplication(l.applicationId);
+                      },
+                    })
+                  : null,
                 el('button', { className: 'tiny', textContent: 'Open', onclick: () => editLetter(l) }),
               ]),
               el('div', { className: 'body', textContent: l.body.slice(0, 260) }),
@@ -1678,6 +1804,12 @@ async function loadLetters() {
               el('div', { className: 'row1' }, [
                 el('b', { textContent: a.question }),
                 el('span', { style: 'flex:1' }),
+                usedBy[a.question]
+                  ? el('span', {
+                      className: 'chip count',
+                      textContent: `used in ${plural(usedBy[a.question], 'application')}`,
+                    })
+                  : null,
                 el('span', { className: 'chip count', textContent: plural(a.variants.length, 'version') }),
                 el('button', { className: 'tiny', textContent: 'Edit', onclick: () => editAnswer(a) }),
               ]),
@@ -1765,15 +1897,250 @@ async function editAnswer(item) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Voice — inferred from real writing, not self-description            *
+ * ------------------------------------------------------------------ */
+
+const SAMPLE_KINDS = [
+  { value: 'letter', label: 'Cover letter' },
+  { value: 'resume', label: 'Resume or bullets' },
+  { value: 'answer', label: 'Application answer' },
+  { value: 'other', label: 'Something else you wrote' },
+];
+
+async function loadVoice() {
+  const data = await api('/voice');
+  $('#voice').value = data.voice ?? '';
+  $('#voice-preview').textContent = data.preview;
+
+  // What is actually being sent, and how much of what exists fits.
+  const pct = data.context.available
+    ? Math.min(100, Math.round((data.context.chars / data.context.available) * 100))
+    : 0;
+  setChildren(
+    $('#voice-budget'),
+    data.context.chars === 0
+      ? el('span', {}, 'No samples yet — every request will fall back to generic instructions.')
+      : el('span', {}, `${plural(data.context.used.length, 'sample')} sent to the AI`),
+    el('div', { className: 'bar' }, [el('span', { style: `width:${Math.max(pct, 4)}%` })]),
+    el('span', {
+      className: 'faint',
+      textContent: data.context.available
+        ? `${data.context.chars.toLocaleString()} of ${data.context.available.toLocaleString()} characters`
+        : '',
+    }),
+  );
+
+  // Samples the user pasted in are editable; the rest are shown as what they
+  // are so it is clear the corpus is bigger than this list.
+  const derived = data.context.used.filter((u) => !data.samples.some((x) => x.title === u.title));
+
+  setChildren(
+    $('#samples'),
+    data.samples.length === 0 && derived.length === 0
+      ? el('div', { className: 'empty' }, [
+          el('b', {}, 'Nothing to learn from yet'),
+          'Paste in an old resume or a cover letter you liked. One or two is enough.',
+        ])
+      : el('div', { className: 'card-list' }, [
+          ...data.samples.map((sample) =>
+            el('div', { className: 'mini-card' }, [
+              el('div', { className: 'row1' }, [
+                el('b', { textContent: sample.title }),
+                el('span', { className: 'chip count sample-kind', textContent: sample.kind }),
+                el('span', { style: 'flex:1' }),
+                el('button', { className: 'tiny', textContent: 'Edit', onclick: () => editSample(sample) }),
+                el('button', {
+                  className: 'tiny danger',
+                  textContent: 'Remove',
+                  onclick: async () => {
+                    if (!(await confirmModal(`Remove “${sample.title}”?`, 'It stops informing your voice. Nothing else changes.'))) return;
+                    await api(`/voice/samples/${encodeURIComponent(sample.id)}`, { method: 'DELETE' });
+                    loadVoice();
+                  },
+                }),
+              ]),
+              el('div', { className: 'body sample', textContent: sample.text.slice(0, 300) }),
+            ]),
+          ),
+          ...derived.map((u) =>
+            el('div', { className: 'mini-card' }, [
+              el('div', { className: 'row1' }, [
+                el('b', { textContent: u.title }),
+                el('span', { className: 'chip count sample-kind', textContent: u.kind }),
+                el('span', { style: 'flex:1' }),
+                el('span', {
+                  className: 'faint',
+                  textContent: 'already in your store',
+                  title: 'Letters you have sent and answers you have saved count automatically',
+                }),
+              ]),
+            ]),
+          ),
+        ]),
+  );
+}
+
+async function addSample() {
+  const answer = await form('Add a writing sample', [
+    { name: 'title', label: 'What is it?', value: '' },
+    {
+      name: 'kind',
+      label: 'Kind',
+      type: 'select',
+      value: 'letter',
+      options: SAMPLE_KINDS.map((k) => ({ value: k.value, label: k.label })),
+    },
+    { name: 'text', label: 'Paste the text', value: '', multiline: true, tall: true },
+  ], 'It need not relate to any application. Older material is fine — voice changes slowly.');
+  if (!answer?.text?.trim()) return;
+
+  const id = `${slug(answer.title) || 'sample'}-${Date.now().toString(36)}`;
+  await api(`/voice/samples/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ title: answer.title || 'Untitled', kind: answer.kind, text: answer.text }),
+  });
+  setStatus('Sample added');
+  loadVoice();
+}
+
+async function editSample(sample) {
+  const answer = await form(sample.title, [
+    { name: 'title', label: 'What is it?', value: sample.title },
+    {
+      name: 'kind',
+      label: 'Kind',
+      type: 'select',
+      value: sample.kind,
+      options: SAMPLE_KINDS.map((k) => ({ value: k.value, label: k.label })),
+    },
+    { name: 'text', label: 'Text', value: sample.text, multiline: true, tall: true },
+  ]);
+  if (!answer?.text?.trim()) return;
+  await api(`/voice/samples/${encodeURIComponent(sample.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ ...sample, ...answer }),
+  });
+  setStatus('Sample saved');
+  loadVoice();
+}
+
+/* ------------------------------------------------------------------ *
  * Settings                                                            *
  * ------------------------------------------------------------------ */
 
+/**
+ * Presets carry each CLI's own confinement flags as well as its invocation.
+ *
+ * Every one of these tasks is pure text — the prompt already contains
+ * everything to reason about — so the agent is given no tools and no writable
+ * directory. The server additionally runs the child in an empty scratch
+ * directory, so even a CLI with no flags of its own cannot reach your files;
+ * these flags are the second lock, not the only one.
+ */
 const AI_PRESETS = [
-  { label: 'Claude Code', command: 'claude', args: ['-p', '{prompt}'] },
-  { label: 'Codex CLI', command: 'codex', args: ['exec', '{promptText}'] },
-  { label: 'Gemini CLI', command: 'gemini', args: ['-p', '{promptText}'] },
+  {
+    label: 'Claude Code',
+    command: 'claude',
+    // No tools at all, and the only directory it knows about is the scratch one.
+    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch', '{prompt}'],
+  },
+  {
+    label: 'Codex CLI',
+    command: 'codex',
+    // Codex takes a sandbox mode directly; read-only is the strictest.
+    args: ['exec', '--sandbox', 'read-only', '--cd', '{sandbox}', '{promptText}'],
+  },
+  {
+    label: 'Gemini CLI',
+    command: 'gemini',
+    args: ['-p', '{promptText}'],
+  },
   { label: 'Custom…', command: '', args: [] },
 ];
+
+/** Where the store lives, and whether it is backed up anywhere. */
+async function loadStoreSettings() {
+  const info = await api('/config/store');
+  const box = $('#store-settings');
+
+  const remote = el('input', {
+    type: 'text',
+    value: info.remote.url ?? '',
+    placeholder: 'git@github.com:you/my-resume-store.git',
+  });
+  const result = el('div', {
+    className: 'result idle',
+    textContent: info.remote.url
+      ? describeRemote(info.remote)
+      : 'Local only. Nothing leaves this machine.',
+  });
+
+  const setResult = (text, kind = 'idle') => {
+    result.className = `result ${kind}`;
+    result.textContent = text;
+  };
+
+  setChildren(
+    box,
+    el('div', { className: 'lbl', textContent: 'Location' }),
+    el('div', { className: 'mono-path', textContent: info.dir }),
+    el('div', {
+      className: 'hint',
+      style: 'margin-bottom:12px',
+      textContent: info.isRepo
+        ? `Its own git repository, ${plural(info.commits, 'commit')} so far.`
+        : 'Not a git repository yet — it becomes one the first time you save.',
+    }),
+    el('label', { className: 'f' }, [
+      el('div', { className: 'lbl', textContent: 'Backup remote (optional)' }),
+      remote,
+      el('div', {
+        className: 'hint',
+        textContent: 'Create an empty private repository on GitHub, then paste its url here.',
+      }),
+    ]),
+    el('div', { className: 'row' }, [
+      el('button', {
+        textContent: 'Save remote',
+        onclick: async () => {
+          try {
+            const status = await api('/config/store/remote', {
+              method: 'PUT',
+              body: JSON.stringify({ url: remote.value.trim() }),
+            });
+            setResult(status.url ? describeRemote(status) : 'Remote removed. The store is local only.', 'ok');
+          } catch (err) {
+            setResult(err.message, 'bad');
+          }
+        },
+      }),
+      el('button', {
+        className: 'primary',
+        textContent: 'Push now',
+        disabled: !info.remote.url,
+        onclick: async () => {
+          setResult('Pushing…');
+          try {
+            const res = await api('/config/store/push', { method: 'POST' });
+            setResult(res.output, res.ok ? 'ok' : 'bad');
+          } catch (err) {
+            setResult(err.message, 'bad');
+          }
+        },
+      }),
+    ]),
+    result,
+  );
+}
+
+function describeRemote(remote) {
+  if (!remote.tracked) return `${remote.url} — never pushed.`;
+  if (remote.ahead === 0 && remote.behind === 0) return `${remote.url} — up to date.`;
+  const bits = [];
+  if (remote.ahead) bits.push(`${plural(remote.ahead, 'commit')} to push`);
+  if (remote.behind) bits.push(`${plural(remote.behind, 'commit')} behind`);
+  return `${remote.url} — ${bits.join(', ')}.`;
+}
 
 async function loadSettings() {
   const config = await api('/config');
@@ -1845,7 +2212,16 @@ async function loadSettings() {
       : null,
     field('Preset', preset),
     field('Command', command, 'Must be on your PATH.'),
-    field('Arguments', args, '{prompt} is a file holding the prompt; {promptText} inlines it.'),
+    field(
+      'Arguments',
+      args,
+      '{prompt} is a file holding the prompt, {promptText} inlines it, {sandbox} is the scratch directory.',
+    ),
+    el('div', { className: 'sandbox-note' }, [
+      el('b', {}, 'Confined to a scratch directory. '),
+      'The command runs in an empty temporary folder containing only the prompt — never your store, ' +
+        'your home directory, or this source tree. The presets add each CLI’s own read-only flags on top.',
+    ]),
     field('Timeout, seconds', timeout),
     field('LaTeX engine', engine, 'Auto-detect tries tectonic, then latexmk, then pdflatex.'),
     el('label', { className: 'check', style: 'margin:12px 0' }, [
@@ -2131,8 +2507,9 @@ function setupTabs() {
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'history') loadHistory().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'voice') {
-        api('/voice').then(({ voice }) => ($('#voice').value = voice));
+        loadVoice().catch((e) => setStatus(e.message, true));
         loadSettings().catch((e) => setStatus(e.message, true));
+        loadStoreSettings().catch((e) => setStatus(e.message, true));
       }
     };
   }
@@ -2190,9 +2567,11 @@ async function boot() {
       setStatus(err.message, true);
     }
   };
+  $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
   $('#btn-save-voice').onclick = async () => {
     await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: $('#voice').value }) });
-    setStatus('Voice notes saved');
+    setStatus('Notes saved');
+    loadVoice();
   };
 
   document.addEventListener('keydown', (e) => {

@@ -11,6 +11,7 @@ import {
   tailorPrompt,
   type TailorContext,
 } from '../ai/prompts.js';
+import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { extractJob, jobPostingScore } from '../jobs/extract.js';
@@ -31,6 +32,7 @@ import type {
   StoreData,
   Variant,
   VariantField,
+  WritingSample,
 } from '../model/types.js';
 import { compileResume, OverflowError } from '../render/compile.js';
 
@@ -296,6 +298,45 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Where the store lives and whether it is backed up anywhere.
+   *
+   * The store is a local git repository by default and stays that way. Pushing
+   * it to GitHub is a deliberate step, not something that happens quietly, and
+   * a resume store is exactly the kind of thing that belongs in a *private*
+   * repository — which is why the reply says so rather than assuming.
+   */
+  api.get(
+    '/config/store',
+    handler(async (_req, res) => {
+      const remote = await repo.remoteStatus();
+      res.json({
+        dir: store.root,
+        isRepo: await repo.isRepo(),
+        commits: (await repo.log(1)).length,
+        remote,
+      });
+    }),
+  );
+
+  api.put(
+    '/config/store/remote',
+    handler(async (req, res) => {
+      const { url } = req.body as { url: string };
+      await repo.ensure();
+      await repo.setRemote(String(url ?? '').trim());
+      res.json(await repo.remoteStatus());
+    }),
+  );
+
+  api.post(
+    '/config/store/push',
+    handler(async (_req, res) => {
+      const result = await repo.push();
+      res.json({ ...result, remote: await repo.remoteStatus() });
+    }),
+  );
+
   /** Run the configured AI command on a trivial prompt, to prove it works. */
   api.post(
     '/config/test-ai',
@@ -323,9 +364,61 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * The voice as it will actually be used: the samples that will be sent, not
+   * a description of them. Showing this is the point — you can see exactly
+   * what the model will read.
+   */
   api.get(
     '/voice',
-    handler(async (_req, res) => res.json({ voice: store.loadVoice() })),
+    handler(async (_req, res) => {
+      const data = store.load();
+      const context = buildVoiceContext(data);
+      res.json({
+        voice: data.voice,
+        samples: data.samples,
+        context: {
+          chars: context.chars,
+          available: context.available,
+          used: context.samples.map((x) => ({ kind: x.kind, title: x.title, chars: x.text.length })),
+        },
+        preview: renderVoiceContext(context),
+      });
+    }),
+  );
+
+  /** Add or replace a writing sample. */
+  api.put(
+    '/voice/samples/:id',
+    handler(async (req, res) => {
+      const body = req.body as Partial<WritingSample>;
+      if (!body.text?.trim()) throw new Error('A sample needs some text');
+
+      const sample: WritingSample = {
+        id: String(req.params.id),
+        title: body.title?.trim() || 'Untitled',
+        kind: body.kind ?? 'other',
+        text: body.text,
+        createdAt: body.createdAt ?? new Date().toISOString(),
+        writtenAt: body.writtenAt,
+        tags: body.tags,
+        archived: body.archived,
+      };
+      await withCommit(repo, autoCommit(), `Add writing sample "${sample.id}"`, () => store.saveSample(sample));
+      res.json(sample);
+    }),
+  );
+
+  api.delete(
+    '/voice/samples/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const removed = await withCommit(repo, autoCommit(), `Remove writing sample "${id}"`, () =>
+        store.deleteSample(id),
+      );
+      if (!removed) throw new Error(`No sample "${id}"`);
+      res.json({ ok: true });
+    }),
   );
 
   api.put(
@@ -366,6 +459,12 @@ export function createApi({ store, repo }: ApiDeps): Router {
         texPath: pdfPath.replace(/\.pdf$/, '.tex'),
         strict: body.strict ?? false,
         engine: store.loadConfig().latex.engine,
+        // This endpoint only ever backs the editor's Preview button, the
+        // master-document view, and the extension's "build resume" step —
+        // never a file that gets attached to an application, so the fast
+        // preview path is safe to use here. It falls back to the trusted
+        // engine on its own if unavailable.
+        mode: 'preview',
       });
 
       res.json({
@@ -376,7 +475,8 @@ export function createApi({ store, repo }: ApiDeps): Router {
         usedPt: result.usedPt,
         availablePt: result.availablePt,
         adjustments: result.adjustments,
-        engine: result.engine,
+        engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
+        fastPath: result.fastPath,
         warnings: result.warnings,
         pdfUrl: `/pdf/${path.basename(pdfPath)}?t=${Date.now()}`,
       });
@@ -714,6 +814,42 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * One application, whole: the resume, the letter, the answers, the files, and
+   * how it has moved. Looking back at an application means seeing what was
+   * actually submitted, not three separate lists that have to be cross-read.
+   */
+  api.get(
+    '/applications/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const data = store.load();
+      const app = data.applications.find((a) => a.id === id);
+      if (!app) throw new Error(`No application "${id}"`);
+
+      const letter =
+        data.coverLetters.find((l) => l.id === app.letterId) ??
+        data.coverLetters.find((l) => l.applicationId === app.id);
+
+      const dir = app.snapshotDir ? path.join(store.outDir(), app.snapshotDir) : undefined;
+      const files =
+        dir && fs.existsSync(dir)
+          ? fs
+              .readdirSync(dir, { withFileTypes: true })
+              .filter((e) => e.isFile())
+              .map((e) => e.name)
+          : [];
+
+      res.json({
+        application: app,
+        resume: app.resumeId ? (store.getResume(app.resumeId) ?? null) : null,
+        letter: letter ?? (app.coverLetter ? { id: null, body: app.coverLetter, title: 'As sent' } : null),
+        files,
+        dir: dir ?? null,
+      });
+    }),
+  );
+
   api.post(
     '/applications',
     handler(async (req, res) => {
@@ -1035,7 +1171,28 @@ export function createApi({ store, repo }: ApiDeps): Router {
 
       // The application record carries the answers, so the history shows what
       // was actually said, not merely that something was sent.
-      const app = { ...result.application, answers: answered.map((q) => ({ question: q.question, answer: q.answer })) };
+      // File the letter in `letters/` too, tagged with the application, so the
+      // letters view can be read either as a library or per application.
+      let letterId: string | undefined;
+      if (draft.coverLetter.required && draft.coverLetter.body.trim()) {
+        letterId = `${new Date().toISOString().slice(0, 10)}-${slug(draft.company)}`;
+        const letter: CoverLetter = {
+          id: letterId,
+          title: `${draft.role} — ${draft.company}`,
+          company: draft.company,
+          role: draft.role,
+          createdAt: new Date().toISOString(),
+          body: draft.coverLetter.body,
+          applicationId: result.application.id,
+        };
+        store.saveCoverLetter(letter);
+      }
+
+      const app = {
+        ...result.application,
+        answers: answered.map((q) => ({ question: q.question, answer: q.answer })),
+        letterId,
+      };
       app.history = [
         ...(app.history ?? []),
         {

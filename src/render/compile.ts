@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LayoutOptions, ResolvedResume } from '../model/types.js';
+import { compileFast, hasFastPath } from './fastCompile.js';
 import { renderLatex } from './latex.js';
 
 const run = promisify(execFile);
@@ -41,6 +42,8 @@ export interface CompileResult extends FitReport {
   warnings: string[];
   /** Tail of the LaTeX log, kept for when a compile fails. */
   log?: string;
+  /** True when the precompiled-format preview path produced this PDF. */
+  fastPath: boolean;
 }
 
 let resolvedEngine: Engine | undefined;
@@ -257,6 +260,17 @@ export interface CompileOptions {
   engine?: Engine;
   /** Cap on recompiles while auto-fitting. Each is roughly half a second. */
   maxAttempts?: number;
+  /**
+   * 'final' (the default) always compiles with the detected, unmodified
+   * engine — tectonic, then latexmk, then pdflatex — the trusted path for
+   * anything that leaves the machine: `rmm build`, an application bundle.
+   *
+   * 'preview' uses a precompiled-format fast path when one is available
+   * (see fastCompile.ts), for the editor's live preview and the extension's
+   * "build resume" step, and falls back to the trusted engine automatically
+   * if the fast path is missing or fails on a particular document.
+   */
+  mode?: 'preview' | 'final';
 }
 
 export class OverflowError extends Error {
@@ -288,6 +302,13 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   const base = resume.layout;
   const maxAttempts = opts.maxAttempts ?? 8;
 
+  // The fast path is only ever a preview convenience. If it is unavailable, or
+  // errors on this particular document, every attempt silently falls back to
+  // the trusted engine — a resume must always compile correctly, with or
+  // without the shortcut.
+  const wantFast = opts.mode === 'preview' && (await hasFastPath());
+  let usedFast = false;
+
   type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string };
   let attemptsLeft = maxAttempts;
 
@@ -295,6 +316,32 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     attemptsLeft--;
     const layout = t === 0 ? base : layoutAt(base, t);
     const tex = renderLatex({ ...resume, layout });
+
+    if (wantFast) {
+      try {
+        const raw = await compileFast(resume, layout);
+        const m = measure(raw.aux, layout, 1);
+
+        // Self-consistency guard: the reported page count and the measured
+        // content height come from the same run and must roughly agree. On
+        // rare pathological layouts (a margin so large the text block is
+        // shorter than a single line) a raw `pdftex -fmt=` invocation has
+        // been observed to under-report the page break count while the
+        // height measurement itself stays correct — i.e. the two halves of
+        // its own answer contradict each other. That is reason enough to
+        // distrust the shortcut for this one attempt rather than ship a
+        // number nothing else confirms.
+        const perPagePt = textHeightIn(layout) * PT_PER_IN;
+        const minPlausiblePages = Math.max(1, Math.ceil(m.usedPt / perPagePt - 1e-6));
+        if (m.pages + 1 >= minPlausiblePages) {
+          usedFast = true;
+          return { layout, raw, m, tex };
+        }
+        // Falls through to the trusted engine below.
+      } catch {
+        // Fall through to the trusted engine for this attempt.
+      }
+    }
     const raw = await compileOnce(tex, engine);
     return { layout, raw, m: measure(raw.aux, layout, 1), tex };
   };
@@ -368,6 +415,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     engine,
     warnings: resume.warnings,
     log: tail(best.raw.log, 30),
+    fastPath: usedFast,
   };
 }
 

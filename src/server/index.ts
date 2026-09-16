@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Repo } from '../git/repo.js';
+import { resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
 import { createApi, createPdfRouter } from './api.js';
 
@@ -18,7 +19,12 @@ export interface ServerOptions {
 export async function startServer(opts: ServerOptions = {}) {
   const port = opts.port ?? Number(process.env.PORT ?? 4600);
   const host = opts.host ?? '127.0.0.1';
-  const dataDir = opts.dataDir ?? process.env.RMM_DATA ?? path.join(projectRoot, 'data');
+  const dataDir = opts.dataDir ?? resolveStoreDir(projectRoot);
+  // A fresh store starts as a copy of the bundled example, so the app is
+  // usable on first run without anyone hand-writing YAML.
+  if (seedStore(path.join(projectRoot, 'data'), dataDir)) {
+    console.log(`Created a new store at ${dataDir} from the bundled example.`);
+  }
 
   const store = new Store(dataDir);
   // The store may be its own repo or sit inside a larger one; either works,
@@ -69,7 +75,10 @@ export async function startServer(opts: ServerOptions = {}) {
 
 // Started directly rather than imported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  const repo = Repo.forStore(process.env.RMM_DATA ?? path.join(projectRoot, 'data'));
-  await repo.ensure();
+  const dir = resolveStoreDir(projectRoot);
+  seedStore(path.join(projectRoot, 'data'), dir);
+  // The store is its own repository, so its history is separate from the
+  // application's and can be pushed somewhere private on its own.
+  await Repo.forStore(dir).ensure();
   await startServer();
 }

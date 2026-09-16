@@ -115,6 +115,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     source: req.source,
     notes: req.notes,
     answers: req.answers,
+    coverLetter: req.coverLetter?.trim() || undefined,
     history: [{ at: now, status, note: 'Bundle created' }],
   };
   store.upsertApplication(application);
