@@ -43,6 +43,62 @@ describe('extractJson', () => {
   });
 });
 
+/**
+ * A CLI that drains stdin before doing anything — Codex does this even when
+ * the prompt arrived as an argument. If stdin is never closed, it waits for
+ * input that will never come and the call hangs until the timeout. These use a
+ * short timeout deliberately: a regression here shows up as a failure in a
+ * couple of seconds rather than as a suite that appears to be thinking.
+ */
+const DRAINS_STDIN = [
+  '-e',
+  'let n=0;process.stdin.on("data",(d)=>{n+=d.length});process.stdin.on("end",()=>process.stdout.write(`read ${n} bytes of stdin, argv=${process.argv[1]??""}`))',
+];
+
+describe('stdin handling', () => {
+  it('does not hang on a CLI that reads stdin when the prompt was an argument', async () => {
+    const started = Date.now();
+    const result = await runAgent(
+      config({ enabled: true, command: process.execPath, args: [...DRAINS_STDIN, '{promptText}'], timeoutMs: 5000 }),
+      'the prompt',
+    );
+    expect(result.executed).toBe(true);
+    expect(result.output).toContain('argv=the prompt');
+    expect(Date.now() - started).toBeLessThan(4000); // i.e. it did not wait out the timeout
+  });
+
+  it('does not hang on a CLI that reads stdin when the prompt is in a file', async () => {
+    const started = Date.now();
+    const result = await runAgent(
+      config({ enabled: true, command: process.execPath, args: [...DRAINS_STDIN, '{prompt}'], timeoutMs: 5000 }),
+      'the prompt',
+    );
+    expect(result.output).toContain('read 0 bytes'); // nothing on stdin, but it was closed
+    expect(Date.now() - started).toBeLessThan(4000);
+  });
+
+  it('delivers the prompt on stdin when the command takes no prompt argument', async () => {
+    const result = await runAgent(
+      config({ enabled: true, command: process.execPath, args: DRAINS_STDIN, timeoutMs: 5000 }),
+      'twelve chars',
+    );
+    expect(result.output).toContain('read 12 bytes of stdin');
+  });
+
+  it('survives a command that exits without reading stdin', async () => {
+    const result = await runAgent(
+      config({
+        enabled: true,
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write("done early")'],
+        timeoutMs: 5000,
+      }),
+      'x'.repeat(200_000), // enough to fill the pipe buffer, so the write would block
+    );
+    expect(result.output).toBe('done early');
+  });
+});
+
 describe('runAgent', () => {
   it('returns the prompt unexecuted when the AI is switched off', async () => {
     const result = await runAgent(config({ enabled: false }), 'PROMPT BODY');

@@ -312,6 +312,18 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 
 /* The preview recompiles on its own, so the toolbar says whether what you are
    looking at is current rather than offering a button to make it current. */
+/* The save state, stated the way Docs states it: quiet text you can glance at,
+   which only draws attention when something is actually wrong. */
+.save {
+  font-size: var(--t-sm);
+  color: var(--muted);
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+.save.saving { color: var(--faint); }
+.save.unsaved { color: var(--muted); }
+.save.failed { color: var(--bad); font-weight: 500; }
+
 /* Docs says "All changes saved in Drive" as quiet text, not as a badge. Same
    here: the state matters, the decoration does not. */
 .live {

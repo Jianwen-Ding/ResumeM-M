@@ -177,7 +177,14 @@ export function createApi({ store, repo }: ApiDeps): Router {
     '/resumes/:id',
     handler(async (req, res) => {
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
-      await withCommit(repo, autoCommit(), `Update resume "${spec.id}"`, () => store.saveResume(spec));
+
+      // `?commit=0` writes without committing. The editor auto-saves as you
+      // work, and a commit per keystroke would bury the history it feeds; it
+      // commits once the editing stops, through /store/save.
+      const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
+      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${spec.id}"`, () =>
+        store.saveResume(spec),
+      );
       res.json(spec);
     }),
   );

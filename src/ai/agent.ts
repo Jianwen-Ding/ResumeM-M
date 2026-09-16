@@ -51,7 +51,7 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
   const usesFile = config.ai.args.some((a) => a.includes('{prompt}') && !a.includes('{promptText}'));
 
   try {
-    const { stdout, stderr } = await run(config.ai.command, args, {
+    const pending = run(config.ai.command, args, {
       timeout: config.ai.timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
       // The confinement: an empty directory with only the prompt in it, never
@@ -64,9 +64,28 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
         PWD: dir,
         TMPDIR: dir,
       },
-      // CLIs that take the prompt on stdin get it there; harmless otherwise.
-      ...(usesFile ? {} : { input: prompt } as object),
     });
+
+    /*
+     * Close the child's stdin — always, and explicitly.
+     *
+     * `execFile` has no `input` option (that belongs to the *Sync* variants),
+     * so passing one silently does nothing and leaves stdin an open pipe that
+     * nothing ever ends. A CLI that reads stdin then waits for input that will
+     * never come, and the call hangs until the timeout: Codex does exactly
+     * this even when the prompt was handed to it as an argument.
+     *
+     * Ending the stream is also how a CLI that *does* want the prompt on stdin
+     * gets it, so one line covers both.
+     */
+    const stdin = pending.child.stdin;
+    if (stdin) {
+      // The child may exit before reading; a broken pipe is not our problem.
+      stdin.on('error', () => undefined);
+      stdin.end(usesFile ? undefined : prompt);
+    }
+
+    const { stdout, stderr } = await pending;
     const output = stdout.trim() || stderr.trim();
     return { output, executed: true, command: `${config.ai.command} ${args.join(' ')}` };
   } catch (err) {

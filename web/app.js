@@ -262,8 +262,109 @@ function bulletName(entry, bullet) {
  */
 function markDirty(message = 'Changed') {
   state.dirty = true;
-  setStatus(message);
+  if (message !== 'Changed') setStatus(message);
   scheduleRender();
+  scheduleAutoSave();
+}
+
+/* ---- Auto-save ------------------------------------------------------ *
+ * Edits used to live in memory until you explicitly saved, which meant
+ * switching resumes or closing the tab threw them away — and the thing you
+ * lose that way is always the ten minutes of small decisions you have just
+ * finished making.
+ *
+ * Saving and committing are deliberately separated. The file is written
+ * almost immediately, so nothing is ever at risk; the commit waits for the
+ * editing to stop, so the version history stays a list of decisions rather
+ * than one entry per keystroke.
+ * -------------------------------------------------------------------- */
+
+const AUTOSAVE_DELAY_MS = 900;
+const COMMIT_IDLE_MS = 15_000;
+
+let autoSaveTimer = null;
+let commitTimer = null;
+let autoSaving = null;
+
+function scheduleAutoSave() {
+  clearTimeout(autoSaveTimer);
+  setSaveState('unsaved');
+  autoSaveTimer = setTimeout(() => {
+    autoSaveTimer = null;
+    autoSave();
+  }, AUTOSAVE_DELAY_MS);
+}
+
+/** Write the current selection to the store, without making a commit. */
+async function autoSave() {
+  if (!state.dirty || !state.resumeId) return;
+  const spec = currentSpec();
+  state.dirty = false; // further edits re-dirty it; this one is in flight
+  setSaveState('saving');
+
+  autoSaving = (async () => {
+    try {
+      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0`, {
+        method: 'PUT',
+        body: JSON.stringify(spec),
+      });
+      // The store now holds what the editor shows, so the unsaved edits are
+      // no longer overlays on top of it.
+      const stored = state.store?.resumes?.find((r) => r.id === spec.id);
+      if (stored) Object.assign(stored, spec);
+      setSaveState('saved');
+      scheduleCommit();
+    } catch (err) {
+      state.dirty = true; // it did not land; try again on the next edit
+      setSaveState('failed', err.message);
+    } finally {
+      autoSaving = null;
+    }
+  })();
+  return autoSaving;
+}
+
+/** Commit once the editing stops, so one sitting is one version. */
+function scheduleCommit() {
+  if (!state.store?.config?.git?.autoCommit) return; // the user turned it off
+  clearTimeout(commitTimer);
+  commitTimer = setTimeout(() => {
+    commitTimer = null;
+    api('/store/save', { method: 'POST', body: JSON.stringify({}) }).catch(() => {
+      /* the work is on disk either way; the next save will pick it up */
+    });
+  }, COMMIT_IDLE_MS);
+}
+
+/**
+ * Write and commit right now — before switching resumes, or on the way out of
+ * the page. `keepalive` is what lets the last write survive the tab closing.
+ */
+async function flushEdits() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  if (state.dirty) await autoSave();
+  await autoSaving;
+  clearTimeout(commitTimer);
+  commitTimer = null;
+  if (state.store?.config?.git?.autoCommit) {
+    await api('/store/save', { method: 'POST', body: JSON.stringify({}), keepalive: true }).catch(() => {});
+  }
+}
+
+/** Docs says "All changes saved"; so does this, in the same quiet way. */
+function setSaveState(mode, detail) {
+  const chip = $('#save-state');
+  if (!chip) return;
+  chip.className = `save ${mode}`;
+  chip.textContent =
+    mode === 'saving'
+      ? 'Saving…'
+      : mode === 'saved'
+        ? 'All changes saved'
+        : mode === 'failed'
+          ? `Not saved — ${detail ?? 'the server did not accept it'}`
+          : 'Unsaved changes';
 }
 
 /* ------------------------------------------------------------------ *
@@ -2232,7 +2333,18 @@ const AI_PRESETS = [
     label: 'Codex CLI',
     command: 'codex',
     // Codex takes a sandbox mode directly; read-only is the strictest.
-    args: ['exec', '--sandbox', 'read-only', '--cd', '{sandbox}', '{promptText}'],
+    // --skip-git-repo-check because the scratch directory is deliberately not a
+    // repository: Codex otherwise refuses to start, since it assumes you want
+    // version control before it touches anything. Nothing here is touched.
+    args: [
+      'exec',
+      '--sandbox',
+      'read-only',
+      '--skip-git-repo-check',
+      '--cd',
+      '{sandbox}',
+      '{promptText}',
+    ],
   },
   {
     label: 'Gemini CLI',
@@ -2901,12 +3013,24 @@ async function boot() {
   if (!deepLinked) renderPreview();
   window.addEventListener('hashchange', () => applyHash().catch(() => {}));
 
-  $('#resume-select').onchange = (e) => {
-    state.resumeId = e.target.value;
+  $('#resume-select').onchange = async (e) => {
+    const next = e.target.value;
+    // Save what is on screen before leaving it: clearEdits() is about to throw
+    // the unsaved overlay away.
+    await flushEdits();
+    state.resumeId = next;
     clearEdits();
+    setSaveState('saved');
     render();
     scheduleRender();
   };
+
+  // Leaving the page: write and commit on the way out. `visibilitychange` is
+  // the event that actually fires when a tab is closed or hidden; `unload`
+  // does not, reliably.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushEdits().catch(() => {});
+  });
   // The preview keeps itself current; this is only for the rare "recompile it
   // anyway" — after changing the LaTeX engine, say.
   $('#live-state').onclick = renderPreview;
