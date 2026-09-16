@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LayoutOptions, ResolvedResume } from '../model/types.js';
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
-import { renderLatex } from './latex.js';
+import { renderLatex, unrenderableReason } from './latex.js';
 import { renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
 
 const run = promisify(execFile);
@@ -155,6 +155,17 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
   return result;
 }
 
+/**
+ * Refuse a document whose characters the engine cannot set, with a message that
+ * names them. Thrown as a LatexError because that is what every caller already
+ * knows how to show — the log body carries the same text, so a UI that renders
+ * the log instead of the message still says something useful.
+ */
+function assertRenderable(tex: string): void {
+  const reason = unrenderableReason(tex);
+  if (reason) throw new LatexError(reason, reason);
+}
+
 function firstTexError(log: string): string | undefined {
   const m = /^!\s*(.+)$/m.exec(log);
   return m?.[1]?.trim();
@@ -302,6 +313,10 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   const engine = await detectEngine(opts.engine);
   const base = resume.layout;
   const maxAttempts = opts.maxAttempts ?? 8;
+
+  // Before the fit loop, not inside it: a character the engine cannot set fails
+  // identically on all eight attempts, and the answer is never to shrink.
+  assertRenderable(renderLatex(resume));
 
   // The fast path is only ever a preview convenience. If it is unavailable, or
   // errors on this particular document, every attempt silently falls back to
@@ -453,6 +468,7 @@ export async function compileLetter(
 ): Promise<LetterCompileResult> {
   const engine = await detectEngine(opts.engine);
   const tex = renderLetterLatex(letter, layout);
+  assertRenderable(tex);
 
   let raw: RawCompile | undefined;
   let usedFast = false;

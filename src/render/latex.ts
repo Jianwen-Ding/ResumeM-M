@@ -28,30 +28,164 @@ export function tex(input: string): string {
   return String(input ?? '').replace(/[\\&%$#_{}~^]/g, (ch) => ESCAPES[ch] ?? ch);
 }
 
+/*
+ * What the engine can actually put on the page.
+ *
+ * pdflatex and tectonic set type from 8-bit font encodings. Under T1 that is
+ * the Latin scripts and nothing else: a name written in Chinese, Cyrillic,
+ * Greek, Arabic or Hebrew is not merely mis-set, it is a fatal error and no PDF
+ * is produced at all. That is a real thing to hit — `profile.name` is the first
+ * field anyone fills in, and someone whose name is 张伟 has done nothing wrong.
+ *
+ * Left alone, the failure surfaced as "pdflatex failed: LaTeX Error: Unicode
+ * character 张 (U+5F20) not set up for use with LaTeX", after eight identical
+ * attempts of the fit loop, with nothing saying which field the character came
+ * from or that the resume was fine apart from it. Checking first turns that
+ * into one sentence naming the characters and where they are.
+ *
+ * The supported set was measured rather than assumed: a probe document of every
+ * candidate code point, compiled, and the ones LaTeX refused taken out. Hence
+ * the gaps inside Latin Extended-A — Ħ, ŉ, ŧ and a few others really are
+ * missing from T1, while everything around them is present.
+ */
+
+/** Code points LaTeX refuses even though their neighbours are fine. */
+const T1_GAPS = new Set([
+  0x0126, 0x0127, 0x0138, 0x013f, 0x0140, 0x0149, 0x0166, 0x0167, 0x017f,
+]);
+
+/** Punctuation above Latin Extended-A that the utf8 input layer does define. */
+const PUNCTUATION = new Set([
+  0x2010, 0x2011, 0x2012, 0x2013, 0x2014, // hyphens and dashes
+  0x2018, 0x2019, 0x201a, 0x201c, 0x201d, 0x201e, // curly quotes
+  0x2020, 0x2021, 0x2022, 0x2026, 0x2030, // dagger, bullet, ellipsis, permille
+  0x2039, 0x203a, 0x2044, 0x20ac, 0x2122, 0x2192, // guillemets, euro, arrow
+  // Ligatures as single code points. Nobody types these, but copying your own
+  // last resume out of its PDF pastes "ﬁrst" rather than "first".
+  0xfb00, 0xfb01, 0xfb02, 0xfb03, 0xfb04,
+]);
+
+function renderable(code: number): boolean {
+  if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
+  if (code < 0x20) return false; // control characters, NUL included
+  if (code <= 0x7e) return true; // ASCII
+  if (code < 0xa0) return false; // C1 controls
+  if (code <= 0x017f) return !T1_GAPS.has(code); // Latin-1 and Latin Extended-A
+  return PUNCTUATION.has(code);
+}
+
+export interface UnsupportedCharacter {
+  char: string;
+  /** Written as U+XXXX, the form the LaTeX log and every font table use. */
+  codePoint: string;
+  /** A little of the surrounding text, so the field it came from is findable. */
+  context: string;
+}
+
 /**
+ * Every character in a document the engine cannot set, each reported once.
+ * Empty means the text will compile as far as its characters are concerned.
+ */
+export function unsupportedCharacters(text: string): UnsupportedCharacter[] {
+  const found = new Map<string, UnsupportedCharacter>();
+  const chars = [...String(text ?? '')];
+  chars.forEach((ch, i) => {
+    const code = ch.codePointAt(0) ?? 0;
+    if (renderable(code)) return;
+    if (found.has(ch)) return;
+    found.set(ch, {
+      char: ch,
+      codePoint: `U+${code.toString(16).toUpperCase().padStart(4, '0')}`,
+      context: chars
+        .slice(Math.max(0, i - 20), i + 20)
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    });
+  });
+  return [...found.values()];
+}
+
+/** The message shown when a document cannot be set, or undefined when it can. */
+export function unrenderableReason(text: string): string | undefined {
+  const bad = unsupportedCharacters(text);
+  if (bad.length === 0) return undefined;
+
+  const shown = bad.slice(0, 6).map((b) => `${b.char} (${b.codePoint})`).join(', ');
+  const more = bad.length > 6 ? `, and ${bad.length - 6} more` : '';
+  return (
+    `This resume contains ${bad.length} character${bad.length === 1 ? '' : 's'} the LaTeX ` +
+    `engine cannot typeset: ${shown}${more}. It sets Latin scripts only, so text in ` +
+    `Chinese, Japanese, Korean, Cyrillic, Greek, Arabic or Hebrew — and emoji — cannot go ` +
+    `in the PDF. First occurrence near: "${bad[0]!.context}".`
+  );
+}
+
+/*
  * Store text may use a tiny subset of markdown so a bullet can bold a metric
  * without the YAML holding LaTeX. Everything else is escaped.
+ *
+ * One scanner, not four chained `.replace()` passes. Those passes each hid
+ * their output behind a placeholder so a later pass could not escape it again,
+ * which worked only while no span contained another. It did not take a strange
+ * bullet to break it: "ran `npm test **twice**` today" matches the bold rule
+ * first, so the backtick rule wrapped a placeholder, and the final restore — a
+ * single pass, which does not look inside what it substitutes — put the bold
+ * span's placeholder back into the document unresolved. The .tex then carried
+ * literal NUL bytes, which TeX rejects outright: no PDF at all, from one bullet
+ * that mentioned a command and a number.
+ *
+ * Scanning left to right takes whichever span opens first and recurses into its
+ * contents, so nesting is decided by where the markers are rather than by the
+ * order the rules happen to run in.
+ */
+
+/** Link, bold, italic, code — the order here breaks a tie at the same index. */
+const MARKUP =
+  /\[([^\]]+)\]\(([^)]+)\)|\*\*(.+?)\*\*|(?<=^|[\s(])\*([^*]+)\*(?=[\s).,;:]|$)|`(.+?)`/g;
+
+/** Enough for bold inside a link inside italics; a guard, not a limit anyone meets. */
+const MAX_NESTING = 4;
+
+/*
+ * Depth is deliberately not a parameter of the exported function. It was, for
+ * about ten minutes, and `paragraphs.map(inlineTex)` in letter.ts quietly
+ * passed the array index as the depth — so the first paragraph of every cover
+ * letter rendered with depth 0 and lost all its markup. A one-argument function
+ * cannot be broken that way by a callback.
  */
 export function inlineTex(input: string): string {
-  const s = String(input ?? '');
-  // Protect the markup spans, escape the rest, then restore as LaTeX commands.
-  const slots: string[] = [];
-  const hold = (latex: string): string => {
-    slots.push(latex);
-    return `\u0000${slots.length - 1}\u0000`;
-  };
+  return markup(String(input ?? ''), MAX_NESTING);
+}
 
-  const marked = s
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
-      hold(`\\href{${url.replace(/([%#])/g, '\\$1')}}{\\underline{${tex(label)}}}`),
-    )
-    .replace(/\*\*(.+?)\*\*/g, (_m, inner: string) => hold(`\\textbf{${tex(inner)}}`))
-    .replace(/(^|[\s(])\*([^*]+)\*(?=[\s).,;:]|$)/g, (_m, pre: string, inner: string) =>
-      `${pre}${hold(`\\textit{${tex(inner)}}`)}`,
-    )
-    .replace(/`(.+?)`/g, (_m, inner: string) => hold(`\\texttt{${tex(inner)}}`));
+function markup(s: string, depth: number): string {
+  if (depth <= 0) return tex(s);
 
-  return tex(marked).replace(/\u0000(\d+)\u0000/g, (_m, i: string) => slots[Number(i)] ?? '');
+  const re = new RegExp(MARKUP.source, 'g');
+  let out = '';
+  let last = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(s)) !== null) {
+    out += tex(s.slice(last, m.index));
+    const [whole, label, url, bold, italic, code] = m;
+
+    if (label !== undefined) {
+      out += `\\href{${url!.replace(/([%#])/g, '\\$1')}}{\\underline{${markup(label, depth - 1)}}}`;
+    } else if (bold !== undefined) {
+      out += `\\textbf{${markup(bold, depth - 1)}}`;
+    } else if (italic !== undefined) {
+      out += `\\textit{${markup(italic, depth - 1)}}`;
+    } else {
+      // Code is literal, as it is everywhere else markdown is written: the
+      // asterisks in `git commit -m "**"` are part of the command, not markup.
+      out += `\\texttt{${tex(code!)}}`;
+    }
+
+    last = m.index + whole.length;
+  }
+
+  return out + tex(s.slice(last));
 }
 
 const PAPER = { letter: 'letterpaper', a4: 'a4paper' } as const;
