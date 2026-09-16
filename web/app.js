@@ -10,6 +10,7 @@
 
 import { createPreview } from './preview.js';
 import { setupAssets } from './assets.js';
+import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 let activeProject;
 let assetUI;
@@ -85,13 +86,113 @@ function setStatus(text, isError = false) {
 }
 
 async function api(path, options = {}) {
+  /*
+   * Undo is recorded here, and only here.
+   *
+   * Every editing action in this file ends as one write of one whole document,
+   * so snapshotting the document either side of the write covers all of them —
+   * deleting a group, adding one, adding a phrasing, renaming, reordering —
+   * without a list of actions that goes stale the moment a button is added.
+   */
+  const docKey = undoing ? null : docKeyFor(path, options.method);
+  const before = docKey ? readDoc(state.store, docKey) : null;
+
   const res = await fetch(`/api${path}`, {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+
+  /*
+   * Recorded here, from the response, rather than from the store on the next
+   * reload. Several actions update the client's copy in place and never
+   * reload — and hanging the "after" snapshot on a reload that may not come
+   * meant those actions were silently unundoable.
+   *
+   * The response is also the better snapshot: these routes hand back what was
+   * actually saved, so a server that normalises or fills in defaults is
+   * reflected, and a redo puts back what really happened.
+   */
+  if (docKey) {
+    const isDelete = String(options.method ?? 'GET').toUpperCase() === 'DELETE';
+    const after = isDelete ? null : documentFrom(body, options.body);
+    history.record({ docKey, before, after, label: undoLabel });
+    undoLabel = 'change';
+    paintUndo();
+  }
   return body;
+}
+
+/**
+ * What was saved, as best the reply tells us.
+ *
+ * Most document routes return the saved document; a couple return an
+ * acknowledgement instead, and for those the body that was sent is the honest
+ * answer.
+ */
+function documentFrom(reply, sentBody) {
+  const acknowledgement = reply && typeof reply === 'object' && !Array.isArray(reply)
+    && Object.keys(reply).length <= 2 && ('ok' in reply || 'key' in reply);
+  if (reply !== undefined && reply !== null && !acknowledgement) return reply;
+  try {
+    return typeof sentBody === 'string' ? JSON.parse(sentBody) : null;
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Undo and redo                                                       *
+ * ------------------------------------------------------------------ */
+
+const history = createHistory({ limit: 60 });
+/** True while an undo/redo is being applied, so it does not record itself. */
+let undoing = false;
+/** What the write in flight should be called, set by the action that starts it. */
+let undoLabel = 'change';
+/** Name the next write, so the menu can say "Undo delete group". */
+function describeNext(label) {
+  undoLabel = label;
+}
+
+async function stepHistory(direction) {
+  const entry = direction === 'undo' ? history.undo() : history.redo();
+  if (!entry) {
+    setStatus(direction === 'undo' ? 'Nothing to undo' : 'Nothing to redo');
+    return;
+  }
+  // Undo reinstates what was there before; redo puts back what the action did.
+  const doc = direction === 'undo' ? entry.before : entry.after;
+  undoing = true;
+  try {
+    const { path, options } = restoreRequest(entry.docKey, doc);
+    await api(path, options);
+    await loadStore();
+    render();
+    scheduleRender();
+    scheduleCommit();
+    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${entry.label}`);
+  } catch (err) {
+    // Put it back on the stack it came off: a failed undo has not happened.
+    if (direction === 'undo') history.redo();
+    else history.undo();
+    setStatus(err.message, true);
+  } finally {
+    undoing = false;
+    paintUndo();
+  }
+}
+
+/** Keep the two buttons honest about what they would do. */
+function paintUndo() {
+  const undoBtn = $('#btn-undo');
+  const redoBtn = $('#btn-redo');
+  if (!undoBtn || !redoBtn) return;
+  undoBtn.disabled = !history.canUndo();
+  redoBtn.disabled = !history.canRedo();
+  undoBtn.title = history.canUndo() ? `Undo ${history.peekUndoLabel()}` : 'Nothing to undo';
+  redoBtn.title = history.canRedo() ? `Redo ${history.peekRedoLabel()}` : 'Nothing to redo';
 }
 
 /** "1 change" / "3 changes" — the `(s)` suffix reads like a form letter. */
@@ -391,6 +492,7 @@ function setSaveState(mode, detail) {
  * ------------------------------------------------------------------ */
 
 async function saveEntry(entry, message) {
+  describeNext(message ?? 'the change');
   await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'PUT', body: JSON.stringify(entry) });
   setStatus(message ?? `Saved ${entry.id}`);
   await loadStore();
@@ -398,6 +500,7 @@ async function saveEntry(entry, message) {
 }
 
 async function saveResumeSpec(spec, message) {
+  describeNext(message ?? 'the change');
   await api(`/resumes/${encodeURIComponent(spec.id)}`, { method: 'PUT', body: JSON.stringify(spec) });
   setStatus(message ?? `Saved ${spec.id}`);
   await loadStore();
@@ -1335,6 +1438,7 @@ async function addNameAlternate() {
 }
 
 async function saveProfileName(name, message) {
+  describeNext(message ?? 'the change');
   const profile = { ...state.store.profile, name };
   await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
   state.store.profile = profile;
@@ -1345,6 +1449,8 @@ async function saveProfileName(name, message) {
 }
 
 async function saveProfileField(key, text) {
+  const label = (PROFILE_FIELDS.find(([k]) => k === key) ?? [key, key])[1].toLowerCase();
+  describeNext(text.trim() ? `the ${label}` : `removing the ${label}`);
   const profile = { ...state.store.profile };
   if (text.trim()) profile[key] = undisplay(text);
   else delete profile[key];
@@ -1977,6 +2083,7 @@ async function addSkillGroup() {
         .map((text) => ({ id: `s_${slug(text)}`, text })),
     },
   ];
+  describeNext(`adding the group "${answer.name.trim()}"`);
   await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
 
   const root = chain(state.resumeId)[0];
@@ -4480,7 +4587,13 @@ async function boot() {
   };
   assetUI = setupAssets({ api, el, setChildren, readAsBase64, flushEdits, isDirty: () => state.dirty,
     reloadStore: async () => { await loadStore(); render(); }, entryName, status: setStatus,
-    projectChanged: dir => { activeProject = dir; }, loadProjectSettings });
+    projectChanged: dir => {
+      activeProject = dir;
+      // A stack of edits to another save is meaningless here and dangerous if
+      // applied: the ids in it belong to somebody else's documents.
+      history.clear();
+      paintUndo();
+    }, loadProjectSettings });
   setupTabs();
   const project = await assetUI.init();
   if (!project.current) { showTab('save'); return; }
@@ -4564,8 +4677,33 @@ async function boot() {
     loadVoice();
   };
 
+  $('#btn-undo').onclick = () => stepHistory('undo');
+  $('#btn-redo').onclick = () => stepHistory('redo');
+  paintUndo();
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) $('#modal-cancel').click();
+    if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) {
+      $('#modal-cancel').click();
+      return;
+    }
+
+    /*
+     * Cmd/Ctrl+Z, and Shift for redo.
+     *
+     * Not while typing: inside a text box the browser's own undo is the one
+     * you want, and hijacking it to revert a whole document because you
+     * pressed it mid-sentence would be startling. Once you leave the box the
+     * edit has been written, and this is the undo that applies.
+     */
+    const meta = e.metaKey || e.ctrlKey;
+    if (!meta || e.key.toLowerCase() !== 'z') return;
+    const el = document.activeElement;
+    const typing = el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable);
+    if (typing) return;
+    if (!$('#modal').classList.contains('hidden')) return;
+
+    e.preventDefault();
+    stepHistory(e.shiftKey ? 'redo' : 'undo');
   });
 }
 
