@@ -78,6 +78,20 @@ function n(x: number, places = 3): string {
 export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string {
   return `\\documentclass[${PAPER[paper]},11pt]{article}
 
+% T1, and not merely for accents.
+%
+% In the default OT1 encoding, three characters people put in resumes without
+% a second thought come out as different characters entirely: \`<\` prints as
+% an inverted exclamation mark, \`>\` as an inverted question mark, and \`|\` as
+% an em dash. Nothing errors — "Cut p99 latency to <100ms" simply goes to an
+% employer reading "¡100ms".
+%
+% It also decides whether the PDF can be read by machine, which is the whole
+% point of \`glyphtounicode\` below. Under OT1 an underscore and a tilde are
+% drawn rather than set, so they carry no Unicode at all and an applicant
+% tracking system extracts \`jane doe@x.com\` from \`jane_doe@x.com\` — a contact
+% address that is wrong in the one copy nobody ever looks at.
+\\usepackage[T1]{fontenc}
 \\usepackage{latexsym}
 \\usepackage[empty]{fullpage}
 \\usepackage{titlesec}
