@@ -9,6 +9,11 @@
  */
 
 import { createPreview } from './preview.js';
+import { setupAssets } from './assets.js';
+import { renderFeedbackMarkdown } from './feedback.js';
+let activeProject;
+let assetUI;
+const inlineSaves = new Set();
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -29,6 +34,7 @@ const el = (tag, props = {}, children = []) => {
 const state = {
   store: null,
   resumeId: null,
+  masterView: false,
   /** Unsaved variant selections, layered over the resume's own. */
   choices: {},
   /** Unsaved skill-item selections, keyed by group id. */
@@ -72,7 +78,7 @@ function setStatus(text, isError = false) {
 async function api(path, options = {}) {
   const res = await fetch(`/api${path}`, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+    headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
@@ -341,6 +347,7 @@ function scheduleCommit() {
  * the page. `keepalive` is what lets the last write survive the tab closing.
  */
 async function flushEdits() {
+  await Promise.all([...inlineSaves]);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
   if (state.dirty) await autoSave();
@@ -402,6 +409,55 @@ const FIELD_LABELS = {
   subtitle: 'Role / degree / stack',
   location: 'Location',
 };
+
+let activeBulletTools = null;
+
+/** Keep one bullet's secondary actions open, without rebuilding its editor. */
+function revealBulletTools(key) {
+  activeBulletTools = key;
+  for (const block of $('#editor').querySelectorAll('.bullet-disclosure')) {
+    const open = block.dataset.toolsKey === key;
+    block.classList.toggle('tools-open', open);
+    for (const action of block.querySelectorAll('[data-bullet-action]')) action.hidden = !open;
+    const button = block.querySelector('.bullet-more');
+    button.setAttribute('aria-expanded', String(open));
+    button.setAttribute('aria-label', open ? 'Hide bullet actions' : 'Show bullet actions');
+    button.title = open ? 'Hide actions (Escape)' : 'Show actions — or double-click this bullet';
+    button.textContent = open ? '×' : '…';
+  }
+}
+
+function attachBulletTools(block, key, actions, anchor) {
+  block.classList.add('bullet-disclosure');
+  block.dataset.toolsKey = `${state.masterView ? 'master' : state.resumeId}:${key}`;
+  for (const action of actions.filter(Boolean)) {
+    action.dataset.bulletAction = '';
+    action.hidden = block.dataset.toolsKey !== activeBulletTools;
+  }
+  const button = el('button', {
+    className: 'bullet-more tiny',
+    textContent: block.dataset.toolsKey === activeBulletTools ? '×' : '…',
+    title: block.dataset.toolsKey === activeBulletTools ? 'Hide actions (Escape)' : 'Show actions — or double-click this bullet',
+    onclick: () => revealBulletTools(activeBulletTools === block.dataset.toolsKey ? null : block.dataset.toolsKey),
+  });
+  button.setAttribute('aria-label', block.dataset.toolsKey === activeBulletTools ? 'Hide bullet actions' : 'Show bullet actions');
+  button.setAttribute('aria-expanded', String(block.dataset.toolsKey === activeBulletTools));
+  block.classList.toggle('tools-open', block.dataset.toolsKey === activeBulletTools);
+  anchor.append(button);
+  block.addEventListener('dblclick', event => {
+    if (event.target.closest('button, input, select, label')) return;
+    revealBulletTools(block.dataset.toolsKey);
+  });
+  block.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && activeBulletTools === block.dataset.toolsKey) {
+      revealBulletTools(null);
+      button.focus();
+      event.stopPropagation();
+    }
+  });
+  for (const line of block.querySelectorAll('.editable')) line.title = 'Double-click to edit and show bullet actions. Shared wording updates every resume using it.';
+  return block;
+}
 
 /**
  * The dropdown that picks a phrasing, plus the affordances for adding to and
@@ -545,7 +601,9 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     node.classList.remove('editing');
     const next = node.textContent.trim();
     if (commit && next && next !== display(text)) {
-      onCommit(next);
+      const save = Promise.resolve().then(() => onCommit(next));
+      inlineSaves.add(save);
+      save.catch(err => setStatus(err.message, true)).finally(() => inlineSaves.delete(save));
     } else {
       // Put the markup back: the raw text is what gets edited, the rendered
       // form is what gets shown.
@@ -575,6 +633,21 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
   };
   node.onblur = () => stop(true);
   return node;
+}
+
+/** A keyboard-accessible, one-click critique beside the exact wording. */
+function phraseFeedbackButton(entry, target) {
+  return el('button', {
+    className: 'tiny phrase-feedback',
+    textContent: 'AI Feedback',
+    title: 'Get AI feedback on this exact phrasing',
+    onclick: async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try { await askSourceFeedback({ entryId: entry.id, ...target }); }
+      finally { button.disabled = false; }
+    },
+  });
 }
 
 /**
@@ -638,7 +711,7 @@ function listItems(entry, bullet) {
       el('span', {
         className: 'x',
         textContent: '×',
-        title: 'Delete this item from the store',
+        title: 'Delete this item from the save',
         onclick: (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
@@ -713,7 +786,6 @@ function bulletBlock(entry, section, bullet, choices) {
       : editableLine(String(currentText(bullet, choices) ?? ''), {
           onCommit: (text) => saveVariantText(entry, bullet, choices[bullet.id] ?? bullet.default, text),
         }),
-    isList ? null : alternateStepper(bullet.id, bullet, choices[bullet.id] ?? bullet.default),
   ].filter(Boolean));
   wrap.append(head);
 
@@ -729,12 +801,17 @@ function bulletBlock(entry, section, bullet, choices) {
         ]),
       ]),
     );
-    return wrap;
+    return attachBulletTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
   }
 
   const key = bullet.id;
   const chosenId = choices[key] ?? bullet.default;
   const chosen = bullet.variants.find((v) => v.id === chosenId) ?? bullet.variants[0];
+
+  wrap.append(el('div', { className: 'bullet-quick-actions toolbar' }, [
+    alternateStepper(bullet.id, bullet, chosenId),
+    phraseFeedbackButton(entry, { bulletId: bullet.id, variantId: chosen?.id ?? chosenId }),
+  ].filter(Boolean)));
 
   wrap.append(
     variantPicker({
@@ -762,11 +839,11 @@ function bulletBlock(entry, section, bullet, choices) {
           : null,
       ].filter(Boolean),
       trailingActions: [
-        el('button', { className: 'tiny', textContent: 'Feedback', onclick: () => askBulletFeedback(entry, bullet) }),
+        el('button', { className: 'tiny', textContent: 'Compare Phrasings', onclick: () => askBulletFeedback(entry, bullet) }),
         el('button', {
           className: 'tiny danger',
           textContent: 'Remove',
-          title: 'Delete this bullet from the store',
+          title: 'Delete this bullet from the save',
           onclick: () => removeBullet(entry, bullet),
         }),
       ],
@@ -774,7 +851,7 @@ function bulletBlock(entry, section, bullet, choices) {
   );
 
   if (chosen?.note) wrap.append(el('div', { className: 'note', textContent: chosen.note }));
-  return wrap;
+  return attachBulletTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
 }
 
 /** The text a non-list bullet currently resolves to. */
@@ -895,6 +972,7 @@ function entryBlock(entry, section, choices) {
               onCommit: (text) => saveFieldText(entry, name, current, text),
             }),
             alternateStepper(key, field, current),
+            phraseFeedbackButton(entry, { fieldName: name, variantId: current }),
           ].filter(Boolean)),
           control,
         ]),
@@ -918,6 +996,7 @@ function entryBlock(entry, section, choices) {
             className: 'meta-value',
             onCommit: (text) => savePlainField(entry, f.name, text),
           }),
+          phraseFeedbackButton(entry, { fieldName: f.name }),
           el('button', {
             className: 'link meta-add',
             textContent: '+ alt',
@@ -994,7 +1073,7 @@ function skillsBlock(section) {
         el('span', {
           className: 'x',
           textContent: '×',
-          title: 'Delete this skill from the store',
+          title: 'Delete this skill from the save',
           onclick: (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
@@ -1158,7 +1237,9 @@ async function addAutofillField() {
 function renderEditor() {
   const editor = $('#editor');
   editor.replaceChildren();
-  if (!state.store || !state.resumeId) return;
+  if (!state.store) return;
+  if (state.masterView) { renderMasterEditor(editor); return; }
+  if (!state.resumeId) return;
 
   const choices = effectiveChoices();
   const sections = resolveSections();
@@ -1212,6 +1293,68 @@ function renderEditor() {
   }
 }
 
+/** The master edits shared source text, without changing any resume's selections. */
+function renderMasterEditor(editor) {
+  editor.append(profileBlock());
+  for (const kind of ['education', 'experience', 'project', 'custom']) {
+    const entries = state.store.entries.filter(entry => entry.kind === kind && !entry.archived);
+    editor.append(el('div', { className: 'section-heading' }, [
+      el('span', { className: 'name', textContent: SECTION_LABELS[kind] ?? kind }),
+      el('span', { className: 'rule' }),
+      el('button', { className: 'link', textContent: '+ Add Entry', onclick: () => addEntry(kind) }),
+    ]));
+    if (!entries.length) editor.append(el('p', { className: 'hint', textContent: 'No source entries yet.' }));
+    for (const entry of entries) {
+      const box = el('article', { className: 'master-source-entry' });
+      for (const name of ['title', 'subtitle', 'dates', 'location']) {
+        const field = entry[name];
+        if (!field) continue;
+        const variants = isVariantField(field) ? field.variants : [{ id: null, text: field }];
+        for (const variant of variants) box.append(el('div', { className: 'master-source-field' }, [
+          el('span', { className: 'hint', textContent: `${FIELD_LABELS[name] ?? name}${variant.label ? ` · ${variant.label}` : ''}${variant.id && variant.id === field.default ? ' · Default' : ''}` }),
+          el('div', { className: 'phrase-line' }, [
+            editableLine(String(variant.text), { onCommit: text => variant.id
+              ? saveFieldText(entry, name, variant.id, text) : savePlainField(entry, name, text) }),
+            phraseFeedbackButton(entry, { fieldName: name, ...(variant.id ? { variantId: variant.id } : {}) }),
+          ]),
+        ]));
+      }
+      for (const bullet of entry.bullets ?? []) {
+        const row = el('div', { className: 'master-source-bullet' });
+        if (Array.isArray(bullet.items)) {
+          row.append(el('div', { className: 'text', textContent: `${bullet.prefix ?? ''} ${bullet.items.map(item => item.text).join(bullet.separator ?? ', ')}` }));
+          row.append(el('button', { className: 'tiny', textContent: '+ Item', onclick: () => addListItem(entry, bullet) }));
+          row.append(el('button', { className: 'tiny', textContent: 'AI Feedback', onclick: () => askBulletFeedback(entry, bullet) }));
+        } else {
+          for (const variant of bullet.variants) row.append(el('div', { className: 'master-source-variant' }, [
+            el('span', { className: 'hint', textContent: `${variant.label}${variant.id === bullet.default ? ' · Default' : ''}${variant.suggested ? ' · AI Suggestion' : ''}${bullet.archived ? ' · Archived' : ''}` }),
+            el('div', { className: 'phrase-line' }, [
+              editableLine(String(variant.text), { onCommit: text => saveVariantText(entry, bullet, variant.id, text) }),
+              phraseFeedbackButton(entry, { bulletId: bullet.id, variantId: variant.id }),
+            ]),
+          ]));
+          row.append(el('div', { className: 'toolbar' }, [
+            el('button', { className: 'tiny', textContent: '+ Phrasing', onclick: () => addBulletVariant(entry, bullet) }),
+            el('button', { className: 'tiny', textContent: 'Compare Phrasings', onclick: () => askBulletFeedback(entry, bullet) }),
+          ]));
+        }
+        const actions = [...row.querySelectorAll('.phrase-feedback, :scope > button, :scope > .toolbar')];
+        const anchor = row.querySelector('.phrase-line') ?? row;
+        attachBulletTools(row, `${entry.id}/${bullet.id}`, actions, anchor);
+        box.append(row);
+      }
+      box.append(el('button', { className: 'tiny', textContent: '+ Bullet', onclick: () => addBullet(entry) }));
+      editor.append(box);
+    }
+  }
+  editor.append(el('div', { className: 'section-heading' }, [el('span', { className: 'name', textContent: 'Skills' }), el('span', { className: 'rule' })]));
+  for (const group of state.store.skillGroups) editor.append(el('div', { className: 'master-source-entry' }, [
+    el('b', { textContent: group.name }),
+    el('p', { textContent: group.items.map(item => item.text).join(', ') }),
+    el('button', { className: 'tiny', textContent: '+ Skill', onclick: () => addSkill(group) }),
+  ]));
+}
+
 /* ------------------------------------------------------------------ *
  * Adding and editing                                                  *
  * ------------------------------------------------------------------ */
@@ -1247,6 +1390,14 @@ async function addEntry(kind) {
   };
 
   await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+
+  if (state.masterView) {
+    await loadStore();
+    render();
+    scheduleRender();
+    setStatus('Added to the master. Select it in a tailored resume when needed.');
+    return;
+  }
 
   // A new entry nobody references is invisible, so add it to the section of the
   // resume being edited — at the root of the chain, so every resume gets it.
@@ -1284,7 +1435,7 @@ async function editEntry(entry) {
 }
 
 async function removeEntry(entry) {
-  if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the store. Resumes referencing it will warn until you remove the reference.'))) return;
+  if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
   await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
 
   // Drop the reference too, so the next compile does not warn about it.
@@ -1335,7 +1486,7 @@ async function addBullet(entry) {
 }
 
 async function removeBullet(entry, bullet) {
-  if (!(await confirmModal(`Delete “${bulletName(entry, bullet)}”?`, `All ${plural(bullet.variants.length, 'phrasing')} of it are removed from the store.`))) return;
+  if (!(await confirmModal(`Delete “${bulletName(entry, bullet)}”?`, `All ${plural(bullet.variants.length, 'phrasing')} of it are removed from the save.`))) return;
   await saveEntry({ ...entry, bullets: (entry.bullets ?? []).filter((b) => b.id !== bullet.id) }, `Deleted ${bullet.id}`);
   scheduleRender();
 }
@@ -1348,7 +1499,7 @@ async function addBulletVariant(entry, bullet) {
     { name: 'text', label: 'Text', value: current?.text ?? '', multiline: true },
     { name: 'tags', label: 'Tags, comma separated', value: '' },
     { name: 'note', label: 'Note to self (optional)', value: '' },
-    { name: 'useNow', label: 'Use it in this resume straight away', type: 'checkbox', value: true },
+    ...(!state.masterView ? [{ name: 'useNow', label: 'Use it in this resume straight away', type: 'checkbox', value: true }] : []),
   ], 'Starts from the current wording so you can adjust rather than retype.');
   if (!answer?.text?.trim()) return;
 
@@ -1365,14 +1516,14 @@ async function addBulletVariant(entry, bullet) {
     },
   );
 
-  if (answer.useNow) {
+  if (!state.masterView && answer.useNow) {
     state.choices[bullet.id] = variant.id;
     markDirty();
   }
   setStatus(`Added phrasing "${variant.label}"`);
   await loadStore();
   render();
-  if (answer.useNow) scheduleRender();
+  if (state.masterView || answer.useNow) scheduleRender();
 }
 
 /** Edit an existing phrasing in place — it changes everywhere it is used. */
@@ -1480,7 +1631,7 @@ async function addFieldAlternate(entry, name) {
     { name: 'text', label: 'Text', value: currentText, multiline: false },
     { name: 'tags', label: 'Tags, comma separated', value: '' },
     { name: 'note', label: 'Note to self (optional)', value: '' },
-    { name: 'useNow', label: 'Use it in this resume straight away', type: 'checkbox', value: true },
+    ...(!state.masterView ? [{ name: 'useNow', label: 'Use it in this resume straight away', type: 'checkbox', value: true }] : []),
   ], existing ? null : `"${currentText || '(empty)'}" is kept as the default.`);
   if (!answer?.text?.trim()) return;
 
@@ -1509,7 +1660,7 @@ async function addFieldAlternate(entry, name) {
       };
 
   await saveEntry({ ...entry, [name]: nextField }, `Added alternate for ${key}`);
-  if (answer.useNow) {
+  if (!state.masterView && answer.useNow) {
     state.choices[key] = id;
     markDirty();
     render();
@@ -1587,8 +1738,10 @@ async function addListItem(entry, bullet) {
 
   // A newly added item is shown by default; not doing so makes the click
   // look like it failed.
-  state.listEdits = { ...(state.listEdits ?? {}), [bullet.id]: [...listSelection(bullet), id] };
-  markDirty();
+  if (!state.masterView) {
+    state.listEdits = { ...(state.listEdits ?? {}), [bullet.id]: [...listSelection(bullet), id] };
+    markDirty();
+  }
   render();
   scheduleRender();
 }
@@ -1679,7 +1832,7 @@ async function addSkillGroup() {
 }
 
 async function removeSkillGroup(group) {
-  if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the store.'))) return;
+  if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the save.'))) return;
   await api('/skills', {
     method: 'PUT',
     body: JSON.stringify(state.store.skillGroups.filter((g) => g.id !== group.id)),
@@ -1753,22 +1906,24 @@ async function renderPreview() {
   setLive('working');
   if (fit.classList.contains('idle')) fit.textContent = 'Compiling…';
   try {
-    const result = await api('/render', { method: 'POST', body: JSON.stringify({ spec: currentSpec() }) });
+    const master = state.masterView;
+    const result = await api('/render', { method: 'POST', body: JSON.stringify(master ? { master: true } : { spec: currentSpec() }) });
     // A newer edit already asked for a newer compile; this answer is stale.
     if (token !== renderToken) return;
     setLive('ok');
 
     showPdf($('#preview-pane'), result.pdfUrl);
 
-    fit.className = result.fits ? 'fit' : 'fit bad';
+    fit.className = master || result.fits ? 'fit' : 'fit bad';
     fit.replaceChildren(
-      result.fits
+      master ? `Master Document · ${plural(result.pages, 'page')} · All source phrasings; may exceed two pages`
+      : result.fits
         ? `Fits on one page${
             result.overflowLines < 0 ? ` — room for about ${plural(Math.abs(result.overflowLines), 'more line')}` : ''
           }`
         : `${plural(result.pages, 'page')} — about ${plural(result.overflowLines, 'line')} too long. Pick a shorter phrasing or drop a bullet.`,
     );
-    if (result.adjustments.length) {
+    if (!master && result.adjustments.length) {
       fit.append(el('span', { className: 'adj', textContent: ` · auto-fit: ${result.adjustments.join('; ')}` }));
     }
 
@@ -1815,18 +1970,26 @@ async function saveAsVariation() {
  * and do something else. The request goes off as a job; the header says when
  * an answer is waiting.
  */
-async function askFeedback() {
+async function askFeedback(master = false) {
+  const button = $('#btn-feedback');
+  button.disabled = true;
   try {
+    await flushEdits();
+    if (state.dirty) throw new Error('Save your edits before requesting feedback');
+    setStatus(master ? 'Preparing Master Feedback…' : 'Preparing feedback…');
     const { job } = await api('/ai/feedback', {
       method: 'POST',
-      body: JSON.stringify({ resumeId: state.resumeId, background: true }),
+      body: JSON.stringify(master ? { master: true, background: true } : { resumeId: state.resumeId, background: true }),
     });
-    setStatus('Reading your resume — this keeps working while you do');
+    await openJob(job);
+    setStatus(master ? 'Reading the master inventory — feedback will appear in the results indicator' : 'Reading your resume — this keeps working while you do');
     watchJobs();
     return job;
   } catch (err) {
     showModal('Feedback failed', el('pre', { textContent: err.message }));
     return null;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1837,6 +2000,18 @@ async function askFeedback() {
  * -------------------------------------------------------------------- */
 
 let jobTimer = null;
+let feedbackJobs = [];
+let feedbackJobId = null;
+let feedbackShownStatus = null;
+let feedbackRequest = 0;
+
+function updateFeedbackPicker() {
+  $('#feedback-select').replaceChildren(...feedbackJobs.map(job => el('option', {
+    value: job.id,
+    textContent: `${job.about}${job.status === 'running' ? ' — Working…' : job.status === 'failed' ? ' — Failed' : ''}`,
+  })));
+  if (feedbackJobId) $('#feedback-select').value = feedbackJobId;
+}
 
 function watchJobs() {
   clearInterval(jobTimer);
@@ -1846,6 +2021,10 @@ function watchJobs() {
 
 async function refreshJobs() {
   const { jobs } = await api('/ai/jobs');
+  feedbackJobs = jobs.filter(job => job.kind === 'feedback');
+  updateFeedbackPicker();
+  const selected = feedbackJobs.find(job => job.id === feedbackJobId);
+  if (selected && !$('#feedback-panel').hidden && selected.status !== feedbackShownStatus) await openJob(selected, false);
   renderJobChip(jobs);
   // Nothing running and nothing unread: stop asking.
   if (!jobs.some((j) => j.status === 'running' || j.unread)) {
@@ -1862,8 +2041,9 @@ function renderJobChip(jobs) {
   const ready = jobs.filter((j) => j.status !== 'running' && j.unread);
 
   if (running.length === 0 && ready.length === 0) {
-    chip.className = 'jobs-chip hidden';
-    chip.textContent = '';
+    chip.className = jobs.length ? 'jobs-chip' : 'jobs-chip hidden';
+    chip.textContent = jobs.length ? 'Feedback Results' : '';
+    chip.onclick = () => { if (jobs[0]) openJob(jobs[0]); };
     return;
   }
 
@@ -1875,39 +2055,50 @@ function renderJobChip(jobs) {
   chip.onclick = () => openJob(ready[0] ?? running[0]);
 }
 
-async function openJob(job) {
-  if (job.status === 'running') {
-    showModal('Still working', el('p', { className: 'hint' }, `The AI is reading ${job.about}. This panel will have it when it is done.`));
-    return;
+async function openJob(job, reveal = true) {
+  const request = ++feedbackRequest;
+  feedbackJobId = job.id;
+  feedbackShownStatus = job.status;
+  if (!feedbackJobs.some(item => item.id === job.id)) feedbackJobs.unshift(job);
+  updateFeedbackPicker();
+  $('#feedback-panel').hidden = false;
+  if (reveal) showTab('resumes');
+  $('#feedback-status').textContent = job.status === 'running' ? `Reading ${job.about}… You can keep editing.` : 'Loading feedback…';
+  $('#feedback-content').replaceChildren();
+  if (job.status === 'running') return;
+  try {
+    const full = await api(`/ai/jobs/${encodeURIComponent(job.id)}`);
+    if (request !== feedbackRequest) return;
+    feedbackShownStatus = full.status;
+    $('#feedback-status').textContent = full.status === 'failed' ? 'Feedback failed'
+      : full.result?.executed ? full.about : 'AI is off — showing the prompt it would run';
+    if (full.status === 'failed') $('#feedback-content').textContent = full.error ?? 'Unknown error';
+    else $('#feedback-content').replaceChildren(renderFeedbackMarkdown(full.result?.output ?? ''));
+    const local = feedbackJobs.find(item => item.id === job.id);
+    if (local) local.unread = false;
+    renderJobChip(feedbackJobs);
+  } catch (err) {
+    if (request !== feedbackRequest) return;
+    $('#feedback-status').textContent = 'Could not load feedback';
+    $('#feedback-content').textContent = err.message;
   }
-
-  const full = await api(`/ai/jobs/${encodeURIComponent(job.id)}`).catch(() => job);
-  await refreshJobs().catch(() => {});
-
-  if (full.status === 'failed') {
-    showModal('Feedback failed', el('pre', { textContent: full.error ?? 'Unknown error' }));
-    return;
-  }
-  const result = full.result ?? {};
-  showModal(
-    result.executed ? `Feedback — ${full.about}` : 'AI is off — this is the prompt it would have run',
-    el('pre', { textContent: result.output ?? '' }),
-  );
 }
 
 async function askBulletFeedback(entry, bullet) {
-  showModal('Feedback', el('p', { className: 'hint', textContent: 'Asking the configured AI…' }));
+  return askSourceFeedback({ entryId: entry.id, bulletId: bullet.id });
+}
+
+async function askSourceFeedback(target) {
   try {
-    const result = await api('/ai/feedback', {
+    await flushEdits();
+    if (state.dirty) throw new Error('Save your edits before requesting feedback');
+    const { job } = await api('/ai/feedback', {
       method: 'POST',
-      body: JSON.stringify({ entryId: entry.id, bulletId: bullet.id }),
+      body: JSON.stringify({ ...target, background: true }),
     });
-    showModal(
-      result.executed
-        ? `Feedback — ${bulletName(entry, bullet)}`
-        : 'AI is off — this is the prompt it would have run',
-      el('pre', { textContent: result.output }),
-    );
+    await openJob(job);
+    setStatus('AI feedback requested — you can keep editing. Watch the results indicator.');
+    watchJobs();
   } catch (err) {
     showModal('Feedback failed', el('pre', { textContent: err.message }));
   }
@@ -2838,7 +3029,7 @@ async function loadVoice() {
                 el('span', { style: 'flex:1' }),
                 el('span', {
                   className: 'faint',
-                  textContent: 'already in your store',
+                  textContent: 'already in your save',
                   title: 'Letters you have sent and answers you have saved count automatically',
                 }),
               ]),
@@ -3128,14 +3319,22 @@ async function loadAiPresets() {
 }
 
 /** Where the store lives, and whether it is backed up anywhere. */
-async function loadStoreSettings() {
-  const info = await api('/config/store');
-  const box = $('#store-settings');
+async function loadProjectSettings() {
+  const [info, config] = await Promise.all([api('/config/store'), api('/config')]);
+  const box = $('#project-settings');
+  const autoCommit = el('input', { type: 'checkbox', checked: config.git.autoCommit, disabled: config.overrides.autoCommit });
+  autoCommit.onchange = async () => {
+    try {
+      await api('/config', { method: 'PUT', body: JSON.stringify({ git: { autoCommit: autoCommit.checked } }) });
+      state.store.config.git.autoCommit = autoCommit.checked;
+      setStatus('Save history setting saved');
+    } catch (error) { autoCommit.checked = !autoCommit.checked; setStatus(error.message, true); }
+  };
 
   const remote = el('input', {
     type: 'text',
     value: info.remote.url ?? '',
-    placeholder: 'git@github.com:you/my-resume-store.git',
+    placeholder: 'git@github.com:you/my-resume-save.git',
   });
   const result = el('div', {
     className: 'result idle',
@@ -3163,8 +3362,8 @@ async function loadStoreSettings() {
 
   setChildren(
     box,
-    el('div', { className: 'lbl', textContent: 'Location' }),
-    el('div', { className: 'mono-path', textContent: info.dir }),
+    el('label', { className: 'row' }, [autoCommit, el('span', { textContent: 'Automatically Save History' })]),
+    config.overrides.autoCommit ? el('p', { className: 'hint', textContent: 'Automatic history is disabled by the launch settings.' }) : null,
     el('div', {
       className: 'hint',
       style: 'margin-bottom:12px',
@@ -3178,7 +3377,7 @@ async function loadStoreSettings() {
     el('div', { className: 'row' }, [
       el('button', {
         className: 'primary',
-        textContent: 'Save everything to git',
+        textContent: 'Save History',
         onclick: async () => {
           unsaved.className = 'result idle';
           unsaved.textContent = 'Saving…';
@@ -3189,7 +3388,7 @@ async function loadStoreSettings() {
               ? `Saved ${plural(res.files.length, 'file')} — ${res.message}`
               : 'Everything was already saved.';
             setStatus(res.saved ? 'Saved to git' : 'Already saved');
-            loadStoreSettings().catch(() => {});
+            loadProjectSettings().catch(() => {});
           } catch (err) {
             unsaved.className = 'result bad';
             unsaved.textContent = err.message;
@@ -3203,7 +3402,7 @@ async function loadStoreSettings() {
     ]),
     unsaved,
     el('label', { className: 'f' }, [
-      el('div', { className: 'lbl', textContent: 'Backup remote (optional)' }),
+      el('div', { className: 'lbl', textContent: 'Backup Remote (Optional)' }),
       remote,
       el('div', {
         className: 'hint',
@@ -3212,14 +3411,14 @@ async function loadStoreSettings() {
     ]),
     el('div', { className: 'row' }, [
       el('button', {
-        textContent: 'Save remote',
+        textContent: 'Save Remote',
         onclick: async () => {
           try {
             const status = await api('/config/store/remote', {
               method: 'PUT',
               body: JSON.stringify({ url: remote.value.trim() }),
             });
-            setResult(status.url ? describeRemote(status) : 'Remote removed. The store is local only.', 'ok');
+            setResult(status.url ? describeRemote(status) : 'Remote removed. The save is local only.', 'ok');
           } catch (err) {
             setResult(err.message, 'bad');
           }
@@ -3227,7 +3426,7 @@ async function loadStoreSettings() {
       }),
       el('button', {
         className: 'primary',
-        textContent: 'Push now',
+        textContent: 'Push Backup',
         disabled: !info.remote.url,
         onclick: async () => {
           setResult('Pushing…');
@@ -3345,7 +3544,6 @@ async function loadSettings() {
     );
   }
 
-  const autoCommit = el('input', { type: 'checkbox', checked: config.git.autoCommit });
   const result = el('div', { className: 'result idle', textContent: 'Not tested yet.' });
 
   const save = async () => {
@@ -3362,7 +3560,6 @@ async function loadSettings() {
           timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 180_000,
         },
         latex: { engine: engine.value || undefined },
-        git: { autoCommit: autoCommit.checked },
       }),
     });
     setStatus('Settings saved');
@@ -3395,18 +3592,11 @@ async function loadSettings() {
     ),
     el('div', { className: 'sandbox-note' }, [
       el('b', {}, 'Confined to a scratch directory. '),
-      'The command runs in an empty temporary folder containing only the prompt — never your store, ' +
+      'The command runs in an empty temporary folder containing only the prompt — never your save folder, ' +
         'your home directory, or this source tree. The presets add each CLI’s own read-only flags on top.',
     ]),
     field('Timeout, seconds', timeout),
     field('LaTeX engine', engine, 'Auto-detect tries tectonic, then latexmk, then pdflatex.'),
-    el('label', { className: 'check', style: 'margin:12px 0' }, [
-      autoCommit,
-      el('span', {}, 'Commit every change to the store'),
-    ]),
-    config.overrides.autoCommit
-      ? el('div', { className: 'override', textContent: 'RMM_AUTOCOMMIT=0 is set, so nothing is committed.' })
-      : null,
     el('div', { className: 'row' }, [
       el('button', { className: 'primary', textContent: 'Save', onclick: () => save().catch((e) => setStatus(e.message, true)) }),
       el('button', {
@@ -3619,7 +3809,7 @@ async function loadHistory() {
     list.replaceChildren(
       el('div', { className: 'empty' }, [
         el('b', {}, 'No history yet'),
-        'The store is not a git repository, or nothing has been committed. Run ',
+        'The save is not a Git repository, or nothing has been committed. Run ',
         el('code', {}, 'rmm serve'),
         ' once and it will be initialised.',
       ]),
@@ -3817,6 +4007,7 @@ function render() {
   const bases = state.store.resumes.filter((r) => r.base);
   const rest = state.store.resumes.filter((r) => !r.base);
   select.replaceChildren(
+    el('option', { value: '__master__', textContent: 'Master Document — All Source Content' }),
     ...(bases.length > 0
       ? [
           el('optgroup', { label: 'Bases' }, bases.map(option)),
@@ -3824,7 +4015,13 @@ function render() {
         ].filter(Boolean)
       : state.store.resumes.map(option)),
   );
-  select.value = state.resumeId;
+  select.value = state.masterView ? '__master__' : state.resumeId;
+  $('#btn-base').hidden = state.masterView;
+  $('#btn-save-as').hidden = state.masterView;
+  $('#btn-feedback').textContent = state.masterView ? 'Master Feedback' : 'Resume Feedback';
+  $('#resume-view-note').textContent = state.masterView
+    ? 'All source entries and phrasings. Edits here update every tailored resume that uses them.'
+    : 'Select source content for this resume. Shared wording edits also update the master and other resumes that use it.';
   renderBaseButton();
   renderEditor();
 }
@@ -3870,6 +4067,7 @@ async function loadStore() {
       resumes[0]?.id ??
       null;
   }
+  if (!state.resumeId) state.masterView = true;
 }
 
 /** Switch tabs programmatically, so a deep link lands in the right place. */
@@ -3893,7 +4091,14 @@ async function applyHash() {
   // A bare `#voice` or `#applications` opens that tab. The extension links
   // here when it needs to send someone to a setting, and a link that lands on
   // the wrong tab is worse than no link.
-  const tab = /^#([a-z]+)$/.exec(location.hash)?.[1];
+  const requestedTab = /^#([a-z]+)$/.exec(location.hash)?.[1];
+  const tab = ['assets', 'project'].includes(requestedTab) ? 'save'
+    : ['build', 'master'].includes(requestedTab) ? 'resumes' : requestedTab;
+  if (requestedTab === 'master' || requestedTab === 'build') {
+    state.masterView = requestedTab === 'master' || !state.resumeId;
+    render();
+    scheduleRender();
+  }
   if (tab && document.querySelector(`#tabs button[data-tab="${tab}"]`)) {
     showTab(tab);
     return true;
@@ -3906,6 +4111,8 @@ function setupTabs() {
     btn.onclick = () => {
       for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b === btn);
       for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === `tab-${btn.dataset.tab}`);
+      if (btn.dataset.tab === 'resumes') scheduleRender();
+      if (btn.dataset.tab === 'save') assetUI.load().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'workspace') loadDrafts().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
@@ -3916,14 +4123,23 @@ function setupTabs() {
       if (btn.dataset.tab === 'voice') {
         loadVoice().catch((e) => setStatus(e.message, true));
         loadSettings().catch((e) => setStatus(e.message, true));
-        loadStoreSettings().catch((e) => setStatus(e.message, true));
       }
     };
   }
 }
 
 async function boot() {
+  $('#feedback-close').onclick = () => { $('#feedback-panel').hidden = true; };
+  $('#feedback-select').onchange = event => {
+    const job = feedbackJobs.find(item => item.id === event.target.value);
+    if (job) openJob(job);
+  };
+  assetUI = setupAssets({ api, el, setChildren, readAsBase64, flushEdits, isDirty: () => state.dirty,
+    reloadStore: async () => { await loadStore(); render(); }, entryName, status: setStatus,
+    projectChanged: dir => { activeProject = dir; }, loadProjectSettings });
   setupTabs();
+  const project = await assetUI.init();
+  if (!project.current) { showTab('save'); return; }
   setupHistoryTab();
   await loadStore();
   render();
@@ -3931,7 +4147,7 @@ async function boot() {
   // A deep link means the user came here to write, not to look at a resume;
   // skip the compile they did not ask for.
   const deepLinked = await applyHash().catch(() => false);
-  if (!deepLinked) renderPreview();
+  if (!deepLinked) showTab('resumes');
   window.addEventListener('hashchange', () => applyHash().catch(() => {}));
 
   $('#resume-select').onchange = async (e) => {
@@ -3939,7 +4155,11 @@ async function boot() {
     // Save what is on screen before leaving it: clearEdits() is about to throw
     // the unsaved overlay away.
     await flushEdits();
-    state.resumeId = next;
+    if (state.dirty) { e.target.value = state.masterView ? '__master__' : state.resumeId; return; }
+    clearTimeout(renderTimer);
+    renderToken++;
+    state.masterView = next === '__master__';
+    if (!state.masterView) state.resumeId = next;
     clearEdits();
     setSaveState('saved');
     render();
@@ -3956,7 +4176,8 @@ async function boot() {
   // anyway" — after changing the LaTeX engine, say.
   $('#live-state').onclick = renderPreview;
   $('#btn-save-as').onclick = saveAsVariation;
-  $('#btn-feedback').onclick = askFeedback;
+  $('#btn-feedback').onclick = () => askFeedback(state.masterView);
+  $('#btn-rebuild').onclick = renderPreview;
   $('#btn-add-entry').onclick = async () => {
     const answer = await form('Add an entry', [
       {
@@ -3991,17 +4212,6 @@ async function boot() {
   };
   $('#btn-add-letter').onclick = addLetter;
   $('#btn-add-answer').onclick = addAnswer;
-  $('#btn-master').onclick = async () => {
-    setStatus('Compiling the master document…');
-    try {
-      const r = await api('/render', { method: 'POST', body: JSON.stringify({ master: true }) });
-      // The master document is for reading, so fit the width instead.
-      showPdf($('#master-pane'), r.pdfUrl);
-      setStatus(`Master document: ${plural(r.pages, 'page')}`);
-    } catch (err) {
-      setStatus(err.message, true);
-    }
-  };
   $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
   wireVoiceDrop();
   $('#btn-save-voice').onclick = async () => {

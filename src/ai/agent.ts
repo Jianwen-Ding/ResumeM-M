@@ -38,7 +38,8 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
     return { output: prompt, executed: false };
   }
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-ai-'));
+  // macOS aliases /var to /private/var; CLI arguments and cwd must agree.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-ai-')));
   const promptFile = path.join(dir, 'prompt.md');
   fs.writeFileSync(promptFile, prompt, 'utf8');
 

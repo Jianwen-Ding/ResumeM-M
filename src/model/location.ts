@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readProjects } from './projects.js';
 
 /**
  * Where the working store lives.
@@ -19,6 +20,10 @@ import path from 'node:path';
  */
 export function resolveStoreDir(projectRoot: string): string {
   if (process.env.RMM_DATA) return path.resolve(process.env.RMM_DATA);
+
+  const preferences = readProjects();
+  const selected = preferences.defaultFolder || preferences.active;
+  if (selected) return selected;
 
   const bundled = path.join(projectRoot, 'data');
   const home = path.join(os.homedir(), '.resumem-m', 'store');

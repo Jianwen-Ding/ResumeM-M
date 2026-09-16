@@ -346,7 +346,8 @@ export class Store {
 
   /** Absolute path to the configured output directory, created on demand. */
   outDir(): string {
-    const dir = path.resolve(this.root, '..', this.loadConfig().output.dir);
+    const output = this.loadConfig().output;
+    const dir = path.resolve(this.root, output.withinProject ? '.' : '..', output.dir);
     fs.mkdirSync(dir, { recursive: true });
     return dir;
   }

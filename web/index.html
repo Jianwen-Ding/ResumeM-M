@@ -13,57 +13,117 @@
 <header>
   <h1>ResumeM-M</h1>
   <nav id="tabs">
-    <button data-tab="build" class="active">Build</button>
-    <button data-tab="master">Master</button>
-    <button data-tab="workspace">Workspace</button>
-    <button data-tab="applications">Applications</button>
-    <button data-tab="letters">Letters &amp; answers</button>
-    <button data-tab="history">History</button>
-    <button data-tab="voice">Voice &amp; AI</button>
+    <button data-tab="resumes" disabled>Resumes</button>
+    <button data-tab="save" class="active">Save &amp; Files</button>
+    <button data-tab="workspace" disabled>Workspace</button>
+    <button data-tab="applications" disabled>Applications</button>
+    <button data-tab="letters" disabled>Letters &amp; Answers</button>
+    <button data-tab="history" disabled>History</button>
+    <button data-tab="voice" disabled>Voice &amp; AI</button>
   </nav>
+  <button id="project-chip" class="tiny" title="Open or create a save">No Save Open</button>
   <span id="jobs-chip" class="jobs-chip hidden" title="Work the AI is doing, or has finished"></span>
   <span id="status" class="status"></span>
 </header>
 
+<div id="project-banner" role="status"><strong id="project-status">No Save Open</strong><span id="project-banner-path">Open or create a save to access resumes, applications, and files.</span></div>
+
 <main>
   <!-- Build: mix and match variants, preview the compiled PDF beside it. -->
-  <section id="tab-build" class="tab active">
+  <section id="tab-resumes" class="tab">
     <div class="split">
       <div class="pane pane-left">
         <div class="toolbar sticky-toolbar">
-          <select id="resume-select" title="Which resume to edit"></select>
+          <select id="resume-select" title="Master document or tailored resume"></select>
           <button id="btn-base" class="tiny" title="Pinned bases are what new resumes and tailored drafts start from"></button>
-          <span id="save-state" class="save saved" title="Edits are written to the store as you make them, and committed once you stop.">All changes saved</span>
+          <span id="save-state" class="save saved" title="Edits are written to the save as you make them, and committed once you stop.">All changes saved</span>
           <span id="live-state" class="live ok" title="The preview recompiles itself whenever you change something. Click to force one.">Live</span>
           <button id="btn-save-as">Save as variation…</button>
           <button id="btn-feedback">Feedback</button>
+          <button id="btn-rebuild" class="tiny">Rebuild</button>
           <span class="grow"></span>
           <button id="btn-add-entry" title="Add a new education entry, job, or project">+ Entry</button>
         </div>
+        <p id="resume-view-note" class="hint"></p>
+        <p class="hint editor-interaction-hint">Double-click a bullet to edit and show actions, or use its … button.</p>
         <div id="fit" class="fit idle">Not compiled yet.</div>
         <div id="warnings" class="warnings"></div>
         <div id="editor"></div>
       </div>
-      <div class="pane pane-right">
+      <div class="pane pane-right resume-preview-column">
         <!-- Drawn by pdf.js into canvases, so a recompile swaps a finished
              page in rather than blinking. See preview.js. -->
         <div id="preview-pane" class="preview-frame">
           <div id="preview-empty" class="preview-empty">Compiling your resume…</div>
         </div>
+        <section id="feedback-panel" class="feedback-panel" aria-label="AI Feedback" hidden>
+          <div class="toolbar">
+            <h2>AI Feedback</h2>
+            <span class="grow"></span>
+            <button id="feedback-close" class="tiny" title="Hide feedback; reopen it from Results">Hide</button>
+          </div>
+          <label class="feedback-picker" for="feedback-select">Review <select id="feedback-select"></select></label>
+          <p id="feedback-status" class="hint" role="status"></p>
+          <div id="feedback-content" class="feedback-markdown" tabindex="0" aria-label="Feedback text"></div>
+        </section>
       </div>
     </div>
   </section>
 
-  <!-- Master: every entry, bullet, and phrasing, for browsing what exists. -->
-  <section id="tab-master" class="tab">
-    <div class="toolbar">
-      <button id="btn-master" class="primary">Rebuild master document</button>
-      <span class="hint">Every phrasing of every line, side by side. Not a resume — an inventory.</span>
-    </div>
-    <div id="master-pane" class="preview-frame tall">
-      <!-- One element, not three: the centring is a grid, and a bare text node
-           beside a <b> would become three rows stacked down the box. -->
-      <div id="master-empty" class="preview-empty"><span>Press <b>Rebuild</b> to compile the master document.</span></div>
+  <section id="tab-save" class="tab active">
+    <div class="assets-layout">
+      <aside class="project-panel">
+        <h2>Save Folder</h2>
+        <p id="project-description" class="hint">Choose the folder that owns your resumes, applications, settings, and source files.</p>
+        <div id="project-current" class="mono-path">No Save Open</div>
+        <button id="project-close" hidden>Close Save</button>
+        <p id="project-output" class="hint mono-path"></p>
+        <label class="lbl" for="project-recents">Recent Saves</label>
+        <select id="project-recents"></select>
+        <label class="lbl" for="project-mode">Folder Action</label>
+        <select id="project-mode"><option value="open">Open Existing Save</option><option value="create">Create Blank Save</option><option value="move">Move Current Save</option></select>
+        <label class="lbl" for="project-path">Save Folder</label>
+        <input id="project-path" placeholder="~/Documents/My Resume Save">
+        <div class="toolbar"><button id="project-browse" hidden>Choose Folder…</button><button id="project-switch">Open Save</button></div>
+        <p class="hint">Create and Move use an empty or new folder. Move copies your files and history, switches future saves, and keeps the old folder as a backup.</p>
+        <p id="project-override" class="hint"></p>
+        <label class="lbl" for="save-default">Default Save Folder</label>
+        <select id="save-default"><option value="">Ask Me on Startup</option></select>
+        <button id="save-default-current" hidden>Use This Save by Default</button>
+        <p id="save-default-status" class="hint">Choose which save opens when ResumeM-M starts.</p>
+        <div data-project-required hidden>
+        <hr>
+        <h3>Inbox Folder</h3>
+        <p class="hint">Save files here from any app. While ResumeM-M is running, the inbox can import supported documents automatically, including subfolders.</p>
+        <div id="asset-inbox" class="mono-path"></div>
+        <label class="row"><input id="asset-watch" type="checkbox"> Automatically import the inbox</label>
+        <p class="hint">Inbox files stay in place. Identical files are imported once.</p>
+        </div>
+      </aside>
+      <div>
+        <div id="project-welcome" class="project-welcome">
+          <h2>No Save Open</h2>
+          <p>Open a save folder or create a blank save to begin. Resumes, applications, imported files, and settings belong to that save.</p>
+          <div id="project-existing"></div>
+        </div>
+        <div data-project-required hidden>
+        <div class="toolbar"><h2>Files</h2><span class="grow"></span><button id="asset-add-folder">Add Folder…</button><button id="asset-add" class="primary">Add Files…</button></div>
+        <p class="hint">Drop a batch of files. We keep the originals, sort the contents, and draft resume points from your work.</p>
+        <div id="asset-drop" class="dropzone" tabindex="0" role="button" aria-label="Import source files"><b>Drop files or folders here</b><span class="faint">PDF, Word (.docx), Markdown, text, LaTeX, HTML, and data files · up to 20 MB each</span></div>
+        <input id="asset-files" type="file" multiple hidden>
+        <input id="asset-folder" type="file" multiple webkitdirectory hidden>
+        <label class="row"><input id="asset-generate" type="checkbox" checked> Generate draft points after sorting</label>
+        <p id="asset-ai-state" class="hint"></p>
+        <div id="asset-progress" role="status" aria-live="polite"></div>
+        <div class="toolbar"><label for="asset-filter">Show</label><select id="asset-filter"><option value="">All Files</option><option value="resume">Resumes</option><option value="letter">Letters</option><option value="answer">Answers</option><option value="other">Notes &amp; Other</option><option value="error">Needs Attention</option></select><span class="grow"></span><button id="asset-refresh" class="tiny">Refresh</button></div>
+        <div id="asset-list" class="card-list"></div>
+        <details id="project-backup" class="project-backup">
+          <summary>Save History &amp; Backup</summary>
+          <p class="hint">Keep version history or configure a private Git backup for this save.</p>
+          <div id="project-settings" class="settings"></div>
+        </details>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -139,7 +199,7 @@
   <!-- History: what the store looked like at any point, from git. -->
   <section id="tab-history" class="tab">
     <p class="hint">
-      Every change to the store is committed, so this is the record of what you
+      Every change to the save is committed, so this is the record of what you
       sent and when. Pick a commit to see exactly what moved.
     </p>
     <div class="toolbar">
@@ -215,14 +275,7 @@
         </p>
         <div id="settings" class="settings"></div>
 
-        <div class="toolbar" style="margin-top:20px"><h2>Your store</h2></div>
-        <p class="hint">
-          Everything you write lives in its own git repository, separate from
-          this application's code. It stays on your machine unless you choose
-          to push it somewhere — and a resume store belongs in a private
-          repository if you do.
-        </p>
-        <div id="store-settings" class="settings"></div>
+
       </div>
     </div>
   </section>
@@ -241,6 +294,7 @@
   </div>
 </div>
 
+<script type="importmap">{"imports":{"marked":"/vendor/marked.js","dompurify":"/vendor/purify.mjs"}}</script>
 <script src="app.js" type="module"></script>
 </body>
 </html>

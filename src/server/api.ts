@@ -8,6 +8,7 @@ import {
   bulletFeedbackPrompt,
   coverLetterPrompt,
   feedbackPrompt,
+  phraseFeedbackPrompt,
   shortenPrompt,
   tailorPrompt,
   type TailorContext,
@@ -176,22 +177,22 @@ function handler(fn: (req: Request, res: Response) => Promise<unknown>) {
         const message = err instanceof Error ? err.message : String(err);
         res.status(400).json({ error: message });
       }
-    });
+    }).finally(() => res.locals.finishProjectRequest?.());
   };
 }
 
 export interface ApiDeps {
   store: Store;
   repo: Repo;
+  jobs?: Jobs;
 }
 
-export function createApi({ store, repo }: ApiDeps): Router {
+export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
 
   const autoCommit = () => store.loadConfig().git.autoCommit;
   // Work the user started and walked away from.
-  const jobs = new Jobs();
 
   /**
    * What a resume resolved to at a given commit.
@@ -765,27 +766,52 @@ export function createApi({ store, repo }: ApiDeps): Router {
   api.post(
     '/ai/feedback',
     handler(async (req, res) => {
-      const { resumeId, focus, bulletId, entryId, background } = req.body as {
+      const { resumeId, focus, bulletId, entryId, variantId, fieldName, background, master } = req.body as {
+        master?: boolean;
         resumeId?: string;
         focus?: string;
         bulletId?: string;
         entryId?: string;
+        variantId?: string;
+        fieldName?: 'title' | 'subtitle' | 'dates' | 'location';
         /** Return a job to collect later instead of holding the request open. */
         background?: boolean;
       };
       const data = store.load();
 
+      if (master && (resumeId || bulletId || entryId || variantId || fieldName)) throw new Error('Choose master feedback or a specific resume/bullet, not both');
+      if ((resumeId && (entryId || bulletId || variantId || fieldName)) || (bulletId && fieldName)) throw new Error('Choose one feedback target');
+      if ((bulletId || fieldName || variantId) && !entryId) throw new Error('An entry is required for phrase or bullet feedback');
+      if (variantId && !bulletId && !fieldName) throw new Error('Choose a bullet or heading field for this phrasing');
       let prompt: string;
       let about: string;
-      if (bulletId && entryId) {
+      if (entryId) {
         const entry = data.entries.find((e) => e.id === entryId);
-        const bullet = entry?.bullets?.find((b) => b.id === bulletId);
-        if (!entry || !bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
-        prompt = bulletFeedbackPrompt(data, entry, bullet);
-        about = typeof entry.title === 'string' ? entry.title : 'a bullet point';
+        if (!entry) throw new Error(`No entry "${entryId}"`);
+        if (fieldName) {
+          if (!['title', 'subtitle', 'dates', 'location'].includes(fieldName)) throw new Error('Unknown heading field');
+          const field = entry[fieldName];
+          const text = typeof field === 'string' && !variantId ? field
+            : field && isVariantField(field) ? field.variants.find(v => v.id === variantId)?.text : undefined;
+          if (!text) throw new Error('No matching heading phrasing');
+          prompt = phraseFeedbackPrompt(data, entry, { id: `${entryId}.${fieldName}${variantId ? `:${variantId}` : ''}`, text });
+          about = `${fieldName}: ${text.slice(0, 70)}`;
+        } else {
+          const bullet = entry.bullets?.find((b) => b.id === bulletId);
+          if (!bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
+          if (variantId) {
+            const variant = !bullet.items && bullet.variants.find(v => v.id === variantId);
+            if (!variant) throw new Error(`No phrasing "${variantId}" on bullet "${bulletId}"`);
+            prompt = phraseFeedbackPrompt(data, entry, { id: `${entryId}/${bulletId}/${variantId}`, text: variant.text });
+            about = `${variant.label}: ${variant.text.slice(0, 70)}`;
+          } else {
+            prompt = bulletFeedbackPrompt(data, entry, bullet);
+            about = typeof entry.title === 'string' ? entry.title : 'a bullet point';
+          }
+        }
       } else {
-        const resolved = resolveResume(String(resumeId), data);
-        about = resolved.label;
+        const resolved = master ? buildMaster(data) : resolveResume(String(resumeId), data);
+        about = master ? 'Master Document' : resolved.label;
 
         /*
          * Compile it first, and hand the critique the real thing: the exact
@@ -799,7 +825,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
         let fit: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] } | undefined;
         try {
           const compiled = await compileResume(resolved, {
-            pdfPath: path.join(store.outDir(), `${slug(resolved.id) || 'resume'}.pdf`),
+            pdfPath: path.join(store.outDir(), `${master ? 'master' : slug(resolved.id) || 'resume'}.pdf`),
             engine: data.config.latex.engine,
           });
           tex = compiled.tex;

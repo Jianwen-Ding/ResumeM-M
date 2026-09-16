@@ -39,6 +39,21 @@ export function resumeAsText(r: ResolvedResume): string {
   return lines.join('\n');
 }
 
+/** Feedback must understand the shared source and the resumes selected from it. */
+function feedbackWorkspaceContext(): string {
+  return [
+    '## How this resume workspace works',
+    'You are working in ResumeM-M, which automatically compiles smaller, tailored resumes',
+    '(sub-resumes) from a larger master inventory in the active save folder.',
+    'The master is the shared source of experience, education, projects, skills, and alternate phrasings.',
+    'Each sub-resume selects entries, bullets, skill items, and wording variants; it can inherit choices',
+    'from a base resume. Shared source edits flow through to every resume that references them.',
+    'Alternate phrasings of the same bullet are choices, not separate achievements printed together.',
+    'Distinguish advice about improving the shared source from advice about selecting content for one',
+    'submission. Hiding something on a tailored resume does not require deleting it from the master.',
+  ].join('\n');
+}
+
 /**
  * Feedback only. This is deliberately not a rewriting prompt: the point is to
  * get a critique you can act on, not a replacement you have to re-edit back
@@ -55,19 +70,34 @@ export interface FeedbackContext {
 export function feedbackPrompt(data: StoreData, resume: ResolvedResume, context: FeedbackContext | string = {}): string {
   // Older callers passed a focus string.
   const { focus, tex, fit } = typeof context === 'string' ? { focus: context } : context;
+  const master = resume.id === '__master__';
 
   return [
     preamble(data),
     '',
+    feedbackWorkspaceContext(),
+    '',
     '## Task: critique, do not rewrite',
-    'Give feedback on the resume below. Do NOT produce a rewritten resume or rewritten bullets.',
+    master
+      ? 'Give feedback on the MASTER DOCUMENT below as a reusable source inventory. Do NOT produce a rewritten resume or rewritten bullets.'
+      : 'Give feedback on the selected sub-resume below as a standalone submission. Do NOT produce a rewritten resume or rewritten bullets.',
+    master ? [
+      'The master is not a job application and has no one-page limit. Do not recommend shrinking it,',
+      'cutting useful experience, or deleting alternate phrasings merely to fit a submission page.',
+      'Prioritize evidence quality, clear outcomes, factual consistency, missing context, and useful',
+      'distinct angles that help the system select strong content for different roles.',
+      'Separate genuine duplicate claims across different bullets from intentional variants of one bullet.',
+      'Dates or titles may have labeled alternatives: consider their stated purpose before calling them inconsistent.',
+      'If evidence is missing, ask what needs to be verified; never supply invented achievements or metrics.',
+      'Identify the affected entry, bullet, or variant by its ID so the shared source can be improved precisely.',
+    ].join('\n') : '',
     'For each point: quote the fragment, say what specifically is weak, and say what would fix it.',
     'Be direct. Skip anything that is already fine — a short list of real problems beats a long list of nits.',
     'Call out in particular: vague verbs, claims with no outcome, duplicated phrasing across bullets,',
     'and anything a reader would not understand without insider context.',
     focus ? `\nThe user specifically wants feedback on: ${focus}` : '',
     '',
-    '## Resume',
+    master ? '## Master source inventory' : '## Resume',
     resumeAsText(resume),
     '',
     // The rest of the store: other resumes this person keeps, letters they
@@ -77,7 +107,7 @@ export function feedbackPrompt(data: StoreData, resume: ResolvedResume, context:
     theRestOfTheStore(data, resume),
     // What actually gets typeset. Anything about length, spacing or what fits
     // is guesswork without it.
-    compiledEvidence(tex, fit),
+    compiledEvidence(tex, fit, master),
   ]
     .filter(Boolean)
     .join('\n');
@@ -245,17 +275,19 @@ function mayLookThingsUp(data: StoreData, job?: { company?: string; jobTitle?: s
 }
 
 /** The LaTeX and the fit report, so layout advice is about the real page. */
-function compiledEvidence(tex?: string, fit?: FeedbackContext['fit']): string {
+function compiledEvidence(tex?: string, fit?: FeedbackContext['fit'], master = false): string {
   if (!tex && !fit) return '';
   const lines = ['', '## What it compiles to'];
 
   if (fit) {
     lines.push(
       '',
-      fit.fits
+      master
+        ? `Master inventory rendering: ${fit.pages} page(s). This is an inventory layout, not a submission page budget.`
+        : fit.fits
         ? `It fits on ${fit.pages} page(s), with about ${Math.abs(fit.overflowLines)} lines of room to spare.`
         : `It does NOT fit: ${fit.pages} pages, about ${fit.overflowLines} lines too long.`,
-      fit.adjustments.length > 0 ? `Auto-fit had to: ${fit.adjustments.join('; ')}.` : '',
+      !master && fit.adjustments.length > 0 ? `Auto-fit had to: ${fit.adjustments.join('; ')}.` : '',
     );
   }
 
@@ -279,13 +311,36 @@ export function bulletFeedbackPrompt(data: StoreData, entry: Entry, bullet: Bull
   return [
     preamble(data),
     '',
+    feedbackWorkspaceContext(),
+    '',
     '## Task: critique one bullet, do not rewrite',
     `This bullet belongs to "${typeof entry.title === 'string' ? entry.title : entry.id}".`,
     'It already has several phrasings. Say which is strongest and why, and what is weak about each.',
     'Do not produce new phrasings unless asked; this is a critique.',
     '',
     '## Phrasings',
-    ...bullet.variants.map((v) => `- [${v.id}] (${v.label}) ${v.text}`),
+    ...(bullet.items ? [bullet.prefix ?? '', ...bullet.items.map(item => `- [${item.id}] ${item.text}`)]
+      : bullet.variants.map((v) => `- [${v.id}] (${v.label}) ${v.text}`)),
+  ].join('\n');
+}
+
+/** Review exactly the wording clicked, while retaining its source context. */
+export function phraseFeedbackPrompt(data: StoreData, entry: Entry, target: { id: string; text: string }): string {
+  return [
+    preamble(data),
+    '',
+    feedbackWorkspaceContext(),
+    '',
+    '## Task: critique one phrasing, do not rewrite',
+    'Focus only on the selected phrase below. Quote it, then give concise, actionable feedback on clarity, specificity, credibility, and usefulness in a tailored resume.',
+    'Use the surrounding entry only as context; do not critique every alternate or treat alternate phrasings as separate achievements.',
+    'Identify missing evidence as a question, never as an invented fact. Do not produce replacement wording unless asked.',
+    '',
+    `## Selected phrase [${target.id}]`,
+    target.text,
+    '',
+    '## Source entry (context only)',
+    JSON.stringify(entry, null, 2),
   ].join('\n');
 }
 

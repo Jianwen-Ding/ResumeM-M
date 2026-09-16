@@ -8,7 +8,7 @@ import {
   shortenPrompt,
   tailorPrompt,
 } from '../src/ai/prompts.js';
-import { resolveResume } from '../src/model/resolve.js';
+import { buildMaster, resolveResume } from '../src/model/resolve.js';
 import { makeTempStore } from './helpers.js';
 
 const t = makeTempStore();
@@ -79,6 +79,38 @@ describe('feedback prompts', () => {
     expect(p).toContain('[v_base]');
     expect(p).toContain('[v_kafka]');
     expect(p).toContain('do not rewrite');
+  });
+});
+
+describe('feedback understands the master and derived resumes', () => {
+  it('gives shared-source context to resume and bullet critiques', () => {
+    const entry = data.entries.find(e => e.id === 'exp_acme')!;
+    const bullet = entry.bullets![0]!;
+    for (const prompt of [feedbackPrompt(data, resolved), bulletFeedbackPrompt(data, entry, bullet)]) {
+      expect(prompt).toContain('automatically compiles smaller, tailored resumes');
+      expect(prompt).toContain('inherit choices');
+      expect(prompt).toContain('not separate achievements printed together');
+      expect(prompt).toContain('does not require deleting it from the master');
+    }
+  });
+
+  it('critiques every master variant without imposing a submission page budget', () => {
+    const prompt = feedbackPrompt(data, buildMaster(data), {
+      focus: 'evidence gaps', tex: 'master latex source',
+      fit: { pages: 3, fits: false, overflowLines: 20, adjustments: ['shrank text'] },
+    });
+    expect(prompt).toContain('MASTER DOCUMENT');
+    expect(prompt).toContain('no one-page limit');
+    expect(prompt).toContain('genuine duplicate claims');
+    expect(prompt).toContain('variant:v_base');
+    expect(prompt).toContain('variant:v_kafka');
+    expect(prompt).toContain('variant:v_short');
+    expect(prompt).toContain('evidence gaps');
+    expect(prompt).toContain('Master inventory rendering: 3 page(s)');
+    expect(prompt).toContain('master latex source');
+    expect(prompt).not.toContain('lines too long');
+    expect(prompt).not.toContain('Auto-fit had to:');
+    expect(prompt).toContain('Never invent experience');
   });
 });
 

@@ -44,6 +44,90 @@ npm run serve                # editor GUI at http://127.0.0.1:4600
 The sample store under `data/` is a working example. Replace it with your own
 content; the structure is the documentation.
 
+### Mac app
+
+On macOS, install a native app with its own window, Dock icon, and Spotlight entry:
+
+```bash
+npm run mac:install
+```
+
+Then press **⌘ Space**, search **ResumeM-M**, and open it. The installer puts
+`ResumeM-M.app` in `~/Applications`. You can also drag it onto the Dock.
+The app starts its local server automatically; Terminal does not need to stay open.
+Closing the window keeps the app and extension API available; **⌘ Q** quits the
+app and its server. If a matching server was already running, the app reuses it
+and leaves it running when you quit. JobHelper still connects on port 4600.
+
+The app uses your existing store (normally `~/.resumem-m/store`). If you use
+`RMM_DATA`, set it when installing to select that store. The **Save & Files → Save Folder** controls let you create, open, close, or move a save and choose a default folder for startup. **File → Show Save Folder** opens it in Finder. No personal data is moved by the installer.
+
+Building requires macOS 12+, Xcode Command Line Tools, installed npm
+dependencies, and Node.js 20+. The installed app includes a snapshot of the
+editor and server, and uses the Node.js installation already on this Mac.
+LaTeX and any configured AI command also remain external tools. The installer
+preserves their command search path so they work when launched from Spotlight.
+Run `npm run mac:install` again after code updates or changing the Node location
+(quit the app first). This is a locally signed app for this Mac, not a notarized
+distribution for other machines.
+
+`npm run mac:build` builds `dist/macos/ResumeM-M.app` without installing it.
+`npm run mac:smoke` checks the packaged server using a disposable store.
+Startup errors are logged to `~/Library/Logs/ResumeM-M/server.log`.
+
+### Save Folders and Files
+
+Open **Save & Files** to drop a batch of files or a whole folder. Originals are copied
+into `assets/originals/`, sorted source material and draft points are saved in
+`assets/records/`, and duplicate file contents are imported only once. Each file
+can be up to 20 MB. PDF, Word (`.docx`), Markdown, plain text, LaTeX, HTML, RTF,
+and text-based data files are supported. Scanned PDFs need a text layer; this
+importer does not perform OCR. Failed imports keep their originals and can be retried.
+
+Leave **Generate draft points after sorting** checked to draft resume bullets
+with the configured AI. Each draft includes a source quote: edit the wording,
+check the claim, choose an existing or new entry, and click **Add reviewed
+point**. Add that entry to a resume in Resumes when you want to use it. Imported
+material only enters the Voice corpus when you click **Add source text to
+Voice**. With AI off, local rules sort the files and generation gives you a
+copyable prompt. Generation uses the first 60,000 extracted characters of each
+file; the complete extracted text and original remain saved.
+
+For files saved from other apps, enable **Automatically import the inbox** and
+save them inside the displayed `assets/inbox/` folder. ResumeM-M checks that
+folder and its subfolders every five seconds while running. It leaves inbox
+files in place and skips duplicates, hidden files, symlinks, unsupported formats,
+and files over 20 MB. Turn the checkbox off to stop importing.
+
+The **Save Folder** panel manages the folder containing your saved work:
+
+- **Create** starts a blank save in a new or empty folder, with `assets/` and
+  `out/` inside it.
+- **Open** switches to an existing save; recent folders are listed for quick
+  switching.
+- **Move** copies the store, its git history, assets, and generated output to an
+  empty destination, then switches future saves there. The original folder is
+  retained as a backup. Existing destination files are never overwritten.
+
+Choose **Default Save Folder** to configure the save that opens automatically
+at startup, or select **Ask Me on Startup**. Changing this preference does not
+switch the currently open save. **Close Save** returns to the chooser and keeps
+all files on disk. Without an open save, resume and application tabs, imports,
+and the extension's data endpoints are unavailable. A missing default folder
+returns to the chooser with an error; it never recreates example data.
+
+The old default folder is offered as **Open Existing Save** when present. It is
+not silently opened on a fresh installation. An explicit terminal `RMM_DATA`
+or CLI data directory still opens the requested save directly. Existing saved
+folder preferences continue to work until you change the startup setting.
+The current save name and full path are always shown above the editor.
+
+The Mac app offers a native folder chooser; the browser editor accepts an
+absolute folder path or `~/...`. Save-folder preferences are remembered in
+`~/.resumem-m/projects.json` (`RMM_PROJECTS_FILE` can override this for testing).
+An explicit terminal `RMM_DATA` still takes precedence on that terminal's next
+launch. Other open editor windows must reload after a switch before saving.
+
 ### Required LaTeX packages
 
 The template uses `titlesec`, `enumitem`, `fancyhdr`, `tabularx`, `hyperref`,
@@ -170,8 +254,36 @@ Nothing is shrunk past the floors in `layout.fitBounds`. When even the floor is
 not enough you get a number of lines to cut, not a silently unreadable PDF. Set
 `autoFit: false` to be told instead of accommodated.
 
+The **Resumes** tab combines source editing and tailored resumes in one workspace.
+Choose **Master Document — All Source Content** in the resume selector to edit
+shared entries and see every phrasing alongside the live master preview. Choose
+a saved resume to select which entries, bullets, skills, and variants it uses.
+Adding entries or phrasings in the master keeps them available without changing
+a tailored resume's selections.
+
+The same **Feedback** button follows the selected view. **Master Feedback**
+reviews the source inventory, with instructions explaining that ResumeM-M
+compiles smaller sub-resumes from it. It distinguishes useful variants from
+duplicate claims and does not impose a one-page limit on the master. Resume and
+individual-bullet feedback receive that shared-source context too. Results
+open below the rendered document, so you can read them while continuing to
+edit. Markdown headings, lists, emphasis, code, and tables are rendered.
+Use the review picker for earlier results or **Hide** to give the preview more
+room; **Feedback Results** reopens the panel. With AI off, it shows the prompt.
+
+Double-click a bullet (or use its **…** button) to reveal its actions: wording
+choices, **AI Feedback**, details, and removal. Only one bullet's actions stay
+open at a time; press **Escape** or click **×** to hide them. Text and inclusion
+checkboxes stay visible while browsing.
+
+Click **AI Feedback** beside a bullet phrasing or heading wording to critique
+that exact phrase. **Compare Phrasings** reviews all versions of a bullet.
+These requests run in the background and use the same feedback panel.
+Double-clicking text still edits it.
+
 The master document (`rmm master`) is the opposite: every entry, bullet, and
-phrasing in the store on one long page, each labelled with its id. It is an
+phrasing in the store across as many pages as needed, including beyond two
+pages, without shrinking to fit a submission limit. It is an
 inventory for deciding what to use, not something to send.
 
 ---
@@ -261,7 +373,7 @@ rmm save --push                       # and send it to the remote
 It prints what it saved, derives a message from what changed ("Save: 2 resumes,
 the answer bank") when you do not give one, and says so plainly rather than
 making an empty commit when there was nothing to save. The same operation is a
-button in **Voice & AI → Your store**, and `POST /api/store/save`.
+button in **Save & Files → Save History & Backup**, and `POST /api/store/save`.
 
 ### Version history
 
