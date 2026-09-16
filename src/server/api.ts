@@ -18,6 +18,8 @@ import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/an
 import { extractJob, jobPostingScore } from '../jobs/extract.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
+import { diffResumes, sameDocument } from '../model/diff.js';
+import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, resolveResume } from '../model/resolve.js';
 import type { Store } from '../model/store.js';
 import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
@@ -28,6 +30,7 @@ import type {
   DraftQuestion,
   Entry,
   Profile,
+  ResolvedResume,
   ResumeSpec,
   SkillGroup,
   StoreData,
@@ -112,125 +115,6 @@ function describeChange(
     };
   }
   return { ...change };
-}
-
-/** A name for a bullet, for version-history entries where an id alone is noise. */
-function bulletName(bulletId: string, data: StoreData): string {
-  for (const entry of data.entries) {
-    const bullet = (entry.bullets ?? []).find((b) => b.id === bulletId);
-    if (bullet) {
-      const chosen = bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0];
-      const text = String(chosen?.text ?? '').replace(/[*`]/g, '');
-      return text.length > 44 ? `${text.slice(0, 44).trimEnd()}…` : text || bulletId;
-    }
-  }
-  return bulletId;
-}
-
-function entryName(entryId: string, data: StoreData): string {
-  const entry = data.entries.find((e) => e.id === entryId);
-  if (!entry) return entryId;
-  const title = entry.title;
-  if (!isVariantField(title)) return String(title ?? entryId);
-  return (title.variants.find((v) => v.id === title.default) ?? title.variants[0])?.text ?? entryId;
-}
-
-/**
- * What changed between two versions of a resume spec, in the words a person
- * reads rather than the shape a YAML diff prints. `data` supplies today's
- * entries and bullets to resolve ids to names; a version whose ids have since
- * been renamed or removed falls back to the raw id, which is still better
- * than nothing.
- */
-function describeSpecChanges(
-  before: ResumeSpec | undefined,
-  after: ResumeSpec,
-  data: StoreData,
-): { kind: string; text: string }[] {
-  const out: { kind: string; text: string }[] = [];
-  if (!before) {
-    out.push({ kind: 'created', text: `First version — "${after.label}"` });
-    return out;
-  }
-
-  if (before.label !== after.label) {
-    out.push({ kind: 'label', text: `Renamed to "${after.label}"` });
-  }
-  if (before.extends !== after.extends) {
-    out.push({
-      kind: 'extends',
-      text: after.extends ? `Now built on "${after.extends}"` : 'No longer inherits from another resume',
-    });
-  }
-
-  // Variant selections: reuse the same describer the extension's proposal
-  // view uses, so a phrasing swap reads identically everywhere it appears.
-  const beforeChoices = before.choices ?? {};
-  const afterChoices = after.choices ?? {};
-  for (const key of new Set([...Object.keys(beforeChoices), ...Object.keys(afterChoices)])) {
-    if (beforeChoices[key] === afterChoices[key]) continue;
-    const from = beforeChoices[key];
-    const to = afterChoices[key];
-    if (!to) {
-      // A key is either "entryId.field" (a title/dates/subtitle/location pick)
-      // or a bare bullet id — the same split describeChange uses below.
-      const dot = key.indexOf('.');
-      const name = dot > 0 ? entryName(key.slice(0, dot), data) : bulletName(key, data);
-      out.push({ kind: 'choice', text: `${name}: reverted to the default wording` });
-    } else {
-      const described = describeChange({ key, from: from ?? '', to, because: [] }, data);
-      const where = described.where ? `${described.where} — ` : '';
-      out.push({
-        kind: 'choice',
-        text: `${where}${described.fromLabel ?? from ?? 'default'} → ${described.toLabel ?? to}`,
-      });
-    }
-  }
-
-  // List-bullet item selections (coursework, and anything else built the same way).
-  const beforeLists = before.lists ?? {};
-  const afterLists = after.lists ?? {};
-  for (const key of new Set([...Object.keys(beforeLists), ...Object.keys(afterLists)])) {
-    const b = beforeLists[key] ?? [];
-    const a = afterLists[key] ?? [];
-    if (b.join(',') === a.join(',')) continue;
-    out.push({ kind: 'list', text: `${bulletName(key, data)}: ${plural(b.length, 'item')} → ${plural(a.length, 'item')} shown` });
-  }
-
-  // Entry and bullet inclusion, per section.
-  const beforeSections = before.sections ?? [];
-  const afterSections = after.sections ?? [];
-  const kinds = new Set([...beforeSections.map((s) => s.kind), ...afterSections.map((s) => s.kind)]);
-  for (const kind of kinds) {
-    const bSec = beforeSections.find((s) => s.kind === kind);
-    const aSec = afterSections.find((s) => s.kind === kind);
-    if (kind === 'skills') continue; // skills are a different shape; skip for now
-
-    const bEntries = bSec?.entries ?? [];
-    const aEntries = aSec?.entries ?? [];
-    for (const id of aEntries.filter((x) => !bEntries.includes(x))) {
-      out.push({ kind: 'entry', text: `${entryName(id, data)}: shown` });
-    }
-    for (const id of bEntries.filter((x) => !aEntries.includes(x))) {
-      out.push({ kind: 'entry', text: `${entryName(id, data)}: hidden` });
-    }
-
-    const bBullets = bSec?.bullets ?? {};
-    const aBullets = aSec?.bullets ?? {};
-    for (const entryId of new Set([...Object.keys(bBullets), ...Object.keys(aBullets)])) {
-      const b = bBullets[entryId] ?? [];
-      const a = aBullets[entryId] ?? [];
-      for (const id of a.filter((x) => !b.includes(x))) out.push({ kind: 'bullet', text: `${bulletName(id, data)}: shown` });
-      for (const id of b.filter((x) => !a.includes(x))) out.push({ kind: 'bullet', text: `${bulletName(id, data)}: hidden` });
-    }
-  }
-
-  if (out.length === 0) out.push({ kind: 'none', text: 'No meaningful change (formatting only)' });
-  return out;
-}
-
-function plural(n: number, word: string): string {
-  return `${n} ${n === 1 ? word : `${word}s`}`;
 }
 
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
@@ -1469,48 +1353,86 @@ export function createApi({ store, repo }: ApiDeps): Router {
   );
 
   /**
-   * A resume's own timeline: every version it has been, described in words —
-   * "Systems-leaning coursework" not a diff of YAML — rather than the raw
-   * commit log for the whole store. This is what makes version history
-   * readable the way a Google Docs history is: one document, its versions,
-   * what changed between them.
+   * A resume's own timeline: every version of the *document*, and what changed
+   * between them, the way a Google Docs history reads.
+   *
+   * Two things make this a document history rather than a file history.
+   *
+   * First, each version is resolved against the whole store as it was at that
+   * commit — the bullets, the dates, the resume it inherits from — so a
+   * version is what the PDF said, not what `resumes/<id>.yaml` said. Editing a
+   * bullet's wording in `experience.yaml` changes this resume even though its
+   * own file never moved, and that has to show up here.
+   *
+   * Second, a commit that leaves this resume's document identical (a change to
+   * a different resume, a cover letter, an application) produces no version at
+   * all. A history full of "no change" entries is a file log wearing a
+   * document's clothes.
    */
   api.get(
     '/resumes/:id/history',
     handler(async (req, res) => {
       const id = String(req.params.id);
-      const relPath = path.posix.join('resumes', `${id}.yaml`);
-      const commits = await repo.logForPath(relPath, Number(req.query.limit) || 40);
+      const want = Number(req.query.limit) || 30;
+
+      // Every commit is a candidate: any of the store's content files can
+      // change this resume. Scan a generous window and keep the ones that
+      // actually moved the document.
+      const commits = await repo.log(Math.min(Math.max(want * 4, 60), 300));
       if (commits.length === 0) {
         res.json({ versions: [] });
         return;
       }
 
-      const data = store.load();
-      // Oldest first, so each version can be diffed against the one before it.
+      // Blobs are content-addressed, so the same unchanged file across fifty
+      // commits is read exactly once.
+      const blobs = new Map<string, string>();
+      const readSnapshot = async (hash: string): Promise<StoreSnapshot | undefined> => {
+        const tree = await repo.treeAt(hash);
+        const files = new Map<string, string>();
+        for (const [file, objectId] of tree) {
+          if (!isSnapshotFile(file)) continue;
+          let text = blobs.get(objectId);
+          if (text === undefined) {
+            text = await repo.blob(objectId);
+            blobs.set(objectId, text);
+          }
+          files.set(file, text);
+        }
+        return files.size === 0 ? undefined : parseSnapshot(files);
+      };
+
+      // Oldest first, so each version is diffed against the one before it.
       const chronological = [...commits].reverse();
       const versions: unknown[] = [];
-      let previous: ResumeSpec | undefined;
+      let previous: ResolvedResume | undefined;
 
       for (const c of chronological) {
-        let spec: ResumeSpec | undefined;
+        const snapshot = await readSnapshot(c.hash);
+        if (!snapshot) continue;
+
+        let resolved: ResolvedResume;
         try {
-          spec = YAML.parse(await repo.show(c.hash, relPath)) as ResumeSpec;
+          resolved = resolveResume(id, { ...store.load(), ...snapshot });
         } catch {
-          continue; // a commit that deleted the file, or a parse hiccup
+          continue; // the resume did not exist yet, or was broken at this commit
         }
+
+        // Unchanged document: not a version of this resume.
+        if (previous && sameDocument(previous, resolved)) continue;
+
         versions.push({
           hash: c.hash,
           date: c.date,
           message: c.message,
-          label: spec.label,
-          changes: describeSpecChanges(previous, spec, data),
+          label: resolved.label,
+          changes: diffResumes(previous, resolved),
         });
-        previous = spec;
+        previous = resolved;
       }
 
-      // Newest first for display — the same order git log itself uses.
-      res.json({ versions: versions.reverse() });
+      // Newest first for display.
+      res.json({ versions: versions.slice(-want).reverse() });
     }),
   );
 

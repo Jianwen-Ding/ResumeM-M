@@ -900,6 +900,31 @@ tbody tr { cursor: pointer; }
   padding-left: 10px;
   border-left: 2px solid var(--line-soft);
 }
-.version-card .changes .c.entry, .version-card .changes .c.bullet { color: var(--muted); }
 .version-card .changes .c.created { color: var(--good); border-left-color: var(--good-line); }
+.version-card .changes .c.added { border-left-color: var(--good-line); }
+.version-card .changes .c.removed { border-left-color: var(--bad-line); }
+.version-card .changes .c.reworded,
+.version-card .changes .c.changed { border-left-color: var(--accent-line); }
+.version-card .changes .c.moved { color: var(--muted); }
+
+/* Where it happened, then what it used to say and what it says now — a
+   tracked change, not a patch. */
+.version-card .c-where { display: block; font-weight: 600; color: var(--ink); }
+.version-card .c-diff { display: grid; gap: 2px; margin-top: 3px; }
+.version-card .c-diff del,
+.version-card .c-diff ins {
+  display: block;
+  line-height: 1.45;
+  text-decoration: none;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.version-card .c-diff del {
+  color: var(--muted);
+  background: var(--bad-bg);
+  text-decoration: line-through;
+  text-decoration-color: var(--bad-line);
+}
+.version-card .c-diff ins { color: var(--ink); background: var(--good-bg); }
+
 .version-card .actions-row { margin-top: 9px; display: flex; gap: 6px; align-items: center; }

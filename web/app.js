@@ -2464,6 +2464,32 @@ async function loadResumeHistory() {
   }
 }
 
+/**
+ * One change, as a reader of the resume would see it: what it used to say
+ * struck through, what it says now beneath. The server sends the full before
+ * and after text, so nothing here has to guess or re-truncate.
+ */
+function changeRow(c) {
+  const where = c.where ? el('span', { className: 'c-where', textContent: c.where }) : null;
+
+  if (c.from && c.to) {
+    return el('div', { className: `c ${c.kind}` }, [
+      where,
+      el('div', { className: 'c-diff' }, [
+        el('del', { textContent: c.from }),
+        el('ins', { textContent: c.to }),
+      ]),
+    ]);
+  }
+  if (c.kind === 'added' && c.to) {
+    return el('div', { className: 'c added' }, [where, el('div', { className: 'c-diff' }, [el('ins', { textContent: c.to })])]);
+  }
+  if (c.kind === 'removed' && c.from) {
+    return el('div', { className: 'c removed' }, [where, el('div', { className: 'c-diff' }, [el('del', { textContent: c.from })])]);
+  }
+  return el('div', { className: `c ${c.kind}`, textContent: c.text });
+}
+
 function renderResumeTimeline(versions) {
   const timeline = $('#resume-timeline');
   if (versions.length === 0) {
@@ -2491,15 +2517,13 @@ function renderResumeTimeline(versions) {
           el('span', { className: 'grow' }),
           el('span', { className: 'rel', textContent: v.hash.slice(0, 8) }),
         ]),
-        changes.length > 0
-          ? el(
-              'div',
-              { className: 'changes' },
-              changes.map((c) => el('div', { className: `c ${c.kind}`, textContent: c.text })),
-            )
-          : el('div', { className: 'changes' }, [
-              el('div', { className: 'c', textContent: v.message || 'No meaningful change (formatting only)' }),
-            ]),
+        el(
+          'div',
+          { className: 'changes' },
+          changes.length > 0
+            ? changes.map(changeRow)
+            : [el('div', { className: 'c', textContent: v.message || 'Edited' })],
+        ),
         el('div', { className: 'actions-row' }, [
           isCurrent
             ? null

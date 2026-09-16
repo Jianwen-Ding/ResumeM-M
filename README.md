@@ -225,17 +225,36 @@ stored with `suggested: true` until you have looked at them.
 
 ```
 out/applications/2026-09-16-streamly-software-engineer-intern/
-  Jianwen Ding Resume Streamly.pdf     ← named for upload, no renaming needed
-  source/resume.tex                    ← exactly what compiled
-  source/resolved.yaml                 ← the choices, frozen
+  Jianwen Ding Resume Streamly.pdf        ← named for upload, no renaming needed
+  Jianwen Ding Cover Letter Streamly.pdf  ← typeset to match the resume
+  Jianwen Ding Cover Letter Streamly.txt  ← same letter, for paste-in-a-box portals
+  source/resume.tex                       ← exactly what compiled
+  source/cover-letter.tex
+  source/resolved.yaml                    ← the choices, frozen
 ```
 
 and records the application in `applications.yaml` with its status history. The
 snapshot is the point: six weeks later, when they ask about "the pipeline
 project", the file that went out is still there, byte for byte.
 
-Every mutation is auto-committed to git, scoped to the store directory — so
-`git log data/` is a real history of what you sent and when.
+### Version history
+
+Every mutation is auto-committed to git, scoped to the store directory. The
+**History** tab turns that into a per-resume timeline that reads like a document
+history rather than a commit log: each version shows what the *resume* said
+before and what it says now — a bullet reworded, a date moved, an entry gone —
+and any version can be restored in one click.
+
+Two details make it a document history:
+
+- A version is the resume **resolved** against the whole store as it was at that
+  commit. Rewording a bullet in `experience.yaml` changes what this resume
+  prints, even though `resumes/newgrad.yaml` never moved, and it shows up here.
+- A commit that leaves this resume's document identical — a different resume, a
+  cover letter, an application — produces no version at all.
+
+The raw commit log, with patches, is still one click away for anyone who wants
+it.
 
 ---
 
@@ -249,6 +268,8 @@ local tool. Do not expose it; CORS is open so the extension can reach it from a
 | --- | --- |
 | `GET /api/store` | Everything, for the GUI |
 | `POST /api/render` | Compile a stored resume, an ad-hoc spec, or the master |
+| `POST /api/render/letter` | Typeset a cover letter, set to match the resume |
+| `GET /api/resumes/:id/history` | That resume's versions, and what changed between them |
 | `POST /api/extension/analyze` | Page HTML → proposed tailored spec |
 | `GET /api/autofill` | Profile fields and the answer bank |
 | `POST /api/applications/bundle` | Compile, name, file, snapshot, track |

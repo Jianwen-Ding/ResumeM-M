@@ -3,13 +3,12 @@ import express from 'express';
 import request from 'supertest';
 import { createApi } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
-import { makeTempStore, type TempStore } from './helpers.js';
+import { makeTempStore, SAMPLE_EXPERIENCE, type TempStore } from './helpers.js';
 
 /**
- * The resume-centric version history reads real commits back off disk, so
- * these tests use a genuine (auto-committing) git repo rather than mocking
- * git away — the whole point of the feature is "what did this file actually
- * look like at each commit".
+ * The version history reads real commits back off disk, so these tests use a
+ * genuine (auto-committing) git repo rather than mocking git away. The feature
+ * is entirely about what the store actually recorded.
  */
 let t: TempStore;
 let app: express.Express;
@@ -24,148 +23,165 @@ beforeEach(async () => {
 });
 afterEach(() => t.cleanup());
 
-describe('GET /resumes/:id/history', () => {
-  it('is empty for a resume nobody has ever committed', async () => {
-    const res = await request(app).get('/api/resumes/does-not-exist/history').expect(200);
-    expect(res.body.versions).toEqual([]);
+const history = async (id = 'newgrad') => {
+  const res = await request(app).get(`/api/resumes/${id}/history`).expect(200);
+  return res.body.versions as {
+    hash: string;
+    date: string;
+    message: string;
+    label: string;
+    changes: { kind: string; text: string; where?: string; from?: string; to?: string }[];
+  }[];
+};
+
+const texts = (v: Awaited<ReturnType<typeof history>>[number]) => v.changes.map((c) => c.text);
+
+describe('a resume version history', () => {
+  it('is empty for a resume that never existed', async () => {
+    const versions = await history('does-not-exist');
+    expect(versions).toEqual([]);
   });
 
-  it('reports the first version as "created"', async () => {
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    expect(res.body.versions).toHaveLength(1);
-    expect(res.body.versions[0].changes).toEqual([
-      { kind: 'created', text: 'First version — "New grad"' },
-    ]);
+  it('opens with the first version, counted in document terms', async () => {
+    const versions = await history();
+    expect(versions).toHaveLength(1);
+    expect(versions[0]?.changes[0]?.kind).toBe('created');
+    expect(versions[0]?.changes[0]?.text).toMatch(/First version — \d+ sections, \d+ bullet points/);
   });
 
-  it('describes a phrasing change in words, newest version first', async () => {
+  it('describes a phrasing switch as the sentence changing, not the variant id', async () => {
+    await request(app)
+      .put('/api/resumes/newgrad')
+      .send({ label: 'New grad', extends: 'base', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    const versions = await history();
+    const change = versions[0]?.changes.find((c) => c.kind === 'reworded');
+    expect(change).toBeDefined();
+    expect(change?.where).toBe('Acme Co.');
+    // The actual before and after text, not "b_pipeline: v_base → v_kafka".
+    expect(change?.from).toBe('Built a pipeline handling 2M events/day');
+    expect(change?.to).toBe('Built a Kafka pipeline handling 2M events/day');
+    expect(texts(versions[0]!).join(' ')).not.toContain('v_kafka');
+  });
+
+  it('describes a date field change with the dates themselves', async () => {
     await request(app)
       .put('/api/resumes/newgrad')
       .send({ label: 'New grad', extends: 'base', choices: { 'edu_neu.dates': 'v_dec2026' } })
       .expect(200);
 
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    expect(res.body.versions).toHaveLength(2);
-    // Newest first.
-    expect(res.body.versions[0].changes.some((c: { kind: string }) => c.kind === 'choice')).toBe(true);
-    expect(res.body.versions[0].changes[0].text).toContain('May 2026');
-    expect(res.body.versions[0].changes[0].text).toContain('Dec 2026');
-    expect(res.body.versions[1].changes[0].kind).toBe('created');
+    const change = (await history())[0]?.changes.find((c) => c.kind === 'changed');
+    expect(change?.where).toBe('Northeastern University');
+    expect(change?.from).toContain('May 2026');
+    expect(change?.to).toContain('Dec. 2026');
   });
 
-  it('describes a reverted choice as reverting to the default wording', async () => {
-    await request(app)
-      .put('/api/resumes/newgrad')
-      .send({ label: 'New grad', extends: 'base', choices: {} })
-      .expect(200);
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    expect(res.body.versions[0].changes[0]).toEqual({
-      kind: 'choice',
-      text: 'Northeastern University: reverted to the default wording',
-    });
-  });
-
-  it('describes a label rename and an extends change', async () => {
-    await request(app)
-      .put('/api/resumes/newgrad')
-      .send({ label: 'New grad (renamed)', choices: { 'edu_neu.dates': 'v_may2026' } })
-      .expect(200);
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    const changes = res.body.versions[0].changes;
-    expect(changes).toContainEqual({ kind: 'label', text: 'Renamed to "New grad (renamed)"' });
-    expect(changes).toContainEqual({ kind: 'extends', text: 'No longer inherits from another resume' });
-  });
-
-  it('describes entries and bullets being shown or hidden', async () => {
-    // First make both bullets explicit, so the next save has something to
-    // remove — inclusion is diffed against the previous *explicit* choice,
-    // not against the extended default.
+  it('reports a bullet being turned off as the bullet being dropped', async () => {
     await request(app)
       .put('/api/resumes/newgrad')
       .send({
         label: 'New grad',
         extends: 'base',
-        choices: { 'edu_neu.dates': 'v_may2026' },
-        sections: [{ kind: 'experience', entries: ['exp_acme'], bullets: { exp_acme: ['b_pipeline', 'b_testing'] } }],
-      })
-      .expect(200);
-
-    await request(app)
-      .put('/api/resumes/newgrad')
-      .send({
-        label: 'New grad',
-        extends: 'base',
-        choices: { 'edu_neu.dates': 'v_may2026' },
         sections: [{ kind: 'experience', entries: ['exp_acme'], bullets: { exp_acme: ['b_pipeline'] } }],
       })
       .expect(200);
 
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    const changes = res.body.versions[0].changes;
-    expect(changes).toContainEqual({ kind: 'bullet', text: 'Raised coverage from 41% to 88%: hidden' });
-  });
-
-  it('describes an entry disappearing from a section entirely', async () => {
-    await request(app)
-      .put('/api/resumes/newgrad')
-      .send({
-        label: 'New grad',
-        extends: 'base',
-        choices: { 'edu_neu.dates': 'v_may2026' },
-        sections: [{ kind: 'project', entries: ['proj_thing'] }],
-      })
-      .expect(200);
-    await request(app)
-      .put('/api/resumes/newgrad')
-      .send({
-        label: 'New grad',
-        extends: 'base',
-        choices: { 'edu_neu.dates': 'v_may2026' },
-        sections: [{ kind: 'project', entries: [] }],
-      })
-      .expect(200);
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    const changes = res.body.versions[0].changes;
-    expect(changes).toContainEqual({ kind: 'entry', text: 'Thing: hidden' });
-  });
-
-  it('describes a change in how many list items are shown', async () => {
-    await request(app)
-      .put('/api/resumes/newgrad')
-      .send({ label: 'New grad', extends: 'base', lists: { b_course: ['x', 'y'] } })
-      .expect(200);
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    const changes = res.body.versions[0].changes;
-    expect(changes.some((c: { kind: string; text: string }) => c.kind === 'list' && c.text.includes('2 items'))).toBe(
-      true,
+    const versions = await history();
+    expect(versions[0]?.changes).toContainEqual(
+      expect.objectContaining({ kind: 'removed', where: 'Acme Co.', from: 'Raised coverage from 41% to 88%' }),
     );
   });
 
-  it('reports no meaningful change for a no-op save', async () => {
+  it('reports an entry disappearing from the document', async () => {
+    await request(app)
+      .put('/api/resumes/newgrad')
+      .send({ label: 'New grad', extends: 'base', sections: [{ kind: 'project', entries: [] }] })
+      .expect(200);
+
+    const versions = await history();
+    expect(texts(versions[0]!).join(' ')).toContain('Removed from Projects: Thing');
+  });
+
+  /**
+   * The heart of it: this resume's own file did not change, but the sentence
+   * printed on it did. A file-scoped history cannot see this.
+   */
+  it('shows an edit to a shared bullet, whose text this resume prints', async () => {
+    const before = await history();
+
+    const edited = structuredClone(SAMPLE_EXPERIENCE);
+    edited.bullets![0]!.variants[0]!.text = 'Built a pipeline handling **9M events/day**';
+    await request(app).put('/api/entries/exp_acme').send(edited).expect(200);
+
+    const after = await history();
+    expect(after.length).toBe(before.length + 1);
+    const change = after[0]?.changes.find((c) => c.kind === 'reworded');
+    expect(change?.where).toBe('Acme Co.');
+    expect(change?.to).toBe('Built a pipeline handling 9M events/day');
+  });
+
+  it('shows a new bullet added to the store and printed by this resume', async () => {
+    const edited = structuredClone(SAMPLE_EXPERIENCE);
+    edited.bullets!.push({
+      id: 'b_oncall',
+      default: 'v_base',
+      variants: [{ id: 'v_base', label: 'Neutral', text: 'Ran the on-call rotation for three services' }],
+    });
+    await request(app).put('/api/entries/exp_acme').send(edited).expect(200);
+
+    const change = (await history())[0]?.changes.find((c) => c.kind === 'added');
+    expect(change?.to).toBe('Ran the on-call rotation for three services');
+  });
+
+  it('ignores commits that leave this resume’s document untouched', async () => {
+    const before = await history();
+
+    // A different resume, a cover letter, and an application: none of them
+    // change what `newgrad` prints.
+    await request(app)
+      .put('/api/resumes/intern')
+      .send({ label: 'Summer intern (renamed)', extends: 'base', choices: { 'edu_neu.dates': 'v_dec2026' } })
+      .expect(200);
+    await request(app).post('/api/applications').send({ company: 'Streamly', role: 'Intern' }).expect(200);
+
+    const after = await history();
+    expect(after.length).toBe(before.length);
+    expect(after[0]?.hash).toBe(before[0]?.hash);
+  });
+
+  it('never reports a version with nothing to say', async () => {
     await request(app)
       .put('/api/resumes/newgrad')
       .send({ label: 'New grad', extends: 'base', choices: { 'edu_neu.dates': 'v_may2026' } })
       .expect(200);
-    const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    expect(res.body.versions[0].changes).toEqual([
-      { kind: 'none', text: 'No meaningful change (formatting only)' },
-    ]);
+
+    for (const v of await history()) {
+      expect(v.changes.length).toBeGreaterThan(0);
+      expect(v.changes.map((c) => c.kind)).not.toContain('none');
+    }
+  });
+
+  it('names a rename as a rename', async () => {
+    await request(app)
+      .put('/api/resumes/newgrad')
+      .send({ label: 'New grad 2026', extends: 'base' })
+      .expect(200);
+    expect(texts((await history())[0]!)).toContain('Renamed to "New grad 2026"');
   });
 });
 
-describe('POST /resumes/:id/history/:hash/restore', () => {
-  it('rolls a resume back to exactly what an earlier version said', async () => {
-    const first = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    const originalHash = first.body.versions[0].hash;
+describe('restoring a version', () => {
+  it('rolls the resume back to what that version said', async () => {
+    const first = await history();
+    const originalHash = first[0]!.hash;
 
     await request(app)
       .put('/api/resumes/newgrad')
       .send({ label: 'New grad', extends: 'base', choices: { 'edu_neu.dates': 'v_dec2026' } })
       .expect(200);
 
-    const restored = await request(app)
-      .post(`/api/resumes/newgrad/history/${originalHash}/restore`)
-      .expect(200);
+    const restored = await request(app).post(`/api/resumes/newgrad/history/${originalHash}/restore`).expect(200);
     expect(restored.body.choices?.['edu_neu.dates']).toBe('v_may2026');
 
     const resolved = await request(app).get('/api/resumes/newgrad/resolved').expect(200);
@@ -174,11 +190,10 @@ describe('POST /resumes/:id/history/:hash/restore', () => {
       .find((e: { id: string }) => e.id === 'edu_neu')?.dates;
     expect(dates).toBe('Sep. 2022 -- May 2026');
 
-    // Restoring is itself a new version, so the history keeps growing rather
-    // than being rewritten.
-    const after = await request(app).get('/api/resumes/newgrad/history').expect(200);
-    expect(after.body.versions).toHaveLength(3);
-    expect(after.body.versions[0].message).toBe('Restore "newgrad" to an earlier version');
+    // Restoring is itself a version, so nothing is lost by going back.
+    const after = await history();
+    expect(after[0]?.message).toBe('Restore "newgrad" to an earlier version');
+    expect(after.length).toBe(3);
   });
 
   it('rejects a hash the resume never had', async () => {
