@@ -353,3 +353,34 @@ describe('stores that are not shaped like the example', () => {
     expect(prompt).not.toContain('bullet b_pipeline:');
   });
 });
+
+describe('when the AI may look things up', () => {
+  const researching = { ...data, config: { ...data.config, ai: { ...data.config.ai, research: true } } };
+
+  it('says nothing about it when the setting is off', () => {
+    expect(coverLetterPrompt(data, resolved, { jobDescription: 'job', company: 'Acme' }, [])).not.toContain(
+      'You may look things up',
+    );
+  });
+
+  it('invites it to read about the company by name', () => {
+    const p = coverLetterPrompt(researching, resolved, { jobDescription: 'job', company: 'Acme' }, []);
+    expect(p).toContain('You may look things up');
+    expect(p).toContain('Read about Acme');
+  });
+
+  it('draws the line that matters: nothing found becomes a claim about them', () => {
+    const p = coverLetterPrompt(researching, resolved, { jobDescription: 'job', company: 'Acme' }, []);
+    expect(p).toMatch(/never becomes a claim about this person/);
+    expect(p).toMatch(/Do not name a fact you are unsure of/);
+  });
+
+  it('offers the same to an answer, which has the same temptation', () => {
+    const p = answerPrompt(researching, 'Why us?', { company: 'Acme', jobDescription: 'job' });
+    expect(p).toContain('Read about Acme');
+  });
+
+  it('manages without a company name', () => {
+    expect(answerPrompt(researching, 'Why us?')).toContain('Read about the company');
+  });
+});

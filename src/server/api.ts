@@ -2,7 +2,7 @@ import express, { type Request, type Response, type Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { runAgent, extractJson, AgentError } from '../ai/agent.js';
+import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js';
 import {
   answerPrompt,
   bulletFeedbackPrompt,
@@ -909,7 +909,9 @@ export function createApi({ store, repo }: ApiDeps): Router {
         coverLetterPrompt(data, resolved, job, prior),
       );
 
-      const body = result.executed ? result.output : '';
+      // Models sometimes introduce the letter before writing it. The letter
+      // starts at its salutation, so that is where it is taken from.
+      const body = result.executed ? trimToLetter(result.output) : '';
       let saved: CoverLetter | undefined;
       if (save && body.trim()) {
         saved = {
@@ -1612,7 +1614,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
               coverLetterPrompt(data, resolveResume(resumeId, data), job, prior),
             );
             if (agent.executed && agent.output.trim()) {
-              draft.coverLetter.body = agent.output.trim();
+              draft.coverLetter.body = trimToLetter(agent.output);
               notes.push('Cover letter drafted in your voice.');
             } else if (prior[0]) {
               draft.coverLetter.body = prior[0].body;

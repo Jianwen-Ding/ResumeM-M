@@ -20,6 +20,8 @@ export interface AiPreset {
   args: string[];
   /** One line on what this preset does about safety, for the UI to show. */
   note: string;
+  /** What changes when the AI is allowed to look things up. */
+  researchNote?: string;
 }
 
 export const AI_PRESETS: AiPreset[] = [
@@ -42,6 +44,7 @@ export const AI_PRESETS: AiPreset[] = [
      */
     args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch'],
     note: 'Runs with every file-touching and network tool disallowed.',
+    researchNote: 'Web search and fetch are allowed; nothing else changes.',
   },
   {
     label: 'Codex CLI',
@@ -109,4 +112,44 @@ export function repairAiArgs(command: string, args: string[]): string[] {
     }
   }
   return args;
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Looking things up                                                   *
+ * ------------------------------------------------------------------ */
+
+/** The tools a CLI needs in order to read anything on the web. */
+const WEB_TOOLS = ['WebFetch', 'WebSearch'];
+
+/**
+ * Make the arguments agree with the research setting.
+ *
+ * Telling a model it may look something up while denying it the tools to do
+ * so is the worst of both: it either says it cannot, or it makes something up.
+ * So the setting and the arguments are kept in step at the one place the
+ * config is read, rather than relying on the argument box having been edited
+ * to match a checkbox somewhere else.
+ *
+ * Only the deny list moves. The filesystem confinement — an empty scratch
+ * directory, and nothing else named — is untouched either way: what changes is
+ * whether the model may read the company's own careers page, not whether it
+ * may read yours.
+ */
+export function applyResearch(command: string, args: string[], research: boolean): string[] {
+  const at = args.indexOf('--disallowedTools');
+  if (!/(^|[\\/])claude(\.exe)?$/i.test(command.trim()) || at < 0) return args;
+
+  const listed = (args[at + 1] ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+  const next = research
+    ? listed.filter((t) => !WEB_TOOLS.includes(t))
+    : [...listed, ...WEB_TOOLS.filter((t) => !listed.includes(t))];
+
+  if (next.join(',') === listed.join(',')) return args;
+
+  const out = [...args];
+  // Nothing left to deny: drop the flag rather than pass it an empty list.
+  if (next.length === 0) out.splice(at, 2);
+  else out[at + 1] = next.join(',');
+  return out;
 }

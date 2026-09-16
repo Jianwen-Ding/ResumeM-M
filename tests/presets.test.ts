@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runAgent } from '../src/ai/agent.js';
-import { AI_PRESETS, matchPreset, repairAiArgs } from '../src/ai/presets.js';
+import { AI_PRESETS, applyResearch, matchPreset, repairAiArgs } from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 
 /**
@@ -205,5 +205,35 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
       expect(matchPreset(preset.command, preset.args)?.label).toBe(preset.label);
     }
     expect(matchPreset('claude', ['-p', '{prompt}'])).toBeUndefined();
+  });
+
+  it('opens the web tools when research is on, and shuts them when it is off', () => {
+    const confined = AI_PRESETS.find((p) => p.label === 'Claude Code')!.args;
+    const open = applyResearch('claude', confined, true);
+
+    expect(open.join(' ')).not.toContain('WebFetch');
+    expect(open.join(' ')).not.toContain('WebSearch');
+    // Everything else about the confinement is untouched: the model may read
+    // the company's careers page, not the user's files.
+    expect(open).toContain('--add-dir');
+    expect(open.join(' ')).toContain('Bash,Write,Edit');
+
+    expect(applyResearch('claude', open, false).join(' ')).toContain('WebFetch');
+  });
+
+  it('drops the flag rather than passing it an empty list', () => {
+    const onlyWeb = ['-p', '--disallowedTools', 'WebFetch,WebSearch'];
+    expect(applyResearch('claude', onlyWeb, true)).toEqual(['-p']);
+  });
+
+  it('does not add the same tool twice when it is already denied', () => {
+    const confined = AI_PRESETS.find((p) => p.label === 'Claude Code')!.args;
+    expect(applyResearch('claude', confined, false)).toEqual(confined);
+  });
+
+  it('leaves a CLI it does not know how to open alone', () => {
+    const codex = AI_PRESETS.find((p) => p.label === 'Codex CLI')!.args;
+    expect(applyResearch('codex', codex, true)).toEqual(codex);
+    expect(applyResearch('gemini', ['-p', '{promptText}'], true)).toEqual(['-p', '{promptText}']);
   });
 });

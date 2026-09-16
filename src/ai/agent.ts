@@ -161,3 +161,36 @@ export function extractJson<T>(text: string): T {
   }
   throw new AgentError(`Could not find JSON in the agent's reply. Raw output:\n${text.slice(0, 2000)}`);
 }
+
+/**
+ * Take the letter out of whatever the model wrapped it in.
+ *
+ * The rules say to output only what was asked for, and models mostly comply —
+ * but "mostly" is not a contract, and the failure is ugly in a way the user
+ * sees: a cover letter that opens "Here is the draft:" and then has a row of
+ * dashes above the salutation. A letter starts at its salutation, which is a
+ * shape that can be found, so it is found rather than hoped for.
+ *
+ * Only the opening is touched. Everything after the salutation is the letter,
+ * including anything the model added at the end — trimming that would risk
+ * cutting a real sign-off, and a stray trailing line is visible where a
+ * missing signature is not.
+ */
+export function trimToLetter(output: string): string {
+  const text = output.replace(/\r/g, '').trim();
+  const lines = text.split('\n');
+
+  const salutation = lines.findIndex((line) => {
+    const l = line.trim();
+    if (/^(dear\b|to whom it may concern)/i.test(l)) return true;
+    return /^(hello|hi|greetings|good (morning|afternoon))\b[^.!?]{0,60}[,:]$/i.test(l);
+  });
+
+  // No salutation to find, or it is already the first thing: leave it alone.
+  if (salutation <= 0) return text;
+
+  // Only skip a preamble, not half the letter: a salutation a long way down is
+  // more likely to be quoted inside one than to be the start of one.
+  if (salutation > 12) return text;
+  return lines.slice(salutation).join('\n').trim();
+}

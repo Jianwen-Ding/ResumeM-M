@@ -3283,6 +3283,27 @@ async function loadSettings() {
   };
   showAiState(config.ai.enabled);
 
+  /*
+   * Looking things up is its own decision, not part of "use the AI".
+   * Everything else here runs against text the user supplied; this is the one
+   * setting that lets the model go and read something they did not choose.
+   */
+  const research = el('input', { type: 'checkbox', checked: Boolean(config.ai.research) });
+  research.onchange = async () => {
+    try {
+      await api('/config', { method: 'PUT', body: JSON.stringify({ ai: { research: research.checked } }) });
+      setStatus(
+        research.checked
+          ? 'The AI may look up the company while it writes'
+          : 'The AI works only from what you gave it',
+      );
+      loadSettings();
+    } catch (err) {
+      research.checked = !research.checked;
+      setStatus(err.message, true);
+    }
+  };
+
   enabled.onchange = async () => {
     try {
       await api('/config', { method: 'PUT', body: JSON.stringify({ ai: { enabled: enabled.checked } }) });
@@ -3353,6 +3374,14 @@ async function loadSettings() {
       el('label', { className: 'check' }, [enabled, el('span', {}, 'Let the tool run the AI command')]),
       aiState,
     ]),
+    el('label', { className: 'check', style: 'margin-bottom:6px' }, [
+      research,
+      el('span', {}, 'Let it look up the company online'),
+    ]),
+    el('div', { className: 'hint', style: 'margin-bottom:12px' },
+      config.ai.research
+        ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
+        : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.'),
     config.overrides.ai
       ? el('div', { className: 'override', textContent: 'RMM_AI=0 is set, so the AI stays off whatever this says.' })
       : null,
