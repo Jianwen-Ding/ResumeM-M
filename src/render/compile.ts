@@ -328,10 +328,18 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
 
   const availablePt = textHeightIn(best.layout) * PT_PER_IN * base.maxPages;
   const baselinePt = readBaseline(best.raw.log) ?? best.layout.fontSizePt * 1.2;
-  const overflowPt = best.m.usedPt - availablePt;
+  const fits = best.m.pages <= base.maxPages;
+
+  // The compiled page count is ground truth; the height measurement is a
+  // diagnostic derived from it. They can disagree by a few points at the
+  // boundary (\raggedbottom, the depth of the final line), so keep the
+  // diagnostic consistent with the verdict rather than reporting "fits, but
+  // over by 4pt".
+  const rawOverflowPt = best.m.usedPt - availablePt;
+  const overflowPt = fits ? Math.min(rawOverflowPt, 0) : Math.max(rawOverflowPt, 0);
 
   const report: FitReport = {
-    fits: best.m.pages <= base.maxPages,
+    fits,
     pages: best.m.pages,
     usedPt: round(best.m.usedPt, 1),
     availablePt: round(availablePt, 1),

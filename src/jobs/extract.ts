@@ -137,10 +137,10 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
   const ld = fromJsonLd(html);
   const text = stripTags(html);
 
-  const title =
+  const rawTitle =
     ld?.title ??
     metaContent(html, ['og:title', 'twitter:title']) ??
-    pageTitle?.split(/[|–—-]/)[0]?.trim();
+    pageTitle?.split(/[|–—]/)[0]?.trim();
 
   const company =
     ld?.company ??
@@ -149,7 +149,17 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
     // "Software Engineer Intern at Acme" is the common page-title shape.
     /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim();
 
-  const description = ld?.description && ld.description.length > 200 ? ld.description : text;
+  // Page titles routinely carry the company along; the company has its own
+  // field, and repeating it in the role reads badly everywhere it is shown.
+  const title = rawTitle?.replace(/\s+at\s+[A-Z][\w&.\- ]{1,40}\s*$/, '').trim() || rawTitle;
+
+  // A structured description is authoritative even when it is short — it is the
+  // posting itself, where the page text is the posting plus navigation, cookie
+  // banners, and footers. Only fall back when it looks like a stub next to a
+  // substantially richer page.
+  const ldText = ld?.description ?? '';
+  const ldIsUsable = ldText.length >= 200 || ldText.length * 2 >= text.length;
+  const description = ldText.length > 0 && ldIsUsable ? ldText : text;
 
   return {
     title,

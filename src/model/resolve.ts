@@ -6,6 +6,7 @@ import {
   type EntryKind,
   type LayoutOptions,
   type MaybeVariant,
+  type ResolvedBullet,
   type ResolvedEntry,
   type ResolvedResume,
   type ResolvedSection,
@@ -238,29 +239,51 @@ export function buildMaster(data: StoreData): ResolvedResume {
     heading: DEFAULT_HEADINGS[kind],
     skillGroups: [],
     entries: byKind(kind).map((entry) => {
-      // Every variant of every field is shown inline, labelled, so the master
-      // doc answers "what could this line say?" without opening YAML.
-      const label = (f: MaybeVariant | undefined): string | undefined => {
+      // Heading cells stay at their default text. The two-column heading row is
+      // narrow — a graduation date with both of its variants spliced in runs
+      // straight off the page — so field alternates are listed as full-width
+      // lines below instead.
+      const def = (f: MaybeVariant | undefined): string | undefined => {
         if (f === undefined) return undefined;
-        if (!isVariantField(f)) return f;
-        return f.variants.map((v) => `${v.text}  [${v.id}]`).join('  |  ');
+        if (!isVariantField(f)) return String(f);
+        const chosen = f.variants.find((v) => v.id === f.default) ?? f.variants[0];
+        return chosen ? String(chosen.text) : undefined;
       };
+
+      const fieldLines: ResolvedBullet[] = [];
+      for (const name of ['title', 'dates', 'subtitle', 'location'] as const) {
+        const field = entry[name];
+        if (!isVariantField(field) || field.variants.length < 2) continue;
+        fieldLines.push({
+          id: `${entry.id}.${name}`,
+          variantId: field.default,
+          text:
+            `*${entry.id}.${name}* — ` +
+            field.variants
+              .map((v) => `${v.text} [${v.id}]${v.id === field.default ? ' (default)' : ''}`)
+              .join('  ·  '),
+        });
+      }
+
       return {
         id: entry.id,
         kind: entry.kind,
-        title: label(entry.title) ?? entry.id,
-        dates: label(entry.dates),
-        subtitle: label(entry.subtitle),
-        location: label(entry.location),
-        bullets: (entry.bullets ?? []).flatMap((b) =>
-          b.variants.map((v) => ({
-            id: b.id,
-            variantId: v.id,
-            text: `${v.text}   — ${b.id}/${v.id}${v.id === b.default ? ' (default)' : ''}${
-              v.suggested ? ' (AI-suggested, unreviewed)' : ''
-            }`,
-          })),
-        ),
+        title: def(entry.title) ?? entry.id,
+        dates: def(entry.dates),
+        subtitle: def(entry.subtitle),
+        location: def(entry.location),
+        bullets: [
+          ...fieldLines,
+          ...(entry.bullets ?? []).flatMap((b) =>
+            b.variants.map((v) => ({
+              id: b.id,
+              variantId: v.id,
+              text: `${v.text}   — ${b.id}/${v.id}${v.id === b.default ? ' (default)' : ''}${
+                v.suggested ? ' (AI-suggested, unreviewed)' : ''
+              }`,
+            })),
+          ),
+        ],
       } satisfies ResolvedEntry;
     }),
   });

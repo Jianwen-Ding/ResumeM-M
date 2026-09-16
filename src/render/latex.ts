@@ -6,13 +6,26 @@ import type { LayoutOptions, ResolvedResume, ResolvedSection } from '../model/ty
  * the template and the knobs living in two different places.
  */
 
-/** Escape text for LaTeX. Order matters: backslash first, or it eats the rest. */
+const ESCAPES: Record<string, string> = {
+  '\\': '\\textbackslash{}',
+  '&': '\\&',
+  '%': '\\%',
+  $: '\\$',
+  '#': '\\#',
+  _: '\\_',
+  '{': '\\{',
+  '}': '\\}',
+  '~': '\\textasciitilde{}',
+  '^': '\\textasciicircum{}',
+};
+
+/**
+ * Escape text for LaTeX in a single pass. Chained `.replace()` calls cannot do
+ * this correctly: the braces in `\textbackslash{}` would be escaped again by
+ * the rule that handles literal braces.
+ */
 export function tex(input: string): string {
-  return String(input ?? '')
-    .replace(/\\/g, '\\textbackslash{}')
-    .replace(/([&%$#_{}])/g, '\\$1')
-    .replace(/~/g, '\\textasciitilde{}')
-    .replace(/\^/g, '\\textasciicircum{}');
+  return String(input ?? '').replace(/[\\&%$#_{}~^]/g, (ch) => ESCAPES[ch] ?? ch);
 }
 
 /**
