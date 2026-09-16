@@ -465,6 +465,22 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  api.delete(
+    '/applications/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const apps = store.load().applications;
+      const next = apps.filter((a) => a.id !== id);
+      if (next.length === apps.length) throw new Error(`No application "${id}"`);
+      // The snapshot folder under out/ is left alone: a record of what was sent
+      // is worth keeping even when the tracker row was a mistake.
+      await withCommit(repo, autoCommit(), `Remove application "${id}"`, () =>
+        store.saveApplications(next),
+      );
+      res.json({ ok: true });
+    }),
+  );
+
   api.post(
     '/applications/:id/status',
     handler(async (req, res) => {
