@@ -11,6 +11,7 @@ import { ingestPrompt, readIngestPlan, segment, sortByRules, type Proposal } fro
  */
 
 export interface Ingested {
+  text: string;
   name: string;
   via: string;
   chars: number;
@@ -50,7 +51,7 @@ export async function ingestFile(
     }
   }
 
-  return { name, via, chars: text.length, blocks: blocks.length, items, usedAi: wantsAi && !aiError, aiError };
+  return { name, text, via, chars: text.length, blocks: blocks.length, items, usedAi: wantsAi && !aiError, aiError };
 }
 
 export { READABLE } from './text.js';

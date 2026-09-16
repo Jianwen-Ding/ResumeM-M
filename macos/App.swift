@@ -7,7 +7,7 @@ struct Configuration: Decodable {
     let dataDir: String
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var process: Process?
@@ -21,7 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        webView = WKWebView(frame: .zero)
+        let webConfig = WKWebViewConfiguration()
+        webConfig.userContentController.add(self, name: "chooseProjectFolder")
+        webView = WKWebView(frame: .zero, configuration: webConfig)
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -43,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 switch result {
                 case .ready: self.loadWorkspace()
                 case .unavailable: self.startServer()
-                case .conflict: self.fail("Port 4600 is already used by another app or a different resume store. Quit that server and reopen ResumeM-M.")
+                case .conflict: self.fail("Port 4600 is already used by another app or a different save. Quit that server and reopen ResumeM-M.")
                 }
             }
         } catch { fail(error.localizedDescription) }
@@ -60,10 +62,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 result = .conflict
                 if response.statusCode == 200, let data = data,
                    let health = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   health["service"] as? String == "resumem-m", health["ok"] as? Bool == true,
-                   let dataDir = health["dataDir"] as? String,
-                   URL(fileURLWithPath: dataDir).resolvingSymlinksInPath() == URL(fileURLWithPath: self.config.dataDir).resolvingSymlinksInPath() {
-                    result = .ready
+                   health["service"] as? String == "resumem-m", health["ok"] as? Bool == true {
+                    if health["projectOpen"] as? Bool == false {
+                        result = .ready
+                    } else if let dataDir = health["dataDir"] as? String,
+                              URL(fileURLWithPath: dataDir).resolvingSymlinksInPath() == URL(fileURLWithPath: self.projectDirectory).resolvingSymlinksInPath() {
+                        result = .ready
+                    }
                 }
             }
             DispatchQueue.main.async { completion(result) }
@@ -83,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             child.currentDirectoryURL = runtime
             var environment = ProcessInfo.processInfo.environment
             environment["PATH"] = config.path
-            environment["RMM_DATA"] = config.dataDir
+            environment["RMM_DATA"] = projectDirectory
             environment["PORT"] = "4600"
             child.environment = environment
             try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -158,7 +163,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     @objc private func reload() { if connected { webView.reload() } }
     @objc private func openBrowser() { if connected { NSWorkspace.shared.open(baseURL) } }
-    @objc private func openStore() { if let config = config { NSWorkspace.shared.open(URL(fileURLWithPath: config.dataDir)) } }
+    private var projectDirectory: String {
+        let prefs = ProcessInfo.processInfo.environment["RMM_PROJECTS_FILE"] ??
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".resumem-m/projects.json").path
+        if let data = FileManager.default.contents(atPath: prefs),
+           let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let selected = value["defaultFolder"] as? String { return selected }
+            if let active = value["active"] as? String { return active }
+        }
+        return config.dataDir
+    }
+    @objc private func openStore() {
+        URLSession.shared.dataTask(with: baseURL.appendingPathComponent("health")) { data, _, _ in
+            guard let data = data, let health = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let dir = health["dataDir"] as? String else { return }
+            DispatchQueue.main.async { NSWorkspace.shared.open(URL(fileURLWithPath: dir)) }
+        }.resume()
+    }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "chooseProjectFolder", message.frameInfo.isMainFrame,
+              let url = message.frameInfo.request.url, isLocal(url) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Save Folder"
+        panel.beginSheetModal(for: window) { result in
+            guard result == .OK, let path = panel.url?.path,
+                  let data = try? JSONSerialization.data(withJSONObject: [path]),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            self.webView.evaluateJavaScript("window.rmmFolderChosen(\(json)[0])", completionHandler: nil)
+        }
+    }
 
     private func buildMenu() {
         let menu = NSMenu()
@@ -182,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         appMenu.addItem(.separator())
         add(appMenu, "Quit ResumeM-M", #selector(NSApplication.terminate(_:)), "q", target: NSApp)
         let file = submenu("File")
-        add(file, "Open Resume Store", #selector(openStore), target: self)
+        add(file, "Show Save Folder", #selector(openStore), target: self)
         add(file, "Open in Browser", #selector(openBrowser), target: self)
         file.addItem(.separator())
         add(file, "Close Window", #selector(NSWindow.performClose(_:)), "w")

@@ -19,7 +19,9 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "dompurify": "^3.4.15",
     "express": "^4.21.2",
+    "marked": "^18.0.13",
     "pdfjs-dist": "^4.10.38",
     "yaml": "^2.7.0"
   },
@@ -28,6 +30,7 @@
     "@types/node": "^22.10.5",
     "@types/supertest": "^7.2.1",
     "@vitest/coverage-v8": "^2.1.9",
+    "jsdom": "^29.1.1",
     "supertest": "^7.2.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

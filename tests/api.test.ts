@@ -311,6 +311,34 @@ describe('feedback', () => {
     expect(res.body.output).toContain('critique, do not rewrite');
   });
 
+  it('reviews the full master without a resume selection, even when no saved resumes exist', async () => {
+    for (const resume of t.store.loadResumes()) t.store.deleteResume(resume.id);
+    const res = await request(app).post('/api/ai/feedback').send({ master: true, focus: 'outcomes' }).expect(200);
+    expect(res.body.executed).toBe(false);
+    expect(res.body.output).toContain('MASTER DOCUMENT');
+    expect(res.body.output).toContain('variant:v_kafka');
+    expect(res.body.output).toContain('variant:v_short');
+    expect(res.body.output).toContain('automatically compiles smaller, tailored resumes');
+    expect(res.body.output).toContain('no one-page limit');
+    expect(res.body.output).toContain('outcomes');
+  });
+
+  it('returns master feedback through the existing background results flow', async () => {
+    const result = await request(app).post('/api/ai/feedback').send({ master: true, background: true }).expect(200);
+    expect(result.body.job.about).toBe('Master Document');
+    let job = result.body.job;
+    for (let i = 0; i < 40 && job.status === 'running'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      job = (await request(app).get(`/api/ai/jobs/${job.id}`).expect(200)).body;
+    }
+    expect(job.status).toBe('done');
+    expect(job.result.output).toContain('MASTER DOCUMENT');
+  });
+
+  it('rejects conflicting feedback targets instead of critiquing the wrong document', async () => {
+    await request(app).post('/api/ai/feedback').send({ master: true, resumeId: 'newgrad' }).expect(400);
+  });
+
   it('returns a bullet-specific prompt when given one', async () => {
     const res = await request(app)
       .post('/api/ai/feedback')
@@ -325,6 +353,41 @@ describe('feedback', () => {
       .send({ entryId: 'exp_acme', bulletId: 'ghost' })
       .expect(400);
     expect(res.body.error).toMatch(/ghost/);
+  });
+
+  it('critiques the exact selected phrasing with its shared-source context', async () => {
+    const res = await request(app).post('/api/ai/feedback')
+      .send({ entryId: 'exp_acme', bulletId: 'b_pipeline', variantId: 'v_short' }).expect(200);
+    expect(res.body.output).toContain('critique one phrasing');
+    expect(res.body.output).toContain('## Selected phrase [exp_acme/b_pipeline/v_short]\nBuilt a pipeline\n');
+    expect(res.body.output).toContain('automatically compiles smaller, tailored resumes');
+  });
+
+  it('reviews heading wording and rejects absent or ambiguous phrase targets', async () => {
+    const res = await request(app).post('/api/ai/feedback')
+      .send({ entryId: 'exp_acme', fieldName: 'subtitle' }).expect(200);
+    expect(res.body.output).toContain('## Selected phrase [exp_acme.subtitle]\nSoftware Engineer Co-op');
+    for (const target of [
+      { entryId: 'exp_acme', bulletId: 'b_pipeline', variantId: 'ghost' },
+      { entryId: 'exp_acme', fieldName: 'subtitle', variantId: 'ghost' },
+      { entryId: 'exp_acme', fieldName: 'unknown' },
+      { entryId: 'exp_acme', bulletId: 'b_pipeline', fieldName: 'subtitle' },
+      { entryId: 'exp_acme', bulletId: 'b_pipeline', resumeId: 'newgrad' },
+      { variantId: 'v_short' },
+    ]) await request(app).post('/api/ai/feedback').send(target).expect(400);
+  });
+
+  it('returns phrase feedback in a background job', async () => {
+    const result = await request(app).post('/api/ai/feedback')
+      .send({ entryId: 'exp_acme', bulletId: 'b_pipeline', variantId: 'v_short', background: true }).expect(200);
+    let job = result.body.job;
+    for (let i = 0; i < 30 && job.status === 'running'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      job = (await request(app).get(`/api/ai/jobs/${job.id}`).expect(200)).body;
+    }
+    expect(job.status).toBe('done');
+    expect(job.about).toContain('Short');
+    expect(job.result.output).toContain('critique one phrasing');
   });
 
   it('returns the tailor prompt unparsed when the AI is off', async () => {
@@ -450,6 +513,19 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
   it('compiles the master document', async () => {
     const res = await request(app).post('/api/render').send({ master: true }).expect(200);
     expect(res.body.pdfUrl).toContain('master.pdf');
+  });
+
+  it('allows a master beyond two pages without shrinking or rejecting it', async () => {
+    const entry = t.store.load().entries.find(e => e.id === 'exp_acme')!;
+    entry.bullets = Array.from({ length: 85 }, (_, i) => ({
+      id: `long_${i}`, default: 'v_base', variants: [{ id: 'v_base', label: 'Default',
+        text: `Implemented source capability ${i}, validating incoming records and documenting reproducible measurements for future tailored resumes.` }],
+    }));
+    t.store.saveEntry(entry);
+    const res = await request(app).post('/api/render').send({ master: true, strict: true }).expect(200);
+    expect(res.body.pages).toBeGreaterThan(2);
+    expect(res.body.fits).toBe(true);
+    expect(res.body.adjustments).toEqual([]);
   });
 
   it('returns 422 with a report when strict mode cannot fit the page', async () => {

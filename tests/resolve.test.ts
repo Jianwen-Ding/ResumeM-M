@@ -229,7 +229,8 @@ describe('master document', () => {
   });
 
   it('lifts the page limit, since it is an inventory and not a resume', () => {
-    expect(buildMaster(store([base])).layout.maxPages).toBeGreaterThan(1);
+    expect(buildMaster(store([base])).layout.maxPages).toBeGreaterThan(2);
+    expect(buildMaster(store([base])).layout.autoFit).toBe(false);
   });
 });
 

@@ -411,6 +411,8 @@ export interface StoreConfig {
     autoCommit: boolean;
   };
   output: {
+    /** Resolve output inside the project; older stores resolve beside it. */
+    withinProject?: boolean;
     /** Where generated PDFs and application bundles land. */
     dir: string;
   };
