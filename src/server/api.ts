@@ -17,6 +17,7 @@ import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { extractJob, jobPostingScore } from '../jobs/extract.js';
+import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
@@ -177,7 +178,14 @@ export function createApi({ store, repo }: ApiDeps): Router {
     '/resumes/:id',
     handler(async (req, res) => {
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
-      await withCommit(repo, autoCommit(), `Update resume "${spec.id}"`, () => store.saveResume(spec));
+
+      // `?commit=0` writes without committing. The editor auto-saves as you
+      // work, and a commit per keystroke would bury the history it feeds; it
+      // commits once the editing stops, through /store/save.
+      const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
+      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${spec.id}"`, () =>
+        store.saveResume(spec),
+      );
       res.json(spec);
     }),
   );
@@ -814,12 +822,15 @@ export function createApi({ store, repo }: ApiDeps): Router {
         }
       }
 
-      const merged = aiParsed as { choices?: Record<string, string>; skills?: Record<string, string[]> } | null;
-      const finalMatch = merged
+      // The AI selects; it never writes a resume. Everything it returns is
+      // checked against the store, and anything that is not a real id it could
+      // have chosen from is discarded. See jobs/aiPlan.ts.
+      const plan = aiParsed ? sanitizeAiPlan(aiParsed, data) : null;
+      const finalMatch = plan
         ? {
             ...match,
-            choices: { ...match.choices, ...(merged.choices ?? {}) },
-            skills: { ...match.skills, ...(merged.skills ?? {}) },
+            choices: { ...match.choices, ...plan.choices },
+            skills: { ...match.skills, ...plan.skills },
           }
         : match;
 
@@ -829,6 +840,14 @@ export function createApi({ store, repo }: ApiDeps): Router {
         company: job.company,
         role: job.title,
       });
+
+      // Showing and hiding entries or bullets, the other half of what the AI
+      // is allowed to do. Merged over whatever deriveSpec built for skills.
+      const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
+      if (inclusion) {
+        const bySkills = new Map((spec.sections ?? []).map((s) => [s.kind, s]));
+        spec.sections = inclusion.map((s) => ({ ...s, ...(bySkills.get(s.kind) ?? {}), entries: s.entries, bullets: s.bullets }));
+      }
 
       // What the tailoring actually did to the document, in the same words the
       // version history uses: the sentence it replaced and the one it chose.
@@ -1115,6 +1134,24 @@ export function createApi({ store, repo }: ApiDeps): Router {
       const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
         store.saveDraft(draft),
       );
+
+      // An application being written is already an application. Track it as
+      // "applying" so the tracker shows what is in flight, not only what has
+      // been sent — completing the draft moves it to "applied".
+      const tracked = data.applications.find((a) => a.id === id);
+      if (!tracked) {
+        store.upsertApplication({
+          id,
+          company: draft.company,
+          role: draft.role,
+          url: draft.url,
+          status: 'applying',
+          resumeId: draft.resumeId,
+          source: draft.source,
+          history: [{ at: now, status: 'applying', note: 'Workspace opened' }],
+        });
+      }
+
       res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });
     }),
   );

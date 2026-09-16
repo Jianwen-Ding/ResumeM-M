@@ -171,6 +171,50 @@ describe('a resume version history', () => {
   });
 });
 
+describe('auto-save writes', () => {
+  it('writes without committing when asked not to', async () => {
+    const before = (await request(app).get('/api/config/store').expect(200)).body;
+
+    await request(app)
+      .put('/api/resumes/newgrad?commit=0')
+      .send({ label: 'New grad', extends: 'base', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    // On disk immediately...
+    expect(t.store.getResume('newgrad')?.choices).toEqual({ b_pipeline: 'v_kafka' });
+
+    // ...but not yet a version: the commit waits for the editing to stop.
+    const after = (await request(app).get('/api/config/store').expect(200)).body;
+    expect(after.pending.map((f: { path: string }) => f.path)).toContain('resumes/newgrad.yaml');
+    expect(after.commits).toBe(before.commits);
+  });
+
+  it('still commits by default, so other callers are unaffected', async () => {
+    await request(app)
+      .put('/api/resumes/newgrad')
+      .send({ label: 'New grad', extends: 'base', choices: { b_pipeline: 'v_short' } })
+      .expect(200);
+    expect((await request(app).get('/api/config/store').expect(200)).body.pending).toEqual([]);
+  });
+
+  it('collects a burst of auto-saves into one version when the editing stops', async () => {
+    // Ending on a variant whose text differs from the starting one: a burst
+    // that lands back where it started is genuinely no change at all.
+    for (const variant of ['v_kafka', 'v_base', 'v_short']) {
+      await request(app)
+        .put('/api/resumes/newgrad?commit=0')
+        .send({ label: 'New grad', extends: 'base', choices: { b_pipeline: variant } })
+        .expect(200);
+    }
+    const before = (await history()).length;
+    await request(app).post('/api/store/save').send({}).expect(200);
+
+    const versions = await history();
+    expect(versions.length).toBe(before + 1); // one version, not three
+    expect(versions[0]?.changes.some((c) => c.kind === 'reworded')).toBe(true);
+  });
+});
+
 describe('POST /store/save', () => {
   it('commits work that was changed outside the app', async () => {
     t.write('voice.md', '# Voice\n\nEdited by hand in an editor.\n');

@@ -28,6 +28,7 @@
       <div class="pane pane-left">
         <div class="toolbar sticky-toolbar">
           <select id="resume-select" title="Which resume to edit"></select>
+          <span id="save-state" class="save saved" title="Edits are written to the store as you make them, and committed once you stop.">All changes saved</span>
           <span id="live-state" class="live ok" title="The preview recompiles itself whenever you change something. Click to force one.">Live</span>
           <button id="btn-save-as">Save as variation…</button>
           <button id="btn-feedback">Feedback</button>
@@ -66,12 +67,13 @@
         <div class="toolbar">
           <h2>In progress</h2>
           <span class="grow"></span>
+          <button id="btn-new-draft" class="primary">+ Application</button>
           <button id="btn-refresh-drafts" class="tiny">Refresh</button>
         </div>
         <p class="hint">
           Opened from the browser extension when a posting wants a cover letter
-          or essay answers. Anything your answer bank already covers arrives
-          filled in.
+          or essay answers, or started here for one you found some other way.
+          Anything your answer bank already covers arrives filled in.
         </p>
         <div id="draft-list" class="card-list"></div>
       </div>

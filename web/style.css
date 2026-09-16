@@ -312,6 +312,18 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 
 /* The preview recompiles on its own, so the toolbar says whether what you are
    looking at is current rather than offering a button to make it current. */
+/* The save state, stated the way Docs states it: quiet text you can glance at,
+   which only draws attention when something is actually wrong. */
+.save {
+  font-size: var(--t-sm);
+  color: var(--muted);
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+.save.saving { color: var(--faint); }
+.save.unsaved { color: var(--muted); }
+.save.failed { color: var(--bad); font-weight: 500; }
+
 /* Docs says "All changes saved in Drive" as quiet text, not as a badge. Same
    here: the state matters, the decoration does not. */
 .live {
@@ -505,6 +517,48 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .chip-toggle input { display: none; }
 .chip-toggle .x { color: var(--faint); font-size: 13px; line-height: 1; }
 .chip-toggle .x:hover { color: var(--bad); }
+
+/* Lines you can edit where they sit. Nothing announces itself until you are
+   over it — the page should read as a resume, not as a form. */
+.editable {
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  margin: -1px -4px;
+  cursor: text;
+}
+.editable:hover { background: var(--state-hover); }
+.editable.editing {
+  background: var(--panel);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  cursor: auto;
+  white-space: pre-wrap;
+  outline: 0;
+}
+
+/* Step through the alternates from beside the line. */
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: var(--line-soft);
+  padding: 1px;
+}
+.stepper .step {
+  border: 0;
+  background: none;
+  padding: 1px 7px;
+  font-size: var(--t-base);
+  line-height: 1.1;
+  color: var(--muted);
+  border-radius: var(--radius-pill);
+}
+.stepper .step:hover { background: var(--state-hover); color: var(--ink); }
+.stepper .count { font-size: var(--t-xs); color: var(--muted); padding: 0 2px; font-variant-numeric: tabular-nums; }
+
+.field-line { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.field-line .field-text { flex: 1 1 auto; font-size: var(--t-base); }
 
 .bullet .text { margin-bottom: 5px; }
 .bullet .text strong { font-weight: 650; }

@@ -179,7 +179,8 @@ export function stats(apps: Application[]): TrackerStats {
     apps.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
 
   const responded = apps.filter((a) => ['oa', 'interview', 'offer'].includes(a.status)).length;
-  const sent = apps.filter((a) => a.status !== 'interested').length;
+  // "Applying" has not been sent yet, so it cannot have drawn a response.
+  const sent = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying').length;
 
   return {
     total: apps.length,
