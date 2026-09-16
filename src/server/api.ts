@@ -41,6 +41,7 @@ import type {
   WritingSample,
 } from '../model/types.js';
 import { compileLetter, compileResume, OverflowError } from '../render/compile.js';
+import { Jobs } from './jobs.js';
 
 interface DescribedChange {
   key: string;
@@ -146,6 +147,8 @@ export function createApi({ store, repo }: ApiDeps): Router {
   api.use(express.json({ limit: '32mb' }));
 
   const autoCommit = () => store.loadConfig().git.autoCommit;
+  // Work the user started and walked away from.
+  const jobs = new Jobs();
 
   /* ---------------------------------------------------------------- *
    * Store reads                                                       *
@@ -575,27 +578,89 @@ export function createApi({ store, repo }: ApiDeps): Router {
   api.post(
     '/ai/feedback',
     handler(async (req, res) => {
-      const { resumeId, focus, bulletId, entryId } = req.body as {
+      const { resumeId, focus, bulletId, entryId, background } = req.body as {
         resumeId?: string;
         focus?: string;
         bulletId?: string;
         entryId?: string;
+        /** Return a job to collect later instead of holding the request open. */
+        background?: boolean;
       };
       const data = store.load();
 
       let prompt: string;
+      let about: string;
       if (bulletId && entryId) {
         const entry = data.entries.find((e) => e.id === entryId);
         const bullet = entry?.bullets?.find((b) => b.id === bulletId);
         if (!entry || !bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
         prompt = bulletFeedbackPrompt(data, entry, bullet);
+        about = typeof entry.title === 'string' ? entry.title : 'a bullet point';
       } else {
-        prompt = feedbackPrompt(data, resolveResume(String(resumeId), data), focus);
+        const resolved = resolveResume(String(resumeId), data);
+        about = resolved.label;
+
+        /*
+         * Compile it first, and hand the critique the real thing: the exact
+         * LaTeX and what the compiler said about the page. Anything about
+         * length, spacing, or "this runs over" is guesswork from plain text —
+         * the reader sees a typeset page, so the critic should too. Compiling
+         * also means the PDF beside it is current rather than whatever was
+         * last built.
+         */
+        let tex: string | undefined;
+        let fit: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] } | undefined;
+        try {
+          const compiled = await compileResume(resolved, {
+            pdfPath: path.join(store.outDir(), `${slug(resolved.id) || 'resume'}.pdf`),
+            engine: data.config.latex.engine,
+          });
+          tex = compiled.tex;
+          fit = {
+            pages: compiled.pages,
+            fits: compiled.fits,
+            overflowLines: compiled.overflowLines,
+            adjustments: compiled.adjustments,
+          };
+        } catch {
+          // No LaTeX installed, or a resume that will not compile: the
+          // critique is still worth having, just without the page evidence.
+        }
+
+        prompt = feedbackPrompt(data, resolved, { focus, tex, fit });
+      }
+
+      if (background) {
+        const job = jobs.start('feedback', about, () => runAgent(data.config, prompt));
+        res.json({ job });
+        return;
       }
 
       const result = await runAgent(data.config, prompt);
       res.json(result);
     }),
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Background work                                                   *
+   * ---------------------------------------------------------------- */
+
+  api.get('/ai/jobs', handler(async (_req, res) => res.json({ jobs: jobs.list() })));
+
+  api.get(
+    '/ai/jobs/:id',
+    handler(async (req, res) => {
+      // Fetching a finished job is how you read it, so that clears the badge.
+      const job = jobs.get(String(req.params.id));
+      if (!job) throw new Error('That result has expired');
+      if (job.status !== 'running') jobs.read(job.id);
+      res.json(job);
+    }),
+  );
+
+  api.delete(
+    '/ai/jobs/:id',
+    handler(async (req, res) => res.json({ ok: jobs.dismiss(String(req.params.id)) })),
   );
 
   api.post(

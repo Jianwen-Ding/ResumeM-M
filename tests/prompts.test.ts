@@ -172,3 +172,65 @@ describe('shorten prompt', () => {
     expect(p).toContain('[b1]');
   });
 });
+
+describe('feedback sees the whole picture', () => {
+  it('includes the compiled LaTeX and what the compiler said', () => {
+    const t = makeTempStore();
+    try {
+      const data = t.store.load();
+      const prompt = feedbackPrompt(data, resolveResume('newgrad', data), {
+        tex: '\\documentclass{article}\\begin{document}hi\\end{document}',
+        fit: { pages: 2, fits: false, overflowLines: 7, adjustments: ['font 10.5pt → 9.6pt'] },
+      });
+
+      expect(prompt).toContain('What it compiles to');
+      expect(prompt).toContain('does NOT fit: 2 pages, about 7 lines too long');
+      expect(prompt).toContain('font 10.5pt → 9.6pt');
+      expect(prompt).toContain('\\documentclass{article}');
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it('truncates a very long document rather than sending all of it', () => {
+    const t = makeTempStore();
+    try {
+      const data = t.store.load();
+      const prompt = feedbackPrompt(data, resolveResume('newgrad', data), { tex: 'x'.repeat(40_000) });
+      expect(prompt).toContain('truncated');
+      expect(prompt.length).toBeLessThan(40_000);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it('brings in the other resumes, letters, and answered questions', () => {
+    const t = makeTempStore();
+    try {
+      const data = t.store.load();
+      const prompt = feedbackPrompt(data, resolveResume('newgrad', data));
+
+      expect(prompt).toContain('What else this person has');
+      expect(prompt).toContain('Other resumes they keep');
+      expect(prompt).toContain('Summer intern'); // a sibling resume
+      expect(prompt).toContain('Recent cover letters');
+      expect(prompt).toContain('Dear Acme'); // the letter in the fixture
+      expect(prompt).toContain('Questions they have answered');
+      expect(prompt).toContain('Why are you interested in this role?');
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it('still accepts a plain focus string, as older callers pass', () => {
+    const t = makeTempStore();
+    try {
+      const data = t.store.load();
+      expect(feedbackPrompt(data, resolveResume('newgrad', data), 'the projects section')).toContain(
+        'the projects section',
+      );
+    } finally {
+      t.cleanup();
+    }
+  });
+});

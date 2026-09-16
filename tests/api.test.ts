@@ -831,3 +831,56 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
     expect(res.body.error).toMatch(/no resume/i);
   });
 });
+
+describe('work you walked away from', () => {
+  it('hands back a job instead of holding the request open', async () => {
+    const res = await request(app)
+      .post('/api/ai/feedback')
+      .send({ resumeId: 'newgrad', background: true })
+      .expect(200);
+
+    expect(res.body.job.status).toBe('running');
+    expect(res.body.job.about).toBe('New grad');
+    expect(res.body.job.kind).toBe('feedback');
+  });
+
+  it('lists it, and clears the badge once it has been read', async () => {
+    const { body } = await request(app)
+      .post('/api/ai/feedback')
+      .send({ resumeId: 'newgrad', background: true })
+      .expect(200);
+    const id = body.job.id;
+
+    // The AI is off in the fixture, so it finishes almost immediately.
+    let job = body.job;
+    for (let i = 0; i < 40 && job.status === 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      job = (await request(app).get(`/api/ai/jobs/${id}`).expect(200)).body;
+    }
+
+    expect(job.status).toBe('done');
+    expect((job.result as { executed: boolean }).executed).toBe(false); // AI off: the prompt comes back
+    expect(job.unread).toBe(false); // reading it is what clears the badge
+
+    const list = (await request(app).get('/api/ai/jobs').expect(200)).body.jobs;
+    expect(list.some((j: { id: string }) => j.id === id)).toBe(true);
+  });
+
+  it('can be dismissed, and says so when asked for again', async () => {
+    const { body } = await request(app)
+      .post('/api/ai/feedback')
+      .send({ resumeId: 'newgrad', background: true })
+      .expect(200);
+
+    await request(app).delete(`/api/ai/jobs/${body.job.id}`).expect(200);
+    const gone = await request(app).get(`/api/ai/jobs/${body.job.id}`);
+    expect(gone.status).toBe(400);
+    expect(gone.body.error).toMatch(/expired/);
+  });
+
+  it('still answers synchronously for callers that want to wait', async () => {
+    const res = await request(app).post('/api/ai/feedback').send({ resumeId: 'newgrad' }).expect(200);
+    expect(res.body.executed).toBe(false);
+    expect(res.body.output).toContain('Task: critique');
+  });
+});

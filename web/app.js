@@ -768,8 +768,7 @@ function entryBlock(entry, section, choices) {
         title: 'Hidden on this variation — click to show',
         onChange: (checked) => setEntryIncluded(section, entry, checked),
       }),
-      el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || entry.id }),
-      el('span', { className: 'id', textContent: entry.id }),
+      el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || 'Untitled' }),
     ]);
     row.onclick = (ev) => {
       if (ev.target.closest('input')) return;
@@ -787,8 +786,7 @@ function entryBlock(entry, section, choices) {
       title: 'Showing on this variation',
       onChange: (checked) => setEntryIncluded(section, entry, checked),
     }),
-    el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || entry.id }),
-    el('span', { className: 'id', textContent: entry.id }),
+    el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || 'Untitled' }),
     el('span', { className: 'grow' }),
     el('div', { className: 'entry-actions' }, [
       // The title has no meta-line row of its own, so its "give this
@@ -917,7 +915,7 @@ function skillsBlock(section) {
     box.append(
       el('div', { className: 'entry-head' }, [
         el('span', { className: 'title', textContent: group.name }),
-        el('span', { className: 'id', textContent: gid }),
+
         el('span', { className: 'grow' }),
         el('div', { className: 'entry-actions' }, [
           el('button', { className: 'tiny danger', textContent: 'Delete group', onclick: () => removeSkillGroup(group) }),
@@ -1756,17 +1754,92 @@ async function saveAsVariation() {
   render();
 }
 
+/**
+ * Ask for a critique and carry on working.
+ *
+ * A good critique takes the AI a minute or three, and holding a dialog open
+ * for it is the wrong shape — you asked a question, you should be able to go
+ * and do something else. The request goes off as a job; the header says when
+ * an answer is waiting.
+ */
 async function askFeedback() {
-  showModal('Feedback', el('p', { className: 'hint', textContent: 'Asking the configured AI…' }));
   try {
-    const result = await api('/ai/feedback', { method: 'POST', body: JSON.stringify({ resumeId: state.resumeId }) });
-    showModal(
-      result.executed ? 'Feedback' : 'AI is off — this is the prompt it would have run',
-      el('pre', { textContent: result.output }),
-    );
+    const { job } = await api('/ai/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ resumeId: state.resumeId, background: true }),
+    });
+    setStatus('Reading your resume — this keeps working while you do');
+    watchJobs();
+    return job;
   } catch (err) {
     showModal('Feedback failed', el('pre', { textContent: err.message }));
+    return null;
   }
+}
+
+/* ---- Work you walked away from ------------------------------------- *
+ * Jobs are polled rather than pushed: this is a local server and one small
+ * request every few seconds costs nothing, where a socket would be a second
+ * transport to keep working for one badge.
+ * -------------------------------------------------------------------- */
+
+let jobTimer = null;
+
+function watchJobs() {
+  clearInterval(jobTimer);
+  jobTimer = setInterval(() => refreshJobs().catch(() => {}), 3000);
+  refreshJobs().catch(() => {});
+}
+
+async function refreshJobs() {
+  const { jobs } = await api('/ai/jobs');
+  renderJobChip(jobs);
+  // Nothing running and nothing unread: stop asking.
+  if (!jobs.some((j) => j.status === 'running' || j.unread)) {
+    clearInterval(jobTimer);
+    jobTimer = null;
+  }
+}
+
+function renderJobChip(jobs) {
+  const chip = $('#jobs-chip');
+  if (!chip) return;
+
+  const running = jobs.filter((j) => j.status === 'running');
+  const ready = jobs.filter((j) => j.status !== 'running' && j.unread);
+
+  if (running.length === 0 && ready.length === 0) {
+    chip.className = 'jobs-chip hidden';
+    chip.textContent = '';
+    return;
+  }
+
+  chip.className = `jobs-chip${ready.length > 0 ? ' ready' : ' working'}`;
+  chip.textContent =
+    ready.length > 0
+      ? `${plural(ready.length, 'result')} ready`
+      : `Thinking about ${running[0].about}…`;
+  chip.onclick = () => openJob(ready[0] ?? running[0]);
+}
+
+async function openJob(job) {
+  if (job.status === 'running') {
+    showModal('Still working', el('p', { className: 'hint' }, `The AI is reading ${job.about}. This panel will have it when it is done.`));
+    return;
+  }
+
+  const full = await api(`/ai/jobs/${encodeURIComponent(job.id)}`).catch(() => job);
+  await refreshJobs().catch(() => {});
+
+  if (full.status === 'failed') {
+    showModal('Feedback failed', el('pre', { textContent: full.error ?? 'Unknown error' }));
+    return;
+  }
+  const result = full.result ?? {};
+  showModal(
+    result.executed ? `Feedback — ${full.about}` : 'AI is off — this is the prompt it would have run',
+    el('pre', { textContent: result.output ?? '' }),
+  );
 }
 
 async function askBulletFeedback(entry, bullet) {
@@ -2994,7 +3067,7 @@ async function loadResumeHistory() {
   const select = $('#history-resume');
   select.replaceChildren(
     ...state.store.resumes.map((r) =>
-      el('option', { value: r.id, textContent: `${r.label} (${r.id})`, selected: r.id === historyResumeId }),
+      el('option', { value: r.id, textContent: r.label, selected: r.id === historyResumeId }),
     ),
   );
   if (!historyResumeId || !state.store.resumes.some((r) => r.id === historyResumeId)) {
@@ -3068,7 +3141,6 @@ function renderResumeTimeline(versions) {
           el('span', { className: 'rel', textContent: new Date(v.date).toLocaleString() }),
           isCurrent ? el('span', { className: 'badge done', textContent: 'Current' }) : null,
           el('span', { className: 'grow' }),
-          el('span', { className: 'rel', textContent: v.hash.slice(0, 8) }),
         ]),
         el(
           'div',
@@ -3328,7 +3400,7 @@ function render() {
   const select = $('#resume-select');
   select.replaceChildren(
     ...state.store.resumes.map((r) =>
-      el('option', { value: r.id, textContent: `${r.label} (${r.id})`, selected: r.id === state.resumeId }),
+      el('option', { value: r.id, textContent: r.label, selected: r.id === state.resumeId }),
     ),
   );
   select.value = state.resumeId;
@@ -3433,6 +3505,9 @@ async function boot() {
     ]);
     if (answer?.kind) addEntry(answer.kind);
   };
+  // Anything the AI was still doing when the tab was closed is picked up here.
+  refreshJobs().catch(() => {});
+
   $('#btn-add-app').onclick = addApplication;
   $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
   $('#btn-add-letter').onclick = addLetter;

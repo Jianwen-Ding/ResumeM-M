@@ -133,7 +133,25 @@ nav button {
 nav button:hover { background: var(--state-hover); color: var(--ink-soft); }
 nav button.active { background: var(--accent-soft); color: #174ea6; }
 
-.status { margin-left: auto; color: var(--muted); font-size: 12px; max-width: 40ch; text-align: right; }
+/* Something the AI is doing, or has finished while you were elsewhere. */
+.jobs-chip {
+  margin-left: auto;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  background: var(--line-soft);
+  color: var(--muted);
+}
+.jobs-chip.working::after { content: " ⋯"; }
+.jobs-chip.ready { background: var(--accent-soft); color: #174ea6; }
+.jobs-chip.ready:hover { background: #d2e3fc; }
+.jobs-chip.hidden { display: none; }
+.jobs-chip.hidden + .status { margin-left: auto; }
+
+.status { color: var(--muted); font-size: 12px; max-width: 40ch; text-align: right; }
 .status.err { color: var(--bad); }
 
 .tab { display: none; padding: 14px 16px 40px; }
