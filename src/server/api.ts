@@ -18,7 +18,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
-import { extractJob, jobPostingScore } from '../jobs/extract.js';
+import { classifyPage, extractJob, JOB_SHAPED, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
@@ -1039,18 +1039,34 @@ export function createApi({ store, repo }: ApiDeps): Router {
   api.post(
     '/extension/analyze',
     handler(async (req, res) => {
-      const { url, title, html, baseResumeId, useAi } = req.body as {
+      const { url, title, html, pages, baseResumeId, useAi } = req.body as {
         url?: string;
         title?: string;
-        html: string;
+        html?: string;
+        /** Every page of this application, oldest first. */
+        pages?: PageSource[];
         baseResumeId?: string;
         useAi?: boolean;
       };
-      if (!html) throw new Error('No page HTML supplied');
+
+      /*
+       * One application, however many pages it is spread across. The single
+       * page is the trail of length one: the description you read and the form
+       * you are filling in are usually two different pages on two different
+       * hosts, and writing a cover letter from whichever one happens to be
+       * open is why the letters came out thin.
+       */
+      const trail: PageSource[] = pages?.length ? pages : html ? [{ url, title, html }] : [];
+      if (trail.length === 0) throw new Error('No page HTML supplied');
 
       const data = store.load();
-      const job = extractJob(html, url, title);
-      const score = jobPostingScore(html, url);
+      const current = trail[trail.length - 1]!;
+      const job = mergeJobPages(trail);
+      // The verdict is about the page you are on; the description is about all
+      // of them. A form page is worth offering on even though it describes
+      // nothing, which is exactly the case a single score could not express.
+      const verdict = classifyPage(current.html, current.url);
+      const score = Math.max(verdict.score, ...trail.map((p) => classifyPage(p.html, p.url).score));
 
       const baseId = baseResumeId ?? defaultBaseId(data.resumes);
       if (!baseId) throw new Error('The store has no resumes to start from');
@@ -1125,9 +1141,14 @@ export function createApi({ store, repo }: ApiDeps): Router {
       }
 
       res.json({
-        isJobPosting: score >= 4,
+        isJobPosting: verdict.kind !== 'none' || score >= JOB_SHAPED,
         score,
+        kind: verdict.kind,
+        why: verdict.why,
         job,
+        // What each page contributed, so the card can show the trail and the
+        // user can drop a page that does not belong.
+        pages: job.pages,
         baseResumeId: baseId,
         baseLabel: base.label,
         spec,
