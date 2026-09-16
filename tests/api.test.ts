@@ -567,3 +567,187 @@ describe('list bullets', () => {
     expect(res.body.warnings.join(' ')).toMatch(/c_ghost/);
   });
 });
+
+describe('workspace', () => {
+  const open = (patch: Record<string, unknown> = {}) =>
+    request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Streamly',
+        role: 'Data Platform Intern',
+        url: 'https://boards.greenhouse.io/streamly/jobs/1',
+        jobDescription: 'Kafka streaming in Go.',
+        resumeId: 'intern',
+        coverLetterRequired: true,
+        questions: [
+          { question: 'Why are you interested in this role?', required: true },
+          { question: 'Describe a technical project you are proud of.', required: true },
+        ],
+        ...patch,
+      });
+
+  it('pre-fills what the answer bank already covers', async () => {
+    const res = await open().expect(200);
+    const draft = res.body.draft;
+
+    expect(draft.company).toBe('Streamly');
+    expect(draft.coverLetter.required).toBe(true);
+    expect(draft.questions).toHaveLength(2);
+
+    const known = draft.questions.find((q: { question: string }) => q.question.startsWith('Why'));
+    expect(known.source).toBe('bank');
+    expect(known.answer).toBe('Because the work is interesting.');
+
+    const unknown = draft.questions.find((q: { question: string }) => q.question.startsWith('Describe'));
+    expect(unknown.source).toBe('empty');
+    expect(unknown.answer).toBe('');
+  });
+
+  it('returns a link straight to the draft', async () => {
+    const res = await open().expect(200);
+    expect(res.body.url).toBe(`/#workspace/${res.body.draft.id}`);
+  });
+
+  it('requires a company and a role', async () => {
+    await request(app).post('/api/workspace').send({ company: 'Only' }).expect(400);
+  });
+
+  it('saves a posting-specific resume that arrives with the draft', async () => {
+    const res = await open({
+      spec: { id: 'job-streamly', label: 'Streamly', extends: 'intern', choices: { b_pipeline: 'v_kafka' } },
+    }).expect(200);
+    expect(t.store.getResume('job-streamly')).toBeDefined();
+    expect(res.body.draft.resumeId).toBe('job-streamly');
+  });
+
+  it('never overwrites an answer a human has written', async () => {
+    const first = await open().expect(200);
+    const draft = first.body.draft;
+    draft.questions[1].answer = 'My own words.';
+    draft.questions[1].edited = true;
+    await request(app).put(`/api/workspace/${draft.id}`).send(draft).expect(200);
+
+    // The extension sends the same posting again — a page reload, say.
+    const second = await open().expect(200);
+    const q = second.body.draft.questions.find((x: { question: string }) => x.question.startsWith('Describe'));
+    expect(q.answer).toBe('My own words.');
+  });
+
+  it('lists and fetches drafts, and reports one that is gone', async () => {
+    const { body } = await open().expect(200);
+    const list = await request(app).get('/api/workspace').expect(200);
+    expect(list.body.drafts).toHaveLength(1);
+
+    await request(app).get(`/api/workspace/${body.draft.id}`).expect(200);
+    await request(app).delete(`/api/workspace/${body.draft.id}`).expect(200);
+    await request(app).get(`/api/workspace/${body.draft.id}`).expect(400);
+    await request(app).delete(`/api/workspace/${body.draft.id}`).expect(400);
+  });
+
+  it('falls back to the closest previous letter when the AI is off', async () => {
+    const { body } = await open().expect(200);
+    const res = await request(app)
+      .post(`/api/workspace/${body.draft.id}/generate`)
+      .send({ what: 'letter' })
+      .expect(200);
+
+    expect(res.body.draft.coverLetter.body).toContain('letter I wrote before');
+    expect(res.body.notes.join(' ')).toMatch(/AI is off/);
+  });
+
+  it('leaves an edited letter alone when generating', async () => {
+    const { body } = await open().expect(200);
+    const draft = body.draft;
+    draft.coverLetter.body = 'Mine.';
+    draft.coverLetter.edited = true;
+    await request(app).put(`/api/workspace/${draft.id}`).send(draft).expect(200);
+
+    const res = await request(app).post(`/api/workspace/${draft.id}/generate`).send({ what: 'letter' }).expect(200);
+    expect(res.body.draft.coverLetter.body).toBe('Mine.');
+    expect(res.body.notes.join(' ')).toMatch(/left alone/);
+  });
+
+  it('reports how many questions still need an answer', async () => {
+    const { body } = await open().expect(200);
+    const res = await request(app)
+      .post(`/api/workspace/${body.draft.id}/generate`)
+      .send({ what: 'questions' })
+      .expect(200);
+    expect(res.body.notes.join(' ')).toMatch(/1 of 2 questions/);
+  });
+
+  it('reports a draft that does not exist', async () => {
+    await request(app).post('/api/workspace/ghost/generate').send({}).expect(400);
+    await request(app).post('/api/workspace/ghost/complete').send({}).expect(400);
+    await request(app).put('/api/workspace/ghost').send({}).expect(400);
+  });
+});
+
+describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
+  it('files the answers into the application history and the bank', async () => {
+    const created = await request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Streamly',
+        role: 'Intern',
+        resumeId: 'intern',
+        coverLetterRequired: true,
+        questions: [{ question: 'Describe a technical project you are proud of.', required: true }],
+      })
+      .expect(200);
+
+    const draft = created.body.draft;
+    draft.coverLetter.body = 'Dear Streamly, here is why.';
+    draft.coverLetter.edited = true;
+    draft.questions[0].answer = 'I built a pipeline.';
+    draft.questions[0].edited = true;
+    await request(app).put(`/api/workspace/${draft.id}`).send(draft).expect(200);
+
+    const done = await request(app)
+      .post(`/api/workspace/${draft.id}/complete`)
+      .send({ saveAnswersToBank: true })
+      .expect(200);
+
+    expect(done.body.files).toContain('Test Person Resume Streamly.pdf');
+    expect(done.body.files.some((f: string) => f.includes('Cover Letter'))).toBe(true);
+
+    // The application record carries what was actually said.
+    const app1 = t.store.load().applications.find((a) => a.company === 'Streamly');
+    expect(app1?.answers?.[0]?.answer).toBe('I built a pipeline.');
+    expect(app1?.history?.some((h) => /question\(s\) answered/.test(h.note ?? ''))).toBe(true);
+
+    // And the hand-written answer is in the bank for next time.
+    const bank = t.store.load().answers.find((a) => a.question.startsWith('Describe'));
+    expect(bank?.variants.at(-1)?.text).toBe('I built a pipeline.');
+
+    // The draft is cleared once filed.
+    expect(t.store.getDraft(draft.id)).toBeUndefined();
+  });
+
+  it('can keep the draft, marked submitted', async () => {
+    const created = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Acme', role: 'Intern', resumeId: 'intern', questions: [] })
+      .expect(200);
+
+    await request(app)
+      .post(`/api/workspace/${created.body.draft.id}/complete`)
+      .send({ keepDraft: true, saveAnswersToBank: false })
+      .expect(200);
+
+    expect(t.store.getDraft(created.body.draft.id)?.status).toBe('submitted');
+  });
+
+  it('refuses to file a draft with no resume attached', async () => {
+    const created = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Acme', role: 'Intern', questions: [] })
+      .expect(200);
+    // No resumeId was supplied and none was derived.
+    const draft = { ...created.body.draft, resumeId: undefined };
+    await request(app).put(`/api/workspace/${draft.id}`).send(draft).expect(200);
+
+    const res = await request(app).post(`/api/workspace/${draft.id}/complete`).send({}).expect(400);
+    expect(res.body.error).toMatch(/no resume/i);
+  });
+});

@@ -182,3 +182,77 @@ describe('withCommit', () => {
     expect(git(['show', '--name-only', '--pretty=format:', 'HEAD'])).toContain('async.txt');
   });
 });
+
+describe('commit detail', () => {
+  it('reports what one commit changed, with counts and a patch', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.writeFileSync(path.join(root, 'bullet.yaml'), 'text: original\nother: kept\n');
+    await repo.commitAll('add a bullet');
+    fs.writeFileSync(path.join(root, 'bullet.yaml'), 'text: revised\nother: kept\n');
+    const hash = await repo.commitAll('revise the wording');
+
+    const detail = await repo.commit(hash!);
+    expect(detail?.message).toBe('revise the wording');
+    expect(detail?.hash).toBe(hash);
+    expect(detail?.author).toBe('ResumeM-M');
+    expect(detail?.date).toMatch(/^\d{4}-/);
+
+    const file = detail?.files.find((f) => f.path === 'bullet.yaml');
+    expect(file?.added).toBe(1);
+    expect(file?.removed).toBe(1);
+
+    expect(detail?.diff).toContain('-text: original');
+    expect(detail?.diff).toContain('+text: revised');
+  });
+
+  it('carries the commit body separately from the subject', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'x');
+    git(['add', '-A']);
+    execFileSync(
+      'git',
+      ['-c', 'user.email=a@b.c', '-c', 'user.name=T', 'commit', '-q', '-m', 'subject line', '-m', 'body line'],
+      { cwd: root },
+    );
+
+    const [head] = await repo.log(1);
+    const detail = await repo.commit(head!.hash);
+    expect(detail?.message).toBe('subject line');
+    expect(detail?.body).toBe('body line');
+  });
+
+  it('counts a binary file as an unknown number of lines', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.writeFileSync(path.join(root, 'blob.bin'), Buffer.from([0, 1, 2, 0, 255, 0]));
+    const hash = await repo.commitAll('add a binary file');
+
+    const detail = await repo.commit(hash!);
+    const file = detail?.files.find((f) => f.path === 'blob.bin');
+    expect(file?.added).toBeNull();
+    expect(file?.removed).toBeNull();
+  });
+
+  it('returns nothing for a hash that is not in the history', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    expect(await repo.commit('0000000')).toBeUndefined();
+  });
+
+  it('returns nothing outside a repo', async () => {
+    expect(await new Repo(path.join(root, 'nope')).commit('abc1234')).toBeUndefined();
+  });
+
+  it('truncates an enormous diff rather than returning it whole', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.writeFileSync(path.join(root, 'huge.txt'), Array.from({ length: 40_000 }, (_, i) => `line ${i}`).join('\n'));
+    const hash = await repo.commitAll('add a huge file');
+
+    const detail = await repo.commit(hash!);
+    expect(detail!.diff.length).toBeLessThanOrEqual(200_100);
+    expect(detail!.diff).toContain('diff truncated');
+  });
+});

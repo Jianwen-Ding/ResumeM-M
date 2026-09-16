@@ -6,6 +6,7 @@ import {
   type AnswerBankItem,
   type Application,
   type CoverLetter,
+  type Draft,
   type Entry,
   type Profile,
   type ResumeSpec,
@@ -63,6 +64,7 @@ export class Store {
       resumes: this.loadResumes(),
       applications: this.readYaml<Application[]>('applications.yaml', []),
       coverLetters: this.loadCoverLetters(),
+      drafts: this.loadDrafts(),
       answers: this.readYaml<AnswerBankItem[]>('answers.yaml', []),
       voice: this.loadVoice(),
       config,
@@ -241,6 +243,41 @@ export class Store {
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
     fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${body}`, 'utf8');
+  }
+
+  /**
+   * Applications in progress. One file each, like resumes, so a draft is
+   * readable in a diff and easy to delete by hand.
+   */
+  loadDrafts(): Draft[] {
+    const dir = this.file('drafts');
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.yaml'))
+      .map((f) => {
+        const draft = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as Draft;
+        return { ...draft, id: draft?.id ?? path.basename(f, '.yaml') };
+      })
+      .filter((d): d is Draft => Boolean(d && d.id))
+      .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+  }
+
+  getDraft(id: string): Draft | undefined {
+    return this.loadDrafts().find((d) => d.id === id);
+  }
+
+  saveDraft(draft: Draft): Draft {
+    const next = { ...draft, updatedAt: new Date().toISOString() };
+    this.writeYaml(path.join('drafts', `${draft.id}.yaml`), next);
+    return next;
+  }
+
+  deleteDraft(id: string): boolean {
+    const f = this.file('drafts', `${id}.yaml`);
+    if (!fs.existsSync(f)) return false;
+    fs.unlinkSync(f);
+    return true;
   }
 
   /** Absolute path to the configured output directory, created on demand. */

@@ -262,6 +262,50 @@ export interface Application {
   history?: { at: string; status: ApplicationStatus; note?: string }[];
 }
 
+/**
+ * An application in progress.
+ *
+ * The extension knows what a posting asks for — a cover letter, three essay
+ * questions — but a browser sidebar is the wrong place to write prose. A draft
+ * carries that requirement into the editor, where there is room to work, and
+ * carries the finished answers back out into the application record.
+ */
+export interface Draft {
+  id: string;
+  company: string;
+  role: string;
+  url?: string;
+  /** Which resume the application will use; usually one the extension derived. */
+  resumeId?: string;
+  createdAt: string;
+  updatedAt: string;
+  status: 'drafting' | 'ready' | 'submitted';
+  /** Where it came from, e.g. the hostname the extension saw. */
+  source?: string;
+  /** The posting text, kept so generation has context without re-fetching. */
+  jobDescription?: string;
+  coverLetter: {
+    required: boolean;
+    body: string;
+    /** True once a human has touched it, so generation cannot overwrite silently. */
+    edited?: boolean;
+  };
+  questions: DraftQuestion[];
+  notes?: string;
+}
+
+export interface DraftQuestion {
+  id: string;
+  question: string;
+  required?: boolean;
+  answer: string;
+  /** Which answer-bank item this came from, when it came from one. */
+  fromAnswerId?: string;
+  /** How the current text got here. */
+  source?: 'bank' | 'ai' | 'human' | 'empty';
+  edited?: boolean;
+}
+
 export interface CoverLetter {
   id: string;
   title: string;
@@ -289,6 +333,7 @@ export interface StoreData {
   resumes: ResumeSpec[];
   applications: Application[];
   coverLetters: CoverLetter[];
+  drafts: Draft[];
   answers: AnswerBankItem[];
   /** Contents of voice.md — the writing-voice instructions handed to any AI. */
   voice: string;

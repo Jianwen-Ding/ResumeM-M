@@ -1345,6 +1345,298 @@ async function addApplication() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Workspace — applications in progress                                *
+ * ------------------------------------------------------------------ */
+
+let openDraftId = null;
+
+async function loadDrafts() {
+  const { drafts } = await api('/workspace');
+  const list = $('#draft-list');
+
+  if (drafts.length === 0) {
+    setChildren(
+      list,
+      el('div', { className: 'empty' }, [
+        el('b', {}, 'Nothing in progress'),
+        'When a posting wants a cover letter or written answers, send it here from the browser extension.',
+      ]),
+    );
+    if (!openDraftId) renderDraft(null);
+    return;
+  }
+
+  setChildren(
+    list,
+    ...drafts.map((d) => {
+      const answered = d.questions.filter((q) => q.answer.trim()).length;
+      const letterDone = !d.coverLetter.required || Boolean(d.coverLetter.body.trim());
+      const ready = letterDone && answered === d.questions.length;
+
+      return el(
+        'div',
+        {
+          className: `draft-card${d.id === openDraftId ? ' selected' : ''}`,
+          onclick: () => openDraft(d.id),
+        },
+        [
+          el('div', { className: 'co', textContent: d.company }),
+          el('div', { className: 'role', textContent: d.role }),
+          el('div', { className: 'bits' }, [
+            d.coverLetter.required
+              ? el('span', {
+                  className: `badge ${d.coverLetter.body.trim() ? 'done' : 'required'}`,
+                  textContent: d.coverLetter.body.trim() ? 'letter written' : 'letter needed',
+                })
+              : null,
+            d.questions.length
+              ? el('span', {
+                  className: `badge ${answered === d.questions.length ? 'done' : 'required'}`,
+                  textContent: `${answered}/${d.questions.length} answered`,
+                })
+              : null,
+            ready ? el('span', { className: 'badge done', textContent: 'ready' }) : null,
+          ]),
+        ],
+      );
+    }),
+  );
+
+  if (!openDraftId && drafts[0]) openDraft(drafts[0].id);
+}
+
+async function openDraft(id) {
+  openDraftId = id;
+  location.hash = `#workspace/${encodeURIComponent(id)}`;
+  try {
+    renderDraft(await api(`/workspace/${encodeURIComponent(id)}`));
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+  loadDrafts();
+}
+
+const SOURCE_LABEL = { bank: 'from your answer bank', ai: 'drafted by AI', human: 'written by you', empty: 'not answered' };
+
+function renderDraft(draft) {
+  const panel = $('#draft-editor');
+  if (!draft) {
+    setChildren(
+      panel,
+      el('div', { className: 'empty' }, [
+        el('b', {}, 'Nothing open'),
+        'Pick an application on the left, or send one over from the extension.',
+      ]),
+    );
+    return;
+  }
+
+  const notes = el('div', { className: 'gen-notes' });
+
+  /** Persist the draft as it stands, marking edited fields so generation
+   *  never overwrites something a human wrote. */
+  const save = async (message) => {
+    await api(`/workspace/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: JSON.stringify(draft) });
+    if (message) setStatus(message);
+  };
+
+  const blocks = [];
+
+  /* Cover letter */
+  if (draft.coverLetter.required) {
+    const letter = el('textarea', {
+      className: 'letter',
+      value: draft.coverLetter.body,
+      placeholder: 'Write the letter here, or press Draft to start from your previous ones.',
+    });
+    letter.oninput = () => {
+      draft.coverLetter.body = letter.value;
+      draft.coverLetter.edited = true;
+    };
+    letter.onblur = () => save();
+
+    blocks.push(
+      el('div', { className: 'block' }, [
+        el('div', { className: 'block-head' }, [
+          el('h4', {}, 'Cover letter'),
+          el('span', {
+            className: `badge ${draft.coverLetter.body.trim() ? 'done' : 'required'}`,
+            textContent: draft.coverLetter.body.trim() ? 'written' : 'required',
+          }),
+          el('span', { className: 'grow', style: 'flex:1' }),
+          el('button', {
+            className: 'tiny',
+            textContent: 'Draft from previous letters',
+            onclick: () => generate(draft, 'letter', notes),
+          }),
+        ]),
+        letter,
+      ]),
+    );
+  }
+
+  /* Questions */
+  if (draft.questions.length > 0) {
+    const qs = el('div');
+    for (const q of draft.questions) {
+      const box = el('textarea', {
+        value: q.answer,
+        placeholder: 'No stored answer yet — what you write here is saved for next time.',
+      });
+      box.oninput = () => {
+        q.answer = box.value;
+        q.edited = true;
+        q.source = 'human';
+      };
+      box.onblur = () => save();
+
+      qs.append(
+        el('div', { style: 'margin-bottom:16px' }, [
+          el('div', { className: 'q-label' }, [
+            document.createTextNode(q.question),
+            q.required ? el('span', { className: 'badge required', style: 'margin-left:6px', textContent: 'required' }) : null,
+          ]),
+          el('div', { style: 'margin-bottom:5px' }, [
+            el('span', {
+              className: `badge ${q.edited ? 'human' : (q.source ?? 'empty')}`,
+              textContent: q.edited ? SOURCE_LABEL.human : (SOURCE_LABEL[q.source] ?? SOURCE_LABEL.empty),
+            }),
+          ]),
+          box,
+        ]),
+      );
+    }
+
+    blocks.push(
+      el('div', { className: 'block' }, [
+        el('div', { className: 'block-head' }, [
+          el('h4', {}, `Questions (${draft.questions.length})`),
+          el('span', { style: 'flex:1' }),
+          el('button', {
+            className: 'tiny',
+            textContent: 'Fill in what is empty',
+            onclick: () => generate(draft, 'questions', notes),
+          }),
+        ]),
+        qs,
+      ]),
+    );
+  }
+
+  if (blocks.length === 0) {
+    blocks.push(
+      el('div', { className: 'block' }, [
+        el('p', { className: 'hint' }, 'This posting asked for no cover letter and no written answers — just the resume.'),
+      ]),
+    );
+  }
+
+  /* Notes and actions */
+  const notesBox = el('textarea', { value: draft.notes ?? '', placeholder: 'Notes to yourself about this application.' });
+  notesBox.oninput = () => (draft.notes = notesBox.value);
+  notesBox.onblur = () => save();
+
+  const resumeSelect = el('select');
+  for (const r of state.store.resumes) {
+    resumeSelect.append(el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }));
+  }
+  resumeSelect.onchange = () => {
+    draft.resumeId = resumeSelect.value;
+    save('Resume changed');
+  };
+
+  setChildren(
+    panel,
+    el('h3', { textContent: `${draft.role}` }),
+    el('div', { className: 'where' }, [
+      document.createTextNode(draft.company),
+      draft.url ? document.createTextNode(' · ') : null,
+      draft.url ? el('a', { href: draft.url, target: '_blank', textContent: 'posting' }) : null,
+    ]),
+    ...blocks,
+    el('div', { className: 'block' }, [
+      el('div', { className: 'block-head' }, [el('h4', {}, 'Resume and notes')]),
+      el('div', { className: 'toolbar' }, [el('span', { className: 'hint' }, 'Send'), resumeSelect]),
+      notesBox,
+    ]),
+    el('div', { className: 'block' }, [
+      el('div', { className: 'toolbar' }, [
+        el('button', {
+          className: 'primary',
+          textContent: 'Build files and record it',
+          title: 'Compile the resume, name the files, and log the answers in the application history',
+          onclick: () => completeDraft(draft, notes),
+        }),
+        el('button', { textContent: 'Save', onclick: () => save('Saved') }),
+        el('span', { style: 'flex:1' }),
+        el('button', {
+          className: 'tiny danger',
+          textContent: 'Discard',
+          onclick: async () => {
+            if (!(await confirmModal(`Discard the draft for ${draft.company}?`, 'The written answers are lost. The resume and the answer bank are untouched.'))) return;
+            await api(`/workspace/${encodeURIComponent(draft.id)}`, { method: 'DELETE' });
+            openDraftId = null;
+            renderDraft(null);
+            loadDrafts();
+          },
+        }),
+      ]),
+      notes,
+    ]),
+  );
+}
+
+async function generate(draft, what, notes) {
+  setChildren(notes, el('div', { textContent: 'Working…' }));
+  try {
+    const res = await api(`/workspace/${encodeURIComponent(draft.id)}/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ what }),
+    });
+    renderDraft(res.draft);
+    const panel = $('#draft-editor .gen-notes');
+    if (panel) setChildren(panel, ...res.notes.map((n) => el('div', { textContent: n })));
+    setStatus('Draft updated');
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  }
+}
+
+async function completeDraft(draft, notes) {
+  const unanswered = draft.questions.filter((q) => q.required && !q.answer.trim());
+  if (unanswered.length > 0) {
+    const go = await showModal(
+      'Some required questions are blank',
+      el('p', {}, `${plural(unanswered.length, 'required question')} still has no answer. Build the files anyway?`),
+      { okLabel: 'Build anyway', showCancel: true },
+    );
+    if (!go) return;
+  }
+
+  setChildren(notes, el('div', { textContent: 'Compiling…' }));
+  try {
+    const res = await api(`/workspace/${encodeURIComponent(draft.id)}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({ saveAnswersToBank: true }),
+    });
+    openDraftId = null;
+    renderDraft(null);
+    await loadDrafts();
+    await showModal(
+      'Filed',
+      el('div', {}, [
+        el('p', {}, 'Ready to attach:'),
+        ...res.files.map((f) => el('div', { className: 'hint', textContent: f })),
+        el('p', { className: 'hint', style: 'margin-top:8px', textContent: res.dir }),
+        el('p', { className: 'hint', textContent: 'Answers are in the application history and saved to your bank.' }),
+      ]),
+    );
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Letters and answers                                                 *
  * ------------------------------------------------------------------ */
 
@@ -1811,11 +2103,30 @@ async function loadStore() {
   }
 }
 
+/** Switch tabs programmatically, so a deep link lands in the right place. */
+function showTab(name) {
+  const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
+  if (btn) btn.click();
+}
+
+/**
+ * `#workspace/<id>` opens that draft. The extension links here, so a posting
+ * that wants an essay moves from the browser to the editor in one click.
+ */
+async function applyHash() {
+  const m = /^#workspace\/(.+)$/.exec(location.hash);
+  if (!m) return false;
+  showTab('workspace');
+  await openDraft(decodeURIComponent(m[1]));
+  return true;
+}
+
 function setupTabs() {
   for (const btn of document.querySelectorAll('#tabs button')) {
     btn.onclick = () => {
       for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b === btn);
       for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === `tab-${btn.dataset.tab}`);
+      if (btn.dataset.tab === 'workspace') loadDrafts().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'history') loadHistory().catch((e) => setStatus(e.message, true));
@@ -1831,7 +2142,12 @@ async function boot() {
   setupTabs();
   await loadStore();
   render();
-  renderPreview();
+
+  // A deep link means the user came here to write, not to look at a resume;
+  // skip the compile they did not ask for.
+  const deepLinked = await applyHash().catch(() => false);
+  if (!deepLinked) renderPreview();
+  window.addEventListener('hashchange', () => applyHash().catch(() => {}));
 
   $('#resume-select').onchange = (e) => {
     state.resumeId = e.target.value;

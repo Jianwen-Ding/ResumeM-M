@@ -12,6 +12,7 @@
   <nav id="tabs">
     <button data-tab="build" class="active">Build</button>
     <button data-tab="master">Master</button>
+    <button data-tab="workspace">Workspace</button>
     <button data-tab="applications">Applications</button>
     <button data-tab="letters">Letters &amp; answers</button>
     <button data-tab="history">History</button>
@@ -55,6 +56,28 @@
     <div class="preview-frame tall">
       <iframe id="master-preview" title="Master document"></iframe>
       <div id="master-empty" class="preview-empty">Press <b>Rebuild</b> to compile the master document.</div>
+    </div>
+  </section>
+
+  <!-- Workspace: applications in progress, with room to actually write. -->
+  <section id="tab-workspace" class="tab">
+    <div class="workspace-split">
+      <div>
+        <div class="toolbar">
+          <h2>In progress</h2>
+          <span class="grow"></span>
+          <button id="btn-refresh-drafts" class="tiny">Refresh</button>
+        </div>
+        <p class="hint">
+          Opened from the browser extension when a posting wants a cover letter
+          or essay answers. Anything your answer bank already covers arrives
+          filled in.
+        </p>
+        <div id="draft-list" class="card-list"></div>
+      </div>
+      <div id="draft-editor" class="draft-editor">
+        <div class="empty"><b>Nothing open</b>Pick an application on the left, or send one over from the extension.</div>
+      </div>
     </div>
   </section>
 

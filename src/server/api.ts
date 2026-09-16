@@ -22,6 +22,8 @@ import { isVariantField } from '../model/types.js';
 import type {
   Application,
   CoverLetter,
+  Draft,
+  DraftQuestion,
   Entry,
   Profile,
   ResumeSpec,
@@ -786,6 +788,294 @@ export function createApi({ store, repo }: ApiDeps): Router {
       const result = await buildBundle(store, body);
       if (autoCommit()) await repo.commitAll(`Apply: ${result.application.company} — ${result.application.role}`);
       res.json(result);
+    }),
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Workspace — applications in progress                              *
+   * ---------------------------------------------------------------- */
+
+  api.get(
+    '/workspace',
+    handler(async (_req, res) => res.json({ drafts: store.loadDrafts() })),
+  );
+
+  api.get(
+    '/workspace/:id',
+    handler(async (req, res) => {
+      const draft = store.getDraft(String(req.params.id));
+      if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
+      res.json(draft);
+    }),
+  );
+
+  /**
+   * Open a workspace for a posting.
+   *
+   * The extension knows what a form asks for; a browser sidebar is the wrong
+   * place to write three paragraphs of prose. This carries the requirement into
+   * the editor, pre-filling anything the answer bank already covers so the
+   * human starts from text rather than from empty boxes.
+   */
+  api.post(
+    '/workspace',
+    handler(async (req, res) => {
+      const body = req.body as {
+        company?: string;
+        role?: string;
+        url?: string;
+        source?: string;
+        jobDescription?: string;
+        resumeId?: string;
+        spec?: ResumeSpec;
+        coverLetterRequired?: boolean;
+        questions?: { question: string; required?: boolean }[];
+      };
+      if (!body.company || !body.role) throw new Error('company and role are required');
+
+      const data = store.load();
+      const id = applicationId(body.company, body.role);
+      const existing = store.getDraft(id);
+
+      // A posting-specific resume comes over with the draft; save it so the
+      // draft refers to something that still exists later.
+      if (body.spec) {
+        const spec = body.spec;
+        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
+      }
+
+      const incoming = body.questions ?? [];
+      const questions: DraftQuestion[] = incoming.map((q, i) => {
+        // Never clobber something a human has already written here.
+        const prior = existing?.questions.find((x) => x.question === q.question);
+        if (prior?.edited) return { ...prior, required: q.required ?? prior.required };
+
+        const match = matchAnswer(q.question, data.answers);
+        return {
+          id: prior?.id ?? `q${i + 1}`,
+          question: q.question,
+          required: q.required,
+          answer: match.confident ? (match.answer ?? '') : (prior?.answer ?? ''),
+          fromAnswerId: match.confident ? match.item?.id : undefined,
+          source: match.confident ? 'bank' : 'empty',
+        };
+      });
+
+      const now = new Date().toISOString();
+      const draft: Draft = {
+        id,
+        company: body.company,
+        role: body.role,
+        url: body.url ?? existing?.url,
+        source: body.source ?? existing?.source,
+        jobDescription: body.jobDescription ?? existing?.jobDescription,
+        resumeId: body.spec?.id ?? body.resumeId ?? existing?.resumeId,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        status: existing?.status ?? 'drafting',
+        coverLetter: existing?.coverLetter ?? {
+          required: Boolean(body.coverLetterRequired),
+          body: '',
+        },
+        questions,
+        notes: existing?.notes,
+      };
+      if (body.coverLetterRequired !== undefined && !draft.coverLetter.edited) {
+        draft.coverLetter.required = body.coverLetterRequired;
+      }
+
+      const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
+        store.saveDraft(draft),
+      );
+      res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });
+    }),
+  );
+
+  api.put(
+    '/workspace/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const existing = store.getDraft(id);
+      if (!existing) throw new Error(`No draft "${id}"`);
+
+      const patch = req.body as Partial<Draft>;
+      const merged: Draft = {
+        ...existing,
+        ...patch,
+        id,
+        coverLetter: { ...existing.coverLetter, ...(patch.coverLetter ?? {}) },
+        questions: patch.questions ?? existing.questions,
+      };
+      const saved = await withCommit(repo, autoCommit(), `Update workspace for ${merged.company}`, () =>
+        store.saveDraft(merged),
+      );
+      res.json(saved);
+    }),
+  );
+
+  api.delete(
+    '/workspace/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const removed = await withCommit(repo, autoCommit(), `Discard workspace "${id}"`, () =>
+        store.deleteDraft(id),
+      );
+      if (!removed) throw new Error(`No draft "${id}"`);
+      res.json({ ok: true });
+    }),
+  );
+
+  /**
+   * Fill in whatever is still empty: the cover letter, the answers, or both.
+   * Anything a human has edited is left alone — that is the point of `edited`.
+   */
+  api.post(
+    '/workspace/:id/generate',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const draft = store.getDraft(id);
+      if (!draft) throw new Error(`No draft "${id}"`);
+
+      const { what = 'all', force = false } = req.body as { what?: 'letter' | 'questions' | 'all'; force?: boolean };
+      const data = store.load();
+      const job: TailorContext = {
+        company: draft.company,
+        jobTitle: draft.role,
+        jobDescription: draft.jobDescription ?? '',
+        url: draft.url,
+      };
+
+      const notes: string[] = [];
+
+      if ((what === 'letter' || what === 'all') && draft.coverLetter.required) {
+        if (draft.coverLetter.edited && !force) {
+          notes.push('Cover letter left alone — you have edited it.');
+        } else {
+          const resumeId = draft.resumeId ?? data.resumes[0]?.id;
+          const prior = relevantLetters(data.coverLetters, { company: draft.company, role: draft.role });
+          if (resumeId) {
+            const agent = await runAgent(
+              data.config,
+              coverLetterPrompt(data, resolveResume(resumeId, data), job, prior.map((l) => l.body)),
+            );
+            if (agent.executed && agent.output.trim()) {
+              draft.coverLetter.body = agent.output.trim();
+              notes.push('Cover letter drafted in your voice.');
+            } else if (prior[0]) {
+              draft.coverLetter.body = prior[0].body;
+              notes.push(`AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}.`);
+            } else {
+              notes.push('AI is off and there are no previous letters to start from.');
+            }
+          }
+        }
+      }
+
+      if (what === 'questions' || what === 'all') {
+        for (const q of draft.questions) {
+          if (q.edited && !force) continue;
+          if (q.answer.trim() && q.source === 'bank' && !force) continue;
+
+          const match = matchAnswer(q.question, data.answers);
+          if (match.confident && !force) {
+            q.answer = match.answer ?? '';
+            q.fromAnswerId = match.item?.id;
+            q.source = 'bank';
+            continue;
+          }
+          const agent = await runAgent(data.config, answerPrompt(data, q.question, job));
+          if (agent.executed && agent.output.trim()) {
+            q.answer = agent.output.trim();
+            q.source = 'ai';
+          } else if (match.item) {
+            q.answer = match.answer ?? '';
+            q.fromAnswerId = match.item.id;
+            q.source = 'bank';
+          }
+        }
+        const written = draft.questions.filter((q) => q.answer.trim()).length;
+        notes.push(`${written} of ${draft.questions.length} questions have an answer.`);
+      }
+
+      const saved = await withCommit(repo, autoCommit(), `Draft answers for ${draft.company}`, () =>
+        store.saveDraft(draft),
+      );
+      res.json({ draft: saved, notes, aiEnabled: data.config.ai.enabled });
+    }),
+  );
+
+  /**
+   * Finish: compile the bundle, file the answers into the application record,
+   * and keep anything worth reusing in the answer bank.
+   */
+  api.post(
+    '/workspace/:id/complete',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const draft = store.getDraft(id);
+      if (!draft) throw new Error(`No draft "${id}"`);
+      if (!draft.resumeId) throw new Error('This draft has no resume attached');
+
+      const { saveAnswersToBank = true, keepDraft = false } = req.body as {
+        saveAnswersToBank?: boolean;
+        keepDraft?: boolean;
+      };
+
+      const answered = draft.questions.filter((q) => q.answer.trim());
+      const result = await buildBundle(store, {
+        company: draft.company,
+        role: draft.role,
+        url: draft.url,
+        resumeId: draft.resumeId,
+        source: draft.source,
+        coverLetter: draft.coverLetter.required ? draft.coverLetter.body : undefined,
+        answers: answered.map((q) => ({ question: q.question, answer: q.answer })),
+        notes: draft.notes,
+      });
+
+      // The application record carries the answers, so the history shows what
+      // was actually said, not merely that something was sent.
+      const app = { ...result.application, answers: answered.map((q) => ({ question: q.question, answer: q.answer })) };
+      app.history = [
+        ...(app.history ?? []),
+        {
+          at: new Date().toISOString(),
+          status: app.status,
+          note: `${answered.length} question(s) answered${draft.coverLetter.required ? ', cover letter included' : ''}`,
+        },
+      ];
+      store.upsertApplication(app);
+
+      // Anything written by hand is worth having next time.
+      if (saveAnswersToBank) {
+        const answers = store.load().answers;
+        for (const q of answered) {
+          if (q.source === 'bank' && !q.edited) continue;
+          const existing = answers.find((a) => a.id === q.fromAnswerId || a.question === q.question);
+          if (existing) {
+            const vid = `v_${Date.now().toString(36)}`;
+            existing.variants.push({ id: vid, label: draft.company, text: q.answer });
+            existing.default = vid;
+          } else {
+            answers.push({
+              id: `ans_${slug(q.question).slice(0, 40) || Date.now()}`,
+              question: q.question,
+              default: 'v_1',
+              variants: [{ id: 'v_1', label: draft.company, text: q.answer }],
+            });
+          }
+        }
+        store.saveAnswers(answers);
+      }
+
+      if (keepDraft) {
+        store.saveDraft({ ...draft, status: 'submitted' });
+      } else {
+        store.deleteDraft(id);
+      }
+
+      if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
+      res.json({ application: app, dir: result.dir, files: result.files, fits: result.fits, pages: result.pages });
     }),
   );
 
