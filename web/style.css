@@ -150,20 +150,27 @@ nav button.active { background: var(--accent-soft); color: var(--accent); font-w
 }
 .preview-frame.tall { height: calc(100vh - 190px); }
 
-/* Both frames occupy the same space; only the front one is visible. The new
-   PDF loads in the back frame and is promoted once it has painted, so a
-   recompile never shows the empty pane underneath. */
-.preview-frame iframe {
+/* Pages drawn by pdf.js. Each one is a finished canvas swapped in whole, which
+   is what keeps a recompile from blinking; see preview.js. */
+.pdf-pages {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  display: block;
-  opacity: 0;
-  pointer-events: none;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
 }
-.preview-frame iframe.front { opacity: 1; z-index: 2; pointer-events: auto; }
+.pdf-page {
+  display: block;
+  background: #fff;
+  border-radius: 2px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .18);
+  max-width: 100%;
+}
+.preview-empty { z-index: 3; }
+.preview-frame.loaded .preview-empty { display: none; }
 .preview-empty {
   position: absolute;
   inset: 0;
