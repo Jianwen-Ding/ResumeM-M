@@ -7,6 +7,7 @@ import {
   answerPrompt,
   bulletFeedbackPrompt,
   coverLetterPrompt,
+  entryFeedbackPrompt,
   feedbackPrompt,
   phraseFeedbackPrompt,
   shortenPrompt,
@@ -440,7 +441,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
   /**
    * The CLIs this knows how to drive, so the editor does not carry its own
-   * copy of a fact about three external programs — a preset fixed in one place
+   * copy of a fact about external programs — a preset fixed in one place
    * and not the other is how a config ends up broken.
    */
   api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS })));
@@ -796,7 +797,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           if (!text) throw new Error('No matching heading phrasing');
           prompt = phraseFeedbackPrompt(data, entry, { id: `${entryId}.${fieldName}${variantId ? `:${variantId}` : ''}`, text });
           about = `${fieldName}: ${text.slice(0, 70)}`;
-        } else {
+        } else if (bulletId) {
           const bullet = entry.bullets?.find((b) => b.id === bulletId);
           if (!bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
           if (variantId) {
@@ -808,6 +809,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             prompt = bulletFeedbackPrompt(data, entry, bullet);
             about = typeof entry.title === 'string' ? entry.title : 'a bullet point';
           }
+        } else {
+          prompt = entryFeedbackPrompt(data, entry);
+          const titleField = entry.title;
+          const title = typeof titleField === 'string' ? titleField
+            : titleField.variants.find(v => v.id === titleField.default)?.text ?? titleField.variants[0]?.text;
+          about = `Entry: ${title || entry.id}`;
         }
       } else {
         const resolved = master ? buildMaster(data) : resolveResume(String(resumeId), data);

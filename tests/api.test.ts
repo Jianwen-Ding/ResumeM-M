@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createApi, createPdfRouter } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
+import type { Entry } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
 
 const latex = await hasLatex();
@@ -345,6 +346,25 @@ describe('feedback', () => {
       .send({ entryId: 'exp_acme', bulletId: 'b_pipeline' })
       .expect(200);
     expect(res.body.output).toContain('critique one bullet');
+  });
+
+  it('reviews a whole entry through background feedback without requiring a bullet', async () => {
+    const result = await request(app).post('/api/ai/feedback')
+      .send({ entryId: 'exp_acme', background: true }).expect(200);
+    expect(result.body.job.about).toBe('Entry: Acme Co.');
+    let job = result.body.job;
+    for (let i = 0; i < 30 && job.status === 'running'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      job = (await request(app).get(`/api/ai/jobs/${job.id}`).expect(200)).body;
+    }
+    expect(job.status).toBe('done');
+    expect(job.result.output).toContain('critique one complete entry, do not rewrite');
+    const source = job.result.output.split('## Complete source entry [exp_acme]\n')[1];
+    const entry = JSON.parse(source) as Entry;
+    expect(entry.subtitle).toBe('Software Engineer Co-op');
+    expect(entry.bullets!.map(b => b.id)).toEqual(['b_pipeline', 'b_testing']);
+    expect(entry.bullets![0]!.variants.map(v => v.id)).toEqual(['v_base', 'v_kafka', 'v_short']);
+    await request(app).post('/api/ai/feedback').send({ entryId: 'missing-entry' }).expect(400);
   });
 
   it('reports a bullet that does not exist', async () => {

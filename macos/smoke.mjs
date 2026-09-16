@@ -42,6 +42,9 @@ try {
   const data = await fetch(`${url}/api/store`).then(r => r.json());
   assert.equal(data.profile.name, 'Your Name');
   assert.equal(data.entries.length, 0);
+  const { presets } = await fetch(`${url}/api/ai/presets`).then(r => r.json());
+  const agy = presets.find(preset => preset.command === 'agy');
+  assert(agy?.args.includes('--print={promptText}'), 'Missing Antigravity print preset');
   for (const asset of ['/', '/app.js', '/assets.js', '/feedback.js', '/vendor/marked.js', '/vendor/purify.mjs', '/api/projects', '/api/assets', '/style.css', '/vendor/pdf.min.mjs', '/api/store']) {
     const response = await fetch(`${url}${asset}`);
     assert.equal(response.status, 200, `Missing packaged asset: ${asset}`);

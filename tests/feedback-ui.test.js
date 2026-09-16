@@ -132,6 +132,27 @@ describe('feedback while editing', () => {
     expect(requests.some(request => request.url === '/api/ai/feedback')).toBe(false);
   });
 
+  it('requests complete-entry feedback from master and tailored entry headers', async () => {
+    const master = [...document.querySelectorAll('.master-source-entry')]
+      .find(node => node.textContent.includes('Built a pipeline'));
+    master.querySelector('.entry-feedback').click();
+    await vi.waitFor(() => expect(jobs).toHaveLength(1));
+    expect(requests.filter(request => request.url === '/api/ai/feedback')[0].body)
+      .toEqual({ entryId: 'exp_acme', background: true });
+    expect(document.querySelector('#feedback-panel').hidden).toBe(false);
+
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'newgrad';
+    selector.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(document.querySelector('.entry .entry-feedback')).not.toBeNull());
+    const entry = [...document.querySelectorAll('.entry')].find(node => node.textContent.includes('Acme Co.'));
+    expect(entry.querySelector('.entry-feedback').closest('[data-bullet-action]')).toBeNull();
+    entry.querySelector('.entry-feedback').click();
+    await vi.waitFor(() => expect(jobs).toHaveLength(2));
+    expect(requests.filter(request => request.url === '/api/ai/feedback')[1].body)
+      .toEqual({ entryId: 'exp_acme', background: true });
+  });
+
   it('keeps tailored bullet choices hidden until requested and keeps actions open after cycling wording', async () => {
     const selector = document.querySelector('#resume-select');
     selector.value = 'newgrad';
