@@ -488,13 +488,13 @@ async function chooseVariant(key, field, current) {
  * The text belongs to the store, not to this resume: editing it here changes it
  * everywhere it appears, which is the whole point of keeping one copy.
  */
-function editableLine(text, { onCommit, className = 'text' }) {
+function editableLine(text, { onCommit, className = 'text', title } = {}) {
   const node = el('div', {
     // `editable` is what carries the affordance in CSS: a line that merely
     // looks like this one — a list bullet's preview, say — must not invite a
     // double-click that does nothing.
     className: `${className} editable`,
-    title: 'Double-click to edit. This wording is shared by every resume using it.',
+    title: title ?? 'Double-click to edit. This wording is shared by every resume using it.',
   });
   node.append(markup(display(text)));
 
@@ -970,6 +970,140 @@ function skillsBlock(section) {
   return frag;
 }
 
+/**
+ * Who this is: the block that prints at the top of every resume, and the
+ * fields the extension fills forms from.
+ *
+ * It is the one part of a resume with no variants and no choices — there is
+ * only one of you — so it lives above the sections rather than inside them,
+ * and it was the last thing in the store that could only be changed by opening
+ * YAML.
+ */
+const PROFILE_FIELDS = [
+  ['name', 'Name'],
+  ['email', 'Email'],
+  ['phone', 'Phone'],
+  ['location', 'Address / location'],
+  ['linkedin', 'LinkedIn'],
+  ['github', 'GitHub'],
+  ['website', 'Website'],
+];
+
+function profileBlock() {
+  const profile = state.store.profile ?? {};
+  const box = el('div', { className: 'entry profile-entry' });
+
+  box.append(
+    el('div', { className: 'head' }, [
+      editableLine(profile.name || 'Your Name', {
+        className: 'title',
+        title: 'Double-click to edit. This is the name at the top of every resume.',
+        onCommit: (text) => saveProfileField('name', text),
+      }),
+      el('span', { className: 'id', textContent: 'prints at the top of every resume' }),
+    ]),
+  );
+
+  const grid = el('div', { className: 'profile-grid' });
+  for (const [key, label] of PROFILE_FIELDS) {
+    if (key === 'name') continue;
+    const value = profile[key];
+    grid.append(
+      el('div', { className: 'profile-field' }, [
+        el('span', { className: 'meta-label', textContent: label }),
+        value
+          ? editableLine(String(value), {
+              className: 'meta-value',
+              title: `Double-click to edit. ${label} appears in the header of every resume.`,
+              onCommit: (text) => saveProfileField(key, text),
+            })
+          : el('button', {
+              className: 'link',
+              textContent: `+ ${label.toLowerCase()}`,
+              onclick: () => addProfileField(key, label),
+            }),
+        value
+          ? el('button', {
+              className: 'link',
+              textContent: '×',
+              title: `Remove ${label.toLowerCase()} from the header`,
+              onclick: () => saveProfileField(key, ''),
+            })
+          : null,
+      ].filter(Boolean)),
+    );
+  }
+  box.append(grid);
+
+  // Extra fields exist for the extension: a portal that asks for a school or a
+  // work-authorisation answer should not need typing twice.
+  const extras = Object.entries(profile.autofill ?? {});
+  const extraWrap = el('div', { className: 'profile-grid' });
+  for (const [key, value] of extras) {
+    extraWrap.append(
+      el('div', { className: 'profile-field' }, [
+        el('span', { className: 'meta-label', textContent: key }),
+        editableLine(String(value), {
+          className: 'meta-value',
+          title: 'Double-click to edit. Used to fill forms, never printed on a resume.',
+          onCommit: (text) => saveAutofillField(key, text),
+        }),
+        el('button', { className: 'link', textContent: '×', title: 'Remove', onclick: () => saveAutofillField(key, '') }),
+      ]),
+    );
+  }
+  box.append(
+    el('div', { className: 'profile-extras' }, [
+      el('div', { className: 'field-label', textContent: 'For filling forms' }),
+      extras.length > 0 ? extraWrap : el('div', { className: 'hint', textContent: 'Nothing extra yet.' }),
+      el('button', { className: 'link', textContent: '+ Field', onclick: addAutofillField }),
+    ]),
+  );
+
+  return box;
+}
+
+async function saveProfileField(key, text) {
+  const profile = { ...state.store.profile };
+  if (text.trim()) profile[key] = undisplay(text);
+  else delete profile[key];
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  state.store.profile = profile;
+  setStatus('Saved');
+  render();
+  scheduleRender();
+  scheduleCommit();
+}
+
+async function saveAutofillField(key, text) {
+  const autofill = { ...(state.store.profile.autofill ?? {}) };
+  if (text.trim()) autofill[key] = text.trim();
+  else delete autofill[key];
+
+  const profile = { ...state.store.profile, autofill };
+  if (Object.keys(autofill).length === 0) delete profile.autofill;
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  state.store.profile = profile;
+  setStatus('Saved');
+  render();
+  scheduleCommit();
+}
+
+async function addProfileField(key, label) {
+  const answer = await form(`Add ${label.toLowerCase()}`, [{ name: 'value', label, value: '' }]);
+  if (answer?.value?.trim()) await saveProfileField(key, answer.value.trim());
+}
+
+async function addAutofillField() {
+  const answer = await form('Add a field for forms', [
+    { name: 'key', label: 'What the form calls it', value: '' },
+    { name: 'value', label: 'What to fill in', value: '' },
+  ], 'Matched loosely against form labels — "school", "work authorization", and so on.');
+  if (answer?.key?.trim() && answer?.value?.trim()) {
+    await saveAutofillField(answer.key.trim(), answer.value.trim());
+  }
+}
+
 function renderEditor() {
   const editor = $('#editor');
   editor.replaceChildren();
@@ -977,6 +1111,14 @@ function renderEditor() {
 
   const choices = effectiveChoices();
   const sections = resolveSections();
+
+  editor.append(
+    el('div', { className: 'section-heading' }, [
+      el('span', { className: 'name', textContent: 'You' }),
+      el('span', { className: 'rule' }),
+    ]),
+    profileBlock(),
+  );
 
   for (const section of sections) {
     const heading = el('div', { className: 'section-heading' }, [

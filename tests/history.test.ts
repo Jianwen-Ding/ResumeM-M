@@ -215,6 +215,27 @@ describe('auto-save writes', () => {
   });
 });
 
+describe('profile writes', () => {
+  it('can be saved without committing, like every other auto-save', async () => {
+    const before = (await request(app).get('/api/config/store').expect(200)).body;
+
+    await request(app)
+      .put('/api/profile?commit=0')
+      .send({ name: 'Test Person', email: 'test@example.com', location: 'Cambridge, MA' })
+      .expect(200);
+
+    expect(t.store.load().profile.location).toBe('Cambridge, MA');
+    const after = (await request(app).get('/api/config/store').expect(200)).body;
+    expect(after.pending.map((f: { path: string }) => f.path)).toContain('profile.yaml');
+    expect(after.commits).toBe(before.commits);
+  });
+
+  it('commits by default', async () => {
+    await request(app).put('/api/profile').send({ name: 'Test Person', phone: '555' }).expect(200);
+    expect((await request(app).get('/api/config/store').expect(200)).body.pending).toEqual([]);
+  });
+});
+
 describe('POST /store/save', () => {
   it('commits work that was changed outside the app', async () => {
     t.write('voice.md', '# Voice\n\nEdited by hand in an editor.\n');

@@ -535,6 +535,18 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
   outline: 0;
 }
 
+/* Who you are: one block, no variants, above the sections it heads. */
+.profile-entry .title { font-size: var(--t-lg); font-weight: 500; }
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 2px 14px;
+  margin-top: 6px;
+}
+.profile-field { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.profile-field .meta-value { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.profile-extras { margin-top: 12px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
+
 /* Step through the alternates from beside the line. */
 .stepper {
   display: inline-flex;

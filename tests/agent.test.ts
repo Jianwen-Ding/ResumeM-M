@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AgentError, extractJson, runAgent } from '../src/ai/agent.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
+import { repairAiArgs } from '../src/model/store.js';
 
 function config(patch: Partial<StoreConfig['ai']>): StoreConfig {
   return { ...DEFAULT_CONFIG, ai: { ...DEFAULT_CONFIG.ai, ...patch } };
@@ -226,5 +227,42 @@ describe('confinement', () => {
       'p',
     );
     expect(result.output).toContain('rmm-ai-');
+  });
+});
+
+describe('repairing an AI command that cannot work', () => {
+  it('adds --skip-git-repo-check to a codex exec that lacks it', () => {
+    // The agent runs in an empty scratch directory, which is never a git
+    // repository, so codex refuses to start without this.
+    expect(repairAiArgs('codex', ['exec', '--sandbox', 'read-only', '--cd', '{sandbox}', '{promptText}'])).toEqual([
+      'exec',
+      '--skip-git-repo-check',
+      '--sandbox',
+      'read-only',
+      '--cd',
+      '{sandbox}',
+      '{promptText}',
+    ]);
+  });
+
+  it('leaves a codex command that already has it alone', () => {
+    const args = ['exec', '--skip-git-repo-check', '{promptText}'];
+    expect(repairAiArgs('codex', args)).toBe(args);
+  });
+
+  it('recognises codex by path and on Windows', () => {
+    expect(repairAiArgs('/usr/local/bin/codex', ['exec', 'x'])).toContain('--skip-git-repo-check');
+    expect(repairAiArgs('C:\\tools\\codex.exe', ['exec', 'x'])).toContain('--skip-git-repo-check');
+  });
+
+  it('touches nothing else', () => {
+    for (const [command, args] of [
+      ['claude', ['-p', '{prompt}']],
+      ['gemini', ['-p', '{promptText}']],
+      ['codex-like-but-not', ['exec', 'x']],
+      ['codex', ['--help']], // no `exec`, so not the broken shape
+    ] as [string, string[]][]) {
+      expect(repairAiArgs(command, args)).toBe(args);
+    }
   });
 });

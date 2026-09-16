@@ -207,7 +207,10 @@ export function createApi({ store, repo }: ApiDeps): Router {
     '/profile',
     handler(async (req, res) => {
       const profile = req.body as Profile;
-      await withCommit(repo, autoCommit(), 'Update profile', () => store.saveProfile(profile));
+      // `?commit=0` for the editor's inline edits, which commit on idle like
+      // every other auto-save rather than once per keystroke.
+      const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
+      await withCommit(repo, autoCommit() && wantCommit, 'Update profile', () => store.saveProfile(profile));
       res.json(profile);
     }),
   );
