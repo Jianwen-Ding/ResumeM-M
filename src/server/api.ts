@@ -172,7 +172,11 @@ function describeSpecChanges(
     const from = beforeChoices[key];
     const to = afterChoices[key];
     if (!to) {
-      out.push({ kind: 'choice', text: `${bulletName(key.split('.')[0] ?? key, data)}: reverted to the default wording` });
+      // A key is either "entryId.field" (a title/dates/subtitle/location pick)
+      // or a bare bullet id — the same split describeChange uses below.
+      const dot = key.indexOf('.');
+      const name = dot > 0 ? entryName(key.slice(0, dot), data) : bulletName(key, data);
+      out.push({ kind: 'choice', text: `${name}: reverted to the default wording` });
     } else {
       const described = describeChange({ key, from: from ?? '', to, because: [] }, data);
       const where = described.where ? `${described.where} — ` : '';
@@ -1471,10 +1475,10 @@ export function createApi({ store, repo }: ApiDeps): Router {
       }
       spec.id = id; // the filename remains the source of truth for the id
 
-      const saved = await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () =>
-        store.saveResume(spec),
-      );
-      res.json(saved);
+      // saveResume() returns nothing, so the response is built from `spec`
+      // itself — the caller wants to know what it was just rolled back to.
+      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () => store.saveResume(spec));
+      res.json(spec);
     }),
   );
 
