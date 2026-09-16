@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
+import { absorbBase } from './resolve.js';
 import {
   DEFAULT_CONFIG,
   type AnswerBankItem,
@@ -184,7 +185,29 @@ export class Store {
     this.writeYaml(['resumes', `${spec.id}.yaml`], spec);
   }
 
+  /**
+   * Deleting a resume must not break the ones built on it.
+   *
+   * Variations are thin — "new grad" is the base plus a handful of choices,
+   * recorded as `extends: base`. Unlinking the base and nothing else left every
+   * variation throwing "extends 'base', which does not exist" from that moment
+   * on, in the editor, the preview and the tracker alike, with nothing in the
+   * UI able to edit `extends` and so no way back but hand-editing YAML.
+   *
+   * So each child absorbs what the deleted resume contributed and re-points at
+   * its parent. The children are written first: if anything fails partway, the
+   * base is still there and they still resolve.
+   */
   deleteResume(id: string): void {
+    const all = this.loadResumes();
+    const removed = all.find((r) => r.id === id);
+
+    if (removed) {
+      for (const child of all) {
+        if (child.extends === id) this.saveResume(absorbBase(child, removed));
+      }
+    }
+
     for (const ext of ['yaml', 'yml']) {
       const f = this.file('resumes', `${id}.${ext}`);
       if (fs.existsSync(f)) fs.unlinkSync(f);

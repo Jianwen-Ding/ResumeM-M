@@ -42,17 +42,35 @@ export function flattenSpec(spec: ResumeSpec, all: ResumeSpec[], seen = new Set<
   if (!parent) {
     throw new Error(`Resume "${spec.id}" extends "${spec.extends}", which does not exist`);
   }
-  const base = flattenSpec(parent, all, seen);
+  return mergeOnto(flattenSpec(parent, all, seen), spec);
+}
 
-  const sections = mergeSections(base.sections ?? [], spec.sections ?? []);
+/** One inheritance step: `spec` laid over `base`. */
+function mergeOnto(base: ResumeSpec, spec: ResumeSpec): ResumeSpec {
   return {
     ...base,
     ...spec,
-    sections,
+    sections: mergeSections(base.sections ?? [], spec.sections ?? []),
     choices: { ...(base.choices ?? {}), ...(spec.choices ?? {}) },
     lists: { ...(base.lists ?? {}), ...(spec.lists ?? {}) },
     layout: { ...(base.layout ?? {}), ...(spec.layout ?? {}) },
   };
+}
+
+/**
+ * Rewrite a resume that extends one being deleted, so it stands without it.
+ *
+ * The deleted resume's own contribution is folded in underneath the child's,
+ * and the child is re-pointed at the deleted resume's parent — which is to say
+ * the child resolves to exactly what it resolved to before, because this runs
+ * the same merge `flattenSpec` would have run at render time. Deleting one
+ * resume should not change how any other one looks.
+ */
+export function absorbBase(child: ResumeSpec, removed: ResumeSpec): ResumeSpec {
+  const merged = mergeOnto(removed, child);
+  if (removed.extends) merged.extends = removed.extends;
+  else delete merged.extends;
+  return merged;
 }
 
 function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpec[] {
