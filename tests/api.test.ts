@@ -1143,6 +1143,40 @@ describe('pinning', () => {
     expect(typeof entry?.dates === 'object' && entry.dates.default).toBe('v_dec2026');
   });
 
+  it('starts a plain variation for an application, and says where to go to edit it', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Altair Labs', role: 'Platform Engineer', source: 'by hand' })
+      .expect(200);
+    const draftId = made.body.draft.id;
+
+    const res = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
+
+    // A thin selection over the base, not a copy of it: nothing decided yet,
+    // because deciding is what you are about to go and do.
+    expect(res.body.spec.extends).toBeTruthy();
+    expect(res.body.spec.choices).toBeUndefined();
+    expect(res.body.spec.label).toBe('Platform Engineer — Altair Labs');
+    expect(res.body.draft.resumeId).toBe(res.body.spec.id);
+    // The way there and the way back, in one link, so the two ends cannot
+    // disagree about its shape.
+    expect(res.body.url).toBe(
+      `/#resumes/${encodeURIComponent(res.body.spec.id)}/from/${encodeURIComponent(draftId)}`,
+    );
+
+    // Asked twice, it makes a second one rather than overwriting the first.
+    const again = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
+    expect(again.body.spec.id).not.toBe(res.body.spec.id);
+    // And the second inherits from the base, never from the first — a
+    // variation of a variation of a variation is how a store becomes a maze.
+    expect(again.body.spec.extends).toBe(res.body.spec.extends);
+  });
+
+  it('refuses to start a variation for a draft that is not there', async () => {
+    const res = await request(app).post('/api/workspace/no-such-draft/variation').send({}).expect(400);
+    expect(res.body.error).toMatch(/No draft/);
+  });
+
   it('pins a form of your name, which lives on the profile rather than an entry', async () => {
     // The name is a field like any other, so it pins through the same route —
     // which knew only about entries and told you your name was "not in the

@@ -1311,3 +1311,12 @@ tbody tr { cursor: pointer; }
 @media (hover: none) { .bullet-disclosure:not(.tools-open) .bullet-more { opacity: 1; } }
 .master-source-bullet { border-top: 1px solid var(--line-soft); padding-top: 8px; margin-top: 12px; }
 #resume-view-note { padding: 0 4px; }
+
+/* The trail back to the application that sent you to the builder. */
+.way-back {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 8px 0 2px; padding: 8px 12px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+}
+.way-back button { background: #fff; }

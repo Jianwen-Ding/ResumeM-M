@@ -1525,6 +1525,62 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   );
 
   /**
+   * Start a variation for this application, to edit by hand.
+   *
+   * Tailoring, above, decides for you — by tag match, or by asking the AI. This
+   * is the other thing you want while working on an application: a resume of
+   * your own that belongs to this posting, inheriting everything from the base
+   * so it stays a thin selection rather than a copy that drifts.
+   *
+   * It is created empty of opinions on purpose. The point is to go and make the
+   * decisions in the builder, which is why this hands back where to go.
+   */
+  api.post(
+    '/workspace/:id/variation',
+    handler(async (req, res) => {
+      const draft = store.getDraft(String(req.params.id));
+      if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
+
+      const { baseResumeId, label } = req.body as { baseResumeId?: string; label?: string };
+      const data = store.load();
+
+      // What it inherits from. Never the draft's own tailored copy, or the
+      // variation would inherit from a thing it is meant to sit beside.
+      let baseId = baseResumeId ?? draft.resumeId ?? defaultBaseId(data.resumes);
+      const seen = new Set<string>();
+      while (baseId && data.resumes.find((r) => r.id === baseId)?.generatedFor && !seen.has(baseId)) {
+        seen.add(baseId);
+        baseId = data.resumes.find((r) => r.id === baseId)?.extends ?? defaultBaseId(data.resumes);
+      }
+      const base = data.resumes.find((r) => r.id === baseId);
+      if (!base) throw new Error('The store has no resume to start from');
+
+      // A name you would recognise in a list a month from now, and an id that
+      // does not quietly overwrite the last variation made for this posting.
+      const wanted = `${slug(draft.company)}-${slug(draft.role)}`.slice(0, 55) || 'variation';
+      let id = wanted;
+      for (let n = 2; data.resumes.some((r) => r.id === id); n++) id = `${wanted}-${n}`.slice(0, 60);
+
+      const spec: ResumeSpec = {
+        id,
+        label: label?.trim() || `${draft.role} — ${draft.company}`,
+        extends: base.id,
+        generatedFor: { url: draft.url, company: draft.company, role: draft.role, at: new Date().toISOString() },
+      };
+
+      await withCommit(repo, autoCommit(), `Start a resume variation for ${draft.company}`, () =>
+        store.saveResume(spec),
+      );
+
+      draft.resumeId = spec.id;
+      draft.updatedAt = new Date().toISOString();
+      store.saveDraft(draft);
+
+      res.json({ draft, spec, url: `/#resumes/${encodeURIComponent(spec.id)}/from/${encodeURIComponent(draft.id)}` });
+    }),
+  );
+
+  /**
    * Make a resume for this posting, from inside the workspace.
    *
    * The extension does this with the page already in front of it; a draft

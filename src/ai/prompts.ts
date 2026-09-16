@@ -1,6 +1,15 @@
 import { buildVoiceContext, renderVoiceContext } from './voice.js';
 import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
-import type { Bullet, CoverLetter, Entry, ResolvedResume, StoreData } from '../model/types.js';
+import type {
+  Bullet,
+  CoverLetter,
+  Draft,
+  DraftQuestion,
+  Entry,
+  MaybeVariant,
+  ResolvedResume,
+  StoreData,
+} from '../model/types.js';
 
 /**
  * The standing instructions prepended to every request, so the rules you would
@@ -539,6 +548,218 @@ export function answerPrompt(data: StoreData, question: string, job?: TailorCont
     job ? `## Posting\n${job.company ?? ''} ${job.jobTitle ?? ''}\n${job.jobDescription.slice(0, 4000)}` : '',
     '',
     `## Question\n${question}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/* ------------------------------------------------------------------ *
+ * Critiquing what was written for one application                     *
+ *                                                                     *
+ * The same split as the resume feedback prompts: a letter you can act  *
+ * on is a letter someone told you what was wrong with, not one handed  *
+ * back rewritten in a voice you then have to undo.                     *
+ * ------------------------------------------------------------------ */
+
+/** How much of the posting a critique gets. Enough to judge fit against. */
+const CRITIQUE_POSTING = 6000;
+/** How much of the draft itself. Nearly always the whole thing. */
+const CRITIQUE_DRAFT = 12_000;
+/** How much of the store's evidence, so it cannot bury the draft. */
+const EVIDENCE_BUDGET = 6000;
+
+/** The chosen phrasing of a field that may carry alternates. */
+function plain(field: MaybeVariant | undefined): string {
+  if (!field) return '';
+  if (typeof field === 'string') return field;
+  return (field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? '';
+}
+
+/**
+ * What the store can actually back up.
+ *
+ * Judging a letter turns on whether its claims are evidenced, and a model that
+ * cannot see the evidence will either wave the claim through or object to a
+ * true one. This is the inventory flattened to headings and their default
+ * phrasings — enough to check a sentence against, not the whole variant tree,
+ * which would bury the draft being discussed.
+ */
+function storeEvidence(data: StoreData): string {
+  const lines: string[] = [];
+  let spent = 0;
+
+  for (const e of data.entries ?? []) {
+    if (e.archived || spent >= EVIDENCE_BUDGET) continue;
+    const heading = [plain(e.title), plain(e.subtitle), plain(e.dates)].filter(Boolean).join(' — ') || e.id;
+    lines.push(`### ${heading}`);
+    spent += heading.length;
+
+    for (const b of e.bullets ?? []) {
+      if (b.archived || spent >= EVIDENCE_BUDGET) continue;
+      const source = b.items
+        ? `${b.prefix ?? ''} ${b.items.map((i) => i.text).join(b.separator ?? ', ')}`
+        : (b.variants.find((v) => v.id === b.default) ?? b.variants[0])?.text ?? '';
+      const text = clip(source, Math.min(400, EVIDENCE_BUDGET - spent));
+      if (!text) continue;
+      lines.push(`- ${text}`);
+      spent += text.length;
+    }
+  }
+
+  for (const g of data.skillGroups ?? []) {
+    if (g.items.length === 0) continue;
+    lines.push(`- ${g.name}: ${g.items.map((i) => i.text).join(', ')}`);
+  }
+
+  if (lines.length === 0) return '';
+  return [
+    '## What this person has evidence for',
+    '',
+    'Their stored experience, in brief. A claim in the draft that nothing below supports',
+    'is worth flagging; so is a claim that stretches further than what is here.',
+    '',
+    ...lines,
+  ].join('\n');
+}
+
+/** The shared instructions for critiquing prose written for an application. */
+function critiqueRules(): string[] {
+  return [
+    'For each point: quote the sentence, say what specifically is weak, and say what would fix it.',
+    'Be direct, and skip what is already fine — a short list of real problems beats a long list of nits.',
+    'Where evidence is missing, ask for it as a question. Never supply an achievement, a metric, or a',
+    'reason they did not give you; a critique that invents the material it praises is worthless.',
+    'Do NOT rewrite it. Naming the move that would fix a sentence is feedback; handing back a replacement',
+    'paragraph is not, and a replacement in your words is something they then have to undo.',
+  ];
+}
+
+/**
+ * Critique the cover letter drafted for one application.
+ *
+ * The model gets three things, and needs all three: the posting, so it can tell
+ * generic enthusiasm from an argument about this job; the letter itself; and
+ * the letters this person has already sent, because the failure that matters
+ * most here is a letter that reads like a competent stranger wrote it.
+ */
+export function letterFeedbackPrompt(data: StoreData, draft: Draft, letters: CoverLetter[]): string {
+  const body = clip(draft.coverLetter?.body ?? '', CRITIQUE_DRAFT);
+  const where = [draft.company, draft.role].filter(Boolean).join(' — ');
+
+  if (!body) {
+    return [
+      preamble(data),
+      '',
+      '## Task: say there is nothing to review yet',
+      `The cover letter for ${where || 'this application'} is empty.`,
+      'Reply with one short sentence saying there is no letter to review yet, and stop there.',
+      'Do not draft one, do not suggest an opening, and do not outline what it might say.',
+      'You were asked for feedback on a letter; there is no letter.',
+    ].join('\n');
+  }
+
+  const prior = priorWork(data, {
+    job: { company: draft.company, role: draft.role },
+    letters: letters.length > 0 ? letters : undefined,
+  });
+
+  return [
+    preamble(data),
+    '',
+    '## Task: critique a cover letter, do not rewrite',
+    `Give feedback on the letter below, written for ${where || 'the posting below'}.`,
+    'Read the posting first, then the letter, then the letters they have sent before.',
+    ...critiqueRules(),
+    'Call out in particular:',
+    '- sentences that would fit any applicant writing to any company, and say nothing about this one;',
+    '- claims their stored experience does not support, or that reach further than it does;',
+    '- the posting repeated back at them, as though quoting the requirements were an argument for hiring them;',
+    '- what a reader would skim: throat-clearing openings, the resume restated line by line, a closing that only thanks them;',
+    '- anywhere it stops sounding like the person who wrote the earlier letters.',
+    'Say briefly what is working, so the next draft does not lose it.',
+    '',
+    '## Posting',
+    draft.company ? `Company: ${draft.company}` : '',
+    draft.role ? `Role: ${draft.role}` : '',
+    draft.url ? `URL: ${draft.url}` : '',
+    clip(draft.jobDescription ?? '', CRITIQUE_POSTING) || '(No posting text was saved with this draft.)',
+    '',
+    '## The letter as written',
+    '',
+    body,
+    '',
+    prior
+      ? 'Their earlier letters and answers follow. Use them to judge whether this draft sounds like the same person — as a yardstick, not as material to paste in.'
+      : '',
+    prior,
+    '',
+    storeEvidence(data),
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * Critique one answer on an application.
+ *
+ * Narrower than the letter, and the failures are different: an answer that does
+ * not answer what was asked, or that is padded to look like effort, or that
+ * contradicts what the same person said to the same question last month.
+ */
+export function answerFeedbackPrompt(data: StoreData, draft: Draft, question: DraftQuestion): string {
+  const asked = question.question?.trim() ?? '';
+  const answer = clip(question.answer ?? '', CRITIQUE_DRAFT);
+  const where = [draft.company, draft.role].filter(Boolean).join(' — ');
+
+  if (!answer) {
+    return [
+      preamble(data),
+      '',
+      '## Task: say there is nothing to review yet',
+      `This question on the application to ${where || 'this company'} has no answer written yet:`,
+      asked ? `> ${asked}` : '(The question itself was not recorded either.)',
+      'Reply with one short sentence saying there is nothing to review yet, and stop there.',
+      'Do not answer it, do not suggest what to say, and do not sketch an approach.',
+    ].join('\n');
+  }
+
+  const prior = priorWork(data, {
+    question: asked,
+    job: { company: draft.company, role: draft.role },
+  });
+
+  return [
+    preamble(data),
+    '',
+    '## Task: critique one answer, do not rewrite',
+    `Give feedback on the answer below, written for ${where || 'the posting below'}.`,
+    ...critiqueRules(),
+    'Call out in particular:',
+    '- anything that does not answer what was actually asked, however well it reads;',
+    '- length that does not match what the question implies — padding, or a one-liner where they were asked to explain;',
+    '- claims their stored experience does not support;',
+    '- phrasing lifted from the posting, and stock lines that would answer any version of this question;',
+    '- anywhere it contradicts, or sits oddly beside, what they have said to this question before.',
+    'Say briefly what is working, so the next draft does not lose it.',
+    '',
+    '## Posting',
+    draft.company ? `Company: ${draft.company}` : '',
+    draft.role ? `Role: ${draft.role}` : '',
+    clip(draft.jobDescription ?? '', CRITIQUE_POSTING) || '(No posting text was saved with this draft.)',
+    '',
+    `## The question${question.required ? ' (required)' : ''}`,
+    asked || '(The question was not recorded.)',
+    '',
+    '## The answer as written',
+    '',
+    answer,
+    '',
+    prior
+      ? 'What they have written before follows, closest questions first. Use it to judge consistency, not as material to paste in.'
+      : '',
+    prior,
+    '',
+    storeEvidence(data),
   ]
     .filter(Boolean)
     .join('\n');

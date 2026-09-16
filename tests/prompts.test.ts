@@ -1,19 +1,37 @@
 import { describe, expect, it } from 'vitest';
 import {
+  answerFeedbackPrompt,
   answerPrompt,
   bulletFeedbackPrompt,
   coverLetterPrompt,
   feedbackPrompt,
+  letterFeedbackPrompt,
   resumeAsText,
   shortenPrompt,
   tailorPrompt,
 } from '../src/ai/prompts.js';
 import { buildMaster, resolveResume } from '../src/model/resolve.js';
+import type { Draft, DraftQuestion } from '../src/model/types.js';
 import { makeTempStore } from './helpers.js';
 
 const t = makeTempStore();
 const data = t.store.load();
 const resolved = resolveResume('newgrad', data);
+
+/** An application in progress, with a letter and a question already written. */
+const makeDraft = (over: Partial<Draft> = {}): Draft => ({
+  id: 'd_streamly',
+  company: 'Streamly',
+  role: 'Data Engineer',
+  url: 'https://example.com/job',
+  createdAt: '2026-02-01T00:00:00.000Z',
+  updatedAt: '2026-02-01T00:00:00.000Z',
+  status: 'drafting',
+  jobDescription: 'Kafka, Go, distributed systems',
+  coverLetter: { required: true, body: 'Dear Streamly, I am passionate about synergy and data.' },
+  questions: [{ id: 'q1', question: 'Why are you interested in this role?', answer: 'Because it is a role.' }],
+  ...over,
+});
 
 describe('resumeAsText', () => {
   it('renders sections, entries, and bullets with their ids', () => {
@@ -32,6 +50,8 @@ describe('every prompt', () => {
     cover: coverLetterPrompt(data, resolved, { jobDescription: 'Kafka' }, ['a previous letter']),
     answer: answerPrompt(data, 'Why this role?'),
     shorten: shortenPrompt(data, [{ id: 'b', text: 'a bullet' }], 3),
+    letterFeedback: letterFeedbackPrompt(data, makeDraft(), []),
+    answerFeedback: answerFeedbackPrompt(data, makeDraft(), makeDraft().questions[0]!),
   };
 
   it('carries the voice notes, so they are never retyped into a chat', () => {
@@ -246,6 +266,140 @@ describe('answer prompt', () => {
   it('includes the posting when one is supplied', () => {
     const p = answerPrompt(data, 'Q?', { company: 'Streamly', jobDescription: 'Kafka' });
     expect(p).toContain('Streamly');
+  });
+});
+
+describe('cover letter feedback prompt', () => {
+  it('shows the posting and the letter as written, so the critique is about this one', () => {
+    const p = letterFeedbackPrompt(data, makeDraft(), []);
+    expect(p).toContain('Streamly');
+    expect(p).toContain('Data Engineer');
+    expect(p).toContain('Kafka, Go, distributed systems');
+    expect(p).toContain('## The letter as written');
+    expect(p).toContain('I am passionate about synergy and data');
+  });
+
+  it('asks for criticism and forbids handing back a rewrite', () => {
+    const p = letterFeedbackPrompt(data, makeDraft(), []);
+    expect(p).toContain('critique a cover letter, do not rewrite');
+    expect(p).toMatch(/Do NOT rewrite it/);
+    expect(p).toMatch(/would fit any applicant writing to any company/);
+    expect(p).toMatch(/posting repeated back at them/);
+    expect(p).toMatch(/a reader would skim/);
+    expect(p).toMatch(/Never supply an achievement, a metric/);
+  });
+
+  it('hands over the letters the caller picked, to judge whether it is the same person', () => {
+    const p = letterFeedbackPrompt(data, makeDraft(), [
+      {
+        id: 'l1',
+        title: 'x',
+        body: 'A letter body long enough to matter.',
+        company: 'Northwind',
+        role: 'Intern',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    ]);
+    expect(p).toContain('Northwind — Intern');
+    expect(p).toContain('A letter body long enough to matter.');
+    expect(p).toMatch(/sounds like the same person/);
+  });
+
+  it('falls back to the letters in the store when the caller picked none', () => {
+    const p = letterFeedbackPrompt(data, makeDraft(), []);
+    expect(p).toContain('Dear Acme, here is a letter I wrote before');
+  });
+
+  it('gives it the stored experience, so an unsupported claim can be spotted', () => {
+    const p = letterFeedbackPrompt(data, makeDraft(), []);
+    expect(p).toContain('What this person has evidence for');
+    expect(p).toContain('Built a pipeline handling **2M events/day**');
+    expect(p).toContain('Languages: Python, Go');
+  });
+
+  it('says plainly there is nothing to review, without inviting a draft', () => {
+    const p = letterFeedbackPrompt(data, makeDraft({ coverLetter: { required: true, body: '   ' } }), []);
+    expect(p).toContain('nothing to review yet');
+    expect(p).toContain('no letter to review yet');
+    expect(p).toMatch(/Do not draft one/);
+    expect(p).not.toContain('## The letter as written');
+    expect(p).not.toContain('Kafka, Go, distributed systems');
+  });
+
+  it('clips an enormous letter and an enormous posting rather than sending them whole', () => {
+    const bare = { ...data, coverLetters: [], answers: [], samples: [], entries: [], skillGroups: [] };
+    const p = letterFeedbackPrompt(
+      bare,
+      makeDraft({
+        jobDescription: 'j'.repeat(50_000),
+        coverLetter: { required: true, body: 'x'.repeat(50_000) },
+      }),
+      [],
+    );
+    expect(p.length).toBeLessThan(25_000);
+    expect(p).toContain('…');
+  });
+
+  it('manages a draft that never captured the posting text', () => {
+    const p = letterFeedbackPrompt(data, makeDraft({ jobDescription: undefined }), []);
+    expect(p).toContain('No posting text was saved');
+  });
+});
+
+describe('answer feedback prompt', () => {
+  const question: DraftQuestion = {
+    id: 'q1',
+    question: 'Why are you interested in this role?',
+    required: true,
+    answer: 'Because it is a role, and I am interested in roles.',
+  };
+
+  it('shows the question, the answer, and the posting it was written for', () => {
+    const p = answerFeedbackPrompt(data, makeDraft(), question);
+    expect(p).toContain('## The question (required)');
+    expect(p).toContain('Why are you interested in this role?');
+    expect(p).toContain('## The answer as written');
+    expect(p).toContain('I am interested in roles');
+    expect(p).toContain('Streamly');
+    expect(p).toContain('Kafka, Go, distributed systems');
+  });
+
+  it('asks for criticism and forbids handing back a rewrite', () => {
+    const p = answerFeedbackPrompt(data, makeDraft(), question);
+    expect(p).toContain('critique one answer, do not rewrite');
+    expect(p).toMatch(/Do NOT rewrite it/);
+    expect(p).toMatch(/does not answer what was actually asked/);
+    expect(p).toMatch(/Never supply an achievement, a metric/);
+  });
+
+  it('brings in what they have answered before, closest question first', () => {
+    const p = answerFeedbackPrompt(data, makeDraft(), {
+      ...question,
+      question: 'Will you now or in the future require sponsorship?',
+    });
+    const sponsorship = p.indexOf('require sponsorship for employment');
+    const interest = p.indexOf('## Questions they have answered');
+    expect(sponsorship).toBeGreaterThan(-1);
+    expect(sponsorship).toBeGreaterThan(interest);
+    expect(p).toMatch(/judge consistency, not as material to paste in/);
+  });
+
+  it('says plainly there is nothing to review, without answering the question itself', () => {
+    const p = answerFeedbackPrompt(data, makeDraft(), { ...question, answer: '  ' });
+    expect(p).toContain('nothing to review yet');
+    expect(p).toMatch(/Do not answer it/);
+    expect(p).not.toContain('## The answer as written');
+    expect(p).not.toContain('Kafka, Go, distributed systems');
+  });
+
+  it('clips an enormous answer rather than sending it whole', () => {
+    const bare = { ...data, coverLetters: [], answers: [], samples: [], entries: [], skillGroups: [] };
+    const p = answerFeedbackPrompt(bare, makeDraft({ jobDescription: 'j'.repeat(50_000) }), {
+      ...question,
+      answer: 'y'.repeat(50_000),
+    });
+    expect(p.length).toBeLessThan(25_000);
+    expect(p).toContain('…');
   });
 });
 

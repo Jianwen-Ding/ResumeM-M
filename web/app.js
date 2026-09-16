@@ -46,6 +46,15 @@ const state = {
   /** Unsaved list-item selections on list bullets, keyed by bullet id. */
   listEdits: null,
   dirty: false,
+  /**
+   * The application that sent you to the builder, if one did.
+   *
+   * Kept so the way back names the posting rather than dropping you at the
+   * Workspace to find it again. `fromDraftId` comes out of the hash and so
+   * survives a reload; `fromDraft` is what it resolved to, for the label.
+   */
+  fromDraftId: null,
+  fromDraft: null,
 };
 
 /** Forget every unsaved edit — used when switching resumes. */
@@ -2828,7 +2837,30 @@ function renderDraft(draft) {
           title: 'The AI reads the posting and decides which phrasings and bullets to use',
           onclick: () => tailorDraft(draft, notes, true),
         }),
+        /*
+         * The third thing you want, and the one that was missing: neither
+         * matching nor AI, but going and deciding yourself. Working on an
+         * application is where you notice the resume needs a version for it.
+         */
+        el('button', {
+          className: 'tiny',
+          textContent: 'Start one to edit myself',
+          title: 'Create a variation for this application and open it in the builder',
+          onclick: () => startVariation(draft, notes),
+        }),
       ]),
+      draft.resumeId
+        ? el('div', { className: 'toolbar' }, [
+            el('button', {
+              className: 'link',
+              textContent: 'Open this resume in the builder →',
+              title: 'Edit the resume this application will send, and come back here after',
+              onclick: () => {
+                location.hash = `#resumes/${encodeURIComponent(draft.resumeId)}/from/${encodeURIComponent(draft.id)}`;
+              },
+            }),
+          ])
+        : null,
       el('div', {
         className: 'hint',
         textContent: draft.url
@@ -2868,6 +2900,31 @@ function renderDraft(draft) {
  * Make a resume for this posting from inside the workspace — the same
  * pipeline the extension runs, given a link instead of a page.
  */
+/**
+ * Start a resume variation for this application and go and edit it.
+ *
+ * The walk matters as much as the variation: it lands in the builder already
+ * on the new resume, and the builder knows which application sent it, so the
+ * way back is one click to this posting rather than a hunt through the list.
+ */
+async function startVariation(draft, notes) {
+  try {
+    setStatus('Starting a variation…');
+    const result = await api(`/workspace/${encodeURIComponent(draft.id)}/variation`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    await loadStore();
+    setStatus(`Started "${result.spec.label}"`);
+    // The server hands back where to go, so the two ends cannot disagree about
+    // the shape of the link.
+    location.hash = result.url.slice(result.url.indexOf('#'));
+  } catch (err) {
+    notes.textContent = err.message;
+    setStatus(err.message, true);
+  }
+}
+
 async function tailorDraft(draft, notes, useAi) {
   setChildren(notes, el('div', { textContent: useAi ? 'Reading the posting…' : 'Matching against the posting…' }));
   try {
@@ -4165,6 +4222,7 @@ function render() {
       : state.store.resumes.map(option)),
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
+  drawWayBack();
   $('#btn-base').hidden = state.masterView;
   $('#btn-save-as').hidden = state.masterView;
   $('#btn-feedback').textContent = state.masterView ? 'Master Feedback' : 'Resume Feedback';
@@ -4219,6 +4277,59 @@ async function loadStore() {
   if (!state.resumeId) state.masterView = true;
 }
 
+/**
+ * The way back to the application that sent you here.
+ *
+ * Named, because "back to the Workspace" would leave you looking for which of
+ * eleven drafts you had open. You came from one posting; the button says which,
+ * and returns to it rather than to a list.
+ */
+function drawWayBack() {
+  const bar = $('#way-back');
+  if (!bar) return;
+  const draft = state.fromDraft;
+  bar.hidden = !state.fromDraftId;
+  if (!state.fromDraftId) return;
+
+  const where = draft ? `${draft.role} — ${draft.company}` : 'the application you came from';
+  bar.replaceChildren(
+    el('button', {
+      className: 'tiny',
+      textContent: `← Back to ${where}`,
+      title: 'Return to the application you were working on',
+      onclick: () => {
+        location.hash = `#workspace/${encodeURIComponent(state.fromDraftId)}`;
+      },
+    }),
+    el('span', {
+      className: 'faint',
+      textContent: 'This resume is the one that application will send.',
+    }),
+  );
+}
+
+/**
+ * Look up the application named in the hash, for the label on the way back.
+ *
+ * Quietly forgotten if it has gone — completed, or discarded from another
+ * window — because a dead trail back should just not be offered, rather than
+ * being an error about a thing the user never asked for.
+ */
+async function loadFromDraft() {
+  const id = state.fromDraftId;
+  try {
+    const draft = await api(`/workspace/${encodeURIComponent(id)}`);
+    if (state.fromDraftId !== id) return;
+    state.fromDraft = draft;
+  } catch {
+    if (state.fromDraftId === id) {
+      state.fromDraftId = null;
+      state.fromDraft = null;
+    }
+  }
+  render();
+}
+
 /** Switch tabs programmatically, so a deep link lands in the right place. */
 function showTab(name) {
   const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
@@ -4234,6 +4345,34 @@ async function applyHash() {
   if (draft) {
     showTab('workspace');
     await openDraft(decodeURIComponent(draft[1]));
+    return true;
+  }
+
+  /*
+   * `#resumes/<id>` opens the builder on one resume, and the optional
+   * `/from/<draftId>` remembers which application sent you there.
+   *
+   * In the hash rather than in a variable, because the way back has to survive
+   * a reload: you go to the builder to make the decisions, spend twenty
+   * minutes there, refresh, and the trail back to the posting you were
+   * answering should not be the thing that goes missing.
+   */
+  const build = /^#resumes\/([^/]+)(?:\/from\/(.+))?$/.exec(location.hash);
+  if (build) {
+    const wanted = decodeURIComponent(build[1]);
+    state.fromDraftId = build[2] ? decodeURIComponent(build[2]) : null;
+    state.fromDraft = null;
+    showTab('resumes');
+    if (state.store.resumes.some((r) => r.id === wanted)) {
+      state.masterView = false;
+      state.resumeId = wanted;
+      clearEdits();
+    } else {
+      setStatus(`No resume "${wanted}" — it may have been deleted.`, true);
+    }
+    if (state.fromDraftId) loadFromDraft().catch(() => undefined);
+    render();
+    scheduleRender();
     return true;
   }
 
