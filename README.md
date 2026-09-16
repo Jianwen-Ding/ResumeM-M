@@ -271,13 +271,15 @@ edit. Markdown headings, lists, emphasis, code, and tables are rendered.
 Use the review picker for earlier results or **Hide** to give the preview more
 room; **Feedback Results** reopens the panel. With AI off, it shows the prompt.
 
-Double-click a bullet (or use its **…** button) to reveal its actions: wording
-choices, **AI Feedback**, details, and removal. Only one bullet's actions stay
+Double-click a heading field or bullet (or use its **…** button) to reveal its actions: wording
+choices, **AI Feedback**, details, and bullet removal. Only one field or bullet's actions stay
 open at a time; press **Escape** or click **×** to hide them. Text and inclusion
 checkboxes stay visible while browsing.
 
 Click **AI Feedback** beside a bullet phrasing or heading wording to critique
 that exact phrase. **Compare Phrasings** reviews all versions of a bullet.
+The **AI Feedback** button at the top of an entry reviews its complete heading,
+bullets, and alternate phrasings together, including repetition and evidence gaps.
 These requests run in the background and use the same feedback panel.
 Double-clicking text still edits it.
 
@@ -313,13 +315,30 @@ Configured in `data/config.yaml`, and **off by default**:
 
 ```yaml
 ai:
-  command: claude      # or codex, agy, or anything that reads a prompt file
-  args: ["-p", "{prompt}"]
+  command: claude
+  args: ["-p", "--add-dir", "{sandbox}", "--disallowedTools", "Bash,Write,Edit,WebFetch,WebSearch"]
   enabled: false
 ```
 
 While disabled, every AI endpoint returns the prompt it *would* have run, so you
 can paste it wherever you like and still not have to rewrite the instructions.
+
+For Antigravity CLI (`agy`), choose **Antigravity (agy)** in Settings → Preset,
+enable AI, then click **Save and test**. Sign in through `agy` first. Its preset
+uses plan mode and terminal sandbox restrictions, with plain-text output:
+
+```yaml
+ai:
+  command: agy
+  args: ["--mode", "plan", "--sandbox", "--disable-slash-commands", "--output-format", "text", "--print={promptText}"]
+  enabled: true
+  timeoutMs: 180000
+```
+
+`agy` requires the prompt text as the value of `--print`; a prompt-file path
+is treated as literal text, and text on stdin is not used as the prompt. Saved
+`agy` print arguments using `{prompt}` are repaired when the config is loaded.
+The desktop app includes `~/.local/bin` in its command search path.
 
 Two things make this different from pasting into a chat window:
 

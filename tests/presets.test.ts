@@ -7,7 +7,7 @@ import { AI_PRESETS, applyResearch, matchPreset, repairAiArgs } from '../src/ai/
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 
 /**
- * The three CLIs, checked against stand-ins.
+ * The supported CLIs, checked against stand-ins.
  *
  * The real `claude`, `codex` and `gemini` are not installable in a test, and
  * "does the model give a good answer" is not a thing a test can assert anyway.
@@ -107,7 +107,23 @@ if (i < 0) throw new Error('gemini: expected -p');
 process.stdout.write(JSON.stringify({ cli: 'gemini', cwd: process.cwd(), prompt: argv[i + 1] }));
 `;
 
-const STANDINS: Record<string, string> = { 'Claude Code': CLAUDE, 'Codex CLI': CODEX, 'Gemini CLI': GEMINI };
+/** agy: print is a string flag, not a switch; stdin is not a text prompt. */
+const AGY = `
+const argv = process.argv.slice(2);
+const print = argv.find(a => a.startsWith('--print='));
+if (!print) throw new Error('agy: expected --print=<prompt>');
+const prompt = print.slice('--print='.length);
+if (!prompt) throw new Error('agy: empty prompt');
+if (argv[argv.indexOf('--mode') + 1] !== 'plan') throw new Error('agy: expected plan mode');
+if (!argv.includes('--sandbox')) throw new Error('agy: expected sandbox');
+if (!argv.includes('--disable-slash-commands')) throw new Error('agy: expected literal prompt');
+if (argv[argv.indexOf('--output-format') + 1] !== 'text') throw new Error('agy: expected text output');
+process.stdout.write(JSON.stringify({ cli: 'agy', cwd: process.cwd(), prompt }));
+`;
+
+const STANDINS: Record<string, string> = {
+  'Claude Code': CLAUDE, 'Codex CLI': CODEX, 'Gemini CLI': GEMINI, 'Antigravity (agy)': AGY,
+};
 
 describe('every preset hands its CLI a prompt it can actually use', () => {
   for (const preset of AI_PRESETS) {
@@ -205,6 +221,29 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
       expect(matchPreset(preset.command, preset.args)?.label).toBe(preset.label);
     }
     expect(matchPreset('claude', ['-p', '{prompt}'])).toBeUndefined();
+  });
+
+  it('passes agy multiline prompts literally, including leading dashes and shell syntax', async () => {
+    const preset = AI_PRESETS.find((p) => p.command === 'agy')!;
+    const { command, prefix } = stub('agy', AGY);
+    const prompt = '--resume\nQuotes: "hello"; $HOME; `whoami`\n' + 'Experience. '.repeat(5000);
+    const result = await runAgent(config(command, [...prefix, ...preset.args]), prompt);
+    expect(JSON.parse(result.output).prompt).toBe(prompt);
+  });
+
+  it('repairs agy print placeholders without changing custom flags or other commands', () => {
+    for (const command of ['agy', '/Users/example/.local/bin/agy', 'agy.exe']) {
+      for (const flag of ['-p', '--print', '--prompt']) {
+        expect(repairAiArgs(command, ['--mode', 'plan', flag, '{prompt}']))
+          .toEqual(['--mode', 'plan', `${flag}={promptText}`]);
+        expect(repairAiArgs(command, [`${flag}={prompt}`])).toEqual([`${flag}={promptText}`]);
+        expect(repairAiArgs(command, [flag, '{promptText}'])).toEqual([`${flag}={promptText}`]);
+      }
+    }
+    const preset = AI_PRESETS.find((p) => p.command === 'agy')!;
+    expect(repairAiArgs('agy', preset.args)).toEqual(preset.args);
+    expect(repairAiArgs('agy', ['--print=custom', '--model', 'chosen'])).toEqual(['--print=custom', '--model', 'chosen']);
+    expect(repairAiArgs('custom-agy', ['-p', '{prompt}'])).toEqual(['-p', '{prompt}']);
   });
 
   it('opens the web tools when research is on, and shuts them when it is off', () => {

@@ -5,7 +5,8 @@ latex:
 
 ai:
   # The CLI to shell out to for feedback and tailoring. Whatever you have:
-  # claude, codex, gemini, or any command that reads a prompt file.
+  # claude, codex, gemini, agy, or any command that reads a prompt file.
+  # Choose the matching preset in Settings; each CLI takes different arguments.
   #
   # The child always runs in an empty scratch directory containing nothing but
   # the prompt — not your store, not your home directory, not this source tree.

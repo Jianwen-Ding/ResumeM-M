@@ -306,6 +306,28 @@ function compiledEvidence(tex?: string, fit?: FeedbackContext['fit'], master = f
   return lines.filter(Boolean).join('\n');
 }
 
+/** Review a complete source entry, including its heading and all bullet variants. */
+export function entryFeedbackPrompt(data: StoreData, entry: Entry): string {
+  return [
+    preamble(data),
+    '',
+    feedbackWorkspaceContext(),
+    '',
+    '## Task: critique one complete entry, do not rewrite',
+    'Review the entire education, experience, project, or custom entry below as a reusable source inventory.',
+    'Assess the heading and bullets together: clarity of the role, evidence of impact, coverage of distinct contributions,',
+    'repetition across different bullets, factual consistency, and missing context a reader would need.',
+    'Compare alternate phrasings as choices, not as separate achievements. Treat archived bullets as background only.',
+    'The source entry has no one-page limit. Distinguish improving the source from selecting fewer bullets for a tailored resume.',
+    'Prioritize the most useful improvements. Quote the affected text and identify its field, bullet, or variant ID.',
+    'For each issue, explain what is weak and what would fix it. Ask for missing evidence; never invent facts or metrics.',
+    'Do not produce replacement wording or a rewritten entry. Focus on this entry, not unrelated entries in the writing samples.',
+    '',
+    `## Complete source entry [${entry.id}]`,
+    JSON.stringify(entry, null, 2),
+  ].join('\n');
+}
+
 /** Feedback on one bullet and all of its existing phrasings. */
 export function bulletFeedbackPrompt(data: StoreData, entry: Entry, bullet: Bullet): string {
   return [

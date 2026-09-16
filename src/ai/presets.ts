@@ -4,7 +4,7 @@
  *
  * These lived in the editor's JavaScript, which meant the command line could
  * not offer them, nothing could test them, and a preset that stopped working
- * would only be discovered by a user. They are a fact about three external
+ * would only be discovered by a user. They are a fact about the external
  * programs, so they belong somewhere both ends can read and a test can check.
  *
  * Every preset is confined the same way regardless of its own flags: the child
@@ -66,6 +66,15 @@ export const AI_PRESETS: AiPreset[] = [
     args: ['-p', '{promptText}'],
     note: 'Prompt passed inline; nothing is written anywhere.',
   },
+  {
+    label: 'Antigravity (agy)',
+    command: 'agy',
+    // agy 1.1.28 requires a string value for --print; it does not read a
+    // text prompt from stdin. Attach the value so leading dashes in a prompt
+    // cannot be mistaken for another flag. A filename is just literal text.
+    args: ['--mode', 'plan', '--sandbox', '--disable-slash-commands', '--output-format', 'text', '--print={promptText}'],
+    note: 'Runs in plan mode with terminal sandbox restrictions, in a scratch directory.',
+  },
 ];
 
 /** Which preset a saved config matches, if any. */
@@ -77,19 +86,28 @@ export function matchPreset(command: string, args: string[]): AiPreset | undefin
  * Repair an AI command that cannot work as configured.
  *
  * A preset is copied when it is chosen, not referenced, so a config saved
- * before a preset was fixed keeps the broken arguments forever. The one case
- * that matters: the agent always runs in an empty scratch directory — that
- * confinement is the point — and `codex exec` refuses to start outside a git
- * repository unless told not to care. A config saved before that was understood
- * fails every time with "Not inside a trusted directory", which reads like a
- * bug in this tool rather than a missing flag.
- *
- * Only this one case is repaired, and only by adding a flag that cannot change
- * what the command does to anything outside the scratch directory: the
- * read-only sandbox stays exactly as configured.
+ * before a preset was fixed keeps the broken arguments forever. Repair known
+ * invocation errors here: Codex's git check in the scratch directory, Claude's
+ * prompt swallowed by its deny list, and agy's literal prompt-file path.
+ * Preserve custom flags and the configured permission restrictions.
  */
 export function repairAiArgs(command: string, args: string[]): string[] {
   const named = (re: RegExp) => re.test(command.trim());
+
+  // The old README suggested -p {prompt} for any CLI. agy treats that path
+  // as the prompt itself, so give print mode the actual prompt text instead.
+  if (named(/(^|[\\/])agy(\.exe)?$/i)) {
+    const out = [...args];
+    const printFlags = ['-p', '--print', '--prompt'];
+    for (let i = 0; i < out.length; i++) {
+      if (printFlags.includes(out[i]!) && ['{prompt}', '{promptText}'].includes(out[i + 1] ?? '')) {
+        out.splice(i, 2, `${out[i]}={promptText}`);
+      } else if (printFlags.some((flag) => out[i] === `${flag}={prompt}`)) {
+        out[i] = out[i]!.replace('{prompt}', '{promptText}');
+      }
+    }
+    return out;
+  }
 
   // Codex: refuses to start outside a git repository unless told not to check.
   if (named(/(^|[\\/])codex(\.exe)?$/i) && args.includes('exec') && !args.includes('--skip-git-repo-check')) {

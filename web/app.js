@@ -410,52 +410,54 @@ const FIELD_LABELS = {
   location: 'Location',
 };
 
-let activeBulletTools = null;
+let activeSourceTools = null;
 
-/** Keep one bullet's secondary actions open, without rebuilding its editor. */
-function revealBulletTools(key) {
-  activeBulletTools = key;
+/** Keep one field or bullet's secondary actions open without rebuilding its editor. */
+function revealSourceTools(key) {
+  activeSourceTools = key;
   for (const block of $('#editor').querySelectorAll('.bullet-disclosure')) {
     const open = block.dataset.toolsKey === key;
     block.classList.toggle('tools-open', open);
     for (const action of block.querySelectorAll('[data-bullet-action]')) action.hidden = !open;
     const button = block.querySelector('.bullet-more');
+    const kind = block.dataset.toolsKind;
     button.setAttribute('aria-expanded', String(open));
-    button.setAttribute('aria-label', open ? 'Hide bullet actions' : 'Show bullet actions');
-    button.title = open ? 'Hide actions (Escape)' : 'Show actions — or double-click this bullet';
+    button.setAttribute('aria-label', open ? `Hide ${kind} actions` : `Show ${kind} actions`);
+    button.title = open ? 'Hide actions (Escape)' : `Show actions — or double-click this ${kind}`;
     button.textContent = open ? '×' : '…';
   }
 }
 
-function attachBulletTools(block, key, actions, anchor) {
+function attachSourceTools(block, key, actions, anchor, kind = 'bullet') {
   block.classList.add('bullet-disclosure');
+  block.dataset.toolsKind = kind;
   block.dataset.toolsKey = `${state.masterView ? 'master' : state.resumeId}:${key}`;
   for (const action of actions.filter(Boolean)) {
     action.dataset.bulletAction = '';
-    action.hidden = block.dataset.toolsKey !== activeBulletTools;
+    action.hidden = block.dataset.toolsKey !== activeSourceTools;
   }
   const button = el('button', {
     className: 'bullet-more tiny',
-    textContent: block.dataset.toolsKey === activeBulletTools ? '×' : '…',
-    title: block.dataset.toolsKey === activeBulletTools ? 'Hide actions (Escape)' : 'Show actions — or double-click this bullet',
-    onclick: () => revealBulletTools(activeBulletTools === block.dataset.toolsKey ? null : block.dataset.toolsKey),
+    textContent: block.dataset.toolsKey === activeSourceTools ? '×' : '…',
+    title: block.dataset.toolsKey === activeSourceTools ? 'Hide actions (Escape)' : `Show actions — or double-click this ${kind}`,
+    onclick: () => revealSourceTools(activeSourceTools === block.dataset.toolsKey ? null : block.dataset.toolsKey),
   });
-  button.setAttribute('aria-label', block.dataset.toolsKey === activeBulletTools ? 'Hide bullet actions' : 'Show bullet actions');
-  button.setAttribute('aria-expanded', String(block.dataset.toolsKey === activeBulletTools));
-  block.classList.toggle('tools-open', block.dataset.toolsKey === activeBulletTools);
+  button.setAttribute('aria-label', block.dataset.toolsKey === activeSourceTools ? `Hide ${kind} actions` : `Show ${kind} actions`);
+  button.setAttribute('aria-expanded', String(block.dataset.toolsKey === activeSourceTools));
+  block.classList.toggle('tools-open', block.dataset.toolsKey === activeSourceTools);
   anchor.append(button);
   block.addEventListener('dblclick', event => {
     if (event.target.closest('button, input, select, label')) return;
-    revealBulletTools(block.dataset.toolsKey);
+    revealSourceTools(block.dataset.toolsKey);
   });
   block.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && activeBulletTools === block.dataset.toolsKey) {
-      revealBulletTools(null);
+    if (event.key === 'Escape' && activeSourceTools === block.dataset.toolsKey) {
+      revealSourceTools(null);
       button.focus();
       event.stopPropagation();
     }
   });
-  for (const line of block.querySelectorAll('.editable')) line.title = 'Double-click to edit and show bullet actions. Shared wording updates every resume using it.';
+  for (const line of block.querySelectorAll('.editable')) line.title = `Double-click to edit and show ${kind} actions. Shared wording updates every resume using it.`;
   return block;
 }
 
@@ -635,6 +637,21 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
   return node;
 }
 
+/** Review the complete entry through the same background feedback panel. */
+function entryFeedbackButton(entry) {
+  return el('button', {
+    className: 'tiny entry-feedback',
+    textContent: 'AI Feedback',
+    title: 'Review this entire entry: heading, bullets, and alternate phrasings',
+    onclick: async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try { await askSourceFeedback({ entryId: entry.id }); }
+      finally { button.disabled = false; }
+    },
+  });
+}
+
 /** A keyboard-accessible, one-click critique beside the exact wording. */
 function phraseFeedbackButton(entry, target) {
   return el('button', {
@@ -801,7 +818,7 @@ function bulletBlock(entry, section, bullet, choices) {
         ]),
       ]),
     );
-    return attachBulletTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
+    return attachSourceTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
   }
 
   const key = bullet.id;
@@ -851,7 +868,7 @@ function bulletBlock(entry, section, bullet, choices) {
   );
 
   if (chosen?.note) wrap.append(el('div', { className: 'note', textContent: chosen.note }));
-  return attachBulletTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
+  return attachSourceTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
 }
 
 /** The text a non-list bullet currently resolves to. */
@@ -912,6 +929,7 @@ function entryBlock(entry, section, choices) {
     }),
     el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || 'Untitled' }),
     el('span', { className: 'grow' }),
+    entryFeedbackButton(entry),
     el('div', { className: 'entry-actions' }, [
       // The title has no meta-line row of its own, so its "give this
       // alternates" action lives here beside the name it applies to.
@@ -963,20 +981,19 @@ function entryBlock(entry, section, choices) {
         ].filter(Boolean),
       });
       if (chosen?.note) control.append(el('div', { className: 'note', textContent: chosen.note }));
-      box.append(
-        el('div', { className: 'field' }, [
-          el('div', { className: 'field-label' }, FIELD_LABELS[name] ?? name),
-          el('div', { className: 'field-line' }, [
-            editableLine(String(chosen?.text ?? ''), {
-              className: 'text field-text',
-              onCommit: (text) => saveFieldText(entry, name, current, text),
-            }),
-            alternateStepper(key, field, current),
-            phraseFeedbackButton(entry, { fieldName: name, variantId: current }),
-          ].filter(Boolean)),
-          control,
-        ]),
-      );
+      const line = el('div', { className: 'field-line' }, [
+        editableLine(String(chosen?.text ?? ''), {
+          className: 'text field-text',
+          onCommit: (text) => saveFieldText(entry, name, current, text),
+        }),
+      ]);
+      const actions = [alternateStepper(key, field, current),
+        phraseFeedbackButton(entry, { fieldName: name, variantId: current })].filter(Boolean);
+      line.append(...actions);
+      const row = el('div', { className: 'field' }, [
+        el('div', { className: 'field-label' }, FIELD_LABELS[name] ?? name), line, control,
+      ]);
+      box.append(attachSourceTools(row, key, [...actions, control], line, 'field'));
       continue;
     }
 
@@ -989,22 +1006,22 @@ function entryBlock(entry, section, choices) {
   if (plainFields.length > 0) {
     const meta = el('div', { className: 'meta-row' });
     for (const f of plainFields) {
-      meta.append(
-        el('span', { className: 'meta-item' }, [
-          f.name === 'title' ? null : el('span', { className: 'meta-label', textContent: FIELD_LABELS[f.name] }),
-          editableLine(f.text, {
-            className: 'meta-value',
-            onCommit: (text) => savePlainField(entry, f.name, text),
-          }),
-          phraseFeedbackButton(entry, { fieldName: f.name }),
-          el('button', {
-            className: 'link meta-add',
-            textContent: '+ alt',
-            title: `Give ${FIELD_LABELS[f.name] ?? f.name} a second option — a different graduation date, say`,
-            onclick: () => addFieldAlternate(entry, f.name),
-          }),
-        ]),
-      );
+      const row = el('span', { className: 'meta-item' }, [
+        el('span', { className: 'meta-label', textContent: FIELD_LABELS[f.name] }),
+        editableLine(f.text, {
+          className: 'meta-value',
+          onCommit: (text) => savePlainField(entry, f.name, text),
+        }),
+        phraseFeedbackButton(entry, { fieldName: f.name }),
+        el('button', {
+          className: 'link meta-add',
+          textContent: '+ alt',
+          title: `Give ${FIELD_LABELS[f.name] ?? f.name} a second option — a different graduation date, say`,
+          onclick: () => addFieldAlternate(entry, f.name),
+        }),
+      ]);
+      meta.append(attachSourceTools(row, `${entry.id}.${f.name}`,
+        [...row.querySelectorAll('button')], row, 'field'));
     }
     // Fields the entry does not have yet, so a missing date is still reachable.
     const missing = ['dates', 'subtitle', 'location'].filter((n) => entry[n] == null);
@@ -1306,18 +1323,25 @@ function renderMasterEditor(editor) {
     if (!entries.length) editor.append(el('p', { className: 'hint', textContent: 'No source entries yet.' }));
     for (const entry of entries) {
       const box = el('article', { className: 'master-source-entry' });
+      box.append(el('div', { className: 'entry-head' }, [
+        el('span', { className: 'grow' }), entryFeedbackButton(entry),
+      ]));
       for (const name of ['title', 'subtitle', 'dates', 'location']) {
         const field = entry[name];
         if (!field) continue;
         const variants = isVariantField(field) ? field.variants : [{ id: null, text: field }];
-        for (const variant of variants) box.append(el('div', { className: 'master-source-field' }, [
-          el('span', { className: 'hint', textContent: `${FIELD_LABELS[name] ?? name}${variant.label ? ` · ${variant.label}` : ''}${variant.id && variant.id === field.default ? ' · Default' : ''}` }),
-          el('div', { className: 'phrase-line' }, [
-            editableLine(String(variant.text), { onCommit: text => variant.id
-              ? saveFieldText(entry, name, variant.id, text) : savePlainField(entry, name, text) }),
-            phraseFeedbackButton(entry, { fieldName: name, ...(variant.id ? { variantId: variant.id } : {}) }),
-          ]),
-        ]));
+        for (const variant of variants) {
+          const row = el('div', { className: 'master-source-field' }, [
+            el('span', { className: 'hint', textContent: `${FIELD_LABELS[name] ?? name}${variant.label ? ` · ${variant.label}` : ''}${variant.id && variant.id === field.default ? ' · Default' : ''}` }),
+            el('div', { className: 'phrase-line' }, [
+              editableLine(String(variant.text), { onCommit: text => variant.id
+                ? saveFieldText(entry, name, variant.id, text) : savePlainField(entry, name, text) }),
+              phraseFeedbackButton(entry, { fieldName: name, ...(variant.id ? { variantId: variant.id } : {}) }),
+            ]),
+          ]);
+          box.append(attachSourceTools(row, `${entry.id}.${name}/${variant.id ?? 'plain'}`,
+            [row.querySelector('.phrase-feedback')], row.querySelector('.phrase-line'), 'field'));
+        }
       }
       for (const bullet of entry.bullets ?? []) {
         const row = el('div', { className: 'master-source-bullet' });
@@ -1340,7 +1364,7 @@ function renderMasterEditor(editor) {
         }
         const actions = [...row.querySelectorAll('.phrase-feedback, :scope > button, :scope > .toolbar')];
         const anchor = row.querySelector('.phrase-line') ?? row;
-        attachBulletTools(row, `${entry.id}/${bullet.id}`, actions, anchor);
+        attachSourceTools(row, `${entry.id}/${bullet.id}`, actions, anchor);
         box.append(row);
       }
       box.append(el('button', { className: 'tiny', textContent: '+ Bullet', onclick: () => addBullet(entry) }));
@@ -3305,7 +3329,7 @@ async function editSample(sample) {
  */
 /**
  * The CLIs this knows how to drive. Fetched rather than hard-coded here: they
- * are a fact about three external programs, and a preset fixed on the server
+ * are a fact about external programs, and a preset fixed on the server
  * but not in this file is how a config ends up broken.
  */
 let AI_PRESETS = [];
