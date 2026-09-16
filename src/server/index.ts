@@ -95,9 +95,27 @@ export async function startServer(opts: ServerOptions = {}) {
   }, 5000);
   watcher.unref();
 
-  // JobHelper calls from chrome-extension:// origins. Keep the server on loopback.
+  /*
+   * Who is allowed to call this.
+   *
+   * It answered `*`, which on a server with no password means every page you
+   * visit can read your whole resume store and write to it. That was how a
+   * traversal in an id turned into a page being able to set `ai.command` — the
+   * command this application runs.
+   *
+   * The extension is why the header exists at all, and it asks for
+   * `host_permissions` on loopback, so Chrome exempts it from CORS regardless.
+   * Echoing its origin is belt and braces for an install that has not been
+   * granted them; every other origin gets no header, which is what stops an
+   * ordinary web page from reaching in. The editor is served from here, so it
+   * is same-origin and needs nothing.
+   */
+  const mayCall = (origin: string | undefined) => /^chrome-extension:\/\/[a-p]+$/.test(origin ?? '');
+
   app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const origin = req.headers.origin;
+    if (mayCall(origin)) res.setHeader('Access-Control-Allow-Origin', origin!);
+    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-RMM-Project');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     if (req.method === 'OPTIONS') { res.sendStatus(204); return; }

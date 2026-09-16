@@ -496,6 +496,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/skills',
     handler(async (req, res) => {
       const groups = req.body as SkillGroup[];
+      if (!Array.isArray(groups)) throw new Error('Skills have to be a list of groups');
       await withCommit(repo, autoCommit(), 'Update skills', () => store.saveSkillGroups(groups));
       res.json(groups);
     }),
@@ -1614,7 +1615,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
       }
 
-      const incoming = body.questions ?? [];
+      /*
+       * Every other field on a re-opened draft falls back to what is stored;
+       * this one did not, so a second post from a page with no form visible —
+       * which is an ordinary thing for the extension to do — rewrote the draft
+       * with `questions: []` and took every hand-written answer with it.
+       */
+      const incoming = body.questions ?? existing?.questions ?? [];
       const questions: DraftQuestion[] = incoming.map((q, i) => {
         // Never clobber something a human has already written here.
         const prior = existing?.questions.find((x) => x.question === q.question);
@@ -2103,6 +2110,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/answers',
     handler(async (req, res) => {
       const answers = req.body as Parameters<typeof store.saveAnswers>[0];
+      // A cast is not a check. Sending `{}` here wrote an object into
+      // answers.yaml, which reads back as an empty list — the whole answer
+      // bank gone, with a 200 and nothing said.
+      if (!Array.isArray(answers)) throw new Error('The answer bank has to be a list of answers');
       await withCommit(repo, autoCommit(), 'Update answer bank', () => store.saveAnswers(answers));
       res.json(answers);
     }),

@@ -35,12 +35,41 @@ export class Store {
     this.root = path.resolve(root);
   }
 
+  /**
+   * A path inside the store, and never outside it.
+   *
+   * Ids reach here from URLs and from request bodies, and they end up as
+   * filenames — so a resume called `../config` wrote over the store's own
+   * configuration, whose `ai.command` this application executes. With the
+   * server answering any origin, that was a page you visited being able to run
+   * a command on your machine.
+   *
+   * Checked here rather than at each route because there are a dozen routes and
+   * one of them will always be the one that was forgotten. Everything that
+   * becomes a file goes through this function.
+   */
   private file(...p: string[]): string {
-    return path.join(this.root, ...p);
+    /*
+     * Each segment is one name, never a path. Checking only that the result
+     * lands inside the store is not enough: `../config` from the resumes
+     * folder stays inside it and overwrites the store's own configuration,
+     * whose `ai.command` this application executes.
+     */
+    for (const segment of p) {
+      if (segment.includes('/') || segment.includes('\\') || segment.split('.').includes('..')) {
+        throw new Error('That name is not allowed — a name cannot contain a path.');
+      }
+    }
+    const full = path.resolve(this.root, ...p);
+    // And the belt to that pair of braces, in case a segment ever gets through.
+    if (full !== this.root && !full.startsWith(this.root + path.sep)) {
+      throw new Error('That name is not allowed — it points outside the save folder.');
+    }
+    return full;
   }
 
-  private readYaml<T>(rel: string, fallback: T): T {
-    const f = this.file(rel);
+  private readYaml<T>(rel: string | string[], fallback: T): T {
+    const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
     if (!fs.existsSync(f)) return fallback;
     const raw = fs.readFileSync(f, 'utf8');
     if (!raw.trim()) return fallback;
@@ -48,8 +77,8 @@ export class Store {
     return (parsed ?? fallback) as T;
   }
 
-  private writeYaml(rel: string, data: unknown): void {
-    const f = this.file(rel);
+  private writeYaml(rel: string | string[], data: unknown): void {
+    const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
     fs.mkdirSync(path.dirname(f), { recursive: true });
     // lineWidth 0 keeps long bullet text on one line so diffs stay per-bullet
     // instead of reflowing a whole paragraph every time a word changes.
@@ -152,7 +181,7 @@ export class Store {
   }
 
   saveResume(spec: ResumeSpec): void {
-    this.writeYaml(path.join('resumes', `${spec.id}.yaml`), spec);
+    this.writeYaml(['resumes', `${spec.id}.yaml`], spec);
   }
 
   deleteResume(id: string): void {
@@ -261,7 +290,7 @@ export class Store {
     const dir = this.file('letters');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-    fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${body}`, 'utf8');
+    fs.writeFileSync(this.file('letters', `${id}.md`), `---\n${front}\n---\n${body}`, 'utf8');
   }
 
   /**
@@ -299,7 +328,7 @@ export class Store {
     const dir = this.file('corpus');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-    fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${text}`, 'utf8');
+    fs.writeFileSync(this.file('corpus', `${id}.md`), `---\n${front}\n---\n${text}`, 'utf8');
   }
 
   deleteSample(id: string): boolean {
@@ -333,7 +362,7 @@ export class Store {
 
   saveDraft(draft: Draft): Draft {
     const next = { ...draft, updatedAt: new Date().toISOString() };
-    this.writeYaml(path.join('drafts', `${draft.id}.yaml`), next);
+    this.writeYaml(['drafts', `${draft.id}.yaml`], next);
     return next;
   }
 
