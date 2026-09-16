@@ -16,27 +16,11 @@ import {
   type StoreData,
 } from './types.js';
 
-/**
- * Repair an AI command that cannot work as configured.
- *
- * The agent always runs in an empty scratch directory — that confinement is
- * the point — and `codex exec` refuses to start outside a git repository
- * unless told not to care. A config saved before that was understood fails
- * every time with "Not inside a trusted directory", which looks like a bug in
- * this tool rather than a missing flag.
- *
- * Only this one case is repaired, and only by adding a flag that cannot change
- * what the command does to anything outside the scratch directory: the
- * read-only sandbox stays exactly as configured.
- */
-export function repairAiArgs(command: string, args: string[]): string[] {
-  const isCodex = /(^|[\\/])codex(\.exe)?$/i.test(command.trim());
-  if (!isCodex || !args.includes('exec') || args.includes('--skip-git-repo-check')) return args;
-
-  const out = [...args];
-  out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
-  return out;
-}
+// It lives with the presets, which are what it repairs a config back towards,
+// and is re-exported here because this is where config is read.
+import { repairAiArgs } from '../ai/presets.js';
+import { normalizeAnswers, normalizeEntries, normalizeEntry } from './normalize.js';
+export { repairAiArgs };
 
 /**
  * The store is a directory of YAML files under git. It is deliberately dumb:
@@ -77,19 +61,22 @@ export class Store {
     const config = this.loadConfig();
     return {
       profile: this.readYaml<Profile>('profile.yaml', { name: 'Your Name' }),
-      entries: [
+      // Normalised on the way in, so nothing downstream has to guard against a
+      // hand-edited file that left a field without its alternates. See
+      // normalize.ts — this is the only place it needs doing.
+      entries: normalizeEntries([
         ...this.readYaml<Entry[]>('education.yaml', []),
         ...this.readYaml<Entry[]>('experience.yaml', []),
         ...this.readYaml<Entry[]>('projects.yaml', []),
         ...this.readYaml<Entry[]>('custom.yaml', []),
-      ],
+      ]),
       skillGroups: this.readYaml<SkillGroup[]>('skills.yaml', []),
       resumes: this.loadResumes(),
       applications: this.readYaml<Application[]>('applications.yaml', []),
       coverLetters: this.loadCoverLetters(),
       drafts: this.loadDrafts(),
       samples: this.loadSamples(),
-      answers: this.readYaml<AnswerBankItem[]>('answers.yaml', []),
+      answers: normalizeAnswers(this.readYaml<AnswerBankItem[]>('answers.yaml', [])),
       voice: this.loadVoice(),
       config,
     };
@@ -191,11 +178,15 @@ export class Store {
   }
 
   saveEntry(entry: Entry): void {
-    const rel = this.fileForKind(entry.kind);
+    // Normalised on the way out as well as in, so a bad write from the API
+    // never becomes a bad file: reads are already safe, but a file that says
+    // something impossible is a trap for whoever opens it next.
+    const clean = normalizeEntry(entry);
+    const rel = this.fileForKind(clean.kind);
     const list = this.readYaml<Entry[]>(rel, []);
-    const idx = list.findIndex((e) => e.id === entry.id);
-    if (idx >= 0) list[idx] = entry;
-    else list.push(entry);
+    const idx = list.findIndex((e) => e.id === clean.id);
+    if (idx >= 0) list[idx] = clean;
+    else list.push(clean);
     this.writeYaml(rel, list);
   }
 

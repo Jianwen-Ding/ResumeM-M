@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import { normalizeEntries } from './normalize.js';
 import type { Entry, Profile, ResumeSpec, SkillGroup, StoreData } from './types.js';
 
 /**
@@ -48,7 +49,9 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
 
   return {
     profile: parse<Profile>(files.get('profile.yaml'), { name: 'Your Name' }),
-    entries,
+    // Same guarantee as a live read: history rebuilds from old commits, and an
+    // old commit is exactly where a malformed field is most likely to live.
+    entries: normalizeEntries(entries),
     skillGroups: parse<SkillGroup[]>(files.get('skills.yaml'), []),
     resumes,
   };

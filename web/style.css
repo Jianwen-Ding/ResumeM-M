@@ -1226,3 +1226,11 @@ tbody tr { cursor: pointer; }
   .sk-line { animation: none; }
   .dropzone .bar.indeterminate span { animation: none; width: 100%; }
 }
+
+/* The AI switch and what it currently amounts to, side by side: a checkbox
+   alone does not say whether a command is set, and that is half the answer. */
+.ai-switch { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.ai-switch .check { margin: 0; }
+.chip.ai-state { font-weight: 550; }
+.chip.ai-state.on { background: var(--good-bg); color: var(--good); }
+.chip.ai-state.off { background: var(--line-soft); color: var(--muted); }

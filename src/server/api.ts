@@ -12,6 +12,7 @@ import {
   tailorPrompt,
   type TailorContext,
 } from '../ai/prompts.js';
+import { AI_PRESETS } from '../ai/presets.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
@@ -435,6 +436,13 @@ export function createApi({ store, repo }: ApiDeps): Router {
       });
     }),
   );
+
+  /**
+   * The CLIs this knows how to drive, so the editor does not carry its own
+   * copy of a fact about three external programs — a preset fixed in one place
+   * and not the other is how a config ends up broken.
+   */
+  api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS })));
 
   api.put(
     '/config',

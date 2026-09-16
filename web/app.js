@@ -3112,37 +3112,20 @@ async function editSample(sample) {
  * directory, so even a CLI with no flags of its own cannot reach your files;
  * these flags are the second lock, not the only one.
  */
-const AI_PRESETS = [
-  {
-    label: 'Claude Code',
-    command: 'claude',
-    // No tools at all, and the only directory it knows about is the scratch one.
-    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch', '{prompt}'],
-  },
-  {
-    label: 'Codex CLI',
-    command: 'codex',
-    // Codex takes a sandbox mode directly; read-only is the strictest.
-    // --skip-git-repo-check because the scratch directory is deliberately not a
-    // repository: Codex otherwise refuses to start, since it assumes you want
-    // version control before it touches anything. Nothing here is touched.
-    args: [
-      'exec',
-      '--sandbox',
-      'read-only',
-      '--skip-git-repo-check',
-      '--cd',
-      '{sandbox}',
-      '{promptText}',
-    ],
-  },
-  {
-    label: 'Gemini CLI',
-    command: 'gemini',
-    args: ['-p', '{promptText}'],
-  },
-  { label: 'Custom…', command: '', args: [] },
-];
+/**
+ * The CLIs this knows how to drive. Fetched rather than hard-coded here: they
+ * are a fact about three external programs, and a preset fixed on the server
+ * but not in this file is how a config ends up broken.
+ */
+let AI_PRESETS = [];
+const CUSTOM_PRESET = { label: 'Custom…', command: '', args: [], note: '' };
+
+async function loadAiPresets() {
+  if (AI_PRESETS.length > 0) return AI_PRESETS;
+  const { presets } = await api('/ai/presets').catch(() => ({ presets: [] }));
+  AI_PRESETS = [...presets, CUSTOM_PRESET];
+  return AI_PRESETS;
+}
 
 /** Where the store lives, and whether it is backed up anywhere. */
 async function loadStoreSettings() {
@@ -3281,7 +3264,35 @@ async function loadSettings() {
       note ? el('div', { className: 'hint', textContent: note }) : null,
     ]);
 
+  await loadAiPresets();
+
+  /*
+   * The one switch that matters takes effect the moment it is flipped.
+   *
+   * It used to need the Save button below it, like the command and the
+   * arguments — so ticking it and walking away left the AI off, with nothing
+   * saying so. The command needs saving because a half-typed command is not a
+   * command; a checkbox is never half-ticked.
+   */
   const enabled = el('input', { type: 'checkbox', checked: config.ai.enabled });
+  const aiState = el('span', { className: 'chip' });
+
+  const showAiState = (on) => {
+    aiState.textContent = on ? `On — ${config.ai.command || 'no command set'}` : 'Off';
+    aiState.className = `chip ai-state ${on ? 'on' : 'off'}`;
+  };
+  showAiState(config.ai.enabled);
+
+  enabled.onchange = async () => {
+    try {
+      await api('/config', { method: 'PUT', body: JSON.stringify({ ai: { enabled: enabled.checked } }) });
+      showAiState(enabled.checked);
+      setStatus(enabled.checked ? 'AI on — it will run your command' : 'AI off — every action hands you the prompt');
+    } catch (err) {
+      enabled.checked = !enabled.checked;
+      setStatus(err.message, true);
+    }
+  };
   const command = el('input', { type: 'text', value: config.ai.command });
   const args = el('input', { type: 'text', value: (config.ai.args ?? []).join(' ') });
   const timeout = el('input', { type: 'text', value: String(Math.round(config.ai.timeoutMs / 1000)) });
@@ -3289,11 +3300,18 @@ async function loadSettings() {
   const preset = el('select');
   for (const p of AI_PRESETS) preset.append(el('option', { value: p.label, textContent: p.label }));
   const matching = AI_PRESETS.find(
-    (p) => p.command === config.ai.command && p.args.join(' ') === (config.ai.args ?? []).join(' '),
+    (p) => p.label !== 'Custom…' && p.command === config.ai.command && p.args.join(' ') === (config.ai.args ?? []).join(' '),
   );
   preset.value = matching?.label ?? 'Custom…';
+  const presetNote = el('div', { className: 'hint' });
+  const showPresetNote = () => {
+    presetNote.textContent = AI_PRESETS.find((p) => p.label === preset.value)?.note ?? '';
+  };
+  showPresetNote();
+
   preset.onchange = () => {
     const chosen = AI_PRESETS.find((p) => p.label === preset.value);
+    showPresetNote();
     if (!chosen || chosen.label === 'Custom…') return;
     command.value = chosen.command;
     args.value = chosen.args.join(' ');
@@ -3331,14 +3349,15 @@ async function loadSettings() {
 
   setChildren(
     box,
-    el('label', { className: 'check', style: 'margin-bottom:12px' }, [
-      enabled,
-      el('span', {}, 'Let the tool run the AI command'),
+    el('div', { className: 'ai-switch' }, [
+      el('label', { className: 'check' }, [enabled, el('span', {}, 'Let the tool run the AI command')]),
+      aiState,
     ]),
     config.overrides.ai
       ? el('div', { className: 'override', textContent: 'RMM_AI=0 is set, so the AI stays off whatever this says.' })
       : null,
     field('Preset', preset),
+    presetNote,
     field('Command', command, 'Must be on your PATH.'),
     field(
       'Arguments',
@@ -3835,11 +3854,22 @@ function showTab(name) {
  * that wants an essay moves from the browser to the editor in one click.
  */
 async function applyHash() {
-  const m = /^#workspace\/(.+)$/.exec(location.hash);
-  if (!m) return false;
-  showTab('workspace');
-  await openDraft(decodeURIComponent(m[1]));
-  return true;
+  const draft = /^#workspace\/(.+)$/.exec(location.hash);
+  if (draft) {
+    showTab('workspace');
+    await openDraft(decodeURIComponent(draft[1]));
+    return true;
+  }
+
+  // A bare `#voice` or `#applications` opens that tab. The extension links
+  // here when it needs to send someone to a setting, and a link that lands on
+  // the wrong tab is worse than no link.
+  const tab = /^#([a-z]+)$/.exec(location.hash)?.[1];
+  if (tab && document.querySelector(`#tabs button[data-tab="${tab}"]`)) {
+    showTab(tab);
+    return true;
+  }
+  return false;
 }
 
 function setupTabs() {
