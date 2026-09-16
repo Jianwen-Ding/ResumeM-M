@@ -131,7 +131,16 @@
       Every change to the store is committed, so this is the record of what you
       sent and when. Pick a commit to see exactly what moved.
     </p>
-    <div class="history-split">
+    <div class="toolbar">
+      <select id="history-resume" title="Whose version history to show"></select>
+      <span class="hint">Every version this resume has been, newest first.</span>
+      <span class="grow"></span>
+      <button id="btn-raw-history" class="tiny">Show raw git log instead</button>
+    </div>
+
+    <div id="resume-timeline" class="timeline-list"></div>
+
+    <div id="raw-history" class="history-split" style="display:none">
       <div id="commits" class="commit-list"></div>
       <div id="commit-detail" class="commit-detail">
         <div class="empty"><b>Pick a commit</b>Its files and the exact change appear here.</div>

@@ -2314,6 +2314,127 @@ async function loadSettings() {
  * ------------------------------------------------------------------ */
 
 let selectedCommit = null;
+let historyResumeId = null;
+
+/**
+ * The friendly, Google-Docs-style view: every version *this one resume* has
+ * been, not a flat log of every commit the whole store ever made. Raw git
+ * history stays reachable behind a toggle for anyone who wants it, but it is
+ * not the thing you land on.
+ */
+async function loadResumeHistory() {
+  const select = $('#history-resume');
+  select.replaceChildren(
+    ...state.store.resumes.map((r) =>
+      el('option', { value: r.id, textContent: `${r.label} (${r.id})`, selected: r.id === historyResumeId }),
+    ),
+  );
+  if (!historyResumeId || !state.store.resumes.some((r) => r.id === historyResumeId)) {
+    historyResumeId = state.resumeId ?? state.store.resumes[0]?.id ?? null;
+  }
+  select.value = historyResumeId;
+
+  const timeline = $('#resume-timeline');
+  if (!historyResumeId) {
+    timeline.replaceChildren(el('div', { className: 'empty', textContent: 'No resumes yet.' }));
+    return;
+  }
+
+  timeline.replaceChildren(el('p', { className: 'hint', textContent: 'Loading…' }));
+  try {
+    const { versions } = await api(`/resumes/${encodeURIComponent(historyResumeId)}/history`);
+    renderResumeTimeline(versions);
+  } catch (err) {
+    timeline.replaceChildren(el('div', { className: 'err', textContent: err.message }));
+  }
+}
+
+function renderResumeTimeline(versions) {
+  const timeline = $('#resume-timeline');
+  if (versions.length === 0) {
+    timeline.replaceChildren(
+      el('div', { className: 'empty' }, [
+        el('b', {}, 'No history yet'),
+        'Save an edit to this resume and its versions will show up here.',
+      ]),
+    );
+    return;
+  }
+
+  // The API already returns newest first, so the current version reads like
+  // the top of a document history — the same order Google Docs uses.
+  timeline.replaceChildren(
+    ...versions.map((v, i) => {
+      const isCurrent = i === 0;
+      const changes = (v.changes ?? []).filter((c) => c.kind !== 'none');
+      return el('div', { className: `version-card${isCurrent ? ' current' : ''}` }, [
+        el('div', { className: 'vhead' }, [
+          el('span', { className: 'dot' }),
+          el('span', { className: 'when', textContent: formatWhen(v.date) }),
+          el('span', { className: 'rel', textContent: new Date(v.date).toLocaleString() }),
+          isCurrent ? el('span', { className: 'badge done', textContent: 'Current' }) : null,
+          el('span', { className: 'grow' }),
+          el('span', { className: 'rel', textContent: v.hash.slice(0, 8) }),
+        ]),
+        changes.length > 0
+          ? el(
+              'div',
+              { className: 'changes' },
+              changes.map((c) => el('div', { className: `c ${c.kind}`, textContent: c.text })),
+            )
+          : el('div', { className: 'changes' }, [
+              el('div', { className: 'c', textContent: v.message || 'No meaningful change (formatting only)' }),
+            ]),
+        el('div', { className: 'actions-row' }, [
+          isCurrent
+            ? null
+            : el('button', {
+                className: 'tiny',
+                textContent: 'Restore this version',
+                onclick: () => restoreResumeVersion(v.hash),
+              }),
+        ]),
+      ]);
+    }),
+  );
+}
+
+async function restoreResumeVersion(hash) {
+  if (!historyResumeId) return;
+  if (!confirm('Restore this version? The current version will be replaced (its own history is kept, so you can still get back to it).')) {
+    return;
+  }
+  try {
+    await api(`/resumes/${encodeURIComponent(historyResumeId)}/history/${encodeURIComponent(hash)}/restore`, {
+      method: 'POST',
+    });
+    setStatus('Restored.');
+    await loadStore();
+    if (historyResumeId === state.resumeId) {
+      clearEdits();
+      render();
+      renderPreview();
+    }
+    await loadResumeHistory();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+function setupHistoryTab() {
+  $('#history-resume').onchange = (e) => {
+    historyResumeId = e.target.value;
+    loadResumeHistory().catch((err) => setStatus(err.message, true));
+  };
+  $('#btn-raw-history').onclick = () => {
+    const showingRaw = $('#raw-history').style.display !== 'none';
+    $('#raw-history').style.display = showingRaw ? 'none' : '';
+    $('#resume-timeline').style.display = showingRaw ? '' : 'none';
+    $('#history-resume').closest('.toolbar').querySelector('.hint').style.display = showingRaw ? '' : 'none';
+    $('#btn-raw-history').textContent = showingRaw ? 'Show raw git log instead' : 'Show this resume’s timeline instead';
+    if (!showingRaw) loadHistory().catch((err) => setStatus(err.message, true));
+  };
+}
 
 async function loadHistory() {
   const { commits } = await api('/history?limit=80');
@@ -2555,7 +2676,10 @@ function setupTabs() {
       if (btn.dataset.tab === 'workspace') loadDrafts().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
-      if (btn.dataset.tab === 'history') loadHistory().catch((e) => setStatus(e.message, true));
+      if (btn.dataset.tab === 'history') {
+        loadResumeHistory().catch((e) => setStatus(e.message, true));
+        if ($('#raw-history').style.display !== 'none') loadHistory().catch((e) => setStatus(e.message, true));
+      }
       if (btn.dataset.tab === 'voice') {
         loadVoice().catch((e) => setStatus(e.message, true));
         loadSettings().catch((e) => setStatus(e.message, true));
@@ -2567,6 +2691,7 @@ function setupTabs() {
 
 async function boot() {
   setupTabs();
+  setupHistoryTab();
   await loadStore();
   render();
 

@@ -156,6 +156,32 @@ export class Repo {
     return this.git(['show', `${hash}:${relPath}`]);
   }
 
+  /**
+   * Commits that touched one file, oldest problem first for this class of
+   * question: "how has this specific resume changed over time?" A version
+   * history that means anything is scoped to one file, not the whole store —
+   * a commit that only touched a bullet in `experience.yaml` is not a change
+   * to `resumes/newgrad.yaml`, even though newgrad references that bullet.
+   */
+  async logForPath(relPath: string, limit = 50): Promise<{ hash: string; date: string; message: string }[]> {
+    if (!(await this.isRepo())) return [];
+    const out = await this.git([
+      'log',
+      `-${limit}`,
+      '--follow',
+      '--pretty=format:%H%aI%s',
+      '--',
+      relPath,
+    ]).catch(() => '');
+    return out
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [hash = '', date = '', message = ''] = line.split('');
+        return { hash, date, message };
+      });
+  }
+
   /* ---- Remotes ---------------------------------------------------- *
    * The store is a local repository by default and stays that way unless you
    * ask otherwise. Pushing it somewhere private is an option, not a step.

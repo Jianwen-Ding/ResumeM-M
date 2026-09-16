@@ -811,3 +811,44 @@ tbody tr { cursor: pointer; }
   margin: 0;
   color: var(--ink-soft);
 }
+
+/* ---- Resume version timeline (Google-Docs-style history) ---- */
+
+.timeline-list { display: grid; gap: 10px; max-width: 760px; }
+.version-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  box-shadow: var(--shadow-sm);
+  position: relative;
+}
+/* A connecting rail, the way a Docs history rail reads top to bottom. */
+.version-card:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 21px;
+  bottom: -10px;
+  width: 1px;
+  height: 10px;
+  background: var(--line);
+}
+.version-card .vhead { display: flex; align-items: baseline; gap: 9px; }
+.version-card .dot {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+  flex: 0 0 auto; margin-top: 2px;
+}
+.version-card.current .dot { background: var(--good); }
+.version-card .when { font-weight: 620; font-size: var(--t-md); }
+.version-card .rel { color: var(--faint); font-size: var(--t-sm); }
+.version-card .grow { flex: 1 1 auto; }
+.version-card .changes { margin: 8px 0 2px 18px; display: grid; gap: 4px; }
+.version-card .changes .c {
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+  padding-left: 10px;
+  border-left: 2px solid var(--line-soft);
+}
+.version-card .changes .c.entry, .version-card .changes .c.bullet { color: var(--muted); }
+.version-card .changes .c.created { color: var(--good); border-left-color: var(--good-line); }
+.version-card .actions-row { margin-top: 9px; display: flex; gap: 6px; align-items: center; }
