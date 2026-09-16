@@ -2864,6 +2864,10 @@ function wireVoiceDrop() {
 
   const open = () => input.click();
   zone.onclick = open;
+  // The toolbar button opens the same picker. Dropping is the gesture this is
+  // built around, but a button is what people look for first.
+  const button = $('#btn-add-files');
+  if (button) button.onclick = open;
   zone.onkeydown = (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -3916,6 +3920,16 @@ async function boot() {
 
   $('#btn-add-app').onclick = addApplication;
   $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
+  // The extension writes drafts from another tab, so there is something to
+  // refresh to — this list is not only changed from here.
+  $('#btn-refresh-drafts').onclick = async () => {
+    try {
+      await loadDrafts();
+      setStatus('Up to date');
+    } catch (e) {
+      setStatus(e.message, true);
+    }
+  };
   $('#btn-add-letter').onclick = addLetter;
   $('#btn-add-answer').onclick = addAnswer;
   $('#btn-master').onclick = async () => {

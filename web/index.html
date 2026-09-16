@@ -58,10 +58,12 @@
   <section id="tab-master" class="tab">
     <div class="toolbar">
       <button id="btn-master" class="primary">Rebuild master document</button>
-      <span class="hint">Everything in the store, labelled with its id. Not a resume — an inventory.</span>
+      <span class="hint">Every phrasing of every line, side by side. Not a resume — an inventory.</span>
     </div>
     <div id="master-pane" class="preview-frame tall">
-      <div id="master-empty" class="preview-empty">Press <b>Rebuild</b> to compile the master document.</div>
+      <!-- One element, not three: the centring is a grid, and a bare text node
+           beside a <b> would become three rows stacked down the box. -->
+      <div id="master-empty" class="preview-empty"><span>Press <b>Rebuild</b> to compile the master document.</span></div>
     </div>
   </section>
 

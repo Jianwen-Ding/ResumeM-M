@@ -255,6 +255,18 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
  * The master document: every entry, every bullet, every variant, on one long
  * page. Not a resume — a browsable inventory of what you have to say.
  */
+/**
+ * What the editor calls each heading field. The master document is for reading,
+ * so it says "Dates", not "edu_neu.dates" — the store's keys stopped appearing
+ * anywhere else in the interface and this was the last place they showed.
+ */
+const FIELD_NAMES: Record<'title' | 'dates' | 'subtitle' | 'location', string> = {
+  title: 'Title',
+  dates: 'Dates',
+  subtitle: 'Role / degree',
+  location: 'Location',
+};
+
 export function buildMaster(data: StoreData): ResolvedResume {
   const byKind = (kind: EntryKind) => data.entries.filter((e) => e.kind === kind && !e.archived);
   const warnings: string[] = [];
@@ -283,9 +295,9 @@ export function buildMaster(data: StoreData): ResolvedResume {
           id: `${entry.id}.${name}`,
           variantId: field.default,
           text:
-            `*${entry.id}.${name}* — ` +
+            `*${FIELD_NAMES[name]}* — ` +
             field.variants
-              .map((v) => `${v.text} [${v.id}]${v.id === field.default ? ' (default)' : ''}`)
+              .map((v) => `${v.text} (${v.label}${v.id === field.default ? ', default' : ''})`)
               .join('  ·  '),
         });
       }
@@ -307,15 +319,15 @@ export function buildMaster(data: StoreData): ResolvedResume {
                   {
                     id: b.id,
                     variantId: '__list__',
-                    text: `${b.prefix ?? ''} ${b.items!.map((i) => `${i.text} [${i.id}]`).join(
-                      b.separator ?? ', ',
-                    )}   — ${b.id} (list)`.trim(),
+                    text: `${b.prefix ?? ''} ${b.items!
+                      .map((i) => i.text)
+                      .join(b.separator ?? ', ')}   — (every item on this list)`.trim(),
                   },
                 ]
               : b.variants.map((v) => ({
                   id: b.id,
                   variantId: v.id,
-                  text: `${v.text}   — ${b.id}/${v.id}${v.id === b.default ? ' (default)' : ''}${
+                  text: `${v.text}   — ${v.label}${v.id === b.default ? ' (default)' : ''}${
                     v.suggested ? ' (AI-suggested, unreviewed)' : ''
                   }`,
                 })),
