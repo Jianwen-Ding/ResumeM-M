@@ -807,7 +807,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
 
       const result = await runAgent(
         data.config,
-        coverLetterPrompt(data, resolved, job, prior.map((l) => l.body)),
+        coverLetterPrompt(data, resolved, job, prior),
       );
 
       const body = result.executed ? result.output : '';
@@ -1486,7 +1486,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
           if (resumeId) {
             const agent = await runAgent(
               data.config,
-              coverLetterPrompt(data, resolveResume(resumeId, data), job, prior.map((l) => l.body)),
+              coverLetterPrompt(data, resolveResume(resumeId, data), job, prior),
             );
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = agent.output.trim();

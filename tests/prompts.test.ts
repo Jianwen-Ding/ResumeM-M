@@ -129,14 +129,36 @@ describe('tailor prompt', () => {
 });
 
 describe('cover letter prompt', () => {
-  it('uses previous letters for voice and says so', () => {
+  it('hands over the letters the caller picked out, to adapt rather than imitate', () => {
     const p = coverLetterPrompt(data, resolved, { jobDescription: 'job' }, ['an earlier letter']);
     expect(p).toContain('an earlier letter');
-    expect(p).toContain('for voice, not content');
+    expect(p).toContain('What you have already written');
+    expect(p).toMatch(/adapt it rather than starting over/);
   });
 
-  it('omits the previous-letters section when there are none', () => {
-    expect(coverLetterPrompt(data, resolved, { jobDescription: 'job' }, [])).not.toContain('Previous letters');
+  it('names the company a letter went to, so the model can tell them apart', () => {
+    const p = coverLetterPrompt(data, resolved, { jobDescription: 'job' }, [
+      { id: 'l1', title: 'x', body: 'A letter body long enough to matter.', company: 'Northwind', role: 'Intern' },
+    ]);
+    expect(p).toContain('Northwind — Intern');
+  });
+
+  it('falls back to the letters in the store when the caller picked none', () => {
+    const p = coverLetterPrompt(data, resolved, { jobDescription: 'job' }, []);
+    expect(p).toContain('Dear Acme, here is a letter I wrote before');
+  });
+
+  it('shows the answers they have already given, which often say it better', () => {
+    const p = coverLetterPrompt(data, resolved, { jobDescription: 'job' }, []);
+    expect(p).toContain('Questions they have answered');
+    expect(p).toContain('Because the work is interesting.');
+  });
+
+  it('says nothing about previous work when there is none', () => {
+    const bare = { ...data, coverLetters: [], answers: [] };
+    expect(coverLetterPrompt(bare, resolved, { jobDescription: 'job' }, [])).not.toContain(
+      'What you have already written',
+    );
   });
 
   it('bans the opening everyone uses', () => {
@@ -149,13 +171,37 @@ describe('cover letter prompt', () => {
 describe('answer prompt', () => {
   it('offers previously written answers to adapt', () => {
     const p = answerPrompt(data, 'Why this role?');
-    expect(p).toContain('Previously written answers');
+    expect(p).toContain('What you have already written');
     expect(p).toContain('Because the work is interesting.');
     expect(p).toMatch(/staying consistent across applications/);
   });
 
-  it('omits the bank section when it is empty', () => {
-    expect(answerPrompt({ ...data, answers: [] }, 'Q?')).not.toContain('Previously written answers');
+  it('shows every phrasing of an answer, not only the default one', () => {
+    // The alternates are the range this person has already accepted for that
+    // question; showing one of them throws that away.
+    const p = answerPrompt(data, 'Will you require sponsorship?');
+    expect(p).toContain('No');
+    expect(p).toContain('Yes');
+    expect(p).toContain('— or —');
+  });
+
+  it('gives a question the cover letters too, which often say it better', () => {
+    const p = answerPrompt(data, 'Why this role?');
+    expect(p).toContain('Cover letters they have sent');
+    expect(p).toContain('Dear Acme, here is a letter I wrote before');
+  });
+
+  it('puts the closest previous question first', () => {
+    const p = answerPrompt(data, 'Will you now or in the future require sponsorship?');
+    const sponsorship = p.indexOf('require sponsorship for employment');
+    const interest = p.indexOf('Why are you interested in this role?');
+    expect(sponsorship).toBeGreaterThan(-1);
+    expect(sponsorship).toBeLessThan(interest);
+  });
+
+  it('omits the section when there is nothing written yet', () => {
+    const bare = { ...data, answers: [], coverLetters: [] };
+    expect(answerPrompt(bare, 'Q?')).not.toContain('What you have already written');
   });
 
   it('includes the posting when one is supplied', () => {
