@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
@@ -14,7 +15,21 @@ import { resolveResume } from './resolve.js';
  */
 export function bundleFileName(name: string, company: string | undefined, kind: 'Resume' | 'Cover Letter'): string {
   const person = name.trim().replace(/\s+/g, ' ');
-  const co = company?.trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, ' ');
+  /*
+   * Letters and digits in any alphabet, not only `\w`, which is ASCII.
+   * "Jane Doe Resume rsted.pdf" was going to Ørsted, and a company written in
+   * Chinese vanished from the filename entirely — which also made two
+   * applications share one name in the folder you upload from.
+   *
+   * The rule is otherwise the one that was already here — `\w`, plus spaces
+   * and hyphens — so everything it stripped before is still stripped. Only the
+   * definition of a letter has widened.
+   */
+  const co = company
+    ?.trim()
+    .replace(/[^\p{L}\p{N}_\s-]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   return [person, kind, co].filter(Boolean).join(' ') + '.pdf';
 }
 
@@ -26,9 +41,34 @@ export function slug(s: string): string {
     .slice(0, 60);
 }
 
+/**
+ * A few characters of a hash, for names a slug cannot represent.
+ *
+ * Ids are meant to be read in a folder listing, so the slug stays the way it
+ * is. But a slug is ASCII-only: a company and role written in Chinese both
+ * reduce to nothing, and every such application collapsed onto the same id —
+ * one tracker row silently replacing the other, and the first one's files
+ * left behind inside the second one's bundle.
+ */
+function fingerprint(...parts: string[]): string {
+  return createHash('sha1').update(parts.join('\u0000')).digest('hex').slice(0, 8);
+}
+
 export function applicationId(company: string, role: string, at = new Date()): string {
   const date = at.toISOString().slice(0, 10);
-  return `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
+  const readable = `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
+
+  /*
+   * The readable form is kept whenever it actually distinguishes one
+   * application from another. It does not when the names have no ASCII in
+   * them — the slug is empty and the id is just today's date — nor when two
+   * long role names share their first sixty characters, which `slug` truncates
+   * to. Both collapse two applications into one id, and an id is what the
+   * tracker row, the bundle folder and the upload file are all keyed on.
+   */
+  const slugged = `${slug(company)}-${slug(role)}`.replace(/^-|-$/g, '');
+  const faithful = slugged.length > 0 && slug(company).length < 60 && slug(role).length < 60;
+  return faithful ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
 }
 
 export interface BundleRequest {
