@@ -53,6 +53,7 @@ function store(resumes: ResumeSpec[]): StoreData {
     resumes,
     applications: [],
     coverLetters: [],
+    drafts: [],
     answers: [],
     voice: '',
     config: DEFAULT_CONFIG,
@@ -218,5 +219,84 @@ describe('master document', () => {
 
   it('lifts the page limit, since it is an inventory and not a resume', () => {
     expect(buildMaster(store([base])).layout.maxPages).toBeGreaterThan(1);
+  });
+});
+
+describe('list bullets', () => {
+  const listEntry: Entry = {
+    id: 'edu_list',
+    kind: 'education',
+    title: 'University',
+    bullets: [
+      {
+        id: 'b_courses',
+        default: 'v_list',
+        prefix: '**Coursework:**',
+        separator: '; ',
+        variants: [],
+        items: [
+          { id: 'c_a', text: 'Algorithms' },
+          { id: 'c_b', text: 'Databases' },
+        ],
+      },
+    ],
+  };
+
+  const listBase: ResumeSpec = {
+    id: 'base',
+    label: 'Base',
+    sections: [{ kind: 'education', entries: ['edu_list'] }],
+  };
+
+  const listStore = (resumes: ResumeSpec[], entry: Entry = listEntry): StoreData => ({
+    ...store(resumes),
+    entries: [entry],
+  });
+
+  const textOf = (data: StoreData, id = 'base') =>
+    resolveResume(id, data).sections[0]?.entries[0]?.bullets[0]?.text;
+
+  it('joins every item with the configured separator', () => {
+    expect(textOf(listStore([listBase]))).toBe('**Coursework:** Algorithms; Databases');
+  });
+
+  it('omits the prefix when there is not one', () => {
+    const noPrefix = structuredClone(listEntry);
+    delete noPrefix.bullets![0]!.prefix;
+    expect(textOf(listStore([listBase], noPrefix))).toBe('Algorithms; Databases');
+  });
+
+  it('defaults the separator to a comma', () => {
+    const noSep = structuredClone(listEntry);
+    delete noSep.bullets![0]!.separator;
+    expect(textOf(listStore([listBase], noSep))).toContain('Algorithms, Databases');
+  });
+
+  it('merges list selections down the inheritance chain', () => {
+    const child: ResumeSpec = { id: 'c', label: 'C', extends: 'base', lists: { b_courses: ['c_b'] } };
+    expect(textOf(listStore([listBase, child]), 'c')).toBe('**Coursework:** Databases');
+  });
+
+  it('drops the bullet when the selection is empty', () => {
+    const child: ResumeSpec = { id: 'c', label: 'C', extends: 'base', lists: { b_courses: [] } };
+    const r = resolveResume('c', listStore([listBase, child]));
+    expect(r.sections[0]?.entries[0]?.bullets).toHaveLength(0);
+  });
+
+  it('warns about an item that no longer exists', () => {
+    const child: ResumeSpec = { id: 'c', label: 'C', extends: 'base', lists: { b_courses: ['c_a', 'c_gone'] } };
+    const r = resolveResume('c', listStore([listBase, child]));
+    expect(r.warnings.join(' ')).toMatch(/c_gone/);
+    expect(r.sections[0]?.entries[0]?.bullets[0]?.text).toBe('**Coursework:** Algorithms');
+  });
+
+  it('shows every item in the master document, with its id', () => {
+    const master = buildMaster(listStore([listBase]));
+    const text = master.sections
+      .flatMap((s) => s.entries.flatMap((e) => e.bullets))
+      .map((b) => b.text)
+      .join(' ');
+    expect(text).toContain('Algorithms [c_a]');
+    expect(text).toContain('(list)');
   });
 });

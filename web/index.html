@@ -12,8 +12,11 @@
   <nav id="tabs">
     <button data-tab="build" class="active">Build</button>
     <button data-tab="master">Master</button>
+    <button data-tab="workspace">Workspace</button>
     <button data-tab="applications">Applications</button>
-    <button data-tab="voice">Voice</button>
+    <button data-tab="letters">Letters &amp; answers</button>
+    <button data-tab="history">History</button>
+    <button data-tab="voice">Voice &amp; AI</button>
   </nav>
   <span id="status" class="status"></span>
 </header>
@@ -23,18 +26,23 @@
   <section id="tab-build" class="tab active">
     <div class="split">
       <div class="pane pane-left">
-        <div class="toolbar">
+        <div class="toolbar sticky-toolbar">
           <select id="resume-select" title="Which resume to edit"></select>
           <button id="btn-render" class="primary">Preview</button>
           <button id="btn-save-as">Save as variation…</button>
-          <button id="btn-feedback">Get feedback</button>
+          <button id="btn-feedback">Feedback</button>
+          <span class="grow"></span>
+          <button id="btn-add-entry" title="Add a new education entry, job, or project">+ Entry</button>
         </div>
-        <div id="fit" class="fit"></div>
+        <div id="fit" class="fit idle">Not compiled yet.</div>
         <div id="warnings" class="warnings"></div>
         <div id="editor"></div>
       </div>
       <div class="pane pane-right">
-        <iframe id="preview" title="Resume preview"></iframe>
+        <div class="preview-frame">
+          <iframe id="preview" title="Resume preview"></iframe>
+          <div id="preview-empty" class="preview-empty">Press <b>Preview</b> to compile.</div>
+        </div>
       </div>
     </div>
   </section>
@@ -45,39 +53,122 @@
       <button id="btn-master" class="primary">Rebuild master document</button>
       <span class="hint">Everything in the store, labelled with its id. Not a resume — an inventory.</span>
     </div>
-    <iframe id="master-preview" title="Master document"></iframe>
+    <div class="preview-frame tall">
+      <iframe id="master-preview" title="Master document"></iframe>
+      <div id="master-empty" class="preview-empty">Press <b>Rebuild</b> to compile the master document.</div>
+    </div>
+  </section>
+
+  <!-- Workspace: applications in progress, with room to actually write. -->
+  <section id="tab-workspace" class="tab">
+    <div class="workspace-split">
+      <div>
+        <div class="toolbar">
+          <h2>In progress</h2>
+          <span class="grow"></span>
+          <button id="btn-refresh-drafts" class="tiny">Refresh</button>
+        </div>
+        <p class="hint">
+          Opened from the browser extension when a posting wants a cover letter
+          or essay answers. Anything your answer bank already covers arrives
+          filled in.
+        </p>
+        <div id="draft-list" class="card-list"></div>
+      </div>
+      <div id="draft-editor" class="draft-editor">
+        <div class="empty"><b>Nothing open</b>Pick an application on the left, or send one over from the extension.</div>
+      </div>
+    </div>
   </section>
 
   <!-- Applications: the tracker. -->
   <section id="tab-applications" class="tab">
     <div id="stats" class="stats"></div>
     <div class="toolbar">
-      <button id="btn-add-app">Record an application</button>
+      <button id="btn-add-app" class="primary">Record an application</button>
     </div>
-    <table id="apps">
-      <thead><tr><th>Date</th><th>Company</th><th>Role</th><th>Status</th><th>Resume</th><th>Files</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div id="apps-wrap"></div>
   </section>
 
-  <!-- Voice: the standing instructions every AI request carries. -->
-  <section id="tab-voice" class="tab">
+  <!-- Letters and reusable answers. -->
+  <section id="tab-letters" class="tab">
+    <div class="split-even">
+      <div>
+        <div class="toolbar">
+          <h2>Cover letters</h2>
+          <span class="grow"></span>
+          <button id="btn-add-letter">+ Letter</button>
+        </div>
+        <p class="hint">
+          Past letters are the context any new draft is written from, by the
+          extension and by <code>rmm</code> alike.
+        </p>
+        <div id="letters"></div>
+      </div>
+      <div>
+        <div class="toolbar">
+          <h2>Answer bank</h2>
+          <span class="grow"></span>
+          <button id="btn-add-answer">+ Question</button>
+        </div>
+        <p class="hint">
+          Application questions repeat. Anything here is offered automatically
+          the next time a form asks something close to it.
+        </p>
+        <div id="answers"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- History: what the store looked like at any point, from git. -->
+  <section id="tab-history" class="tab">
     <p class="hint">
-      These notes are prepended to every AI request, so you never paste the same
-      instructions into a fresh chat again. Describe how you write, not what you did.
+      Every change to the store is committed, so this is the record of what you
+      sent and when. Pick a commit to see exactly what moved.
     </p>
-    <textarea id="voice" spellcheck="false"></textarea>
-    <div class="toolbar"><button id="btn-save-voice" class="primary">Save</button></div>
+    <div class="history-split">
+      <div id="commits" class="commit-list"></div>
+      <div id="commit-detail" class="commit-detail">
+        <div class="empty"><b>Pick a commit</b>Its files and the exact change appear here.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Voice and AI: the standing instructions, and what runs them. -->
+  <section id="tab-voice" class="tab">
+    <div class="split-even">
+      <div>
+        <div class="toolbar"><h2>Voice</h2></div>
+        <p class="hint">
+          Prepended to every AI request, so you never paste the same instructions
+          into a fresh chat again. Describe how you write, not what you did.
+        </p>
+        <textarea id="voice" spellcheck="false"></textarea>
+        <div class="toolbar"><button id="btn-save-voice" class="primary">Save voice notes</button></div>
+      </div>
+
+      <div>
+        <div class="toolbar"><h2>AI command</h2></div>
+        <p class="hint">
+          Whatever coding-agent CLI you already have. Nothing is sent anywhere
+          else; this runs on your machine. Leave it off and every AI action hands
+          you the prompt instead.
+        </p>
+        <div id="settings" class="settings"></div>
+      </div>
+    </div>
   </section>
 </main>
 
 <div id="modal" class="modal hidden">
   <div class="modal-body">
     <h2 id="modal-title"></h2>
-    <div id="modal-content"></div>
-    <div class="toolbar">
-      <button id="modal-ok" class="primary">OK</button>
+    <div id="modal-content" class="modal-scroll"></div>
+    <div class="modal-actions">
+      <span id="modal-note" class="hint"></span>
+      <span class="grow"></span>
       <button id="modal-cancel">Cancel</button>
+      <button id="modal-ok" class="primary">OK</button>
     </div>
   </div>
 </div>

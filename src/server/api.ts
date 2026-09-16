@@ -12,13 +12,104 @@ import {
   type TailorContext,
 } from '../ai/prompts.js';
 import { Repo, withCommit } from '../git/repo.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { extractJob, jobPostingScore } from '../jobs/extract.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
 import { buildMaster, resolveResume } from '../model/resolve.js';
 import type { Store } from '../model/store.js';
-import type { Application, Entry, Profile, ResumeSpec, SkillGroup, Variant } from '../model/types.js';
+import { isVariantField } from '../model/types.js';
+import type {
+  Application,
+  CoverLetter,
+  Draft,
+  DraftQuestion,
+  Entry,
+  Profile,
+  ResumeSpec,
+  SkillGroup,
+  StoreData,
+  Variant,
+  VariantField,
+} from '../model/types.js';
 import { compileResume, OverflowError } from '../render/compile.js';
+
+interface DescribedChange {
+  key: string;
+  from: string;
+  to: string;
+  because: string[];
+  /** Which entry the change belongs to, in words. */
+  where?: string;
+  /** What kind of thing changed: a bullet, or a heading field. */
+  what?: string;
+  fromLabel?: string;
+  toLabel?: string;
+  fromText?: string;
+  toText?: string;
+}
+
+const FIELD_WORDS: Record<string, string> = {
+  title: 'title',
+  dates: 'dates',
+  subtitle: 'role',
+  location: 'location',
+};
+
+/**
+ * Resolve a raw `{key, from, to}` change into the human words it swaps, so the
+ * extension can say "Coursework: Broad → Systems-leaning" instead of
+ * "b_edu_coursework → v_systems".
+ */
+function describeChange(
+  change: { key: string; from: string; to: string; because: string[] },
+  data: StoreData,
+): DescribedChange {
+  const plainTitle = (e: Entry): string => {
+    if (!isVariantField(e.title)) return String(e.title ?? e.id);
+    const chosen = e.title.variants.find((v) => v.id === (e.title as VariantField).default) ?? e.title.variants[0];
+    return String(chosen?.text ?? e.id);
+  };
+
+  const dot = change.key.indexOf('.');
+  if (dot > 0) {
+    const entryId = change.key.slice(0, dot);
+    const fieldName = change.key.slice(dot + 1);
+    const entry = data.entries.find((e) => e.id === entryId);
+    const field = entry?.[fieldName as 'title' | 'dates' | 'subtitle' | 'location'];
+    if (entry && field && typeof field !== 'string') {
+      const from = field.variants.find((v) => v.id === change.from);
+      const to = field.variants.find((v) => v.id === change.to);
+      return {
+        ...change,
+        where: plainTitle(entry),
+        what: FIELD_WORDS[fieldName] ?? fieldName,
+        fromLabel: from?.label,
+        toLabel: to?.label,
+        fromText: from?.text,
+        toText: to?.text,
+      };
+    }
+    return { ...change };
+  }
+
+  for (const entry of data.entries) {
+    const bullet = (entry.bullets ?? []).find((b) => b.id === change.key);
+    if (!bullet) continue;
+    const from = bullet.variants.find((v) => v.id === change.from);
+    const to = bullet.variants.find((v) => v.id === change.to);
+    return {
+      ...change,
+      where: plainTitle(entry),
+      what: 'bullet',
+      fromLabel: from?.label,
+      toLabel: to?.label,
+      fromText: from?.text,
+      toText: to?.text,
+    };
+  }
+  return { ...change };
+}
 
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
 function handler(fn: (req: Request, res: Response) => Promise<unknown>) {
@@ -172,6 +263,66 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * The AI and engine settings, editable from the GUI so config.yaml is not
+   * the only way in. `args` is a template, so it is exposed verbatim.
+   */
+  api.get(
+    '/config',
+    handler(async (_req, res) => {
+      const c = store.loadConfig();
+      res.json({
+        ai: c.ai,
+        latex: c.latex,
+        git: c.git,
+        output: c.output,
+        // Environment overrides win over the file, so say when one is active
+        // rather than letting the GUI show a setting that is not in effect.
+        overrides: {
+          autoCommit: process.env.RMM_AUTOCOMMIT === '0',
+          ai: process.env.RMM_AI === '0',
+          engine: Boolean(process.env.RMM_LATEX_ENGINE),
+        },
+      });
+    }),
+  );
+
+  api.put(
+    '/config',
+    handler(async (req, res) => {
+      const patch = req.body as Parameters<typeof store.saveConfig>[0];
+      const saved = await withCommit(repo, autoCommit(), 'Update settings', () => store.saveConfig(patch));
+      res.json(saved);
+    }),
+  );
+
+  /** Run the configured AI command on a trivial prompt, to prove it works. */
+  api.post(
+    '/config/test-ai',
+    handler(async (_req, res) => {
+      const config = store.loadConfig();
+      if (!config.ai.enabled) {
+        res.json({ ok: false, reason: 'disabled', message: 'The AI is switched off.' });
+        return;
+      }
+      const started = Date.now();
+      try {
+        const result = await runAgent(
+          { ...config, ai: { ...config.ai, timeoutMs: Math.min(config.ai.timeoutMs, 60_000) } },
+          'Reply with exactly the word: ready',
+        );
+        res.json({
+          ok: true,
+          ms: Date.now() - started,
+          output: result.output.slice(0, 500),
+          command: config.ai.command,
+        });
+      } catch (err) {
+        res.json({ ok: false, reason: 'failed', message: (err as Error).message });
+      }
+    }),
+  );
+
   api.get(
     '/voice',
     handler(async (_req, res) => res.json({ voice: store.loadVoice() })),
@@ -293,25 +444,145 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Draft a cover letter for a posting, grounded in previous letters.
+   *
+   * Works with the AI off: it still returns the most relevant previous letters,
+   * which is the thing you would actually start from. "Generated from previous
+   * responses" should not require a model to be installed.
+   */
   api.post(
     '/ai/cover-letter',
     handler(async (req, res) => {
-      const { resumeId, job } = req.body as { resumeId: string; job: TailorContext };
+      const { resumeId, job, save } = req.body as {
+        resumeId: string;
+        job: TailorContext;
+        save?: boolean;
+      };
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
-      const prior = data.coverLetters.map((l) => l.body);
-      const result = await runAgent(data.config, coverLetterPrompt(data, resolved, job, prior));
-      res.json(result);
+      const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
+
+      const result = await runAgent(
+        data.config,
+        coverLetterPrompt(data, resolved, job, prior.map((l) => l.body)),
+      );
+
+      const body = result.executed ? result.output : '';
+      let saved: CoverLetter | undefined;
+      if (save && body.trim()) {
+        saved = {
+          id: letterId(job.company, job.jobTitle),
+          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? 'Unknown'}`,
+          company: job.company,
+          role: job.jobTitle,
+          createdAt: new Date().toISOString(),
+          body,
+        };
+        const letter = saved;
+        await withCommit(repo, autoCommit(), `Add cover letter "${letter.id}"`, () =>
+          store.saveCoverLetter(letter),
+        );
+      }
+
+      res.json({
+        ...result,
+        body,
+        saved,
+        // Always useful, and the whole answer when the AI is off.
+        priorLetters: prior.map((l) => ({
+          id: l.id,
+          title: l.title,
+          company: l.company,
+          role: l.role,
+          createdAt: l.createdAt,
+          body: l.body,
+        })),
+      });
     }),
   );
 
+  /**
+   * Match page questions against the answer bank with no AI call at all. This
+   * is the offline path: a question you have answered before comes back
+   * answered.
+   */
+  api.post(
+    '/answers/match',
+    handler(async (req, res) => {
+      const { questions, threshold } = req.body as { questions: string[]; threshold?: number };
+      if (!Array.isArray(questions)) throw new Error('questions must be an array');
+      const data = store.load();
+      res.json({
+        matches: matchAnswers(questions, data.answers, threshold),
+        bankSize: data.answers.length,
+      });
+    }),
+  );
+
+  /**
+   * Answer a question. Reuses a stored answer outright when one plainly covers
+   * it, and only reaches for the AI when nothing does — or when asked to adapt
+   * the stored answer to this specific posting.
+   */
   api.post(
     '/ai/answer',
     handler(async (req, res) => {
-      const { question, job } = req.body as { question: string; job?: TailorContext };
+      const { question, job, force } = req.body as {
+        question: string;
+        job?: TailorContext;
+        force?: boolean;
+      };
       const data = store.load();
+      const match = matchAnswer(question, data.answers);
+
+      if (match.confident && !force) {
+        res.json({
+          output: match.answer,
+          executed: false,
+          source: 'answer-bank',
+          match,
+        });
+        return;
+      }
+
       const result = await runAgent(data.config, answerPrompt(data, question, job));
-      res.json(result);
+      res.json({ ...result, source: result.executed ? 'ai' : 'prompt', match });
+    }),
+  );
+
+  /** Save an answer back to the bank, so the next form starts from it. */
+  api.post(
+    '/answers/save',
+    handler(async (req, res) => {
+      const { question, answer, label, itemId } = req.body as {
+        question: string;
+        answer: string;
+        label?: string;
+        itemId?: string;
+      };
+      if (!question?.trim() || !answer?.trim()) throw new Error('question and answer are required');
+
+      const answers = store.load().answers;
+      const existing = itemId ? answers.find((a) => a.id === itemId) : undefined;
+
+      if (existing) {
+        // A new phrasing of a question already in the bank, not a new question.
+        const id = `v_${slug(label ?? new Date().toISOString().slice(0, 10))}` || `v_${Date.now()}`;
+        const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
+        existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
+        existing.default = unique;
+      } else {
+        answers.push({
+          id: `ans_${slug(question).slice(0, 40) || Date.now()}`,
+          question: question.trim(),
+          default: 'v_1',
+          variants: [{ id: 'v_1', label: label ?? 'Saved', text: answer.trim() }],
+        });
+      }
+
+      await withCommit(repo, autoCommit(), 'Update answer bank', () => store.saveAnswers(answers));
+      res.json({ ok: true, answers });
     }),
   );
 
@@ -391,7 +662,12 @@ export function createApi({ store, repo }: ApiDeps): Router {
         job,
         baseResumeId: baseId,
         spec,
-        rationale: finalMatch.rationale,
+        // Ids are how the store refers to things; they are not how a person
+        // reads a diff. Resolve each change to the words it actually swaps.
+        rationale: finalMatch.rationale.map((r) => describeChange(r, data)),
+        entryByBullet: Object.fromEntries(
+          data.entries.flatMap((e) => (e.bullets ?? []).map((b) => [b.id, e.id])),
+        ),
         suggestions: (aiParsed as { suggestions?: unknown[] } | null)?.suggestions ?? [],
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
@@ -516,6 +792,294 @@ export function createApi({ store, repo }: ApiDeps): Router {
   );
 
   /* ---------------------------------------------------------------- *
+   * Workspace — applications in progress                              *
+   * ---------------------------------------------------------------- */
+
+  api.get(
+    '/workspace',
+    handler(async (_req, res) => res.json({ drafts: store.loadDrafts() })),
+  );
+
+  api.get(
+    '/workspace/:id',
+    handler(async (req, res) => {
+      const draft = store.getDraft(String(req.params.id));
+      if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
+      res.json(draft);
+    }),
+  );
+
+  /**
+   * Open a workspace for a posting.
+   *
+   * The extension knows what a form asks for; a browser sidebar is the wrong
+   * place to write three paragraphs of prose. This carries the requirement into
+   * the editor, pre-filling anything the answer bank already covers so the
+   * human starts from text rather than from empty boxes.
+   */
+  api.post(
+    '/workspace',
+    handler(async (req, res) => {
+      const body = req.body as {
+        company?: string;
+        role?: string;
+        url?: string;
+        source?: string;
+        jobDescription?: string;
+        resumeId?: string;
+        spec?: ResumeSpec;
+        coverLetterRequired?: boolean;
+        questions?: { question: string; required?: boolean }[];
+      };
+      if (!body.company || !body.role) throw new Error('company and role are required');
+
+      const data = store.load();
+      const id = applicationId(body.company, body.role);
+      const existing = store.getDraft(id);
+
+      // A posting-specific resume comes over with the draft; save it so the
+      // draft refers to something that still exists later.
+      if (body.spec) {
+        const spec = body.spec;
+        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
+      }
+
+      const incoming = body.questions ?? [];
+      const questions: DraftQuestion[] = incoming.map((q, i) => {
+        // Never clobber something a human has already written here.
+        const prior = existing?.questions.find((x) => x.question === q.question);
+        if (prior?.edited) return { ...prior, required: q.required ?? prior.required };
+
+        const match = matchAnswer(q.question, data.answers);
+        return {
+          id: prior?.id ?? `q${i + 1}`,
+          question: q.question,
+          required: q.required,
+          answer: match.confident ? (match.answer ?? '') : (prior?.answer ?? ''),
+          fromAnswerId: match.confident ? match.item?.id : undefined,
+          source: match.confident ? 'bank' : 'empty',
+        };
+      });
+
+      const now = new Date().toISOString();
+      const draft: Draft = {
+        id,
+        company: body.company,
+        role: body.role,
+        url: body.url ?? existing?.url,
+        source: body.source ?? existing?.source,
+        jobDescription: body.jobDescription ?? existing?.jobDescription,
+        resumeId: body.spec?.id ?? body.resumeId ?? existing?.resumeId,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        status: existing?.status ?? 'drafting',
+        coverLetter: existing?.coverLetter ?? {
+          required: Boolean(body.coverLetterRequired),
+          body: '',
+        },
+        questions,
+        notes: existing?.notes,
+      };
+      if (body.coverLetterRequired !== undefined && !draft.coverLetter.edited) {
+        draft.coverLetter.required = body.coverLetterRequired;
+      }
+
+      const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
+        store.saveDraft(draft),
+      );
+      res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });
+    }),
+  );
+
+  api.put(
+    '/workspace/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const existing = store.getDraft(id);
+      if (!existing) throw new Error(`No draft "${id}"`);
+
+      const patch = req.body as Partial<Draft>;
+      const merged: Draft = {
+        ...existing,
+        ...patch,
+        id,
+        coverLetter: { ...existing.coverLetter, ...(patch.coverLetter ?? {}) },
+        questions: patch.questions ?? existing.questions,
+      };
+      const saved = await withCommit(repo, autoCommit(), `Update workspace for ${merged.company}`, () =>
+        store.saveDraft(merged),
+      );
+      res.json(saved);
+    }),
+  );
+
+  api.delete(
+    '/workspace/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const removed = await withCommit(repo, autoCommit(), `Discard workspace "${id}"`, () =>
+        store.deleteDraft(id),
+      );
+      if (!removed) throw new Error(`No draft "${id}"`);
+      res.json({ ok: true });
+    }),
+  );
+
+  /**
+   * Fill in whatever is still empty: the cover letter, the answers, or both.
+   * Anything a human has edited is left alone — that is the point of `edited`.
+   */
+  api.post(
+    '/workspace/:id/generate',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const draft = store.getDraft(id);
+      if (!draft) throw new Error(`No draft "${id}"`);
+
+      const { what = 'all', force = false } = req.body as { what?: 'letter' | 'questions' | 'all'; force?: boolean };
+      const data = store.load();
+      const job: TailorContext = {
+        company: draft.company,
+        jobTitle: draft.role,
+        jobDescription: draft.jobDescription ?? '',
+        url: draft.url,
+      };
+
+      const notes: string[] = [];
+
+      if ((what === 'letter' || what === 'all') && draft.coverLetter.required) {
+        if (draft.coverLetter.edited && !force) {
+          notes.push('Cover letter left alone — you have edited it.');
+        } else {
+          const resumeId = draft.resumeId ?? data.resumes[0]?.id;
+          const prior = relevantLetters(data.coverLetters, { company: draft.company, role: draft.role });
+          if (resumeId) {
+            const agent = await runAgent(
+              data.config,
+              coverLetterPrompt(data, resolveResume(resumeId, data), job, prior.map((l) => l.body)),
+            );
+            if (agent.executed && agent.output.trim()) {
+              draft.coverLetter.body = agent.output.trim();
+              notes.push('Cover letter drafted in your voice.');
+            } else if (prior[0]) {
+              draft.coverLetter.body = prior[0].body;
+              notes.push(`AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}.`);
+            } else {
+              notes.push('AI is off and there are no previous letters to start from.');
+            }
+          }
+        }
+      }
+
+      if (what === 'questions' || what === 'all') {
+        for (const q of draft.questions) {
+          if (q.edited && !force) continue;
+          if (q.answer.trim() && q.source === 'bank' && !force) continue;
+
+          const match = matchAnswer(q.question, data.answers);
+          if (match.confident && !force) {
+            q.answer = match.answer ?? '';
+            q.fromAnswerId = match.item?.id;
+            q.source = 'bank';
+            continue;
+          }
+          const agent = await runAgent(data.config, answerPrompt(data, q.question, job));
+          if (agent.executed && agent.output.trim()) {
+            q.answer = agent.output.trim();
+            q.source = 'ai';
+          } else if (match.item) {
+            q.answer = match.answer ?? '';
+            q.fromAnswerId = match.item.id;
+            q.source = 'bank';
+          }
+        }
+        const written = draft.questions.filter((q) => q.answer.trim()).length;
+        notes.push(`${written} of ${draft.questions.length} questions have an answer.`);
+      }
+
+      const saved = await withCommit(repo, autoCommit(), `Draft answers for ${draft.company}`, () =>
+        store.saveDraft(draft),
+      );
+      res.json({ draft: saved, notes, aiEnabled: data.config.ai.enabled });
+    }),
+  );
+
+  /**
+   * Finish: compile the bundle, file the answers into the application record,
+   * and keep anything worth reusing in the answer bank.
+   */
+  api.post(
+    '/workspace/:id/complete',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const draft = store.getDraft(id);
+      if (!draft) throw new Error(`No draft "${id}"`);
+      if (!draft.resumeId) throw new Error('This draft has no resume attached');
+
+      const { saveAnswersToBank = true, keepDraft = false } = req.body as {
+        saveAnswersToBank?: boolean;
+        keepDraft?: boolean;
+      };
+
+      const answered = draft.questions.filter((q) => q.answer.trim());
+      const result = await buildBundle(store, {
+        company: draft.company,
+        role: draft.role,
+        url: draft.url,
+        resumeId: draft.resumeId,
+        source: draft.source,
+        coverLetter: draft.coverLetter.required ? draft.coverLetter.body : undefined,
+        answers: answered.map((q) => ({ question: q.question, answer: q.answer })),
+        notes: draft.notes,
+      });
+
+      // The application record carries the answers, so the history shows what
+      // was actually said, not merely that something was sent.
+      const app = { ...result.application, answers: answered.map((q) => ({ question: q.question, answer: q.answer })) };
+      app.history = [
+        ...(app.history ?? []),
+        {
+          at: new Date().toISOString(),
+          status: app.status,
+          note: `${answered.length} question(s) answered${draft.coverLetter.required ? ', cover letter included' : ''}`,
+        },
+      ];
+      store.upsertApplication(app);
+
+      // Anything written by hand is worth having next time.
+      if (saveAnswersToBank) {
+        const answers = store.load().answers;
+        for (const q of answered) {
+          if (q.source === 'bank' && !q.edited) continue;
+          const existing = answers.find((a) => a.id === q.fromAnswerId || a.question === q.question);
+          if (existing) {
+            const vid = `v_${Date.now().toString(36)}`;
+            existing.variants.push({ id: vid, label: draft.company, text: q.answer });
+            existing.default = vid;
+          } else {
+            answers.push({
+              id: `ans_${slug(q.question).slice(0, 40) || Date.now()}`,
+              question: q.question,
+              default: 'v_1',
+              variants: [{ id: 'v_1', label: draft.company, text: q.answer }],
+            });
+          }
+        }
+        store.saveAnswers(answers);
+      }
+
+      if (keepDraft) {
+        store.saveDraft({ ...draft, status: 'submitted' });
+      } else {
+        store.deleteDraft(id);
+      }
+
+      if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
+      res.json({ application: app, dir: result.dir, files: result.files, fits: result.fits, pages: result.pages });
+    }),
+  );
+
+  /* ---------------------------------------------------------------- *
    * Cover letters and answers                                         *
    * ---------------------------------------------------------------- */
 
@@ -554,7 +1118,22 @@ export function createApi({ store, repo }: ApiDeps): Router {
 
   api.get(
     '/history',
-    handler(async (_req, res) => res.json(await repo.log(50))),
+    handler(async (req, res) => {
+      const limit = Number(req.query.limit ?? 60);
+      res.json({ commits: await repo.log(Number.isFinite(limit) ? limit : 60) });
+    }),
+  );
+
+  /** One commit in full: what it touched and the patch, for the history view. */
+  api.get(
+    '/history/:hash',
+    handler(async (req, res) => {
+      const hash = String(req.params.hash);
+      if (!/^[0-9a-fA-F]{4,40}$/.test(hash)) throw new Error(`"${hash}" is not a commit hash`);
+      const detail = await repo.commit(hash);
+      if (!detail) throw new Error(`No commit "${hash}" in the store's history`);
+      res.json(detail);
+    }),
   );
 
   return api;

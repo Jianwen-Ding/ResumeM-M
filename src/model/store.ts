@@ -6,6 +6,7 @@ import {
   type AnswerBankItem,
   type Application,
   type CoverLetter,
+  type Draft,
   type Entry,
   type Profile,
   type ResumeSpec,
@@ -63,6 +64,7 @@ export class Store {
       resumes: this.loadResumes(),
       applications: this.readYaml<Application[]>('applications.yaml', []),
       coverLetters: this.loadCoverLetters(),
+      drafts: this.loadDrafts(),
       answers: this.readYaml<AnswerBankItem[]>('answers.yaml', []),
       voice: this.loadVoice(),
       config,
@@ -71,12 +73,38 @@ export class Store {
 
   loadConfig(): StoreConfig {
     const raw = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
-    return {
+    const config: StoreConfig = {
       latex: { ...DEFAULT_CONFIG.latex, ...(raw.latex ?? {}) },
       ai: { ...DEFAULT_CONFIG.ai, ...(raw.ai ?? {}) },
       git: { ...DEFAULT_CONFIG.git, ...(raw.git ?? {}) },
       output: { ...DEFAULT_CONFIG.output, ...(raw.output ?? {}) },
     };
+
+    // Escape hatches for automated runs. A test suite driving a real server
+    // should be able to leave no commits behind without editing config.yaml.
+    if (process.env.RMM_AUTOCOMMIT === '0') config.git.autoCommit = false;
+    if (process.env.RMM_AI === '0') config.ai.enabled = false;
+    if (process.env.RMM_LATEX_ENGINE) {
+      config.latex.engine = process.env.RMM_LATEX_ENGINE as StoreConfig['latex']['engine'];
+    }
+    return config;
+  }
+
+  /**
+   * Write config.yaml. Only the fields the caller supplies are changed, so a
+   * GUI that knows about the AI settings cannot clobber the LaTeX ones.
+   */
+  saveConfig(patch: Partial<StoreConfig>): StoreConfig {
+    const current = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
+    const merged: Partial<StoreConfig> = {
+      ...current,
+      ...(patch.latex ? { latex: { ...current.latex, ...patch.latex } } : {}),
+      ...(patch.ai ? { ai: { ...current.ai, ...patch.ai } } : {}),
+      ...(patch.git ? { git: { ...current.git, ...patch.git } } : {}),
+      ...(patch.output ? { output: { ...current.output, ...patch.output } } : {}),
+    };
+    this.writeYaml('config.yaml', merged);
+    return this.loadConfig();
   }
 
   loadVoice(): string {
@@ -215,6 +243,41 @@ export class Store {
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
     fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${body}`, 'utf8');
+  }
+
+  /**
+   * Applications in progress. One file each, like resumes, so a draft is
+   * readable in a diff and easy to delete by hand.
+   */
+  loadDrafts(): Draft[] {
+    const dir = this.file('drafts');
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.yaml'))
+      .map((f) => {
+        const draft = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as Draft;
+        return { ...draft, id: draft?.id ?? path.basename(f, '.yaml') };
+      })
+      .filter((d): d is Draft => Boolean(d && d.id))
+      .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+  }
+
+  getDraft(id: string): Draft | undefined {
+    return this.loadDrafts().find((d) => d.id === id);
+  }
+
+  saveDraft(draft: Draft): Draft {
+    const next = { ...draft, updatedAt: new Date().toISOString() };
+    this.writeYaml(path.join('drafts', `${draft.id}.yaml`), next);
+    return next;
+  }
+
+  deleteDraft(id: string): boolean {
+    const f = this.file('drafts', `${id}.yaml`);
+    if (!fs.existsSync(f)) return false;
+    fs.unlinkSync(f);
+    return true;
   }
 
   /** Absolute path to the configured output directory, created on demand. */

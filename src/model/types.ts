@@ -32,13 +32,37 @@ export interface VariantField {
 /** A field that is either a plain string or a set of alternates. */
 export type MaybeVariant = string | VariantField;
 
-/** One bullet point, with all of its phrasings. */
+/** A single selectable item inside a list bullet, e.g. one course. */
+export interface ListItem {
+  id: string;
+  text: string;
+  tags?: string[];
+}
+
+/**
+ * One bullet point.
+ *
+ * Most bullets are a sentence with several phrasings. A few are really a list —
+ * relevant coursework, awards — where the decision is which items to show, not
+ * how to word them. Those carry `items` and are picked with checkboxes, the
+ * same way skills are.
+ */
 export interface Bullet {
   id: string;
   default: string;
   variants: Variant[];
+  /** Present on list bullets. When set, `variants` is unused for rendering. */
+  items?: ListItem[];
+  /** Text printed before the list, e.g. "**Relevant Coursework:**". */
+  prefix?: string;
+  /** Separator between items. Defaults to ", ". */
+  separator?: string;
   /** Bullets can be omitted from a resume but kept in the store. */
   archived?: boolean;
+}
+
+export function isListBullet(b: Bullet): boolean {
+  return Array.isArray(b.items) && b.items.length > 0;
 }
 
 export type EntryKind = 'education' | 'experience' | 'project' | 'skills' | 'custom';
@@ -122,6 +146,11 @@ export interface ResumeSpec {
    * (`edu_neu.dates`). Values are variant ids. Merged over the parent's.
    */
   choices?: Record<string, string>;
+  /**
+   * Which items to show on a list bullet, keyed by bullet id. Absent means all
+   * of them. Merged over the parent's, per bullet.
+   */
+  lists?: Record<string, string[]>;
   /** Rendering knobs; merged over defaults and the parent's. */
   layout?: Partial<LayoutOptions>;
   notes?: string;
@@ -233,6 +262,50 @@ export interface Application {
   history?: { at: string; status: ApplicationStatus; note?: string }[];
 }
 
+/**
+ * An application in progress.
+ *
+ * The extension knows what a posting asks for — a cover letter, three essay
+ * questions — but a browser sidebar is the wrong place to write prose. A draft
+ * carries that requirement into the editor, where there is room to work, and
+ * carries the finished answers back out into the application record.
+ */
+export interface Draft {
+  id: string;
+  company: string;
+  role: string;
+  url?: string;
+  /** Which resume the application will use; usually one the extension derived. */
+  resumeId?: string;
+  createdAt: string;
+  updatedAt: string;
+  status: 'drafting' | 'ready' | 'submitted';
+  /** Where it came from, e.g. the hostname the extension saw. */
+  source?: string;
+  /** The posting text, kept so generation has context without re-fetching. */
+  jobDescription?: string;
+  coverLetter: {
+    required: boolean;
+    body: string;
+    /** True once a human has touched it, so generation cannot overwrite silently. */
+    edited?: boolean;
+  };
+  questions: DraftQuestion[];
+  notes?: string;
+}
+
+export interface DraftQuestion {
+  id: string;
+  question: string;
+  required?: boolean;
+  answer: string;
+  /** Which answer-bank item this came from, when it came from one. */
+  fromAnswerId?: string;
+  /** How the current text got here. */
+  source?: 'bank' | 'ai' | 'human' | 'empty';
+  edited?: boolean;
+}
+
 export interface CoverLetter {
   id: string;
   title: string;
@@ -260,6 +333,7 @@ export interface StoreData {
   resumes: ResumeSpec[];
   applications: Application[];
   coverLetters: CoverLetter[];
+  drafts: Draft[];
   answers: AnswerBankItem[];
   /** Contents of voice.md — the writing-voice instructions handed to any AI. */
   voice: string;

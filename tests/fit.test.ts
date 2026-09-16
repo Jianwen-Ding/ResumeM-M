@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compileResume, detectEngine, OverflowError } from '../src/render/compile.js';
+import { compileResume, detectEngine, LatexError, OverflowError } from '../src/render/compile.js';
 import { DEFAULT_LAYOUT, type ResolvedBullet, type ResolvedResume } from '../src/model/types.js';
 
 /**
@@ -103,5 +103,36 @@ describe.skipIf(!hasEngine)('one-page enforcement', { timeout: 300_000 }, () => 
     expect(fs.readFileSync(result.pdfPath!).subarray(0, 4).toString()).toBe('%PDF');
     expect(fs.readFileSync(result.texPath!, 'utf8')).toContain('\\begin{document}');
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('engine selection', () => {
+  it('rejects an engine that is not installed, naming the alternatives', async () => {
+    await expect(detectEngine('not-an-engine' as never)).rejects.toThrow(/not-an-engine/);
+  });
+});
+
+describe.skipIf(!hasEngine)('other layouts', { timeout: 180_000 }, () => {
+  it('respects a lower attempt cap without hanging', async () => {
+    const result = await compileResume(resume(16), { maxAttempts: 2 });
+    expect(result.pages).toBeGreaterThanOrEqual(1);
+  });
+
+  it('compiles on A4 when asked', async () => {
+    const r = resume(1);
+    r.layout = { ...r.layout, paper: 'a4' };
+    const result = await compileResume(r);
+    expect(result.fits).toBe(true);
+  });
+
+  it('cannot be broken by LaTeX-looking text in the store', async () => {
+    // Everything from the store is escaped, so a name that reads like a macro
+    // is printed rather than executed. This is why a corrupted store cannot
+    // produce a compile failure.
+    const r = resume(1);
+    r.profile = { ...r.profile, name: String.raw`\undefinedmacro & 100% {braces}` };
+    const result = await compileResume(r);
+    expect(result.fits).toBe(true);
+    expect(LatexError).toBeTypeOf('function');
   });
 });

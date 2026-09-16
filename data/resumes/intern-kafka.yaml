@@ -7,7 +7,6 @@ extends: intern
 choices:
   b_ec_pipeline: v_kafka
   b_ec_testing: v_ci
-  b_edu_coursework: v_systems
 sections:
   - kind: skills
     groups: [sk_languages, sk_frameworks, sk_tools]
@@ -18,3 +17,5 @@ sections:
 notes: >
   Drafted for streaming-heavy backend postings. Drops TypeScript/React from the
   skills list so the relevant items are not buried.
+lists:
+  b_edu_coursework: [c_systems, c_os, c_networks, c_distributed, c_algorithms, c_databases]
