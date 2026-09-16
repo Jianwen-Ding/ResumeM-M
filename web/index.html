@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ResumeM-M</title>
+<!-- The same rounded mark as the header, inline: one fewer request, and no
+     404 in the console for a file that was never going to be interesting. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='3' width='26' height='26' rx='8' fill='%231a73e8'/%3E%3Crect x='7' y='7' width='18' height='18' rx='5' fill='none' stroke='white' stroke-width='3' stroke-opacity='.55'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,6 +21,7 @@
     <button data-tab="history">History</button>
     <button data-tab="voice">Voice &amp; AI</button>
   </nav>
+  <span id="jobs-chip" class="jobs-chip hidden" title="Work the AI is doing, or has finished"></span>
   <span id="status" class="status"></span>
 </header>
 
@@ -28,6 +32,7 @@
       <div class="pane pane-left">
         <div class="toolbar sticky-toolbar">
           <select id="resume-select" title="Which resume to edit"></select>
+          <button id="btn-base" class="tiny" title="Pinned bases are what new resumes and tailored drafts start from"></button>
           <span id="save-state" class="save saved" title="Edits are written to the store as you make them, and committed once you stop.">All changes saved</span>
           <span id="live-state" class="live ok" title="The preview recompiles itself whenever you change something. Click to force one.">Live</span>
           <button id="btn-save-as">Save as variation…</button>
@@ -88,6 +93,8 @@
     <div id="stats" class="stats"></div>
     <div class="toolbar">
       <button id="btn-add-app" class="primary">Record an application</button>
+      <span class="grow"></span>
+      <span id="current-files" class="current-files"></span>
     </div>
     <div class="apps-split">
       <div id="apps-wrap"></div>
@@ -157,7 +164,8 @@
         <div class="toolbar">
           <h2>Your writing</h2>
           <span class="grow"></span>
-          <button id="btn-add-sample" class="primary">+ Add a sample</button>
+          <button id="btn-add-sample">+ Add a sample</button>
+          <button id="btn-add-files" class="primary">+ Add files</button>
         </div>
         <p class="hint">
           Your voice is taken from things you have actually written, not from a
@@ -166,6 +174,19 @@
           application. Letters you send and answers you save are included
           automatically.
         </p>
+
+        <!-- Drop anything in: what it holds is worked out for you. -->
+        <div id="voice-drop" class="dropzone" tabindex="0" role="button">
+          <b>Drop files here</b>
+          <span class="faint">
+            PDF, Word, Markdown, LaTeX, plain text — a file with four old cover
+            letters in it is split into four. Nothing is saved until you have
+            looked at it.
+          </span>
+        </div>
+        <input id="voice-files" type="file" multiple hidden
+               accept=".txt,.md,.markdown,.text,.rtf,.pdf,.docx,.html,.htm,.tex,.json,.yaml,.yml,.csv" />
+
         <div id="voice-budget" class="voice-budget"></div>
         <div id="samples" class="card-list"></div>
 

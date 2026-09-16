@@ -118,7 +118,8 @@ export function buildVoiceContext(data: StoreData): VoiceContext {
 
       const room = BUDGET - spent;
       if (room < 200) break;
-      const text = next.text.length > room ? `${next.text.slice(0, room).trimEnd()}…` : next.text;
+      // room - 1 so the ellipsis fits inside the budget rather than past it.
+      const text = next.text.length > room ? `${next.text.slice(0, room - 1).trimEnd()}…` : next.text;
       chosen.push({ ...next, text });
       spent += text.length;
       if (spent >= BUDGET) break;

@@ -431,6 +431,7 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
   // wording, add another), then the incidental actions.
   const actions = el('div', { className: 'actions' });
   for (const a of extraActions) actions.append(a);
+  if (field.variants.length > 1) actions.append(pinControl(key, field, current));
   if (choose) actions.append(choose);
   if (onEdit) {
     actions.append(
@@ -455,6 +456,44 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
   for (const a of trailingActions) actions.append(a);
 
   return el('div', { className: 'variant-row' }, [el('span', { className: 'grow' }), actions]);
+}
+
+/**
+ * Pin this wording as the one used wherever nothing else is chosen.
+ *
+ * Choosing a wording on one resume says "here"; pinning says "unless told
+ * otherwise, everywhere". The difference is worth a control of its own —
+ * without it, deciding a phrasing is simply the better one meant editing YAML.
+ */
+function pinControl(key, field, current) {
+  const isDefault = current === field.default;
+  if (isDefault) {
+    return el('span', {
+      className: 'chip pinned',
+      textContent: 'Default',
+      title: 'Used by every resume that does not choose otherwise',
+    });
+  }
+  return el('button', {
+    className: 'tiny',
+    textContent: 'Make default',
+    title: 'Use this wording wherever a resume does not choose otherwise',
+    onclick: () => pinDefault(key, current),
+  });
+}
+
+async function pinDefault(key, variantId) {
+  try {
+    await api(`/defaults/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ variantId }),
+    });
+    await loadStore();
+    setStatus('Pinned as the default everywhere');
+    render();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
 }
 
 /** Pick from every wording at once, for fields with more than a few. */
@@ -712,7 +751,15 @@ function bulletBlock(entry, section, bullet, choices) {
           title: 'How many ways this point can be said',
         }),
         chosen?.suggested ? el('span', { className: 'chip suggested', textContent: 'unreviewed' }) : null,
-        key in state.choices ? el('span', { className: 'chip overridden', textContent: 'changed' }) : null,
+        // Differs from what the store falls back to — not merely "was touched",
+        // since pinning this wording as the default settles the difference.
+        chosenId !== bullet.default
+          ? el('span', {
+              className: 'chip overridden',
+              textContent: 'changed',
+              title: 'This resume uses a different wording from the pinned default',
+            })
+          : null,
       ].filter(Boolean),
       trailingActions: [
         el('button', { className: 'tiny', textContent: 'Feedback', onclick: () => askBulletFeedback(entry, bullet) }),
@@ -768,8 +815,7 @@ function entryBlock(entry, section, choices) {
         title: 'Hidden on this variation — click to show',
         onChange: (checked) => setEntryIncluded(section, entry, checked),
       }),
-      el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || entry.id }),
-      el('span', { className: 'id', textContent: entry.id }),
+      el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || 'Untitled' }),
     ]);
     row.onclick = (ev) => {
       if (ev.target.closest('input')) return;
@@ -787,8 +833,7 @@ function entryBlock(entry, section, choices) {
       title: 'Showing on this variation',
       onChange: (checked) => setEntryIncluded(section, entry, checked),
     }),
-    el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || entry.id }),
-    el('span', { className: 'id', textContent: entry.id }),
+    el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || 'Untitled' }),
     el('span', { className: 'grow' }),
     el('div', { className: 'entry-actions' }, [
       // The title has no meta-line row of its own, so its "give this
@@ -831,7 +876,13 @@ function entryBlock(entry, section, choices) {
         onEdit: chosen ? () => editFieldVariant(entry, name, chosen) : null,
         extraActions: [
           el('span', { className: 'chip count', textContent: plural(field.variants.length, 'alternate') }),
-          key in state.choices ? el('span', { className: 'chip overridden', textContent: 'changed' }) : null,
+          current !== field.default
+            ? el('span', {
+                className: 'chip overridden',
+                textContent: 'changed',
+                title: 'This resume uses a different alternate from the pinned default',
+              })
+            : null,
         ].filter(Boolean),
       });
       if (chosen?.note) control.append(el('div', { className: 'note', textContent: chosen.note }));
@@ -917,7 +968,7 @@ function skillsBlock(section) {
     box.append(
       el('div', { className: 'entry-head' }, [
         el('span', { className: 'title', textContent: group.name }),
-        el('span', { className: 'id', textContent: gid }),
+
         el('span', { className: 'grow' }),
         el('div', { className: 'entry-actions' }, [
           el('button', { className: 'tiny danger', textContent: 'Delete group', onclick: () => removeSkillGroup(group) }),
@@ -1756,17 +1807,92 @@ async function saveAsVariation() {
   render();
 }
 
+/**
+ * Ask for a critique and carry on working.
+ *
+ * A good critique takes the AI a minute or three, and holding a dialog open
+ * for it is the wrong shape — you asked a question, you should be able to go
+ * and do something else. The request goes off as a job; the header says when
+ * an answer is waiting.
+ */
 async function askFeedback() {
-  showModal('Feedback', el('p', { className: 'hint', textContent: 'Asking the configured AI…' }));
   try {
-    const result = await api('/ai/feedback', { method: 'POST', body: JSON.stringify({ resumeId: state.resumeId }) });
-    showModal(
-      result.executed ? 'Feedback' : 'AI is off — this is the prompt it would have run',
-      el('pre', { textContent: result.output }),
-    );
+    const { job } = await api('/ai/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ resumeId: state.resumeId, background: true }),
+    });
+    setStatus('Reading your resume — this keeps working while you do');
+    watchJobs();
+    return job;
   } catch (err) {
     showModal('Feedback failed', el('pre', { textContent: err.message }));
+    return null;
   }
+}
+
+/* ---- Work you walked away from ------------------------------------- *
+ * Jobs are polled rather than pushed: this is a local server and one small
+ * request every few seconds costs nothing, where a socket would be a second
+ * transport to keep working for one badge.
+ * -------------------------------------------------------------------- */
+
+let jobTimer = null;
+
+function watchJobs() {
+  clearInterval(jobTimer);
+  jobTimer = setInterval(() => refreshJobs().catch(() => {}), 3000);
+  refreshJobs().catch(() => {});
+}
+
+async function refreshJobs() {
+  const { jobs } = await api('/ai/jobs');
+  renderJobChip(jobs);
+  // Nothing running and nothing unread: stop asking.
+  if (!jobs.some((j) => j.status === 'running' || j.unread)) {
+    clearInterval(jobTimer);
+    jobTimer = null;
+  }
+}
+
+function renderJobChip(jobs) {
+  const chip = $('#jobs-chip');
+  if (!chip) return;
+
+  const running = jobs.filter((j) => j.status === 'running');
+  const ready = jobs.filter((j) => j.status !== 'running' && j.unread);
+
+  if (running.length === 0 && ready.length === 0) {
+    chip.className = 'jobs-chip hidden';
+    chip.textContent = '';
+    return;
+  }
+
+  chip.className = `jobs-chip${ready.length > 0 ? ' ready' : ' working'}`;
+  chip.textContent =
+    ready.length > 0
+      ? `${plural(ready.length, 'result')} ready`
+      : `Thinking about ${running[0].about}…`;
+  chip.onclick = () => openJob(ready[0] ?? running[0]);
+}
+
+async function openJob(job) {
+  if (job.status === 'running') {
+    showModal('Still working', el('p', { className: 'hint' }, `The AI is reading ${job.about}. This panel will have it when it is done.`));
+    return;
+  }
+
+  const full = await api(`/ai/jobs/${encodeURIComponent(job.id)}`).catch(() => job);
+  await refreshJobs().catch(() => {});
+
+  if (full.status === 'failed') {
+    showModal('Feedback failed', el('pre', { textContent: full.error ?? 'Unknown error' }));
+    return;
+  }
+  const result = full.result ?? {};
+  showModal(
+    result.executed ? `Feedback — ${full.about}` : 'AI is off — this is the prompt it would have run',
+    el('pre', { textContent: result.output ?? '' }),
+  );
 }
 
 async function askBulletFeedback(entry, bullet) {
@@ -1796,7 +1922,24 @@ const STATUSES = ['interested', 'applying', 'applied', 'oa', 'interview', 'offer
 let openApplicationId = null;
 
 async function loadApplications() {
-  const { applications, stats } = await api('/applications');
+  const { applications, stats, current } = await api('/applications');
+
+  // Where to point a file picker: everything still in flight, in one folder,
+  // already named the way portals want it.
+  const files = $('#current-files');
+  if (files) {
+    setChildren(
+      files,
+      el('span', { className: 'meta-label', textContent: 'Ready to upload' }),
+      el('span', { className: 'mono-path', textContent: current?.dir ?? '' }),
+      el('span', {
+        className: 'hint',
+        textContent: current?.files?.length
+          ? `${plural(current.files.length, 'file')} from ${plural(current.applications, 'application')} still being sent.`
+          : 'Empty — nothing is mid-application.',
+      }),
+    );
+  }
 
   $('#stats').replaceChildren(
     ...[
@@ -1882,7 +2025,7 @@ async function loadApplications() {
 async function openApplication(id) {
   openApplicationId = id;
   const panel = $('#app-detail');
-  setChildren(panel, el('p', { className: 'hint', textContent: 'Loading…' }));
+  setChildren(panel, skeleton('detail', 3));
 
   try {
     const { application: a, resume, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
@@ -2327,6 +2470,27 @@ function renderDraft(draft) {
     el('div', { className: 'block' }, [
       el('div', { className: 'block-head' }, [el('h4', {}, 'Resume and notes')]),
       el('div', { className: 'toolbar' }, [el('span', { className: 'hint' }, 'Send'), resumeSelect]),
+      el('div', { className: 'toolbar' }, [
+        el('button', {
+          textContent: 'Tailor one for this posting',
+          title: draft.url
+            ? 'Read the posting and pick the phrasings that suit it'
+            : 'Works from the posting text; add a link to this draft to read it automatically',
+          onclick: () => tailorDraft(draft, notes, false),
+        }),
+        el('button', {
+          className: 'tiny',
+          textContent: 'Let the AI choose',
+          title: 'The AI reads the posting and decides which phrasings and bullets to use',
+          onclick: () => tailorDraft(draft, notes, true),
+        }),
+      ]),
+      el('div', {
+        className: 'hint',
+        textContent: draft.url
+          ? 'The posting is read from its link, the same way the extension reads the page you are on.'
+          : 'No link on this draft, so it works from whatever posting text it already has.',
+      }),
       notesBox,
     ]),
     el('div', { className: 'block' }, [
@@ -2354,6 +2518,41 @@ function renderDraft(draft) {
       notes,
     ]),
   );
+}
+
+/**
+ * Make a resume for this posting from inside the workspace — the same
+ * pipeline the extension runs, given a link instead of a page.
+ */
+async function tailorDraft(draft, notes, useAi) {
+  setChildren(notes, el('div', { textContent: useAi ? 'Reading the posting…' : 'Matching against the posting…' }));
+  try {
+    const res = await api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
+      method: 'POST',
+      body: JSON.stringify({ useAi, baseResumeId: draft.resumeId }),
+    });
+
+    const changed = (res.diff ?? []).filter((c) => c.kind !== 'none');
+    setChildren(
+      notes,
+      el('div', {
+        textContent: res.fetched
+          ? `Read the posting and made "${res.spec.label}".`
+          : `Made "${res.spec.label}" from the posting text on this draft.`,
+      }),
+      el('div', {
+        textContent: changed.length
+          ? `${plural(changed.length, 'change')} from the resume it started from${res.usedAi ? ', chosen by the AI' : ''}.`
+          : 'Nothing needed changing — the resume already suited it.',
+      }),
+      ...changed.slice(0, 6).map((c) => el('div', { className: 'hint', textContent: c.text })),
+    );
+
+    await loadStore();
+    await openDraft(draft.id);
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  }
 }
 
 async function generate(draft, what, notes) {
@@ -2643,6 +2842,209 @@ async function loadVoice() {
           ),
         ]),
   );
+}
+
+/* ------------------------------------------------------------------ *
+ * Adding files to the corpus                                          *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The drop zone. Dragging a file onto a page is the one gesture everyone
+ * already knows, so it is the main way in; the click and the keyboard are
+ * there because a gesture nobody can reach is not an affordance.
+ */
+function wireVoiceDrop() {
+  const zone = $('#voice-drop');
+  const input = $('#voice-files');
+  if (!zone || !input) return;
+
+  const open = () => input.click();
+  zone.onclick = open;
+  zone.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
+  };
+  input.onchange = () => {
+    const files = [...input.files];
+    input.value = ''; // so the same file can be dropped again
+    if (files.length) ingestFiles(files).catch((e) => setStatus(e.message, true));
+  };
+
+  for (const type of ['dragenter', 'dragover']) {
+    zone.addEventListener(type, (e) => {
+      e.preventDefault();
+      zone.classList.add('over');
+    });
+  }
+  for (const type of ['dragleave', 'drop']) {
+    zone.addEventListener(type, () => zone.classList.remove('over'));
+  }
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length) ingestFiles(files).catch((err) => setStatus(err.message, true));
+  });
+}
+
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '');
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Read each file, ask the server what is in it, then show the lot for review. */
+async function ingestFiles(files) {
+  const zone = $('#voice-drop');
+  zone.classList.add('busy');
+
+  const proposals = [];
+  const failed = [];
+  try {
+    for (const [n, file] of files.entries()) {
+      setChildren(
+        zone,
+        el('b', { textContent: `Reading ${file.name}…` }),
+        el('span', {
+          className: 'faint',
+          textContent:
+            files.length > 1
+              ? `File ${n + 1} of ${files.length}. Sorting what is inside it.`
+              : 'Sorting what is inside it.',
+        }),
+        el('div', { className: 'bar indeterminate' }, [el('span')]),
+      );
+
+      try {
+        const result = await api('/voice/ingest', {
+          method: 'POST',
+          body: JSON.stringify({ name: file.name, data: await readAsBase64(file) }),
+        });
+        for (const item of result.items) proposals.push({ ...item, source: file.name });
+        if (result.aiError) setStatus(`Sorted ${file.name} without AI: ${result.aiError}`, true);
+      } catch (err) {
+        failed.push(`${file.name}: ${err.message}`);
+      }
+    }
+  } finally {
+    zone.classList.remove('busy');
+    resetVoiceDrop();
+  }
+
+  if (failed.length) setStatus(failed.join(' · '), true);
+  if (proposals.length === 0) {
+    if (!failed.length) setStatus('Nothing in those files looked like writing', true);
+    return;
+  }
+  await reviewProposals(proposals);
+}
+
+function resetVoiceDrop() {
+  setChildren(
+    $('#voice-drop'),
+    el('b', {}, 'Drop files here'),
+    el('span', {
+      className: 'faint',
+      textContent:
+        'PDF, Word, Markdown, LaTeX, plain text — a file with four old cover letters in it is split into four. Nothing is saved until you have looked at it.',
+    }),
+  );
+}
+
+const PROPOSAL_NOTE =
+  'Each of these was taken from the file as it stands — nothing was rewritten. Correct anything filed wrongly, untick what you do not want, then add them.';
+
+/**
+ * What was found, before it is kept. Everything is ticked and ready; the work
+ * left is glancing down the list, which is the point.
+ */
+async function reviewProposals(proposals) {
+  const rows = [];
+  const content = el('div', { className: 'proposals' });
+
+  const files = new Set(proposals.map((p) => p.source)).size;
+  const summaryLine = el('p', { className: 'hint' });
+
+  // What will actually be added, recounted as boxes are ticked: the button
+  // says "Add them", and this is the sentence that says what "them" is.
+  const retally = () => {
+    const kept = rows.filter((r) => r.keep.checked);
+    const counts = {};
+    for (const r of kept) counts[r.kind.value] = (counts[r.kind.value] ?? 0) + 1;
+    const byKind = SAMPLE_KINDS.filter((k) => counts[k.value])
+      .map((k) => `${counts[k.value]} × ${k.label.toLowerCase()}`)
+      .join(', ');
+
+    const skipped = rows.length - kept.length;
+    summaryLine.textContent = kept.length === 0
+      ? `Nothing ticked — all ${plural(rows.length, 'piece')} from ${plural(files, 'file')} will be left out.`
+      : `${plural(kept.length, 'piece')} of writing from ${plural(files, 'file')}${
+          byKind ? `: ${byKind}` : ''
+        }${skipped > 0 ? `. ${skipped} left out.` : '.'}`;
+  };
+
+  content.append(summaryLine);
+
+  for (const p of proposals) {
+    const keep = el('input', { type: 'checkbox', checked: true });
+    const title = el('input', { type: 'text', value: p.title, className: 'proposal-title' });
+    const kind = el('select');
+    for (const k of SAMPLE_KINDS) {
+      kind.append(el('option', { value: k.value, textContent: k.label, selected: k.value === p.kind }));
+    }
+
+    const body = el('div', { className: 'body sample', textContent: p.text });
+    const row = el('div', { className: 'proposal' }, [
+      el('div', { className: 'row1' }, [
+        keep,
+        title,
+        kind,
+        el('span', {
+          className: 'faint',
+          textContent: `${p.source} · ${p.by === 'ai' ? 'sorted by AI' : 'sorted by rules'}`,
+        }),
+      ]),
+      body,
+    ]);
+
+    // Untick and the row recedes, so what will be kept reads at a glance.
+    keep.onchange = () => {
+      row.classList.toggle('dropped', !keep.checked);
+      retally();
+    };
+    kind.onchange = retally;
+    content.append(row);
+    rows.push({ p, keep, title, kind });
+  }
+
+  retally();
+
+  const ok = await showModal('Add these to your writing?', content, {
+    note: PROPOSAL_NOTE,
+    okLabel: 'Add them',
+    showCancel: true,
+  });
+  if (!ok) return;
+
+  const items = rows
+    .filter((r) => r.keep.checked)
+    .map((r) => ({ kind: r.kind.value, title: r.title.value, text: r.p.text }));
+  if (items.length === 0) {
+    setStatus('Nothing added');
+    return;
+  }
+
+  const sources = [...new Set(proposals.map((p) => p.source))];
+  const result = await api('/voice/ingest/accept', {
+    method: 'POST',
+    body: JSON.stringify({ items, source: sources.length === 1 ? sources[0] : `${sources.length} files` }),
+  });
+  setStatus(`Added ${plural(result.added, 'sample')} to your writing`);
+  loadVoice();
 }
 
 async function addSample() {
@@ -2994,7 +3396,7 @@ async function loadResumeHistory() {
   const select = $('#history-resume');
   select.replaceChildren(
     ...state.store.resumes.map((r) =>
-      el('option', { value: r.id, textContent: `${r.label} (${r.id})`, selected: r.id === historyResumeId }),
+      el('option', { value: r.id, textContent: r.label, selected: r.id === historyResumeId }),
     ),
   );
   if (!historyResumeId || !state.store.resumes.some((r) => r.id === historyResumeId)) {
@@ -3008,13 +3410,36 @@ async function loadResumeHistory() {
     return;
   }
 
-  timeline.replaceChildren(el('p', { className: 'hint', textContent: 'Loading…' }));
+  timeline.replaceChildren(skeleton('versions', 4));
   try {
     const { versions } = await api(`/resumes/${encodeURIComponent(historyResumeId)}/history`);
     renderResumeTimeline(versions);
   } catch (err) {
     timeline.replaceChildren(el('div', { className: 'err', textContent: err.message }));
   }
+}
+
+
+/**
+ * A placeholder shaped like the thing being fetched.
+ *
+ * "Loading…" in the middle of an empty page tells you only that nothing is
+ * there. Rebuilding a long version history takes a second or two the first
+ * time, and a few grey rows in the shape of the list say what is coming and
+ * roughly how much of it — which is the question you are actually asking
+ * while you wait.
+ */
+function skeleton(kind, rows = 3) {
+  return el(
+    'div',
+    { className: `skeleton ${kind}`, 'aria-busy': 'true', 'aria-label': 'Loading' },
+    Array.from({ length: rows }, () =>
+      el('div', { className: 'sk-row' }, [
+        el('span', { className: 'sk-line wide' }),
+        el('span', { className: 'sk-line' }),
+      ]),
+    ),
+  );
 }
 
 /**
@@ -3024,6 +3449,9 @@ async function loadResumeHistory() {
  */
 function changeRow(c) {
   const where = c.where ? el('span', { className: 'c-where', textContent: c.where }) : null;
+  // `text` is a self-contained sentence, so it names the place it happened —
+  // and the place is already the label beside it.
+  const detail = c.where && c.text?.startsWith(`${c.where}: `) ? c.text.slice(c.where.length + 2) : c.text;
 
   if (c.from && c.to) {
     return el('div', { className: `c ${c.kind}` }, [
@@ -3040,7 +3468,7 @@ function changeRow(c) {
   if (c.kind === 'removed' && c.from) {
     return el('div', { className: 'c removed' }, [where, el('div', { className: 'c-diff' }, [el('del', { textContent: c.from })])]);
   }
-  return el('div', { className: `c ${c.kind}`, textContent: c.text });
+  return el('div', { className: `c ${c.kind}` }, [where, el('span', { className: 'c-plain', textContent: detail })]);
 }
 
 function renderResumeTimeline(versions) {
@@ -3068,7 +3496,6 @@ function renderResumeTimeline(versions) {
           el('span', { className: 'rel', textContent: new Date(v.date).toLocaleString() }),
           isCurrent ? el('span', { className: 'badge done', textContent: 'Current' }) : null,
           el('span', { className: 'grow' }),
-          el('span', { className: 'rel', textContent: v.hash.slice(0, 8) }),
         ]),
         el(
           'div',
@@ -3182,7 +3609,7 @@ function formatWhen(iso) {
 async function showCommit(hash) {
   selectedCommit = hash;
   const panel = $('#commit-detail');
-  panel.replaceChildren(el('p', { className: 'hint', textContent: 'Loading…' }));
+  panel.replaceChildren(skeleton('detail', 3));
   await loadHistory();
 
   try {
@@ -3326,19 +3753,66 @@ function form(title, fields, note) {
 
 function render() {
   const select = $('#resume-select');
+  const option = (r) => el('option', { value: r.id, textContent: r.label, selected: r.id === state.resumeId });
+
+  // Bases in their own group. A store fills up with resumes tailored for one
+  // posting each; the two or three you actually build from should not have to
+  // be found among them.
+  const bases = state.store.resumes.filter((r) => r.base);
+  const rest = state.store.resumes.filter((r) => !r.base);
   select.replaceChildren(
-    ...state.store.resumes.map((r) =>
-      el('option', { value: r.id, textContent: `${r.label} (${r.id})`, selected: r.id === state.resumeId }),
-    ),
+    ...(bases.length > 0
+      ? [
+          el('optgroup', { label: 'Bases' }, bases.map(option)),
+          rest.length > 0 ? el('optgroup', { label: 'Variations' }, rest.map(option)) : null,
+        ].filter(Boolean)
+      : state.store.resumes.map(option)),
   );
   select.value = state.resumeId;
+  renderBaseButton();
   renderEditor();
+}
+
+/** The pin itself: what this resume is, and the one click that changes it. */
+function renderBaseButton() {
+  const btn = $('#btn-base');
+  if (!btn) return;
+  const spec = state.store.resumes.find((r) => r.id === state.resumeId);
+  const pinned = Boolean(spec?.base);
+
+  btn.textContent = pinned ? '★ Base' : '☆ Pin as base';
+  btn.className = pinned ? 'tiny pinned' : 'tiny';
+  btn.title = pinned
+    ? 'New resumes and tailored drafts start from this one. Click to unpin.'
+    : 'Pin this as a starting point for new resumes and tailored drafts';
+  btn.disabled = !spec;
+  btn.onclick = async () => {
+    try {
+      await api(`/resumes/${encodeURIComponent(state.resumeId)}/base`, {
+        method: 'PUT',
+        body: JSON.stringify({ base: !pinned }),
+      });
+      await loadStore();
+      setStatus(pinned ? 'No longer a base' : 'Pinned as a base');
+      render();
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  };
 }
 
 async function loadStore() {
   state.store = await api('/store');
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
-    state.resumeId = state.store.resumes.find((r) => r.id === 'newgrad')?.id ?? state.store.resumes[0]?.id ?? null;
+    // A pinned base is what this store says it starts from; the old
+    // conventional id is only the guess for a store that has never said.
+    const resumes = state.store.resumes;
+    state.resumeId =
+      resumes.find((r) => r.base)?.id ??
+      resumes.find((r) => r.id === 'newgrad')?.id ??
+      resumes.find((r) => !r.extends)?.id ??
+      resumes[0]?.id ??
+      null;
   }
 }
 
@@ -3433,6 +3907,9 @@ async function boot() {
     ]);
     if (answer?.kind) addEntry(answer.kind);
   };
+  // Anything the AI was still doing when the tab was closed is picked up here.
+  refreshJobs().catch(() => {});
+
   $('#btn-add-app').onclick = addApplication;
   $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
   $('#btn-add-letter').onclick = addLetter;
@@ -3449,6 +3926,7 @@ async function boot() {
     }
   };
   $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
+  wireVoiceDrop();
   $('#btn-save-voice').onclick = async () => {
     await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: $('#voice').value }) });
     setStatus('Notes saved');

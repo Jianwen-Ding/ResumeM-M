@@ -223,3 +223,74 @@ describe('construction', () => {
     expect(path.isAbsolute(new Store('data').root)).toBe(true);
   });
 });
+
+describe('files a person edited by hand', () => {
+  it('reads a sample with no front matter as an untitled note', () => {
+    t.write('corpus/scratch.md', 'Something I wrote and never labelled.');
+    const sample = t.store.loadSamples().find((s) => s.id === 'scratch');
+    expect(sample?.title).toBe('scratch');
+    expect(sample?.kind).toBe('other');
+    expect(sample?.text).toContain('never labelled');
+  });
+
+  it('fills in what a half-written header left out', () => {
+    t.write('corpus/half.md', '---\ntags: [old]\n---\nThe body.');
+    const sample = t.store.loadSamples().find((s) => s.id === 'half');
+    expect(sample?.title).toBe('half');
+    expect(sample?.kind).toBe('other');
+    expect(sample?.createdAt).toBe('');
+    expect(sample?.tags).toEqual(['old']);
+  });
+
+  it('reads an empty header rather than tripping over it', () => {
+    t.write('corpus/empty-head.md', '---\n\n---\nJust the body.');
+    expect(t.store.loadSamples().find((s) => s.id === 'empty-head')?.text).toContain('Just the body');
+    t.write('letters/empty-head.md', '---\n\n---\nJust the body.');
+    expect(t.store.loadCoverLetters().find((l) => l.id === 'empty-head')?.title).toBe('empty-head');
+  });
+
+  it('has no corpus when the folder was never made', () => {
+    const empty = makeTempStore({ empty: true });
+    expect(empty.store.loadSamples()).toEqual([]);
+    empty.cleanup();
+  });
+
+  it('names a draft after its file when the file forgot to say', () => {
+    t.write('drafts/nameless.yaml', 'company: Acme\nrole: Intern\n');
+    expect(t.store.loadDrafts().find((d) => d.id === 'nameless')).toBeTruthy();
+  });
+
+  it('treats an empty yaml file as the empty thing it is', () => {
+    t.write('applications.yaml', '');
+    expect(t.store.load().applications).toEqual([]);
+  });
+});
+
+describe('patching config one section at a time', () => {
+  it('merges into a section without dropping the rest of it', () => {
+    t.store.saveConfig({ latex: { engine: 'tectonic' } } as never);
+    const after = t.store.loadConfig();
+    expect(after.latex.engine).toBe('tectonic');
+    // The sections that were not mentioned are untouched.
+    expect(after.ai.command).toBe(t.store.loadConfig().ai.command);
+    expect(after.output.dir).toBeTruthy();
+  });
+
+  it('patches the other sections the same way', () => {
+    t.store.saveConfig({ ai: { enabled: true } } as never);
+    t.store.saveConfig({ git: { autoCommit: false } } as never);
+    t.store.saveConfig({ output: { dir: 'built' } } as never);
+    const after = t.store.loadConfig();
+    expect(after.ai.enabled).toBe(true);
+    expect(after.git.autoCommit).toBe(false);
+    expect(after.output.dir).toBe('built');
+  });
+});
+
+describe('where an entry is written back', () => {
+  it('puts a project in projects.yaml, beside the other projects', () => {
+    t.store.saveEntry({ id: 'proj_new', kind: 'project', title: 'A new thing' });
+    const raw = fs.readFileSync(path.join(t.dir, 'projects.yaml'), 'utf8');
+    expect(raw).toContain('proj_new');
+  });
+});

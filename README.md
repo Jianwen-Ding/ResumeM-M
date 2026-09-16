@@ -187,6 +187,8 @@ rmm feedback <id> [--focus "…"]   Ask the configured AI for a critique
 rmm apply <id> --company C --role R [--url U]
                                   Named bundle + tracker entry + snapshot
 rmm track                         The tracker
+rmm voice add <file…>             Read files into your writing corpus, sorted
+                                  into letters, answers, resumes, and the rest
 rmm save [-m "why"] [--push]      Commit the whole store to git
 rmm serve [--port 4600]           Editor GUI and the extension's API
 ```
@@ -211,6 +213,12 @@ Two things make this different from pasting into a chat window:
 
 - **`voice.md` is prepended to every request.** The rules about how you write
   live in a file you edit once.
+- **Your voice comes from your writing, not a description of it.** Drop files —
+  PDF, Word, Markdown, LaTeX, plain text — onto the Voice tab, or run
+  `rmm voice add <file…>`, and a file holding four old cover letters becomes
+  four samples. The AI does the sorting by naming block numbers; the text of
+  every sample is reassembled from the file, so nothing it says can end up
+  stored as something you wrote.
 - **Feedback prompts refuse to rewrite.** They quote the fragment, say what is
   weak, and say what would fix it. The words stay yours.
 

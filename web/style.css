@@ -133,7 +133,25 @@ nav button {
 nav button:hover { background: var(--state-hover); color: var(--ink-soft); }
 nav button.active { background: var(--accent-soft); color: #174ea6; }
 
-.status { margin-left: auto; color: var(--muted); font-size: 12px; max-width: 40ch; text-align: right; }
+/* Something the AI is doing, or has finished while you were elsewhere. */
+.jobs-chip {
+  margin-left: auto;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  background: var(--line-soft);
+  color: var(--muted);
+}
+.jobs-chip.working::after { content: " ⋯"; }
+.jobs-chip.ready { background: var(--accent-soft); color: #174ea6; }
+.jobs-chip.ready:hover { background: #d2e3fc; }
+.jobs-chip.hidden { display: none; }
+.jobs-chip.hidden + .status { margin-left: auto; }
+
+.status { color: var(--muted); font-size: 12px; max-width: 40ch; text-align: right; }
 .status.err { color: var(--bad); }
 
 .tab { display: none; padding: 14px 16px 40px; }
@@ -535,6 +553,11 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
   outline: 0;
 }
 
+/* The flat folder of what is in flight: a path you can paste into a file
+   picker, not a place to browse. */
+.current-files { display: inline-flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.current-files .mono-path { font-size: var(--t-sm); padding: 3px 8px; }
+
 /* Who you are: one block, no variants, above the sections it heads. */
 .profile-entry .title { font-size: var(--t-lg); font-weight: 500; }
 .profile-grid {
@@ -601,6 +624,14 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .chip.count { background: var(--line-soft); color: var(--muted); }
 .chip.overridden { background: var(--accent-soft); color: var(--accent); }
 .chip.suggested { background: var(--warn-bg); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn-line); }
+/* Pinned: what the store falls back to, and the resumes you build from. */
+.chip.pinned { background: var(--accent-soft); color: #174ea6; font-weight: 550; }
+button.tiny.pinned {
+  background: var(--accent-soft);
+  border-color: #c6d4f2;
+  color: #174ea6;
+  font-weight: 550;
+}
 
 .note { color: var(--muted); font-size: 12px; margin-top: 4px; font-style: italic; }
 
@@ -979,6 +1010,75 @@ tbody tr { cursor: pointer; }
 .sample-kind { text-transform: capitalize; }
 .mini-card .body.sample { max-height: 4.6em; }
 
+/* Dropping files in. A dashed outline is the one shape everyone reads as
+   "put something here", so it stays a dashed outline. */
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  text-align: center;
+  padding: 18px 16px;
+  margin-bottom: 12px;
+  border: 1.5px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.dropzone:hover,
+.dropzone:focus-visible { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone.over {
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--accent-soft);
+}
+.dropzone.busy { cursor: progress; border-style: solid; }
+.dropzone .faint { max-width: 46ch; line-height: 1.45; }
+.dropzone .bar {
+  width: 180px;
+  height: 4px;
+  margin-top: 8px;
+  background: var(--line-soft);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.dropzone .bar.indeterminate span {
+  display: block;
+  width: 40%;
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  animation: slide 1.1s ease-in-out infinite;
+}
+@keyframes slide {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+
+/* Reviewing what was found before it is kept. */
+.proposals { display: flex; flex-direction: column; gap: 8px; }
+.proposal {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  background: var(--panel);
+}
+.proposal .row1 { display: flex; align-items: center; gap: 8px; }
+.proposal .row1 > .faint { margin-left: auto; white-space: nowrap; }
+.proposal .proposal-title { flex: 1 1 auto; min-width: 8ch; }
+.proposal .body.sample {
+  max-height: 6.4em;
+  overflow: auto;
+  margin-top: 7px;
+  white-space: pre-wrap;
+  color: var(--muted);
+}
+.proposal.dropped { opacity: 0.45; }
+.proposal.dropped .body.sample { max-height: 0; margin-top: 0; overflow: hidden; }
+
 .voice-extras {
   margin-top: 18px;
   border-top: 1px solid var(--line);
@@ -1009,7 +1109,14 @@ tbody tr { cursor: pointer; }
 
 /* ---- Resume version timeline (Google-Docs-style history) ---- */
 
-.timeline-list { display: grid; gap: 10px; max-width: 760px; }
+/* A version history is one column of documents. It reads at a single measure
+   rather than the full width of the window, and the toolbar shares that
+   measure so the two have the same edges. 760px left a third of a wide window
+   conspicuously empty; 980 is still a comfortable line length for the diffs. */
+#tab-history > .hint,
+#tab-history > .toolbar,
+.timeline-list { max-width: 980px; }
+.timeline-list { display: grid; gap: 10px; }
 .version-card {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1054,6 +1161,7 @@ tbody tr { cursor: pointer; }
 /* Where it happened, then what it used to say and what it says now — a
    tracked change, not a patch. */
 .version-card .c-where { display: block; font-weight: 600; color: var(--ink); }
+.version-card .c-plain { display: block; margin-top: 3px; color: var(--ink-soft); }
 .version-card .c-diff { display: grid; gap: 2px; margin-top: 3px; }
 .version-card .c-diff del,
 .version-card .c-diff ins {
@@ -1072,3 +1180,38 @@ tbody tr { cursor: pointer; }
 .version-card .c-diff ins { color: var(--ink); background: var(--good-bg); }
 
 .version-card .actions-row { margin-top: 9px; display: flex; gap: 6px; align-items: center; }
+
+/* ------------------------------------------------------------------ *
+ * Waiting                                                             *
+ * ------------------------------------------------------------------ */
+
+/* Grey rows in the shape of what is coming. The shimmer is slow on purpose:
+   a fast one reads as an error state rather than as work in progress. */
+.skeleton { display: flex; flex-direction: column; gap: 10px; }
+.sk-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+.sk-line {
+  height: 10px;
+  width: 42%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--line-soft) 25%, var(--line) 37%, var(--line-soft) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+.sk-line.wide { width: 72%; }
+.skeleton.detail .sk-row { padding: 10px 11px; }
+@keyframes shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk-line { animation: none; }
+  .dropzone .bar.indeterminate span { animation: none; width: 100%; }
+}

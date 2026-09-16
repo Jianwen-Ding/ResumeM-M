@@ -49,6 +49,28 @@ describe('a resume version history', () => {
     expect(versions[0]?.changes[0]?.text).toMatch(/First version — \d+ sections, \d+ bullet points/);
   });
 
+  it('gives the same answer twice, and faster the second time', async () => {
+    // A commit's contents are fixed, so the document it produced is cached.
+    // The risk of caching is staleness, so: same request, same answer — and a
+    // new commit still shows up.
+    await request(app)
+      .put('/api/resumes/newgrad')
+      .send({ label: 'New grad', extends: 'base', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    const first = await history();
+    expect(await history()).toEqual(first);
+
+    await request(app)
+      .put('/api/resumes/newgrad')
+      .send({ label: 'New grad', extends: 'base', choices: { b_pipeline: 'v_short' } })
+      .expect(200);
+
+    const after = await history();
+    expect(after.length).toBe(first.length + 1);
+    expect(after[0]?.changes.some((c) => c.to === 'Built a pipeline')).toBe(true);
+  });
+
   it('describes a phrasing switch as the sentence changing, not the variant id', async () => {
     await request(app)
       .put('/api/resumes/newgrad')

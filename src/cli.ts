@@ -1,15 +1,18 @@
 #!/usr/bin/env node
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
 import { Repo } from './git/repo.js';
 import { saveStore } from './git/save.js';
+import { ingestFile } from './ingest/index.js';
 import { resolveStoreDir, seedStore } from './model/location.js';
-import { buildBundle, stats } from './model/applications.js';
+import { buildBundle, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
 import { compileResume, OverflowError } from './render/compile.js';
+import type { WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,6 +30,9 @@ const USAGE = `rmm — resume mix-and-match
   rmm apply <id> --company C --role R [--url U]
                                   Build a named application bundle and track it
   rmm track                       Show the application tracker
+  rmm voice add <file…> [--dry-run] [--no-ai]
+                                  Read files into your writing corpus, sorted
+                                  into letters, answers, resumes, and the rest
   rmm save [-m "why"] [--push]    Commit everything in the store to git
   rmm serve [--port 4600]         Start the editor GUI and extension API
 
@@ -221,6 +227,75 @@ async function main(argv: string[]): Promise<number> {
         console.log(`${plural(result.remote.ahead, 'commit')} not yet pushed to ${result.remote.url} — \`rmm save --push\` sends them.`);
       }
       return 0;
+    }
+
+    /**
+     * Put files into the corpus the AI learns your voice from. The sorting is
+     * the feature: a file with four old cover letters in it becomes four
+     * samples, not one lump nobody will ever read back.
+     */
+    case 'voice': {
+      const [sub, ...files] = rest;
+      if (sub !== 'add') {
+        console.error('Usage: rmm voice add <file…> [--dry-run] [--no-ai]');
+        return 1;
+      }
+
+      const paths = files.filter((f) => !f.startsWith('-'));
+      if (paths.length === 0) {
+        console.error('Name at least one file to add.');
+        return 1;
+      }
+
+      const dryRun = rest.includes('--dry-run');
+      const useAi = !rest.includes('--no-ai');
+      const config = store.loadConfig();
+      const stamp = Date.now().toString(36);
+      const samples: WritingSample[] = [];
+      let failed = 0;
+
+      for (const file of paths) {
+        let found;
+        try {
+          found = await ingestFile(config, path.basename(file), fs.readFileSync(file), { useAi });
+        } catch (err) {
+          console.error(`${file}: ${err instanceof Error ? err.message : String(err)}`);
+          failed++;
+          continue;
+        }
+
+        console.log(`${file} — ${plural(found.items.length, 'piece')} of writing${found.usedAi ? ', sorted by AI' : ''}`);
+        if (found.aiError) console.log(`  (the AI could not be reached: ${found.aiError} — sorted by rules instead)`);
+
+        for (const item of found.items) {
+          console.log(`  ${item.kind.padEnd(6)} ${item.title}`);
+          samples.push({
+            id: `${slug(item.title) || 'sample'}-${stamp}-${samples.length}`,
+            title: item.title,
+            kind: item.kind,
+            text: item.text,
+            createdAt: new Date().toISOString(),
+            tags: [`from:${path.basename(file)}`],
+          });
+        }
+      }
+
+      if (samples.length === 0) {
+        console.log('Nothing was added.');
+        return failed > 0 ? 1 : 0;
+      }
+      if (dryRun) {
+        console.log(`\nNothing saved — this was a dry run. Drop --dry-run to keep ${plural(samples.length, 'sample')}.`);
+        return failed > 0 ? 1 : 0;
+      }
+
+      for (const sample of samples) store.saveSample(sample);
+      if (store.loadConfig().git.autoCommit) {
+        await repo.ensure();
+        await repo.commitAll(`Add ${plural(samples.length, 'writing sample')} from ${plural(paths.length, 'file')}`);
+      }
+      console.log(`\nAdded ${plural(samples.length, 'sample')}. Fix anything filed wrongly in Voice & AI, or with \`rmm serve\`.`);
+      return failed > 0 ? 1 : 0;
     }
 
     case 'serve': {

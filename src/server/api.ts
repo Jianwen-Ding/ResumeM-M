@@ -13,6 +13,7 @@ import {
   type TailorContext,
 } from '../ai/prompts.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
+import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
@@ -20,6 +21,8 @@ import { extractJob, jobPostingScore } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
+import { byBaseFirst, defaultBaseId } from '../model/bases.js';
+import { syncCurrent } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, resolveResume } from '../model/resolve.js';
@@ -41,6 +44,7 @@ import type {
   WritingSample,
 } from '../model/types.js';
 import { compileLetter, compileResume, OverflowError } from '../render/compile.js';
+import { Jobs } from './jobs.js';
 
 interface DescribedChange {
   key: string;
@@ -119,6 +123,45 @@ function describeChange(
   return { ...change };
 }
 
+/**
+ * Fetch a job posting so a workspace opened by hand can be tailored the same
+ * way the extension tailors one it is already looking at.
+ *
+ * Narrow on purpose. This server has no authentication and sits on loopback,
+ * so anything it can be asked to fetch is worth constraining: http(s) only, a
+ * hard timeout, and a cap on what is read. It also cannot see anything behind
+ * a login — which is why failing to fetch is not treated as an error by the
+ * caller, just as less to work with.
+ */
+async function fetchPosting(url: string): Promise<string> {
+  const target = new URL(url);
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    throw new Error('Only http and https links can be read');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(target, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: {
+        // Job boards serve very different markup to something that looks like
+        // a script; asking as a browser gets the posting rather than a shell.
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+    });
+    if (!res.ok) throw new Error(`the site replied ${res.status}`);
+
+    const text = await res.text();
+    return text.slice(0, 2_000_000);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
 function handler(fn: (req: Request, res: Response) => Promise<unknown>) {
   return (req: Request, res: Response) => {
@@ -146,6 +189,29 @@ export function createApi({ store, repo }: ApiDeps): Router {
   api.use(express.json({ limit: '32mb' }));
 
   const autoCommit = () => store.loadConfig().git.autoCommit;
+  // Work the user started and walked away from.
+  const jobs = new Jobs();
+
+  /**
+   * What a resume resolved to at a given commit.
+   *
+   * Version history is the one page that has to look at the whole store dozens
+   * of times over — once per commit — and a commit's contents are fixed
+   * forever, so the document it produced is too. Remembering them turns the
+   * second visit to a long history into no work at all. Bounded, because a
+   * history of a thousand commits is not worth a thousand resolved documents
+   * in memory; the oldest go first, and recomputing one costs a blob read.
+   */
+  const documentCache = new Map<string, ResolvedResume | null>();
+  const MAX_REMEMBERED = 400;
+  const rememberDocument = (key: string, doc: ResolvedResume | null): void => {
+    documentCache.set(key, doc);
+    while (documentCache.size > MAX_REMEMBERED) {
+      const oldest = documentCache.keys().next().value;
+      if (oldest === undefined) break;
+      documentCache.delete(oldest);
+    }
+  };
 
   /* ---------------------------------------------------------------- *
    * Store reads                                                       *
@@ -161,9 +227,38 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Bases first. Everything that offers "start from…" wants the two or three
+   * resumes you actually build from at the top, not whatever sorted first.
+   */
   api.get(
     '/resumes',
-    handler(async (_req, res) => res.json(store.loadResumes())),
+    handler(async (_req, res) => res.json(byBaseFirst(store.loadResumes()))),
+  );
+
+  /**
+   * Pin a resume as a base, or unpin it. Its own toggle rather than part of
+   * the whole-spec save: this is a decision about how the store is organised,
+   * and it should not ride along with an unrelated edit.
+   */
+  api.put(
+    '/resumes/:id/base',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const base = (req.body as { base?: boolean }).base !== false;
+      const spec = store.loadResumes().find((r) => r.id === id);
+      if (!spec) throw new Error(`No resume "${id}"`);
+
+      // Absent rather than false: an unpinned resume should look untouched in
+      // YAML, not carry a field explaining that it is ordinary.
+      if (base) spec.base = true;
+      else delete spec.base;
+
+      await withCommit(repo, autoCommit(), `${base ? 'Pin' : 'Unpin'} "${spec.label}" as a base`, () =>
+        store.saveResume(spec),
+      );
+      res.json(spec);
+    }),
   );
 
   api.get(
@@ -269,6 +364,42 @@ export function createApi({ store, repo }: ApiDeps): Router {
         store.saveEntry(entry),
       );
       res.json(variant);
+    }),
+  );
+
+  /**
+   * Pin an alternate as the one used when a resume expresses no preference.
+   *
+   * Choosing a wording on one resume is a decision about that resume; deciding
+   * a wording is simply the better one is a decision about the store, and
+   * until now there was no way to say the second without editing YAML. The key
+   * is the same key `choices` uses — a bullet id, or `entryId.field` — so
+   * "pinned here" and "chosen there" are the same idea at two scopes.
+   */
+  api.put(
+    '/defaults/:key',
+    handler(async (req, res) => {
+      const key = String(req.params.key);
+      const { variantId } = req.body as { variantId?: string };
+      if (!variantId) throw new Error('Name the alternate to pin');
+
+      const data = store.load();
+      const dot = key.indexOf('.');
+      const entry = dot > 0
+        ? data.entries.find((e) => e.id === key.slice(0, dot))
+        : data.entries.find((e) => (e.bullets ?? []).some((b) => b.id === key));
+      if (!entry) throw new Error('That line is not in the store any more');
+
+      const target = dot > 0
+        ? entry[key.slice(dot + 1) as 'title' | 'dates' | 'subtitle' | 'location']
+        : (entry.bullets ?? []).find((b) => b.id === key);
+      if (!target || typeof target === 'string') throw new Error('That line has no alternates to pin');
+      if (!target.variants.some((v) => v.id === variantId)) throw new Error('No such alternate');
+
+      target.default = variantId;
+      const label = target.variants.find((v) => v.id === variantId)?.label ?? variantId;
+      await withCommit(repo, autoCommit(), `Pin "${label}" as the default`, () => store.saveEntry(entry));
+      res.json({ key, variantId });
     }),
   );
 
@@ -451,6 +582,57 @@ export function createApi({ store, repo }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Read a file and propose what is in it, without saving anything.
+   *
+   * Two steps rather than one: a model sorting someone's old letters into the
+   * wrong drawers silently would be worse than not offering the feature, so
+   * the proposal is shown before it becomes part of the corpus.
+   */
+  api.post(
+    '/voice/ingest',
+    handler(async (req, res) => {
+      const body = req.body as { name?: string; data?: string; text?: string; useAi?: boolean };
+      const name = String(body.name ?? '').trim();
+
+      const bytes = body.data
+        ? Buffer.from(body.data, 'base64')
+        : Buffer.from(String(body.text ?? ''), 'utf8');
+
+      res.json(await ingestFile(store.loadConfig(), name, bytes, { useAi: body.useAi !== false }));
+    }),
+  );
+
+  /** Take the proposals the user kept and put them in the corpus, in one commit. */
+  api.post(
+    '/voice/ingest/accept',
+    handler(async (req, res) => {
+      const body = req.body as { items?: { kind?: string; title?: string; text?: string }[]; source?: string };
+      const wanted = (body.items ?? []).filter((i) => i.text?.trim());
+      if (wanted.length === 0) throw new Error('Nothing was selected');
+
+      const stamp = Date.now().toString(36);
+      const saved: WritingSample[] = wanted.map((item, n) => ({
+        id: `${slug(item.title ?? '') || 'sample'}-${stamp}-${n}`,
+        title: item.title?.trim() || 'Untitled',
+        kind: (['letter', 'answer', 'resume', 'other'].includes(String(item.kind)) ? item.kind : 'other') as WritingSample['kind'],
+        text: item.text!.trim(),
+        createdAt: new Date().toISOString(),
+        tags: body.source ? [`from:${body.source}`] : undefined,
+      }));
+
+      await withCommit(
+        repo,
+        autoCommit(),
+        `Add ${saved.length} writing sample${saved.length === 1 ? '' : 's'}${body.source ? ` from ${body.source}` : ''}`,
+        () => {
+          for (const sample of saved) store.saveSample(sample);
+        },
+      );
+      res.json({ added: saved.length, samples: saved });
+    }),
+  );
+
   api.put(
     '/voice',
     handler(async (req, res) => {
@@ -575,27 +757,89 @@ export function createApi({ store, repo }: ApiDeps): Router {
   api.post(
     '/ai/feedback',
     handler(async (req, res) => {
-      const { resumeId, focus, bulletId, entryId } = req.body as {
+      const { resumeId, focus, bulletId, entryId, background } = req.body as {
         resumeId?: string;
         focus?: string;
         bulletId?: string;
         entryId?: string;
+        /** Return a job to collect later instead of holding the request open. */
+        background?: boolean;
       };
       const data = store.load();
 
       let prompt: string;
+      let about: string;
       if (bulletId && entryId) {
         const entry = data.entries.find((e) => e.id === entryId);
         const bullet = entry?.bullets?.find((b) => b.id === bulletId);
         if (!entry || !bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
         prompt = bulletFeedbackPrompt(data, entry, bullet);
+        about = typeof entry.title === 'string' ? entry.title : 'a bullet point';
       } else {
-        prompt = feedbackPrompt(data, resolveResume(String(resumeId), data), focus);
+        const resolved = resolveResume(String(resumeId), data);
+        about = resolved.label;
+
+        /*
+         * Compile it first, and hand the critique the real thing: the exact
+         * LaTeX and what the compiler said about the page. Anything about
+         * length, spacing, or "this runs over" is guesswork from plain text —
+         * the reader sees a typeset page, so the critic should too. Compiling
+         * also means the PDF beside it is current rather than whatever was
+         * last built.
+         */
+        let tex: string | undefined;
+        let fit: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] } | undefined;
+        try {
+          const compiled = await compileResume(resolved, {
+            pdfPath: path.join(store.outDir(), `${slug(resolved.id) || 'resume'}.pdf`),
+            engine: data.config.latex.engine,
+          });
+          tex = compiled.tex;
+          fit = {
+            pages: compiled.pages,
+            fits: compiled.fits,
+            overflowLines: compiled.overflowLines,
+            adjustments: compiled.adjustments,
+          };
+        } catch {
+          // No LaTeX installed, or a resume that will not compile: the
+          // critique is still worth having, just without the page evidence.
+        }
+
+        prompt = feedbackPrompt(data, resolved, { focus, tex, fit });
+      }
+
+      if (background) {
+        const job = jobs.start('feedback', about, () => runAgent(data.config, prompt));
+        res.json({ job });
+        return;
       }
 
       const result = await runAgent(data.config, prompt);
       res.json(result);
     }),
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Background work                                                   *
+   * ---------------------------------------------------------------- */
+
+  api.get('/ai/jobs', handler(async (_req, res) => res.json({ jobs: jobs.list() })));
+
+  api.get(
+    '/ai/jobs/:id',
+    handler(async (req, res) => {
+      // Fetching a finished job is how you read it, so that clears the badge.
+      const job = jobs.get(String(req.params.id));
+      if (!job) throw new Error('That result has expired');
+      if (job.status !== 'running') jobs.read(job.id);
+      res.json(job);
+    }),
+  );
+
+  api.delete(
+    '/ai/jobs/:id',
+    handler(async (req, res) => res.json({ ok: jobs.dismiss(String(req.params.id)) })),
   );
 
   api.post(
@@ -650,7 +894,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
 
       const result = await runAgent(
         data.config,
-        coverLetterPrompt(data, resolved, job, prior.map((l) => l.body)),
+        coverLetterPrompt(data, resolved, job, prior),
       );
 
       const body = result.executed ? result.output : '';
@@ -796,7 +1040,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
       const job = extractJob(html, url, title);
       const score = jobPostingScore(html, url);
 
-      const baseId = baseResumeId ?? data.resumes.find((r) => r.id === 'newgrad')?.id ?? data.resumes[0]?.id;
+      const baseId = baseResumeId ?? defaultBaseId(data.resumes);
       if (!baseId) throw new Error('The store has no resumes to start from');
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error(`No resume "${baseId}"`);
@@ -924,7 +1168,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
     '/applications',
     handler(async (_req, res) => {
       const apps = store.load().applications;
-      res.json({ applications: apps, stats: stats(apps) });
+      res.json({ applications: apps, stats: stats(apps), current: syncCurrent(store, apps) });
     }),
   );
 
@@ -1194,6 +1438,111 @@ export function createApi({ store, repo }: ApiDeps): Router {
   );
 
   /**
+   * Make a resume for this posting, from inside the workspace.
+   *
+   * The extension does this with the page already in front of it; a draft
+   * opened by hand has only a link. So the server fetches the posting itself
+   * and runs the identical pipeline — the same extraction, the same matching,
+   * the same AI plan if it is enabled — rather than a second, lesser version
+   * of it that would drift.
+   */
+  api.post(
+    '/workspace/:id/tailor',
+    handler(async (req, res) => {
+      const draft = store.getDraft(String(req.params.id));
+      if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
+
+      const { useAi, baseResumeId } = req.body as { useAi?: boolean; baseResumeId?: string };
+      const data = store.load();
+
+      // The posting text: fetched from the link when there is one, falling
+      // back to whatever the draft already carries.
+      let html = draft.jobDescription ?? '';
+      let fetched = false;
+      if (draft.url) {
+        try {
+          html = await fetchPosting(draft.url);
+          fetched = true;
+        } catch (err) {
+          // A posting behind a login is common and is not a failure: carry on
+          // with whatever text the draft has.
+          if (!html) throw new Error(`Could not read ${draft.url}: ${(err as Error).message}`);
+        }
+      }
+      if (!html.trim()) throw new Error('This draft has no link and no posting text to work from');
+
+      const job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
+      const specId = `job-${slug(draft.company)}-${slug(draft.role)}`.slice(0, 60);
+
+      /*
+       * Tailoring twice must not make a resume that inherits from itself. The
+       * second run finds the draft already pointing at the tailored copy, so
+       * start from what that copy was built on rather than from the copy.
+       */
+      let baseId = baseResumeId ?? draft.resumeId ?? defaultBaseId(data.resumes);
+      if (baseId === specId) {
+        baseId = data.resumes.find((r) => r.id === specId)?.extends ?? defaultBaseId(data.resumes);
+      }
+      const base = data.resumes.find((r) => r.id === baseId);
+      if (!base) throw new Error('The store has no resume to start from');
+
+      const match = matchVariants(data, base, { keywords: job.keywords });
+
+      let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
+      if (useAi && data.config.ai.enabled) {
+        const agent = await runAgent(
+          data.config,
+          tailorPrompt(data, resolveResume(baseId!, data), {
+            jobTitle: draft.role,
+            company: draft.company,
+            jobDescription: job.description ?? html,
+            url: draft.url,
+          }),
+        );
+        try {
+          plan = sanitizeAiPlan(extractJson(agent.output), data);
+        } catch {
+          plan = null; // a malformed reply must not sink the deterministic match
+        }
+      }
+
+      const finalMatch = plan
+        ? { ...match, choices: { ...match.choices, ...plan.choices }, skills: { ...match.skills, ...plan.skills } }
+        : match;
+
+      const spec = deriveSpec(base, specId, `${draft.role} — ${draft.company}`, finalMatch, {
+        url: draft.url,
+        company: draft.company,
+        role: draft.role,
+      });
+      const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
+      if (inclusion) {
+        const bySkills = new Map((spec.sections ?? []).map((sec) => [sec.kind, sec]));
+        spec.sections = inclusion.map((sec) => ({ ...sec, ...(bySkills.get(sec.kind) ?? {}), entries: sec.entries, bullets: sec.bullets }));
+      }
+
+      await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => store.saveResume(spec));
+
+      // The draft now sends this one, and keeps the posting text for the
+      // letter and the answers to draw on.
+      draft.resumeId = spec.id;
+      draft.jobDescription = job.description || html.slice(0, 20_000);
+      draft.updatedAt = new Date().toISOString();
+      store.saveDraft(draft);
+
+      const after = store.load();
+      res.json({
+        draft,
+        spec,
+        fetched,
+        usedAi: Boolean(plan),
+        rejected: plan?.rejected ?? [],
+        diff: diffResumes(resolveResume(baseId!, data), resolveResume(spec, after), { ignoreLabel: true }),
+      });
+    }),
+  );
+
+  /**
    * Fill in whatever is still empty: the cover letter, the answers, or both.
    * Anything a human has edited is left alone — that is the point of `edited`.
    */
@@ -1224,7 +1573,7 @@ export function createApi({ store, repo }: ApiDeps): Router {
           if (resumeId) {
             const agent = await runAgent(
               data.config,
-              coverLetterPrompt(data, resolveResume(resumeId, data), job, prior.map((l) => l.body)),
+              coverLetterPrompt(data, resolveResume(resumeId, data), job, prior),
             );
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = agent.output.trim();
@@ -1457,6 +1806,11 @@ export function createApi({ store, repo }: ApiDeps): Router {
         return;
       }
 
+      // A commit's contents cannot change, so the document it produced cannot
+      // either: resolving one is worth doing exactly once per process. The
+      // first visit to a long history pays; every visit after it is free.
+      const live = store.load();
+
       // Blobs are content-addressed, so the same unchanged file across fifty
       // commits is read exactly once.
       const blobs = new Map<string, string>();
@@ -1481,15 +1835,21 @@ export function createApi({ store, repo }: ApiDeps): Router {
       let previous: ResolvedResume | undefined;
 
       for (const c of chronological) {
-        const snapshot = await readSnapshot(c.hash);
-        if (!snapshot) continue;
+        const key = `${id}@${c.hash}`;
+        let resolved = documentCache.get(key);
 
-        let resolved: ResolvedResume;
-        try {
-          resolved = resolveResume(id, { ...store.load(), ...snapshot });
-        } catch {
-          continue; // the resume did not exist yet, or was broken at this commit
+        if (resolved === undefined) {
+          const snapshot = await readSnapshot(c.hash);
+          try {
+            // `null` is a real answer — the resume did not exist yet, or was
+            // broken at this commit — and worth remembering as one.
+            resolved = snapshot ? resolveResume(id, { ...live, ...snapshot }) : null;
+          } catch {
+            resolved = null;
+          }
+          rememberDocument(key, resolved);
         }
+        if (!resolved) continue;
 
         // Unchanged document: not a version of this resume.
         if (previous && sameDocument(previous, resolved)) continue;

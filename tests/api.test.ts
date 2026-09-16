@@ -831,3 +831,241 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
     expect(res.body.error).toMatch(/no resume/i);
   });
 });
+
+describe('work you walked away from', () => {
+  it('hands back a job instead of holding the request open', async () => {
+    const res = await request(app)
+      .post('/api/ai/feedback')
+      .send({ resumeId: 'newgrad', background: true })
+      .expect(200);
+
+    expect(res.body.job.status).toBe('running');
+    expect(res.body.job.about).toBe('New grad');
+    expect(res.body.job.kind).toBe('feedback');
+  });
+
+  it('lists it, and clears the badge once it has been read', async () => {
+    const { body } = await request(app)
+      .post('/api/ai/feedback')
+      .send({ resumeId: 'newgrad', background: true })
+      .expect(200);
+    const id = body.job.id;
+
+    // The AI is off in the fixture, so it finishes almost immediately.
+    let job = body.job;
+    for (let i = 0; i < 40 && job.status === 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      job = (await request(app).get(`/api/ai/jobs/${id}`).expect(200)).body;
+    }
+
+    expect(job.status).toBe('done');
+    expect((job.result as { executed: boolean }).executed).toBe(false); // AI off: the prompt comes back
+    expect(job.unread).toBe(false); // reading it is what clears the badge
+
+    const list = (await request(app).get('/api/ai/jobs').expect(200)).body.jobs;
+    expect(list.some((j: { id: string }) => j.id === id)).toBe(true);
+  });
+
+  it('can be dismissed, and says so when asked for again', async () => {
+    const { body } = await request(app)
+      .post('/api/ai/feedback')
+      .send({ resumeId: 'newgrad', background: true })
+      .expect(200);
+
+    await request(app).delete(`/api/ai/jobs/${body.job.id}`).expect(200);
+    const gone = await request(app).get(`/api/ai/jobs/${body.job.id}`);
+    expect(gone.status).toBe(400);
+    expect(gone.body.error).toMatch(/expired/);
+  });
+
+  it('still answers synchronously for callers that want to wait', async () => {
+    const res = await request(app).post('/api/ai/feedback').send({ resumeId: 'newgrad' }).expect(200);
+    expect(res.body.executed).toBe(false);
+    expect(res.body.output).toContain('Task: critique');
+  });
+});
+
+describe('adding files to the corpus', () => {
+  const LETTERS = [
+    'Dear Streamly,',
+    '',
+    'I am writing about the data platform internship. I have spent two years on pipelines that mostly stayed up, and I would like to keep doing that.',
+    '',
+    'Sincerely,',
+    'Test Person',
+    '',
+    'Why do you want to work here?',
+    '',
+    'Because I have read the code you publish, and it is written the way I like to write.',
+  ].join('\n');
+
+  const send = (body: Record<string, unknown>) => request(app).post('/api/voice/ingest').send(body);
+
+  it('reads a file and says what is in it, without saving anything yet', async () => {
+    const res = await send({ name: 'old-applications.txt', text: LETTERS }).expect(200);
+
+    expect(res.body.items.map((i: { kind: string }) => i.kind)).toEqual(['letter', 'answer']);
+    expect(res.body.items[0].text).toContain('Sincerely,');
+    expect(res.body.usedAi).toBe(false); // AI is off in the fixture
+    // Nothing is in the corpus until the proposals are accepted.
+    expect((await request(app).get('/api/voice').expect(200)).body.samples).toHaveLength(0);
+  });
+
+  it('takes a file as base64, which is how the browser sends one', async () => {
+    const res = await send({
+      name: 'letter.txt',
+      data: Buffer.from(LETTERS, 'utf8').toString('base64'),
+    }).expect(200);
+    expect(res.body.items[0].kind).toBe('letter');
+    expect(res.body.via).toBe('text');
+  });
+
+  it('refuses a file it cannot read, naming what it can', async () => {
+    const res = await send({
+      name: 'shot.png',
+      data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13]).toString('base64'),
+    }).expect(400);
+    expect(res.body.error).toMatch(/not text/);
+    expect(res.body.error).toMatch(/\.pdf/);
+  });
+
+  it('refuses an empty file rather than proposing nothing', async () => {
+    expect((await send({ name: 'empty.txt', text: '' }).expect(400)).body.error).toMatch(/nothing in/i);
+  });
+
+  it('says so when a file has no readable text', async () => {
+    expect((await send({ name: 'blank.txt', text: '   \n\n  \t ' }).expect(400)).body.error).toMatch(
+      /no readable text/,
+    );
+  });
+
+  it('keeps what was accepted, with the kinds as confirmed', async () => {
+    const { body } = await send({ name: 'old-applications.txt', text: LETTERS }).expect(200);
+
+    const accepted = await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({
+        items: body.items.map((i: { kind: string; title: string; text: string }) => ({ ...i })),
+        source: 'old-applications.txt',
+      })
+      .expect(200);
+    expect(accepted.body.added).toBe(2);
+
+    const voice = (await request(app).get('/api/voice').expect(200)).body;
+    expect(voice.samples).toHaveLength(2);
+    expect(voice.samples.map((s: { kind: string }) => s.kind).sort()).toEqual(['answer', 'letter']);
+    // Where it came from is recorded, so a bad import can be found again.
+    expect(voice.samples[0].tags).toContain('from:old-applications.txt');
+    expect(voice.preview).toContain('I have read the code you publish');
+  });
+
+  it('honours a kind the user corrected, over the one that was proposed', async () => {
+    const { body } = await send({ name: 'notes.txt', text: LETTERS }).expect(200);
+    await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({ items: [{ ...body.items[0], kind: 'other' }] })
+      .expect(200);
+
+    const voice = (await request(app).get('/api/voice').expect(200)).body;
+    expect(voice.samples[0].kind).toBe('other');
+  });
+
+  it('files an unknown kind as other rather than writing it into the store', async () => {
+    await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({ items: [{ kind: 'manifesto', title: 'x', text: 'y'.repeat(60) }] })
+      .expect(200);
+    expect((await request(app).get('/api/voice').expect(200)).body.samples[0].kind).toBe('other');
+  });
+
+  it('declines an empty acceptance instead of writing blank samples', async () => {
+    const res = await request(app)
+      .post('/api/voice/ingest/accept')
+      .send({ items: [{ kind: 'other', title: 'x', text: '   ' }] })
+      .expect(400);
+    expect(res.body.error).toMatch(/Nothing was selected/);
+  });
+
+  it('hands back the prompt instead of guessing when the AI is off but asked for', async () => {
+    // AI is disabled in the fixture, so `useAi` cannot make one appear: the
+    // rules answer, and the response says no AI was used.
+    const res = await send({ name: 'notes.txt', text: LETTERS, useAi: true }).expect(200);
+    expect(res.body.usedAi).toBe(false);
+    expect(res.body.items.every((i: { by: string }) => i.by === 'rules')).toBe(true);
+  });
+});
+
+describe('pinning', () => {
+  it('pins an alternate on a bullet as the one everything falls back to', async () => {
+    const res = await request(app)
+      .put('/api/defaults/b_pipeline')
+      .send({ variantId: 'v_kafka' })
+      .expect(200);
+    expect(res.body).toEqual({ key: 'b_pipeline', variantId: 'v_kafka' });
+
+    const entry = t.store.load().entries.find((e) => e.id === 'exp_acme');
+    expect(entry?.bullets?.find((b) => b.id === 'b_pipeline')?.default).toBe('v_kafka');
+  });
+
+  it('changes what a resume renders when that resume chose nothing', async () => {
+    const before = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
+    expect(JSON.stringify(before)).not.toContain('`Kafka` pipeline');
+
+    await request(app).put('/api/defaults/b_pipeline').send({ variantId: 'v_kafka' }).expect(200);
+
+    const after = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
+    expect(JSON.stringify(after)).toContain('`Kafka` pipeline');
+  });
+
+  it('pins an alternate on a heading field, which uses the dotted key', async () => {
+    await request(app).put('/api/defaults/edu_neu.dates').send({ variantId: 'v_dec2026' }).expect(200);
+    const entry = t.store.load().entries.find((e) => e.id === 'edu_neu');
+    expect(typeof entry?.dates === 'object' && entry.dates.default).toBe('v_dec2026');
+  });
+
+  it('refuses an alternate that does not exist', async () => {
+    const res = await request(app).put('/api/defaults/b_pipeline').send({ variantId: 'v_ghost' }).expect(400);
+    expect(res.body.error).toMatch(/No such alternate/);
+  });
+
+  it('says so when the line has no alternates, or is gone', async () => {
+    expect((await request(app).put('/api/defaults/b_ghost').send({ variantId: 'v' }).expect(400)).body.error)
+      .toMatch(/not in the store/);
+    expect((await request(app).put('/api/defaults/edu_neu.title').send({ variantId: 'v' }).expect(400)).body.error)
+      .toMatch(/no alternates/);
+  });
+
+  it('needs to be told which alternate', async () => {
+    expect((await request(app).put('/api/defaults/b_pipeline').send({}).expect(400)).body.error)
+      .toMatch(/Name the alternate/);
+  });
+
+  it('pins a resume as a base, and unpins it without leaving a field behind', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.base).toBe(true);
+
+    await request(app).put('/api/resumes/intern/base').send({ base: false }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')).not.toHaveProperty('base');
+  });
+
+  it('lists the bases first, so a picker opens on what you build from', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    const ids = (await request(app).get('/api/resumes').expect(200)).body.map((r: { id: string }) => r.id);
+    expect(ids[0]).toBe('intern');
+    expect(ids).toHaveLength(t.store.loadResumes().length);
+  });
+
+  it('names a resume that is not there', async () => {
+    expect((await request(app).put('/api/resumes/ghost/base').send({ base: true }).expect(400)).body.error)
+      .toMatch(/No resume "ghost"/);
+  });
+
+  it('starts a tailored draft from the pinned base rather than a guessed name', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, url: 'https://example.com/job' })
+      .expect(200);
+    expect(res.body.spec.extends).toBe('intern');
+  });
+});

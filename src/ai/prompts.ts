@@ -1,5 +1,6 @@
 import { buildVoiceContext, renderVoiceContext } from './voice.js';
-import type { Bullet, Entry, ResolvedResume, StoreData } from '../model/types.js';
+import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
+import type { Bullet, CoverLetter, Entry, ResolvedResume, StoreData } from '../model/types.js';
 
 /**
  * The standing instructions prepended to every request, so the rules you would
@@ -43,7 +44,18 @@ export function resumeAsText(r: ResolvedResume): string {
  * get a critique you can act on, not a replacement you have to re-edit back
  * into your own voice.
  */
-export function feedbackPrompt(data: StoreData, resume: ResolvedResume, focus?: string): string {
+export interface FeedbackContext {
+  focus?: string;
+  /** The exact LaTeX that produced the PDF, when it has been compiled. */
+  tex?: string;
+  /** What the compiler said about fitting the page. */
+  fit?: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] };
+}
+
+export function feedbackPrompt(data: StoreData, resume: ResolvedResume, context: FeedbackContext | string = {}): string {
+  // Older callers passed a focus string.
+  const { focus, tex, fit } = typeof context === 'string' ? { focus: context } : context;
+
   return [
     preamble(data),
     '',
@@ -57,9 +69,173 @@ export function feedbackPrompt(data: StoreData, resume: ResolvedResume, focus?: 
     '',
     '## Resume',
     resumeAsText(resume),
+    '',
+    // The rest of the store: other resumes this person keeps, letters they
+    // have sent, questions they have answered. Feedback on one resume is
+    // better for knowing what else is true about them — a claim that looks
+    // thin here may be evidenced at length in a cover letter.
+    theRestOfTheStore(data, resume),
+    // What actually gets typeset. Anything about length, spacing or what fits
+    // is guesswork without it.
+    compiledEvidence(tex, fit),
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/**
+ * Everything else the person has written, in brief. Not the full text of
+ * everything — that would bury the resume being discussed — but enough that
+ * the critique is informed by the whole picture rather than one page.
+ */
+function theRestOfTheStore(data: StoreData, resume: ResolvedResume): string {
+  const lines: string[] = ['## What else this person has'];
+
+  const others = data.resumes.filter((r) => r.id !== resume.id);
+  if (others.length > 0) {
+    lines.push('', `Other resumes they keep: ${others.map((r) => r.label).join('; ')}.`);
+  }
+
+  const letters = [...data.coverLetters]
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .slice(0, 3);
+  if (letters.length > 0) {
+    lines.push('', '### Recent cover letters');
+    for (const l of letters) {
+      lines.push(`- **${l.title}** — ${l.body.replace(/\s+/g, ' ').slice(0, 600)}…`);
+    }
+  }
+
+  const answers = data.answers.slice(0, 8);
+  if (answers.length > 0) {
+    lines.push('', '### Questions they have answered');
+    for (const a of answers) {
+      const text = (a.variants.find((v) => v.id === a.default) ?? a.variants[0])?.text ?? '';
+      lines.push(`- **${a.question}** — ${text.replace(/\s+/g, ' ').slice(0, 300)}`);
+    }
+  }
+
+  return lines.length > 1 ? lines.join('\n') : '';
+}
+
+/**
+ * Everything the person has already written for an application, in full.
+ *
+ * Drafting anything new starts here. The fifteenth "why are you interested in
+ * this role" should begin from the fourteenth answer, and the paragraph that
+ * explained a career change well in March explains it just as well in
+ * September — consistency across a season of applications matters more than
+ * novelty, and a reader comparing a letter to an answer should find the same
+ * person in both.
+ *
+ * So this is the full text, not the summary the feedback prompt gets: enough to
+ * adapt, not just enough to imitate. What is shown is ranked — the same company
+ * first for letters, the most similar question first for answers — and then cut
+ * to a budget, because everything is not an option.
+ */
+const PRIOR_BUDGET = 9000;
+
+export interface PriorWork {
+  /** The question being answered, when there is one. Ranks the answer bank. */
+  question?: string;
+  job?: { company?: string; role?: string };
+  /** Letters the caller already picked out; ranked from the store otherwise. */
+  letters?: CoverLetter[];
+}
+
+function priorWork(data: StoreData, { question, job, letters }: PriorWork): string {
+  const chosenLetters = letters ?? relevantLetters(data.coverLetters ?? [], job ?? {}, 3);
+
+  const ranked = [...(data.answers ?? [])];
+  if (question) {
+    ranked.sort((a, b) => questionSimilarity(question, b.question) - questionSimilarity(question, a.question));
+  }
+
+  const letterParts: string[] = [];
+  const answerParts: string[] = [];
+  let spent = 0;
+
+  // Alternating, so a long letter cannot crowd out every answer: both kinds
+  // are useful and they are useful for different reasons.
+  for (let i = 0; i < Math.max(chosenLetters.length, ranked.length); i++) {
+    for (const which of ['letter', 'answer'] as const) {
+      if (spent >= PRIOR_BUDGET) break;
+
+      if (which === 'letter') {
+        const letter = chosenLetters[i];
+        if (!letter?.body?.trim()) continue;
+        const where = [letter.company, letter.role].filter(Boolean).join(' — ') || letter.title;
+        const text = clip(letter.body, PRIOR_BUDGET - spent);
+        letterParts.push(`### ${where}\n\n${text}`);
+        spent += text.length;
+        continue;
+      }
+
+      const item = ranked[i];
+      if (!item) continue;
+      // Every phrasing, not just the default: the alternates are exactly the
+      // range this person has already found acceptable for that question.
+      const texts = item.variants
+        .slice(0, 2)
+        .map((v) => v.text?.trim())
+        .filter(Boolean) as string[];
+      if (texts.length === 0) continue;
+      const body = texts.map((t) => clip(t, 1500)).join('\n\n— or —\n\n');
+      answerParts.push(`### ${item.question}\n\n${clip(body, PRIOR_BUDGET - spent)}`);
+      spent += body.length;
+    }
+  }
+
+  if (letterParts.length === 0 && answerParts.length === 0) return '';
+
+  const out = [
+    '## What you have already written',
+    '',
+    'Their own words, from earlier applications. Where one of these already says',
+    'the thing well, adapt it rather than starting over — but only where it is',
+    'still true of this posting, and never at the cost of answering what was',
+    'actually asked.',
+  ];
+  if (letterParts.length > 0) out.push('', '### Cover letters they have sent', '', ...letterParts);
+  if (answerParts.length > 0) out.push('', '### Questions they have answered', '', ...answerParts);
+  return out.join('\n');
+}
+
+function clip(text: string, room: number): string {
+  const clean = text.trim();
+  if (room <= 0) return '';
+  // The ellipsis counts against the room, so a clip never exceeds what it was given.
+  return clean.length > room ? `${clean.slice(0, room - 1).trimEnd()}…` : clean;
+}
+
+/** The LaTeX and the fit report, so layout advice is about the real page. */
+function compiledEvidence(tex?: string, fit?: FeedbackContext['fit']): string {
+  if (!tex && !fit) return '';
+  const lines = ['', '## What it compiles to'];
+
+  if (fit) {
+    lines.push(
+      '',
+      fit.fits
+        ? `It fits on ${fit.pages} page(s), with about ${Math.abs(fit.overflowLines)} lines of room to spare.`
+        : `It does NOT fit: ${fit.pages} pages, about ${fit.overflowLines} lines too long.`,
+      fit.adjustments.length > 0 ? `Auto-fit had to: ${fit.adjustments.join('; ')}.` : '',
+    );
+  }
+
+  if (tex) {
+    lines.push(
+      '',
+      'The exact LaTeX that produced the PDF follows. Judge spacing, length and layout from this,',
+      'not from the plain text above — and remember the reader sees a typeset page, not a list.',
+      '',
+      '```latex',
+      tex.length > 24_000 ? `${tex.slice(0, 24_000)}\n% … truncated` : tex,
+      '```',
+    );
+  }
+
+  return lines.filter(Boolean).join('\n');
 }
 
 /** Feedback on one bullet and all of its existing phrasings. */
@@ -194,7 +370,8 @@ export function coverLetterPrompt(
   data: StoreData,
   resume: ResolvedResume,
   job: TailorContext,
-  priorLetters: string[],
+  /** Letters the caller judged relevant. Bare text still works. */
+  priorLetters: (CoverLetter | string)[],
 ): string {
   return [
     preamble(data),
@@ -204,9 +381,17 @@ export function coverLetterPrompt(
     'Ground every claim in the resume; do not introduce experience that is not there.',
     'Three or four short paragraphs. No "I am writing to express my interest". No restating the resume line by line.',
     '',
-    priorLetters.length > 0
-      ? `## Previous letters (for voice, not content)\n${priorLetters.slice(0, 3).join('\n\n---\n\n').slice(0, 8000)}`
-      : '',
+    // Their own letters and answers, in full. A letter that has to be written
+    // from nothing every time drifts; one that starts from what was already
+    // said well stays recognisably the same person.
+    priorWork(data, {
+      job: { company: job.company, role: job.jobTitle },
+      letters: priorLetters.length > 0
+        ? priorLetters.map((l, n) =>
+            typeof l === 'string' ? ({ id: `given-${n}`, title: `An earlier letter`, body: l } as CoverLetter) : l,
+          )
+        : undefined,
+    }),
     '',
     '## Posting',
     job.company ? `Company: ${job.company}` : '',
@@ -222,13 +407,6 @@ export function coverLetterPrompt(
 
 /** Answer an application question, reusing a previous answer where one fits. */
 export function answerPrompt(data: StoreData, question: string, job?: TailorContext): string {
-  const bank = data.answers
-    .map((a) => {
-      const v = a.variants.find((x) => x.id === a.default) ?? a.variants[0];
-      return v ? `- Q: ${a.question}\n  A: ${v.text}` : '';
-    })
-    .filter(Boolean);
-
   return [
     preamble(data),
     '',
@@ -236,9 +414,12 @@ export function answerPrompt(data: StoreData, question: string, job?: TailorCont
     'Answer the question below in the voice described above.',
     'If one of the previously written answers already covers it, adapt that answer rather than starting over —',
     'staying consistent across applications matters more than novelty.',
+    'A cover letter below may already say it better than any of the answers do; take it from there if so.',
     'Keep it to the length the question implies. No filler.',
     '',
-    bank.length > 0 ? `## Previously written answers\n${bank.join('\n')}` : '',
+    // The closest questions first, and the letters that went with this kind of
+    // posting — the same material either way, ranked for this question.
+    priorWork(data, { question, job: { company: job?.company, role: job?.jobTitle } }),
     '',
     job ? `## Posting\n${job.company ?? ''} ${job.jobTitle ?? ''}\n${job.jobDescription.slice(0, 4000)}` : '',
     '',
