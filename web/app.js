@@ -118,9 +118,16 @@ async function api(path, options = {}) {
   if (docKey) {
     const isDelete = String(options.method ?? 'GET').toUpperCase() === 'DELETE';
     const after = isDelete ? null : documentFrom(body, options.body);
-    history.record({ docKey, before, after, label: undoLabel });
-    undoLabel = 'change';
-    paintUndo();
+    if (openGroup) {
+      // One user action, however many requests it takes. The group records the
+      // lot as a single step once it finishes.
+      if (!openGroup.before.has(docKey)) openGroup.before.set(docKey, before);
+      openGroup.after.set(docKey, after);
+    } else {
+      history.record({ docKey, before, after, label: undoLabel });
+      undoLabel = 'change';
+      paintUndo();
+    }
   }
   return body;
 }
@@ -150,6 +157,58 @@ function documentFrom(reply, sentBody) {
 const history = createHistory({ limit: 60 });
 /** True while an undo/redo is being applied, so it does not record itself. */
 let undoing = false;
+
+/**
+ * The action currently being performed, when it is more than one request.
+ *
+ * A step of undo should be a thing the user did, and several of the editor's
+ * actions are not one request: deleting an entry writes the entry and the
+ * resume that referenced it; adding one writes the entry and the section that
+ * lists it. Recorded per request those cost two presses each, and the state
+ * between the presses is one no action ever produced — an entry that exists
+ * with nothing pointing at it.
+ *
+ * `watch` is for the actions whose write is not a whole-document PUT at all.
+ * Adding a phrasing is `POST …/variants`, which `docKeyFor` rightly ignores,
+ * so it was simply not undoable: the only way back was to find the phrasing
+ * and delete it. Naming the document it changes makes it a step like any
+ * other, without this file having to know what the route does.
+ */
+let openGroup = null;
+
+async function undoGroup(label, watch, run) {
+  if (openGroup) return run(); // nested: the outermost action owns the step
+  openGroup = { label, before: new Map(), after: new Map() };
+  for (const key of watch ?? []) openGroup.before.set(key, readDoc(state.store, key));
+
+  try {
+    return await run();
+  } finally {
+    const group = openGroup;
+    openGroup = null;
+    try {
+      /*
+       * Read the end state back rather than trusting what was sent. A watched
+       * document changed by a POST has no reply to snapshot, and the server
+       * normalises and fills in defaults besides — so the only honest "after"
+       * is the store as it now is.
+       */
+      if (group.before.size) {
+        await loadStore();
+        const changes = [...group.before.keys()].map((docKey) => ({
+          docKey,
+          before: group.before.get(docKey) ?? null,
+          after: group.after.has(docKey) ? group.after.get(docKey) : readDoc(state.store, docKey),
+        }));
+        history.record({ changes, label });
+        paintUndo();
+      }
+    } catch {
+      // A step that cannot be recorded is not a reason to fail the action the
+      // user asked for; it only means this one cannot be taken back.
+    }
+  }
+}
 /** What the write in flight should be called, set by the action that starts it. */
 let undoLabel = 'change';
 /** Name the next write, so the menu can say "Undo delete group". */
@@ -164,11 +223,25 @@ async function stepHistory(direction) {
     return;
   }
   // Undo reinstates what was there before; redo puts back what the action did.
-  const doc = direction === 'undo' ? entry.before : entry.after;
+  // In reverse for an undo, so a step that created a document and then pointed
+  // something at it is taken apart in the order it was put together.
+  const changes = direction === 'undo' ? [...entry.changes].reverse() : entry.changes;
   undoing = true;
   try {
-    const { path, options } = restoreRequest(entry.docKey, doc);
-    await api(path, options);
+    for (const change of changes) {
+      const { path, options } = restoreRequest(change.docKey, direction === 'undo' ? change.before : change.after);
+      await api(path, options);
+    }
+    /*
+     * The selections on screen are dropped, not kept.
+     *
+     * A resume is a thin overlay and the editor holds the unsaved part of it
+     * in `state.choices` and friends. Undoing a selection change put the old
+     * spec back on disk and left that overlay untouched, so the next render
+     * re-applied exactly what had just been undone and the next auto-save
+     * wrote it out again. From the outside, Ctrl+Z did nothing at all.
+     */
+    clearEdits();
     await loadStore();
     render();
     scheduleRender();
@@ -760,12 +833,31 @@ function pinControl(key, field, current) {
   });
 }
 
+/**
+ * Which document "Make default" actually changes.
+ *
+ * `PUT /defaults/:key` is a route of its own, so nothing about it looks like a
+ * whole-document write and it recorded no undo step. It always lands on the
+ * profile or on one entry, and which is decided by the same reading of the key
+ * the server does — `entryId.field` for a heading, a bare bullet id otherwise.
+ */
+function documentBehind(key) {
+  if (key === PROFILE_NAME_KEY) return 'profile';
+  const dot = String(key).indexOf('.');
+  if (dot > 0) return `entry:${key.slice(0, dot)}`;
+  const owner = (state.store?.entries ?? []).find((e) => (e.bullets ?? []).some((b) => b.id === key));
+  return owner ? `entry:${owner.id}` : null;
+}
+
 async function pinDefault(key, variantId) {
   try {
-    await api(`/defaults/${encodeURIComponent(key)}`, {
-      method: 'PUT',
-      body: JSON.stringify({ variantId }),
-    });
+    const doc = documentBehind(key);
+    await undoGroup('pin the default wording', doc ? [doc] : [], () =>
+      api(`/defaults/${encodeURIComponent(key)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ variantId }),
+      }),
+    );
     await loadStore();
     setStatus('Pinned as the default everywhere');
     render();
@@ -1926,24 +2018,29 @@ async function editEntry(entry) {
 
 async function removeEntry(entry) {
   if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
-  /*
-   * In the lane, so a whole-entry write still queued behind it goes first.
-   * `PUT /entries/:id` has no existence check, so a delete that overtook one
-   * saw the entry recreated a moment later as an orphan no resume references.
-   */
-  await inEntryLane(entry.id, async (lane) => {
-    await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
-    lane.server = null;
-  });
+  // The entry and the resume that pointed at it are one thing the user did, so
+  // they are one press of Ctrl+Z — not two, with an orphaned reference in
+  // between that no action ever produces.
+  await undoGroup(`delete ${entryName(entry)}`, [], async () => {
+    /*
+     * In the lane, so a whole-entry write still queued behind it goes first.
+     * `PUT /entries/:id` has no existence check, so a delete that overtook one
+     * saw the entry recreated a moment later as an orphan no resume references.
+     */
+    await inEntryLane(entry.id, async (lane) => {
+      await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+      lane.server = null;
+    });
 
-  // Drop the reference too, so the next compile does not warn about it. From
-  // the root's own sections, for the reason given in addEntry.
-  const root = chain(state.resumeId)[0];
-  const sections = (root.sections ?? []).map((s) => ({
-    ...s,
-    entries: (s.entries ?? []).filter((id) => id !== entry.id),
-  }));
-  await saveResumeSpec({ ...root, sections }, `Deleted ${entry.id}`);
+    // Drop the reference too, so the next compile does not warn about it. From
+    // the root's own sections, for the reason given in addEntry.
+    const root = chain(state.resumeId)[0];
+    const sections = (root.sections ?? []).map((s) => ({
+      ...s,
+      entries: (s.entries ?? []).filter((id) => id !== entry.id),
+    }));
+    await saveResumeSpec({ ...root, sections }, `Deleted ${entry.id}`);
+  });
   render();
   scheduleRender();
 }
@@ -2085,10 +2182,18 @@ async function addBulletVariant(entry, bullet) {
   ], 'Starts from the current wording so you can adjust rather than retype.');
   if (!answer?.text?.trim()) return;
 
-  // In the lane: a whole-entry write queued beside this one would otherwise
-  // rebase onto a copy of the entry that does not have the new phrasing in it,
-  // and delete it.
-  const variant = await inEntryLane(entry.id, () =>
+  /*
+   * Adding a phrasing is a POST to a sub-resource, so nothing about it looks
+   * like a whole-document write and it recorded no undo step at all — the only
+   * way back was to find the new phrasing and delete it by hand. Naming the
+   * document it changes makes it a step like any other.
+   *
+   * In the lane too: a whole-entry write queued beside this one would
+   * otherwise rebase onto a copy of the entry without the new phrasing in it,
+   * and delete it.
+   */
+  const variant = await undoGroup(`add phrasing to ${bulletName(entry, bullet)}`, [`entry:${entry.id}`], () =>
+    inEntryLane(entry.id, () =>
     api(`/entries/${encodeURIComponent(entry.id)}/bullets/${encodeURIComponent(bullet.id)}/variants`, {
       method: 'POST',
       body: JSON.stringify({
@@ -2098,6 +2203,7 @@ async function addBulletVariant(entry, bullet) {
         note: answer.note?.trim() || undefined,
       }),
     }),
+    ),
   );
 
   if (!state.masterView && answer.useNow) {
@@ -5353,6 +5459,17 @@ async function boot() {
     const typing = el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable);
     if (typing) return;
     if (!$('#modal').classList.contains('hidden')) return;
+
+    /*
+     * Only where the history belongs.
+     *
+     * This undo is the resume builder's, and it reverted a resume edit from
+     * whichever tab happened to be open — so Ctrl+Z while reading the
+     * Applications list, or with a cover letter on screen, silently rolled back
+     * an edit made somewhere the user was not looking. Anywhere else the key
+     * does nothing, which is the honest answer: there is nothing here it means.
+     */
+    if (!$('#tab-resumes')?.classList.contains('active')) return;
 
     e.preventDefault();
     stepHistory(e.shiftKey ? 'redo' : 'undo');

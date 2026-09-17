@@ -191,9 +191,11 @@ export function restoreRequest(docKey, doc) {
  *
  * @param {{ limit?: number }} [options]  how many steps to keep; oldest go first
  * @returns {{
- *   record(entry: { docKey: string, before: any, after: any, label?: string }): boolean,
- *   undo(): { docKey: string, before: any, after: any, label: string }|null,
- *   redo(): { docKey: string, before: any, after: any, label: string }|null,
+ *   record(entry: { docKey?: string, before?: any, after?: any,
+ *                    changes?: { docKey: string, before: any, after: any }[],
+ *                    label?: string }): boolean,
+ *   undo(): { changes: { docKey: string, before: any, after: any }[], label: string }|null,
+ *   redo(): { changes: { docKey: string, before: any, after: any }[], label: string }|null,
  *   canUndo(): boolean,
  *   canRedo(): boolean,
  *   peekUndoLabel(): string|null,
@@ -211,21 +213,38 @@ export function createHistory({ limit = 50 } = {}) {
   let future = [];
 
   const copy = (entry) => ({
-    docKey: entry.docKey,
-    before: deepClone(entry.before ?? null),
-    after: deepClone(entry.after ?? null),
     label: entry.label,
+    changes: entry.changes.map((c) => ({
+      docKey: c.docKey,
+      before: deepClone(c.before ?? null),
+      after: deepClone(c.after ?? null),
+    })),
   });
 
   return {
     limit: cap,
 
-    record({ docKey, before = null, after = null, label = 'change' } = {}) {
-      if (!docKey) return false; // not a document write; nothing to undo
-      // A save that changed nothing must not cost the user an undo step.
-      if (deepEqual(before ?? null, after ?? null)) return false;
+    /**
+     * One step, which may be several documents.
+     *
+     * A step is a thing the user did, not a request the editor sent, and the
+     * two are often not one-to-one: deleting an entry writes the entry and the
+     * resume that referenced it, adding one writes the entry and the section
+     * listing it. Recorded per request, those cost two presses of Ctrl+Z each
+     * — and the state in between the two presses is one no action ever
+     * produced: an entry that exists and nothing pointing at it.
+     *
+     * Accepts a single `{ docKey, before, after }` as well, which is the
+     * common case and reads better at the call site.
+     */
+    record({ docKey, before = null, after = null, changes, label = 'change' } = {}) {
+      const all = (changes ?? (docKey ? [{ docKey, before, after }] : []))
+        .filter((c) => c && c.docKey)
+        // A save that changed nothing must not cost the user an undo step.
+        .filter((c) => !deepEqual(c.before ?? null, c.after ?? null));
+      if (all.length === 0) return false;
 
-      past.push(copy({ docKey, before, after, label: String(label) }));
+      past.push(copy({ changes: all, label: String(label) }));
       if (past.length > cap) past = past.slice(past.length - cap); // drop the oldest
       future = []; // editing past a redo throws the redo away
       return true;
