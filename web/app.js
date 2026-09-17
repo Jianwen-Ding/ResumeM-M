@@ -3204,10 +3204,11 @@ async function askSourceFeedback(target) {
 /**
  * What each stage is called, and what it is called in the file.
  *
- * The file keeps short keys because they are written by hand and matched in
- * code; the dropdown showed them raw, so the tracker offered "oa" and
- * "applying" as if the reader were expected to know the schema. Nobody
- * describes their week as being at "oa".
+ * The file keeps short keys because they are hand-edited and matched in code;
+ * the dropdown showed them raw, so the tracker offered `interested` and
+ * `applying` as if the reader were expected to know the schema. It is a
+ * ladder and it reads like one: not applied, applying, applied, interviewing,
+ * got it — and closed, for the ones that end.
  */
 const STATUSES = [
   ['interested', 'Not applied'],
