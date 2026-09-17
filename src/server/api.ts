@@ -1099,7 +1099,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         skillGroups: data.skillGroups.map((g) => ({ id: g.id, name: g.name })),
       };
 
-      const agent = await runAgent(
+      /*
+       * In the background, like feedback.
+       *
+       * This is the longest-running thing in the product — four files read
+       * end to end and an entry proposed out of each — and holding an HTTP
+       * request open for it is the wrong shape twice over: you should be able
+       * to go and do something else, and a request that takes four minutes is
+       * one a proxy or a browser will give up on while the work carries on
+       * invisibly.
+       */
+      const run = () => runAgent(
         configForTask(data.config, 'author'),
         readMaterialPrompt(data, documents.map((d) => ({ name: d.name, kind: d.kind }))),
         {
@@ -1119,21 +1129,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             ),
           read: (out) => readState(out),
         },
-      );
-
-      if (!agent.executed) {
-        res.json({ executed: false, prompt: agent.output, proposal: null });
-        return;
-      }
-
-      const proposal = agent.tools as AuthoringState | undefined;
-      res.json({
-        executed: true,
-        read: samples.map((s) => ({ id: s.id, title: s.title })),
-        proposal: proposal ?? null,
+      ).then((agent) => ({
+        executed: agent.executed,
+        prompt: agent.executed ? undefined : agent.output,
+        read: samples.map((sample) => ({ id: sample.id, title: sample.title })),
+        proposal: agent.executed ? ((agent.tools as AuthoringState | undefined) ?? null) : null,
         // Said plainly, because the whole arrangement depends on it being true.
         saved: false,
-      });
+      }));
+
+      const n = samples.length;
+      res.json({ job: jobs.start('material', `${n} ${n === 1 ? 'file' : 'files'} of your writing`, run) });
     }),
   );
 

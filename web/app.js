@@ -2003,6 +2003,22 @@ async function draftEntryWithAi(kind) {
 
 /** Show what came back and let it be edited before anything is written. */
 /**
+ * Wait for a background job, without holding a request open for it.
+ *
+ * Polling rather than a socket: the jobs list is already polled for the
+ * toolbar chip, a store server has one client, and a second transport for a
+ * thing that finishes in minutes is machinery nobody has to maintain.
+ */
+async function waitForJob(id, every = 2000) {
+  for (;;) {
+    const job = await api(`/ai/jobs/${encodeURIComponent(id)}`);
+    if (job.status === 'failed') throw new Error(job.error ?? 'It failed, and said nothing about why.');
+    if (job.status !== 'running') return job.result;
+    await new Promise((resolve) => setTimeout(resolve, every));
+  }
+}
+
+/**
  * Read everything in the corpus into a proposal, and offer it one at a time.
  *
  * One at a time is the whole design. A model that has read four files and
@@ -2016,7 +2032,14 @@ async function readMaterial(notes) {
   const stop = showAiProgress(notes, 'Reading your material', () => showTab('voice'));
   let result;
   try {
-    result = await api('/ai/read-material', { method: 'POST', body: JSON.stringify({}) });
+    /*
+     * A background job, like feedback, because this is the longest-running
+     * thing in the product: four files read end to end and an entry proposed
+     * out of each. A request held open for four minutes is one a proxy or a
+     * browser gives up on while the work carries on invisibly.
+     */
+    const { job } = await api('/ai/read-material', { method: 'POST', body: JSON.stringify({}) });
+    result = await waitForJob(job.id);
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
     return;
@@ -2052,7 +2075,7 @@ async function readMaterial(notes) {
     el('p', {
       textContent:
         `Read ${plural(result.read?.length ?? 0, 'file')}. ` +
-        `${plural(entries.length, 'entry')} and ${plural(alternates.length, 'other wording')} to look at. ` +
+        `${plural(entries.length, 'entry', 'entries')} and ${plural(alternates.length, 'other wording')} to look at. ` +
         'Nothing is saved yet.',
     }),
     proposal.notes ? el('p', { className: 'hint', textContent: proposal.notes }) : null,

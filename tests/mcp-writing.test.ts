@@ -507,7 +507,22 @@ describe('reading material, over the endpoint', () => {
       const app = express();
       app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
 
-      const res = await request(app).post('/api/ai/read-material').send({}).expect(200);
+      /*
+       * A background job, so the answer is fetched rather than waited on —
+       * this is the longest-running thing in the product and a request held
+       * open for it is one a proxy gives up on.
+       */
+      const started = await request(app).post('/api/ai/read-material').send({}).expect(200);
+      expect(started.body.job.status).toBe('running');
+      expect(started.body.job.about).toContain('1 file');
+
+      let job = started.body.job;
+      for (let n = 0; n < 60 && job.status === 'running'; n++) {
+        await new Promise((r) => setTimeout(r, 500));
+        job = (await request(app).get(`/api/ai/jobs/${job.id}`).expect(200)).body;
+      }
+      expect(job.status, job.error).toBe('done');
+      const res = { body: job.result };
       expect(res.body.executed).toBe(true);
       // Said plainly, because the whole arrangement depends on it being true.
       expect(res.body.saved).toBe(false);
@@ -539,6 +554,7 @@ describe('reading material, over the endpoint', () => {
       for (const s of t.store.loadSamples()) t.store.deleteSample(s.id);
       const app = express();
       app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+      // Refused before a job is started at all: there is nothing to run.
       const res = await request(app).post('/api/ai/read-material').send({}).expect(400);
       expect(res.body.error).toContain('Voice tab');
     } finally {
