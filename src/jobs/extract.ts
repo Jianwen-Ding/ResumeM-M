@@ -191,7 +191,9 @@ const NOT_A_NAME =
 export function looksLikeCompanyName(name?: string): boolean {
   const n = (name ?? '').trim().replace(/\s+/g, ' ');
   if (n.length < 2 || n.length > 60) return false;
-  if (NOT_A_NAME.test(n)) return false;
+  // Without the trailing punctuation: "We are hiring!" is the same non-answer
+  // as "We are hiring", and a page that shouts it is if anything more certain.
+  if (NOT_A_NAME.test(n.replace(/[!?.]+$/, ''))) return false;
   // A sentence, a URL fragment, or a list is not a name.
   if (/[.!?]\s|[|<>{}]|\S@\S|^https?:/i.test(n)) return false;
   if (n.split(' ').length > 6) return false;
@@ -208,21 +210,76 @@ export function looksLikeCompanyName(name?: string): boolean {
   return true;
 }
 
+/**
+ * Words a page title uses about itself, which are never the job.
+ *
+ * The first segment of a title is the role on a posting and something else
+ * entirely on the page where you actually apply: the enterprise systems —
+ * Oracle Recruiting, Cornerstone, UKG, Dayforce — title that step "Apply",
+ * "Application" or "Job Details" and put the employer after the dash. Reading
+ * the first segment regardless produced applications filed under the role
+ * "Apply", which is not a job and cannot be searched for later.
+ */
+const NOT_A_ROLE =
+  /^(apply|apply now|apply here|application|job application|submit application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
+
+/** A page title's parts, in the order they were written. */
+function titleParts(pageTitle?: string): string[] {
+  return (pageTitle ?? '')
+    .split(/[|–—·»]|\s-\s/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * A heading that names a role, for a page whose title does not.
+ *
+ * Required to contain a role noun rather than simply being the first heading:
+ * on these systems the first heading is usually the employer, and taking it
+ * would swap the two fields rather than fill them.
+ */
+function headingRole(html: string): string | undefined {
+  for (const match of html.matchAll(/<h[12][^>]*>([\s\S]{0,120}?)<\/h[12]>/gi)) {
+    const text = stripTags(match[1] ?? '').replace(/\s+/g, ' ').trim();
+    if (text.length > 2 && text.length <= 80 && ROLE_NOUN.test(text) && !NOT_A_ROLE.test(text)) return text;
+  }
+  return undefined;
+}
+
 export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
   const ld = fromJsonLd(html);
   const text = stripTags(html);
+  const parts = titleParts(pageTitle);
 
+  /*
+   * A part that names a job, before a part that merely is not a page word.
+   *
+   * "Apply — Novena Health" has two segments and neither is the first one:
+   * taking the first that was not a word about the page filed the employer as
+   * the role, which is the same mistake in the opposite direction. So: a
+   * segment that reads like a job, then a heading that does, and only then
+   * the old answer — which is still right for every title shaped "Role | Site".
+   */
   const rawTitle =
     ld?.title ??
     metaContent(html, ['og:title', 'twitter:title']) ??
-    pageTitle?.split(/[|–—]/)[0]?.trim();
+    parts.find((part) => !NOT_A_ROLE.test(part) && ROLE_NOUN.test(part)) ??
+    headingRole(html) ??
+    parts.find((part) => !NOT_A_ROLE.test(part));
 
   const company =
     ld?.company ??
     companyFromUrl(url) ??
     metaContent(html, ['og:site_name']) ??
     // "Software Engineer Intern at Acme" is the common page-title shape.
-    /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim();
+    /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim() ??
+    /*
+     * Or the other half of the title, which is where these systems put it:
+     * "Apply — Novena Health", "Platform Engineer | Halewood Group". Held to
+     * `looksLikeCompanyName`, so a second role, a sentence or a hostname in
+     * that position is refused rather than filed as the employer.
+     */
+    parts.find((part) => part !== rawTitle && !NOT_A_ROLE.test(part) && looksLikeCompanyName(part));
 
   // Page titles routinely carry the company along; the company has its own
   // field, and repeating it in the role reads badly everywhere it is shown.

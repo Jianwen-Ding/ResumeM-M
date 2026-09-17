@@ -135,7 +135,20 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     if (importing) throw new Error('Wait for the import batch to finish');
     await flushEdits();
     if (isDirty()) throw new Error('Your edits could not be saved. Retry saving before changing saves.');
-    await api('/projects/switch', { method: 'POST', body: JSON.stringify({ dir: $('#project-path').value.trim(), mode: $('#project-mode').value }) });
+    const mode = $('#project-mode').value;
+    /*
+     * Cloning reaches the network and can take a while — long enough that a
+     * button which does nothing visible reads as a button that did not work.
+     */
+    if (mode === 'clone') status('Cloning the save…');
+    await api('/projects/switch', {
+      method: 'POST',
+      body: JSON.stringify({
+        dir: $('#project-path').value.trim(),
+        mode,
+        ...(mode === 'clone' ? { url: $('#project-url')?.value.trim() ?? '' } : {}),
+      }),
+    });
     // A fresh page clears previews, cached selections, and all project-specific UI.
     location.hash = 'save';
     location.reload();
@@ -285,13 +298,21 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
   const PATH_LABEL = {
     open: 'Folder to open',
     create: 'Where to create it',
+    clone: 'Where to put it',
     move: 'Where to move it',
   };
   $('#project-mode').onchange = () => {
     const mode = $('#project-mode').value;
-    $('#project-switch').textContent = ({ open: 'Open Save', create: 'Create Save', move: 'Move Save' })[mode];
+    $('#project-switch').textContent = ({ open: 'Open Save', create: 'Create Save', clone: 'Clone Save', move: 'Move Save' })[mode];
     const label = document.querySelector('label[for="project-path"]');
     if (label) label.textContent = PATH_LABEL[mode] ?? 'Folder to open';
+    /*
+     * The address box only exists for the one mode that needs it. A field
+     * that is permanently on screen and permanently ignored teaches people to
+     * ignore the ones that are not.
+     */
+    const urlRow = $('#project-url-row');
+    if (urlRow) urlRow.hidden = mode !== 'clone';
   };
   // The markup ships the "open" wording; run once so a restored mode agrees.
   $('#project-mode').onchange?.();

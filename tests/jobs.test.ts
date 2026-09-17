@@ -51,6 +51,57 @@ describe('posting extraction', () => {
   });
 });
 
+/*
+ * The page where you actually apply, which is not shaped like the posting.
+ *
+ * The enterprise systems — Oracle Recruiting, Cornerstone, UKG, Dayforce —
+ * title that step "Apply" or "Job Details" and put the employer after the
+ * dash. Reading the first segment regardless filed applications under the
+ * role "Apply", which is not a job and cannot be looked up later, with no
+ * company at all.
+ */
+describe('a page that calls itself Apply', () => {
+  const applyPage = (title: string, heading = 'Novena Health', role = 'Platform Engineer') =>
+    extractJob(
+      `<html><head><title>${title}</title></head><body><h1>${heading}</h1><h2>${role}</h2>
+       <p>Submit application. Upload your resume. Equal opportunity employer.</p></body></html>`,
+      'https://novena.example/hcmUI/CandidateExperience/en/sites/CX_1/job/18842/apply',
+      title,
+    );
+
+  it('does not take the word Apply as the job', () => {
+    const job = applyPage('Apply — Novena Health');
+    expect(job.title).not.toMatch(/^apply$/i);
+    expect(job.title).toBe('Platform Engineer');
+  });
+
+  it('reads the employer out of the other half of the title', () => {
+    expect(applyPage('Apply — Novena Health').company).toBe('Novena Health');
+    expect(applyPage('Job Details | Halewood Group').company).toBe('Halewood Group');
+  });
+
+  it('still prefers a real role in the title to one in a heading', () => {
+    const job = applyPage('Staff Platform Engineer — Novena Health');
+    expect(job.title).toBe('Staff Platform Engineer');
+  });
+
+  /*
+   * The company is held to the same standard as everywhere else: the other
+   * half of a title is often another role, a tagline or a hostname, and any
+   * of those filed as the employer is worse than none.
+   */
+  it('refuses a second role, or a sentence, where the company goes', () => {
+    expect(applyPage('Apply — Platform Engineer').company).toBeUndefined();
+    expect(applyPage('Apply — We are hiring!').company).toBeUndefined();
+  });
+
+  it('falls back to a heading only when it names a role', () => {
+    // The first heading here is the employer, which must not become the job.
+    const job = applyPage('Apply', 'Novena Health', 'Platform Engineer');
+    expect(job.title).toBe('Platform Engineer');
+  });
+});
+
 describe('company from url', () => {
   it.each([
     ['https://boards.greenhouse.io/streamly/jobs/1', 'Streamly'],

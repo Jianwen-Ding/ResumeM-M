@@ -1968,6 +1968,7 @@ async function draftEntryWithAi(kind) {
   if (!asked || (!asked.repoUrl?.trim() && !asked.notes?.trim())) return;
 
   setStatus('Reading and drafting…');
+  const stopChip = startDrafting(`Drafting a ${kind} entry`, () => showTab('resumes'));
   let result;
   try {
     result = await api('/ai/draft-entry', {
@@ -1978,14 +1979,19 @@ async function draftEntryWithAi(kind) {
     showModal('Could not draft it', el('pre', { textContent: err.message }));
     setStatus(err.message, true);
     return;
+  } finally {
+    stopChip();
   }
 
   if (!result.executed) {
     showModal(
       'The AI is switched off',
       el('div', {}, [
-        el('p', { textContent: 'Turn it on in Voice & AI to draft entries. This is the prompt it would have been given:' }),
-        el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+        el('p', {
+          textContent:
+            'Turn it on under Voice & AI to draft entries. Or copy what it would have been asked and paste it into a chat of your own — the reply comes back as a new entry you can paste in.',
+        }),
+        advanced('Show what it would have been asked', promptBlock(result.prompt)),
       ]),
     );
     setStatus('AI is off');
@@ -1996,6 +2002,193 @@ async function draftEntryWithAi(kind) {
 }
 
 /** Show what came back and let it be edited before anything is written. */
+/**
+ * Wait for a background job, without holding a request open for it.
+ *
+ * Polling rather than a socket: the jobs list is already polled for the
+ * toolbar chip, a store server has one client, and a second transport for a
+ * thing that finishes in minutes is machinery nobody has to maintain.
+ */
+async function waitForJob(id, every = 2000) {
+  for (;;) {
+    const job = await api(`/ai/jobs/${encodeURIComponent(id)}`);
+    if (job.status === 'failed') throw new Error(job.error ?? 'It failed, and said nothing about why.');
+    if (job.status !== 'running') return job.result;
+    await new Promise((resolve) => setTimeout(resolve, every));
+  }
+}
+
+/**
+ * Read everything in the corpus into a proposal, and offer it one at a time.
+ *
+ * One at a time is the whole design. A model that has read four files and
+ * proposes eleven entries is proposing eleven decisions, and a single "Add
+ * them all" makes those eleven into one — which is how a resume ends up with
+ * a line nobody read on it. Each is shown with the sentence in the material it
+ * came from, because "where did this come from" is the only question worth
+ * asking about a bullet you did not write.
+ */
+async function readMaterial(notes) {
+  const stop = showAiProgress(
+    notes,
+    'Reading your material',
+    () => showTab('voice'),
+    'This takes a few minutes for a few files. You can go and work on something else — it carries on.',
+  );
+  let result;
+  try {
+    /*
+     * A background job, like feedback, because this is the longest-running
+     * thing in the product: four files read end to end and an entry proposed
+     * out of each. A request held open for four minutes is one a proxy or a
+     * browser gives up on while the work carries on invisibly.
+     */
+    const { job } = await api('/ai/read-material', { method: 'POST', body: JSON.stringify({}) });
+    result = await waitForJob(job.id);
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+    return;
+  } finally {
+    stop();
+  }
+
+  if (!result.executed) {
+    setChildren(notes, el('div', {}, [
+      el('p', { textContent: 'The AI is switched off, so nothing was read. Turn it on under Voice & AI.' }),
+      advanced('Show what it would have been asked', promptBlock(result.prompt)),
+    ]));
+    return;
+  }
+
+  const proposal = result.proposal ?? {};
+  const entries = proposal.entries ?? [];
+  const alternates = proposal.alternates ?? [];
+
+  if (entries.length === 0 && alternates.length === 0) {
+    setChildren(notes, el('div', {}, [
+      el('p', {
+        textContent:
+          `Read ${plural(result.read?.length ?? 0, 'file')} and found nothing new to add — which usually means ` +
+          'what is in them is already in your store.',
+      }),
+      proposal.notes ? el('p', { className: 'hint', textContent: proposal.notes }) : null,
+    ]));
+    return;
+  }
+
+  setChildren(notes, el('div', {}, [
+    el('p', {
+      textContent:
+        `Read ${plural(result.read?.length ?? 0, 'file')}. ` +
+        `${plural(entries.length, 'entry', 'entries')} and ${plural(alternates.length, 'other wording')} to look at. ` +
+        'Nothing is saved yet.',
+    }),
+    proposal.notes ? el('p', { className: 'hint', textContent: proposal.notes }) : null,
+  ]));
+
+  let added = 0;
+  const failures = [];
+  for (const entry of entries) {
+    const accepted = await showModal(
+      `From your material — ${entry.title}`,
+      el('div', {}, [
+        el('p', {
+          className: 'hint',
+          textContent: [entry.subtitle, entry.dates, entry.location].filter(Boolean).join(' · ') || entry.kind,
+        }),
+        el('ul', {}, (entry.bullets ?? []).map((b) =>
+          el('li', {}, [
+            el('div', { textContent: b.text }),
+            // Where it came from, which is the only question worth asking
+            // about a line you did not write.
+            el('div', { className: 'hint', textContent: `from your material: “${b.source}”` }),
+          ]),
+        )),
+        el('p', { className: 'hint', textContent: 'Every wording is saved unreviewed, so you can see what you have not read yet.' }),
+      ]),
+      { okLabel: 'Add it', showCancel: true, cancelLabel: 'Skip' },
+    );
+    if (!accepted) continue;
+
+    let id = entry.id;
+    for (let n = 2; state.store.entries.some((e) => e.id === id); n++) id = `${entry.id}_${n}`;
+    describeNext(`adding "${entry.title}" from your material`);
+    /*
+     * One failing save must not take the rest of the list with it. You have
+     * just said yes to eleven things one at a time; a throw on the fourth
+     * would drop seven you had already agreed to, silently.
+     */
+    try {
+      await saveEntry(
+        {
+          id,
+          kind: entry.kind,
+          title: entry.title,
+          ...(entry.subtitle ? { subtitle: entry.subtitle } : {}),
+          ...(entry.dates ? { dates: entry.dates } : {}),
+          ...(entry.location ? { location: entry.location } : {}),
+          bullets: (entry.bullets ?? []).map((b, i) => ({
+            id: `${id}_b${i + 1}`,
+            default: 'v_read',
+            variants: [{ id: 'v_read', label: b.label || 'From your material', text: b.text, suggested: true }],
+          })),
+        },
+        `Added "${entry.title}" from your material`,
+      );
+      added++;
+    } catch (err) {
+      failures.push(`${entry.title}: ${err.message}`);
+    }
+  }
+
+  for (const alt of alternates) {
+    const entry = state.store.entries.find((e) => (e.bullets ?? []).some((b) => b.id === alt.bulletId));
+    const bullet = entry?.bullets?.find((b) => b.id === alt.bulletId);
+    if (!bullet) continue;
+    const accepted = await showModal(
+      'Another way you have put it',
+      el('div', {}, [
+        el('p', { className: 'hint', textContent: 'The line you have now:' }),
+        el('p', { textContent: (bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0])?.text ?? '' }),
+        el('p', { className: 'hint', textContent: 'From your material:' }),
+        el('p', { textContent: alt.text }),
+        el('div', { className: 'hint', textContent: `quoted from: “${alt.source}”` }),
+      ]),
+      { okLabel: 'Keep both', showCancel: true, cancelLabel: 'Skip' },
+    );
+    if (!accepted) continue;
+    describeNext('adding a wording from your material');
+    try {
+      await saveEntry(
+        {
+          ...entry,
+          bullets: entry.bullets.map((b) =>
+            b.id !== alt.bulletId
+              ? b
+              : { ...b, variants: [...b.variants, { id: `v_read_${Date.now().toString(36)}`, label: alt.label || 'From your material', text: alt.text, suggested: true }] },
+          ),
+        },
+        'Added a wording from your material',
+      );
+      added++;
+    } catch (err) {
+      failures.push(`${alt.bulletId}: ${err.message}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    // Said, not swallowed: you agreed to these, and a silent "nothing
+    // happened" is the worst possible answer to that.
+    setChildren(
+      notes,
+      el('div', { textContent: `Added ${plural(added, 'thing')}.` }),
+      el('div', { className: 'err', textContent: `${plural(failures.length, 'one')} could not be saved:` }),
+      ...failures.map((f) => el('div', { className: 'hint', textContent: f })),
+    );
+  }
+  setStatus(added ? `Added ${plural(added, 'thing')} from your material` : 'Nothing added');
+}
+
 async function reviewDraftedEntry(entry, repo, kind) {
   const lines = (entry.bullets ?? []).flatMap((b) => b.variants.map((v) => `${v.label}: ${v.text}`));
   const accepted = await showModal(
@@ -2201,6 +2394,7 @@ async function draftPhrasings(entry, target) {
   if (!asked) return;
 
   setStatus('Drafting…');
+  const stopChip = startDrafting('Drafting another wording', () => showTab('resumes'));
   let result;
   try {
     result = await api('/ai/draft-phrasing', {
@@ -2211,12 +2405,17 @@ async function draftPhrasings(entry, target) {
     showModal('Could not draft it', el('pre', { textContent: err.message }));
     setStatus(err.message, true);
     return;
+  } finally {
+    stopChip();
   }
 
   if (!result.executed) {
     showModal('The AI is switched off', el('div', {}, [
-      el('p', { textContent: 'Turn it on in Voice & AI to draft wordings. This is the prompt it would have been given:' }),
-      el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+      el('p', {
+        textContent:
+          'Turn it on under Voice & AI to draft wordings. Or copy what it would have been asked and paste it into a chat of your own.',
+      }),
+      advanced('Show what it would have been asked', promptBlock(result.prompt)),
     ]));
     return;
   }
@@ -2674,6 +2873,53 @@ function scheduleRender({ delay = LIVE_DELAY_MS } = {}) {
  */
 const previews = new WeakMap();
 
+/**
+ * Something the tool needs and the person using it mostly does not.
+ *
+ * The prompts are thousands of words of instructions nobody here wrote, and
+ * they were shown in full every time the AI was switched off — a modal whose
+ * entire content was machinery. The command line and its `{prompt}` templates
+ * are the same kind of thing: necessary, occasionally essential, and not what
+ * anyone opens Settings to look at.
+ *
+ * `<details>` rather than a button that toggles a class, because it is the
+ * one disclosure the browser already knows how to make keyboard- and
+ * screen-reader-accessible, and because it stays open once opened — someone
+ * who needs the command line usually needs it more than once.
+ */
+/**
+ * A prompt, with the one thing anyone actually wants to do to it.
+ *
+ * Reading it is rare; pasting it into a chat window is the whole reason it is
+ * offered at all. Selecting several thousand words out of a scrolling <pre>
+ * by hand is not something to make somebody do.
+ */
+function promptBlock(text) {
+  const body = el('pre', { className: 'prompt-dump', textContent: text ?? '' });
+  const copy = el('button', {
+    className: 'tiny',
+    textContent: 'Copy',
+    onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(text ?? '');
+        copy.textContent = 'Copied';
+        setTimeout(() => (copy.textContent = 'Copy'), 1500);
+      } catch {
+        // No clipboard permission: the text is right there to select.
+        copy.textContent = 'Select it and copy';
+      }
+    },
+  });
+  return el('div', {}, [el('div', { className: 'toolbar' }, [copy]), body]);
+}
+
+function advanced(summary, ...children) {
+  const box = el('details', { className: 'advanced' });
+  box.append(el('summary', { textContent: summary }));
+  for (const child of children) if (child != null && child !== false) box.append(child);
+  return box;
+}
+
 function showPdf(frame, url) {
   let preview = previews.get(frame);
   if (!preview) {
@@ -2683,6 +2929,18 @@ function showPdf(frame, url) {
   return preview.show(url).catch((err) => {
     console.warn('[rmm] preview failed:', err);
   });
+}
+
+/**
+ * Nothing to preview any more.
+ *
+ * The class alone was not enough: it only brings the placeholder back, and
+ * the page already drawn stays where it was — so an emptied cover letter
+ * showed its own last version with "type a first sentence" written across it.
+ */
+function clearPdf(frame) {
+  previews.get(frame)?.clear?.();
+  frame.classList.remove('loaded');
 }
 
 /** The "is what I see current?" indicator that replaced the Preview button. */
@@ -2883,10 +3141,32 @@ async function openJob(job, reveal = true) {
     const full = await api(`/ai/jobs/${encodeURIComponent(job.id)}`);
     if (request !== feedbackRequest) return;
     feedbackShownStatus = full.status;
-    $('#feedback-status').textContent = full.status === 'failed' ? 'Feedback failed'
-      : full.result?.executed ? full.about : 'AI is off — showing the prompt it would run';
-    if (full.status === 'failed') $('#feedback-content').textContent = full.error ?? 'Unknown error';
-    else $('#feedback-content').replaceChildren(renderFeedbackMarkdown(full.result?.output ?? ''));
+    const ran = full.result?.executed;
+    $('#feedback-status').textContent = full.status === 'failed'
+      ? 'Feedback failed'
+      : ran ? full.about : 'The AI is off, so there is no feedback';
+    if (full.status === 'failed') {
+      $('#feedback-content').textContent = full.error ?? 'Unknown error';
+    } else if (!ran) {
+      /*
+       * Not the prompt, dumped into the panel where feedback goes.
+       *
+       * With the AI off this filled the feedback pane with several thousand
+       * words of instructions nobody here wrote, under a heading that said
+       * feedback — which reads as the tool having answered. Say what
+       * happened, and keep the machinery behind a disclosure for the one
+       * person in twenty who wants to paste it somewhere.
+       */
+      $('#feedback-content').replaceChildren(
+        el('p', {
+          textContent:
+            'Nothing was read, because the AI command is switched off. Turn it on under Voice & AI, or copy the request below into a chat of your own and paste what comes back wherever you like.',
+        }),
+        advanced('Show what it would have been asked', promptBlock(full.result?.output ?? '')),
+      );
+    } else {
+      $('#feedback-content').replaceChildren(renderFeedbackMarkdown(full.result?.output ?? ''));
+    }
     const local = feedbackJobs.find(item => item.id === job.id);
     if (local) local.unread = false;
     renderJobChip(feedbackJobs);
@@ -3148,18 +3428,25 @@ async function addApplication() {
  * ------------------------------------------------------------------ */
 
 let openDraftId = null;
+/*
+ * How many are in the list, so the pane beside it can stop telling you to
+ * pick one when there are none to pick. "Nothing open — pick an application
+ * on the left" over an empty left column is advice that cannot be followed,
+ * printed beside two other paragraphs saying the same thing a third way.
+ */
+let draftsInList = 0;
 
 async function loadDrafts() {
   const { drafts } = await api('/workspace');
   const list = $('#draft-list');
+  draftsInList = drafts.length;
 
   if (drafts.length === 0) {
     setChildren(
       list,
-      el('div', { className: 'empty' }, [
-        el('b', {}, 'Nothing in progress'),
-        'When a posting wants a cover letter or written answers, send it here from the browser extension.',
-      ]),
+      // Short: the paragraph above this box already says where these come
+      // from, and the pane beside it says it once more with what to do.
+      el('div', { className: 'empty' }, [el('b', {}, 'Nothing yet')]),
     );
     if (!openDraftId) renderDraft(null);
     return;
@@ -3412,8 +3699,11 @@ function renderDraft(draft) {
     setChildren(
       panel,
       el('div', { className: 'empty' }, [
-        el('b', {}, 'Nothing open'),
-        'Pick an application on the left, or send one over from the extension.',
+        el('b', {}, draftsInList === 0 ? 'Nothing in progress' : 'Nothing open'),
+        draftsInList === 0
+          ? 'One arrives here when JobHelper finds a posting that wants a cover letter or written answers. ' +
+            'Or start one yourself with + Application, above.'
+          : 'Pick an application on the left.',
       ]),
     );
     return;
@@ -3455,7 +3745,9 @@ function renderDraft(draft) {
 
     const compile = async () => {
       if (!draft.coverLetter.body.trim()) {
-        letterPane.classList.remove('loaded');
+        // The whole page goes, not just the class over it.
+        letterToken++;
+        clearPdf(letterPane);
         letterFit.className = 'fit idle';
         letterFit.textContent = 'Nothing written yet.';
         liveChip.className = 'live ok';
@@ -3854,7 +4146,12 @@ async function startVariation(draft, notes) {
 }
 
 async function tailorDraft(draft, notes, useAi) {
-  setChildren(notes, el('div', { textContent: useAi ? 'Reading the posting…' : 'Matching against the posting…' }));
+  const doing = useAi ? 'Reading the posting' : 'Matching against the posting';
+  setChildren(notes, el('div', { textContent: `${doing}…` }));
+  // In the toolbar too, so leaving this panel does not lose the only sign it
+  // is running. `useAi` runs for minutes; the match is instant and the chip
+  // is gone before anyone reads it, which is the right amount of noise.
+  const stopChip = startDrafting(doing, () => openDraft(draft.id));
   try {
     const res = await api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
       method: 'POST',
@@ -3881,6 +4178,8 @@ async function tailorDraft(draft, notes, useAi) {
     await openDraft(draft.id);
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  } finally {
+    stopChip();
   }
 }
 
@@ -3910,8 +4209,68 @@ function aiButton({ className = 'tiny', label, title, onclick }) {
  * cheapest honest thing — it moves, so the panel is visibly alive, and it says
  * how long you have actually been waiting rather than how long it feels.
  */
-function showAiProgress(notes, doing) {
+/**
+ * Everything the AI is writing right now, so the toolbar can say so.
+ *
+ * Feedback has had a chip up there since it went into the background, and it
+ * is the reason a feedback run is something you can start and then go back to
+ * work: the sign that it is happening follows you between tabs. A draft had
+ * nothing of the kind — the progress bar lives in the panel that started it,
+ * so opening the resume builder while a cover letter was being written left
+ * no trace anywhere that anything was.
+ *
+ * Which is the same question in both cases: is it still going, and where is
+ * it. So it gets the same answer, in the same place.
+ */
+const drafting = new Map();
+let draftingSeq = 0;
+let draftingTimer = null;
+
+function startDrafting(what, go) {
+  const id = ++draftingSeq;
+  drafting.set(id, { what, started: Date.now(), go });
+  renderDraftingChip();
+  // One timer for however many are running, started on the first and stopped
+  // with the last.
+  draftingTimer ??= setInterval(renderDraftingChip, 1000);
+  return () => {
+    drafting.delete(id);
+    renderDraftingChip();
+    if (drafting.size === 0 && draftingTimer) {
+      clearInterval(draftingTimer);
+      draftingTimer = null;
+    }
+  };
+}
+
+function renderDraftingChip() {
+  const chip = $('#drafting-chip');
+  if (!chip) return;
+  const running = [...drafting.values()];
+  if (running.length === 0) {
+    chip.className = 'jobs-chip hidden';
+    chip.textContent = '';
+    chip.onclick = null;
+    return;
+  }
+
+  // The oldest, because it is the one that has been waited on longest and the
+  // one most likely to be worth looking at.
+  const oldest = running.reduce((a, b) => (a.started <= b.started ? a : b));
+  const s = Math.round((Date.now() - oldest.started) / 1000);
+  const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  chip.className = 'jobs-chip working';
+  chip.textContent =
+    running.length > 1 ? `${oldest.what}, and ${running.length - 1} more · ${clock}` : `${oldest.what} · ${clock}`;
+  chip.title = running.map((r) => r.what).join('\n');
+  chip.onclick = oldest.go ?? null;
+  // A chip that cannot take you anywhere should not look as though it could.
+  chip.style.cursor = oldest.go ? 'pointer' : 'default';
+}
+
+function showAiProgress(notes, doing, go, hint = 'Keep writing if you like — nothing you type now will be lost.') {
   const started = Date.now();
+  const stopChip = startDrafting(doing, go);
   const clock = el('span', { className: 'ai-elapsed', textContent: '0:00' });
   setChildren(
     notes,
@@ -3920,14 +4279,20 @@ function showAiProgress(notes, doing) {
       el('span', { textContent: `${doing}… ` }),
       clock,
     ]),
-    el('div', { className: 'hint', textContent: 'Keep writing if you like — nothing you type now will be lost.' }),
+    // The reassurance depends on what is running. "Keep writing" is the right
+    // thing to say beside a letter being drafted and a strange thing to say
+    // beside a pile of files being read, where there is nothing to type into.
+    el('div', { className: 'hint', textContent: hint }),
   );
 
   const tick = setInterval(() => {
     const s = Math.round((Date.now() - started) / 1000);
     clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }, 1000);
-  return () => clearInterval(tick);
+  return () => {
+    clearInterval(tick);
+    stopChip();
+  };
 }
 
 const DOING = {
@@ -3937,7 +4302,13 @@ const DOING = {
 };
 
 async function generate(draft, what, notes, extra = {}) {
-  const stop = showAiProgress(notes, extra.questionId ? 'Writing the answer' : (DOING[what] ?? 'Working'));
+  const stop = showAiProgress(
+    notes,
+    extra.questionId ? 'Writing the answer' : (DOING[what] ?? 'Working'),
+    // Where to go back to: the chip is only worth having if it can take you
+    // to the thing it is telling you about.
+    () => openDraft(draft.id),
+  );
   // Nothing else starts a second run on top of this one.
   const buttons = [...($('#draft-editor')?.querySelectorAll('button.ai-action') ?? [])];
   for (const b of buttons) b.disabled = true;
@@ -3983,6 +4354,11 @@ async function generate(draft, what, notes, extra = {}) {
  * nobody should watch a spinner for it.
  */
 async function askDraftFeedback(draft, target, notes) {
+  /*
+   * Not a `startDrafting`: this one hands off to a background job, which has
+   * had its own chip since it went into the background. Two chips for one
+   * run would be worse than none.
+   */
   try {
     setChildren(notes, el('div', { textContent: 'Reading it…' }));
     const { job } = await api('/ai/feedback', {
@@ -4261,6 +4637,36 @@ async function loadVoice() {
         : '',
     }),
   );
+
+  /*
+   * And the offer to read them.
+   *
+   * These files are already the material a resume is made of — an old resume,
+   * the cover letters, a README. Typing the entries out of them by hand is
+   * the evening this saves, and the button belongs beside the files rather
+   * than three tabs away from them.
+   */
+  const materialNotes = $('#read-material-notes');
+  const row = $('#read-material-row');
+  if (row) {
+    const count = (data.samples?.length ?? 0) + (data.context?.used?.length ?? 0);
+    row.hidden = count === 0;
+    setChildren(
+      row,
+      aiButton({
+        className: '',
+        label: 'Read these into entries',
+        title:
+          'Read everything here and propose the entries, bullets and alternate wordings in it. ' +
+          'Nothing is saved: you accept them one at a time',
+        onclick: () => readMaterial(materialNotes),
+      }),
+      el('span', {
+        className: 'hint',
+        textContent: 'Nothing is saved — you look at every line before it goes in.',
+      }),
+    );
+  }
 
   // Samples the user pasted in are editable; the rest are shown as what they
   // are so it is clear the corpus is bigger than this list.
@@ -4582,12 +4988,14 @@ async function editSample(sample) {
  * but not in this file is how a config ends up broken.
  */
 let AI_PRESETS = [];
+let AI_TASKS = [];
 const CUSTOM_PRESET = { label: 'Custom…', command: '', args: [], note: '' };
 
 async function loadAiPresets() {
   if (AI_PRESETS.length > 0) return AI_PRESETS;
-  const { presets } = await api('/ai/presets').catch(() => ({ presets: [] }));
+  const { presets, tasks } = await api('/ai/presets').catch(() => ({ presets: [], tasks: [] }));
   AI_PRESETS = [...presets, CUSTOM_PRESET];
+  AI_TASKS = tasks ?? [];
   return AI_PRESETS;
 }
 
@@ -4844,6 +5252,324 @@ async function loadSettings() {
   };
   showPresetNote();
 
+  /*
+   * Which model, and how hard it should think.
+   *
+   * Two settings rather than two more arguments to hand-edit: a preset is
+   * copied when it is chosen, so editing the argument line to change a model
+   * turns the configuration into a custom one that then drifts out of date
+   * with the preset it came from. These are applied to the arguments on the
+   * server, the way the research switch is, so the saved arguments stay the
+   * preset's own.
+   *
+   * A text box with suggestions rather than a dropdown, because every one of
+   * these CLIs gains models faster than this file can be edited and a closed
+   * list would start refusing names that work.
+   */
+  const modelList = el('datalist', { id: 'ai-model-options' });
+  const model = keptField('ai-model', config.ai.model ?? '', {
+    placeholder: 'Whatever the CLI uses by default',
+  });
+  // `list` is read-only on an input, so assigning it throws rather than
+  // linking the datalist — it has to be set as an attribute.
+  model.setAttribute('list', 'ai-model-options');
+
+  /*
+   * The models the chosen CLI actually has, as buttons.
+   *
+   * Typing "opus" into a box is asking somebody to remember a name; four
+   * buttons is reading. The box is still there behind "Another…", because
+   * every one of these CLIs gains models faster than this file can be edited
+   * and a closed list would start refusing names that work — but it is the
+   * exception now rather than the only way in.
+   */
+  const modelChips = el('div', { className: 'chip-set model-chips' });
+  const modelOther = el('div', { className: 'model-other', hidden: true }, [model]);
+  const typedModel = () => model.value.trim();
+  const showModelChips = () => {
+    const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
+    const names = chosen?.model?.suggestions ?? [];
+    const listed = names.includes(typedModel());
+    // Nothing to choose between: the box is the only control that makes sense.
+    modelChips.hidden = names.length === 0;
+    // And the box stays out of the way only while the buttons can say what is
+    // chosen — which includes choosing nothing.
+    modelOther.hidden = names.length > 0 && (typedModel() === '' || listed);
+
+    /*
+     * `aria-pressed` by setAttribute, not through el(): that builds with
+     * Object.assign, and assigning a hyphenated key sets a plain JavaScript
+     * property that no attribute and no screen reader ever sees. The same
+     * trap as `list` on an input, one line further down the file.
+     */
+    const pressable = (node, on) => {
+      node.setAttribute('aria-pressed', String(on));
+      if (on) node.classList.add('on');
+      return node;
+    };
+    const chip = (label, value, title) =>
+      pressable(
+        el('button', {
+          type: 'button',
+          className: 'chip-toggle',
+          textContent: label,
+          title: title ?? '',
+          onclick: () => {
+            model.value = value;
+            model.oninput();
+          },
+        }),
+        typedModel() === value,
+      );
+
+    modelChips.replaceChildren(
+      chip('Default', '', `Whatever ${chosen?.command ?? 'the CLI'} uses when it is not told`),
+      ...names.map((m) => chip(m, m)),
+      pressable(
+        el('button', {
+          type: 'button',
+          className: 'chip-toggle',
+          textContent: 'Another…',
+          onclick: () => {
+            modelOther.hidden = false;
+            model.focus();
+          },
+        }),
+        !listed && Boolean(typedModel()),
+      ),
+    );
+  };
+
+  /*
+   * And a model per kind of work, for when one is not enough.
+   *
+   * Behind a disclosure because almost nobody needs it: the box above is the
+   * answer for most people, and four more boxes at the top of the panel would
+   * make choosing a preset look like a configuration exercise. Each is empty
+   * by default, which reads as "whatever Model says" and is exactly what it
+   * does.
+   */
+  const perTask = new Map();
+  for (const task of AI_TASKS) {
+    const box = keptField(`ai-model-${task.key}`, config.ai.models?.[task.key] ?? '', {
+      placeholder: 'A model name',
+    });
+    box.setAttribute('list', 'ai-model-options');
+    perTask.set(task.key, box);
+  }
+
+  /*
+   * Four kinds of work down the side, the models across the top.
+   *
+   * It was four text boxes, one per kind of work, each asking you to type a
+   * model name from memory — and no way to see at a glance that three of them
+   * say the same thing. As a grid the whole arrangement is one look: every row
+   * has exactly one mark on it, and the column it is in is the answer.
+   *
+   * Radio buttons rather than styled cells, because that is what this is: one
+   * choice per row, out of a named set. Arrow keys move along a row and screen
+   * readers read the column heading with the cell, both for free.
+   */
+  const taskGrid = el('table', { className: 'model-grid' });
+  const taskOther = new Map();
+  let gridColumns = null;
+
+  const paintTaskGrid = (names) => {
+    const columns = JSON.stringify(names);
+    if (columns === gridColumns) {
+      // Same columns: only the marks can have moved, and rebuilding would take
+      // the focus out of a name somebody is halfway through typing.
+      for (const task of AI_TASKS) {
+        const value = perTask.get(task.key).value.trim();
+        const listed = names.includes(value);
+        for (const radio of taskGrid.querySelectorAll(`input[name="ai-task-${task.key}"]`)) {
+          radio.checked = radio.value === (listed || !value ? value : 'other');
+        }
+        taskOther.get(task.key).hidden = listed || !value;
+      }
+      return;
+    }
+    gridColumns = columns;
+
+    const head = el('tr', {}, [
+      el('th', { className: 'what', scope: 'col', textContent: 'For' }),
+      el('th', { scope: 'col', textContent: 'Same as above' }),
+      ...names.map((m) => el('th', { scope: 'col', textContent: m })),
+      el('th', { scope: 'col', textContent: 'Another…' }),
+    ]);
+
+    const rows = AI_TASKS.flatMap((task) => {
+      const box = perTask.get(task.key);
+      const value = box.value.trim();
+      const listed = names.includes(value);
+      const choose = (v) => {
+        if (v !== 'other') box.value = v;
+        box.oninput();
+        taskOther.get(task.key).hidden = v !== 'other';
+        if (v === 'other') box.focus();
+      };
+      const cell = (value_, on) => {
+        const radio = el('input', {
+          type: 'radio',
+          name: `ai-task-${task.key}`,
+          value: value_,
+          checked: on,
+          onchange: () => choose(value_),
+        });
+        // By setAttribute: el() builds with Object.assign, and a hyphenated
+        // key there sets a plain property no attribute ever sees — the same
+        // trap as `list` on an input. A bare radio in a grid has no other name.
+        const said = value_ === '' ? 'same as above' : value_ === 'other' ? 'another model' : value_;
+        radio.setAttribute('aria-label', `${task.label}: ${said}`);
+        return el('td', {}, [radio]);
+      };
+
+      const otherRow = el('tr', { className: 'other-row', hidden: listed || !value }, [
+        el('td', { colSpan: String(names.length + 3) }, [box]),
+      ]);
+      taskOther.set(task.key, otherRow);
+
+      return [
+        el('tr', {}, [
+          el('th', { className: 'what', scope: 'row', title: task.note, textContent: task.label }),
+          cell('', !value),
+          ...names.map((m) => cell(m, value === m)),
+          cell('other', Boolean(value) && !listed),
+        ]),
+        otherRow,
+      ];
+    });
+
+    setChildren(taskGrid, el('thead', {}, [head]), el('tbody', {}, rows));
+  };
+
+  /*
+   * Effort as a slider, because it is one axis and four stops on it.
+   *
+   * A dropdown asks you to open it before you can see what the choices even
+   * are, and hides the thing that matters most about them: that they are
+   * ordered, and that you are somewhere on that order. A slider is the shape
+   * of the setting.
+   */
+  const EFFORTS = [
+    ['', 'As it comes'],
+    ['low', 'Quick'],
+    ['medium', 'Normal'],
+    ['high', 'Thorough'],
+  ];
+  const effortAt = (i) => EFFORTS[Math.max(0, Math.min(EFFORTS.length - 1, Number(i) || 0))];
+  const effortSlider = el('input', {
+    type: 'range',
+    min: '0',
+    max: String(EFFORTS.length - 1),
+    step: '1',
+    className: 'effort-slider',
+    value: String(Math.max(0, EFFORTS.findIndex(([v]) => v === (config.ai.effort ?? '')))),
+  });
+  const effortValue = () => effortAt(effortSlider.value)[0];
+  /*
+   * The scale under the track is also the readout: the stop you are on is the
+   * one in darker type. A separate "As it comes" line above the slider said
+   * the same words as the left-hand end of the scale below it, which is the
+   * current value printed twice and no clearer for it.
+   */
+  const effortScale = el(
+    'div',
+    { className: 'effort-scale' },
+    EFFORTS.map(([, label]) => el('span', { textContent: label })),
+  );
+  const showEffortLabel = () => {
+    const at = Number(effortSlider.value) || 0;
+    [...effortScale.children].forEach((span, i) => span.classList.toggle('on', i === at));
+    effortSlider.setAttribute('aria-valuetext', effortAt(effortSlider.value)[1]);
+  };
+  let savedEffort = config.ai.effort ?? '';
+
+  /**
+   * What these two will actually do, given the command that is configured.
+   *
+   * Only Codex has a reasoning-effort flag. Saying "Thorough" and having it
+   * silently mean nothing would be the worst version of this, so the panel
+   * says which mechanism is in play: the CLI's own switch where there is one,
+   * and a line in the prompt everywhere else — which reaches every model,
+   * just less precisely.
+   */
+  /*
+   * One note each, under the field it is about.
+   *
+   * Both sentences used to be joined into a single line below Effort, so
+   * "Passed as --model" sat under the Effort dropdown, two fields away from
+   * the box it describes, and read as if the effort were the thing being
+   * passed. A note belongs to its field.
+   */
+  const modelNote = el('div', { className: 'hint' });
+  const effortNote = el('div', { className: 'hint' });
+  /*
+   * A command that is not a preset gets neither control, and is told so.
+   *
+   * There is nothing to build a model menu out of — the names come from the
+   * preset — and nothing to attach either setting to, so showing the pair
+   * greyed out or full of a stranger's model names would be offering a choice
+   * that does nothing. What stays is one line saying where the equivalent
+   * lives: the flags go in Arguments, and the effort still reaches the model
+   * through the prompt, which is true of every command.
+   */
+  const noPresetNote = el('div', { className: 'hint' });
+  /*
+   * The disclosure's own heading follows what is inside it: with no preset
+   * there is no model and no effort in there, and a summary that promises
+   * both is a promise the block does not keep.
+   */
+  let commandSummary = null;
+  /*
+   * The model and the effort, as one thing that appears and disappears.
+   *
+   * Built here rather than inline below because `setChildren` returns what
+   * `replaceChildren` returns, which is nothing — passing its result as a
+   * child put `undefined` in the tree and the whole block simply was not
+   * there.
+   */
+  const modelAndEffort = el('div', {}, [
+    el('div', { className: 'lbl', textContent: 'Model' }),
+    modelChips,
+    modelOther,
+    modelList,
+    modelNote,
+    el('div', { className: 'lbl', textContent: 'Effort' }),
+    effortSlider,
+    effortScale,
+    effortNote,
+    advanced('A different model for a particular kind of work', taskGrid),
+  ]);
+  const showModelNote = () => {
+    const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
+    modelList.replaceChildren(...(chosen?.model?.suggestions ?? []).map((m) => el('option', { value: m })));
+    showModelChips();
+    paintTaskGrid(chosen?.model?.suggestions ?? []);
+    showEffortLabel();
+
+    modelAndEffort.hidden = !chosen;
+    noPresetNote.hidden = Boolean(chosen);
+    if (commandSummary) {
+      commandSummary.textContent = chosen
+        ? 'Advanced — the exact command, the model and the effort'
+        : 'Advanced — the exact command';
+    }
+    if (!chosen) {
+      noPresetNote.textContent =
+        `"${command.value.trim() || 'this command'}" is not one of the presets, so there is no model or effort to ` +
+        'choose here: put the flags it wants in Arguments. The effort is still asked for in the prompt, which ' +
+        'reaches every model.';
+      return;
+    }
+    modelNote.textContent = chosen.model
+      ? `Passed as ${chosen.model.flag}. Leave it empty to let ${chosen.command} choose.`
+      : `${chosen.command} has no model switch, so this is ignored.`;
+    effortNote.textContent = chosen.effort
+      ? `Passed as ${chosen.effort.flag}, and said in the prompt as well.`
+      : `${chosen.command} has no effort switch, so this is asked for in the prompt instead — which every model understands, less precisely than a flag would.`;
+  };
+
   const engine = el('select');
   for (const e of ['', 'tectonic', 'latexmk', 'pdflatex']) {
     engine.append(
@@ -4851,6 +5577,42 @@ async function loadSettings() {
     );
   }
   let savedEngine = config.latex.engine ?? '';
+
+  /*
+   * The exact invocation, folded away.
+   *
+   * Choosing a preset, a model and an effort level is the whole of what
+   * almost everyone needs, and leading with a command line and an argument
+   * template full of `{promptText}` placeholders made the panel look like
+   * something you had to understand before you could use any of it.
+   *
+   * Open to begin with when what is saved is not a preset, because then it
+   * is the only thing on the panel that says what is actually going to run —
+   * and hiding a command somebody typed themselves is how they come to
+   * believe the preset they picked took effect when it did not.
+   */
+  const commandBlock = advanced(
+    'Advanced — the exact command, the model and the effort',
+    field('Command', command, 'Must be on your PATH.'),
+    field(
+      'Arguments',
+      args,
+      '{prompt} is a file holding the prompt, {promptText} inlines it, {sandbox} is the scratch directory.',
+    ),
+    field('Timeout, seconds', timeout),
+    /*
+     * The model and the effort live here, below the command, because they are
+     * facts about that command: which names are even offered depends on which
+     * CLI is chosen, and neither means anything until one is. Picking a preset
+     * is the whole of what most people need from this panel — and a command
+     * that is not a preset gets this whole block hidden rather than a pair of
+     * controls that cannot do anything.
+     */
+    modelAndEffort,
+    noPresetNote,
+  );
+  commandSummary = commandBlock.querySelector('summary');
+  commandBlock.open = !matching;
 
   const result = el('div', { className: 'result idle', textContent: 'Not tested yet.' });
 
@@ -4868,12 +5630,27 @@ async function loadSettings() {
     command.value !== command.dataset.stored ||
     args.value !== args.dataset.stored ||
     timeout.value !== timeout.dataset.stored ||
+    model.value !== model.dataset.stored ||
+    [...perTask.values()].some((box) => box.value !== box.dataset.stored) ||
+    effortValue() !== savedEffort ||
     (engine.value || '') !== savedEngine;
   const markAiUnsaved = () => {
     unsaved.hidden = !aiIsDirty();
   };
-  for (const input of [command, args, timeout]) input.oninput = markAiUnsaved;
+  for (const input of [command, args, timeout, model, ...perTask.values()]) {
+    input.oninput = () => {
+      markAiUnsaved();
+      // The command decides what the model box can even do, so its note
+      // follows what is typed rather than what was last saved.
+      showModelNote();
+    };
+  }
   engine.onchange = markAiUnsaved;
+  effortSlider.oninput = () => {
+    showEffortLabel();
+    markAiUnsaved();
+  };
+  showModelNote();
   markAiUnsaved();
 
   const save = async () => {
@@ -4887,6 +5664,9 @@ async function loadSettings() {
           // The template is whitespace-separated; `{prompt}` becomes the path
           // to a file holding the prompt, `{promptText}` the prompt itself.
           args: args.value.split(/\s+/).filter(Boolean),
+          model: model.value.trim(),
+          models: Object.fromEntries([...perTask].map(([key, box]) => [key, box.value.trim()])),
+          effort: effortValue() || undefined,
           timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 180_000,
         },
         latex: { engine: engine.value || undefined },
@@ -4897,8 +5677,9 @@ async function loadSettings() {
      * rather than treat them as unsaved edits and keep them forever — which
      * would mean a change made in another window never arrived here again.
      */
-    for (const input of [command, args, timeout]) input.dataset.stored = input.value;
+    for (const input of [command, args, timeout, model, ...perTask.values()]) input.dataset.stored = input.value;
     savedEngine = engine.value || '';
+    savedEffort = effortValue();
     markAiUnsaved();
     setStatus('Settings saved');
   };
@@ -4947,6 +5728,7 @@ async function loadSettings() {
     }
     command.value = chosen.command;
     args.value = chosen.args.join(' ');
+    showModelNote();
     markAiUnsaved();
     return saveAndTest();
   };
@@ -4974,27 +5756,36 @@ async function loadSettings() {
           }),
           el('button', {
             className: 'link',
-            textContent: 'Use the preset’s',
+            // The whole phrase, not a possessive with its noun in the next
+            // node: "Use the preset’s — that saves and tests it." is not a
+            // sentence, and it is the only instruction on a warning about a
+            // command that will not run.
+            textContent: `Put the "${drifted.label}" arguments back`,
             onclick: () => {
               preset.value = drifted.label;
               preset.onchange();
             },
           }),
-          el('span', { textContent: ' — that saves and tests it.' }),
+          el('span', { textContent: ' — that saves them and tests the command.' }),
         ])
       : null,
-    field('Command', command, 'Must be on your PATH.'),
-    field(
-      'Arguments',
-      args,
-      '{prompt} is a file holding the prompt, {promptText} inlines it, {sandbox} is the scratch directory.',
-    ),
+    /*
+     * The exact invocation, folded away.
+     *
+     * Choosing a preset, a model and an effort level is the whole of what
+     * almost everyone needs, and leading with a command line and an argument
+     * template full of `{promptText}` placeholders made the panel look like
+     * something you had to understand before you could use any of it. It is
+     * still one click away, and it opens by itself when what is saved is not
+     * a preset — because then it is the only thing on the panel that explains
+     * what is going to run.
+     */
+    commandBlock,
     el('div', { className: 'sandbox-note' }, [
       el('b', {}, 'Confined to a scratch directory. '),
       'The command runs in an empty temporary folder containing only the prompt — never your save folder, ' +
         'your home directory, or this source tree. The presets add each CLI’s own read-only flags on top.',
     ]),
-    field('Timeout, seconds', timeout),
     field('LaTeX engine', engine, 'Auto-detect tries tectonic, then latexmk, then pdflatex.'),
     el('div', { className: 'row' }, [
       el('button', { className: 'primary', textContent: 'Save', onclick: () => save().catch((e) => setStatus(e.message, true)) }),
@@ -5289,11 +6080,14 @@ function renderDiff(diff) {
  * Modals                                                              *
  * ------------------------------------------------------------------ */
 
-function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false } = {}) {
+function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false, cancelLabel = 'Cancel' } = {}) {
   $('#modal-title').textContent = title;
   $('#modal-content').replaceChildren(content);
   $('#modal-note').textContent = note;
   $('#modal-cancel').style.display = showCancel ? '' : 'none';
+  // "Skip" and "Cancel" are different promises when there are eleven of these
+  // to get through: one moves on, the other sounds like it stops.
+  $('#modal-cancel').textContent = cancelLabel;
   $('#modal-ok').textContent = okLabel;
   $('#modal').classList.remove('hidden');
   return new Promise((resolve) => {

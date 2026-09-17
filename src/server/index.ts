@@ -3,18 +3,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { Repo } from '../git/repo.js';
-import { resolveStoreDir, seedStore } from '../model/location.js';
+import { Repo, cloneRepo } from '../git/repo.js';
+import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
 import { createApi, createPdfRouter } from './api.js';
-import { prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
+import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
 import { localOnly } from './guard.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(here, '..', '..');
+const projectRoot = findProjectRoot(here);
 const require = createRequire(import.meta.url);
 
 export interface ServerOptions {
@@ -131,9 +131,54 @@ export async function startServer(opts: ServerOptions = {}) {
     if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
     next();
   });
-  app.get('/health', (_req, res) => {
+  /*
+   * `build` is a fingerprint of the code that is running, not a version
+   * number anyone sets.
+   *
+   * A server keeps serving whatever it loaded at start: `tsx` compiles once,
+   * and `dist/` is a snapshot. So a process left running from this morning
+   * answers requests the way this morning's code did, and there is nothing
+   * about it from the outside that says so. That cost an hour: a test suite
+   * failed on a feature that worked, because one server in its pool predated
+   * the feature.
+   *
+   * The mtime of the newest source file the server could be running is enough
+   * to tell two builds apart, and costs one stat per request on a handful of
+   * files. Anything cleverer would need a build step to maintain.
+   */
+  const stampNow = () => {
+    const roots = [path.join(projectRoot, 'dist', 'src'), path.join(projectRoot, 'src'), path.join(projectRoot, 'web')];
+    let newest = 0;
+    const walk = (dir: string, depth = 0) => {
+      if (depth > 4 || !fs.existsSync(dir)) return;
+      for (const name of fs.readdirSync(dir)) {
+        const full = path.join(dir, name);
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) walk(full, depth + 1);
+        else newest = Math.max(newest, stat.mtimeMs);
+      }
+    };
+    for (const root of roots) walk(root);
+    return String(Math.round(newest));
+  };
+  const buildStamp = stampNow();
+
+  /*
+   * Comparing servers to each other catches one stale process among several.
+   * It cannot catch all of them being stale together, which is what happens
+   * the moment the code is edited while they are running — and that is the
+   * ordinary case during development, not the exotic one.
+   *
+   * So `?fresh` re-reads the files and says whether anything has been written
+   * since this process started. It is behind a flag because `/health` is
+   * polled, and walking three trees on every poll to answer a question only a
+   * test runner asks is a poor trade.
+   */
+  app.get('/health', (req, res) => {
     const ai = active?.store.loadConfig().ai;
-    res.json({ ok: true, service: 'resumem-m', dataDir: active?.store.root ?? null,
+    const fresh = req.query.fresh !== undefined ? stampNow() : undefined;
+    res.json({ ok: true, service: 'resumem-m', build: buildStamp, dataDir: active?.store.root ?? null,
+      ...(fresh === undefined ? {} : { onDisk: fresh, stale: fresh !== buildStamp }),
       projectOpen: Boolean(active), ai: { enabled: ai?.enabled ?? false, command: ai?.command ?? '', configured: Boolean(ai?.command?.trim()) } });
   });
 
@@ -166,9 +211,21 @@ export async function startServer(opts: ServerOptions = {}) {
     if (busy()) { res.status(409).json({ error: 'Wait for current saves, imports, and AI work to finish before changing saves.' }); return; }
     switching = true;
     try {
-      const { dir, mode } = req.body;
-      if (typeof dir !== 'string' || !['open', 'create', 'move'].includes(mode)) throw new Error('Choose Open, Create, or Move and a folder');
-      const next = projectSession(prepareProject(active?.store, dir, mode));
+      const { dir, mode, url } = req.body;
+      if (typeof dir !== 'string' || !['open', 'create', 'move', 'clone'].includes(mode)) {
+        throw new Error('Choose Open, Create, Move or Clone, and a folder');
+      }
+      /*
+       * Cloning is its own path because it is the only one that reaches the
+       * network, takes an unbounded amount of time, and can fail for reasons
+       * that are nothing to do with the folder. It ends in the same place:
+       * a validated store that becomes the open save.
+       */
+      const next = projectSession(
+        mode === 'clone'
+          ? await cloneProject(String(url ?? ''), dir, cloneRepo)
+          : prepareProject(active?.store, dir, mode),
+      );
       rememberProject(next.store.root, preferencesFile, active?.store.root);
       active = next; openedBy = 'selected'; startupError = undefined;
       res.json({ dir: next.store.root, mode });
@@ -199,7 +256,24 @@ export async function startServer(opts: ServerOptions = {}) {
   });
   app.get('/vendor/marked.js', (_req, res) => res.sendFile(require.resolve('marked')));
   app.get('/vendor/purify.mjs', (_req, res) => res.sendFile(path.join(path.dirname(require.resolve('dompurify')), 'purify.es.mjs')));
-  app.use(express.static(path.join(projectRoot, 'web')));
+  /*
+   * And say so if they are not there.
+   *
+   * A missing `web/` is not a missing file, it is a missing product: the API
+   * answers everything, the editor is a 404, and nothing in between says
+   * which of the two you have. That state shipped once already — see
+   * `findProjectRoot` — and the only reason it was ever noticed is that
+   * somebody pointed a browser at a built server. One line at startup is
+   * cheaper than that.
+   */
+  const webRoot = path.join(projectRoot, 'web');
+  if (!fs.existsSync(path.join(webRoot, 'index.html'))) {
+    console.warn(
+      `ResumeM-M: no editor found at ${webRoot}. The API will answer and every page will 404. ` +
+        `This usually means the server is running from a build that did not carry web/ with it.`,
+    );
+  }
+  app.use(express.static(webRoot));
 
   return new Promise<{ close: () => Promise<void>; port: number }>((resolve, reject) => {
     const server = app.listen(port, host, () => {

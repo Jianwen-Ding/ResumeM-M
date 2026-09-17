@@ -13,6 +13,19 @@
  * not the guarantee.
  */
 
+/**
+ * How one CLI spells "use this model" or "think this hard".
+ *
+ * Declarative rather than a function, because the whole preset list is sent to
+ * the editor as JSON and a function would not survive the trip. `join: '='`
+ * is for the CLIs that want `--flag=value` as a single argument; the default
+ * is two arguments.
+ */
+export interface AiSwitch {
+  flag: string;
+  join?: '=' | ' ';
+}
+
 export interface AiPreset {
   /** Shown in the picker. */
   label: string;
@@ -22,7 +35,27 @@ export interface AiPreset {
   note: string;
   /** What changes when the AI is allowed to look things up. */
   researchNote?: string;
+  /**
+   * How to name a model, and which names are worth offering.
+   *
+   * The suggestions are a starting list, not a closed one — every one of these
+   * CLIs gains models faster than this file can be edited, so the editor's box
+   * is a text field with these as a datalist rather than a dropdown that would
+   * go stale and start refusing things that work.
+   */
+  model?: AiSwitch & { suggestions: string[] };
+  /**
+   * How to ask for more or less thinking, where the CLI has a way to say it.
+   *
+   * Deliberately absent for the ones that do not. Inventing a flag is how a
+   * command stops working entirely, which is a worse outcome than the model
+   * simply thinking as much as it would have anyway — and the request goes
+   * into the prompt either way, which is the part that always works.
+   */
+  effort?: AiSwitch & { values: Record<AiEffort, string> };
 }
+
+export type AiEffort = 'low' | 'medium' | 'high';
 
 export const AI_PRESETS: AiPreset[] = [
   {
@@ -61,6 +94,9 @@ export const AI_PRESETS: AiPreset[] = [
     args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,Read,Glob,Grep,Task,TodoWrite,SlashCommand,WebFetch,WebSearch'],
     note: 'Runs with every tool denied: it is asked for text and can reach for nothing.',
     researchNote: 'Web search and fetch are allowed; nothing else changes.',
+    model: { flag: '--model', suggestions: ['opus', 'sonnet', 'haiku'] },
+    // Claude Code has no reasoning-effort switch; the ask goes in the prompt.
+    
   },
   {
     label: 'Codex CLI',
@@ -74,6 +110,16 @@ export const AI_PRESETS: AiPreset[] = [
      */
     args: ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--cd', '{sandbox}', '{promptText}'],
     note: 'Runs in Codex’s own read-only sandbox, in a scratch directory.',
+    model: { flag: '--model', suggestions: ['gpt-5-codex', 'gpt-5', 'o4-mini'] },
+    /*
+     * Codex takes arbitrary config overrides with `-c key=value`, and
+     * reasoning effort is one of them. This is the only preset here with a
+     * real switch for it.
+     */
+    effort: {
+      flag: '-c',
+      values: { low: 'model_reasoning_effort=low', medium: 'model_reasoning_effort=medium', high: 'model_reasoning_effort=high' },
+    },
   },
   {
     label: 'Gemini CLI',
@@ -81,6 +127,7 @@ export const AI_PRESETS: AiPreset[] = [
     // Gemini takes the prompt inline after -p and writes the answer to stdout.
     args: ['-p', '{promptText}'],
     note: 'Prompt passed inline; nothing is written anywhere.',
+    model: { flag: '--model', suggestions: ['gemini-2.5-pro', 'gemini-2.5-flash'] },
   },
   {
     label: 'Antigravity (agy)',
@@ -102,6 +149,7 @@ export const AI_PRESETS: AiPreset[] = [
      */
     args: ['--mode', 'plan', '--sandbox', '--output-format', 'text', '--print={promptText}'],
     note: 'Runs in plan mode, which cannot run commands, in a scratch directory.',
+    model: { flag: '--model', suggestions: [] },
   },
 ];
 
@@ -276,4 +324,162 @@ export function applyResearch(command: string, args: string[], research: boolean
   if (next.length === 0) out.splice(at, end - at);
   else out.splice(at + 1, end - at - 1, next.join(','));
   return out;
+}
+
+/**
+ * Put the chosen model and effort into an invocation.
+ *
+ * Applied on load beside `applyResearch`, for the same reason: the saved
+ * arguments stay preset-shaped, so switching model does not quietly turn the
+ * configuration into a custom one that then drifts out of date with the
+ * preset it came from.
+ *
+ * Only ever touches its own flags, and only for a command it recognises.
+ * A hand-written command line with a `--model` already in it is left exactly
+ * as written — somebody who typed that meant it.
+ */
+export function applyModelAndEffort(
+  command: string,
+  args: string[],
+  choice: { model?: string; effort?: AiEffort } = {},
+): string[] {
+  const preset = AI_PRESETS.find((p) => matchesCommand(p.command, command));
+  if (!preset) return args;
+
+  let out = [...args];
+  out = setSwitch(out, preset.model, choice.model?.trim() || undefined);
+  out = setSwitch(out, preset.effort, choice.effort ? preset.effort?.values[choice.effort] : undefined);
+  return out;
+}
+
+/** Does this command line name that CLI, with or without a path or a .exe? */
+function matchesCommand(name: string, command: string): boolean {
+  return new RegExp(`(^|[\\\\/])${name}(\\.exe)?$`, 'i').test(command.trim());
+}
+
+/**
+ * Set, replace or remove one flag, leaving everything else where it is.
+ *
+ * Removing when the value is empty is the half that is easy to forget: a
+ * model chosen and then cleared has to take its flag with it, or the box says
+ * "whatever the CLI defaults to" while the command line still pins one.
+ */
+function setSwitch(args: string[], spec: AiSwitch | undefined, value: string | undefined): string[] {
+  if (!spec) return args;
+  const out: string[] = [];
+
+  // Drop whatever is there now, in either spelling.
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === spec.flag) {
+      i++; // and its value
+      continue;
+    }
+    if (a.startsWith(`${spec.flag}=`)) continue;
+    out.push(a);
+  }
+
+  if (!value) return out;
+
+  /*
+   * In front of the prompt, not after it.
+   *
+   * Three of the four presets pass the prompt as the last argument, and a CLI
+   * that takes a positional prompt reads whatever follows it as more prompt —
+   * so appending `--model opus` to Codex's line made "opus" part of the
+   * posting. Inserted before the first argument that carries the prompt, or
+   * at the end when none does.
+   */
+  const promptAt = out.findIndex((a) => a.includes('{prompt}') || a.includes('{promptText}'));
+  const added = spec.join === '=' ? [`${spec.flag}=${value}`] : [spec.flag, value];
+  if (promptAt < 0) return [...out, ...added];
+  return [...out.slice(0, promptAt), ...added, ...out.slice(promptAt)];
+}
+
+/**
+ * What to say in the prompt about how hard to think.
+ *
+ * The flag is the better mechanism and only one CLI here has one, so this is
+ * what makes the choice mean something everywhere else. It is a sentence
+ * about the work rather than a number, because "reasoning effort: high" means
+ * nothing to a model that was never given such a parameter.
+ */
+export function effortInstruction(effort?: AiEffort): string {
+  if (effort === 'low') {
+    return 'Work quickly. Take the obvious reading of the posting and the obvious matches in the store; do not weigh every alternative.';
+  }
+  if (effort === 'high') {
+    return 'Take your time with this. Read the whole posting before deciding anything, consider every phrasing that could fit each requirement, and satisfy yourself that a choice is better than what it replaces before making it.';
+  }
+  return '';
+}
+
+/* ------------------------------------------------------------------ *
+ * Which model does which job                                          *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The kinds of work this asks an AI to do.
+ *
+ * One model for all of it is the wrong shape, and obviously so once the list
+ * is written down: tailoring is a selection problem over a fixed inventory
+ * and rewards a model that will sit with it; drafting a letter is a writing
+ * problem in somebody else's voice; reading a repository and proposing an
+ * entry is neither, and is the one that runs while you wait. These are
+ * different enough to be worth different answers, and expensive enough that
+ * using the careful model for all five is a real cost.
+ *
+ * Grouped as coarsely as the work allows. Six switches nobody adjusts are
+ * worse than three that get used.
+ */
+export const AI_TASKS = [
+  {
+    key: 'tailor',
+    label: 'Tailoring a resume',
+    note: 'Choosing which of your wordings suit a posting, and what order they go in.',
+  },
+  {
+    key: 'write',
+    label: 'Writing letters and answers',
+    note: 'Drafting a cover letter or an application answer in your voice.',
+  },
+  {
+    key: 'review',
+    label: 'Reviewing what you wrote',
+    note: 'Reading a resume, a letter or an answer and saying what is weak.',
+  },
+  {
+    key: 'author',
+    label: 'Drafting new entries and wordings',
+    note: 'Reading a repository or a note and proposing something to add. Runs while you wait.',
+  },
+] as const;
+
+export type AiTask = (typeof AI_TASKS)[number]['key'];
+
+/** The model this kind of work should use, falling back to the one model. */
+export function modelFor(ai: { model?: string; models?: Partial<Record<AiTask, string>> }, task: AiTask): string {
+  return (ai.models?.[task] ?? '').trim() || (ai.model ?? '').trim();
+}
+
+/**
+ * The config a particular kind of work should run with.
+ *
+ * Returns the same object when nothing differs, so the twelve call sites can
+ * wrap themselves in this without anybody wondering whether it costs
+ * something.
+ */
+export function configForTask<T extends { ai: { command: string; args: string[]; model?: string; models?: Partial<Record<AiTask, string>>; effort?: AiEffort } }>(
+  config: T,
+  task: AiTask,
+): T {
+  const model = modelFor(config.ai, task);
+  if (model === (config.ai.model ?? '').trim()) return config;
+  return {
+    ...config,
+    ai: {
+      ...config.ai,
+      args: applyModelAndEffort(config.ai.command, config.ai.args, { model, effort: config.ai.effort }),
+    },
+  };
 }

@@ -3,7 +3,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
 
-vi.mock('../web/preview.js', () => ({ createPreview: () => ({ show: async () => {} }) }));
+/*
+ * A stand-in for pdf.js that records what it was asked to do. `clear` matters
+ * here: the real one takes the drawn page down, and the bug was that nothing
+ * took it down — so an emptied letter showed its own last version with "type
+ * a first sentence" written across it.
+ */
+const previewCalls = [];
+vi.mock('../web/preview.js', () => ({
+  createPreview: (frame) => ({
+    show: async (url) => {
+      previewCalls.push(['show', url]);
+      frame.classList.add('loaded');
+      frame.querySelector('.pages')?.replaceChildren(document.createElement('canvas'));
+    },
+    clear: () => {
+      previewCalls.push(['clear']);
+      frame.classList.remove('loaded');
+      frame.querySelector('.pages')?.replaceChildren();
+    },
+  }),
+}));
 vi.mock('../web/assets.js', () => ({
   setupAssets: () => ({ init: async () => ({ current: '/test-save' }), load: async () => {} }),
 }));
@@ -101,6 +121,57 @@ describe('typing in the Workspace', () => {
   const savedLetter = () => drafts[draftId].coverLetter.body;
 
   const PARAGRAPH = 'Dear Streamly, I have spent the last year building ingest pipelines.';
+
+  /**
+   * Open the app again from scratch, with whatever is in `drafts` now and
+   * nothing selected — which is what arriving at the Workspace actually looks
+   * like, and the one state the fixture above cannot reach because it opens a
+   * draft before every test.
+   */
+  const reopenWorkspace = async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    location.hash = '';
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#resume-select')).not.toBeNull());
+    for (const b of document.querySelectorAll('#tabs button')) b.disabled = false;
+    document.querySelector('button[data-tab="workspace"]').click();
+  };
+
+  /*
+   * "Nothing open — pick an application on the left" over an empty left
+   * column is advice that cannot be followed, and it was printed beside two
+   * other paragraphs saying where applications come from. Three sentences,
+   * one of them wrong.
+   */
+  it('does not tell you to pick one when there are none to pick', async () => {
+    for (const id of Object.keys(drafts)) delete drafts[id];
+    await reopenWorkspace();
+
+    const pane = () => document.querySelector('#draft-editor').textContent;
+    await vi.waitFor(() => expect(pane()).toContain('Nothing in progress'));
+    expect(pane()).not.toMatch(/on the left/i);
+    // It says what would actually put one there.
+    expect(pane()).toMatch(/JobHelper/);
+    expect(pane()).toMatch(/\+ Application/);
+    // And the list beside it does not say the same thing a third time.
+    expect(document.querySelector('#draft-list').textContent.trim()).toBe('Nothing yet');
+  });
+
+  /*
+   * Which is the only empty state the pane can actually show: with anything
+   * in the list the Workspace opens the first one rather than sitting empty,
+   * so "pick one on the left" was unreachable as well as unfollowable. It is
+   * kept for the moment between discarding one and the list reloading.
+   */
+  it('opens the first one rather than showing an empty pane', async () => {
+    await reopenWorkspace();
+    await vi.waitFor(() => expect(document.querySelector('#draft-editor .letter')).not.toBeNull());
+    const pane = document.querySelector('#draft-editor').textContent;
+    expect(pane).not.toContain('Nothing open');
+    expect(pane).not.toContain('Nothing in progress');
+    expect(document.querySelector('.draft-card.selected')).not.toBeNull();
+  });
 
   it('writes the letter without waiting for the caret to leave the box', async () => {
     type(letterBox(), PARAGRAPH);
@@ -315,5 +386,65 @@ describe('typing in the Workspace', () => {
     const draftIt = [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it'));
     expect(draftIt.classList.contains('ai-action')).toBe(true);
     expect(draftIt.title).toContain('Runs your AI command');
+  });
+  /*
+   * Clearing the letter left the last compiled page on screen with the empty
+   * state drawn over the top of it — two things rendering in the same box, the
+   * letter you had just deleted still legible under the invitation to write
+   * one. Dropping the `loaded` class brings the placeholder back and does
+   * nothing at all about the page pdf.js has already painted.
+   */
+  it('takes the page down when the letter is emptied, not just the class off it', async () => {
+    previewCalls.length = 0;
+    type(letterBox(), PARAGRAPH);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(previewCalls.some(([what]) => what === 'show'), 'a page was drawn to begin with').toBe(true);
+
+    const pane = document.querySelector('#draft-editor .letter-preview');
+    expect(pane.classList.contains('loaded')).toBe(true);
+
+    previewCalls.length = 0;
+    type(letterBox(), '');
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(previewCalls.some(([what]) => what === 'clear'), 'and taken down when there is nothing left').toBe(true);
+    expect(pane.classList.contains('loaded')).toBe(false);
+    expect(pane.querySelector('canvas')).toBeNull();
+  });
+  /*
+   * A feedback run has had a chip in the toolbar since it went into the
+   * background, and that chip is why a feedback run is something you can
+   * start and then go back to work. A draft had nothing of the kind: the
+   * progress bar lives in the panel that started it, so opening the resume
+   * builder while a cover letter was being written left no trace anywhere
+   * that anything was.
+   */
+  it('says in the toolbar that something is being written, and stops when it is', async () => {
+    const chip = () => document.querySelector('#drafting-chip');
+    expect(chip().className).toContain('hidden');
+
+    const heading = [...document.querySelectorAll('#draft-editor .block-head')].find((h) =>
+      h.textContent.includes('Cover letter'),
+    );
+    [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it')).click();
+
+    await vi.waitFor(() => expect(chip().className).not.toContain('hidden'));
+    // Named, and counting — so a run that has died is distinguishable from one
+    // that is merely slow, which is the whole question after the first minute.
+    expect(chip().textContent).toContain('Writing the cover letter');
+    expect(chip().textContent).toMatch(/\d+:\d\d/);
+
+    // The run finishes — the fixture's server answers immediately — and the
+    // chip goes with it rather than sitting there for the rest of the session.
+    await vi.waitFor(() => expect(chip().className).toContain('hidden'));
+  });
+
+  it('takes you back to the draft it is talking about', async () => {
+    const heading = [...document.querySelectorAll('#draft-editor .block-head')].find((h) =>
+      h.textContent.includes('Cover letter'),
+    );
+    [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it')).click();
+    await vi.waitFor(() => expect(document.querySelector('#drafting-chip').onclick).toBeTypeOf('function'));
+    expect(document.querySelector('#drafting-chip').style.cursor).toBe('pointer');
   });
 });

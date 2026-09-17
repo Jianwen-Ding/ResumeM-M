@@ -154,6 +154,23 @@ data/
   config.yaml        Engine, AI command, git, output directory
 ```
 
+### It is its own repository
+
+The store is kept apart from this source tree on purpose: it has a different
+lifetime, it is the thing you might push somewhere private, and it should
+survive deleting and re-cloning the code.
+
+Which is also how you get it onto a second machine:
+
+```bash
+rmm clone git@github.com:you/my-resume-save.git ~/Documents/My\ Resume\ Save
+```
+
+or, in the editor, **Save & Files → Folder Action → Clone Save from Git**.
+Either way the clone is staged beside the destination and checked before it
+becomes the open save — a repository that turns out to hold something else is
+refused and the folder it was cloned into goes with it.
+
 ### Variants
 
 A field that can differ between resumes holds its alternates inline:
@@ -305,6 +322,10 @@ rmm voice add <file…>             Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
 rmm save [-m "why"] [--push]      Commit the whole store to git
 rmm serve [--port 4600]           Editor GUI and the extension's API
+
+Any command also takes:
+  --data <folder>                 Work on the save in this folder rather than
+                                  the one that is open. Beats RMM_DATA.
 ```
 
 ---
@@ -356,6 +377,112 @@ Two things make this different from pasting into a chat window:
 Tailoring asks for a *selection* over phrasings that already exist, which cannot
 drift. New phrasings come back in a separate list, are capped at three, and are
 stored with `suggested: true` until you have looked at them.
+
+### Which model, and how hard it thinks
+
+Settings → Voice & AI has a **Model** box and an **Effort** picker. Both are
+settings rather than arguments you edit by hand: a preset is copied when you
+choose it, so hand-editing the argument line turns your configuration into a
+custom one that then drifts out of date with the preset it came from. They are
+applied to the arguments when the config is loaded, the way the research switch
+is.
+
+Only Codex has a reasoning-effort flag. Rather than invent one for the others —
+a flag a CLI does not recognise usually stops it running at all — effort is also
+said in the prompt, in words, which reaches every model. The panel tells you
+which mechanism is in play for the command you have configured.
+
+Under **A different model for a particular kind of work**, each kind can name
+its own and fall back to the one above when it does not:
+
+| | |
+| --- | --- |
+| Tailoring a resume | Choosing which of your wordings suit a posting, and what order they go in |
+| Writing letters and answers | Drafting in your voice |
+| Reviewing what you wrote | Reading a resume, a letter or an answer and saying what is weak |
+| Drafting new entries and wordings | Reading a repository or a note. The one that runs while you wait |
+
+Four rather than one per endpoint: switches nobody adjusts are worse than
+fewer that get used.
+
+### Tailoring through tools, not one big JSON reply
+
+Where the configured CLI supports MCP (Claude Code, Codex and Gemini do), the
+tailoring pass gets a small tool server instead of being asked for one large
+JSON object:
+
+    read_posting      read_resume       read_inventory
+    choose_wording    reorder_bullets   reorder_entries
+    hide              show              choose_skills
+    suggest_wording   review_changes    finish
+
+The difference is where mistakes are caught. A JSON reply is checked once, at
+the end, and everything wrong in it is dropped in silence — an id the model
+half-remembered simply does not happen, and a reply wrapped in prose that will
+not parse loses *every* choice rather than one. A tool call is checked as it is
+made, so a wrong id comes back as "there is no bullet `b_kafka`; the bullets on
+this entry are b_pipeline, b_testing" while the model can still act on it. It
+can also read the page back after each move and see what it actually did.
+
+Nothing about what it is allowed to do changes. Every tool names things that
+already exist; `suggest_wording` takes text and puts it in the same quarantine
+the JSON path does, where a person accepts or declines it.
+
+The server runs inside the same empty scratch directory the CLI is confined to
+— the CLI spawns it over a pipe, there is no port and no token, and the whole
+exchange is two processes and a file that is deleted when the run ends. A CLI
+we do not know how to wire up, or one where MCP is unavailable, falls back to
+asking for JSON, which is what every run did before this existed.
+
+Writing gets the same treatment, with the tools the job actually needs:
+
+    read_posting     read_resume      read_work
+    find_my_letters  find_my_answers  check_claim
+    save_letter      save_answer      finish
+
+`check_claim` is the one worth pointing at. A letter is read beside the resume
+that supports it, so "does the resume actually say 2M events a day" is the
+question it most needs answered — and it is a lookup, which a model doing it
+from memory mid-sentence is about to get wrong. Ask, and it says which part of
+the claim the resume carries and quotes the lines. `find_my_letters` is a
+search rather than three pre-selected samples: ranking is a guess made before
+anyone knows what the letter needs to say. And `save_letter` takes the letter
+as an argument, which means an agent's habit of explaining itself first cannot
+put "I have prepared the implementation plan in cover_letter_plan.md" at the
+top of somebody's cover letter — a real run, and the reason `trimToLetter`
+exists.
+
+And getting started — turning an old resume, some cover letters and a README
+into a store — has:
+
+    list_documents   read_document   read_store
+    propose_entry    propose_bullet  propose_alternate
+    propose_skill    review_proposal finish
+
+This is the one place the AI writes text that ends up on a resume, so the line
+moves rather than disappearing, and it moves in exactly one place. Nothing is
+written to the store: the session builds a proposal you accept entry by entry.
+And every bullet must quote the sentence in your material it is a rewording
+of — checked, not requested. A model that has to point at what it is
+paraphrasing cannot invent a job, which is the difference between "read what I
+wrote" and "write me a resume".
+
+It runs from **Voice & AI → Read these into entries**, over the files already
+in your corpus, and shows you each proposal beside the sentence it came from:
+
+```
+From your material — Vega Analytics
+Backend Engineer · 2023–2024
+
+  Built a Kafka-backed ingest pipeline handling 2M events a day
+    from your material: "Built a Kafka-backed ingest pipeline handling 2M events a day."
+
+                                            [ Skip ]  [ Add it ]
+```
+
+One at a time, on purpose. Eleven proposals behind a single "Add them all" is
+eleven decisions collapsed into one, which is how a line nobody read ends up
+on a resume.
 
 ---
 

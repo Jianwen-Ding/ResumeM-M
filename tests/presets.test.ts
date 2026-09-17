@@ -3,7 +3,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runAgent } from '../src/ai/agent.js';
-import { AI_PRESETS, applyResearch, matchPreset, repairAiArgs } from '../src/ai/presets.js';
+import {
+  AI_PRESETS,
+  applyModelAndEffort,
+  applyResearch,
+  effortInstruction,
+  AI_TASKS,
+  configForTask,
+  modelFor,
+  matchPreset,
+  repairAiArgs,
+} from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 
 /**
@@ -305,5 +315,141 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
     const codex = AI_PRESETS.find((p) => p.label === 'Codex CLI')!.args;
     expect(applyResearch('codex', codex, true)).toEqual(codex);
     expect(applyResearch('gemini', ['-p', '{promptText}'], true)).toEqual(['-p', '{promptText}']);
+  });
+});
+
+describe('choosing a model and an effort level', () => {
+  const claude = AI_PRESETS.find((p) => p.command === 'claude')!;
+  const codex = AI_PRESETS.find((p) => p.command === 'codex')!;
+  const gemini = AI_PRESETS.find((p) => p.command === 'gemini')!;
+
+  it('adds nothing when nothing was chosen', () => {
+    expect(applyModelAndEffort('claude', claude.args, {})).toEqual(claude.args);
+    expect(applyModelAndEffort('claude', claude.args, { model: '   ' })).toEqual(claude.args);
+  });
+
+  it('names the model the way each CLI spells it', () => {
+    expect(applyModelAndEffort('claude', claude.args, { model: 'opus' })).toContain('--model');
+    expect(applyModelAndEffort('claude', claude.args, { model: 'opus' })).toContain('opus');
+    expect(applyModelAndEffort('gemini', gemini.args, { model: 'gemini-2.5-pro' })).toContain('gemini-2.5-pro');
+  });
+
+  /*
+   * Three of the four presets pass the prompt as the last argument, and a CLI
+   * that takes a positional prompt reads whatever follows it as more prompt —
+   * so a flag appended to the end became part of the posting.
+   */
+  it('puts the flag in front of the prompt, never after it', () => {
+    const out = applyModelAndEffort('codex', codex.args, { model: 'gpt-5' });
+    const prompt = out.findIndex((a) => a.includes('{promptText}'));
+    const flag = out.indexOf('--model');
+    expect(flag).toBeGreaterThanOrEqual(0);
+    expect(flag).toBeLessThan(prompt);
+    expect(out[flag + 1]).toBe('gpt-5');
+    // And the prompt is still the last thing on the line.
+    expect(prompt).toBe(out.length - 1);
+  });
+
+  it('replaces a model rather than stacking them up', () => {
+    const once = applyModelAndEffort('claude', claude.args, { model: 'opus' });
+    const twice = applyModelAndEffort('claude', once, { model: 'sonnet' });
+    expect(twice.filter((a) => a === '--model')).toHaveLength(1);
+    expect(twice).toContain('sonnet');
+    expect(twice).not.toContain('opus');
+  });
+
+  it('takes the flag away again when the box is cleared', () => {
+    const set = applyModelAndEffort('claude', claude.args, { model: 'opus' });
+    expect(applyModelAndEffort('claude', set, {})).toEqual(claude.args);
+  });
+
+  it('passes effort only where the CLI has a switch for it', () => {
+    const withEffort = applyModelAndEffort('codex', codex.args, { effort: 'high' });
+    expect(withEffort).toContain('model_reasoning_effort=high');
+    // Claude has none. Adding one would be inventing a flag, which is how a
+    // command stops working entirely.
+    expect(applyModelAndEffort('claude', claude.args, { effort: 'high' })).toEqual(claude.args);
+  });
+
+  it('leaves a command it does not recognise exactly as written', () => {
+    const mine = ['--go', '{promptText}'];
+    expect(applyModelAndEffort('my-own-cli', mine, { model: 'opus', effort: 'high' })).toEqual(mine);
+  });
+
+  it('finds the CLI behind a path or an extension', () => {
+    expect(applyModelAndEffort('/usr/local/bin/claude', claude.args, { model: 'opus' })).toContain('opus');
+    expect(applyModelAndEffort('C:\\tools\\claude.exe', claude.args, { model: 'opus' })).toContain('opus');
+  });
+
+  /*
+   * Only one of the four has a flag, so the flag alone would make this a
+   * no-op on three of them — and a setting that silently does nothing on most
+   * configurations is worse than no setting.
+   */
+  it('says it in words too, which reaches every model', () => {
+    expect(effortInstruction('high')).toMatch(/Take your time/);
+    expect(effortInstruction('low')).toMatch(/Work quickly/);
+    expect(effortInstruction('medium')).toBe('');
+    expect(effortInstruction(undefined)).toBe('');
+  });
+});
+
+/**
+ * One model for everything is the wrong shape, and obviously so once the list
+ * is written down: tailoring is a selection problem over a fixed inventory,
+ * writing a letter is a writing problem in somebody else's voice, and reading
+ * a repository is neither — and is the one that runs while you wait.
+ */
+describe('a different model for a different kind of work', () => {
+  const claude = AI_PRESETS.find((p) => p.command === 'claude')!;
+  const base = { command: 'claude', args: claude.args, enabled: true, timeoutMs: 1000 };
+
+  it('falls back to the one model when a kind of work names none', () => {
+    expect(modelFor({ model: 'opus' }, 'tailor')).toBe('opus');
+    expect(modelFor({ model: 'opus', models: {} }, 'write')).toBe('opus');
+    expect(modelFor({ model: 'opus', models: { write: '  ' } }, 'write')).toBe('opus');
+  });
+
+  it('uses the one it names when it names one', () => {
+    expect(modelFor({ model: 'opus', models: { write: 'sonnet' } }, 'write')).toBe('sonnet');
+    // And the others are unaffected.
+    expect(modelFor({ model: 'opus', models: { write: 'sonnet' } }, 'tailor')).toBe('opus');
+  });
+
+  it('manages with no default at all', () => {
+    expect(modelFor({ models: { tailor: 'opus' } }, 'tailor')).toBe('opus');
+    expect(modelFor({}, 'review')).toBe('');
+  });
+
+  it('rewrites the arguments for that kind of work and nothing else', () => {
+    const config = { ai: { ...base, model: 'opus', models: { write: 'haiku' } } };
+    const writing = configForTask(config, 'write');
+    expect(writing.ai.args).toContain('haiku');
+    expect(writing.ai.args).not.toContain('opus');
+    // The config it was given is untouched: twelve call sites share it.
+    expect(config.ai.args).toBe(claude.args);
+  });
+
+  it('hands back the same object when nothing differs, so a call site costs nothing', () => {
+    const config = { ai: { ...base, model: 'opus' } };
+    expect(configForTask(config, 'tailor')).toBe(config);
+  });
+
+  it('carries the effort setting along, rather than dropping it on the way', () => {
+    const codex = AI_PRESETS.find((p) => p.command === 'codex')!;
+    const config = {
+      ai: { command: 'codex', args: codex.args, model: 'gpt-5', models: { tailor: 'o4-mini' }, effort: 'high' as const },
+    };
+    const tailoring = configForTask(config, 'tailor');
+    expect(tailoring.ai.args).toContain('o4-mini');
+    expect(tailoring.ai.args).toContain('model_reasoning_effort=high');
+  });
+
+  it('names the kinds of work in words a person would use', () => {
+    expect(AI_TASKS.map((t) => t.key)).toEqual(['tailor', 'write', 'review', 'author']);
+    for (const t of AI_TASKS) {
+      expect(t.label[0]).toBe(t.label[0]?.toUpperCase());
+      expect(t.note.length).toBeGreaterThan(20);
+    }
   });
 });

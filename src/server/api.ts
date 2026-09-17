@@ -1,12 +1,16 @@
 import express, { type Request, type Response, type Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js';
 import {
   answerPrompt,
   bulletFeedbackPrompt,
+  applicationWritingPrompt,
   coverLetterPrompt,
+  readMaterialPrompt,
+  resumeAsText,
   entryFeedbackPrompt,
   feedbackPrompt,
   letterFeedbackPrompt,
@@ -18,7 +22,11 @@ import {
   tailorPrompt,
   type TailorContext,
 } from '../ai/prompts.js';
-import { AI_PRESETS } from '../ai/presets.js';
+import { AI_PRESETS, AI_TASKS, configForTask } from '../ai/presets.js';
+import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
+import { readState } from '../mcp/main.js';
+import type { SessionState } from '../mcp/session.js';
+import type { AuthoringState } from '../mcp/authoring.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
@@ -259,6 +267,67 @@ function plainText(field: MaybeVariant | undefined): string {
   if (typeof field === 'string') return field;
   return String((field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? '');
 }
+
+/**
+ * Did the run actually decide anything through its tools?
+ *
+ * A session file exists the moment the server starts, because a run killed
+ * before its first call should still be distinguishable from one that never
+ * started. So "there is a file" is not the question — "is there a move in it"
+ * is, and when there is not, the reply is read as JSON instead.
+ */
+function decidedAnything(state: SessionState): boolean {
+  const { plan, suggestions, reasoning } = state;
+  return (
+    Object.keys(plan.choices).length > 0 ||
+    Object.keys(plan.skills).length > 0 ||
+    Object.keys(plan.order).length > 0 ||
+    Object.keys(plan.entryOrder).length > 0 ||
+    plan.enable.length > 0 ||
+    plan.disable.length > 0 ||
+    suggestions.length > 0 ||
+    Boolean(reasoning)
+  );
+}
+
+/**
+ * The writing tools, for a run that is drafting a letter or an answer.
+ *
+ * Shaped as a helper because four endpoints want the same thing and the
+ * difference between them is only which draft they are working on.
+ */
+function writingTools(
+  data: StoreData,
+  resolved: ReturnType<typeof resolveResume>,
+  job: { company?: string; jobTitle?: string; jobDescription: string; url?: string },
+  draft: { coverLetter: { required: boolean; body: string }; questions: Draft['questions'] },
+): Parameters<typeof runAgent>[2] {
+  return {
+    wire: (sandbox, command) =>
+      wireUp(
+        sandbox,
+        command,
+        {
+          kind: 'write',
+          data,
+          resume: resolved,
+          posting: {
+            company: job.company,
+            jobTitle: job.jobTitle,
+            url: job.url,
+            description: job.jobDescription,
+          },
+          draft,
+          resumeText: resumeAsText(resolved),
+        },
+        serverEntry(mcpDir),
+      ),
+    read: (out) => readState(out),
+  };
+}
+
+/** Where the compiled MCP entry point sits relative to this file. */
+const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
 
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
@@ -532,7 +601,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * copy of a fact about external programs — a preset fixed in one place
    * and not the other is how a config ends up broken.
    */
-  api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS })));
+  api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS, tasks: AI_TASKS })));
 
   api.put(
     '/config',
@@ -966,13 +1035,111 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       if (background) {
-        const job = jobs.start('feedback', about, () => runAgent(data.config, prompt));
+        const job = jobs.start('feedback', about, () => runAgent(configForTask(data.config, 'review'), prompt));
         res.json({ job });
         return;
       }
 
-      const result = await runAgent(data.config, prompt);
+      const result = await runAgent(configForTask(data.config, 'review'), prompt);
       res.json(result);
+    }),
+  );
+
+  /**
+   * Read everything you have handed over into a proposal.
+   *
+   * The evening this saves is the first one. Getting started means having an
+   * old resume, three cover letters, a project README and a performance
+   * review, and typing the entries out of them by hand — while the files
+   * themselves are already sitting in the corpus, read to text, because
+   * `rmm voice add` and the Voice tab put them there.
+   *
+   * Nothing is written. The run builds a proposal and this hands it back; the
+   * editor asks, entry by entry. That is the same rule as every other place
+   * the AI touches resume text, applied to a larger unit — and it is why this
+   * can be allowed to write at all.
+   */
+  api.post(
+    '/ai/read-material',
+    handler(async (req, res) => {
+      const { sampleIds } = req.body as { sampleIds?: string[] };
+      const data = store.load();
+
+      const samples = store
+        .loadSamples()
+        .filter((sample) => !sample.archived)
+        .filter((sample) => !sampleIds?.length || sampleIds.includes(sample.id))
+        .filter((sample) => sample.text.trim().length > 40);
+
+      if (samples.length === 0) {
+        throw new Error(
+          'There is nothing to read. Drop your old resume, your cover letters, or anything else you have ' +
+            'written onto the Voice tab first — this reads what is there.',
+        );
+      }
+
+      if (!canWire(data.config.ai.command) || serverEntry(mcpDir) === null) {
+        throw new Error(
+          `Reading material needs an AI command that can take tools. The presets that can are ` +
+            `${AI_PRESETS.filter((p) => ['claude', 'codex', 'gemini'].includes(p.command)).map((p) => p.label).join(', ')}. ` +
+            `Yours is "${data.config.ai.command}".`,
+        );
+      }
+
+      const documents = samples.map((sample) => ({
+        id: sample.id,
+        name: sample.title,
+        kind: sample.kind,
+        text: sample.text,
+      }));
+
+      const existing = {
+        entryIds: data.entries.map((e) => e.id),
+        bulletIds: data.entries.flatMap((e) => (e.bullets ?? []).map((b) => b.id)),
+        skillGroups: data.skillGroups.map((g) => ({ id: g.id, name: g.name })),
+      };
+
+      /*
+       * In the background, like feedback.
+       *
+       * This is the longest-running thing in the product — four files read
+       * end to end and an entry proposed out of each — and holding an HTTP
+       * request open for it is the wrong shape twice over: you should be able
+       * to go and do something else, and a request that takes four minutes is
+       * one a proxy or a browser will give up on while the work carries on
+       * invisibly.
+       */
+      const run = () => runAgent(
+        configForTask(data.config, 'author'),
+        readMaterialPrompt(data, documents.map((d) => ({ name: d.name, kind: d.kind }))),
+        {
+          wire: (sandbox, command) =>
+            wireUp(
+              sandbox,
+              command,
+              {
+                kind: 'author',
+                data,
+                resume: resolveResume(defaultBaseId(data.resumes) ?? data.resumes[0]?.id ?? '', data),
+                posting: { description: '' },
+                documents,
+                existing,
+              },
+              serverEntry(mcpDir),
+            ),
+          read: (out) => readState(out),
+        },
+      ).then((agent) => ({
+        executed: agent.executed,
+        prompt: agent.executed ? undefined : agent.output,
+        read: samples.map((sample) => ({ id: sample.id, title: sample.title })),
+        proposal: agent.executed ? ((agent.tools as AuthoringState | undefined) ?? null) : null,
+        // Said plainly, because the whole arrangement depends on it being true.
+        saved: false,
+      }));
+
+      const n = samples.length;
+      res.json({ job: jobs.start('material', `${n} ${n === 1 ? 'file' : 'files'} of your writing`, run) });
     }),
   );
 
@@ -995,7 +1162,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const repo = repoUrl?.trim() ? await readRepo(repoUrl.trim()) : undefined;
 
       const prompt = entryDraftPrompt(data, { repo, notes, kind });
-      const agent = await runAgent(data.config, prompt);
+      const agent = await runAgent(configForTask(data.config, 'author'), prompt);
       if (!agent.executed) {
         res.json({ executed: false, prompt: agent.output, repo, entry: null });
         return;
@@ -1046,7 +1213,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         angle,
         count,
       });
-      const agent = await runAgent(data.config, prompt);
+      const agent = await runAgent(configForTask(data.config, 'author'), prompt);
       if (!agent.executed) {
         res.json({ executed: false, prompt: agent.output, variants: [] });
         return;
@@ -1099,7 +1266,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
-      const result = await runAgent(data.config, tailorPrompt(data, resolved, job));
+      const result = await runAgent(configForTask(data.config, 'tailor'), tailorPrompt(data, resolved, job));
       if (!result.executed) return res.json({ ...result, parsed: null });
 
       const parsed = extractJson<{
@@ -1119,7 +1286,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
       const bullets = resolved.sections.flatMap((s) => s.entries.flatMap((e) => e.bullets));
-      const result = await runAgent(data.config, shortenPrompt(data, bullets, linesToCut ?? 2));
+      const result = await runAgent(configForTask(data.config, 'tailor'), shortenPrompt(data, bullets, linesToCut ?? 2));
       res.json(result);
     }),
   );
@@ -1144,13 +1311,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
 
       const result = await runAgent(
-        data.config,
-        coverLetterPrompt(data, resolved, job, prior),
+        configForTask(data.config, 'write'),
+        coverLetterPrompt(data, resolved, job, prior, { tools: canWire(data.config.ai.command) && serverEntry(mcpDir) !== null }),
+        writingTools(data, resolved, job, { coverLetter: { required: true, body: '' }, questions: [] }),
       );
 
-      // Models sometimes introduce the letter before writing it. The letter
-      // starts at its salutation, so that is where it is taken from.
-      const body = result.executed ? trimToLetter(result.output) : '';
+      /*
+       * The letter the tools were handed, where there was one.
+       *
+       * A letter passed as the argument to `save_letter` cannot have prose
+       * accidentally prepended to it, which is the failure `trimToLetter`
+       * exists to clean up after. That path is still here for every run that
+       * answered the old way.
+       */
+      const written = (result.tools as { letter?: string } | undefined)?.letter?.trim();
+      const body = written || (result.executed ? trimToLetter(result.output) : '');
       let saved: CoverLetter | undefined;
       if (save && body.trim()) {
         saved = {
@@ -1230,7 +1405,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return;
       }
 
-      const result = await runAgent(data.config, answerPrompt(data, question, job));
+      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job));
 
       /*
        * `output` means "text you may use". When the AI did not run, `runAgent`
@@ -1324,6 +1499,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         tailor?: 'none' | 'match' | 'ai';
       };
       const mode = tailor ?? (useAi ? 'ai' : 'match');
+      /*
+       * A mode this does not know silently behaved as `match` and was echoed
+       * back to the card as if it had happened — so an extension asking for
+       * something misspelled got a resume it did not ask for, labelled with
+       * the thing it asked for. Three modes, named in the refusal.
+       */
+      if (!['none', 'match', 'ai'].includes(mode)) {
+        throw new Error(`"${mode}" is not a way of tailoring. It is one of: none, match, ai.`);
+      }
 
       /*
        * One application, however many pages it is spread across. The single
@@ -1376,23 +1560,71 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
+      let aiVia: 'tools' | 'json' | undefined;
       if (mode === 'ai' && data.config.ai.enabled) {
         const resolved = resolveResume(baseId, data);
+        const posting = {
+          jobTitle: job.title,
+          company: job.company,
+          jobDescription: job.description,
+          url,
+        };
+        /*
+         * The prompt has to agree with what the run will actually have. A
+         * model told to call tools it was never given answers with nothing,
+         * and one handed tools but asked for JSON mostly writes the JSON and
+         * leaves them alone.
+         */
+        const withTools = canWire(data.config.ai.command) && serverEntry(mcpDir) !== null;
         const agent = await runAgent(
-          data.config,
-          tailorPrompt(data, resolved, {
-            jobTitle: job.title,
-            company: job.company,
-            jobDescription: job.description,
-            url,
-          }),
+          configForTask(data.config, 'tailor'),
+          tailorPrompt(data, resolved, posting, { tools: withTools }),
+          /*
+           * Tools where the CLI can take them, JSON where it cannot.
+           *
+           * The two paths produce the same shape of plan on purpose — the
+           * session builds exactly what `sanitizeAiPlan` already accepts —
+           * so nothing downstream has to know which one ran. What changes is
+           * where the mistakes are caught: through the tools a wrong id is
+           * answered while the model can still fix it, and a reply that
+           * would not have parsed costs nothing because there is no reply to
+           * parse.
+           */
+          {
+            wire: (sandbox, command) =>
+              wireUp(
+                sandbox,
+                command,
+                {
+                  data,
+                  resume: resolved,
+                  posting: {
+                    company: job.company,
+                    jobTitle: job.title,
+                    url,
+                    description: job.description,
+                    keywords: job.keywords,
+                  },
+                },
+                serverEntry(mcpDir),
+              ),
+            read: (out) => readState(out),
+          },
         );
         aiRaw = agent.output;
-        try {
-          aiParsed = extractJson(agent.output);
-        } catch {
-          // A malformed AI reply must not sink the deterministic proposal.
-          aiParsed = null;
+
+        const decided = agent.tools as SessionState | null | undefined;
+        if (decided && decidedAnything(decided)) {
+          aiParsed = { ...decided.plan, suggestions: decided.suggestions, reasoning: decided.reasoning };
+          aiVia = 'tools';
+        } else {
+          try {
+            aiParsed = extractJson(agent.output);
+            aiVia = 'json';
+          } catch {
+            // A malformed AI reply must not sink the deterministic proposal.
+            aiParsed = null;
+          }
         }
       }
 
@@ -1478,6 +1710,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         suggestions: (aiParsed as { suggestions?: unknown[] } | null)?.suggestions ?? [],
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
+        // Which of the two ways the AI answered, so a run that went through
+        // the tools can be told apart from one that got lucky with JSON.
+        aiVia,
         aiRaw: aiParsed ? undefined : aiRaw,
         // What was actually done, not what was asked for: an AI run that came
         // back unusable falls through to the keyword match, and the card has
@@ -1626,6 +1861,73 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const id = String(req.params.id);
       const app = await withCommit(repo, autoCommit(), `${id}: ${status}`, () => advance(store, id, status, note));
       res.json(app);
+    }),
+  );
+
+  /**
+   * The application looks like it was sent.
+   *
+   * A rough check, and deliberately so: the extension sees the form it filled
+   * being submitted, and that is the best evidence anyone is going to get from
+   * outside the portal. What it is worth is the difference between a tracker
+   * that reflects what you did and one that reflects what you remembered to
+   * record — and nobody records the last step, because by then the tab has
+   * already gone to a confirmation page.
+   *
+   * Keyed on company and role rather than an id, because the caller is a
+   * browser extension that knows a posting, not a filing system. Everything
+   * about how an application is named stays on this side.
+   *
+   * It only ever moves forwards. An application already at `interview` is not
+   * dragged back to `applied` because a form was resubmitted, and one already
+   * `applied` is left alone rather than given a second identical history line.
+   */
+  api.post(
+    '/extension/sent',
+    handler(async (req, res) => {
+      const body = req.body as { company?: string; role?: string; url?: string; note?: string };
+      if (!body.company || !body.role) throw new Error('company and role are required');
+
+      const id = applicationId(body.company, body.role);
+      const data = store.load();
+      const tracked = data.applications.find((a) => a.id === id);
+      const note = body.note ?? 'The form was submitted on the page';
+      const now = new Date().toISOString();
+
+      // Past `applied` already: the tracker knows more than the page does.
+      const BEFORE_SENT: Application['status'][] = ['interested', 'applying'];
+      if (tracked && !BEFORE_SENT.includes(tracked.status)) {
+        res.json({ application: tracked, changed: false });
+        return;
+      }
+
+      const application = await withCommit(repo, autoCommit(), `${id}: applied`, () => {
+        if (tracked) return advance(store, id, 'applied', note);
+        /*
+         * Submitted without ever opening a workspace — a form filled straight
+         * from the card, which is the quick path and the one most likely to
+         * leave no trace. Recording it is the whole point.
+         */
+        const made: Application = {
+          id,
+          company: body.company!,
+          role: body.role!,
+          url: body.url,
+          status: 'applied',
+          appliedAt: now,
+          history: [{ at: now, status: 'applied', note }],
+        };
+        store.upsertApplication(made);
+        return made;
+      });
+
+      // And the draft, if there is one, stops looking like something to finish.
+      const draft = store.getDraft(id);
+      if (draft && draft.status !== 'submitted') {
+        store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
+      }
+
+      res.json({ application, changed: true });
     }),
   );
 
@@ -2011,7 +2313,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
       if (useAi && data.config.ai.enabled) {
         const agent = await runAgent(
-          data.config,
+          configForTask(data.config, 'tailor'),
           tailorPrompt(data, resolveResume(baseId!, data), {
             jobTitle: draft.role,
             company: draft.company,
@@ -2103,6 +2405,43 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let countAnswers = false;
 
       /*
+       * One run for the whole application, where the CLI can take the tools.
+       *
+       * This used to be one AI run for the letter and one more for every
+       * question — four runs for a form with three, each of them minutes long,
+       * and none able to see what the others wrote. Which is how an
+       * application ends up saying two different things about why you want the
+       * job. The loops below still exist: they are what happens when there are
+       * no tools, and they are what fills in anything this run left.
+       */
+      const canUseTools = canWire(data.config.ai.command) && serverEntry(mcpDir) !== null;
+      let written: { letter?: string; answers?: Record<string, string> } | undefined;
+
+      if (canUseTools && data.config.ai.enabled && (what === 'letter' || what === 'questions' || what === 'all')) {
+        const resumeId = draft.resumeId ?? data.resumes[0]?.id;
+        const wantsLetter = (what === 'letter' || what === 'all') && draft.coverLetter.required
+          && (!draft.coverLetter.edited || force);
+        const pending = what === 'letter'
+          ? []
+          : (questionId ? draft.questions.filter((q) => q.id === questionId) : draft.questions)
+              .filter((q) => force || Boolean(questionId) || (!q.edited && !q.answer.trim()));
+
+        if (resumeId && (wantsLetter || pending.length > 0)) {
+          const resolved = resolveResume(resumeId, data);
+          const agent = await runAgent(
+            configForTask(data.config, 'write'),
+            applicationWritingPrompt(data, resolved, job),
+            writingTools(data, resolved, job, {
+              coverLetter: { required: wantsLetter, body: draft.coverLetter.body },
+              questions: pending,
+            }),
+          );
+          const state = agent.tools as { letter?: string; answers?: Record<string, string> } | undefined;
+          if (state?.letter?.trim() || Object.keys(state?.answers ?? {}).length > 0) written = state;
+        }
+      }
+
+      /*
        * What the letter step says it did, held back until the merge below has
        * decided whether it actually happened. Pushed as it went, the reply read
        * "Cover letter drafted in your voice." immediately above "You edited the
@@ -2118,9 +2457,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         } else {
           const resumeId = draft.resumeId ?? data.resumes[0]?.id;
           const prior = relevantLetters(data.coverLetters, { company: draft.company, role: draft.role });
-          if (resumeId) {
+          if (written?.letter?.trim()) {
+            draft.coverLetter.body = written.letter.trim();
+            letterNotes.push('Cover letter drafted in your voice.');
+          } else if (resumeId) {
             const agent = await runAgent(
-              data.config,
+              configForTask(data.config, 'write'),
               coverLetterPrompt(data, resolveResume(resumeId, data), job, prior),
             );
             if (agent.executed && agent.output.trim()) {
@@ -2165,6 +2507,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           if (q.edited && !overwrite) continue;
           if (q.answer.trim() && q.source === 'bank' && !overwrite) continue;
 
+          const fromTools = written?.answers?.[q.id]?.trim();
+          if (fromTools) {
+            q.answer = fromTools;
+            q.source = 'ai';
+            q.needsReview = undefined;
+            continue;
+          }
+
           const match = matchAnswer(q.question, data.answers);
           if (match.confident && !overwrite) {
             q.answer = match.answer ?? '';
@@ -2173,7 +2523,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.needsReview = undefined;
             continue;
           }
-          const agent = await runAgent(data.config, answerPrompt(data, q.question, job));
+          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job));
           if (agent.executed && agent.output.trim()) {
             q.answer = agent.output.trim();
             q.source = 'ai';

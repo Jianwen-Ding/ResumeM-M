@@ -4,19 +4,31 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
-import { Repo } from './git/repo.js';
+import { Repo, cloneRepo } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
-import { resolveStoreDir, seedStore } from './model/location.js';
+import { findProjectRoot, resolveStoreDir, seedStore } from './model/location.js';
 import { buildBundle, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
+import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dataDir = resolveStoreDir(projectRoot);
+const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
+/*
+ * `--data` belongs to every command, not to one, which is why it is read here
+ * rather than inside the switch: `rmm list --data other-save` should list that
+ * save, and `rmm serve --data other-save` should serve it.
+ *
+ * It used to be read nowhere at all. `rmm serve --data /tmp/copy` started, said
+ * nothing, and served whichever save was open — so a pool of servers each given
+ * its own copy of a store was in fact three servers writing to one real store,
+ * which is the exact thing that arrangement exists to prevent. A flag that is
+ * accepted and discarded is worse than one that is rejected.
+ */
+const dataDir = resolveStoreDir(projectRoot, arg(process.argv.slice(2), 'data'));
 seedStore(path.join(projectRoot, 'data'), dataDir);
 
 const USAGE = `rmm — resume mix-and-match
@@ -34,7 +46,13 @@ const USAGE = `rmm — resume mix-and-match
                                   Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
   rmm save [-m "why"] [--push]    Commit everything in the store to git
+  rmm clone <repo> <folder>       Bring a save down from where it is pushed,
+                                  and open it
   rmm serve [--port 4600]         Start the editor GUI and extension API
+
+Any command also takes:
+  --data <folder>    Work on the save in this folder instead of the one that is
+                     open. Beats RMM_DATA and the remembered save.
 
 Environment:
   RMM_DATA           Where the store lives. Defaults to ~/.resumem-m/store,
@@ -45,8 +63,59 @@ Environment:
 `;
 
 function arg(argv: string[], name: string): string | undefined {
+  const joined = argv.find((a) => a.startsWith(`--${name}=`));
+  // `--data=/some/save` is how half of every other tool is written, and it
+  // used to resolve to nothing at all — the same silent miss as a flag that
+  // is never read.
+  if (joined) return joined.slice(name.length + 3);
   const i = argv.indexOf(`--${name}`);
   return i >= 0 ? argv[i + 1] : undefined;
+}
+
+/**
+ * Every flag each command takes, so one it does not take can be said out loud.
+ *
+ * `rmm serve --data /tmp/copy` accepted the flag and ignored it for as long as
+ * the flag existed, and a typo like `--dta` still would: it quietly means
+ * "serve the save that happens to be open", which is the one outcome nobody
+ * asking for `--data` wants. An unknown flag is a mistake every time, and
+ * saying so costs one line.
+ */
+const TAKES: Record<string, { value?: string[]; bare?: string[] }> = {
+  build: { bare: ['all'] },
+  feedback: { value: ['focus'] },
+  apply: { value: ['company', 'role', 'url'] },
+  save: { value: ['message', 'm'], bare: ['push'] },
+  voice: { bare: ['dry-run', 'no-ai'] },
+  serve: { value: ['port'] },
+};
+
+/** The first flag this command does not take, with what it does take. */
+function unknownFlag(command: string, rest: string[]): string | null {
+  const spec = TAKES[command] ?? {};
+  // `--data` is every command's, which is the whole point of reading it once.
+  const value = new Set(['data', ...(spec.value ?? [])]);
+  const bare = new Set(spec.bare ?? []);
+
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i] ?? '';
+    if (token === '--') break; // everything after it is a value, by convention
+    if (token === '-m' && value.has('m')) {
+      i++;
+      continue;
+    }
+    if (!token.startsWith('--')) continue;
+    const name = token.slice(2).split('=')[0] ?? '';
+    if (value.has(name)) {
+      if (!token.includes('=')) i++; // its value is not a flag
+      continue;
+    }
+    if (bare.has(name)) continue;
+
+    const known = [...value, ...bare].sort().map((f) => `--${f}`);
+    return `"${token}" is not something ${command ? `\`rmm ${command}\`` : 'rmm'} takes. It takes: ${known.join(', ')}.`;
+  }
+  return null;
 }
 
 /** `-m "message"`, because every other tool that commits accepts it. */
@@ -71,6 +140,13 @@ function fmtFit(r: { pages: number; fits: boolean; overflowPt: number; overflowL
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+
+  const wrong = command && !['help', '--help', '-h'].includes(command) ? unknownFlag(command, rest) : null;
+  if (wrong) {
+    console.error(wrong);
+    return 1;
+  }
+
   const store = new Store(dataDir);
   const repo = Repo.forStore(dataDir);
 
@@ -309,6 +385,26 @@ async function main(argv: string[]): Promise<number> {
       }
       console.log(`\nAdded ${plural(samples.length, 'sample')}. Fix anything filed wrongly in Voice & AI, or with \`rmm serve\`.`);
       return failed > 0 ? 1 : 0;
+    }
+
+    /**
+     * Bring a save down from wherever it is pushed.
+     *
+     * The same thing the chooser's Clone does, for a machine where opening a
+     * browser first is the wrong order: this is the command you want on a new
+     * laptop, before there is anything to open.
+     */
+    case 'clone': {
+      const url = rest[0];
+      const into = rest[1];
+      if (!url || !into) {
+        console.error('Usage: rmm clone <repository> <folder>');
+        return 1;
+      }
+      const store = await cloneProject(url, into, cloneRepo);
+      rememberProject(store.root);
+      console.log(`Cloned into ${store.root}, and opened it. Run \`rmm serve\` to work on it.`);
+      return 0;
     }
 
     case 'serve': {

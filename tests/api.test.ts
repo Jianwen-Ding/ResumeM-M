@@ -242,6 +242,75 @@ describe('job analysis', () => {
     expect(res.body.spec.choices.b_pipeline).toBe('v_kafka');
   });
 
+  /*
+   * The tracker reflected what you remembered to record, and nobody records
+   * the last step: by the time the form is submitted the tab has already gone
+   * to a confirmation page. The extension watching its own form being
+   * submitted is the best evidence there is from outside the portal.
+   */
+  describe('noticing that an application went out', () => {
+    const sent = (body: Record<string, unknown>) =>
+      request(app).post('/api/extension/sent').send(body);
+
+    it('records one that was never opened as a workspace', async () => {
+      const res = await sent({ company: 'Quasar', role: 'Platform Engineer', url: 'https://quasar.example/apply' }).expect(200);
+      expect(res.body.changed).toBe(true);
+      expect(res.body.application).toMatchObject({ company: 'Quasar', role: 'Platform Engineer', status: 'applied' });
+      expect(res.body.application.appliedAt).toBeTruthy();
+      expect(res.body.application.history.at(-1).note).toMatch(/submitted/i);
+    });
+
+    it('moves one that was being worked on, and its draft with it', async () => {
+      await request(app)
+        .post('/api/workspace')
+        .send({ company: 'Pulsar', role: 'Data Engineer', coverLetterRequired: true })
+        .expect(200);
+      const before = await request(app).get('/api/applications').expect(200);
+      expect(before.body.applications.find((a: { company: string }) => a.company === 'Pulsar').status).toBe('applying');
+
+      const res = await sent({ company: 'Pulsar', role: 'Data Engineer' }).expect(200);
+      expect(res.body.application.status).toBe('applied');
+
+      const drafts = await request(app).get('/api/workspace').expect(200);
+      expect(drafts.body.drafts.find((d: { company: string }) => d.company === 'Pulsar').status).toBe('submitted');
+    });
+
+    /*
+     * Only forwards. A form resubmitted after a reply came back must not drag
+     * an application at `interview` back to `applied`, and one already sent
+     * must not collect a second identical line of history.
+     */
+    it('never moves an application backwards, and does not repeat itself', async () => {
+      await sent({ company: 'Vela', role: 'Backend Engineer' }).expect(200);
+      const again = await sent({ company: 'Vela', role: 'Backend Engineer' }).expect(200);
+      expect(again.body.changed).toBe(false);
+      expect(again.body.application.history).toHaveLength(1);
+
+      const id = again.body.application.id;
+      await request(app).post(`/api/applications/${encodeURIComponent(id)}/status`).send({ status: 'interview' }).expect(200);
+      const later = await sent({ company: 'Vela', role: 'Backend Engineer' }).expect(200);
+      expect(later.body.changed).toBe(false);
+      expect(later.body.application.status).toBe('interview');
+    });
+
+    it('needs to know which application it is', async () => {
+      await sent({ company: 'Nobody' }).expect(400);
+    });
+  });
+
+  /*
+   * A mode it does not know used to behave as `match` and come back labelled
+   * as whatever was asked for — a resume nobody asked for, wearing the name
+   * of the one they did.
+   */
+  it('refuses a way of tailoring it does not have', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'AI' })
+      .expect(400);
+    expect(res.body.error).toContain('none, match, ai');
+  });
+
   it('reads the older useAi flag as the two modes it could express', async () => {
     const off = await request(app)
       .post('/api/extension/analyze')

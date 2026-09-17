@@ -4,6 +4,38 @@ import path from 'node:path';
 import { readProjects } from './projects.js';
 
 /**
+ * The directory the shipped files live in, found rather than counted to.
+ *
+ * `path.resolve(here, '..', '..')` was the rule, and it is right exactly once.
+ * Under `tsx`, `src/server/index.ts` is two levels down and lands on the
+ * repository. Compiled, `dist/src/server/index.js` is three, and two levels up
+ * is `dist/` — which has no `web/` in it, because TypeScript emits JavaScript
+ * and nothing else. So a built server answered every API call and served the
+ * editor as a 404, which is also what the macOS app is: a WKWebView pointed at
+ * that server, showing nothing.
+ *
+ * The same off-by-one moved the seed data, so a freshly built install also
+ * looked for `dist/data` and found no example store to copy.
+ *
+ * Looking for the thing instead of counting to it survives both layouts, and
+ * the one after that.
+ */
+export function findProjectRoot(from: string): string {
+  let dir = from;
+  // Six is more than any layout here needs and stops a symlink loop dead.
+  for (let i = 0; i < 6; i++) {
+    if (fs.existsSync(path.join(dir, 'web', 'index.html')) && fs.existsSync(path.join(dir, 'package.json'))) {
+      return dir;
+    }
+    const up = path.dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  // Nothing found: keep the old answer rather than inventing a new failure.
+  return path.resolve(from, '..', '..');
+}
+
+/**
  * Where the working store lives.
  *
  * Deliberately not inside the application's source tree. The store is your
@@ -13,12 +45,19 @@ import { readProjects } from './projects.js';
  * itself.
  *
  * Resolution order:
- *   1. RMM_DATA, if set — an explicit choice always wins.
- *   2. ./data, if it looks like a real store someone has been using. This
+ *   1. `--data`, if the command line named a folder — the most explicit thing
+ *      there is, and it must beat the remembered save. It did not, once: the
+ *      CLI accepted `--data` and threw it away, so three test servers started
+ *      over three copies of a store all quietly served the *real* one and
+ *      wrote to it.
+ *   2. RMM_DATA, if set — the same choice, made by the environment.
+ *   3. The save that is open, or the one chosen as the default.
+ *   4. ./data, if it looks like a real store someone has been using. This
  *      keeps existing checkouts working rather than silently moving them.
- *   3. ~/.resumem-m/store, seeded from the bundled example on first run.
+ *   5. ~/.resumem-m/store, seeded from the bundled example on first run.
  */
-export function resolveStoreDir(projectRoot: string): string {
+export function resolveStoreDir(projectRoot: string, chosen?: string): string {
+  if (chosen?.trim()) return path.resolve(chosen.trim());
   if (process.env.RMM_DATA) return path.resolve(process.env.RMM_DATA);
 
   const preferences = readProjects();

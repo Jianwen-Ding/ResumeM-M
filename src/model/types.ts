@@ -422,6 +422,30 @@ export interface StoreConfig {
      * and read something you did not choose.
      */
     research?: boolean;
+    /**
+     * Which model, and how hard it should think.
+     *
+     * Kept apart from `args` on purpose. A preset is copied when it is chosen
+     * rather than referenced, so hand-editing the arguments to change a model
+     * turns the configuration into a custom one that then drifts out of date
+     * with the preset it came from — the exact failure that made "I picked a
+     * preset and it still ran the old command" possible. These two are
+     * applied to the arguments on load, the way `research` is, so the saved
+     * arguments stay preset-shaped.
+     *
+     * Empty means "whatever the CLI would do anyway", which is the right
+     * default: every one of these tools picks a sensible model on its own.
+     */
+    model?: string;
+    /**
+     * And a model per kind of work, where one is not enough.
+     *
+     * Overrides `model` for that kind only. Absent or empty means "whatever
+     * `model` says", which is what almost everyone wants and is why this is
+     * a second setting rather than four required ones.
+     */
+    models?: Partial<Record<'tailor' | 'write' | 'review' | 'author', string>>;
+    effort?: 'low' | 'medium' | 'high';
     timeoutMs: number;
   };
   git: {

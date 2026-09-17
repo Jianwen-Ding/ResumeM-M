@@ -1380,3 +1380,104 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
  * it will not do anything, so it should not read like a footnote.
  */
 .hint.warn { color: var(--warn); font-weight: 500; }
+
+/*
+ * Machinery, folded away.
+ *
+ * The prompts and the raw command line are necessary and occasionally
+ * essential, and they are not what anyone opens a panel to look at. The
+ * summary reads as a control rather than a heading, so it is obvious there is
+ * something behind it.
+ */
+.advanced { margin: 8px 0 12px; }
+.advanced > summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  width: fit-content;
+  list-style: none;
+}
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before { content: "▸ "; color: var(--faint); }
+.advanced[open] > summary::before { content: "▾ "; }
+.advanced > summary:hover { background: var(--accent-hover-layer); }
+.advanced > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.advanced[open] { border-left: 2px solid var(--line); padding-left: 10px; margin-left: 2px; }
+.advanced[open] > summary { margin-left: -10px; }
+
+/*
+ * Picking a model, and saying how hard to think.
+ *
+ * Both were boxes: a text input you had to remember a name for, and a select
+ * you had to open before you could see that the choices were ordered at all.
+ * The models a CLI has are a short list, so they are buttons; effort is one
+ * axis with four stops on it, so it is a slider. `Another…` keeps the box,
+ * because these CLIs gain models faster than this file can be edited.
+ */
+.model-chips { margin-left: 0; margin-top: 4px; }
+.model-other { margin: 4px 0 2px; }
+.model-other input { width: 100%; }
+/* Standalone labels inside the block need the air a `label.f` gets for free. */
+.advanced > .lbl { margin-top: 12px; }
+.effort-slider { width: 100%; margin: 6px 0 0; accent-color: var(--accent); cursor: pointer; }
+.effort-slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.effort-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--t-xs);
+  color: var(--faint);
+  /* Room for the last label, which the block's own padding only gives the
+     left-hand side of. */
+  margin: 2px 2px 6px 0;
+}
+/* The stop you are on, which is why there is no separate readout above. */
+.effort-scale span.on { color: var(--ink); font-weight: 600; }
+
+/*
+ * A model per kind of work, as a grid.
+ *
+ * It was four text boxes, each asking for a model name from memory, and no
+ * way to see at a glance that three of them said the same thing. Kinds of
+ * work down the side and models across the top: every row has one mark on it,
+ * and the column it sits in is the answer.
+ */
+/*
+ * Not the applications table: the rules above dress a `table` as a data
+ * panel — a card, a shadow, uppercase headings with letter-spacing — and this
+ * is a form control that happens to have rows and columns. Every one of those
+ * is turned back off here rather than avoided by not using a table, because a
+ * table is what this is and the headings have to be readable by a screen
+ * reader as headings.
+ */
+.model-grid {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0 2px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.model-grid th,
+.model-grid td {
+  font-size: var(--t-sm);
+  text-transform: none;
+  letter-spacing: 0;
+  background: transparent;
+  text-align: center;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.model-grid thead th { font-weight: 500; color: var(--muted); white-space: nowrap; border-bottom: 1px solid var(--line); }
+.model-grid th.what { text-align: left; font-weight: 400; color: var(--ink-soft); white-space: normal; width: 42%; }
+.model-grid tbody th.what { padding-left: 0; }
+.model-grid tbody tr:last-child td, .model-grid tbody tr:last-child th { border-bottom: 0; }
+.model-grid input[type=radio] { accent-color: var(--accent); cursor: pointer; margin: 0; }
+.model-grid tr.other-row td { padding: 2px 0 6px; text-align: left; }
+.model-grid tr.other-row input { width: 100%; }
+/* The end labels sit under the ends of the track rather than centred on them. */
+.effort-scale span:first-child { text-align: left; }
+.effort-scale span:last-child { text-align: right; }

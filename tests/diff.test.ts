@@ -137,7 +137,25 @@ describe('diffing two versions of a resume', () => {
 
     const changes = diffResumes(withSkills, after);
     expect(changes.map((c) => c.text)).toContain('Languages: added Rust');
-    expect(changes.map((c) => c.text)).toContain('Languages: dropped Python');
+    /*
+     * And what is left, which is the half that can actually be judged: the
+     * line that prints is the one that is kept, and naming only the cuts
+     * makes a proposal read as destruction with no way to weigh it.
+     */
+    expect(changes.map((c) => c.text)).toContain('Languages: dropped Python — keeping Go, Rust');
+  });
+
+  it('says so when a cut takes the whole line', () => {
+    const withSkills = doc({
+      sections: [
+        { kind: 'skills', heading: 'Technical Skills', skillGroups: [{ id: 'g', name: 'Languages', items: ['Go', 'Python'] }], entries: [] },
+      ],
+    });
+    const after = structuredClone(withSkills);
+    after.sections[0]!.skillGroups[0]!.items = [];
+
+    const texts = diffResumes(withSkills, after).map((c) => c.text);
+    expect(texts).toContain('Languages: dropped Go, Python, which is all of them, so the line will not print');
   });
 
   it('notices a rename and a new name on the header', () => {

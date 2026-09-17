@@ -639,3 +639,31 @@ describe('saying exactly what a letter and an answer should be', () => {
     expect(p).toMatch(/no visa or work-authorisation status, no salary figure/);
   });
 });
+
+describe('telling the AI it may rearrange', () => {
+  it('names ordering among the moves, and says what it is for', () => {
+    const p = tailorPrompt(data, resolved, { jobDescription: 'Kafka streaming ingest', jobTitle: 'Platform Engineer' });
+    expect(p).toMatch(/put things in a different order/);
+    expect(p).toMatch(/first bullet of an entry more attention than the last/);
+    expect(p).toMatch(/by how directly each line answers \*this\* posting/);
+  });
+
+  /*
+   * A model told only that it may reorder will reorder. The two limits are
+   * what stop it scrambling a project that reads design, build, measure, and
+   * shuffling jobs out of the reverse-chronological order a reader takes as a
+   * fact about dates.
+   */
+  it('says when not to', () => {
+    const p = tailorPrompt(data, resolved, { jobDescription: 'job' });
+    expect(p).toMatch(/bullets read as a sequence/);
+    expect(p).toMatch(/reverse\s*\n?chronological order/);
+    expect(p).toMatch(/Naming nothing leaves the order exactly as it is/);
+  });
+
+  it('shows it the shape to answer in', () => {
+    const p = tailorPrompt(data, resolved, { jobDescription: 'job' });
+    expect(p).toContain('"order":');
+    expect(p).toContain('"entryOrder":');
+  });
+});

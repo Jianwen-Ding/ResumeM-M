@@ -68,6 +68,8 @@ describe('what the AI is allowed to decide', () => {
       skills: {},
       enable: [],
       disable: [],
+      order: {},
+      entryOrder: {},
       rejected: [],
     });
   });
@@ -151,5 +153,78 @@ describe('fixtures', () => {
     expect(SAMPLE_EDUCATION.id).toBe('edu_neu');
     expect(SAMPLE_PROJECT.id).toBe('proj_thing');
     expect(SAMPLE_SKILLS[0]?.id).toBe('sk_lang');
+  });
+});
+
+/**
+ * Ordering was the one move the model did not have, and it is the cheapest
+ * real tailoring there is: a posting about streaming ingest wants the Kafka
+ * line first, and until now the only way to get it there was to hide the
+ * three above it.
+ *
+ * Accepting an order from a reply is only safe because it is a permutation
+ * and can be nothing else — these are the tests that say so.
+ */
+describe('putting things in a different order', () => {
+  it('takes an order for the bullets inside an entry', () => {
+    const plan = sanitizeAiPlan({ order: { exp_acme: ['b_testing', 'b_pipeline'] } }, data());
+    expect(plan.order).toEqual({ exp_acme: ['b_testing', 'b_pipeline'] });
+    expect(plan.rejected).toEqual([]);
+  });
+
+  it('cannot add a bullet by naming it in an order', () => {
+    // A bullet that belongs to another entry, and one that does not exist.
+    const plan = sanitizeAiPlan({ order: { exp_acme: ['b_thing', 'b_invented', 'b_pipeline'] } }, data());
+    expect(plan.order).toEqual({ exp_acme: ['b_pipeline'] });
+    expect(plan.rejected.join(' ')).toContain('exp_acme');
+  });
+
+  it('cannot drop one by leaving it out', () => {
+    const plan = sanitizeAiPlan({ order: { exp_acme: ['b_testing'] } }, data());
+    const sections = applyInclusion(SAMPLE_BASE, data(), plan);
+    const experience = sections?.find((s) => s.kind === 'experience');
+    // Named first, everything else behind it, nothing lost.
+    expect(experience?.bullets?.exp_acme).toEqual(['b_testing', 'b_pipeline']);
+  });
+
+  it('refuses an order for an entry that does not exist', () => {
+    const plan = sanitizeAiPlan({ order: { exp_nowhere: ['b_pipeline'] } }, data());
+    expect(plan.order).toEqual({});
+    expect(plan.rejected.join(' ')).toContain('exp_nowhere');
+  });
+
+  it('ignores a repeated id rather than printing it twice', () => {
+    const plan = sanitizeAiPlan({ order: { exp_acme: ['b_pipeline', 'b_pipeline', 'b_testing'] } }, data());
+    expect(plan.order.exp_acme).toEqual(['b_pipeline', 'b_testing']);
+  });
+
+  it('reorders entries within a section, by kind', () => {
+    const plan = sanitizeAiPlan({ entryOrder: { experience: ['exp_acme'] } }, data());
+    expect(plan.entryOrder).toEqual({ experience: ['exp_acme'] });
+  });
+
+  it('will not move an entry into a section it does not belong to', () => {
+    const plan = sanitizeAiPlan({ entryOrder: { experience: ['proj_thing'] } }, data());
+    expect(plan.entryOrder).toEqual({});
+    expect(plan.rejected.join(' ')).toContain('experience');
+  });
+
+  /*
+   * Order is applied after showing and hiding, because reordering a list that
+   * is about to lose an entry is work thrown away — and because the default
+   * bullet list has to be materialised before there is anything to permute.
+   */
+  it('orders what is left after hiding, not what was there before', () => {
+    const plan = sanitizeAiPlan(
+      { disable: ['b_pipeline'], order: { exp_acme: ['b_pipeline', 'b_testing'] } },
+      data(),
+    );
+    const sections = applyInclusion(SAMPLE_BASE, data(), plan);
+    expect(sections?.find((s) => s.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_testing']);
+  });
+
+  it('does nothing at all when no order is given', () => {
+    const plan = sanitizeAiPlan({ choices: {} }, data());
+    expect(applyInclusion(SAMPLE_BASE, data(), plan)).toBeUndefined();
   });
 });

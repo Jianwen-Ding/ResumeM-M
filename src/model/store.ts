@@ -20,7 +20,7 @@ import {
 
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
-import { applyResearch, repairAiArgs } from '../ai/presets.js';
+import { applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
 import { normalizeAnswers, normalizeEntries, normalizeEntry, normalizeProfile } from './normalize.js';
 export { repairAiArgs };
 
@@ -160,6 +160,13 @@ export class Store {
     config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
     // The deny list follows the research setting, so the two cannot disagree.
     config.ai.args = applyResearch(config.ai.command, config.ai.args, Boolean(config.ai.research));
+    // And the model and effort flags follow their own settings, for the same
+    // reason: the saved arguments stay the preset's, and the choice is a
+    // setting rather than a hand edit that drifts.
+    config.ai.args = applyModelAndEffort(config.ai.command, config.ai.args, {
+      model: config.ai.model,
+      effort: config.ai.effort,
+    });
 
     // Escape hatches for automated runs. A test suite driving a real server
     // should be able to leave no commits behind without editing config.yaml.

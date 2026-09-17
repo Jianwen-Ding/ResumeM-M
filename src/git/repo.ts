@@ -449,3 +449,38 @@ export async function withCommit<T>(
   }
   return result;
 }
+
+/**
+ * Clone a repository into a directory that already exists and is empty.
+ *
+ * Its own function rather than a method, because there is no `Repo` yet: this
+ * is how one arrives. `--` separates the options from the operands, so a URL
+ * that begins with a dash is an address git cannot find rather than an option
+ * git obeys — belt and braces over the caller's own check.
+ *
+ * `GIT_TERMINAL_PROMPT=0` is the important one. A private repository with no
+ * credentials makes git ask for a username on the terminal, and there is no
+ * terminal: the server would hang until something killed it, with nothing on
+ * screen to say why. Refused immediately, the failure is a sentence.
+ */
+export async function cloneRepo(url: string, into: string): Promise<void> {
+  try {
+    await run('git', ['clone', '--', url, into], {
+      cwd: path.dirname(into),
+      maxBuffer: 32 * 1024 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo' },
+    });
+  } catch (err) {
+    const said = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '').trim();
+    if (/could not read Username|terminal prompts disabled|Authentication failed|Permission denied \(publickey\)/i.test(said)) {
+      throw new Error(
+        'Git could not sign in to that repository. Set up the credentials it needs — an SSH key, or a ' +
+          'credential helper — and try again. Nothing was written.',
+      );
+    }
+    if (/repository .* not found|does not appear to be a git repository|Could not resolve host/i.test(said)) {
+      throw new Error(`Git could not reach that repository. ${said.split('\n').pop() ?? ''}`.trim());
+    }
+    throw new Error(`git clone failed: ${said.split('\n').slice(-2).join(' ') || 'unknown error'}`);
+  }
+}

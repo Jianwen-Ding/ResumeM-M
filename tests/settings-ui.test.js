@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
-import { AI_PRESETS } from '../src/ai/presets.ts';
+import { AI_PRESETS, AI_TASKS } from '../src/ai/presets.ts';
 
 vi.mock('../web/preview.js', () => ({ createPreview: () => ({ show: async () => {} }) }));
 vi.mock('../web/assets.js', () => ({
@@ -48,7 +48,7 @@ describe('the settings panel', () => {
       else if (url === '/api/ai/jobs') result = { jobs: [] };
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/voice') result = { voice: '' };
-      else if (url === '/api/ai/presets') result = { presets: AI_PRESETS };
+      else if (url === '/api/ai/presets') result = { presets: AI_PRESETS, tasks: AI_TASKS };
       else if (url === '/api/config/test-ai') result = { ok: true, command: config.ai.command, ms: 1200, output: 'ok' };
       else if (url === '/api/config' && options.method === 'PUT') {
         config = { ...config, ...body, ai: { ...config.ai, ...(body.ai ?? {}) } };
@@ -203,7 +203,18 @@ describe('the settings panel', () => {
     );
     expect(warning).toBeTruthy();
 
-    warning.querySelector('button.link').click();
+    /*
+     * The button has to say what it does on its own. It read "Use the
+     * preset’s", with the noun in the next node, so the whole instruction
+     * came out as "Use the preset’s — that saves and tests it." on the only
+     * warning that explains why the AI command will not run.
+     */
+    const mend = warning.querySelector('button.link');
+    expect(mend.textContent).toContain('Claude Code');
+    expect(mend.textContent).toMatch(/arguments/i);
+    expect(mend.textContent.trim()).not.toMatch(/[’']s$/);
+
+    mend.click();
     const claude = AI_PRESETS.find((p) => p.command === 'claude');
     await vi.waitFor(() => expect(config.ai.args).toEqual(claude.args));
   });
@@ -216,5 +227,292 @@ describe('the settings panel', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('#settings').textContent).not.toContain('not the "Claude Code" preset'),
     );
+  });
+  /*
+   * Changing which model tailors a resume used to mean hand-editing the
+   * argument line — which turns a preset into a custom configuration that
+   * then drifts out of date with the preset it came from, the exact failure
+   * behind "I picked a preset and it still ran the old command". It is a
+   * setting now, applied to the arguments on the server.
+   */
+  const boxFor = (label) =>
+    [...document.querySelectorAll('#settings label.f')]
+      .find((f) => f.querySelector('.lbl').textContent === label)
+      ?.querySelector('input, select');
+
+  /** The model buttons, which are the chosen CLI's own names for its models. */
+  const modelChips = () => [...document.querySelectorAll('#settings .model-chips button')];
+  const chip = (label) => modelChips().find((b) => b.textContent === label);
+  const effortSlider = () => document.querySelector('#settings .effort-slider');
+  const slideTo = (i) => {
+    const s = effortSlider();
+    s.value = String(i);
+    s.dispatchEvent(new Event('input'));
+  };
+
+  /*
+   * Typing "opus" into a box is asking somebody to remember a name; four
+   * buttons is reading. The box stays behind "Another…", because these CLIs
+   * gain models faster than the list in this repository can be edited.
+   */
+  it('saves a model chosen from the buttons, without touching the preset’s arguments', async () => {
+    expect(modelChips().map((b) => b.textContent)).toEqual(['Default', 'opus', 'sonnet', 'haiku', 'Another…']);
+    expect(chip('Default').className).toContain('on');
+
+    chip('opus').click();
+    expect(chip('opus').className).toContain('on');
+    document.querySelector('#settings button.primary').click();
+
+    await vi.waitFor(() => expect(config.ai.model).toBe('opus'));
+    // The arguments are still the ones that were there; the flag is the
+    // server's business, not a hand edit to this box.
+    expect(config.ai.args).toEqual(['-p', '{promptText}']);
+  });
+
+  it('still takes a model name that is not on the list', async () => {
+    const box = () => document.querySelector('#settings .model-other');
+    expect(box().hidden).toBe(true);
+
+    chip('Another…').click();
+    expect(box().hidden).toBe(false);
+
+    const input = box().querySelector('input');
+    input.value = 'some-model-9';
+    input.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(config.ai.model).toBe('some-model-9'));
+    // And it is the one that reads as chosen, since none of the buttons is.
+    expect(chip('Another…').getAttribute('aria-pressed')).toBe('true');
+    expect(chip('Default').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  /*
+   * Effort is one axis with four stops on it. A dropdown hides that: you have
+   * to open it before you can see the choices are even ordered.
+   */
+  it('saves an effort level from the slider, and says it in words', async () => {
+    expect([...document.querySelectorAll('#settings .effort-scale span')].map((n) => n.textContent)).toEqual([
+      'As it comes',
+      'Quick',
+      'Normal',
+      'Thorough',
+    ]);
+    // The scale is the readout: the stop you are on is the one marked. A
+    // separate line above the slider said the same words as the left-hand end
+    // of the scale below it.
+    const marked = () =>
+      [...document.querySelectorAll('#settings .effort-scale span.on')].map((n) => n.textContent);
+    expect(marked()).toEqual(['As it comes']);
+
+    slideTo(3);
+    expect(marked()).toEqual(['Thorough']);
+    expect(effortSlider().getAttribute('aria-valuetext')).toBe('Thorough');
+
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(config.ai.effort).toBe('high'));
+  });
+
+  /*
+   * Only Codex has a reasoning-effort flag. Saying "Thorough" and having it
+   * silently mean nothing would be the worst version of this.
+   */
+  it('says which mechanism each setting will actually use', async () => {
+    const text = () => document.querySelector('#settings').textContent;
+    // The fixture is claude.
+    expect(text()).toContain('has no effort switch');
+    expect(text()).toContain('Passed as --model');
+
+    /*
+     * And says it under the field it is about. Both sentences were one line
+     * below Effort, so "Passed as --model" sat two fields from the box it
+     * describes and read as though the effort were what got passed.
+     */
+    const hints = [...document.querySelectorAll('#settings .hint')].map((n) => n.textContent);
+    expect(hints.some((h) => h.includes('--model') && !/effort/i.test(h))).toBe(true);
+    expect(hints.some((h) => /effort switch/i.test(h) && !h.includes('--model'))).toBe(true);
+
+    const command = commandBox();
+    command.value = 'codex';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(text()).toContain('Passed as -c'));
+
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(text()).toContain('is not one of the presets'));
+  });
+
+  /*
+   * A command that is not a preset has nothing to build a model menu out of —
+   * the names come from the preset — and nothing to attach either setting to.
+   * Showing the pair greyed out, or full of another CLI's model names, would
+   * be offering a choice that does nothing.
+   */
+  it('takes the model and the effort away when the command is not a preset', async () => {
+    const block = () => effortSlider().closest('div');
+    const command = commandBox();
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+
+    await vi.waitFor(() => expect(block().hidden).toBe(true));
+    expect(document.querySelector('#settings').textContent).toContain('is not one of the presets');
+    // And the heading over it stops promising what is no longer inside.
+    expect(advancedBlock().querySelector('summary').textContent).toBe('Advanced — the exact command');
+
+    command.value = 'claude';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(block().hidden).toBe(false));
+    expect(advancedBlock().querySelector('summary').textContent).toContain('the model and the effort');
+  });
+
+  it('follows the command: the buttons are whichever CLI is configured', async () => {
+    expect(modelChips().map((b) => b.textContent)).toContain('opus');
+
+    const command = commandBox();
+    command.value = 'gemini';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(modelChips().map((b) => b.textContent)).toContain('gemini-2.5-pro'));
+    expect(modelChips().map((b) => b.textContent)).not.toContain('opus');
+
+  });
+
+  it('counts the model and the effort as unsaved changes like everything else', async () => {
+    const flag = () =>
+      [...document.querySelectorAll('#settings .hint.warn')].find((n) => n.textContent === 'Not saved yet.');
+    expect(flag().hidden).toBe(true);
+
+    slideTo(1);
+    expect(flag().hidden).toBe(false);
+  });
+  /*
+   * The panel led with a command line and an argument template full of
+   * {promptText} placeholders, which made choosing a preset look like
+   * something you had to understand the machinery to do.
+   */
+  const advancedBlock = () =>
+    [...document.querySelectorAll('#settings details.advanced')].find((d) =>
+      d.querySelector('summary').textContent.includes('exact command'),
+    );
+
+  it('keeps the command line behind a disclosure', () => {
+    const box = advancedBlock();
+    expect(box).toBeTruthy();
+    expect(box.contains(commandBox())).toBe(true);
+    // The fixture's config is claude with drifted arguments, so it is not a
+    // preset and the block opens by itself — see the next test for why.
+    expect(box.open).toBe(true);
+  });
+
+  it('but opens it when what is saved is not a preset, which is when it matters', async () => {
+    const claude = AI_PRESETS.find((p) => p.command === 'claude');
+    config.ai = { ...config.ai, args: [...claude.args] };
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    // Exactly a preset now: the machinery folds away.
+    await vi.waitFor(() => expect(advancedBlock()?.open).toBe(false));
+    expect(advancedBlock().contains(commandBox())).toBe(true);
+  });
+
+  /*
+   * The preset is the whole of what most people need. The model and the
+   * effort are facts about the command it chose — which names are even on
+   * offer depends on which CLI it is — so they live with it.
+   */
+  it('keeps the preset in plain sight and the command’s own settings with the command', () => {
+    const outside = (label) => {
+      const f = [...document.querySelectorAll('#settings label.f')].find(
+        (n) => n.querySelector('.lbl').textContent === label,
+      );
+      return f && !f.closest('details.advanced');
+    };
+    expect(outside('Preset')).toBe(true);
+    expect(outside('LaTeX engine')).toBe(true);
+    expect(outside('Command')).toBe(false);
+    expect(outside('Timeout, seconds')).toBe(false);
+
+    const box = advancedBlock();
+    expect(box.contains(document.querySelector('#settings .model-chips'))).toBe(true);
+    expect(box.contains(effortSlider())).toBe(true);
+  });
+  /*
+   * "terra for resume review, astra for cover letter drafting, luna for
+   * tailoring resumes" — one model for all of it is the wrong shape, and
+   * hand-editing the argument line per task is not a way to express it.
+   */
+  const taskBlock = () =>
+    [...document.querySelectorAll('#settings details.advanced')].find((d) =>
+      d.querySelector('summary').textContent.includes('particular kind of work'),
+    );
+  /** The radio for one kind of work and one column of the grid. */
+  const gridCell = (row, column) =>
+    [...taskBlock().querySelectorAll('tbody tr')]
+      .find((tr) => tr.querySelector('th.what')?.textContent === row)
+      ?.querySelector(`input[value="${column}"]`);
+
+  /*
+   * It was four text boxes, each asking for a model name from memory, and no
+   * way to see at a glance that three of them said the same thing. As a grid
+   * it is one look: every row has one mark, and the column it is in is the
+   * answer.
+   */
+  it('lays the kinds of work against the models, behind a disclosure', async () => {
+    const box = taskBlock();
+    expect(box).toBeTruthy();
+    // Folded away: almost nobody needs it, and putting it at the top would
+    // make choosing a preset look like a configuration exercise.
+    expect(box.open).toBe(false);
+
+    const columns = [...box.querySelectorAll('thead th')].map((n) => n.textContent);
+    expect(columns).toEqual(['For', 'Same as above', 'opus', 'sonnet', 'haiku', 'Another…']);
+
+    const rows = [...box.querySelectorAll('tbody th.what')].map((n) => n.textContent);
+    expect(rows).toEqual([
+      'Tailoring a resume',
+      'Writing letters and answers',
+      'Reviewing what you wrote',
+      'Drafting new entries and wordings',
+    ]);
+
+    // Exactly one mark per row, and to begin with it is "same as above" —
+    // which is what an empty per-task model does.
+    for (const tr of box.querySelectorAll('tbody tr:not(.other-row)')) {
+      expect([...tr.querySelectorAll('input:checked')]).toHaveLength(1);
+    }
+    for (const row of rows) expect(gridCell(row, '').checked).toBe(true);
+  });
+
+  it('saves the one it is given, and leaves the rest alone', async () => {
+    gridCell('Writing letters and answers', 'sonnet').click();
+    document.querySelector('#settings button.primary').click();
+
+    await vi.waitFor(() => expect(config.ai.models.write).toBe('sonnet'));
+    expect(config.ai.models.tailor).toBe('');
+    expect(config.ai.models.review).toBe('');
+    // And the row shows it, while the others still say "same as above".
+    expect(gridCell('Writing letters and answers', 'sonnet').checked).toBe(true);
+    expect(gridCell('Tailoring a resume', '').checked).toBe(true);
+  });
+
+  it('still takes a model name that is not on the grid', async () => {
+    const otherRow = () =>
+      gridCell('Reviewing what you wrote', 'other').closest('tr').nextElementSibling;
+    expect(otherRow().hidden).toBe(true);
+
+    gridCell('Reviewing what you wrote', 'other').click();
+    expect(otherRow().hidden).toBe(false);
+
+    const box = otherRow().querySelector('input');
+    box.value = 'terra';
+    box.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(config.ai.models.review).toBe('terra'));
+  });
+
+  it('counts a per-task model as an unsaved change like everything else', () => {
+    const flag = () =>
+      [...document.querySelectorAll('#settings .hint.warn')].find((n) => n.textContent === 'Not saved yet.');
+    expect(flag().hidden).toBe(true);
+
+    gridCell('Tailoring a resume', 'opus').click();
+    expect(flag().hidden).toBe(false);
   });
 });

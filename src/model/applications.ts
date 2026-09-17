@@ -237,9 +237,20 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
       dir,
       answersName,
     );
+    /*
+     * Titled, because this one is read rather than uploaded.
+     *
+     * The resume and the letter are attachments: a portal takes them and
+     * nobody opens them again. This file is the one you sit with, copying
+     * answers into boxes — often with a second application's open beside it,
+     * since the flat folder holds everything in flight at once. It began
+     * straight in at "## Why this team?", with nothing on the page saying
+     * whose question that was.
+     */
+    const title = [req.company, req.role].filter(Boolean).join(' — ');
     fs.writeFileSync(
       qaPath,
-      req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n'),
+      `# ${title}\n\n${req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n')}`,
       'utf8',
     );
     files.push(path.basename(qaPath));

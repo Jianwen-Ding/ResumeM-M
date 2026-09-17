@@ -22,6 +22,50 @@ describe('local desktop server', () => {
       store.cleanup();
     }
   });
+
+  /*
+   * A server serves whatever it loaded at start, and there is nothing about it
+   * from the outside that says so — which is how a test suite came to fail for
+   * sixty seconds against a build from that morning. `?fresh` re-reads the
+   * files and answers the only question that matters: am I still the code?
+   */
+  it('says whether it is still running the code that is on disk', async () => {
+    const store = makeTempStore();
+    const server = await startServer({ port: 0, dataDir: store.dir });
+    const base = `http://127.0.0.1:${server.port}`;
+    try {
+      const quiet = await fetch(`${base}/health`).then((r) => r.json());
+      // Not on every poll: walking three trees to answer a question only a
+      // test runner asks would be paid for by the extension, which polls this.
+      expect(quiet.stale).toBeUndefined();
+
+      const asked = await fetch(`${base}/health?fresh`).then((r) => r.json());
+      expect(asked.stale).toBe(false);
+      expect(asked.onDisk).toBe(asked.build);
+
+      /*
+       * A new file under a watched tree, rather than touching a real one: the
+       * stamp is the newest file mtime, so removing the probe puts it back
+       * exactly, and nothing a parallel run is reading changes underneath it.
+       */
+      const probe = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'web', '.build-probe');
+      fs.writeFileSync(probe, '');
+      fs.utimesSync(probe, new Date(), new Date(Date.now() + 60_000));
+      try {
+        const after = await fetch(`${base}/health?fresh`).then((r) => r.json());
+        expect(after.stale).toBe(true);
+        expect(after.build).toBe(asked.build);
+        expect(Number(after.onDisk)).toBeGreaterThan(Number(after.build));
+      } finally {
+        fs.rmSync(probe, { force: true });
+      }
+      // And back again, once the probe is gone.
+      expect((await fetch(`${base}/health?fresh`).then((r) => r.json())).stale).toBe(false);
+    } finally {
+      await server.close();
+      store.cleanup();
+    }
+  });
 });
 
 /*
