@@ -219,9 +219,15 @@
 
   <!-- History: what the store looked like at any point, from git. -->
   <section id="tab-history" class="tab">
+    <!--
+      Describes what is on the screen. It used to end "Pick a commit to see
+      exactly what moved", which is the older design: every version now shows
+      what moved on its own card, so the instruction asked for a click that
+      does nothing and implied the list was hiding something.
+    -->
     <p class="hint">
-      Every change to the save is committed, so this is the record of what you
-      sent and when. Pick a commit to see exactly what moved.
+      Every change to the save is committed once you stop editing, so one
+      sitting is one version. Each shows what moved, and can be restored.
     </p>
     <div class="toolbar">
       <select id="history-resume" title="Whose version history to show"></select>
