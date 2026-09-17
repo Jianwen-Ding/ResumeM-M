@@ -11,6 +11,7 @@ import { prepareProject, readProjects, rememberProject, setDefaultFolder, projec
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
+import { localOnly } from './guard.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, '..', '..');
@@ -111,6 +112,15 @@ export async function startServer(opts: ServerOptions = {}) {
    * is same-origin and needs nothing.
    */
   const mayCall = (origin: string | undefined) => /^chrome-extension:\/\/[a-p]+$/.test(origin ?? '');
+
+  // Before anything else: the `Host` check that makes DNS rebinding fail, and
+  // the `Origin` check that catches writes CORS never got to preflight.
+  app.use(
+    localOnly({
+      host,
+      allowHosts: (process.env.RMM_ALLOWED_HOSTS ?? '').split(',').filter(Boolean),
+    }),
+  );
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
