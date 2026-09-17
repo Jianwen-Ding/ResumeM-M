@@ -113,10 +113,7 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
      */
     const output = stdout.trim();
     if (!output) {
-      throw new AgentError(
-        `AI command "${config.ai.command}" exited without writing anything.` +
-          (stderr.trim() ? ` It said: ${stderr.trim().slice(0, 400)}` : ''),
-      );
+      throw new AgentError(explainSilence(config.ai.command, stderr));
     }
     return { output, executed: true, command: `${config.ai.command} ${args.join(' ')}` };
   } catch (err) {
@@ -151,6 +148,57 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Why a CLI that exited cleanly wrote nothing, in this tool's own words.
+ *
+ * A coding-agent CLI reports its troubles in its own vocabulary, and pasting
+ * that through unread put this in front of someone who wanted a cover letter:
+ *
+ *   AI command "agy" exited without writing anything. It said: warning: --mode
+ *   plan has no effect while slash command expansion is disabled. jetski: no
+ *   output produced — a tool required the "command" permission that headless
+ *   mode cannot prompt for, so it was auto-denied. Add an allow-rule under
+ *   permissions.allow in settings.json (e.g. command(<target>)). Alternatively,
+ *   re-run with --dangerously-skip-permissions to auto-approve all tools.
+ *
+ * Two names for programs they did not run, a file they do not have, and a
+ * suggestion to disable every safety check in it. None of that is theirs to
+ * act on: this tool asks the model for text and nothing else, so a run that
+ * stopped to ask for a shell is a run that was configured to do more than it
+ * needs to. Say that, and say where the switch is.
+ */
+export function explainSilence(command: string, stderr: string): string {
+  const said = stderr.trim();
+  const lower = said.toLowerCase();
+  const head = `The AI command "${command}" finished without writing anything.`;
+
+  if (/permission|auto-denied|not allowed|denied/.test(lower) && /tool|command|bash|shell/.test(lower)) {
+    return (
+      `${head} It stopped to ask permission to run something on your machine, and nothing was ` +
+      `there to answer, so it gave up. ResumeM-M only ever wants text back — it does not need ` +
+      `the AI to run commands, read your files or change anything. Pick a preset in Settings, ` +
+      `which confines the command to a scratch folder, rather than granting it more access.`
+    );
+  }
+
+  // Deliberately narrow. "api key rotated; using cached credentials" is a
+  // working command talking to itself, and answering it with "you are not
+  // signed in" sends someone to fix something that is not broken.
+  if (/unauthorized|\b401\b|\b403\b|not (logged|signed) in|please (log|sign) in|authentication failed|(invalid|missing|no) api key/.test(lower)) {
+    return (
+      `${head} It looks like it is not signed in. Run it once yourself in a terminal to log in, ` +
+      `then try again — Settings › Save and test will tell you when it is working.`
+    );
+  }
+
+  if (/rate limit|quota|429|usage limit/.test(lower)) {
+    return `${head} It reported a rate or usage limit. Wait and try again; nothing was lost.`;
+  }
+
+  // Unrecognised: pass it on, but say plainly that it is the CLI talking.
+  return head + (said ? ` The command reported: ${said.slice(0, 400)}` : '');
 }
 
 export class AgentError extends Error {

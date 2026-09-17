@@ -116,7 +116,10 @@ const prompt = print.slice('--print='.length);
 if (!prompt) throw new Error('agy: empty prompt');
 if (argv[argv.indexOf('--mode') + 1] !== 'plan') throw new Error('agy: expected plan mode');
 if (!argv.includes('--sandbox')) throw new Error('agy: expected sandbox');
-if (!argv.includes('--disable-slash-commands')) throw new Error('agy: expected literal prompt');
+// The real agy warns "--mode plan has no effect while slash command
+// expansion is disabled" and then, no longer planning, stops to ask for a
+// permission headless mode cannot grant — producing nothing at all.
+if (argv.includes('--disable-slash-commands')) throw new Error('agy: plan mode cancelled, refusing to run tools');
 if (argv[argv.indexOf('--output-format') + 1] !== 'text') throw new Error('agy: expected text output');
 process.stdout.write(JSON.stringify({ cli: 'agy', cwd: process.cwd(), prompt }));
 `;

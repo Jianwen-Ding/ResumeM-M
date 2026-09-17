@@ -69,11 +69,23 @@ export const AI_PRESETS: AiPreset[] = [
   {
     label: 'Antigravity (agy)',
     command: 'agy',
-    // agy 1.1.28 requires a string value for --print; it does not read a
-    // text prompt from stdin. Attach the value so leading dashes in a prompt
-    // cannot be mistaken for another flag. A filename is just literal text.
-    args: ['--mode', 'plan', '--sandbox', '--disable-slash-commands', '--output-format', 'text', '--print={promptText}'],
-    note: 'Runs in plan mode with terminal sandbox restrictions, in a scratch directory.',
+    /*
+     * agy 1.1.28 requires a string value for --print; it does not read a text
+     * prompt from stdin. Attach the value so leading dashes in a prompt cannot
+     * be mistaken for another flag. A filename is just literal text.
+     *
+     * `--disable-slash-commands` is gone because it cancelled the flag that
+     * matters. agy said so itself — "warning: --mode plan has no effect while
+     * slash command expansion is disabled" — and then, no longer in plan mode,
+     * reached for a tool needing the `command` permission, which headless mode
+     * cannot prompt for and therefore refused. The run produced nothing, every
+     * time, and the advice it printed was to allow the command or to re-run
+     * with every permission check disabled. Plan mode is what stops it wanting
+     * the permission in the first place, so plan mode stays and the flag that
+     * silently disabled it does not.
+     */
+    args: ['--mode', 'plan', '--sandbox', '--output-format', 'text', '--print={promptText}'],
+    note: 'Runs in plan mode, which cannot run commands, in a scratch directory.',
   },
 ];
 
@@ -97,7 +109,17 @@ export function repairAiArgs(command: string, args: string[]): string[] {
   // The old README suggested -p {prompt} for any CLI. agy treats that path
   // as the prompt itself, so give print mode the actual prompt text instead.
   if (named(/(^|[\\/])agy(\.exe)?$/i)) {
-    const out = [...args];
+    /*
+     * `--disable-slash-commands` silently cancels `--mode plan`, and without
+     * plan mode agy reaches for a tool needing a permission that headless mode
+     * cannot prompt for — so every run produced nothing at all. A preset is
+     * copied when it is chosen rather than referenced, so a config saved before
+     * this was understood keeps the combination forever.
+     */
+    let out = [...args];
+    if (out.includes('--mode') && out.includes('--disable-slash-commands')) {
+      out = out.filter((a) => a !== '--disable-slash-commands');
+    }
     const printFlags = ['-p', '--print', '--prompt'];
     for (let i = 0; i < out.length; i++) {
       if (printFlags.includes(out[i]!) && ['{prompt}', '{promptText}'].includes(out[i + 1] ?? '')) {

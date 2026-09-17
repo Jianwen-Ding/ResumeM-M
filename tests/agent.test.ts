@@ -141,7 +141,7 @@ describe('runAgent', () => {
         }),
         'hello',
       ),
-    ).rejects.toThrow(/exited without writing anything/);
+    ).rejects.toThrow(/finished without writing anything/);
   });
 
   it('says what the command complained about, so the failure is actionable', async () => {
@@ -155,6 +155,87 @@ describe('runAgent', () => {
         'hello',
       ),
     ).rejects.toThrow(/api key rotated/);
+  });
+
+  it('does not mistake a CLI talking to itself for a sign-in problem', async () => {
+    // "api key rotated; using cached credentials" is a working command saying
+    // so. Answering it with "you are not signed in" sends someone to fix
+    // something that is not broken.
+    await expect(
+      runAgent(
+        config({
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stderr.write("401 unauthorized")', '{prompt}'],
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow(/not signed in/);
+  });
+
+  /*
+   * A CLI reports its troubles in its own vocabulary, and pasting that through
+   * unread put two program names, a settings file the user does not have, and
+   * a suggestion to disable every permission check in front of someone who
+   * wanted a cover letter. None of it was theirs to act on.
+   */
+  it('translates a run that stopped to ask for a permission nobody could grant', async () => {
+    await expect(
+      runAgent(
+        config({
+          enabled: true,
+          command: process.execPath,
+          args: [
+            '-e',
+            'process.stderr.write(\'jetski: no output produced — a tool required the "command" \' +\n' +
+              '  \'permission that headless mode cannot prompt for, so it was auto-denied. Add an \' +\n' +
+              '  \'allow-rule under permissions.allow in settings.json. Alternatively, re-run with \' +\n' +
+              '  \'--dangerously-skip-permissions to auto-approve all tools.\')',
+            '{prompt}',
+          ],
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow(/only ever wants text back/);
+  });
+
+  it('does not repeat a CLI\'s advice to turn its own safety checks off', async () => {
+    await expect(
+      runAgent(
+        config({
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stderr.write("a tool required the permission and was auto-denied")', '{prompt}'],
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow(/^(?!.*dangerously-skip-permissions)/s);
+  });
+
+  it('says a rate limit is a rate limit', async () => {
+    await expect(
+      runAgent(
+        config({
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stderr.write("429 rate limit exceeded")', '{prompt}'],
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow(/rate or usage limit/);
+  });
+
+  it('passes an unfamiliar complaint through, saying whose words they are', async () => {
+    await expect(
+      runAgent(
+        config({
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stderr.write("segmentation fault in module 4")', '{prompt}'],
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow(/The command reported: segmentation fault in module 4/);
   });
 
   /*
