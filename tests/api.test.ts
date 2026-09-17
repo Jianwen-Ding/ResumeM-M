@@ -930,6 +930,44 @@ describe('workspace', () => {
   }, 30_000);
 
   /*
+   * The card's button says it hands over "the posting, the resume, and the
+   * questions", and it did exactly that — the answers and the letter typed
+   * into it stayed behind. Following the invitation to go and write in the
+   * editor therefore meant abandoning what was already written.
+   */
+  it('takes the answers and the letter that come with the posting', async () => {
+    const { body } = await open({
+      coverLetter: 'Dear Streamly, I started this in the extension.',
+      questions: [
+        { question: 'Why are you interested in this role?', required: true, answer: 'The ingest rewrite.' },
+        { question: 'Describe a technical project you are proud of.', required: true },
+      ],
+    }).expect(200);
+
+    const draft = body.draft;
+    expect(draft.coverLetter.body).toBe('Dear Streamly, I started this in the extension.');
+    expect(draft.coverLetter.required).toBe(true);
+    // Marked as written by hand, because it was — so generating leaves it be.
+    expect(draft.coverLetter.edited).toBe(true);
+
+    expect(draft.questions[0].answer).toBe('The ingest rewrite.');
+    expect(draft.questions[0].source).toBe('human');
+    expect(draft.questions[0].edited).toBe(true);
+    // And one that came with nothing is still answered from the bank as before.
+    expect(draft.questions[1].answer).not.toBe('The ingest rewrite.');
+  });
+
+  it('does not put a carried letter over one already being written', async () => {
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const mine = { ...t.store.getDraft(id)!, coverLetter: { required: true, body: 'Mine, written here.', edited: true } };
+    await request(app).put(`/api/workspace/${id}`).send(mine).expect(200);
+
+    const again = await open({ coverLetter: 'From the card.' }).expect(200);
+    expect(again.body.draft.coverLetter.body).toBe('Mine, written here.');
+  });
+
+  /*
    * Re-opening a workspace is something the extension does on its own as you
    * move through an application, and it saves the tailored resume first — which
    * shells out to git, a yield of the length a person fits several sentences

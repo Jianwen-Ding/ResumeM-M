@@ -1660,7 +1660,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         resumeId?: string;
         spec?: ResumeSpec;
         coverLetterRequired?: boolean;
-        questions?: { question: string; required?: boolean }[];
+        /** What the extension has already been written into, if anything. */
+        coverLetter?: string;
+        questions?: { question: string; required?: boolean; answer?: string }[];
       };
       if (!body.company || !body.role) throw new Error('company and role are required');
 
@@ -1699,6 +1701,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const prior = existing?.questions.find((x) => x.question === q.question);
         if (prior?.edited) return { ...prior, required: q.required ?? prior.required };
 
+        /*
+         * An answer that came with the request was written by hand somewhere
+         * else — in the extension's card, on the page before this one — and
+         * beats both the bank and anything stored. The button that sends it
+         * says it is handing the questions over; handing them over without the
+         * answers meant writing them twice.
+         */
+        if (q.answer?.trim()) {
+          return {
+            id: prior?.id ?? `q${i + 1}`,
+            question: q.question,
+            required: q.required,
+            answer: q.answer,
+            source: 'human',
+            edited: true,
+          };
+        }
+
         const match = matchAnswer(q.question, data.answers);
         return {
           id: prior?.id ?? `q${i + 1}`,
@@ -1726,11 +1746,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           required: Boolean(body.coverLetterRequired),
           body: '',
         },
+
         questions,
         notes: existing?.notes,
       };
       if (body.coverLetterRequired !== undefined && !draft.coverLetter.edited) {
         draft.coverLetter.required = body.coverLetterRequired;
+      }
+      /*
+       * A letter written in the card comes with it, and is treated as written
+       * by hand — because it was. Only over an empty box: a draft already
+       * holding a letter is the one being worked on.
+       */
+      if (body.coverLetter?.trim() && !draft.coverLetter.body.trim()) {
+        draft.coverLetter = { required: true, body: body.coverLetter, edited: true };
       }
 
       const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
