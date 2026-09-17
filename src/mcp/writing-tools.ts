@@ -83,7 +83,9 @@ export function writingTools(session: WritingSession): ToolDefinition[] {
       name: 'find_my_answers',
       description:
         'Search the answers this person has given to application questions before, ranked against a question you ' +
-        'are about to answer. The same reasoning as find_my_letters: consistency beats novelty.',
+        'are about to answer. The same reasoning as find_my_letters: consistency beats novelty. It returns only ' +
+        'answers that are about the question — if it says there is nothing close, there is nothing close, and ' +
+        'this one is written from the resume and the posting.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -221,7 +223,7 @@ export function authoringTools(session: AuthoringSession): ToolDefinition[] {
       description:
         'A job, a degree or a project you found in the material. Nothing is written to the store: this is a ' +
         'proposal the person reviews and accepts or declines, one at a time. Propose the entry first, then its ' +
-        'bullets — an entry with no bullets is a heading and will be refused at the end.',
+        'bullets — an entry that still has none at the end is a heading, and is left out of the proposal.',
       inputSchema: {
         type: 'object',
         properties: {

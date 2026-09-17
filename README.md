@@ -322,6 +322,10 @@ rmm voice add <file…>             Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
 rmm save [-m "why"] [--push]      Commit the whole store to git
 rmm serve [--port 4600]           Editor GUI and the extension's API
+
+Any command also takes:
+  --data <folder>                 Work on the save in this folder rather than
+                                  the one that is open. Beats RMM_DATA.
 ```
 
 ---
