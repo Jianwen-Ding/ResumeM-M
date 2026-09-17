@@ -46,11 +46,49 @@ export type DocumentKind = 'Resume' | 'Cover Letter' | 'Answers';
 export function bundleFileName(
   name: string,
   role: string | undefined,
-  kind: DocumentKind,
+  kind: DocumentKind | undefined,
   { extension = '.pdf', disambiguator }: { extension?: string; disambiguator?: string } = {},
 ): string {
   const parts = [namePart(name), namePart(role), namePart(kind), namePart(disambiguator)];
   return parts.filter(Boolean).join('-') + extension;
+}
+
+/** The three shapes the setting offers, and what each one puts in a name. */
+export type FileNameShape = 'type' | 'title' | 'title-type';
+
+/**
+ * Name every document of one application, in the shape asked for.
+ *
+ * Done together rather than one at a time because `'title'` cannot tell two
+ * documents of one application apart: the resume and the cover letter going to
+ * the same posting are both `FirstName-LastName-Data-Platform-Intern.pdf`, and
+ * the second would quietly replace the first in the folder you are about to
+ * upload from. Where that happens the type comes back — on the clashing names
+ * only, so an application with just a resume still gets the short name that
+ * was asked for.
+ */
+export function bundleFileNames(
+  name: string,
+  role: string | undefined,
+  documents: { kind: DocumentKind; extension?: string }[],
+  shape: FileNameShape = 'type',
+): string[] {
+  const titled = shape === 'type' ? undefined : role;
+  const wanted = (withType: boolean) =>
+    documents.map((d) =>
+      bundleFileName(name, titled, withType || shape !== 'title' ? d.kind : undefined, {
+        extension: d.extension,
+      }),
+    );
+
+  const short = wanted(false);
+  if (new Set(short).size === short.length) return short;
+
+  // Two documents claimed one name. Only the clashing ones grow.
+  const counts = new Map<string, number>();
+  for (const n of short) counts.set(n, (counts.get(n) ?? 0) + 1);
+  const full = wanted(true);
+  return short.map((n, i) => ((counts.get(n) ?? 0) > 1 ? full[i]! : n));
 }
 
 export function slug(s: string): string {
@@ -124,11 +162,17 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const resolved: ResolvedResume = resolveResume(req.resumeId, data);
 
   /*
-   * The job title goes in the filename only when the setting says so. Off by
-   * default: most of the time the reviewer opening the attachment already
-   * knows which role they advertised, and a longer name is a worse one.
+   * All three names decided together, because the shape that leaves the
+   * document type out cannot tell a resume from a cover letter on its own.
+   * Every document this bundle might hold is listed here whether or not it is
+   * written, so a name does not change depending on what else was included.
    */
-  const titled = data.config.output.roleInFileName ? req.role : undefined;
+  const [resumeName, letterName, answersName] = bundleFileNames(
+    resolved.profile.name,
+    req.role,
+    [{ kind: 'Resume' }, { kind: 'Cover Letter' }, { kind: 'Answers', extension: '.md' }],
+    data.config.output.fileNames ?? 'type',
+  ) as [string, string, string];
 
   const id = applicationId(req.company, req.role);
   const dir = path.join(store.outDir(), 'applications', id);
@@ -151,7 +195,6 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     if (entry.isFile()) fs.rmSync(path.join(dir, entry.name), { force: true });
   }
 
-  const resumeName = bundleFileName(resolved.profile.name, titled, 'Resume');
   const pdfPath = path.join(dir, resumeName);
   const compiled = await compileResume(resolved, {
     pdfPath,
@@ -161,7 +204,6 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const files = [resumeName];
 
   if (req.coverLetter?.trim()) {
-    const letterName = bundleFileName(resolved.profile.name, titled, 'Cover Letter');
 
     // Typeset to match the resume, with the trusted engine — this is a file
     // that gets uploaded, so it never takes the preview shortcut. The plain
@@ -193,7 +235,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
      */
     const qaPath = path.join(
       dir,
-      bundleFileName(resolved.profile.name, titled, 'Answers', { extension: '.md' }),
+      answersName,
     );
     fs.writeFileSync(
       qaPath,

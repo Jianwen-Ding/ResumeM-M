@@ -434,15 +434,24 @@ export interface StoreConfig {
     /** Where generated PDFs and application bundles land. */
     dir: string;
     /**
-     * Put the job title in the filename:
-     * `FirstName-LastName-<Job Title>-<Document Type>.pdf`.
+     * What goes after the person's name in a bundle's filenames.
      *
-     * Off by default, because most of the time it is noise — the reviewer
-     * opening the attachment already knows which role they advertised. It
-     * earns its place when you have several applications open at once and want
-     * to tell them apart in the file picker without opening them.
+     *   'type'        FirstName-LastName-Resume.pdf
+     *   'title'       FirstName-LastName-Data-Platform-Intern.pdf
+     *   'title-type'  FirstName-LastName-Data-Platform-Intern-Resume.pdf
+     *
+     * `'type'` by default, because most of the time the title is noise — the
+     * reviewer opening the attachment already knows which role they
+     * advertised. The other two earn their place when several applications are
+     * open at once and you want to tell them apart in a file picker without
+     * opening them.
+     *
+     * `'title'` cannot name two documents of one application apart on its own,
+     * so where it would collide — a resume and a cover letter going to the
+     * same posting — the type is added back to the ones that clash. A name
+     * that is short is worth having; two files with one name is not.
      */
-    roleInFileName?: boolean;
+    fileNames?: 'type' | 'title' | 'title-type';
   };
 }
 
@@ -470,7 +479,7 @@ export const DEFAULT_CONFIG: StoreConfig = {
     timeoutMs: 180_000,
   },
   git: { autoCommit: true },
-  output: { dir: 'out', roleInFileName: false },
+  output: { dir: 'out', fileNames: 'type' },
 };
 
 export function isVariantField(v: MaybeVariant | undefined): v is VariantField {

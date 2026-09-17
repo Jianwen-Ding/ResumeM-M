@@ -21,15 +21,26 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
    * earns its place when several applications are open at once and you want to
    * tell them apart in a file picker without opening them.
    */
+  /*
+   * Shown as the names themselves rather than described, because the only
+   * question anyone has here is what the file in the picker will be called.
+   * The second shape shows both files: it is the one that cannot tell a resume
+   * from a cover letter on its own, and seeing the type come back on exactly
+   * the two that would have clashed explains that better than a sentence.
+   */
+  const NAME_EXAMPLES = {
+    type: 'Jane-Doe-Resume.pdf, Jane-Doe-Cover-Letter.pdf',
+    title: 'Jane-Doe-Software-Engineer-Resume.pdf, Jane-Doe-Software-Engineer-Cover-Letter.pdf',
+    'title-type': 'Jane-Doe-Software-Engineer-Resume.pdf, Jane-Doe-Software-Engineer-Cover-Letter.pdf',
+  };
+
   async function refreshFileNaming() {
     const config = await api('/config');
-    const on = Boolean(config.output?.roleInFileName);
-    const box = $('#output-role-name');
-    if (!box) return;
-    box.checked = on;
-    $('#output-name-example').textContent = on
-      ? 'Jane-Doe-Software-Engineer-Resume.pdf'
-      : 'Jane-Doe-Resume.pdf';
+    const shape = config.output?.fileNames ?? 'type';
+    const picker = $('#output-file-names');
+    if (!picker) return;
+    picker.value = shape;
+    $('#output-name-example').textContent = NAME_EXAMPLES[shape] ?? NAME_EXAMPLES.type;
   }
 
   async function refreshProject() {
@@ -267,24 +278,22 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     const fallback = [...event.dataTransfer.files];
     try { await importFiles(entries.length ? (await Promise.all(entries.map(readDirectory))).flat() : fallback); } catch (error) { report(error); }
   };
-  const naming = $('#output-role-name');
+  const naming = $('#output-file-names');
   if (naming) {
+    let lastShape = naming.value;
     naming.onchange = async () => {
       naming.disabled = true;
       try {
         await api('/config', {
           method: 'PUT',
-          body: JSON.stringify({ output: { roleInFileName: naming.checked } }),
+          body: JSON.stringify({ output: { fileNames: naming.value } }),
         });
+        lastShape = naming.value;
         await refreshFileNaming();
-        status(
-          naming.checked
-            ? 'New files will carry the job title. Files already built keep their names.'
-            : 'New files will leave the job title out. Files already built keep their names.',
-        );
+        status('New files will use that shape. Files already built keep their names.');
       } catch (error) {
         report(error);
-        naming.checked = !naming.checked;
+        naming.value = lastShape;
       } finally {
         naming.disabled = false;
       }

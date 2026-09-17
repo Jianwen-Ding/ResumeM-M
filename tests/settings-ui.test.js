@@ -36,7 +36,7 @@ describe('the settings panel', () => {
       ai: { enabled: false, research: false, command: 'claude', args: ['-p', '{promptText}'], timeoutMs: 180_000 },
       latex: { engine: '' },
       git: { autoCommit: false },
-      output: { dir: 'out', roleInFileName: false },
+      output: { dir: 'out', fileNames: 'type' },
       overrides: {},
     };
 

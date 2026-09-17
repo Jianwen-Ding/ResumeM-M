@@ -82,7 +82,12 @@
         <button id="project-close" hidden>Close Save</button>
         <p id="project-output" class="hint mono-path"></p>
         <div data-project-required hidden>
-          <label class="row"><input id="output-role-name" type="checkbox"> Put the job title in file names</label>
+          <label class="row" for="output-file-names">File names</label>
+          <select id="output-file-names">
+            <option value="type">Name and document type</option>
+            <option value="title">Name and job title</option>
+            <option value="title-type">Name, job title and document type</option>
+          </select>
           <p id="output-name-example" class="hint"></p>
         </div>
         <label class="lbl" for="project-recents">Recent Saves</label>
