@@ -1865,6 +1865,73 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   );
 
   /**
+   * The application looks like it was sent.
+   *
+   * A rough check, and deliberately so: the extension sees the form it filled
+   * being submitted, and that is the best evidence anyone is going to get from
+   * outside the portal. What it is worth is the difference between a tracker
+   * that reflects what you did and one that reflects what you remembered to
+   * record — and nobody records the last step, because by then the tab has
+   * already gone to a confirmation page.
+   *
+   * Keyed on company and role rather than an id, because the caller is a
+   * browser extension that knows a posting, not a filing system. Everything
+   * about how an application is named stays on this side.
+   *
+   * It only ever moves forwards. An application already at `interview` is not
+   * dragged back to `applied` because a form was resubmitted, and one already
+   * `applied` is left alone rather than given a second identical history line.
+   */
+  api.post(
+    '/extension/sent',
+    handler(async (req, res) => {
+      const body = req.body as { company?: string; role?: string; url?: string; note?: string };
+      if (!body.company || !body.role) throw new Error('company and role are required');
+
+      const id = applicationId(body.company, body.role);
+      const data = store.load();
+      const tracked = data.applications.find((a) => a.id === id);
+      const note = body.note ?? 'The form was submitted on the page';
+      const now = new Date().toISOString();
+
+      // Past `applied` already: the tracker knows more than the page does.
+      const BEFORE_SENT: Application['status'][] = ['interested', 'applying'];
+      if (tracked && !BEFORE_SENT.includes(tracked.status)) {
+        res.json({ application: tracked, changed: false });
+        return;
+      }
+
+      const application = await withCommit(repo, autoCommit(), `${id}: applied`, () => {
+        if (tracked) return advance(store, id, 'applied', note);
+        /*
+         * Submitted without ever opening a workspace — a form filled straight
+         * from the card, which is the quick path and the one most likely to
+         * leave no trace. Recording it is the whole point.
+         */
+        const made: Application = {
+          id,
+          company: body.company!,
+          role: body.role!,
+          url: body.url,
+          status: 'applied',
+          appliedAt: now,
+          history: [{ at: now, status: 'applied', note }],
+        };
+        store.upsertApplication(made);
+        return made;
+      });
+
+      // And the draft, if there is one, stops looking like something to finish.
+      const draft = store.getDraft(id);
+      if (draft && draft.status !== 'submitted') {
+        store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
+      }
+
+      res.json({ application, changed: true });
+    }),
+  );
+
+  /**
    * Compile, name, and file everything for one application in a single folder,
    * then snapshot it. Replaces the rename/download/re-upload loop.
    */
