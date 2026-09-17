@@ -348,8 +348,20 @@ function optionText(variant) {
 }
 
 /** Turn a label into a usable id fragment. */
+/*
+ * The same shape the server makes, because they name the same things.
+ *
+ * This produced underscores and the server's `slug` produces hyphens, so a
+ * filename derived here came out `kafka_heavy_variation` in a folder where
+ * every other file is `intern-kafka.yaml` and
+ * `job-helios-platform-engineer.yaml`. Two functions with one name and two
+ * answers, and the visible result was a store that looked like two people had
+ * been at it.
+ *
+ * Ids already stored keep whatever they were given; nothing regenerates them.
+ */
 function slug(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
 }
 
 /* ------------------------------------------------------------------ *
@@ -2703,19 +2715,39 @@ async function renderPreview() {
 }
 
 async function saveAsVariation() {
+  /*
+   * The name first, because that is the thing anyone is actually deciding.
+   *
+   * The id was first and therefore focused, so the field you landed in asked
+   * for a filename — and the note underneath named the resume this one
+   * inherits from by *its* id too, so the sentence read `Inherits from
+   * "newgrad"` about a resume called "New grad". The id still has a box,
+   * because the store is files and some people care what they are called; it
+   * is no longer the question you are asked first.
+   */
+  const parentLabel = resumeById(state.resumeId)?.label ?? state.resumeId;
   const answer = await form('Save as variation', [
-    { name: 'id', label: 'Id — becomes the filename', value: `${state.resumeId}-variant` },
-    { name: 'label', label: 'Label', value: `${resumeById(state.resumeId)?.label ?? state.resumeId} variation` },
-  ], `Inherits from "${state.resumeId}", so later edits there still reach it.`);
-  if (!answer?.id?.trim()) return;
+    { name: 'label', label: 'Name', value: `${parentLabel} variation` },
+    { name: 'id', label: 'Filename', value: `${state.resumeId}-variant` },
+  ], `Inherits from ${parentLabel}, so later edits there still reach it.`);
+  if (!answer) return;
+
+  /*
+   * A cleared filename is not a reason to do nothing silently. It used to be:
+   * the guard returned, the modal closed, and the variation you had just
+   * named simply did not exist.
+   */
+  const chosenLabel = answer.label?.trim();
+  const chosenId = slug(answer.id?.trim() || chosenLabel || '');
+  if (!chosenId) return;
 
   // A variation is the whole bundle: which entries and bullets are switched
   // on, which phrasings are used, and which list items are shown. Saving only
   // the phrasings would silently drop half of what you just did.
   const built = currentSpec();
   const spec = {
-    id: answer.id.trim(),
-    label: answer.label?.trim() || answer.id.trim(),
+    id: chosenId,
+    label: chosenLabel || chosenId,
     extends: state.resumeId,
     choices: { ...state.choices },
     ...(state.listEdits ? { lists: { ...state.listEdits } } : {}),

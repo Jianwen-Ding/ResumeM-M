@@ -207,6 +207,40 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * Keeping it as its own resume                                     *
+     * -------------------------------------------------------------- */
+
+    console.log('\nSaving it as a variation');
+    {
+      /*
+       * The modal asked for an id first, in the focused field, and told you
+       * what it inherits from by that resume's id rather than its name — so
+       * it read `Inherits from "newgrad"` about a resume called "New grad".
+       */
+      await page.locator('#btn-save-as').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+
+      const note = (await page.locator('#modal-note').innerText()).trim();
+      check('the note names the parent as you call it', !/"[a-z0-9-]+"/.test(note), note);
+
+      const firstLabel = (await page.locator('#modal-content .lbl, #modal-content label').first().innerText()).trim();
+      check('the first thing it asks for is a name', /name/i.test(firstLabel), firstLabel);
+
+      const focused = await page.evaluate(() => document.activeElement?.name ?? null);
+      check('and that is the field you land in', focused === 'label', String(focused));
+
+      // Clearing the filename used to close the modal and save nothing at all.
+      await page.locator('#f_label').fill('Kafka-heavy variation');
+      await page.locator('#f_id').fill('');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(2500);
+
+      const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+      const made = resumes.find((r) => r.label === 'Kafka-heavy variation');
+      check('an emptied filename still saves, named from what you typed', Boolean(made), made?.id ?? 'not saved');
+    }
+
+    /* -------------------------------------------------------------- *
      * Writing an application                                          *
      * -------------------------------------------------------------- */
 
