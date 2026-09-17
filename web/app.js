@@ -2989,17 +2989,28 @@ async function openApplication(id) {
   setChildren(panel, skeleton('detail', 3));
 
   try {
-    const { application: a, resume, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
+    const { application: a, resume, extendsLabel, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
 
     const sections = [];
 
     sections.push(
       el('div', { className: 'sect' }, [
         el('h4', {}, 'Resume sent'),
-        el('div', { className: 'file', textContent: resume ? `${resume.label} (${resume.id})` : (a.resumeId ?? '—') }),
-        resume?.extends
-          ? el('div', { className: 'hint', textContent: `Built on ${resume.extends}.` })
-          : null,
+        /*
+         * By its label. This printed "Summer intern (intern)" — the id in
+         * brackets after the name, in a monospace face, which is the sort of
+         * thing the rest of the editor stopped doing a while ago. The id is
+         * still there on hover for anyone who wants to go looking in the
+         * folder.
+         */
+        el('div', {
+          className: 'file',
+          textContent: resume ? resume.label : (a.resumeId ?? '—'),
+          title: resume ? `Stored as ${resume.id}.yaml` : '',
+        }),
+        // And the base by its name too: "Built on base." was an id with a
+        // full stop after it, not a sentence.
+        extendsLabel ? el('div', { className: 'hint', textContent: `Built on ${extendsLabel}.` }) : null,
       ]),
     );
 

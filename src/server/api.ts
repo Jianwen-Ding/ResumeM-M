@@ -1526,9 +1526,23 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
               .map((e) => e.name)
           : [];
 
+      /*
+       * The base by the name its owner gave it.
+       *
+       * `extends` is an id, and the detail pane printed it raw — "Built on
+       * base." is not a sentence, it is a filename with a full stop after it.
+       * Resolved here because the pane has only this one response to work
+       * from and no reason to hold the whole store.
+       */
+      const sent = app.resumeId ? (store.getResume(app.resumeId) ?? null) : null;
+      const extendsLabel = sent?.extends
+        ? (store.getResume(sent.extends)?.label ?? sent.extends)
+        : undefined;
+
       res.json({
         application: app,
-        resume: app.resumeId ? (store.getResume(app.resumeId) ?? null) : null,
+        resume: sent,
+        extendsLabel,
         letter: letter ?? (app.coverLetter ? { id: null, body: app.coverLetter, title: 'As sent' } : null),
         files,
         dir: dir ?? null,

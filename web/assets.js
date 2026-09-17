@@ -100,7 +100,10 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     setChildren($('#project-existing'), nothingAtAll
       ? el('button', { className: 'primary', textContent: 'Create a Save…', onclick: () => {
           $('#project-mode').value = 'create';
-          $('#project-switch').textContent = 'Create Save';
+          // Through the one handler, so the button and the field's label both
+          // follow. Setting the button text here left the label saying "Folder
+          // to open" above a box you are about to create a folder in.
+          $('#project-mode').onchange?.();
           $('#project-path').focus();
         } })
       : project.suggested ? [
@@ -109,6 +112,7 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
         el('button', { className: 'primary', textContent: 'Open Existing Save', onclick: action(async () => {
           $('#project-path').value = project.suggested;
           $('#project-mode').value = 'open';
+          $('#project-mode').onchange?.();
           await changeProject();
         }) }),
       ] : el('p', { className: 'hint', textContent: 'Choose Open Existing Save or Create Blank Save on the left.' }));
@@ -270,9 +274,27 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     location.hash = 'save';
     location.reload();
   });
-  $('#project-mode').onchange = () => {
-    $('#project-switch').textContent = ({ open: 'Open Save', create: 'Create Save', move: 'Move Save' })[$('#project-mode').value];
+  /*
+   * The button already followed the action; the field above it did not.
+   *
+   * It was labelled "Save Folder" — the same two words as the heading at the
+   * top of this column, which names the save that is currently open. Two
+   * different things with one name, four hundred pixels apart, and the one
+   * that means "type a path here" is the second.
+   */
+  const PATH_LABEL = {
+    open: 'Folder to open',
+    create: 'Where to create it',
+    move: 'Where to move it',
   };
+  $('#project-mode').onchange = () => {
+    const mode = $('#project-mode').value;
+    $('#project-switch').textContent = ({ open: 'Open Save', create: 'Create Save', move: 'Move Save' })[mode];
+    const label = document.querySelector('label[for="project-path"]');
+    if (label) label.textContent = PATH_LABEL[mode] ?? 'Folder to open';
+  };
+  // The markup ships the "open" wording; run once so a restored mode agrees.
+  $('#project-mode').onchange?.();
   $('#project-recents').onchange = event => { $('#project-path').value = event.target.value; $('#project-mode').value = 'open'; $('#project-mode').onchange(); };
   const native = window.webkit?.messageHandlers?.chooseProjectFolder;
   $('#project-browse').hidden = !native;
