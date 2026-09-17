@@ -87,64 +87,11 @@ export class Repo {
     }
   }
 
-  /**
-   * What a save keeps, and what it rebuilds.
-   *
-   * A save created through the app puts `out/` inside itself, and everything
-   * inside a save is committed — so the history filled up with compiled PDFs.
-   * Not the ones worth keeping: `out/applications/…` is the record of what was
-   * actually sent and belongs in git, byte for byte. The rest is derived.
-   * `out/base.pdf` is recompiled from `base.yaml` on the next keystroke, the
-   * `.tex` beside it is written on the way, and `out/current` is a projection
-   * of the tracker that rebuilds itself whenever the Applications tab is read.
-   *
-   * Versioning those means a binary blob in the history every time anyone
-   * looks at a resume, on a repository whose whole point is that it is small,
-   * readable, and yours. The leading slash keeps this to the top of `out/`:
-   * a PDF inside an application's folder is a snapshot, not a preview.
-   */
-  private static readonly DERIVED = [
-    '# Written by ResumeM-M. These are rebuilt from the YAML beside them;',
-    '# what was actually sent lives in out/applications/ and is kept.',
-    '/out/*.pdf',
-    '/out/*.tex',
-    '/out/*.aux',
-    '/out/*.log',
-    '/out/*.out',
-    '/out/*.fls',
-    '/out/*.fdb_latexmk',
-    '/out/current/',
-    '',
-  ].join('\n');
-
-  /**
-   * Put the ignore file in place, and stop tracking anything it covers.
-   *
-   * `--cached` only: the files stay exactly where they are on disk, and the
-   * preview a user is looking at right now does not blink. What changes is
-   * that git stops carrying a new copy of it every time it is recompiled.
-   */
-  async ignoreDerived(): Promise<void> {
-    // Nothing to ignore for yet: a save that is not a repository is a
-    // supported state, and this must not be what turns it into one.
-    if (!(await this.isRepo())) return;
-    const file = path.join(this.root, '.gitignore');
-    if (fs.existsSync(file)) return;
-    fs.writeFileSync(file, Repo.DERIVED, 'utf8');
-    await this.git(['rm', '-r', '--cached', '--quiet', '--ignore-unmatch', '--', 'out']).catch(() => undefined);
-    // The snapshots are the exception, and go straight back.
-    await this.git(['add', '--', 'out/applications']).catch(() => undefined);
-  }
-
   /** Initialise a repo if the store is not already inside one. */
   async ensure(): Promise<void> {
-    if (await this.isRepo()) {
-      await this.ignoreDerived();
-      return;
-    }
+    if (await this.isRepo()) return;
     fs.mkdirSync(this.root, { recursive: true });
     await this.git(['init']);
-    await this.ignoreDerived();
 
     // --allow-empty so a brand-new store still gets a baseline commit. Without
     // one, git has no HEAD and every later read of the history fails.

@@ -94,11 +94,6 @@ export async function saveStore(repo: Repo, opts: SaveOptions = {}): Promise<Sav
   // should never fail on a setup step the user did not know about.
   if (initialised) await repo.ensure();
 
-  // And decide what belongs in it before deciding what changed: a compiled
-  // preview is rebuilt from the YAML beside it and does not need a place in
-  // the history. A no-op after the first save. See `ignoreDerived`.
-  await repo.ignoreDerived();
-
   // Read the pending list before committing — afterwards there is nothing to
   // read, and this is what the caller reports back to the user.
   let files = await repo.pending();

@@ -34,17 +34,6 @@ const existingStore = (dir: string): string | undefined => (isSave(dir) ? dir : 
 
 function projectSession(store: Store) {
   const repo = Repo.forStore(store.root);
-  /*
-   * Once per save opened, and only for one that is already a repository.
-   *
-   * Compiled previews were being versioned: a save keeps `out/` inside itself
-   * and everything inside a save is committed, so every look at a resume put
-   * another copy of its PDF in the history. This writes the ignore file and
-   * stops tracking them; what was actually sent stays. Not awaited, because
-   * opening a save should not wait on git, and it is a no-op after the first
-   * time.
-   */
-  void repo.ignoreDerived().catch(() => undefined);
   const assets = new Assets(store, repo);
   const jobs = new Jobs();
   return { store, assets, jobs, api: createApi({ store, repo, jobs }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store), current: createCurrentRouter(store) };

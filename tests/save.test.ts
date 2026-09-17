@@ -64,10 +64,7 @@ describe('saveStore', () => {
     const result = await saveStore(repo);
     expect(result.initialised).toBe(true);
     expect(result.saved).toBe(true);
-    // `.gitignore` is written the first time, and reported rather than
-    // hidden: it is a file in the user's folder that they did not create, and
-    // a save that lists what it saved should list it. See `ignoreDerived`.
-    expect(result.files.map((f) => f.path).sort()).toEqual(['.gitignore', 'profile.yaml', 'resumes/newgrad.yaml']);
+    expect(result.files.map((f) => f.path).sort()).toEqual(['profile.yaml', 'resumes/newgrad.yaml']);
     expect(await repo.isRepo()).toBe(true);
   });
 
@@ -204,14 +201,18 @@ describe('Repo.pending', () => {
   });
 });
 
+
 /*
- * A save keeps what was sent and rebuilds the rest.
+ * Everything in the save is in the save.
  *
- * Saves created through the app put `out/` inside themselves, and everything
- * inside a save is committed — so looking at a resume put another copy of its
- * compiled PDF into the history, on a repository whose whole point is that it
- * stays small and readable. The snapshot of an application is the exception:
- * that is the record of what actually went out, and it is kept byte for byte.
+ * `out/` lives inside a save made through the app, so the compiled previews
+ * and the flat upload folder are versioned along with the snapshots of what
+ * was sent. That is deliberate, and it is what "my work is in git" is taken
+ * to mean: nothing in the folder is quietly left out of the history, and a
+ * clone of the save is the save.
+ *
+ * It was briefly not true — previews were ignored to keep the history small —
+ * and small was not what was wanted.
  */
 describe('what goes into the history', () => {
   const tracked = () =>
@@ -219,55 +220,39 @@ describe('what goes into the history', () => {
       .split('\n')
       .filter(Boolean);
 
-  const laydown = () => {
+  it('keeps everything in the save folder, previews and snapshots alike', async () => {
     write('profile.yaml', 'name: Test Person\n');
-    write('out/base.pdf', '%PDF-1.7 pretend\n');
-    write('out/base.tex', '\\documentclass{article}\n');
-    write('out/current/.rmm-current.json', '["Test-Person-Resume.pdf"]\n');
-    write('out/current/Test-Person-Resume.pdf', '%PDF-1.7 pretend\n');
+    write('voice.md', 'I write plainly.\n');
+    write('corpus/letter-1.md', '---\nkind: letter\n---\nDear sir\n');
+    write('applications.yaml', '- id: a\n  company: Acme\n');
+    write('out/base.pdf', '%PDF-1.7 a preview\n');
+    write('out/current/Test-Person-Resume.pdf', '%PDF-1.7 ready to upload\n');
     write('out/applications/2026-09-16-acme-swe/Test-Person-Resume.pdf', '%PDF-1.7 what was sent\n');
     write('out/applications/2026-09-16-acme-swe/source/resolved.yaml', 'spec: {}\n');
-  };
 
-  it('keeps the application snapshots and leaves the previews out', async () => {
-    laydown();
     await saveStore(repo);
 
     const files = tracked();
-    expect(files).toContain('out/applications/2026-09-16-acme-swe/Test-Person-Resume.pdf');
-    expect(files).toContain('out/applications/2026-09-16-acme-swe/source/resolved.yaml');
-    expect(files).toContain('profile.yaml');
-    expect(files).not.toContain('out/base.pdf');
-    expect(files).not.toContain('out/base.tex');
-    expect(files.some((f) => f.startsWith('out/current/'))).toBe(false);
-
-    // And recompiling a preview does not make the save look unsaved.
-    write('out/base.pdf', '%PDF-1.7 compiled again\n');
-    expect(await repo.pending()).toHaveLength(0);
+    for (const kept of [
+      'profile.yaml',
+      'voice.md',
+      'corpus/letter-1.md',
+      'applications.yaml',
+      'out/base.pdf',
+      'out/current/Test-Person-Resume.pdf',
+      'out/applications/2026-09-16-acme-swe/Test-Person-Resume.pdf',
+      'out/applications/2026-09-16-acme-swe/source/resolved.yaml',
+    ]) {
+      expect(files, kept).toContain(kept);
+    }
   });
 
-  it('untracks previews a save was already carrying, without deleting them', async () => {
-    // A repository from before this rule: everything committed, previews too.
+  it('notices a recompiled preview as something to save', async () => {
     write('profile.yaml', 'name: Test Person\n');
-    await repo.ensure();
-    fs.rmSync(path.join(root, '.gitignore'));
-    laydown();
-    execFileSync('git', ['add', '-A'], { cwd: root });
-    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'everything'], { cwd: root });
-    expect(tracked()).toContain('out/base.pdf');
+    write('out/base.pdf', '%PDF-1.7 one\n');
+    await saveStore(repo);
 
-    await saveStore(repo, { message: 'tidy' });
-
-    expect(tracked()).not.toContain('out/base.pdf');
-    expect(tracked()).toContain('out/applications/2026-09-16-acme-swe/Test-Person-Resume.pdf');
-    // The file itself is untouched: the preview on screen must not blink.
-    expect(fs.existsSync(path.join(root, 'out/base.pdf'))).toBe(true);
-  });
-
-  it('leaves a save that is not a repository alone', async () => {
-    laydown();
-    await repo.ignoreDerived();
-    expect(fs.existsSync(path.join(root, '.gitignore'))).toBe(false);
-    expect(await repo.isRepo()).toBe(false);
+    write('out/base.pdf', '%PDF-1.7 two\n');
+    expect(await repo.pending()).toEqual([{ path: 'out/base.pdf', state: 'modified' }]);
   });
 });
