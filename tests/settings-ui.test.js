@@ -126,6 +126,25 @@ describe('the settings panel', () => {
     );
   });
 
+  /*
+   * And once saved, the field must go back to following the store. Keeping
+   * "it differs from what was last loaded" as the test forever would mean a
+   * field stayed pinned to its own value after being saved, and a change made
+   * in another window never arrived here again.
+   */
+  it('follows the store again once the command has been saved', async () => {
+    const command = commandBox();
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary, #settings button').click();
+    await vi.waitFor(() => expect(config.ai.command).toBe('my-own-cli'));
+
+    config.ai = { ...config.ai, command: 'changed-elsewhere' };
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.waitFor(() => expect(commandBox().value).toBe('changed-elsewhere'));
+  });
+
   it('puts the switch back where it was when the save is refused', async () => {
     const research = checkboxes()[1];
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => ({ error: 'read-only save' }) })));

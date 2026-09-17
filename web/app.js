@@ -33,6 +33,35 @@ const el = (tag, props = {}, children = []) => {
   return node;
 };
 
+/**
+ * A text field that waits for a Save button, and survives its panel being
+ * rebuilt around it.
+ *
+ * Most of this editor saves as you go, and the handful of fields that do not
+ * are the ones a reload can silently destroy — the AI command, its arguments,
+ * the timeout, the git remote. Each of those lives in a panel that is
+ * rebuilt wholesale from the server whenever it is shown, or whenever a
+ * button elsewhere in it finishes: press "Save History" and the remote URL
+ * you were halfway through typing is replaced by the empty one on disk.
+ *
+ * Half-typed is exactly the state worth keeping. The reason these fields wait
+ * for a button is that a half-typed command should not be *run*, which is not
+ * an argument for deleting it.
+ *
+ * So the new field looks for the one it is replacing, and keeps what is in it
+ * when that differs from what the store last supplied. A field nobody has
+ * touched still refreshes, or a change made in another window would never
+ * arrive here.
+ */
+function keptField(name, stored, props = {}) {
+  const previous = document.querySelector(`[data-keeps="${name}"]`);
+  const edited = previous != null && previous.value !== previous.dataset.stored;
+  const input = el('input', { type: 'text', ...props, value: edited ? previous.value : stored });
+  input.dataset.keeps = name;
+  input.dataset.stored = stored;
+  return input;
+}
+
 const state = {
   store: null,
   resumeId: null,
@@ -4461,9 +4490,9 @@ async function loadProjectSettings() {
     } catch (error) { autoCommit.checked = !autoCommit.checked; setStatus(error.message, true); }
   };
 
-  const remote = el('input', {
-    type: 'text',
-    value: info.remote.url ?? '',
+  // Rebuilt by "Save History" further down this same panel, so a URL being
+  // typed has to survive that. See `keptField`.
+  const remote = keptField('git-remote', info.remote.url ?? '', {
     placeholder: 'git@github.com:you/my-resume-save.git',
   });
   const result = el('div', {
@@ -4673,27 +4702,9 @@ async function loadSettings() {
    * three do not save themselves is that a half-typed command is not a
    * command; that is an argument for not *running* it, not for deleting it.
    */
-  const keptIfEdited = (input, fromConfig) =>
-    input && input.value !== input.dataset.saved ? input.value : fromConfig;
-  const wasCommand = box.querySelector('[data-field="ai-command"]');
-  const wasArgs = box.querySelector('[data-field="ai-args"]');
-  const wasTimeout = box.querySelector('[data-field="ai-timeout"]');
-
-  const savedCommand = config.ai.command;
-  const savedArgs = (config.ai.args ?? []).join(' ');
-  const savedTimeout = String(Math.round(config.ai.timeoutMs / 1000));
-
-  const command = el('input', { type: 'text', value: keptIfEdited(wasCommand, savedCommand) });
-  const args = el('input', { type: 'text', value: keptIfEdited(wasArgs, savedArgs) });
-  const timeout = el('input', { type: 'text', value: keptIfEdited(wasTimeout, savedTimeout) });
-  // What the store holds, kept on the element so the next rebuild can tell an
-  // edit from a value that simply came back unchanged.
-  command.dataset.field = 'ai-command';
-  command.dataset.saved = savedCommand;
-  args.dataset.field = 'ai-args';
-  args.dataset.saved = savedArgs;
-  timeout.dataset.field = 'ai-timeout';
-  timeout.dataset.saved = savedTimeout;
+  const command = keptField('ai-command', config.ai.command);
+  const args = keptField('ai-args', (config.ai.args ?? []).join(' '));
+  const timeout = keptField('ai-timeout', String(Math.round(config.ai.timeoutMs / 1000)));
 
   const preset = el('select');
   for (const p of AI_PRESETS) preset.append(el('option', { value: p.label, textContent: p.label }));
@@ -4740,6 +4751,12 @@ async function loadSettings() {
         latex: { engine: engine.value || undefined },
       }),
     });
+    /*
+     * These now match the store, so the next rebuild should refresh them
+     * rather than treat them as unsaved edits and keep them forever — which
+     * would mean a change made in another window never arrived here again.
+     */
+    for (const input of [command, args, timeout]) input.dataset.stored = input.value;
     setStatus('Settings saved');
   };
 
