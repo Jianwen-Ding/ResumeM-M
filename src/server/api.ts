@@ -1228,7 +1228,28 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       const result = await runAgent(data.config, answerPrompt(data, question, job));
-      res.json({ ...result, source: result.executed ? 'ai' : 'prompt', match });
+
+      /*
+       * `output` means "text you may use". When the AI did not run, `runAgent`
+       * hands back the prompt it would have sent — which is worth showing
+       * someone, and is not an answer.
+       *
+       * Spread whole, it was: the card put `r.output` straight into the answer
+       * box, so one click on "Draft an answer" with the AI off filled the
+       * employer's form with nine kilobytes beginning "You are helping with a
+       * resume and job-search assistant", and carrying, further down, every
+       * cover letter the user had ever saved and their whole writing corpus.
+       * "Save application folder" then wrote that into application-answers.md
+       * and copied it to the upload folder.
+       *
+       * The separate `prompt` field is what /ai/draft-entry and
+       * /ai/draft-phrasing already use, and what the editor already reads.
+       */
+      if (!result.executed) {
+        res.json({ output: '', executed: false, source: 'prompt', prompt: result.output, match });
+        return;
+      }
+      res.json({ ...result, source: 'ai', match });
     }),
   );
 
@@ -1678,6 +1699,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           status: 'applying',
           resumeId: draft.resumeId,
           source: draft.source,
+          /*
+           * Dated, like one made by hand. The tracker sorts on `appliedAt` and
+           * prints it as the date column, so an application started from the
+           * extension — the one you are working on right now — had a blank date
+           * and sat at the bottom of the list, under everything already sent.
+           * It is the date it started; `trackStatus` records when it was sent.
+           */
+          appliedAt: now,
           history: [{ at: now, status: 'applying', note: 'Workspace opened' }],
         });
       }
@@ -1922,11 +1951,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = trimToLetter(agent.output);
               notes.push('Cover letter drafted in your voice.');
-            } else if (prior[0]) {
+            } else if (!agent.executed && prior[0]) {
+              /*
+               * Only when the AI did not run. This branch used to catch an AI
+               * that ran and returned nothing as well, so an empty reply
+               * silently pasted the letter written to another company into
+               * this application — under a note claiming the AI was off, which
+               * it was not. `relevantLetters` returns its best three whatever
+               * they score, so that company can be entirely unrelated, and
+               * "Complete this application" will bundle the result.
+               */
               draft.coverLetter.body = prior[0].body;
-              notes.push(`AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}.`);
-            } else {
+              notes.push(
+                `AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}. ` +
+                  'It is addressed to them, so read it before sending.',
+              );
+            } else if (!agent.executed) {
               notes.push('AI is off and there are no previous letters to start from.');
+            } else {
+              notes.push('The AI returned nothing, so the letter was left as it was.');
             }
           }
         }

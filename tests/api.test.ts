@@ -256,9 +256,16 @@ describe('answers', () => {
       .post('/api/ai/answer')
       .send({ question: 'Why are you interested in this role?', force: true })
       .expect(200);
-    // The AI is off in the fixture, so the prompt comes back instead.
+    /*
+     * The AI is off in the fixture, so the prompt comes back instead — under
+     * `prompt`, not under `output`. `output` means "text you may use", and the
+     * extension read it as exactly that: one click on "Draft an answer" put
+     * nine kilobytes of prompt into the employer's form, carrying every cover
+     * letter the user had saved and their whole writing corpus with it.
+     */
     expect(res.body.source).toBe('prompt');
-    expect(res.body.output).toContain('answer an application question');
+    expect(res.body.output).toBe('');
+    expect(res.body.prompt).toContain('answer an application question');
   });
 
   it('saves a new question and a new phrasing of an existing one', async () => {

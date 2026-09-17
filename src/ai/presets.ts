@@ -155,19 +155,49 @@ const WEB_TOOLS = ['WebFetch', 'WebSearch'];
  * may read yours.
  */
 export function applyResearch(command: string, args: string[], research: boolean): string[] {
-  const at = args.indexOf('--disallowedTools');
-  if (!/(^|[\\/])claude(\.exe)?$/i.test(command.trim()) || at < 0) return args;
+  if (!/(^|[\\/])claude(\.exe)?$/i.test(command.trim())) return args;
 
-  const listed = (args[at + 1] ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+  const at = args.indexOf('--disallowedTools');
+  if (at < 0) {
+    /*
+     * No deny list at all. With research off, that is a Claude invocation with
+     * the web wide open, so say what is denied — and it is also how the flag
+     * comes back after the branch below has legitimately removed it. Without
+     * this, switching research off could never restore what switching it on
+     * took away.
+     */
+    return research ? args : [...args, '--disallowedTools', WEB_TOOLS.join(',')];
+  }
+
+  /*
+   * `--disallowedTools` takes a *list*, and a list may be written either way:
+   * `--disallowedTools Bash,Write` or `--disallowedTools Bash Write Edit`. The
+   * settings box is whitespace-separated, so people write the second.
+   *
+   * Reading only args[at + 1] saw one entry of it. With research on, that one
+   * entry was WebFetch, the remainder came out empty, and `splice(at, 2)`
+   * removed the flag together with its first value — leaving Bash, Write and
+   * Edit no longer denied and sitting in the command line as positional
+   * arguments. The flag was then gone, so nothing could put it back.
+   */
+  let end = at + 1;
+  while (end < args.length && !args[end]!.startsWith('-')) end++;
+  const listed = args
+    .slice(at + 1, end)
+    .flatMap((token) => token.split(','))
+    .map((t) => t.trim())
+    .filter(Boolean);
+
   const next = research
     ? listed.filter((t) => !WEB_TOOLS.includes(t))
     : [...listed, ...WEB_TOOLS.filter((t) => !listed.includes(t))];
 
-  if (next.join(',') === listed.join(',')) return args;
+  if (next.join(',') === listed.join(',') && end === at + 2) return args;
 
   const out = [...args];
-  // Nothing left to deny: drop the flag rather than pass it an empty list.
-  if (next.length === 0) out.splice(at, 2);
-  else out[at + 1] = next.join(',');
+  // Nothing left to deny: drop the flag rather than pass it an empty list —
+  // and drop every one of its values with it, not just the first.
+  if (next.length === 0) out.splice(at, end - at);
+  else out.splice(at + 1, end - at - 1, next.join(','));
   return out;
 }

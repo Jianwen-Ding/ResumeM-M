@@ -433,7 +433,22 @@ export const DEFAULT_CONFIG: StoreConfig = {
   latex: {},
   ai: {
     command: 'claude',
-    args: ['-p', '{prompt}'],
+    /*
+     * The confined Claude invocation, byte for byte the same as the Claude Code
+     * preset in ai/presets.ts. (Stated literally rather than imported, because
+     * presets.ts reads its types from this file; a test asserts the two agree.)
+     *
+     * This used to be `['-p', '{prompt}']` — no scratch directory, no deny
+     * list. It reads like a harmless placeholder, and for the shipped store it
+     * was, because that store's config.yaml carries the full block. But a save
+     * the user creates from the app is written with only `output:` in it, and
+     * loadConfig fills the rest in from here. Switch the AI on in Settings and
+     * the command line was `claude -p /tmp/rmm-ai-xxx/prompt.md` with Bash,
+     * Write, Edit, WebFetch and WebSearch all live, against the user's own
+     * machine — while the Settings panel said the AI could never reach your
+     * save folder, your home directory, or this source tree.
+     */
+    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch'],
     enabled: false,
     timeoutMs: 180_000,
   },

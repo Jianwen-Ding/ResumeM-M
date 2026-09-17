@@ -46,8 +46,20 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
   // `{prompt}` is the prompt file path; `{promptText}` inlines it for CLIs that
   // insist on an argument; `{sandbox}` is the directory the child is confined
   // to, for CLIs that take an explicit allow-list.
+  /*
+   * Substituted literally, not as a replacement pattern.
+   *
+   * `String.replace` with a string second argument still reads `$&`, `` $` ``,
+   * `$'` and `$1` in it as instructions. Prompts are built from the user's own
+   * store and from job postings fetched off the web, so a bullet that mentions
+   * a shell variable or a regex is enough: "cut cloud spend by $&" reached the
+   * CLI as "cut cloud spend by {promptText}", and `` $` `` spliced the argument
+   * template's own text into the middle of the prompt. Three of the four
+   * presets pass the prompt inline, so three of the four were affected.
+   */
+  const put = (into: string, token: string, value: string) => into.split(token).join(value);
   const args = config.ai.args.map((a) =>
-    a.replace('{prompt}', promptFile).replace('{promptText}', prompt).replace('{sandbox}', dir),
+    put(put(put(a, '{prompt}', promptFile), '{promptText}', prompt), '{sandbox}', dir),
   );
   const usesFile = config.ai.args.some((a) => a.includes('{prompt}') && !a.includes('{promptText}'));
 
@@ -87,14 +99,49 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
     }
 
     const { stdout, stderr } = await pending;
-    const output = stdout.trim() || stderr.trim();
+
+    /*
+     * The answer is what the CLI printed to stdout. Falling back to stderr on a
+     * clean exit treated a CLI's own diagnostics as the model's reply: a tool
+     * that exits 0 having written "[WARN] api key rotated; using cached
+     * credentials" to stderr had that line saved as the cover letter and as the
+     * answer to an application question, under the note "Cover letter drafted
+     * in your voice".
+     *
+     * Empty stdout on a clean exit is a failed run, and saying so is the honest
+     * answer — the caller already knows how to show that.
+     */
+    const output = stdout.trim();
+    if (!output) {
+      throw new AgentError(
+        `AI command "${config.ai.command}" exited without writing anything.` +
+          (stderr.trim() ? ` It said: ${stderr.trim().slice(0, 400)}` : ''),
+      );
+    }
     return { output, executed: true, command: `${config.ai.command} ${args.join(' ')}` };
   } catch (err) {
+    // Our own refusals already say what happened; re-wrapping them as "AI
+    // command failed: AI command failed: …" helps nobody.
+    if (err instanceof AgentError) throw err;
     const e = err as { code?: string; message?: string; stderr?: string; stdout?: string };
     if (e.code === 'ENOENT') {
       throw new AgentError(
         `AI command "${config.ai.command}" not found. Install it, or change ai.command in data/config.yaml, ` +
           `or set ai.enabled: false to get prompts back instead of answers.`,
+      );
+    }
+    /*
+     * A timeout is the commonest failure and the least self-explanatory: the
+     * message was "AI command failed: Command failed: /opt/node22/bin/node
+     * /tmp/rmm-to-xxx/slow.cjs -p", which says nothing about time and shows the
+     * user a scratch path. `killed` and `signal` are right there.
+     */
+    const killed = (err as { killed?: boolean }).killed;
+    if (killed) {
+      throw new AgentError(
+        `AI command "${config.ai.command}" ran for longer than ${Math.round(config.ai.timeoutMs / 1000)}s ` +
+          `and was stopped. Raise ai.timeoutMs in config.yaml if it needs longer.`,
+        e.stdout,
       );
     }
     throw new AgentError(
