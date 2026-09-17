@@ -158,8 +158,31 @@ describe('what it still cannot do', () => {
 
   it('stops at three, rather than rewriting the resume one suggestion at a time', () => {
     const s = session();
-    for (let i = 0; i < 3; i++) expect(s.suggest('b_pipeline', `L${i}`, `text ${i}`, 'why').ok).toBe(true);
-    expect(s.suggest('b_pipeline', 'L4', 'text 4', 'why').ok).toBe(false);
+    for (const id of ['b_pipeline', 'b_testing', 'b_course']) {
+      expect(s.suggest(id, 'L', `a new way to put ${id}`, 'why').ok).toBe(true);
+    }
+    const refused = s.suggest('b_thing', 'L4', 'text 4', 'why');
+    expect(refused.ok).toBe(false);
+    // It used to say "withdraw one before adding another", and there is no
+    // tool for withdrawing one. An instruction that cannot be followed is
+    // read as a dead end by the only reader this message has.
+    expect(refused.text).not.toMatch(/withdraw/i);
+    expect(refused.text).toContain('b_pipeline');
+  });
+
+  /*
+   * A model that suggests twice for one line is rewording its own proposal.
+   * Queueing both spends the limit on one idea and hands the person two
+   * versions of it to choose between.
+   */
+  it('treats a second suggestion for the same bullet as a rewrite of the first', () => {
+    const s = session();
+    expect(s.suggest('b_pipeline', 'First', 'the first way of putting it', 'why').ok).toBe(true);
+    const again = s.suggest('b_pipeline', 'Second', 'the second way of putting it', 'better');
+    expect(again.ok).toBe(true);
+    expect(again.text).toContain('Replaced');
+    expect(s.state.suggestions).toHaveLength(1);
+    expect(s.state.suggestions[0]?.text).toBe('the second way of putting it');
   });
 });
 
