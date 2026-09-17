@@ -137,7 +137,22 @@ function diffSkills(before: ResolvedResume, after: ResolvedResume, out: DocChang
     const added = items.filter((i) => !was.includes(i));
     const gone = was.filter((i) => !items.includes(i));
     if (added.length) out.push({ kind: 'added', where: name, text: `${name}: added ${added.join(', ')}` });
-    if (gone.length) out.push({ kind: 'removed', where: name, text: `${name}: dropped ${gone.join(', ')}` });
+    if (gone.length) {
+      /*
+       * What is left, not only what went.
+       *
+       * "Frameworks: dropped React, Node.js, PostgreSQL" is the half of the
+       * change that cannot be judged: the line that will actually print is
+       * the one that is kept, and naming only the cuts makes a proposal read
+       * as destruction. It is also the question somebody looking at this is
+       * asking — which version am I choosing — and the answer was not on
+       * screen anywhere.
+       */
+      const keeping = items.length
+        ? ` — keeping ${items.join(', ')}`
+        : ', which is all of them, so the line will not print';
+      out.push({ kind: 'removed', where: name, text: `${name}: dropped ${gone.join(', ')}${keeping}` });
+    }
   }
   for (const [name] of b) {
     if (!a.has(name)) out.push({ kind: 'removed', where: name, text: `Skills: dropped "${name}"` });
