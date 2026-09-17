@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyPage,
   companyFromUrl,
+  employerFallback,
   extractJob,
   extractKeywords,
   JOB_SHAPED,
@@ -312,5 +313,27 @@ describe('one application across several pages', () => {
   it('is unbothered by an empty trail, or one full of blanks', () => {
     expect(mergeJobPages([]).description).toBe('');
     expect(mergeJobPages([{ html: '   ' }]).pages).toEqual([]);
+  });
+});
+
+/*
+ * What an employer is called when the page never says.
+ *
+ * "Unknown" was the answer, and it went into resume labels, cover letter
+ * titles and the Workspace list — so every bare application form produced
+ * "Apply — Unknown", and two of them were indistinguishable in the picker.
+ */
+describe('naming an employer the page does not name', () => {
+  it('falls back to the host, which is at least true', () => {
+    expect(employerFallback('https://boards.example.com/gh/acme/jobs/1')).toBe('boards.example.com');
+  });
+
+  it('drops a leading www, which is noise', () => {
+    expect(employerFallback('https://www.example.com/apply')).toBe('example.com');
+  });
+
+  it('still says Unknown when there is not even a url', () => {
+    expect(employerFallback(undefined)).toBe('Unknown');
+    expect(employerFallback('not a url at all')).toBe('Unknown');
   });
 });

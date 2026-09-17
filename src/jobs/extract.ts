@@ -133,6 +133,27 @@ export function extractKeywords(text: string): string[] {
   return [...found];
 }
 
+/**
+ * What to call an employer a page never names.
+ *
+ * "Unknown" is not an answer. It went into resume labels, cover letter titles
+ * and the Workspace list as the name of the application, so a bare
+ * application form — which is most of them, and the ones that say least about
+ * who is hiring — produced "Apply — Unknown" in the resume picker, and two
+ * such applications were indistinguishable.
+ *
+ * The host is the one thing always known and always recognisable: you were
+ * just there. A placeholder either way, but a true one.
+ */
+export function employerFallback(url?: string): string {
+  if (!url) return 'Unknown';
+  try {
+    return new URL(url).hostname.replace(/^www\./, '') || 'Unknown';
+  } catch {
+    return 'Unknown';
+  }
+}
+
 export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
   const ld = fromJsonLd(html);
   const text = stripTags(html);

@@ -24,7 +24,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
-import { classifyPage, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
+import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, fingerprint, slug, stats } from '../model/applications.js';
@@ -1155,7 +1155,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (save && body.trim()) {
         saved = {
           id: letterId(job.company, job.jobTitle),
-          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? 'Unknown'}`,
+          // Named for where it came from when the page never said who is
+          // hiring — see `employerFallback`.
+          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerFallback(job.url)}`,
           company: job.company,
           role: job.jobTitle,
           createdAt: new Date().toISOString(),
@@ -1384,8 +1386,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           }
         : match;
 
-      const specId = `job-${slug(job.company ?? 'unknown')}-${slug(job.title ?? 'role')}`.slice(0, 60);
-      const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${job.company ?? 'Unknown'}`, finalMatch, {
+      /*
+       * "Apply — Unknown" was the label in the resume picker for every bare
+       * application form, and there is more than one of those. Named for
+       * where it came from instead — see `employerFallback`.
+       */
+      const employer = job.company ?? employerFallback(url);
+      const specId = `job-${slug(employer)}-${slug(job.title ?? 'role')}`.slice(0, 60);
+      const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${employer}`, finalMatch, {
         url,
         company: job.company,
         role: job.title,
