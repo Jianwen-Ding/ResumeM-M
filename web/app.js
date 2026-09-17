@@ -4294,6 +4294,14 @@ async function loadSettings() {
    * setting that lets the model go and read something they did not choose.
    */
   const research = el('input', { type: 'checkbox', checked: Boolean(config.ai.research) });
+  const researchNote = el('div', { className: 'hint', style: 'margin-bottom:12px' });
+  const showResearchNote = (on) => {
+    researchNote.textContent = on
+      ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
+      : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.';
+  };
+  showResearchNote(config.ai.research);
+
   research.onchange = async () => {
     try {
       await api('/config', { method: 'PUT', body: JSON.stringify({ ai: { research: research.checked } }) });
@@ -4302,7 +4310,15 @@ async function loadSettings() {
           ? 'The AI may look up the company while it writes'
           : 'The AI works only from what you gave it',
       );
-      loadSettings();
+      /*
+       * The paragraph under the checkbox, and nothing else. Rebuilding the
+       * panel from the server was the easy way to update it, and it threw away
+       * the command, the arguments and the timeout as they had been typed —
+       * fields that are deliberately not saved until Save is pressed, because
+       * a half-typed command is not a command. Ticking a checkbox is not a
+       * reason to lose them.
+       */
+      showResearchNote(research.checked);
     } catch (err) {
       research.checked = !research.checked;
       setStatus(err.message, true);
@@ -4381,10 +4397,7 @@ async function loadSettings() {
       research,
       el('span', {}, 'Let it look up the company online'),
     ]),
-    el('div', { className: 'hint', style: 'margin-bottom:12px' },
-      config.ai.research
-        ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
-        : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.'),
+    researchNote,
     config.overrides.ai
       ? el('div', { className: 'override', textContent: 'RMM_AI=0 is set, so the AI stays off whatever this says.' })
       : null,
