@@ -355,18 +355,51 @@ describe('restoring a version', () => {
     void before;
   });
 
-  it('rolls back the resumes this one inherits from, not only its own file', async () => {
+  /*
+   * A resume this one inherits from is shared, exactly like a bullet or the
+   * profile, and is left alone for exactly the same reason.
+   *
+   * Restore used to walk the whole `extends` chain and write every ancestor
+   * back at the old commit's content. So rolling one tailored variation back to
+   * last week also rolled `base` back — and `base` is what every other
+   * variation is built on, so a week of work on the shared resume went with it.
+   * Under a confirmation that said only "the current version will be replaced",
+   * and a reply carrying no warnings at all, because the check re-resolves the
+   * restored resume, which of course now matches.
+   */
+  it('does not roll back the resume this one is built on, which others share too', async () => {
     const original = (await history())[0]!.hash;
 
-    // The change is in the parent: the child's own file never moves.
+    // The change is in the parent, on a bullet the child does not override, so
+    // it is genuinely part of what this resume says now.
     const base = t.store.getResume('base')!;
     await request(app)
       .put('/api/resumes/base')
-      .send({ ...base, choices: { ...(base.choices ?? {}), 'edu_neu.dates': 'v_dec2026' } })
+      .send({ ...base, choices: { ...(base.choices ?? {}), b_pipeline: 'v_kafka' } })
       .expect(200);
+
+    const restored = await request(app)
+      .post(`/api/resumes/newgrad/history/${original}/restore`)
+      .expect(200);
+
+    expect(t.store.getResume('base')?.choices?.b_pipeline).toBe('v_kafka');
+    // And it says so, rather than reporting a rollback that did not happen.
+    expect(restored.body.warnings.join(' ')).toMatch(/shares with others/i);
+  });
+
+  it('leaves every other variation of that base exactly as it was', async () => {
+    const original = (await history())[0]!.hash;
+
+    const base = t.store.getResume('base')!;
+    await request(app)
+      .put('/api/resumes/base')
+      .send({ ...base, label: 'Base resume — a week of work later' })
+      .expect(200);
+    const intern = t.store.getResume('intern')!;
 
     await request(app).post(`/api/resumes/newgrad/history/${original}/restore`).expect(200);
 
-    expect(t.store.getResume('base')?.choices?.['edu_neu.dates']).not.toBe('v_dec2026');
+    expect(t.store.getResume('base')?.label).toBe('Base resume — a week of work later');
+    expect(t.store.getResume('intern')).toEqual(intern);
   });
 });

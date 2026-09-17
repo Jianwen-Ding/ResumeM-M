@@ -1604,6 +1604,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * So the slow work happens on the copy it read, and only the fields the route
    * actually produced are applied, to a draft read again at the end.
    */
+  /**
+   * Which of a draft's written parts differ between two reads of it, named the
+   * way the person who typed them would name them.
+   */
+  const changedText = (now: Draft | undefined, before: Draft): string[] => {
+    if (!now) return [];
+    const changed: string[] = [];
+    if (now.coverLetter.body !== before.coverLetter.body) changed.push('cover letter');
+    const was = new Map(before.questions.map((q) => [q.id, q.answer]));
+    if (now.questions.some((q) => was.has(q.id) && was.get(q.id) !== q.answer)) changed.push('answers');
+    if ((now.notes ?? '') !== (before.notes ?? '')) changed.push('notes');
+    return changed;
+  };
+
   const reviseDraft = async (id: string, message: string, change: (fresh: Draft) => void): Promise<Draft> =>
     withCommit(repo, autoCommit(), message, () => {
       const fresh = store.getDraft(id);
@@ -1652,7 +1666,6 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const data = store.load();
       const id = applicationId(body.company, body.role);
-      const existing = store.getDraft(id);
 
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
@@ -1660,6 +1673,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const spec = body.spec;
         await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
       }
+
+      /*
+       * Read after that, not before it.
+       *
+       * The extension re-posts the page as you move through an application,
+       * and saving the tailored resume above shells out to git — a real yield,
+       * of the length a person fits several sentences into. A draft read on the
+       * way in and written back on the way out therefore restored the notes and
+       * the answers to what they said when the page loaded. Everything from
+       * here to the write is synchronous, which is what makes the fallbacks
+       * below mean "as it is now" rather than "as it was when this started".
+       */
+      const existing = store.getDraft(id);
 
       /*
        * Every other field on a re-opened draft falls back to what is stored;
@@ -2196,19 +2222,38 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         store.saveAnswers(answers);
       }
 
-      if (keepDraft) {
-        // Only the status. Compiling the bundle took long enough that writing
-        // the whole draft back would restore whatever the letter said before
-        // the LaTeX run, over anything typed since.
+      /*
+       * Only the status, never the whole draft: compiling the bundle takes
+       * long enough that writing it back would restore whatever the letter
+       * said before the LaTeX run, over anything typed since.
+       *
+       * And the same reasoning forbids the delete. The Workspace stays live
+       * while the bundle compiles and saves what is typed into it, so a draft
+       * read before the compile and unlinked after it takes those edits with
+       * it — into no file, no bundle and no application record, since all of
+       * those were built from the copy that was read first. When that has
+       * happened, the draft stays, marked submitted, and the reply says why.
+       */
+      const warnings: string[] = [];
+      const typedSince = changedText(store.getDraft(id), draft);
+      if (keepDraft || typedSince.length) {
         await reviseDraft(id, `Mark ${draft.company} as submitted`, (fresh) => {
           fresh.status = 'submitted';
         });
       } else {
         store.deleteDraft(id);
       }
+      if (typedSince.length && !keepDraft) {
+        warnings.push(
+          `The ${typedSince.join(' and ')} changed while this was compiling, so what was sent does ` +
+            'not include it. The application is kept open with your latest text — read it, then ' +
+            'complete it again to send that version.',
+        );
+      }
 
       if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
       res.json({
+        warnings,
         application: app,
         dir: result.dir,
         currentDir: syncCurrent(store).dir,
@@ -2393,11 +2438,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * the document unchanged, and not even a commit in the timeline to show
        * for it.
        *
-       * What is restored here is this resume's own chain — its file and the
-       * ones it extends. Shared text is deliberately not rolled back, because
-       * it belongs to every other resume too and silently rewriting those is
-       * worse than not restoring. Instead the result is checked against the
-       * version that was asked for, and anything still differing is named.
+       * What is restored is this resume's own file, and nothing else. Anything
+       * it inherits belongs to every other resume too, and silently rewriting
+       * those is worse than not restoring: this used to walk the whole
+       * `extends` chain and write every ancestor back at the old commit's
+       * content, so rolling one tailored variation back to last week's version
+       * also rolled `base` back — and with it every other variation that
+       * inherits from `base`. A week of work on the shared resume, gone, under
+       * a confirmation that said only "the current version will be replaced"
+       * and a reply carrying no warnings, because the check below re-resolves
+       * the restored resume, which of course now matches.
+       *
+       * So the result is checked against the version that was asked for, and
+       * whatever still differs is named rather than forced.
        */
       const tree = await repo.treeAt(hash);
       const readAt = async (file: string): Promise<string | undefined> => {
@@ -2405,25 +2458,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return objectId === undefined ? undefined : repo.blob(objectId);
       };
 
-      const chain: ResumeSpec[] = [];
-      const seen = new Set<string>();
-      for (let want: string | undefined = id; want && !seen.has(want); ) {
-        seen.add(want);
-        const text = await readAt(path.posix.join('resumes', `${want}.yaml`));
-        if (text === undefined) break;
-        const spec = YAML.parse(text) as ResumeSpec;
-        if (!spec) break;
-        spec.id = want; // the filename remains the source of truth for the id
-        chain.push(spec);
-        want = spec.extends;
-      }
-      if (chain.length === 0) {
+      const text = await readAt(path.posix.join('resumes', `${id}.yaml`));
+      const restored = text === undefined ? undefined : (YAML.parse(text) as ResumeSpec | null);
+      if (!restored) {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }
+      restored.id = id; // the filename remains the source of truth for the id
 
-      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () => {
-        for (const spec of chain) store.saveResume(spec);
-      });
+      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () =>
+        store.saveResume(restored),
+      );
 
       /*
        * Did it land? Compare what the resume resolves to now against what it
@@ -2442,8 +2486,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const now = resolveResume(id, store.load());
         if (!sameDocument(then, now)) {
           warnings.push(
-            'Some of that version is in text this resume shares with others — a bullet, a date, ' +
-              'or your profile — so it was left alone rather than changed for every resume at once.',
+            'Some of that version is in things this resume shares with others — a bullet, a date, ' +
+              'your profile, or the resume this one is built on — so they were left alone rather ' +
+              'than changed for every resume at once.',
           );
           for (const change of diffResumes(now, then).slice(0, 8)) warnings.push(change.text);
         }
@@ -2453,7 +2498,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       // saveResume() returns nothing, so the response is built from the spec
       // itself — the caller wants to know what it was just rolled back to.
-      res.json({ ...chain[0]!, warnings });
+      res.json({ ...restored, warnings });
     }),
   );
 

@@ -930,6 +930,48 @@ describe('workspace', () => {
   }, 30_000);
 
   /*
+   * Re-opening a workspace is something the extension does on its own as you
+   * move through an application, and it saves the tailored resume first — which
+   * shells out to git, a yield of the length a person fits several sentences
+   * into. A draft read on the way in and written back on the way out therefore
+   * restored the notes and the answers to what they said when the page loaded.
+   */
+  it('does not reopen a workspace onto what it said before', async () => {
+    // Auto-commit on, and a real repo, because the yield this races against is
+    // the git commit that saving the tailored resume does.
+    const committing = makeTempStore({ config: { git: { autoCommit: true }, ai: { enabled: false }, output: { dir: 'out' } } });
+    const repo = Repo.forStore(committing.dir);
+    await repo.ensure();
+    const live = express();
+    live.use('/api', createApi({ store: committing.store, repo }));
+
+    const posting = {
+      company: 'Streamly',
+      role: 'Data Platform Intern',
+      source: 'greenhouse.io',
+      questions: [{ question: 'Why are you interested in this role?', required: true }],
+    };
+    const { body } = await request(live).post('/api/workspace').send(posting).expect(200);
+    const id = body.draft.id;
+
+    // The extension re-posts the page — and the person waiting types.
+    const reopening = request(live)
+      .post('/api/workspace')
+      .send({ ...posting, spec: { id: 'job-streamly', label: 'Streamly', extends: 'base' } })
+      .then((r) => r);
+
+    const typed = { ...committing.store.getDraft(id)!, notes: 'Three paragraphs the user typed.' };
+    typed.questions[0] = { ...typed.questions[0]!, answer: 'The ingest rewrite.', edited: true };
+    await request(live).put(`/api/workspace/${id}`).send(typed).expect(200);
+
+    await reopening;
+    const after = committing.store.getDraft(id)!;
+    expect(after.notes).toBe('Three paragraphs the user typed.');
+    expect(after.questions[0]!.answer).toBe('The ingest rewrite.');
+    committing.cleanup();
+  }, 30_000);
+
+  /*
    * The other side of the same merge: when the letter itself is the box being
    * typed in, what the person wrote wins over what the AI came back with, and
    * they are told so rather than left to notice.
@@ -1013,6 +1055,48 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
 
     // The draft is cleared once filed.
     expect(t.store.getDraft(draft.id)).toBeUndefined();
+  });
+
+  /*
+   * Completing compiles a bundle, which is seconds of real LaTeX, and the
+   * Workspace stays live and saving throughout it. A draft read before the
+   * compile and unlinked after it therefore took everything typed during it
+   * into no file, no bundle and no application record — since all of those were
+   * built from the copy read first.
+   */
+  it('does not discard what was typed while the bundle compiled', async () => {
+    const created = await request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Helios',
+        role: 'Intern',
+        resumeId: 'intern',
+        coverLetterRequired: true,
+        questions: [{ question: 'Why this team?', required: true }],
+      })
+      .expect(200);
+    const id = created.body.draft.id;
+
+    const completing = request(app)
+      .post(`/api/workspace/${id}/complete`)
+      .send({ saveAnswersToBank: false })
+      .then((r) => r);
+
+    // Written while the compile is running, exactly as the autosave would.
+    await new Promise((go) => setTimeout(go, 250));
+    const typed = { ...t.store.getDraft(id)!, notes: 'Referred by Dana on the platform team.' };
+    typed.coverLetter = { ...typed.coverLetter, body: 'A letter written entirely during the compile.' };
+    await request(app).put(`/api/workspace/${id}`).send(typed).expect(200);
+
+    const done = await completing;
+    expect(done.status).toBe(200);
+
+    // It is still there, holding what was typed, and the reply says why.
+    const kept = t.store.getDraft(id);
+    expect(kept?.coverLetter.body).toBe('A letter written entirely during the compile.');
+    expect(kept?.notes).toBe('Referred by Dana on the platform team.');
+    expect(kept?.status).toBe('submitted');
+    expect(done.body.warnings.join(' ')).toMatch(/cover letter and notes changed while this was compiling/i);
   });
 
   it('can keep the draft, marked submitted', async () => {

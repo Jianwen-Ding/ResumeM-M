@@ -115,6 +115,39 @@ export class Repo {
    * error, and should not create an empty commit either.
    */
   async commitAll(message: string, paths?: string[]): Promise<string | undefined> {
+    /*
+     * One commit at a time, per repository.
+     *
+     * `add`, `diff --cached` and `commit` are three separate git processes, and
+     * two overlapping requests interleaved them: "fatal: cannot lock ref 'HEAD'"
+     * or "Unable to create '.git/index.lock'", swallowed by `withCommit` into a
+     * console warning behind a 200. No text was lost — both writes rode into
+     * whichever commit survived — but one edit got no history entry of its own,
+     * and the history is what "restore this version" is built on. A version you
+     * can see in the timeline and cannot go back to is worse than the delay of
+     * waiting a moment for the commit in front.
+     */
+    const previous = Repo.commits.get(this.root) ?? Promise.resolve();
+    let release!: () => void;
+    const finished = new Promise<void>((done) => (release = done));
+    const chained = previous.then(() => finished);
+    Repo.commits.set(this.root, chained);
+
+    await previous;
+    try {
+      return await this.commitNow(message, paths);
+    } finally {
+      release();
+      // Only when nothing queued behind this one, so the next caller either
+      // waits for a real predecessor or starts a fresh chain.
+      if (Repo.commits.get(this.root) === chained) Repo.commits.delete(this.root);
+    }
+  }
+
+  /** Serialised per repository directory by `commitAll`. */
+  private static readonly commits = new Map<string, Promise<void>>();
+
+  private async commitNow(message: string, paths?: string[]): Promise<string | undefined> {
     if (!(await this.isRepo())) return undefined;
     const targets = paths ?? this.scope;
     await this.git(['add', '--', ...targets]);

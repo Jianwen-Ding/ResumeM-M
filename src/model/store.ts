@@ -306,18 +306,31 @@ export class Store {
     const clean = normalizeEntry(entry);
     const rel = this.fileForKind(clean.kind);
 
-    for (const other of Store.ENTRY_FILES) {
-      if (other === rel) continue;
-      const list = this.readYaml<Entry[]>(other, []);
-      const next = list.filter((e) => e.id !== clean.id);
-      if (next.length !== list.length) this.writeYaml(other, next);
-    }
-
+    /*
+     * The write that adds it comes first, and the ones that remove the old copy
+     * come after.
+     *
+     * Each file is written atomically, but changing an entry's kind touches
+     * two of them and nothing makes the pair atomic. Removing first meant a
+     * window — a full disk, an EIO, a crash — in which the entry was in neither
+     * file, and `load()` simply concatenates the four: the title, the dates and
+     * every phrasing of every bullet, gone, with the error naming the disk
+     * rather than the entry. In this order the same failure leaves the entry in
+     * both files instead, which `load()` resolves in favour of the newer one
+     * and the next successful save tidies up.
+     */
     const list = this.readYaml<Entry[]>(rel, []);
     const idx = list.findIndex((e) => e.id === clean.id);
     if (idx >= 0) list[idx] = clean;
     else list.push(clean);
     this.writeYaml(rel, list);
+
+    for (const other of Store.ENTRY_FILES) {
+      if (other === rel) continue;
+      const stale = this.readYaml<Entry[]>(other, []);
+      const next = stale.filter((e) => e.id !== clean.id);
+      if (next.length !== stale.length) this.writeYaml(other, next);
+    }
   }
 
   /** Removes the id from every file, not merely the first one holding it. */
@@ -381,6 +394,13 @@ export class Store {
           role: meta.role,
           createdAt: meta.createdAt ?? '',
           tags: meta.tags,
+          // Rebuilt field by field, so a field missed here is a field deleted:
+          // the editor loads a letter and PUTs back exactly what it was given,
+          // and this one was dropped on the way in. Completing an application
+          // tags its letter with the application it belongs to, and opening
+          // that letter once untagged it — after which the per-application
+          // lookup could never match and the application showed no letter.
+          applicationId: meta.applicationId,
           body: m[2] ?? '',
         } satisfies CoverLetter;
       });
@@ -451,7 +471,13 @@ export class Store {
       .filter((f) => f.endsWith('.yaml'))
       .map((f) => {
         const draft = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as Draft;
-        return { ...draft, id: draft?.id ?? path.basename(f, '.yaml') };
+        // The filename is the id, the same way it is for resumes, and for the
+        // same reason: an id written inside the file meant that copying a draft
+        // to `d1-backup.yaml` produced two drafts claiming to be `d1`, and that
+        // renaming one left `deleteDraft` unlinking a path that is not there —
+        // so discarding it failed and completing it silently left it on the
+        // list forever.
+        return { ...draft, id: path.basename(f, '.yaml') };
       })
       .filter((d): d is Draft => Boolean(d && d.id))
       .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
