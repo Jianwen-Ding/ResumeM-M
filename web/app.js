@@ -496,6 +496,10 @@ function scheduleCommit() {
  * the page. `keepalive` is what lets the last write survive the tab closing.
  */
 async function flushEdits() {
+  // The Workspace's typing too. Every path out of a page already calls this —
+  // closing the tab, switching resumes, following a deep link — and the draft
+  // was the one thing it did not cover.
+  await flushDraftEdits().catch(() => {});
   await Promise.all([...inlineSaves]);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
@@ -2951,6 +2955,14 @@ async function newDraft() {
 }
 
 async function openDraft(id) {
+  /*
+   * Whatever is in the draft on screen goes to disk before another one
+   * replaces it. Switching drafts is one of the two ways a half-written cover
+   * letter used to disappear — the other being closing the tab — because
+   * nothing but blur ever wrote.
+   */
+  if (draftSave.current && draftSave.current.id !== id) await flushDraftEdits();
+
   openDraftId = id;
   location.hash = `#workspace/${encodeURIComponent(id)}`;
   try {
@@ -2969,6 +2981,97 @@ const SOURCE_LABEL = { bank: 'from your answer bank', ai: 'drafted by AI', human
 let letterTimer = null;
 let letterToken = 0;
 
+/* ------------------------------------------------------------------ *
+ * The Workspace saves as you type                                     *
+ * ------------------------------------------------------------------ *
+ *
+ * It used to save on blur and on nothing else. The cover letter, every
+ * answer and the notes are textareas someone types into for a long time
+ * without clicking anywhere — and the letter's preview retypesets while they
+ * do, which says, convincingly, that the text is being handled. It was not:
+ * reloading the page, closing the tab, or following the link to the resume
+ * builder threw away everything since the last time focus happened to move.
+ *
+ * The builder already had this. The Workspace is where the actual writing
+ * happens, and it had none of it.
+ */
+
+/** The draft being edited, and the machinery keeping it on disk. */
+const draftSave = {
+  /** Set by `renderDraft` so the flush paths can reach the open draft. */
+  current: null,
+  timer: null,
+  /** The write in flight, so anything leaving the page can await it. */
+  pending: null,
+  dirty: false,
+};
+
+function setDraftSaveState(mode, detail) {
+  const chip = $('#draft-save-state');
+  if (!chip) return;
+  chip.className = `save ${mode}`;
+  chip.textContent =
+    mode === 'saving'
+      ? 'Saving…'
+      : mode === 'saved'
+        ? 'All changes saved'
+        : mode === 'failed'
+          ? `Not saved — ${detail ?? 'the server did not accept it'}`
+          : 'Unsaved changes';
+}
+
+/** Write the open draft now. Safe to call when there is nothing to write. */
+async function saveDraftNow(message) {
+  const draft = draftSave.current;
+  if (!draft) return;
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+  if (!draftSave.dirty && !message) return;
+
+  draftSave.dirty = false;
+  setDraftSaveState('saving');
+  const write = api(`/workspace/${encodeURIComponent(draft.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(draft),
+    keepalive: true,
+  })
+    .then(() => {
+      // Only clear the chip if nothing has been typed since this write began.
+      if (!draftSave.dirty) setDraftSaveState('saved');
+      if (message) setStatus(message);
+    })
+    .catch((err) => {
+      draftSave.dirty = true;
+      setDraftSaveState('failed', err.message);
+      throw err;
+    })
+    .finally(() => {
+      if (draftSave.pending === write) draftSave.pending = null;
+    });
+
+  draftSave.pending = write;
+  await write.catch(() => {});
+}
+
+/** A keystroke happened. Same debounce the builder uses. */
+function markDraftDirty() {
+  draftSave.dirty = true;
+  setDraftSaveState('dirty');
+  clearTimeout(draftSave.timer);
+  draftSave.timer = setTimeout(() => {
+    draftSave.timer = null;
+    saveDraftNow().catch(() => {});
+  }, AUTOSAVE_DELAY_MS);
+}
+
+/** Everything typed into the Workspace, on disk, before we go anywhere. */
+async function flushDraftEdits() {
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+  if (draftSave.dirty) await saveDraftNow();
+  await draftSave.pending?.catch(() => {});
+}
+
 function renderDraft(draft) {
   const panel = $('#draft-editor');
   if (!draft) {
@@ -2986,9 +3089,14 @@ function renderDraft(draft) {
 
   /** Persist the draft as it stands, marking edited fields so generation
    *  never overwrites something a human wrote. */
+  draftSave.current = draft;
+  draftSave.dirty = false;
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+
   const save = async (message) => {
-    await api(`/workspace/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: JSON.stringify(draft) });
-    if (message) setStatus(message);
+    draftSave.dirty = true;
+    await saveDraftNow(message);
   };
 
   const blocks = [];
@@ -3075,9 +3183,12 @@ function renderDraft(draft) {
       // review, and nothing else re-renders the header — so writing a letter
       // left it dead until the draft was closed and reopened.
       letterFeedbackBtn.disabled = !letter.value.trim();
+      markDraftDirty();
       scheduleLetter();
     };
-    letter.onblur = () => save();
+    // Blur still writes immediately — it is a strong signal the thought is
+    // finished — but it is no longer the only thing that writes.
+    letter.onblur = () => saveDraftNow().catch(() => {});
 
     blocks.push(
       el('div', { className: 'block' }, [
@@ -3127,8 +3238,9 @@ function renderDraft(draft) {
         q.edited = true;
         q.source = 'human';
         answerFeedbackBtn.disabled = !box.value.trim();
+        markDraftDirty();
       };
-      box.onblur = () => save();
+      box.onblur = () => saveDraftNow().catch(() => {});
 
       qs.append(
         el('div', { style: 'margin-bottom:16px' }, [
@@ -3197,8 +3309,11 @@ function renderDraft(draft) {
 
   /* Notes and actions */
   const notesBox = el('textarea', { value: draft.notes ?? '', placeholder: 'Notes to yourself about this application.' });
-  notesBox.oninput = () => (draft.notes = notesBox.value);
-  notesBox.onblur = () => save();
+  notesBox.oninput = () => {
+    draft.notes = notesBox.value;
+    markDraftDirty();
+  };
+  notesBox.onblur = () => saveDraftNow().catch(() => {});
 
   const resumeSelect = el('select');
   for (const r of state.store.resumes) {
@@ -3211,7 +3326,18 @@ function renderDraft(draft) {
 
   setChildren(
     panel,
-    el('h3', { textContent: `${draft.role}` }),
+    el('div', { className: 'draft-head' }, [
+      el('h3', { textContent: `${draft.role}` }),
+      el('span', { className: 'grow' }),
+      // Says whether what is on screen is on disk. The builder has had one of
+      // these all along; the tab where the writing actually happens did not.
+      el('span', {
+        id: 'draft-save-state',
+        className: 'save saved',
+        title: 'Your letter, answers and notes are written to the save as you type.',
+        textContent: 'All changes saved',
+      }),
+    ]),
     el('div', { className: 'where' }, [
       document.createTextNode(draft.company),
       draft.url ? document.createTextNode(' · ') : null,

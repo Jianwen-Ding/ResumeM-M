@@ -919,6 +919,9 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .draft-editor { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
 .draft-editor > header { all: unset; display: block; margin-bottom: 4px; }
 .draft-editor h3 { margin: 0; font-size: 16px; }
+/* The title on the left, whether it is saved on the right — the same shape as
+   the builder's toolbar, so the two tabs read alike. */
+.draft-head { display: flex; align-items: center; gap: 10px; }
 .draft-editor .where { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
 .draft-editor .block { border-top: 1px solid var(--line-soft); padding-top: 14px; margin-top: 16px; }
 .draft-editor .block:first-of-type { border-top: 0; margin-top: 0; }
