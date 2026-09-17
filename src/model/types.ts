@@ -327,6 +327,13 @@ export interface DraftQuestion {
   fromAnswerId?: string;
   /** How the current text got here. */
   source?: 'bank' | 'ai' | 'human' | 'empty';
+  /**
+   * Set when the text came from a stored answer that only loosely matched.
+   * `matchAnswer` draws the line between "safe to send unread" and "a starting
+   * point the user should read first", and the loose ones used to arrive
+   * looking exactly like the confident ones.
+   */
+  needsReview?: boolean;
   edited?: boolean;
 }
 

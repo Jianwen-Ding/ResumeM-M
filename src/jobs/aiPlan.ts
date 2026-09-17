@@ -61,7 +61,15 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
       plan.rejected.push(`choice ${key}: not a variant id`);
       continue;
     }
-    const dot = key.indexOf('.');
+    /*
+     * A bullet id first, then a field path. Routing on "does it contain a dot"
+     * sent every dotted key to the field branch, so a bullet whose id has a dot
+     * in it — hand-edited YAML is a supported way to author this store — had
+     * its choice rejected as "no such field", while `resolveResume` honours
+     * that same key everywhere else. Only the sanitiser disagreed, and the
+     * result was tailoring that quietly declined to touch those bullets.
+     */
+    const dot = bullets.has(key) ? -1 : key.indexOf('.');
     if (dot > 0) {
       const entry = entries.get(key.slice(0, dot));
       const field = entry?.[key.slice(dot + 1) as 'title' | 'dates' | 'subtitle' | 'location'];
@@ -94,8 +102,19 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
       plan.rejected.push(`skills ${groupId}: no such group`);
       continue;
     }
-    const known = items.filter((i): i is string => typeof i === 'string' && group.items.some((x) => x.id === i));
-    if (known.length !== items.length) plan.rejected.push(`skills ${groupId}: dropped unknown items`);
+    /*
+     * Which skills, from the model; how many and in what order, from the store.
+     *
+     * Keeping the reply's own list let it repeat an id, and `resolveResume`
+     * maps the list straight to text — so {"sk_lang": ["s_py","s_py","s_go"]}
+     * printed "Python, Python, Go" on the resume. It is also the one place this
+     * file's rule that ordering never comes from the reply did not hold.
+     */
+    const wanted = new Set(
+      items.filter((i): i is string => typeof i === 'string' && group.items.some((x) => x.id === i)),
+    );
+    if (wanted.size !== items.length) plan.rejected.push(`skills ${groupId}: dropped unknown items`);
+    const known = group.items.filter((i) => wanted.has(i.id)).map((i) => i.id);
     if (known.length > 0) plan.skills[groupId] = known;
   }
 

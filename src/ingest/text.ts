@@ -154,7 +154,18 @@ function fromDocx(buf: Buffer): string {
 function fromHtml(raw: string): string {
   const text = raw
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    // The head is not the document. Without this, "Resume - Google Docs" from
+    // the <title> became the first line of the writing corpus.
+    .replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, ' ')
     .replace(/<!--[\s\S]*?-->/g, ' ')
+    /*
+     * A table cell ends a block too, and resumes are full of tables: Word's
+     * "Save as Web Page" builds one, so do most resume builders, and so does
+     * any two-column heading. Without `td` and `th` the cells fused —
+     * "Acme Co.Boston, MA", "Software Engineer Co-opJul 2024 – Dec 2024" —
+     * and that is what went into the corpus and the prompts.
+     */
+    .replace(/<\/(td|th|caption|dt|dd|figcaption)>/gi, '\n')
     .replace(/<\/(p|div|li|tr|h[1-6]|section|article|blockquote)>/gi, '\n\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<li\b[^>]*>/gi, '- ')
@@ -201,7 +212,7 @@ function fromRtf(raw: string): string {
  * not. That is the whole rule, and it is right often enough on prose — which
  * is what a corpus is made of.
  */
-export function reflow(lines: string[]): string {
+export function reflow(lines: string[], starts?: number[]): string {
   const widths = lines.map((l) => l.length).filter((n) => n > 0).sort((a, b) => a - b);
   if (widths.length === 0) return '';
   // The 75th percentile, not the longest: one runaway line should not decide
@@ -216,16 +227,47 @@ export function reflow(lines: string[]): string {
     current = [];
   };
 
-  for (const raw of lines) {
+  let previousStart: number | undefined;
+
+  for (const [i, raw] of lines.entries()) {
     const line = raw.trim();
     if (!line) {
       end();
+      previousStart = undefined;
       continue;
     }
+
+    /*
+     * Where the line begins on the page, when the reader knows.
+     *
+     * Width and punctuation alone cannot separate resume bullets: a bullet is
+     * about as wide as the text block and ends without a full stop, which is
+     * `runsOn`'s definition of a line that continues. So every bullet in a
+     * section was glued into one paragraph and the next heading welded onto the
+     * end of it — "…off a single Postgres primary Projects" — and the corpus
+     * sorter, counting bullet-prefixed lines and finding none, then filed the
+     * user's own resume as "other".
+     *
+     * The guard that was supposed to prevent this tests for a leading "-" or
+     * "•", and pdf.js hands back the bullet glyph of a LaTeX itemize as an
+     * empty string, so it never fired.
+     *
+     * Indentation says it plainly instead. A wrapped line sits at or right of
+     * where its first line started; a new bullet, or a heading, starts further
+     * left. So a line that begins to the left of the one before it is a new
+     * block, whatever its width.
+     */
+    const start = starts?.[i];
+    if (start !== undefined && previousStart !== undefined && start < previousStart - 0.5) end();
+
     // A bullet starts its own line whatever came before it.
     if (/^[-•*·]\s/.test(line)) end();
     current.push(line);
-    if (!runsOn(line)) end();
+    previousStart = start;
+    if (!runsOn(line)) {
+      end();
+      previousStart = undefined;
+    }
   }
   end();
 
@@ -256,17 +298,31 @@ async function fromPdf(buf: Buffer): Promise<string> {
     const page = await doc.getPage(n);
     const content = await page.getTextContent();
     let line = '';
+    let start: number | undefined;
     const lines: string[] = [];
+    const starts: number[] = [];
     for (const item of content.items) {
       if (!('str' in item)) continue;
+      // The x of the first item on the line — including the one whose `str` is
+      // empty, which is exactly what a LaTeX itemize bullet comes back as.
+      if (start === undefined) start = (item as { transform?: number[] }).transform?.[4];
       line += item.str;
       if (item.hasEOL) {
         lines.push(line);
+        starts.push(start ?? 0);
         line = '';
+        start = undefined;
       }
     }
-    if (line) lines.push(line);
-    pages.push(reflow(stripRunningHead(lines)));
+    if (line) {
+      lines.push(line);
+      starts.push(start ?? 0);
+    }
+
+    // `stripRunningHead` takes lines off either end; the offsets follow.
+    const kept = stripRunningHead(lines);
+    const from = lines.indexOf(kept[0] ?? '');
+    pages.push(reflow(kept, from >= 0 ? starts.slice(from, from + kept.length) : undefined));
   }
   await doc.destroy();
   return tidy(pages.join('\n\n'));

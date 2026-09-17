@@ -50,7 +50,7 @@ export function slug(s: string): string {
  * one tracker row silently replacing the other, and the first one's files
  * left behind inside the second one's bundle.
  */
-function fingerprint(...parts: string[]): string {
+export function fingerprint(...parts: string[]): string {
   return createHash('sha1').update(parts.join('\u0000')).digest('hex').slice(0, 8);
 }
 

@@ -3073,6 +3073,22 @@ function renderDraft(draft) {
               className: `badge ${q.edited ? 'human' : (q.source ?? 'empty')}`,
               textContent: q.edited ? SOURCE_LABEL.human : (SOURCE_LABEL[q.source] ?? SOURCE_LABEL.empty),
             }),
+            /*
+             * A stored answer that only loosely matched this question. The
+             * matcher draws that line deliberately — above it an answer is safe
+             * to send unread, below it, in its own words, "a starting point the
+             * user should read first" — and a loose one used to arrive looking
+             * exactly like a confident one. It is the difference between "yes,
+             * I am authorized to work" and "no, I require sponsorship".
+             */
+            !q.edited && q.needsReview
+              ? el('span', {
+                  className: 'badge required',
+                  style: 'margin-left:6px',
+                  textContent: 'read this one first',
+                  title: 'This came from a stored answer to a similar — not identical — question.',
+                })
+              : null,
             el('span', { style: 'flex:1' }),
             el('button', {
               className: 'link',

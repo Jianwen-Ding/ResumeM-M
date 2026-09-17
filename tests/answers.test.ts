@@ -194,6 +194,49 @@ describe('the same question, asked by another system', () => {
     expect(reuses('What do you do?', 'Why do you want to work at this company?')).toBe(false);
   });
 
+  /*
+   * The dangerous shape: the stored question is the asked question plus a
+   * qualifier, and the qualifier is the whole answer.
+   *
+   * Coverage was computed over whichever question was shorter, so a stored
+   * question that merely *added* words scored 1.0 on it. "Are you legally
+   * authorized to work in the United States?" matched a stored "…without
+   * sponsorship?" at 0.914 and came back confident — and a confident match is
+   * not advisory. It is written into the draft, copied into the bundle and the
+   * answers file, and sent. The stored answer was "No. I will require H-1B
+   * sponsorship."
+   */
+  it('does not answer a question with the answer to a narrower one', () => {
+    const pairs: [string, string][] = [
+      [
+        'Are you legally authorized to work in the United States?',
+        'Are you legally authorized to work in the United States without sponsorship?',
+      ],
+      [
+        'Have you ever been convicted of a felony?',
+        'Have you ever been convicted of a felony or misdemeanor involving theft?',
+      ],
+      ['Do you hold a security clearance?', 'Do you hold an active TS/SCI security clearance?'],
+      ['Are you willing to relocate?', 'Are you willing to relocate at your own expense?'],
+    ];
+
+    for (const [asked, stored] of pairs) {
+      const m = ask(asked, stored);
+      expect(m.confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+  });
+
+  it('still reuses a stored question the form has only padded out', () => {
+    // The case the coverage bias exists for, and which must keep working: the
+    // stored question says nothing the asked one did not.
+    const m = ask(
+      'Why are you interested in this role at our company? (500 characters max)',
+      'Why are you interested in this role?',
+    );
+    expect(m.answer).toBeTruthy();
+    expect(m.confident).toBe(true);
+  });
+
   it('keeps sponsorship and work authorization apart, which have opposite answers', () => {
     expect(reuses('Are you legally authorized to work in the United States?', 'Will you now or in the future require sponsorship?')).toBe(false);
     expect(reuses('Will you now or in the future require sponsorship?', 'Are you legally authorized to work in the United States?')).toBe(false);

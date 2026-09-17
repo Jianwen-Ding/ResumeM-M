@@ -259,18 +259,27 @@ function resetAt(res: Response): string | null {
  * is genuinely wrong.
  */
 async function readReadme(fetchImpl: typeof fetch, base: string, opts: ReadRepoOptions): Promise<string | undefined> {
-  let res: Response;
+  /*
+   * The body read belongs inside the try, not after it. Reading a response
+   * body can fail on its own — a transfer that terminates mid-stream, which is
+   * ordinary on a large README — and that throw escaped a function documented
+   * as never throwing, out through the Promise.all that gathers it, discarding
+   * a repository read that had already succeeded. What the user saw was
+   * "terminated", which names nothing about the link they pasted.
+   */
   try {
     // `vnd.github.raw` returns the file itself; the default returns base64 in
     // JSON, which would only need decoding again here.
-    res = await fetchImpl(`${base}/readme`, { headers: headers(opts.token, 'application/vnd.github.raw') });
+    const res = await fetchImpl(`${base}/readme`, {
+      headers: headers(opts.token, 'application/vnd.github.raw'),
+    });
+    if (!res.ok) return undefined;
+    const text = await res.text();
+    const cleaned = cleanReadme(text);
+    return cleaned ? clip(cleaned, opts.readmeLimit ?? README_LIMIT) : undefined;
   } catch {
     return undefined;
   }
-  if (!res.ok) return undefined;
-  const text = await res.text();
-  const cleaned = cleanReadme(text);
-  return cleaned ? clip(cleaned, opts.readmeLimit ?? README_LIMIT) : undefined;
 }
 
 /** Languages, most bytes first. Also never fatal: it is a nice-to-have. */
@@ -279,14 +288,18 @@ async function readLanguages(
   base: string,
   opts: ReadRepoOptions,
 ): Promise<string[] | undefined> {
-  let res: Response;
+  // Same again: a `/languages` call answered by a proxy's HTML error page throws
+  // out of `res.json()`, and that throw is not this function's to make.
+  let body: Record<string, unknown>;
   try {
-    res = await fetchImpl(`${base}/languages`, { headers: headers(opts.token, 'application/vnd.github+json') });
+    const res = await fetchImpl(`${base}/languages`, {
+      headers: headers(opts.token, 'application/vnd.github+json'),
+    });
+    if (!res.ok) return undefined;
+    body = (await res.json()) as Record<string, unknown>;
   } catch {
     return undefined;
   }
-  if (!res.ok) return undefined;
-  const body = (await res.json()) as Record<string, unknown>;
   if (!body || typeof body !== 'object') return undefined;
 
   const names = Object.entries(body)

@@ -37,7 +37,7 @@ export interface Proposal {
 const MIN_SAMPLE = 40;
 
 /** More blocks than this and the model is being asked to read a book. */
-const MAX_BLOCKS = 120;
+export const MAX_BLOCKS = 120;
 
 const KINDS: SampleKind[] = ['letter', 'answer', 'resume', 'other'];
 
@@ -79,7 +79,15 @@ export function segment(text: string): Block[] {
   }
   if (carry) merged.push(carry);
 
-  return merged.slice(0, MAX_BLOCKS).map((t, index) => ({ index, text: t }));
+  /*
+   * Every block. The cap belongs on what the *model* is shown, and applying it
+   * here threw the rest of the file away: a 300-paragraph file of old
+   * applications yielded 120 blocks and proposals covering 17 KB of 38 KB,
+   * with `blocks: 120` reported and nothing saying it had been cut. The user
+   * ticked the proposals and the last 60% of what they had handed over never
+   * reached the corpus. `sortByRules` reads all of them perfectly well.
+   */
+  return merged.map((t, index) => ({ index, text: t }));
 }
 
 /* ------------------------------------------------------------------ *

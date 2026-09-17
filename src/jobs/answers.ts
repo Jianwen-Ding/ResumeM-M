@@ -70,9 +70,40 @@ export function questionSimilarity(a: string, b: string): number {
 
   let shared = 0;
   for (const t of ta) if (tb.has(t)) shared++;
-  const coverage = shared / Math.min(ta.size, tb.size);
+
+  /*
+   * Coverage of the *stored* question, which is what the comment above always
+   * said and `Math.min` did not do. Min also returns 1.0 when the asked
+   * question is the shorter of the two — that is, when the stored question
+   * carries qualifiers the form never asked about.
+   *
+   * Those qualifiers are the whole answer. "Are you legally authorized to work
+   * in the United States?" against a stored "…without sponsorship?" scored
+   * 0.914 and came back confident, and the stored answer was "No. I will
+   * require H-1B sponsorship." A confident match is not advisory: it is written
+   * into the draft, bundled, and sent — a false declaration about the
+   * applicant's right to work, made on their behalf.
+   */
+  const coverage = shared / tb.size;
   const union = shared / (ta.size + tb.size - shared);
   return coverage * 0.7 + union * 0.3;
+}
+
+/**
+ * Whether the stored question says nothing the asked question did not.
+ *
+ * Every meaningful word of the stored question has to appear in the one on the
+ * page. A stored question with a word of its own is a question about something
+ * else — "without sponsorship", "or misdemeanor", "active TS/SCI" — and the
+ * answer to it is not the answer to this. The match is still offered; it is
+ * just not claimed as safe to send unread.
+ */
+function fullyAsked(a: string, b: string): boolean {
+  const ta = terms(a);
+  const tb = terms(b);
+  if (tb.size === 0) return ta.size === 0;
+  for (const t of tb) if (!ta.has(t)) return false;
+  return true;
 }
 
 export interface AnswerMatch {
@@ -106,9 +137,13 @@ export function matchAnswer(question: string, bank: AnswerBankItem[], threshold 
     variant,
     answer: variant?.text,
     score: Number(best.score.toFixed(3)),
-    // A near-identical question is safe to reuse verbatim; a loose one is a
-    // starting point the user should read first.
-    confident: best.score >= 0.7,
+    /*
+     * A near-identical question is safe to reuse verbatim; a loose one is a
+     * starting point the user should read first. Near-identical means the
+     * stored question asked nothing extra — a high score alone is not enough,
+     * because adding a qualifier to a question only adds shared words.
+     */
+    confident: best.score >= 0.7 && fullyAsked(question, best.item.question),
   };
 }
 
