@@ -32,6 +32,28 @@ describe('resolveStoreDir', () => {
     else process.env.RMM_DATA = original;
   });
 
+  /*
+   * `--data` is the most explicit thing there is and it lost to everything.
+   * The CLI read the flag nowhere, so three servers each handed their own copy
+   * of a store all served the one real save and wrote to it.
+   */
+  it('honours a folder named on the command line above RMM_DATA', () => {
+    const chosen = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-chosen-'));
+    process.env.RMM_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-env-'));
+    try {
+      expect(resolveStoreDir(projectRoot, chosen)).toBe(path.resolve(chosen));
+    } finally {
+      fs.rmSync(chosen, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a relative folder from the command line, and ignores an empty one', () => {
+    delete process.env.RMM_DATA;
+    expect(resolveStoreDir(projectRoot, 'some/save')).toBe(path.resolve('some/save'));
+    // `--data` with nothing after it must not resolve to the current directory.
+    expect(resolveStoreDir(projectRoot, '   ')).toBe(path.join(os.homedir(), '.resumem-m', 'store'));
+  });
+
   it('honours RMM_DATA above everything else', () => {
     const explicit = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-explicit-'));
     process.env.RMM_DATA = explicit;

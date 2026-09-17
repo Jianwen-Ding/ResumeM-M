@@ -17,7 +17,18 @@ import type { WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
 
 const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
-const dataDir = resolveStoreDir(projectRoot);
+/*
+ * `--data` belongs to every command, not to one, which is why it is read here
+ * rather than inside the switch: `rmm list --data other-save` should list that
+ * save, and `rmm serve --data other-save` should serve it.
+ *
+ * It used to be read nowhere at all. `rmm serve --data /tmp/copy` started, said
+ * nothing, and served whichever save was open — so a pool of servers each given
+ * its own copy of a store was in fact three servers writing to one real store,
+ * which is the exact thing that arrangement exists to prevent. A flag that is
+ * accepted and discarded is worse than one that is rejected.
+ */
+const dataDir = resolveStoreDir(projectRoot, arg(process.argv.slice(2), 'data'));
 seedStore(path.join(projectRoot, 'data'), dataDir);
 
 const USAGE = `rmm — resume mix-and-match
@@ -38,6 +49,10 @@ const USAGE = `rmm — resume mix-and-match
   rmm clone <repo> <folder>       Bring a save down from where it is pushed,
                                   and open it
   rmm serve [--port 4600]         Start the editor GUI and extension API
+
+Any command also takes:
+  --data <folder>    Work on the save in this folder instead of the one that is
+                     open. Beats RMM_DATA and the remembered save.
 
 Environment:
   RMM_DATA           Where the store lives. Defaults to ~/.resumem-m/store,

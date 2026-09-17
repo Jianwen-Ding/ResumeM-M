@@ -131,9 +131,40 @@ export async function startServer(opts: ServerOptions = {}) {
     if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
     next();
   });
+  /*
+   * `build` is a fingerprint of the code that is running, not a version
+   * number anyone sets.
+   *
+   * A server keeps serving whatever it loaded at start: `tsx` compiles once,
+   * and `dist/` is a snapshot. So a process left running from this morning
+   * answers requests the way this morning's code did, and there is nothing
+   * about it from the outside that says so. That cost an hour: a test suite
+   * failed on a feature that worked, because one server in its pool predated
+   * the feature.
+   *
+   * The mtime of the newest source file the server could be running is enough
+   * to tell two builds apart, and costs one stat per request on a handful of
+   * files. Anything cleverer would need a build step to maintain.
+   */
+  const buildStamp = (() => {
+    const roots = [path.join(projectRoot, 'dist', 'src'), path.join(projectRoot, 'src'), path.join(projectRoot, 'web')];
+    let newest = 0;
+    const walk = (dir: string, depth = 0) => {
+      if (depth > 4 || !fs.existsSync(dir)) return;
+      for (const name of fs.readdirSync(dir)) {
+        const full = path.join(dir, name);
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) walk(full, depth + 1);
+        else newest = Math.max(newest, stat.mtimeMs);
+      }
+    };
+    for (const root of roots) walk(root);
+    return String(Math.round(newest));
+  })();
+
   app.get('/health', (_req, res) => {
     const ai = active?.store.loadConfig().ai;
-    res.json({ ok: true, service: 'resumem-m', dataDir: active?.store.root ?? null,
+    res.json({ ok: true, service: 'resumem-m', build: buildStamp, dataDir: active?.store.root ?? null,
       projectOpen: Boolean(active), ai: { enabled: ai?.enabled ?? false, command: ai?.command ?? '', configured: Boolean(ai?.command?.trim()) } });
   });
 
