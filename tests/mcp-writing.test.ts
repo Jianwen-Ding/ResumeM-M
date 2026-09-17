@@ -378,3 +378,196 @@ describe('both sets of tools, as tools', () => {
     expect(reply.result.content[0]?.text).toContain('"text"');
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * The endpoint, end to end, through a real child process              *
+ * ------------------------------------------------------------------ */
+
+/**
+ * A stand-in for a coding-agent CLI that reads the material and proposes out
+ * of it — including one bullet whose quote is not in the document, so the
+ * refusal is exercised on the real path rather than only in a unit test.
+ */
+const READING_CLI = String.raw`
+const fs = require('node:fs');
+/*
+ * A CLI that throws inside its own async work exits 0 by default, which would
+ * make a broken stand-in look like a run that decided nothing — the failure
+ * this test would then report is the endpoint's rather than its own.
+ */
+process.on('unhandledRejection', () => process.exit(3));
+process.on('uncaughtException', () => process.exit(3));
+const { spawn } = require('node:child_process');
+
+const configPath = process.argv[process.argv.indexOf('--mcp-config') + 1];
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.resume;
+const child = spawn(config.command, config.args, {
+  env: { ...process.env, ...config.env },
+  stdio: ['pipe', 'pipe', 'inherit'],
+});
+
+let buffer = '';
+const waiting = new Map();
+child.stdout.setEncoding('utf8');
+child.stdout.on('data', (chunk) => {
+  buffer += chunk;
+  let at;
+  while ((at = buffer.indexOf('\n')) >= 0) {
+    const line = buffer.slice(0, at).trim();
+    buffer = buffer.slice(at + 1);
+    if (!line) continue;
+    const m = JSON.parse(line);
+    waiting.get(m.id)?.(m);
+    waiting.delete(m.id);
+  }
+});
+
+let nextId = 1;
+const call = (method, params) =>
+  new Promise((resolve) => {
+    const id = nextId++;
+    waiting.set(id, resolve);
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+  });
+const tool = (name, args) => call('tools/call', { name, arguments: args });
+
+(async () => {
+  await call('initialize', { protocolVersion: '2024-11-05' });
+  const docs = await tool('list_documents', {});
+  const id = /\[([^\]]+)\]/.exec(docs.result.content[0].text)[1];
+  const body = await tool('read_document', { id });
+  if (!body.result.content[0].text.includes('Vega')) throw new Error('did not get the document');
+
+  await tool('read_store', {});
+  await tool('propose_entry', { id: 'exp_vega', kind: 'experience', title: 'Vega Analytics', document: id });
+
+  // One that is not in the material: it must be refused here, not later.
+  const invented = await tool('propose_bullet', {
+    entry: 'exp_vega',
+    text: 'Led a team of forty',
+    source: 'Led a team of forty engineers.',
+    document: id,
+  });
+  if (!invented.result.isError) throw new Error('an invented bullet was accepted');
+
+  await tool('propose_bullet', {
+    entry: 'exp_vega',
+    text: 'Built a Kafka-backed ingest pipeline handling 2M events a day',
+    source: 'Built a Kafka-backed ingest pipeline handling 2M events a day.',
+    document: id,
+  });
+  await tool('finish', { notes: 'Read the resume.' });
+  child.stdin.end();
+  child.on('exit', () => process.exit(0));
+})();
+`;
+
+describe('reading material, over the endpoint', () => {
+  it('proposes what is in the files and refuses what is not', async () => {
+    const express = (await import('express')).default;
+    const request = (await import('supertest')).default;
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+    const fsx = await import('node:fs');
+    const osx = await import('node:os');
+    const pathx = await import('node:path');
+
+    const t = makeTempStore();
+    try {
+      // The material, where the Voice tab would have put it.
+      t.store.saveSample({
+        id: 'old-resume',
+        title: 'old-resume.pdf',
+        kind: 'resume',
+        createdAt: new Date().toISOString(),
+        text: RESUME_DOC.text,
+      });
+
+      const dir = fsx.mkdtempSync(pathx.join(osx.tmpdir(), 'rmm-read-'));
+      const cli = pathx.join(dir, 'cli.cjs');
+      fsx.writeFileSync(cli, READING_CLI, 'utf8');
+
+      /*
+       * A shim called `claude`, on the PATH.
+       *
+       * The endpoint decides for itself whether a command can take tools, by
+       * name, which is the behaviour under test — so the test cannot hand it a
+       * different name and still be testing it. Putting a stand-in where the
+       * real one would be leaves every line of the path alone.
+       */
+      const shim = pathx.join(dir, 'claude');
+      fsx.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${cli}" "$@"\n`, { mode: 0o755 });
+      const realPath = process.env.PATH;
+      process.env.PATH = `${dir}:${realPath ?? ''}`;
+
+      t.store.saveConfig({
+        ai: { enabled: true, command: 'claude', args: [], timeoutMs: 30_000, research: false },
+      } as never);
+
+      const app = express();
+      app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+
+      const res = await request(app).post('/api/ai/read-material').send({}).expect(200);
+      expect(res.body.executed).toBe(true);
+      // Said plainly, because the whole arrangement depends on it being true.
+      expect(res.body.saved).toBe(false);
+
+      const entries = res.body.proposal.entries as { id: string; bullets: { text: string }[] }[];
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.id).toBe('exp_vega');
+      // The invented one was refused; the quoted one is there.
+      expect(entries[0]?.bullets).toHaveLength(1);
+      expect(entries[0]?.bullets[0]?.text).toContain('Kafka-backed ingest pipeline');
+
+      // And nothing reached the store.
+      expect(t.store.load().entries.some((e) => e.id === 'exp_vega')).toBe(false);
+
+      process.env.PATH = realPath;
+      fsx.rmSync(dir, { recursive: true, force: true });
+    } finally {
+      t.cleanup();
+    }
+  }, 40_000);
+
+  it('says what to do when there is nothing to read', async () => {
+    const express = (await import('express')).default;
+    const request = (await import('supertest')).default;
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+    const t = makeTempStore();
+    try {
+      for (const s of t.store.loadSamples()) t.store.deleteSample(s.id);
+      const app = express();
+      app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+      const res = await request(app).post('/api/ai/read-material').send({}).expect(400);
+      expect(res.body.error).toContain('Voice tab');
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it('says plainly when the configured command cannot take tools', async () => {
+    const express = (await import('express')).default;
+    const request = (await import('supertest')).default;
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+    const t = makeTempStore();
+    try {
+      t.store.saveSample({
+        id: 'old-resume',
+        title: 'old-resume.pdf',
+        kind: 'resume',
+        createdAt: new Date().toISOString(),
+        text: RESUME_DOC.text,
+      });
+      t.store.saveConfig({ ai: { enabled: true, command: 'agy', args: [], timeoutMs: 1000 } } as never);
+      const app = express();
+      app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+      const res = await request(app).post('/api/ai/read-material').send({}).expect(400);
+      expect(res.body.error).toContain('Claude Code');
+      expect(res.body.error).toContain('"agy"');
+    } finally {
+      t.cleanup();
+    }
+  });
+});

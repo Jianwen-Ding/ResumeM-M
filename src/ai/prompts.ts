@@ -1162,3 +1162,115 @@ function howToUseTheWritingTools(): string[] {
     'Nothing you print outside a tool call is kept, so there is no reason to print anything.',
   ];
 }
+
+/**
+ * One run for the whole application, when the writing tools are attached.
+ *
+ * The Workspace used to make one AI run for the letter and then one more for
+ * every question — four runs for a form with three questions, each of them
+ * minutes long, and none of them able to see what the others wrote. Which is
+ * how an application ends up saying two different things about why you want
+ * the job: the letter answers it one way and question two answers it another,
+ * and nothing ever compared them.
+ *
+ * With tools there is no reason for that. `read_work` says what is wanted and
+ * what is already written, `save_letter` and `save_answer` take them one at a
+ * time, and the model holds the whole application in one head while it does.
+ * It is also three quarters cheaper.
+ */
+export function applicationWritingPrompt(data: StoreData, resume: ResolvedResume, job: TailorContext): string {
+  return [
+    preamble(data),
+    '',
+    '## Task: write this application',
+    'Write the cover letter and the answers this form is asking for, in the voice described above.',
+    'Call read_work first — it says which of them are wanted, and shows anything this person has',
+    'already typed, which is theirs and must be built on rather than replaced.',
+    '',
+    'The letter and the answers are read together by one person. Do not answer the same question',
+    'twice in two different ways: if the letter already says why this role, the answer to "why this',
+    'role" is the short version of that, not a second attempt at it.',
+    '',
+    '### What the letter does',
+    '- Three or four paragraphs, 200–320 words.',
+    '- Opening: why this posting in particular, naming something concrete from it.',
+    '- Middle: one or two pieces of work from the resume, chosen because this posting asks for them.',
+    '  Say what the problem was and what changed. Check every metric with check_claim.',
+    '- Close: what they want out of the role, in their own terms.',
+    '',
+    '### What never appears',
+    '- A sentence that would be true of any applicant for any job.',
+    '- Near-verbatim resume bullets, or a claim the resume does not carry.',
+    '- passionate, excited, thrilled, proven track record, leverage, dynamic, fast-paced.',
+    '',
+    employerNaming(job.company),
+    '',
+    mayLookThingsUp(data, { company: job.company, jobTitle: job.jobTitle }),
+    '',
+    '## How to do it',
+    '',
+    '1. `read_posting`, `read_resume`, `read_work`.',
+    '2. `find_my_letters` and `find_my_answers` — what they have written before. Adapt rather than',
+    '   starting over where one of them already says the thing.',
+    '3. `check_claim` for anything you are about to say they did, and for every number.',
+    '4. `save_letter`, then `save_answer` for each question.',
+    '5. `finish`.',
+    '',
+    'Nothing you print outside a tool call is kept.',
+    '',
+    '## Posting',
+    companyLine(job.company),
+    job.jobTitle ? `Role: ${job.jobTitle}` : 'Role: not stated on the page.',
+    job.jobDescription.slice(0, 8000),
+    '',
+    '## Resume',
+    resumeAsText(resume),
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * Reading a pile of the user's own material into a proposal.
+ *
+ * Short, because the tools carry the instructions that matter and repeating
+ * them here would give the model two copies to disagree with each other
+ * about. What belongs in the prompt is the thing the tools cannot say:
+ * whose material this is, and what "read it" means as against "improve it".
+ */
+export function readMaterialPrompt(data: StoreData, files: { name: string; kind?: string }[]): string {
+  return [
+    preamble(data),
+    '',
+    '## Task: read their material into their store',
+    '',
+    `${data.profile.name ?? 'This person'} has handed over ${plural(files.length, 'file')} of their own writing:`,
+    ...files.map((f) => `- ${f.name}${f.kind ? ` (${f.kind})` : ''}`),
+    '',
+    'Read them, and propose the entries, bullets and alternate wordings that are in them. You are',
+    'reading what they wrote, not writing it for them — every bullet has to quote the sentence in',
+    'the material it is a rewording of, and the quote is checked. A claim with nothing behind it',
+    'does not go in, however plausible it is and however much the file seems to imply it.',
+    '',
+    'Rewording is allowed and expected: a resume line is shorter and more specific than the same',
+    'thing in a cover letter, and pulling the metric forward is exactly the job. Inventing is not.',
+    'If a file says "improved performance considerably", that is what it says — do not turn it into',
+    'a percentage.',
+    '',
+    'Nothing you propose is saved. It goes to them, entry by entry, to accept or decline, so propose',
+    'what you actually found rather than what would look best.',
+    '',
+    '## How to do it',
+    '',
+    '1. `read_store` — what they already have. Do not propose it twice.',
+    '2. `list_documents`, then `read_document` on each, all the way through.',
+    '3. `propose_entry`, then `propose_bullet` for each line of it.',
+    '4. `propose_alternate` where the material words something they already have better than they do.',
+    '5. `review_proposal`, then `finish` — saying anything you noticed and could not act on.',
+  ].join('\n');
+}
+
+/** "1 file" / "3 files", so a prompt does not say "1 files". */
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}

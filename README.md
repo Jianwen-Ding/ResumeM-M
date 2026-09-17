@@ -463,6 +463,23 @@ of — checked, not requested. A model that has to point at what it is
 paraphrasing cannot invent a job, which is the difference between "read what I
 wrote" and "write me a resume".
 
+It runs from **Voice & AI → Read these into entries**, over the files already
+in your corpus, and shows you each proposal beside the sentence it came from:
+
+```
+From your material — Vega Analytics
+Backend Engineer · 2023–2024
+
+  Built a Kafka-backed ingest pipeline handling 2M events a day
+    from your material: "Built a Kafka-backed ingest pipeline handling 2M events a day."
+
+                                            [ Skip ]  [ Add it ]
+```
+
+One at a time, on purpose. Eleven proposals behind a single "Add them all" is
+eleven decisions collapsed into one, which is how a line nobody read ends up
+on a resume.
+
 ---
 
 ## Application tracking

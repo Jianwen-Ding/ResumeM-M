@@ -2002,6 +2002,141 @@ async function draftEntryWithAi(kind) {
 }
 
 /** Show what came back and let it be edited before anything is written. */
+/**
+ * Read everything in the corpus into a proposal, and offer it one at a time.
+ *
+ * One at a time is the whole design. A model that has read four files and
+ * proposes eleven entries is proposing eleven decisions, and a single "Add
+ * them all" makes those eleven into one — which is how a resume ends up with
+ * a line nobody read on it. Each is shown with the sentence in the material it
+ * came from, because "where did this come from" is the only question worth
+ * asking about a bullet you did not write.
+ */
+async function readMaterial(notes) {
+  const stop = showAiProgress(notes, 'Reading your material', () => showTab('voice'));
+  let result;
+  try {
+    result = await api('/ai/read-material', { method: 'POST', body: JSON.stringify({}) });
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+    return;
+  } finally {
+    stop();
+  }
+
+  if (!result.executed) {
+    setChildren(notes, el('div', {}, [
+      el('p', { textContent: 'The AI is switched off, so nothing was read. Turn it on under Voice & AI.' }),
+      advanced('Show what it would have been asked', promptBlock(result.prompt)),
+    ]));
+    return;
+  }
+
+  const proposal = result.proposal ?? {};
+  const entries = proposal.entries ?? [];
+  const alternates = proposal.alternates ?? [];
+
+  if (entries.length === 0 && alternates.length === 0) {
+    setChildren(notes, el('div', {}, [
+      el('p', {
+        textContent:
+          `Read ${plural(result.read?.length ?? 0, 'file')} and found nothing new to add — which usually means ` +
+          'what is in them is already in your store.',
+      }),
+      proposal.notes ? el('p', { className: 'hint', textContent: proposal.notes }) : null,
+    ]));
+    return;
+  }
+
+  setChildren(notes, el('div', {}, [
+    el('p', {
+      textContent:
+        `Read ${plural(result.read?.length ?? 0, 'file')}. ` +
+        `${plural(entries.length, 'entry')} and ${plural(alternates.length, 'other wording')} to look at. ` +
+        'Nothing is saved yet.',
+    }),
+    proposal.notes ? el('p', { className: 'hint', textContent: proposal.notes }) : null,
+  ]));
+
+  let added = 0;
+  for (const entry of entries) {
+    const accepted = await showModal(
+      `From your material — ${entry.title}`,
+      el('div', {}, [
+        el('p', {
+          className: 'hint',
+          textContent: [entry.subtitle, entry.dates, entry.location].filter(Boolean).join(' · ') || entry.kind,
+        }),
+        el('ul', {}, (entry.bullets ?? []).map((b) =>
+          el('li', {}, [
+            el('div', { textContent: b.text }),
+            // Where it came from, which is the only question worth asking
+            // about a line you did not write.
+            el('div', { className: 'hint', textContent: `from your material: “${b.source}”` }),
+          ]),
+        )),
+        el('p', { className: 'hint', textContent: 'Every wording is saved unreviewed, so you can see what you have not read yet.' }),
+      ]),
+      { okLabel: 'Add it', showCancel: true, cancelLabel: 'Skip' },
+    );
+    if (!accepted) continue;
+
+    let id = entry.id;
+    for (let n = 2; state.store.entries.some((e) => e.id === id); n++) id = `${entry.id}_${n}`;
+    describeNext(`adding "${entry.title}" from your material`);
+    await saveEntry(
+      {
+        id,
+        kind: entry.kind,
+        title: entry.title,
+        ...(entry.subtitle ? { subtitle: entry.subtitle } : {}),
+        ...(entry.dates ? { dates: entry.dates } : {}),
+        ...(entry.location ? { location: entry.location } : {}),
+        bullets: (entry.bullets ?? []).map((b, i) => ({
+          id: `${id}_b${i + 1}`,
+          default: 'v_read',
+          variants: [{ id: 'v_read', label: b.label || 'From your material', text: b.text, suggested: true }],
+        })),
+      },
+      `Added "${entry.title}" from your material`,
+    );
+    added++;
+  }
+
+  for (const alt of alternates) {
+    const entry = state.store.entries.find((e) => (e.bullets ?? []).some((b) => b.id === alt.bulletId));
+    const bullet = entry?.bullets?.find((b) => b.id === alt.bulletId);
+    if (!bullet) continue;
+    const accepted = await showModal(
+      'Another way you have put it',
+      el('div', {}, [
+        el('p', { className: 'hint', textContent: 'The line you have now:' }),
+        el('p', { textContent: (bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0])?.text ?? '' }),
+        el('p', { className: 'hint', textContent: 'From your material:' }),
+        el('p', { textContent: alt.text }),
+        el('div', { className: 'hint', textContent: `quoted from: “${alt.source}”` }),
+      ]),
+      { okLabel: 'Keep both', showCancel: true, cancelLabel: 'Skip' },
+    );
+    if (!accepted) continue;
+    describeNext('adding a wording from your material');
+    await saveEntry(
+      {
+        ...entry,
+        bullets: entry.bullets.map((b) =>
+          b.id !== alt.bulletId
+            ? b
+            : { ...b, variants: [...b.variants, { id: `v_read_${Date.now().toString(36)}`, label: alt.label || 'From your material', text: alt.text, suggested: true }] },
+        ),
+      },
+      'Added a wording from your material',
+    );
+    added++;
+  }
+
+  setStatus(added ? `Added ${plural(added, 'thing')} from your material` : 'Nothing added');
+}
+
 async function reviewDraftedEntry(entry, repo, kind) {
   const lines = (entry.bullets ?? []).flatMap((b) => b.variants.map((v) => `${v.label}: ${v.text}`));
   const accepted = await showModal(
@@ -4438,6 +4573,36 @@ async function loadVoice() {
     }),
   );
 
+  /*
+   * And the offer to read them.
+   *
+   * These files are already the material a resume is made of — an old resume,
+   * the cover letters, a README. Typing the entries out of them by hand is
+   * the evening this saves, and the button belongs beside the files rather
+   * than three tabs away from them.
+   */
+  const materialNotes = $('#read-material-notes');
+  const row = $('#read-material-row');
+  if (row) {
+    const count = (data.samples?.length ?? 0) + (data.context?.used?.length ?? 0);
+    row.hidden = count === 0;
+    setChildren(
+      row,
+      aiButton({
+        className: '',
+        label: 'Read these into entries',
+        title:
+          'Read everything here and propose the entries, bullets and alternate wordings in it. ' +
+          'Nothing is saved: you accept them one at a time',
+        onclick: () => readMaterial(materialNotes),
+      }),
+      el('span', {
+        className: 'hint',
+        textContent: 'Nothing is saved — you look at every line before it goes in.',
+      }),
+    );
+  }
+
   // Samples the user pasted in are editable; the rest are shown as what they
   // are so it is clear the corpus is bigger than this list.
   const derived = data.context.used.filter((u) => !data.samples.some((x) => x.title === u.title));
@@ -5608,11 +5773,14 @@ function renderDiff(diff) {
  * Modals                                                              *
  * ------------------------------------------------------------------ */
 
-function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false } = {}) {
+function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false, cancelLabel = 'Cancel' } = {}) {
   $('#modal-title').textContent = title;
   $('#modal-content').replaceChildren(content);
   $('#modal-note').textContent = note;
   $('#modal-cancel').style.display = showCancel ? '' : 'none';
+  // "Skip" and "Cancel" are different promises when there are eleven of these
+  // to get through: one moves on, the other sounds like it stops.
+  $('#modal-cancel').textContent = cancelLabel;
   $('#modal-ok').textContent = okLabel;
   $('#modal').classList.remove('hidden');
   return new Promise((resolve) => {

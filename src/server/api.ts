@@ -7,7 +7,9 @@ import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js'
 import {
   answerPrompt,
   bulletFeedbackPrompt,
+  applicationWritingPrompt,
   coverLetterPrompt,
+  readMaterialPrompt,
   resumeAsText,
   entryFeedbackPrompt,
   feedbackPrompt,
@@ -24,6 +26,7 @@ import { AI_PRESETS, AI_TASKS, configForTask } from '../ai/presets.js';
 import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
 import { readState } from '../mcp/main.js';
 import type { SessionState } from '../mcp/session.js';
+import type { AuthoringState } from '../mcp/authoring.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
@@ -1039,6 +1042,98 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const result = await runAgent(configForTask(data.config, 'review'), prompt);
       res.json(result);
+    }),
+  );
+
+  /**
+   * Read everything you have handed over into a proposal.
+   *
+   * The evening this saves is the first one. Getting started means having an
+   * old resume, three cover letters, a project README and a performance
+   * review, and typing the entries out of them by hand — while the files
+   * themselves are already sitting in the corpus, read to text, because
+   * `rmm voice add` and the Voice tab put them there.
+   *
+   * Nothing is written. The run builds a proposal and this hands it back; the
+   * editor asks, entry by entry. That is the same rule as every other place
+   * the AI touches resume text, applied to a larger unit — and it is why this
+   * can be allowed to write at all.
+   */
+  api.post(
+    '/ai/read-material',
+    handler(async (req, res) => {
+      const { sampleIds } = req.body as { sampleIds?: string[] };
+      const data = store.load();
+
+      const samples = store
+        .loadSamples()
+        .filter((sample) => !sample.archived)
+        .filter((sample) => !sampleIds?.length || sampleIds.includes(sample.id))
+        .filter((sample) => sample.text.trim().length > 40);
+
+      if (samples.length === 0) {
+        throw new Error(
+          'There is nothing to read. Drop your old resume, your cover letters, or anything else you have ' +
+            'written onto the Voice tab first — this reads what is there.',
+        );
+      }
+
+      if (!canWire(data.config.ai.command) || serverEntry(mcpDir) === null) {
+        throw new Error(
+          `Reading material needs an AI command that can take tools. The presets that can are ` +
+            `${AI_PRESETS.filter((p) => ['claude', 'codex', 'gemini'].includes(p.command)).map((p) => p.label).join(', ')}. ` +
+            `Yours is "${data.config.ai.command}".`,
+        );
+      }
+
+      const documents = samples.map((sample) => ({
+        id: sample.id,
+        name: sample.title,
+        kind: sample.kind,
+        text: sample.text,
+      }));
+
+      const existing = {
+        entryIds: data.entries.map((e) => e.id),
+        bulletIds: data.entries.flatMap((e) => (e.bullets ?? []).map((b) => b.id)),
+        skillGroups: data.skillGroups.map((g) => ({ id: g.id, name: g.name })),
+      };
+
+      const agent = await runAgent(
+        configForTask(data.config, 'author'),
+        readMaterialPrompt(data, documents.map((d) => ({ name: d.name, kind: d.kind }))),
+        {
+          wire: (sandbox, command) =>
+            wireUp(
+              sandbox,
+              command,
+              {
+                kind: 'author',
+                data,
+                resume: resolveResume(defaultBaseId(data.resumes) ?? data.resumes[0]?.id ?? '', data),
+                posting: { description: '' },
+                documents,
+                existing,
+              },
+              serverEntry(mcpDir),
+            ),
+          read: (out) => readState(out),
+        },
+      );
+
+      if (!agent.executed) {
+        res.json({ executed: false, prompt: agent.output, proposal: null });
+        return;
+      }
+
+      const proposal = agent.tools as AuthoringState | undefined;
+      res.json({
+        executed: true,
+        read: samples.map((s) => ({ id: s.id, title: s.title })),
+        proposal: proposal ?? null,
+        // Said plainly, because the whole arrangement depends on it being true.
+        saved: false,
+      });
     }),
   );
 
@@ -2228,6 +2323,43 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let countAnswers = false;
 
       /*
+       * One run for the whole application, where the CLI can take the tools.
+       *
+       * This used to be one AI run for the letter and one more for every
+       * question — four runs for a form with three, each of them minutes long,
+       * and none able to see what the others wrote. Which is how an
+       * application ends up saying two different things about why you want the
+       * job. The loops below still exist: they are what happens when there are
+       * no tools, and they are what fills in anything this run left.
+       */
+      const canUseTools = canWire(data.config.ai.command) && serverEntry(mcpDir) !== null;
+      let written: { letter?: string; answers?: Record<string, string> } | undefined;
+
+      if (canUseTools && data.config.ai.enabled && (what === 'letter' || what === 'questions' || what === 'all')) {
+        const resumeId = draft.resumeId ?? data.resumes[0]?.id;
+        const wantsLetter = (what === 'letter' || what === 'all') && draft.coverLetter.required
+          && (!draft.coverLetter.edited || force);
+        const pending = what === 'letter'
+          ? []
+          : (questionId ? draft.questions.filter((q) => q.id === questionId) : draft.questions)
+              .filter((q) => force || Boolean(questionId) || (!q.edited && !q.answer.trim()));
+
+        if (resumeId && (wantsLetter || pending.length > 0)) {
+          const resolved = resolveResume(resumeId, data);
+          const agent = await runAgent(
+            configForTask(data.config, 'write'),
+            applicationWritingPrompt(data, resolved, job),
+            writingTools(data, resolved, job, {
+              coverLetter: { required: wantsLetter, body: draft.coverLetter.body },
+              questions: pending,
+            }),
+          );
+          const state = agent.tools as { letter?: string; answers?: Record<string, string> } | undefined;
+          if (state?.letter?.trim() || Object.keys(state?.answers ?? {}).length > 0) written = state;
+        }
+      }
+
+      /*
        * What the letter step says it did, held back until the merge below has
        * decided whether it actually happened. Pushed as it went, the reply read
        * "Cover letter drafted in your voice." immediately above "You edited the
@@ -2243,7 +2375,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         } else {
           const resumeId = draft.resumeId ?? data.resumes[0]?.id;
           const prior = relevantLetters(data.coverLetters, { company: draft.company, role: draft.role });
-          if (resumeId) {
+          if (written?.letter?.trim()) {
+            draft.coverLetter.body = written.letter.trim();
+            letterNotes.push('Cover letter drafted in your voice.');
+          } else if (resumeId) {
             const agent = await runAgent(
               configForTask(data.config, 'write'),
               coverLetterPrompt(data, resolveResume(resumeId, data), job, prior),
@@ -2289,6 +2424,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         for (const q of wanted) {
           if (q.edited && !overwrite) continue;
           if (q.answer.trim() && q.source === 'bank' && !overwrite) continue;
+
+          const fromTools = written?.answers?.[q.id]?.trim();
+          if (fromTools) {
+            q.answer = fromTools;
+            q.source = 'ai';
+            q.needsReview = undefined;
+            continue;
+          }
 
           const match = matchAnswer(q.question, data.answers);
           if (match.confident && !overwrite) {
