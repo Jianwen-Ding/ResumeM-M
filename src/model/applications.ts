@@ -330,7 +330,13 @@ export function stats(apps: Application[]): TrackerStats {
   const since = (days: number) =>
     apps.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
 
-  const responded = apps.filter((a) => ['oa', 'interview', 'offer'].includes(a.status)).length;
+  /*
+   * A response is somebody coming back to you. `closed` is not counted: it
+   * covers a rejection, which is a reply, and being ghosted, which is the
+   * absence of one, and the tracker cannot tell them apart — counting it
+   * either way would state something the data does not know.
+   */
+  const responded = apps.filter((a) => ['interview', 'offer'].includes(a.status)).length;
   // "Applying" has not been sent yet, so it cannot have drawn a response.
   const sent = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying').length;
 

@@ -252,17 +252,32 @@ export interface ResolvedResume {
  * Application tracking                                                *
  * ------------------------------------------------------------------ */
 
+/**
+ * Where an application has got to — five rungs and an ending.
+ *
+ * There were nine, and the extra four were distinctions nobody acts on: an
+ * online assessment and an interview are both "they came back and there is
+ * something to prepare for"; rejected, ghosted and withdrawn are all "this
+ * one is over" and differ only in whose fault it was. A dropdown of nine
+ * makes you classify instead of record, and the tracker is worth having only
+ * if updating it is free.
+ *
+ * The ladder is what remains — it goes one way, and each rung means something
+ * different has to happen next.
+ */
 export type ApplicationStatus =
+  /** Found, not started. */
   | 'interested'
   /** Being worked on — the letter written, the answers drafted — but not sent. */
   | 'applying'
+  /** Out of your hands. */
   | 'applied'
-  | 'oa'
+  /** They came back: a call, an assessment, a panel. Something to prepare for. */
   | 'interview'
+  /** They said yes. */
   | 'offer'
-  | 'rejected'
-  | 'ghosted'
-  | 'withdrawn';
+  /** Over, however it ended. The history says which. */
+  | 'closed';
 
 export interface Application {
   id: string;

@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { Repo, cloneRepo } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
-import { createApi, createPdfRouter } from './api.js';
+import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
 import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
@@ -36,7 +36,7 @@ function projectSession(store: Store) {
   const repo = Repo.forStore(store.root);
   const assets = new Assets(store, repo);
   const jobs = new Jobs();
-  return { store, assets, jobs, api: createApi({ store, repo, jobs }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store) };
+  return { store, assets, jobs, api: createApi({ store, repo, jobs }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store), current: createCurrentRouter(store) };
 }
 
 export async function startServer(opts: ServerOptions = {}) {
@@ -177,7 +177,18 @@ export async function startServer(opts: ServerOptions = {}) {
   app.get('/health', (req, res) => {
     const ai = active?.store.loadConfig().ai;
     const fresh = req.query.fresh !== undefined ? stampNow() : undefined;
+    /*
+     * The output folder as well as the save.
+     *
+     * Two saves side by side — `~/resumes/personal` and `~/resumes/work` —
+     * resolve `out` to the same place, because it is a sibling of the save
+     * rather than part of it. They then share `out/current`, whose manifest
+     * says which files it put there, and each one tidies away the other's.
+     * Nothing in a single server can see that; a caller running several can,
+     * and the test pool does exactly this.
+     */
     res.json({ ok: true, service: 'resumem-m', build: buildStamp, dataDir: active?.store.root ?? null,
+      outDir: active?.store.outDir() ?? null,
       ...(fresh === undefined ? {} : { onDisk: fresh, stale: fresh !== buildStamp }),
       projectOpen: Boolean(active), ai: { enabled: ai?.enabled ?? false, command: ai?.command ?? '', configured: Boolean(ai?.command?.trim()) } });
   });
@@ -253,6 +264,14 @@ export async function startServer(opts: ServerOptions = {}) {
   app.use('/pdf', (req, res, next) => {
     if (!active) { res.status(409).json({ error: 'No Save Open' }); return; }
     active.pdf(req, res, next);
+  });
+  /*
+   * The flat folder as a page, so "where are the files" has an answer you can
+   * click from a job board rather than only a path you can paste.
+   */
+  app.use('/current', (req, res, next) => {
+    if (!active) { res.status(409).type('html').send('<p>No save is open in ResumeM-M.</p>'); return; }
+    active.current(req, res, next);
   });
   app.get('/vendor/marked.js', (_req, res) => res.sendFile(require.resolve('marked')));
   app.get('/vendor/purify.mjs', (_req, res) => res.sendFile(path.join(path.dirname(require.resolve('dompurify')), 'purify.es.mjs')));

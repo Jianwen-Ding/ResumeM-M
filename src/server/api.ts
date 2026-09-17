@@ -37,7 +37,7 @@ import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, fingerprint, slug, stats } from '../model/applications.js';
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
-import { syncCurrent } from '../model/current.js';
+import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
@@ -887,7 +887,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // The letter is set to match the resume it will be sent with, so the
       // pair looks like one document rather than two — which now includes the
       // name at the top, since that is a choice the resume makes.
-      const sentWith = body.resumeId ? resolveResume(String(body.resumeId), data) : undefined;
+      /*
+       * A resume it cannot find is not a reason to refuse the letter.
+       *
+       * The resume is only here for the layout and the name at the top, and
+       * the browser extension asks for this preview while holding a proposal
+       * the store has not been given yet — an id that resolves to nothing
+       * until the folder is prepared. Throwing there would mean the letter
+       * cannot be looked at on precisely the screen where it is being
+       * written, to save a difference in margins.
+       */
+      let sentWith;
+      try {
+        sentWith = body.resumeId ? resolveResume(String(body.resumeId), data) : undefined;
+      } catch {
+        sentWith = undefined;
+      }
       const layout = sentWith?.layout ?? DEFAULT_LAYOUT;
 
       const result = await compileLetter(
@@ -1417,7 +1432,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * employer's form with nine kilobytes beginning "You are helping with a
        * resume and job-search assistant", and carrying, further down, every
        * cover letter the user had ever saved and their whole writing corpus.
-       * "Save application folder" then wrote that into application-answers.md
+       * "Prepare to submit" then wrote that into application-answers.md
        * and copied it to the upload folder.
        *
        * The separate `prompt` field is what /ai/draft-entry and
@@ -1950,6 +1965,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       const result = await buildBundle(store, body);
+
+      /*
+       * And the space it was being written in stops looking like unfinished
+       * work — marked, never deleted.
+       *
+       * "Prepare to submit" files the application as sent, so a space left at
+       * `drafting` would sit in the Workspace next to a tracker row that says
+       * it went out, and the two lists would disagree about the same job.
+       * Marking is not closing: a sent space is still listed and still
+       * editable, under the live ones, until `retireStaleDrafts` lets it go a
+       * fortnight after the last keystroke. A portal that rejects the upload,
+       * or a question that comes back a week later, both want the text rather
+       * than the snapshot of it.
+       */
+      const opened = store.getDraft(result.application.id);
+      if (opened && result.application.status === 'applied' && opened.status !== 'submitted') {
+        store.saveDraft({ ...opened, status: 'submitted', updatedAt: new Date().toISOString() });
+      }
+
       // The same files also go to the flat folder, which is the one a portal's
       // file picker should be pointed at — the archive is for later.
       const current = syncCurrent(store);
@@ -2000,9 +2034,41 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       return store.saveDraft(fresh);
     });
 
+  /**
+   * How long a sent application stays in the Workspace before it lets itself
+   * out.
+   *
+   * Sending is not the end of writing: the portal rejects the upload, the
+   * recruiter asks for the letter again, a question comes back a week later
+   * worded differently. So a space that has been sent stays open and editable
+   * — just out of the way, under the ones still being written.
+   *
+   * It cannot stay forever, or the list becomes an archive of everything ever
+   * applied for, which the tracker already is and does better. Two weeks
+   * without a keystroke is the line: long enough to cover the week-later
+   * follow-up, short enough that the list is still a list of live work. What
+   * is lost is the editing surface, not the content — the application record
+   * keeps the letter, the answers and the files exactly as they went out.
+   */
+  const KEEP_SENT_FOR_DAYS = 14;
+
+  /** Let go of the spaces that have been sent and untouched since. */
+  const retireStaleDrafts = (): void => {
+    const cutoff = Date.now() - KEEP_SENT_FOR_DAYS * 24 * 60 * 60 * 1000;
+    for (const draft of store.loadDrafts()) {
+      if (draft.status !== 'submitted') continue;
+      const touched = Date.parse(draft.updatedAt ?? '');
+      // An unparseable date is not a reason to delete somebody's work.
+      if (Number.isFinite(touched) && touched < cutoff) store.deleteDraft(draft.id);
+    }
+  };
+
   api.get(
     '/workspace',
-    handler(async (_req, res) => res.json({ drafts: store.loadDrafts() })),
+    handler(async (_req, res) => {
+      retireStaleDrafts();
+      res.json({ drafts: store.loadDrafts() });
+    }),
   );
 
   api.get(
@@ -2632,10 +2698,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!draft) throw new Error(`No draft "${id}"`);
       if (!draft.resumeId) throw new Error('This draft has no resume attached');
 
-      const { saveAnswersToBank = true, keepDraft = false } = req.body as {
-        saveAnswersToBank?: boolean;
-        keepDraft?: boolean;
-      };
+      // `keepDraft` used to be here, asking whether to keep the space open
+      // after sending. Every space is kept now, so a caller still sending it
+      // is agreeing with what happens anyway.
+      const { saveAnswersToBank = true } = req.body as { saveAnswersToBank?: boolean };
 
       const answered = draft.questions.filter((q) => q.answer.trim());
       const result = await buildBundle(store, {
@@ -2719,14 +2785,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const warnings: string[] = [];
       const typedSince = changedText(store.getDraft(id), draft);
-      if (keepDraft || typedSince.length) {
-        await reviseDraft(id, `Mark ${draft.company} as submitted`, (fresh) => {
-          fresh.status = 'submitted';
-        });
-      } else {
-        store.deleteDraft(id);
-      }
-      if (typedSince.length && !keepDraft) {
+      /*
+       * Marked, never deleted — `keepDraft` is now what it always was for the
+       * caller that asked, and the default as well.
+       *
+       * Sending it used to close the space, which is the harsher reading of
+       * "finished": the letter and the answers went behind a tracker row, and
+       * going back to them for the follow-up meant reading a snapshot rather
+       * than opening the thing you wrote. It stays, below the live ones, and
+       * `retireStaleDrafts` lets it go two weeks later if nobody comes back.
+       */
+      await reviseDraft(id, `Mark ${draft.company} as submitted`, (fresh) => {
+        fresh.status = 'submitted';
+      });
+      if (typedSince.length) {
         warnings.push(
           `The ${typedSince.join(' and ')} changed while this was compiling, so what was sent does ` +
             'not include it. The application is kept open with your latest text — read it, then ' +
@@ -3005,6 +3077,105 @@ function answerId(question: string, taken: AnswerBankItem[]): string {
   const base = `ans_${slug(question).slice(0, 40)}`;
   if (base === 'ans_') return `ans_${fingerprint(question)}`;
   return taken.some((a) => a.id === base) ? `${base}-${fingerprint(question)}` : base;
+}
+
+/**
+ * The flat folder, as a page you can open.
+ *
+ * The path to it has always been printed — in the editor, and in the browser
+ * extension's card next to a button that copies it. Printing a path is the
+ * right answer for the file dialog, which takes one typed or pasted, and no
+ * answer at all for the rest of the time: from a job board, in a browser, the
+ * folder is a string you cannot click. `file://` is not the way out either;
+ * an extension cannot navigate a tab to one without a permission nobody
+ * should grant to read their own resume.
+ *
+ * So the folder is served. One page, listing what is in it, each file opening
+ * in the browser that is already in front of you, and the real path at the
+ * top for the dialog. It is deliberately not the editor: this is the thing
+ * you look at with a portal's upload box open.
+ */
+export function createCurrentRouter(store: Store): Router {
+  const router = express.Router();
+
+  const escape = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  const size = (bytes: number): string =>
+    bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`;
+
+  router.get('/', (_req, res) => {
+    const folder = syncCurrent(store);
+    const rows = folder.files
+      .map((name) => {
+        let bytes = 0;
+        try {
+          bytes = fs.statSync(path.join(folder.dir, name)).size;
+        } catch {
+          // Removed between the listing and the stat: show it without a size
+          // rather than failing the page over one file.
+        }
+        return `<li><a href="/current/${encodeURIComponent(name)}" target="_blank" rel="noopener">${escape(name)}</a>
+          <span class="size">${bytes ? size(bytes) : ''}</span></li>`;
+      })
+      .join('\n');
+
+    const empty =
+      folder.inFlight > 0
+        ? 'Nothing built yet. Build an application and its files land here.'
+        : 'Nothing is mid-application, so there is nothing to upload.';
+
+    res.type('html').send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Ready to upload</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 32px; }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.where { color: #6b6b76; margin: 0 0 14px; }
+  .strip { display: flex; gap: 12px; align-items: center; background: #f6f6f8; border-radius: 8px; padding: 8px 12px; margin-bottom: 20px; }
+  code { flex: 1; font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; color: #4a4a55; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { display: flex; gap: 12px; align-items: baseline; padding: 10px 12px; border: 1px solid #e3e3e8; border-radius: 8px; margin-bottom: 8px; }
+  li a { flex: 1; text-decoration: none; color: #1a56db; }
+  li a:hover { text-decoration: underline; }
+  .size { color: #8a8a94; font-size: 13px; }
+  .empty { color: #6b6b76; border: 1px dashed #d8d8de; border-radius: 8px; padding: 20px; text-align: center; }
+  button { font: inherit; padding: 4px 10px; border: 1px solid #d8d8de; border-radius: 6px; background: #fff; cursor: pointer; }
+</style></head>
+<body><main>
+  <h1>Ready to upload</h1>
+  <p class="where">Everything for the ${folder.applications === 1 ? 'application' : `${folder.applications} applications`}
+    still being sent, in one folder, already named.</p>
+  <div class="strip"><code id="path">${escape(folder.dir)}</code><button id="copy">Copy the path</button></div>
+  ${rows ? `<ul>${rows}</ul>` : `<div class="empty">${empty}</div>`}
+</main>
+<script>
+  document.getElementById('copy').onclick = async (ev) => {
+    await navigator.clipboard.writeText(document.getElementById('path').textContent);
+    ev.target.textContent = 'Copied';
+  };
+</script>
+</body></html>`);
+  });
+
+  router.get('/:name', (req, res) => {
+    const folder = path.join(store.outDir(), CURRENT_DIR);
+    const name = path.basename(String(req.params.name));
+    const file = path.join(folder, name);
+    if (!file.startsWith(folder) || !fs.existsSync(file)) {
+      res.status(404).type('html').send('<p>That file is not in the folder any more.</p>');
+      return;
+    }
+    // Inline, because the point is to look at it: a PDF opens in the viewer
+    // and a .txt cover letter opens as text, both in the tab.
+    if (name.toLowerCase().endsWith('.pdf')) res.type('application/pdf');
+    else if (name.toLowerCase().endsWith('.txt')) res.type('text/plain; charset=utf-8');
+    res.sendFile(file);
+  });
+
+  return router;
 }
 
 /** Serve generated PDFs, constrained to the output directory. */

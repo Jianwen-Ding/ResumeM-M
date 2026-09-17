@@ -85,6 +85,42 @@ describe('slug and id', () => {
   });
 });
 
+/*
+ * Nine stages became five and an ending, and a store written by the version
+ * with nine has to keep working — nobody's tracker should empty itself
+ * because the vocabulary changed underneath it.
+ */
+describe('the stages that were retired', () => {
+  it('reads an older file into the stages that are left', () => {
+    t.store.saveApplications([
+      { id: 'a', company: 'A', role: 'r', status: 'oa' as never },
+      { id: 'b', company: 'B', role: 'r', status: 'rejected' as never },
+      { id: 'c', company: 'C', role: 'r', status: 'ghosted' as never },
+      { id: 'd', company: 'D', role: 'r', status: 'withdrawn' as never },
+      { id: 'e', company: 'E', role: 'r', status: 'interview' },
+      // Not a stage at all — a typo, or a file from somewhere else.
+      { id: 'f', company: 'F', role: 'r', status: 'maybe?' as never },
+    ]);
+
+    const byId = new Map(t.store.load().applications.map((a) => [a.id, a.status]));
+    // An assessment is an interview stage: they came back, and there is
+    // something to prepare for.
+    expect(byId.get('a')).toBe('interview');
+    // Three ways of being over, which differed only in whose decision it was.
+    expect(byId.get('b')).toBe('closed');
+    expect(byId.get('c')).toBe('closed');
+    expect(byId.get('d')).toBe('closed');
+    expect(byId.get('e')).toBe('interview');
+    expect(byId.get('f')).toBe('interested');
+  });
+
+  it('leaves the file alone until something else writes it', () => {
+    t.store.saveApplications([{ id: 'a', company: 'A', role: 'r', status: 'ghosted' as never }]);
+    t.store.load();
+    expect(fs.readFileSync(path.join(t.dir, 'applications.yaml'), 'utf8')).toContain('ghosted');
+  });
+});
+
 describe('status history', () => {
   beforeEach(() => {
     t.store.saveApplications([
@@ -93,9 +129,9 @@ describe('status history', () => {
   });
 
   it('appends rather than overwriting, so the path through is kept', () => {
-    advance(t.store, 'a1', 'oa', 'online assessment sent');
-    const app = advance(t.store, 'a1', 'interview');
-    expect(app.status).toBe('interview');
+    advance(t.store, 'a1', 'interview', 'online assessment sent');
+    const app = advance(t.store, 'a1', 'offer');
+    expect(app.status).toBe('offer');
     expect(app.history).toHaveLength(2);
     expect(app.history?.[0]?.note).toBe('online assessment sent');
   });
@@ -112,7 +148,7 @@ describe('stats', () => {
   const apps: Application[] = [
     { id: '1', company: 'A', role: 'r', status: 'applied', appliedAt: daysAgo(1) },
     { id: '2', company: 'B', role: 'r', status: 'interview', appliedAt: daysAgo(3) },
-    { id: '3', company: 'C', role: 'r', status: 'rejected', appliedAt: daysAgo(20) },
+    { id: '3', company: 'C', role: 'r', status: 'closed', appliedAt: daysAgo(20) },
     { id: '4', company: 'D', role: 'r', status: 'offer', appliedAt: daysAgo(40) },
     { id: '5', company: 'E', role: 'r', status: 'interested' },
   ];
@@ -268,7 +304,7 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     const result = await bundleFor('Streamly');
     expect(syncCurrent(t.store).files.length).toBeGreaterThan(0);
 
-    advance(t.store, result.application.id, 'rejected');
+    advance(t.store, result.application.id, 'closed');
     const after = syncCurrent(t.store);
     expect(after.files).toEqual([]);
     expect(visible(after.dir)).toEqual([]);
