@@ -3,11 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { Repo } from '../git/repo.js';
+import { Repo, cloneRepo } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
 import { createApi, createPdfRouter } from './api.js';
-import { prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
+import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
@@ -166,9 +166,21 @@ export async function startServer(opts: ServerOptions = {}) {
     if (busy()) { res.status(409).json({ error: 'Wait for current saves, imports, and AI work to finish before changing saves.' }); return; }
     switching = true;
     try {
-      const { dir, mode } = req.body;
-      if (typeof dir !== 'string' || !['open', 'create', 'move'].includes(mode)) throw new Error('Choose Open, Create, or Move and a folder');
-      const next = projectSession(prepareProject(active?.store, dir, mode));
+      const { dir, mode, url } = req.body;
+      if (typeof dir !== 'string' || !['open', 'create', 'move', 'clone'].includes(mode)) {
+        throw new Error('Choose Open, Create, Move or Clone, and a folder');
+      }
+      /*
+       * Cloning is its own path because it is the only one that reaches the
+       * network, takes an unbounded amount of time, and can fail for reasons
+       * that are nothing to do with the folder. It ends in the same place:
+       * a validated store that becomes the open save.
+       */
+      const next = projectSession(
+        mode === 'clone'
+          ? await cloneProject(String(url ?? ''), dir, cloneRepo)
+          : prepareProject(active?.store, dir, mode),
+      );
       rememberProject(next.store.root, preferencesFile, active?.store.root);
       active = next; openedBy = 'selected'; startupError = undefined;
       res.json({ dir: next.store.root, mode });

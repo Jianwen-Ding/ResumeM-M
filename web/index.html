@@ -94,11 +94,15 @@
         <label class="lbl" for="project-recents">Recent Saves</label>
         <select id="project-recents"></select>
         <label class="lbl" for="project-mode">Folder Action</label>
-        <select id="project-mode"><option value="open">Open Existing Save</option><option value="create">Create Blank Save</option><option value="move">Move Current Save</option></select>
+        <select id="project-mode"><option value="open">Open Existing Save</option><option value="create">Create Blank Save</option><option value="clone">Clone Save from Git</option><option value="move">Move Current Save</option></select>
+        <div id="project-url-row" hidden>
+          <label class="lbl" for="project-url">Repository address</label>
+          <input id="project-url" placeholder="git@github.com:you/my-resume-save.git">
+        </div>
         <label class="lbl" for="project-path">Folder to open</label>
         <input id="project-path" placeholder="~/Documents/My Resume Save">
         <div class="toolbar"><button id="project-browse" hidden>Choose Folder…</button><button id="project-switch">Open Save</button></div>
-        <p class="hint">Create and Move use an empty or new folder. Move copies your files and history, switches future saves, and keeps the old folder as a backup.</p>
+        <p class="hint">Create, Clone and Move use an empty or new folder. Move copies your files and history, switches future saves, and keeps the old folder as a backup. Clone brings a save down from the repository you have been pushing it to — on this machine or another one.</p>
         <p id="project-override" class="hint"></p>
         <label class="lbl" for="save-default">Default Save Folder</label>
         <select id="save-default"><option value="">Ask Me on Startup</option></select>

@@ -104,3 +104,69 @@ export function prepareProject(current: Store | undefined, input: string, mode: 
     throw error;
   }
 }
+
+/**
+ * A save is its own git repository, which is exactly why this should exist.
+ *
+ * Keeping the store apart from the source is the whole design — it has its own
+ * lifetime, its own history, and it is the thing you might push somewhere
+ * private. The half that was missing is the other machine: opening it there
+ * meant cloning by hand in a terminal, remembering where you put it, and then
+ * finding that folder in the chooser. Three steps, none of which this tool
+ * helped with, for the thing it was built around.
+ *
+ * Validated as a save, not merely as a clone that worked. A repository that
+ * turns out to hold something else is a mistake worth catching before it is
+ * the open save, and the empty directory it was cloned into goes with it.
+ */
+export async function cloneProject(
+  url: string,
+  into: string,
+  clone: (url: string, dir: string) => Promise<void>,
+): Promise<Store> {
+  const link = url.trim();
+  if (!link) throw new Error('Paste the address of the repository holding the save');
+  /*
+   * Refused rather than passed to git.
+   *
+   * `--upload-pack=…` and friends are options, not addresses, and git reads
+   * them as options wherever they appear. This runs git with a URL the user
+   * pasted, and a pasted string beginning with a dash is either a mistake or
+   * an attempt to turn a clone into "run this program".
+   */
+  if (link.startsWith('-')) throw new Error('That does not look like a repository address');
+  if (!/^(https?:\/\/|git@|ssh:\/\/|git:\/\/|file:\/\/)/i.test(link) && !path.isAbsolute(link)) {
+    throw new Error('Use an https:// or git@ address, or an absolute path to a repository');
+  }
+
+  const expanded = into.startsWith('~/') ? path.join(os.homedir(), into.slice(2)) : into;
+  if (!path.isAbsolute(expanded)) throw new Error('Use an absolute folder path (or ~/...)');
+  const target = canonical(path.resolve(expanded));
+  if (fs.existsSync(target) && (!fs.statSync(target).isDirectory() || fs.readdirSync(target).length)) {
+    throw new Error('Choose an empty or new folder; existing files will not be overwritten');
+  }
+
+  // Staged beside the destination, the way creating and moving are: a clone
+  // that fails halfway must not leave something that looks like a save.
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const stage = fs.mkdtempSync(path.join(path.dirname(target), '.rmm-clone-'));
+  try {
+    await clone(link, stage);
+    if (!fs.existsSync(path.join(stage, 'profile.yaml')) || !fs.existsSync(path.join(stage, 'config.yaml'))) {
+      throw new Error('That repository is not a resume save: it has no profile.yaml and config.yaml at its root.');
+    }
+    const store = new Store(stage);
+    store.load(); // Validate before it becomes the open save.
+
+    // The folders a save needs that git does not carry, because they are empty.
+    fs.mkdirSync(path.join(stage, 'assets', 'inbox'), { recursive: true });
+    fs.mkdirSync(path.join(stage, 'out'), { recursive: true });
+
+    if (fs.existsSync(target)) fs.rmdirSync(target);
+    fs.renameSync(stage, target);
+    return new Store(target);
+  } catch (error) {
+    fs.rmSync(stage, { recursive: true, force: true });
+    throw error;
+  }
+}

@@ -154,6 +154,23 @@ data/
   config.yaml        Engine, AI command, git, output directory
 ```
 
+### It is its own repository
+
+The store is kept apart from this source tree on purpose: it has a different
+lifetime, it is the thing you might push somewhere private, and it should
+survive deleting and re-cloning the code.
+
+Which is also how you get it onto a second machine:
+
+```bash
+rmm clone git@github.com:you/my-resume-save.git ~/Documents/My\ Resume\ Save
+```
+
+or, in the editor, **Save & Files → Folder Action → Clone Save from Git**.
+Either way the clone is staged beside the destination and checked before it
+becomes the open save — a repository that turns out to hold something else is
+refused and the folder it was cloned into goes with it.
+
 ### Variants
 
 A field that can differ between resumes holds its alternates inline:

@@ -4,13 +4,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
-import { Repo } from './git/repo.js';
+import { Repo, cloneRepo } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from './model/location.js';
 import { buildBundle, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
+import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
@@ -34,6 +35,8 @@ const USAGE = `rmm — resume mix-and-match
                                   Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
   rmm save [-m "why"] [--push]    Commit everything in the store to git
+  rmm clone <repo> <folder>       Bring a save down from where it is pushed,
+                                  and open it
   rmm serve [--port 4600]         Start the editor GUI and extension API
 
 Environment:
@@ -309,6 +312,26 @@ async function main(argv: string[]): Promise<number> {
       }
       console.log(`\nAdded ${plural(samples.length, 'sample')}. Fix anything filed wrongly in Voice & AI, or with \`rmm serve\`.`);
       return failed > 0 ? 1 : 0;
+    }
+
+    /**
+     * Bring a save down from wherever it is pushed.
+     *
+     * The same thing the chooser's Clone does, for a machine where opening a
+     * browser first is the wrong order: this is the command you want on a new
+     * laptop, before there is anything to open.
+     */
+    case 'clone': {
+      const url = rest[0];
+      const into = rest[1];
+      if (!url || !into) {
+        console.error('Usage: rmm clone <repository> <folder>');
+        return 1;
+      }
+      const store = await cloneProject(url, into, cloneRepo);
+      rememberProject(store.root);
+      console.log(`Cloned into ${store.root}, and opened it. Run \`rmm serve\` to work on it.`);
+      return 0;
     }
 
     case 'serve': {

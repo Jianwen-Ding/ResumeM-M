@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findProjectRoot, isEmptyStore, resolveStoreDir, seedStore } from '../src/model/location.js';
+import { cloneProject } from '../src/model/projects.js';
 
 describe('resolveStoreDir', () => {
   const original = process.env.RMM_DATA;
@@ -197,5 +198,112 @@ describe('finding the files that ship with the tool', () => {
     fs.mkdirSync(from, { recursive: true });
     expect(findProjectRoot(from)).toBe(path.resolve(from, '..', '..'));
     fs.rmSync(lost, { recursive: true, force: true });
+  });
+});
+
+/**
+ * A save is its own git repository, which is exactly why cloning should
+ * exist: opening it on a second machine meant cloning by hand in a terminal,
+ * remembering where you put it, and then finding that folder in the chooser.
+ */
+describe('cloning a save from a repository', () => {
+  let into: string;
+
+  beforeEach(() => {
+    into = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-clone-')), 'save');
+  });
+
+  /** A stand-in for git: copies a prepared folder into the staging directory. */
+  const copies = (from: string) => async (_url: string, dir: string) => {
+    fs.cpSync(from, dir, { recursive: true });
+  };
+
+  const aSave = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-src-'));
+    fs.writeFileSync(path.join(dir, 'profile.yaml'), 'name: Someone\n');
+    fs.writeFileSync(path.join(dir, 'config.yaml'), 'ai:\n  enabled: false\n');
+    fs.mkdirSync(path.join(dir, 'resumes'));
+    fs.writeFileSync(path.join(dir, 'resumes', 'base.yaml'), 'id: base\nlabel: Base\nbase: true\n');
+    return dir;
+  };
+
+  it('brings the save down and opens it', async () => {
+    const source = aSave();
+    const store = await cloneProject('git@example.com:me/save.git', into, copies(source));
+    expect(store.root).toBe(fs.realpathSync(into));
+    expect(fs.existsSync(path.join(into, 'profile.yaml'))).toBe(true);
+    // The folders a save needs that git does not carry, because they are empty.
+    expect(fs.existsSync(path.join(into, 'assets', 'inbox'))).toBe(true);
+    expect(fs.existsSync(path.join(into, 'out'))).toBe(true);
+  });
+
+  /*
+   * Staged beside the destination, the way creating and moving are: a clone
+   * that fails halfway must not leave something that looks like a save.
+   */
+  it('leaves nothing behind when the clone fails', async () => {
+    await expect(
+      cloneProject('git@example.com:me/save.git', into, async () => {
+        throw new Error('Git could not reach that repository.');
+      }),
+    ).rejects.toThrow(/could not reach/);
+    expect(fs.existsSync(into)).toBe(false);
+    expect(fs.readdirSync(path.dirname(into))).toEqual([]);
+  });
+
+  it('refuses a repository that is not a save, and leaves nothing behind', async () => {
+    const notASave = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-src-'));
+    fs.writeFileSync(path.join(notASave, 'README.md'), '# not a save');
+    await expect(cloneProject('git@example.com:me/x.git', into, copies(notASave))).rejects.toThrow(
+      /not a resume save/,
+    );
+    expect(fs.existsSync(into)).toBe(false);
+  });
+
+  it('will not overwrite a folder that has anything in it', async () => {
+    fs.mkdirSync(into, { recursive: true });
+    fs.writeFileSync(path.join(into, 'mine.txt'), 'x');
+    await expect(cloneProject('git@example.com:me/save.git', into, copies(aSave()))).rejects.toThrow(
+      /empty or new folder/,
+    );
+    expect(fs.readFileSync(path.join(into, 'mine.txt'), 'utf8')).toBe('x');
+  });
+
+  /*
+   * `--upload-pack=…` and friends are options, not addresses, and git reads
+   * them as options wherever they appear. A pasted string beginning with a
+   * dash is either a mistake or an attempt to turn a clone into "run this".
+   */
+  it('refuses an address that is really an option', async () => {
+    let ran = false;
+    await expect(
+      cloneProject('--upload-pack=touch /tmp/pwned', into, async () => {
+        ran = true;
+      }),
+    ).rejects.toThrow(/does not look like a repository address/);
+    expect(ran).toBe(false);
+  });
+
+  it('refuses an address that is not one at all', async () => {
+    for (const bad of ['', '   ', 'my-repo', 'www.github.com/me/save']) {
+      await expect(cloneProject(bad, into, async () => undefined)).rejects.toThrow();
+    }
+  });
+
+  it('takes the addresses people actually paste', async () => {
+    for (const good of [
+      'https://github.com/me/save.git',
+      'git@github.com:me/save.git',
+      'ssh://git@example.com/me/save.git',
+    ]) {
+      const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-clone-')), 'save');
+      await expect(cloneProject(good, dir, copies(aSave()))).resolves.toBeDefined();
+    }
+  });
+
+  it('insists on an absolute destination, the way every other mode does', async () => {
+    await expect(cloneProject('https://example.com/x.git', 'relative/path', copies(aSave()))).rejects.toThrow(
+      /absolute folder path/,
+    );
   });
 });
