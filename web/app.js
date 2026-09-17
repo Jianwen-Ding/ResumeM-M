@@ -4659,9 +4659,41 @@ async function loadSettings() {
       setStatus(err.message, true);
     }
   };
-  const command = el('input', { type: 'text', value: config.ai.command });
-  const args = el('input', { type: 'text', value: (config.ai.args ?? []).join(' ') });
-  const timeout = el('input', { type: 'text', value: String(Math.round(config.ai.timeoutMs / 1000)) });
+  /*
+   * The three fields that wait for the Save button, and therefore the three
+   * that a reload can throw away.
+   *
+   * This whole panel is rebuilt from the server whenever it is shown, and it
+   * is shown every time the Voice tab is opened. A command typed and not yet
+   * saved — which is the normal state of a command, since it is only saved
+   * when you say so — was replaced by the old one by nothing more than
+   * looking at another tab and coming back.
+   *
+   * Half-typed is exactly the state worth keeping here. The reason these
+   * three do not save themselves is that a half-typed command is not a
+   * command; that is an argument for not *running* it, not for deleting it.
+   */
+  const keptIfEdited = (input, fromConfig) =>
+    input && input.value !== input.dataset.saved ? input.value : fromConfig;
+  const wasCommand = box.querySelector('[data-field="ai-command"]');
+  const wasArgs = box.querySelector('[data-field="ai-args"]');
+  const wasTimeout = box.querySelector('[data-field="ai-timeout"]');
+
+  const savedCommand = config.ai.command;
+  const savedArgs = (config.ai.args ?? []).join(' ');
+  const savedTimeout = String(Math.round(config.ai.timeoutMs / 1000));
+
+  const command = el('input', { type: 'text', value: keptIfEdited(wasCommand, savedCommand) });
+  const args = el('input', { type: 'text', value: keptIfEdited(wasArgs, savedArgs) });
+  const timeout = el('input', { type: 'text', value: keptIfEdited(wasTimeout, savedTimeout) });
+  // What the store holds, kept on the element so the next rebuild can tell an
+  // edit from a value that simply came back unchanged.
+  command.dataset.field = 'ai-command';
+  command.dataset.saved = savedCommand;
+  args.dataset.field = 'ai-args';
+  args.dataset.saved = savedArgs;
+  timeout.dataset.field = 'ai-timeout';
+  timeout.dataset.saved = savedTimeout;
 
   const preset = el('select');
   for (const p of AI_PRESETS) preset.append(el('option', { value: p.label, textContent: p.label }));

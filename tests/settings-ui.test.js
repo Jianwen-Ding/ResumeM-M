@@ -87,6 +87,34 @@ describe('the settings panel', () => {
     expect(commandBox().value).toBe('my-own-cli --with-a-flag');
   });
 
+  /*
+   * And across a tab switch, which is the one that actually bit. The panel is
+   * rebuilt from the server every time the Voice tab is opened, so looking at
+   * another tab and coming back was enough to delete a command that had been
+   * typed but — as is normal for a field with a Save button — not yet saved.
+   */
+  it('keeps a command you are still typing across a tab switch', async () => {
+    const command = commandBox();
+    command.value = 'my-own-cli --with-a-flag';
+    command.dispatchEvent(new Event('input'));
+
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(commandBox().value).toBe('my-own-cli --with-a-flag');
+  });
+
+  // The other half: a field nobody has touched must still show what the store
+  // says, or a change made in another window would never arrive in this one.
+  it('still refreshes a command you have not touched', async () => {
+    config.ai = { ...config.ai, command: 'changed-elsewhere' };
+
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.waitFor(() => expect(commandBox().value).toBe('changed-elsewhere'));
+  });
+
   it('still explains what the switch now means', async () => {
     const research = checkboxes()[1];
     expect(document.querySelector('#settings').textContent).toContain('works only from the posting');
