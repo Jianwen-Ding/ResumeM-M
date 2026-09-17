@@ -1007,9 +1007,9 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
 
 /** Review the complete entry through the same background feedback panel. */
 function entryFeedbackButton(entry) {
-  return el('button', {
+  return aiButton({
     className: 'tiny entry-feedback',
-    textContent: 'AI Feedback',
+    label: 'AI Feedback',
     title: 'Review this entire entry: heading, bullets, and alternate phrasings',
     onclick: async (event) => {
       const button = event.currentTarget;
@@ -1022,9 +1022,9 @@ function entryFeedbackButton(entry) {
 
 /** A keyboard-accessible, one-click critique beside the exact wording. */
 function phraseFeedbackButton(entry, target) {
-  return el('button', {
+  return aiButton({
     className: 'tiny phrase-feedback',
-    textContent: 'AI Feedback',
+    label: 'AI Feedback',
     title: 'Get AI feedback on this exact phrasing',
     onclick: async (event) => {
       const button = event.currentTarget;
@@ -1188,7 +1188,7 @@ function bulletBlock(entry, section, bullet, choices) {
         el('span', { className: 'grow' }),
         el('div', { className: 'actions' }, [
           el('span', { className: 'chip count', textContent: `${listSelection(bullet).length}/${bullet.items.length} shown` }),
-          el('button', { className: 'tiny', textContent: 'Feedback', onclick: () => askBulletFeedback(entry, bullet) }),
+          aiButton({ label: 'Feedback', title: 'Review this list and the items in it', onclick: () => askBulletFeedback(entry, bullet) }),
           el('button', { className: 'tiny danger', textContent: 'Remove', onclick: () => removeBullet(entry, bullet) }),
         ]),
       ]),
@@ -1214,9 +1214,23 @@ function bulletBlock(entry, section, bullet, choices) {
    * It stays out. `alternateStepper` returns nothing when there is only one
    * wording, so this appears exactly where there is a choice to make.
    */
+  /*
+   * The stepper is quick; asking an AI to read the line is not.
+   *
+   * Taking this bar out of the disclosure to free the stepper took the
+   * feedback button with it, so every bullet — including the ones with a
+   * single phrasing and therefore no stepper at all — carried an "AI
+   * Feedback" in its corner for good. That is a button that costs minutes
+   * and, depending on the command, money, sitting permanently on every line
+   * of the document.
+   *
+   * The bar stays out so the stepper can be seen; the button inside it folds
+   * away with the rest, and is listed among the actions below.
+   */
+  const phraseFeedback = phraseFeedbackButton(entry, { bulletId: bullet.id, variantId: chosen?.id ?? chosenId });
   const quickActions = el('div', { className: 'bullet-quick-actions toolbar' }, [
     alternateStepper(bullet.id, bullet, chosenId),
-    phraseFeedbackButton(entry, { bulletId: bullet.id, variantId: chosen?.id ?? chosenId }),
+    phraseFeedback,
   ].filter(Boolean));
   wrap.append(quickActions);
 
@@ -1246,7 +1260,7 @@ function bulletBlock(entry, section, bullet, choices) {
           : null,
       ].filter(Boolean),
       trailingActions: [
-        el('button', { className: 'tiny', textContent: 'Compare Phrasings', onclick: () => askBulletFeedback(entry, bullet) }),
+        aiButton({ label: 'Compare Phrasings', title: 'Ask which of these wordings is strongest, and why', onclick: () => askBulletFeedback(entry, bullet) }),
         el('button', {
           className: 'tiny danger',
           textContent: 'Remove',
@@ -1261,7 +1275,9 @@ function bulletBlock(entry, section, bullet, choices) {
   return attachSourceTools(
     wrap,
     `${entry.id}/${bullet.id}`,
-    [...wrap.children].filter((child) => child !== head && child !== quickActions),
+    // The bar itself stays visible for the stepper; the button inside it
+    // does not.
+    [...[...wrap.children].filter((child) => child !== head && child !== quickActions), phraseFeedback].filter(Boolean),
     head,
   );
 }
@@ -1860,9 +1876,9 @@ function renderMasterEditor(editor) {
       el('span', { className: 'name', textContent: SECTION_LABELS[kind] ?? kind }),
       el('span', { className: 'rule' }),
       el('button', { className: 'link', textContent: '+ Add Entry', onclick: () => addEntry(kind) }),
-      el('button', {
+      aiButton({
         className: 'link',
-        textContent: '+ Draft with AI',
+        label: '+ Draft with AI',
         title: 'Paste a repository link, or say a line about it, and get a first draft to edit',
         onclick: () => draftEntryWithAi(kind),
       }),
@@ -1895,7 +1911,7 @@ function renderMasterEditor(editor) {
         if (Array.isArray(bullet.items)) {
           row.append(el('div', { className: 'text', textContent: `${bullet.prefix ?? ''} ${bullet.items.map(item => item.text).join(bullet.separator ?? ', ')}` }));
           row.append(el('button', { className: 'tiny', textContent: '+ Item', onclick: () => addListItem(entry, bullet) }));
-          row.append(el('button', { className: 'tiny', textContent: 'AI Feedback', onclick: () => askBulletFeedback(entry, bullet) }));
+          row.append(aiButton({ label: 'AI Feedback', title: 'Review this list and the items in it', onclick: () => askBulletFeedback(entry, bullet) }));
         } else {
           for (const variant of bullet.variants) row.append(el('div', { className: 'master-source-variant' }, [
             el('span', { className: 'hint', textContent: `${variant.label}${variant.id === bullet.default ? ' · Default' : ''}${variant.suggested ? ' · AI Suggestion' : ''}${bullet.archived ? ' · Archived' : ''}` }),
@@ -1906,13 +1922,12 @@ function renderMasterEditor(editor) {
           ]));
           row.append(el('div', { className: 'toolbar' }, [
             el('button', { className: 'tiny', textContent: '+ Phrasing', onclick: () => addBulletVariant(entry, bullet) }),
-            el('button', {
-              className: 'tiny',
-              textContent: 'Draft one',
-              title: 'Ask the AI for another way to say this line — same claim, different wording',
+            aiButton({
+              label: 'Draft one',
+              title: 'Ask for another way to say this line — same claim, different wording',
               onclick: () => draftPhrasings(entry, { bulletId: bullet.id }),
             }),
-            el('button', { className: 'tiny', textContent: 'Compare Phrasings', onclick: () => askBulletFeedback(entry, bullet) }),
+            aiButton({ label: 'Compare Phrasings', title: 'Ask which of these wordings is strongest, and why', onclick: () => askBulletFeedback(entry, bullet) }),
           ]));
         }
         const actions = [...row.querySelectorAll('.phrase-feedback, :scope > button, :scope > .toolbar')];
@@ -3481,7 +3496,7 @@ function renderDraft(draft) {
     const letterFeedbackBtn = aiButton({
       label: 'Ask for feedback',
       title: 'The AI reads what you have written and says what is weak — it does not rewrite it',
-      onclick: () => askDraftFeedback(draft, {}, notes),
+      onclick: () => askDraftFeedback(draft, {}, letterNotes),
     });
     letterFeedbackBtn.disabled = !draft.coverLetter.body.trim();
 
@@ -3508,6 +3523,21 @@ function renderDraft(draft) {
     // finished — but it is no longer the only thing that writes.
     letter.onblur = () => saveDraftNow().catch(() => {});
 
+    /*
+     * Where "Draft it" reports, which is beside "Draft it".
+     *
+     * Every AI action wrote its progress into one panel at the foot of the
+     * editor — below the resume block, the notes box and the buttons that
+     * finish the application. The letter's own button is at the top of the
+     * page. So pressing it started a run that takes minutes and put the
+     * spinner somewhere you would have to scroll to find, which is
+     * indistinguishable from it having done nothing at all.
+     *
+     * The shared panel still exists for the actions that live down there
+     * with it. This one belongs to this block.
+     */
+    const letterNotes = el('div', { className: 'gen-notes' });
+
     blocks.push(
       el('div', { className: 'block' }, [
         el('div', { className: 'block-head' }, [
@@ -3521,10 +3551,11 @@ function renderDraft(draft) {
           aiButton({
             label: 'Draft it',
             title: 'Write a first draft from the posting and the letters you have written before',
-            onclick: () => generate(draft, 'letter', notes),
+            onclick: () => generate(draft, 'letter', letterNotes),
           }),
           letterFeedbackBtn,
         ]),
+        letterNotes,
         el('div', { className: 'letter-split' }, [letter, letterPane]),
         letterFit,
       ]),
@@ -4795,19 +4826,23 @@ async function loadSettings() {
     (p) => p.label !== 'Custom…' && p.command === config.ai.command && p.args.join(' ') === (config.ai.args ?? []).join(' '),
   );
   preset.value = matching?.label ?? 'Custom…';
+  /*
+   * A preset is copied when it is chosen, never referenced, so a config saved
+   * before a preset was corrected keeps the old arguments for good — and the
+   * picker, which only ever matched exactly, called that "Custom…" and said
+   * nothing more. From the outside it reads as the preset having been
+   * ignored: the command is right there, the run fails, and the advice that
+   * comes back is "pick a preset", which you did.
+   *
+   * So say it, next to the thing that is wrong, with the one button that
+   * fixes it.
+   */
+  const drifted = !matching && AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === config.ai.command);
   const presetNote = el('div', { className: 'hint' });
   const showPresetNote = () => {
     presetNote.textContent = AI_PRESETS.find((p) => p.label === preset.value)?.note ?? '';
   };
   showPresetNote();
-
-  preset.onchange = () => {
-    const chosen = AI_PRESETS.find((p) => p.label === preset.value);
-    showPresetNote();
-    if (!chosen || chosen.label === 'Custom…') return;
-    command.value = chosen.command;
-    args.value = chosen.args.join(' ');
-  };
 
   const engine = el('select');
   for (const e of ['', 'tectonic', 'latexmk', 'pdflatex']) {
@@ -4815,8 +4850,31 @@ async function loadSettings() {
       el('option', { value: e, textContent: e || 'Auto-detect', selected: (config.latex.engine ?? '') === e }),
     );
   }
+  let savedEngine = config.latex.engine ?? '';
 
   const result = el('div', { className: 'result idle', textContent: 'Not tested yet.' });
+
+  /*
+   * Whether what is on screen is what will actually run.
+   *
+   * These four fields wait for a button, and until now nothing said so. A
+   * command typed here, or filled in by the preset picker, sat in the box
+   * looking exactly like a saved one — so the next AI run used the old value
+   * and reported a failure naming a command the user believed they had
+   * replaced. The box has to be able to say "this is not saved".
+   */
+  const unsaved = el('span', { className: 'hint warn', hidden: true, textContent: 'Not saved yet.' });
+  const aiIsDirty = () =>
+    command.value !== command.dataset.stored ||
+    args.value !== args.dataset.stored ||
+    timeout.value !== timeout.dataset.stored ||
+    (engine.value || '') !== savedEngine;
+  const markAiUnsaved = () => {
+    unsaved.hidden = !aiIsDirty();
+  };
+  for (const input of [command, args, timeout]) input.oninput = markAiUnsaved;
+  engine.onchange = markAiUnsaved;
+  markAiUnsaved();
 
   const save = async () => {
     const seconds = Number(timeout.value);
@@ -4840,7 +4898,57 @@ async function loadSettings() {
      * would mean a change made in another window never arrived here again.
      */
     for (const input of [command, args, timeout]) input.dataset.stored = input.value;
+    savedEngine = engine.value || '';
+    markAiUnsaved();
     setStatus('Settings saved');
+  };
+
+  const saveAndTest = async () => {
+    try {
+      await save();
+      result.className = 'result idle';
+      result.textContent = 'Running…';
+      const test = await api('/config/test-ai', { method: 'POST' });
+      if (test.ok) {
+        result.className = 'result ok';
+        result.textContent = `${test.command} replied in ${(test.ms / 1000).toFixed(1)}s: ${test.output.slice(0, 160)}`;
+      } else {
+        result.className = 'result bad';
+        result.textContent = test.message;
+      }
+    } catch (err) {
+      result.className = 'result bad';
+      result.textContent = err.message;
+    }
+  };
+
+  /*
+   * Picking a preset saves it, and tries it.
+   *
+   * It used to only fill the two boxes, which meant the most deliberate
+   * action in this panel — choosing from a list of three known-good
+   * configurations — was the one that did nothing until you also found the
+   * Save button. Someone who picked a preset and went back to writing kept
+   * running the old command, and the failure they then got named that old
+   * command, which reads as the preset having been ignored.
+   *
+   * A preset is a complete, known setting, not a half-typed one: there is
+   * nothing here to protect from being committed too early. Saving it and
+   * then running the one-line test is the whole of what the next two buttons
+   * would have done, and finding out now beats finding out in the middle of
+   * an application.
+   */
+  preset.onchange = () => {
+    const chosen = AI_PRESETS.find((p) => p.label === preset.value);
+    showPresetNote();
+    if (!chosen || chosen.label === 'Custom…') {
+      markAiUnsaved();
+      return;
+    }
+    command.value = chosen.command;
+    args.value = chosen.args.join(' ');
+    markAiUnsaved();
+    return saveAndTest();
   };
 
   setChildren(
@@ -4859,6 +4967,22 @@ async function loadSettings() {
       : null,
     field('Preset', preset),
     presetNote,
+    drifted
+      ? el('div', { className: 'hint warn' }, [
+          el('span', {
+            textContent: `These arguments are not the "${drifted.label}" preset's any more. `,
+          }),
+          el('button', {
+            className: 'link',
+            textContent: 'Use the preset’s',
+            onclick: () => {
+              preset.value = drifted.label;
+              preset.onchange();
+            },
+          }),
+          el('span', { textContent: ' — that saves and tests it.' }),
+        ])
+      : null,
     field('Command', command, 'Must be on your PATH.'),
     field(
       'Arguments',
@@ -4874,27 +4998,8 @@ async function loadSettings() {
     field('LaTeX engine', engine, 'Auto-detect tries tectonic, then latexmk, then pdflatex.'),
     el('div', { className: 'row' }, [
       el('button', { className: 'primary', textContent: 'Save', onclick: () => save().catch((e) => setStatus(e.message, true)) }),
-      el('button', {
-        textContent: 'Save and test',
-        onclick: async () => {
-          try {
-            await save();
-            result.className = 'result idle';
-            result.textContent = 'Running…';
-            const test = await api('/config/test-ai', { method: 'POST' });
-            if (test.ok) {
-              result.className = 'result ok';
-              result.textContent = `${test.command} replied in ${(test.ms / 1000).toFixed(1)}s: ${test.output.slice(0, 160)}`;
-            } else {
-              result.className = 'result bad';
-              result.textContent = test.message;
-            }
-          } catch (err) {
-            result.className = 'result bad';
-            result.textContent = err.message;
-          }
-        },
-      }),
+      el('button', { textContent: 'Save and test', onclick: saveAndTest }),
+      unsaved,
     ]),
     result,
   );

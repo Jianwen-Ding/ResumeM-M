@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
+import { AI_PRESETS } from '../src/ai/presets.ts';
 
 vi.mock('../web/preview.js', () => ({ createPreview: () => ({ show: async () => {} }) }));
 vi.mock('../web/assets.js', () => ({
@@ -47,7 +48,8 @@ describe('the settings panel', () => {
       else if (url === '/api/ai/jobs') result = { jobs: [] };
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/voice') result = { voice: '' };
-      else if (url === '/api/ai/presets') result = { presets: [] };
+      else if (url === '/api/ai/presets') result = { presets: AI_PRESETS };
+      else if (url === '/api/config/test-ai') result = { ok: true, command: config.ai.command, ms: 1200, output: 'ok' };
       else if (url === '/api/config' && options.method === 'PUT') {
         config = { ...config, ...body, ai: { ...config.ai, ...(body.ai ?? {}) } };
         result = config;
@@ -136,7 +138,7 @@ describe('the settings panel', () => {
     const command = commandBox();
     command.value = 'my-own-cli';
     command.dispatchEvent(new Event('input'));
-    document.querySelector('#settings button.primary, #settings button').click();
+    document.querySelector('#settings button.primary').click();
     await vi.waitFor(() => expect(config.ai.command).toBe('my-own-cli'));
 
     config.ai = { ...config.ai, command: 'changed-elsewhere' };
@@ -152,5 +154,67 @@ describe('the settings panel', () => {
     research.checked = true;
     research.dispatchEvent(new Event('change'));
     await vi.waitFor(() => expect(research.checked).toBe(false));
+  });
+  /*
+   * "I did pick a preset, it still failed like this."
+   *
+   * Picking one only filled two boxes. The Save button below them was a
+   * separate, unmarked step, so the most deliberate act on the panel —
+   * choosing from a list of known-good configurations — did nothing at all
+   * until you found it, and the next AI run failed naming the old command.
+   */
+  it('saves a preset the moment it is picked, and tries it', async () => {
+    const select = [...document.querySelectorAll('#settings select')][0];
+    const claude = AI_PRESETS.find((p) => p.command === 'claude');
+    select.value = claude.label;
+    select.dispatchEvent(new Event('change'));
+
+    await vi.waitFor(() => expect(config.ai.args).toEqual(claude.args));
+    expect(config.ai.command).toBe('claude');
+    await vi.waitFor(() => expect(document.querySelector('#settings .result.ok')).not.toBeNull());
+  });
+
+  /* And a command typed by hand still waits — but now says that it is waiting. */
+  it('says when what is on screen is not what will run', async () => {
+    const flag = () =>
+      [...document.querySelectorAll('#settings .hint.warn')].find((n) => n.textContent === 'Not saved yet.');
+    expect(flag()?.hidden ?? true).toBe(true);
+
+    const command = commandBox();
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+    expect(flag().hidden).toBe(false);
+
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(config.ai.command).toBe('my-own-cli'));
+    await vi.waitFor(() => expect(flag().hidden).toBe(true));
+  });
+
+  /*
+   * A preset is copied when it is chosen, never referenced, so a config saved
+   * before a preset was corrected keeps the old arguments for good. The
+   * picker only ever matched exactly, called that "Custom…", and said nothing
+   * — which is indistinguishable from having picked the preset.
+   */
+  it('points out a preset whose arguments have drifted, and mends it', async () => {
+    // The fixture's config is claude with the old `-p {promptText}` arguments.
+    const warning = [...document.querySelectorAll('#settings .hint.warn')].find((n) =>
+      n.textContent.includes('not the "Claude Code" preset'),
+    );
+    expect(warning).toBeTruthy();
+
+    warning.querySelector('button.link').click();
+    const claude = AI_PRESETS.find((p) => p.command === 'claude');
+    await vi.waitFor(() => expect(config.ai.args).toEqual(claude.args));
+  });
+
+  it('says nothing about drift when the settings are exactly a preset', async () => {
+    const claude = AI_PRESETS.find((p) => p.command === 'claude');
+    config.ai = { ...config.ai, args: [...claude.args] };
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.waitFor(() =>
+      expect(document.querySelector('#settings').textContent).not.toContain('not the "Claude Code" preset'),
+    );
   });
 });

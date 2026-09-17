@@ -154,6 +154,60 @@ export function employerFallback(url?: string): string {
   }
 }
 
+/**
+ * Words that name a job rather than a place that has jobs.
+ *
+ * Every source of an employer name can hand back a department or the role over
+ * again: JSON-LD's `hiringOrganization` is filled in by whoever wrote the
+ * posting, `og:site_name` is whatever the CMS was configured with, and the
+ * heading fallbacks read the page. A posting whose company came back as
+ * "Software Engineering" produced a letter ending "I want to bring that focus
+ * to Software Engineering" — which tells the reader, in one line, that nobody
+ * looked at it before it was sent.
+ */
+const ROLE_NOUN =
+  /\b(engineer|engineering|developer|development|programmer|manager|management|designer|analyst|scientist|intern|internship|director|architect|consultant|specialist|associate|coordinator|administrator|technician|researcher|recruiter|apprentice|trainee|senior|junior|principal|staff|lead|full[- ]?stack|front[- ]?end|back[- ]?end)\b/i;
+
+/**
+ * A suffix that settles it: whatever else the name contains, a thing ending in
+ * "Inc" or "Labs" is an organisation. "Designer Brands Inc.", "Lead Bank
+ * Corp", "Acme Software" are companies; "Software Engineering" is not.
+ */
+const ORG_SUFFIX =
+  /\b(inc|llc|l\.l\.c|ltd|limited|corp|corporation|company|co|holdings|group|partners|labs?|technologies|technology|systems|software|solutions|industries|ventures|capital|bank|university|college|institute|hospital|foundation|gmbh|plc|ag|nv|bv|sa|sas|srl|pty|oy|ab)\b\.?$/i;
+
+/** Names that are a page's furniture rather than anyone's employer. */
+const NOT_A_NAME =
+  /^(unknown|n\.?\/?a|none|null|undefined|careers?|jobs?|job (description|posting|details?|opening)|apply|apply now|application|hiring|we ?('?re| are) hiring|now hiring|open (positions?|roles?)|home|homepage|company|employer|untitled|test|example|welcome|search|results?|opportunit(y|ies)|vacanc(y|ies)|the team|team)$/i;
+
+/**
+ * Does this read like the name of an organisation you could address a letter to?
+ *
+ * Deliberately strict, because the two mistakes cost differently. Refusing a
+ * real company means the letter says "your team" — slightly flatter, entirely
+ * sane. Accepting a non-company means the letter names it, repeatedly, as the
+ * place the applicant wants to work.
+ */
+export function looksLikeCompanyName(name?: string): boolean {
+  const n = (name ?? '').trim().replace(/\s+/g, ' ');
+  if (n.length < 2 || n.length > 60) return false;
+  if (NOT_A_NAME.test(n)) return false;
+  // A sentence, a URL fragment, or a list is not a name.
+  if (/[.!?]\s|[|<>{}]|\S@\S|^https?:/i.test(n)) return false;
+  if (n.split(' ').length > 6) return false;
+  // Nothing but punctuation or digits.
+  if (!/[a-z]/i.test(n)) return false;
+  /*
+   * A bare hostname. `employerFallback` hands one back on purpose — it is a
+   * true and recognisable label for a folder or a resume picker — but it is
+   * not a name you write to, and "boards.greenhouse.io" in the body of a
+   * letter is worse than not naming anyone at all.
+   */
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(n)) return false;
+  if (ROLE_NOUN.test(n) && !ORG_SUFFIX.test(n)) return false;
+  return true;
+}
+
 export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
   const ld = fromJsonLd(html);
   const text = stripTags(html);

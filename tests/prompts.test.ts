@@ -232,7 +232,7 @@ describe('answer prompt', () => {
     const p = answerPrompt(data, 'Why this role?');
     expect(p).toContain('What you have already written');
     expect(p).toContain('Because the work is interesting.');
-    expect(p).toMatch(/staying consistent across applications/);
+    expect(p).toMatch(/recognisably the same person across a season of applications/);
   });
 
   it('shows every phrasing of an answer, not only the default one', () => {
@@ -568,5 +568,74 @@ describe('when the AI may look things up', () => {
 
   it('manages without a company name', () => {
     expect(answerPrompt(researching, 'Why us?')).toContain('Read about the company');
+  });
+});
+
+describe('saying exactly what a letter and an answer should be', () => {
+  const job = { jobDescription: 'Kafka, low latency', company: 'Helios Robotics', jobTitle: 'Backend Engineer' };
+
+  it('tells a coding agent there is no side channel', () => {
+    // The observed failure: a CLI wrote a plan file, linked it, asked a
+    // question, and all of it was saved as the cover letter.
+    const p = coverLetterPrompt(data, resolved, job, []);
+    expect(p).toMatch(/Do not write, create or edit any file/);
+    expect(p).toMatch(/Do not ask a question/);
+    expect(p).toMatch(/arrives as the first line of their letter/);
+    expect(p).toMatch(/No markdown/);
+  });
+
+  it('says the same to an answer, which runs through the same CLI', () => {
+    const p = answerPrompt(data, 'Why this role?', job);
+    expect(p).toMatch(/Do not write, create or edit any file/);
+    expect(p).toMatch(/arrives as the first line of their answer/);
+  });
+
+  it('bans the placeholder, which is worse than the omission', () => {
+    for (const p of [coverLetterPrompt(data, resolved, job, []), answerPrompt(data, 'Why?', job)]) {
+      expect(p).toMatch(/Never leave a placeholder/);
+      expect(p).toMatch(/\[Company\]/);
+    }
+  });
+
+  it('gives the letter a shape rather than a word count alone', () => {
+    const p = coverLetterPrompt(data, resolved, job, []);
+    expect(p).toContain('### What the letter does');
+    expect(p).toMatch(/Opening: why this posting in particular/);
+    expect(p).toMatch(/Close: what they want out of the role/);
+    expect(p).toMatch(/employer's name and the role could be swapped out/i);
+  });
+
+  it('uses a company name that is one', () => {
+    const p = coverLetterPrompt(data, resolved, job, []);
+    expect(p).toContain('They are applying to Helios Robotics');
+    expect(p).toContain('Company: Helios Robotics');
+    expect(p).not.toContain('not a usable company name');
+  });
+
+  it('refuses a company name that is a job title', () => {
+    // The real one. "Software Engineering" came back as the employer and the
+    // letter closed "I want to bring that focus to Software Engineering".
+    const p = coverLetterPrompt(data, resolved, { ...job, company: 'Software Engineering' }, []);
+    expect(p).toMatch(/does not read like\nthe name of a company/);
+    expect(p).toMatch(/So do not name them/);
+    expect(p).toContain('not a usable company name');
+    expect(p).not.toContain('They are applying to Software Engineering');
+  });
+
+  it('says plainly when the page named nobody', () => {
+    const p = coverLetterPrompt(data, resolved, { jobDescription: 'job' }, []);
+    expect(p).toContain('The page never named the employer.');
+    expect(p).toContain('Company: not named on the page.');
+  });
+
+  it('carries the same judgement into an answer', () => {
+    expect(answerPrompt(data, 'Why?', { ...job, company: 'Software Engineering' })).toMatch(/So do not name them/);
+    expect(answerPrompt(data, 'Why?', job)).toContain('They are applying to Helios Robotics');
+  });
+
+  it('will not let an answer invent a fact the store does not hold', () => {
+    const p = answerPrompt(data, 'How many years of Go do you have?', job);
+    expect(p).toMatch(/no years of\n {2}experience you counted yourself/);
+    expect(p).toMatch(/no visa or work-authorisation status, no salary figure/);
   });
 });

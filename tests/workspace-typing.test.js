@@ -270,4 +270,50 @@ describe('typing in the Workspace', () => {
     expect(writes, 'a burst of typing is one write').toBe(1);
     expect(savedLetter()).toBe('Dear S');
   });
+  /*
+   * "Clicking draft still doesn't start up a loading bar that signals its
+   * being worked on."
+   *
+   * There was one. The panel it drew into was appended at the foot of the
+   * draft editor — below the resume block, the notes box and the
+   * complete/discard row — while "Draft it" sits at the top beside the Cover
+   * letter heading. So pressing a button that takes minutes scrolled nothing,
+   * changed nothing you could see, and the only sign it was running was off
+   * the bottom of the page.
+   */
+  it('shows the AI at work beside the button that started it', async () => {
+    const heading = [...document.querySelectorAll('#draft-editor .block-head')].find((h) =>
+      h.textContent.includes('Cover letter'),
+    );
+    const draftIt = [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it'));
+    expect(draftIt).toBeTruthy();
+
+    const block = heading.closest('.block');
+    draftIt.click();
+
+    /*
+     * In this block, not merely somewhere on the page. `compareDocumentPosition`
+     * was the first thing tried and it is not sound here: `generate` re-renders
+     * the editor, so one of the two nodes is detached by the time it is asked,
+     * and a disconnected comparison still sets the FOLLOWING bit. The test
+     * passed with the panel back at the foot of the page.
+     */
+    const running = await vi.waitFor(() => {
+      const node = block.querySelector('.ai-running');
+      expect(node).not.toBeNull();
+      return node;
+    });
+
+    expect(running.textContent).toContain('0:00');
+    expect(running.closest('.gen-notes')).not.toBeNull();
+  });
+
+  it('marks Draft it as AI work before anyone presses it', () => {
+    const heading = [...document.querySelectorAll('#draft-editor .block-head')].find((h) =>
+      h.textContent.includes('Cover letter'),
+    );
+    const draftIt = [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it'));
+    expect(draftIt.classList.contains('ai-action')).toBe(true);
+    expect(draftIt.title).toContain('Runs your AI command');
+  });
 });
