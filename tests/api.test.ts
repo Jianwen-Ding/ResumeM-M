@@ -242,6 +242,19 @@ describe('job analysis', () => {
     expect(res.body.spec.choices.b_pipeline).toBe('v_kafka');
   });
 
+  /*
+   * A mode it does not know used to behave as `match` and come back labelled
+   * as whatever was asked for — a resume nobody asked for, wearing the name
+   * of the one they did.
+   */
+  it('refuses a way of tailoring it does not have', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'AI' })
+      .expect(400);
+    expect(res.body.error).toContain('none, match, ai');
+  });
+
   it('reads the older useAi flag as the two modes it could express', async () => {
     const off = await request(app)
       .post('/api/extension/analyze')

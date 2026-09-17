@@ -1499,6 +1499,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         tailor?: 'none' | 'match' | 'ai';
       };
       const mode = tailor ?? (useAi ? 'ai' : 'match');
+      /*
+       * A mode this does not know silently behaved as `match` and was echoed
+       * back to the card as if it had happened — so an extension asking for
+       * something misspelled got a resume it did not ask for, labelled with
+       * the thing it asked for. Three modes, named in the refusal.
+       */
+      if (!['none', 'match', 'ai'].includes(mode)) {
+        throw new Error(`"${mode}" is not a way of tailoring. It is one of: none, match, ai.`);
+      }
 
       /*
        * One application, however many pages it is spread across. The single
