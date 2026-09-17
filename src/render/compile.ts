@@ -333,7 +333,14 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     const layout = t === 0 ? base : layoutAt(base, t);
     const tex = renderLatex({ ...resume, layout });
 
-    if (wantFast) {
+    /*
+     * Only the layout as authored. The format the shortcut loads carries the
+     * layout baked in, so every shrinking attempt of the fit loop would dump
+     * and cache a format of its own — fourteen megabytes each. The first
+     * attempt is the one that matters for a live preview and is almost always
+     * the answer; the shrinking steps go to the trusted engine.
+     */
+    if (wantFast && t === 0) {
       try {
         const raw = await compileFast(resume, layout);
         const m = measure(raw.aux, layout, 1);
@@ -429,14 +436,44 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     texPath: opts.texPath,
     tex: best.tex,
     engine,
-    warnings: resume.warnings,
+    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log)],
     log: tail(best.raw.log, 30),
     fastPath: usedFast,
   };
 }
 
+/**
+ * What the log says about the fonts the engine could actually find.
+ *
+ * T1 is a promise the fonts have to keep, and a TeX install without a scalable
+ * T1 face keeps it with METAFONT bitmaps — Type 3, with no ToUnicode map,
+ * which is why the template falls back to setting everything without
+ * ligatures. Worth saying out loud: it is a real difference in the PDF, and
+ * one package fixes it.
+ */
+function fontWarnings(log: string): string[] {
+  if (log.includes('RMM-FONT-FALLBACK')) {
+    return [
+      'Ligatures are switched off because this TeX install has no scalable T1 font. ' +
+        'The PDF stays machine-readable, but dates print as "--" rather than an en dash. ' +
+        'Installing the `lmodern` package restores both.',
+    ];
+  }
+  if (log.includes('RMM-FONT-BITMAP')) {
+    return [
+      'This TeX install has neither `lmodern` nor `microtype`, so the PDF is set in bitmap ' +
+        'fonts. It looks right, but an applicant tracking system cannot read words containing ' +
+        'fi, fl or ff, or the dash in a date range. Installing `lmodern` fixes it.',
+    ];
+  }
+  return [];
+}
+
 function readBaseline(log: string): number | undefined {
-  const m = /RMM-BASELINESKIP:\s*([\d.]+)pt/.exec(log);
+  // The last one. `runtimeSetup` reports the leading again after setting it,
+  // and on the precompiled path the earlier report is the format's default.
+  const all = [...log.matchAll(/RMM-BASELINESKIP:\s*([\d.]+)pt/g)];
+  const m = all[all.length - 1];
   return m ? Number(m[1]) : undefined;
 }
 
@@ -475,7 +512,7 @@ export async function compileLetter(
 
   if (opts.mode === 'preview' && (await hasFastPath())) {
     try {
-      raw = await compileFastBody(renderLetterFastBody(letter, layout), layout.paper);
+      raw = await compileFastBody(renderLetterFastBody(letter, layout), layout.paper, layout);
       usedFast = true;
     } catch {
       raw = undefined; // fall back to the trusted engine

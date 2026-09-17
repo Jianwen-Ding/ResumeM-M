@@ -226,6 +226,52 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 % tracking system extracts \`jane doe@x.com\` from \`jane_doe@x.com\` — a contact
 % address that is wrong in the one copy nobody ever looks at.
 \\usepackage[T1]{fontenc}
+
+% A scalable font to go with that encoding.
+%
+% T1 on its own is a promise the fonts have to keep. Without a Type 1 T1 face
+% installed, LaTeX falls back to METAFONT bitmaps — the log says
+% \`ecrm1095.600pk\` — and \`pdffonts\` on the result shows six Type 3 fonts with
+% no ToUnicode map. \`\\pdfgentounicode\` cannot build one for a Type 3 font, so
+% the whole point of \`glyphtounicode\` above was lost exactly where it mattered
+% most: every f-ligature came out unreadable. An applicant tracking system
+% extracted control characters where "Firefly Office Staff Engineer" should
+% have been: fit, office, flaky, efficiently, classified and workflows all
+% came out unsearchable, on the one copy of the resume nobody ever looks at.
+%
+% (This comment is inside a template literal, so it cannot show those bytes
+% the obvious way — an escape here becomes a real control character in the
+% .tex, which the character check then refuses. Which is the check working.)
+%
+% Bitmaps also come in fixed sizes, so a request for 10.5pt was quietly served
+% at 10.95pt and several steps of the fit loop changed nothing but the leading.
+%
+% \`lmodern\` is Computer Modern as a scalable Type 1 face: the same design the
+% template already uses, so nothing about the page changes, and the ligatures
+% carry their Unicode. It ships with every full TeX distribution.
+%
+% Where it is missing, the ligatures are switched off instead, so \`office\` is
+% set as six glyphs that each map to a letter rather than one that maps to
+% nothing — and \`--\` prints as two hyphens rather than an en dash, which is the
+% same problem in the place it bites hardest: every date range on every resume
+% came out of the PDF as \`Jul. 2024 <control character> Dec. 2024\`.
+%
+% That is a small typographic loss and a large legibility gain in the copy that
+% gets parsed rather than read. (\`ae\` was the obvious third option and is worse
+% than either: it restores the ligatures by building virtual fonts out of OT1,
+% which takes the underscore and the accents back out — the two things T1 was
+% added for in the first place.)
+\\IfFileExists{lmodern.sty}{%
+  \\usepackage{lmodern}%
+}{%
+  \\IfFileExists{microtype.sty}{%
+    \\usepackage[activate=false]{microtype}%
+    \\DisableLigatures{encoding = *}%
+    \\typeout{RMM-FONT-FALLBACK}%
+  }{%
+    \\typeout{RMM-FONT-BITMAP}%
+  }%
+}
 \\usepackage{latexsym}
 \\usepackage[empty]{fullpage}
 \\usepackage{titlesec}
@@ -328,6 +374,12 @@ export function runtimeSetup(layout: LayoutOptions): string {
 % \\baselineskip smaller than the type, and a tighter setting is unreadable
 % anyway. Below that floor, \`spacing\` keeps working on the block gaps.
 \\changefontsizes[${n(layout.fontSizePt * Math.max(1.02, 1.2 * sp), 2)}pt]{${n(layout.fontSizePt, 2)}pt}
+
+% Reported again here, after the size is set. The copy in the preamble fires
+% from \`\\AtBeginDocument\`, which on the precompiled path runs before these
+% lines do — so the log's first answer is the format's default, not this
+% document's, and the overflow-in-lines figure was computed from it.
+\\typeout{RMM-BASELINESKIP: \\the\\baselineskip}
 `;
 }
 
@@ -407,10 +459,10 @@ ${body}
  * document and the fast path, which supplies its own preamble via a
  * precompiled `.fmt` instead of `stablePreamble`.
  */
-function documentBody(r: ResolvedResume): string {
+function documentBody(r: ResolvedResume, setup = ''): string {
   const sections = r.sections.map(section).filter(Boolean).join('\n\n');
   return `\\begin{document}
-\\zsavepos{rmmstart}
+${setup}\\zsavepos{rmmstart}
 
 ${header(r)}
 
@@ -431,5 +483,8 @@ export function renderLatex(r: ResolvedResume): string {
  * `stablePreamble` for the same paper size; see fastCompile.ts.
  */
 export function renderLatexFastBody(r: ResolvedResume): string {
-  return `${runtimeSetup(r.layout)}\n${documentBody(r)}`;
+  // No `runtimeSetup` here: the format this runs against was dumped with the
+  // layout already in it. See getFormat in fastCompile.ts for why it cannot
+  // live in the document.
+  return documentBody(r);
 }

@@ -87,6 +87,32 @@ describe.runIf(latex && hasPdfToText)('what the reader actually sees', () => {
     expect(text).toContain('get_user_data');
   }, 120_000);
 
+  /*
+   * The f-ligatures, which are where this actually broke.
+   *
+   * T1 is a promise the fonts have to keep, and without a scalable T1 face
+   * LaTeX falls back to METAFONT bitmaps — Type 3, with no ToUnicode map,
+   * which `\pdfgentounicode` cannot build one for. So every word with an fi,
+   * fl, ff or ffi in it came out of the PDF with a hole in it: "Firey Oce Sta
+   * eciently classied workows". Those are ordinary words — office, staff,
+   * efficiently, classified, workflows — on the one copy of the resume that
+   * nobody reads and everybody parses.
+   */
+  it('gives it whole words where the type has ligatures', async () => {
+    const text = await textOf(
+      resume([
+        'Classified workflows efficiently for the Firefly office staff',
+        'Fixed flaky affinity offloading before the final office fit',
+      ]),
+    );
+    for (const word of [
+      'Classified', 'workflows', 'efficiently', 'Firefly', 'office', 'staff',
+      'flaky', 'affinity', 'offloading', 'final', 'fit',
+    ]) {
+      expect(text, word).toContain(word);
+    }
+  }, 120_000);
+
   it('still sets the accents it always could', async () => {
     const text = await textOf(resume(['Worked at Nestlé on café software'], 'Zoë Müller'));
     expect(text).toContain('Zoë Müller');
