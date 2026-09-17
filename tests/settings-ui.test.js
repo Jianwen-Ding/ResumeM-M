@@ -240,13 +240,27 @@ describe('the settings panel', () => {
       .find((f) => f.querySelector('.lbl').textContent === label)
       ?.querySelector('input, select');
 
-  it('saves a model without touching the preset’s arguments', async () => {
-    const model = boxFor('Model');
-    expect(model).toBeTruthy();
-    expect(model.value).toBe('');
+  /** The model buttons, which are the chosen CLI's own names for its models. */
+  const modelChips = () => [...document.querySelectorAll('#settings .model-chips button')];
+  const chip = (label) => modelChips().find((b) => b.textContent === label);
+  const effortSlider = () => document.querySelector('#settings .effort-slider');
+  const slideTo = (i) => {
+    const s = effortSlider();
+    s.value = String(i);
+    s.dispatchEvent(new Event('input'));
+  };
 
-    model.value = 'opus';
-    model.dispatchEvent(new Event('input'));
+  /*
+   * Typing "opus" into a box is asking somebody to remember a name; four
+   * buttons is reading. The box stays behind "Another…", because these CLIs
+   * gain models faster than the list in this repository can be edited.
+   */
+  it('saves a model chosen from the buttons, without touching the preset’s arguments', async () => {
+    expect(modelChips().map((b) => b.textContent)).toEqual(['Default', 'opus', 'sonnet', 'haiku', 'Another…']);
+    expect(chip('Default').className).toContain('on');
+
+    chip('opus').click();
+    expect(chip('opus').className).toContain('on');
     document.querySelector('#settings button.primary').click();
 
     await vi.waitFor(() => expect(config.ai.model).toBe('opus'));
@@ -255,12 +269,45 @@ describe('the settings panel', () => {
     expect(config.ai.args).toEqual(['-p', '{promptText}']);
   });
 
-  it('saves an effort level, and offers words rather than numbers', async () => {
-    const effort = boxFor('Effort');
-    expect([...effort.options].map((o) => o.textContent)).toEqual(['As it comes', 'Quick', 'Normal', 'Thorough']);
+  it('still takes a model name that is not on the list', async () => {
+    const box = () => document.querySelector('#settings .model-other');
+    expect(box().hidden).toBe(true);
 
-    effort.value = 'high';
-    effort.dispatchEvent(new Event('change'));
+    chip('Another…').click();
+    expect(box().hidden).toBe(false);
+
+    const input = box().querySelector('input');
+    input.value = 'some-model-9';
+    input.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(config.ai.model).toBe('some-model-9'));
+    // And it is the one that reads as chosen, since none of the buttons is.
+    expect(chip('Another…').getAttribute('aria-pressed')).toBe('true');
+    expect(chip('Default').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  /*
+   * Effort is one axis with four stops on it. A dropdown hides that: you have
+   * to open it before you can see the choices are even ordered.
+   */
+  it('saves an effort level from the slider, and says it in words', async () => {
+    expect([...document.querySelectorAll('#settings .effort-scale span')].map((n) => n.textContent)).toEqual([
+      'As it comes',
+      'Quick',
+      'Normal',
+      'Thorough',
+    ]);
+    // The scale is the readout: the stop you are on is the one marked. A
+    // separate line above the slider said the same words as the left-hand end
+    // of the scale below it.
+    const marked = () =>
+      [...document.querySelectorAll('#settings .effort-scale span.on')].map((n) => n.textContent);
+    expect(marked()).toEqual(['As it comes']);
+
+    slideTo(3);
+    expect(marked()).toEqual(['Thorough']);
+    expect(effortSlider().getAttribute('aria-valuetext')).toBe('Thorough');
+
     document.querySelector('#settings button.primary').click();
     await vi.waitFor(() => expect(config.ai.effort).toBe('high'));
   });
@@ -294,17 +341,21 @@ describe('the settings panel', () => {
     await vi.waitFor(() => expect(text()).toContain('is not one of the presets'));
   });
 
-  it('offers the chosen CLI’s own model names, and lets you type another', async () => {
-    const options = () => [...document.querySelectorAll('#ai-model-options option')].map((o) => o.value);
-    expect(options()).toEqual(['opus', 'sonnet', 'haiku']);
+  it('follows the command: the buttons are whichever CLI is configured', async () => {
+    expect(modelChips().map((b) => b.textContent)).toContain('opus');
 
     const command = commandBox();
     command.value = 'gemini';
     command.dispatchEvent(new Event('input'));
-    await vi.waitFor(() => expect(options()).toContain('gemini-2.5-pro'));
+    await vi.waitFor(() => expect(modelChips().map((b) => b.textContent)).toContain('gemini-2.5-pro'));
+    expect(modelChips().map((b) => b.textContent)).not.toContain('opus');
 
-    // A datalist suggests; it does not restrict.
-    expect(boxFor('Model').tagName).toBe('INPUT');
+    // A CLI with no names of its own leaves the box, which is the only thing
+    // that can express a model it has never heard of.
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(document.querySelector('#settings .model-chips').hidden).toBe(true));
+    expect(document.querySelector('#settings .model-other').hidden).toBe(false);
   });
 
   it('counts the model and the effort as unsaved changes like everything else', async () => {
@@ -312,8 +363,7 @@ describe('the settings panel', () => {
       [...document.querySelectorAll('#settings .hint.warn')].find((n) => n.textContent === 'Not saved yet.');
     expect(flag().hidden).toBe(true);
 
-    boxFor('Effort').value = 'low';
-    boxFor('Effort').dispatchEvent(new Event('change'));
+    slideTo(1);
     expect(flag().hidden).toBe(false);
   });
   /*
@@ -345,18 +395,26 @@ describe('the settings panel', () => {
     expect(advancedBlock().contains(commandBox())).toBe(true);
   });
 
-  it('leaves the preset, the model and the effort in plain sight', () => {
+  /*
+   * The preset is the whole of what most people need. The model and the
+   * effort are facts about the command it chose — which names are even on
+   * offer depends on which CLI it is — so they live with it.
+   */
+  it('keeps the preset in plain sight and the command’s own settings with the command', () => {
     const outside = (label) => {
       const f = [...document.querySelectorAll('#settings label.f')].find(
         (n) => n.querySelector('.lbl').textContent === label,
       );
       return f && !f.closest('details.advanced');
     };
-    expect(outside('Model')).toBe(true);
-    expect(outside('Effort')).toBe(true);
+    expect(outside('Preset')).toBe(true);
     expect(outside('LaTeX engine')).toBe(true);
     expect(outside('Command')).toBe(false);
     expect(outside('Timeout, seconds')).toBe(false);
+
+    const box = advancedBlock();
+    expect(box.contains(document.querySelector('#settings .model-chips'))).toBe(true);
+    expect(box.contains(effortSlider())).toBe(true);
   });
   /*
    * "terra for resume review, astra for cover letter drafting, luna for

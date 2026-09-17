@@ -5265,6 +5265,72 @@ async function loadSettings() {
   model.setAttribute('list', 'ai-model-options');
 
   /*
+   * The models the chosen CLI actually has, as buttons.
+   *
+   * Typing "opus" into a box is asking somebody to remember a name; four
+   * buttons is reading. The box is still there behind "Another…", because
+   * every one of these CLIs gains models faster than this file can be edited
+   * and a closed list would start refusing names that work — but it is the
+   * exception now rather than the only way in.
+   */
+  const modelChips = el('div', { className: 'chip-set model-chips' });
+  const modelOther = el('div', { className: 'model-other', hidden: true }, [model]);
+  const typedModel = () => model.value.trim();
+  const showModelChips = () => {
+    const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
+    const names = chosen?.model?.suggestions ?? [];
+    const listed = names.includes(typedModel());
+    // Nothing to choose between: the box is the only control that makes sense.
+    modelChips.hidden = names.length === 0;
+    // And the box stays out of the way only while the buttons can say what is
+    // chosen — which includes choosing nothing.
+    modelOther.hidden = names.length > 0 && (typedModel() === '' || listed);
+
+    /*
+     * `aria-pressed` by setAttribute, not through el(): that builds with
+     * Object.assign, and assigning a hyphenated key sets a plain JavaScript
+     * property that no attribute and no screen reader ever sees. The same
+     * trap as `list` on an input, one line further down the file.
+     */
+    const pressable = (node, on) => {
+      node.setAttribute('aria-pressed', String(on));
+      if (on) node.classList.add('on');
+      return node;
+    };
+    const chip = (label, value, title) =>
+      pressable(
+        el('button', {
+          type: 'button',
+          className: 'chip-toggle',
+          textContent: label,
+          title: title ?? '',
+          onclick: () => {
+            model.value = value;
+            model.oninput();
+          },
+        }),
+        typedModel() === value,
+      );
+
+    modelChips.replaceChildren(
+      chip('Default', '', `Whatever ${chosen?.command ?? 'the CLI'} uses when it is not told`),
+      ...names.map((m) => chip(m, m)),
+      pressable(
+        el('button', {
+          type: 'button',
+          className: 'chip-toggle',
+          textContent: 'Another…',
+          onclick: () => {
+            modelOther.hidden = false;
+            model.focus();
+          },
+        }),
+        !listed && Boolean(typedModel()),
+      ),
+    );
+  };
+
+  /*
    * And a model per kind of work, for when one is not enough.
    *
    * Behind a disclosure because almost nobody needs it: the box above is the
@@ -5283,15 +5349,46 @@ async function loadSettings() {
     return field(task.label, box, task.note);
   });
 
-  const effort = el('select');
-  for (const [value, label] of [
+  /*
+   * Effort as a slider, because it is one axis and four stops on it.
+   *
+   * A dropdown asks you to open it before you can see what the choices even
+   * are, and hides the thing that matters most about them: that they are
+   * ordered, and that you are somewhere on that order. A slider is the shape
+   * of the setting.
+   */
+  const EFFORTS = [
     ['', 'As it comes'],
     ['low', 'Quick'],
     ['medium', 'Normal'],
     ['high', 'Thorough'],
-  ]) {
-    effort.append(el('option', { value, textContent: label, selected: (config.ai.effort ?? '') === value }));
-  }
+  ];
+  const effortAt = (i) => EFFORTS[Math.max(0, Math.min(EFFORTS.length - 1, Number(i) || 0))];
+  const effortSlider = el('input', {
+    type: 'range',
+    min: '0',
+    max: String(EFFORTS.length - 1),
+    step: '1',
+    className: 'effort-slider',
+    value: String(Math.max(0, EFFORTS.findIndex(([v]) => v === (config.ai.effort ?? '')))),
+  });
+  const effortValue = () => effortAt(effortSlider.value)[0];
+  /*
+   * The scale under the track is also the readout: the stop you are on is the
+   * one in darker type. A separate "As it comes" line above the slider said
+   * the same words as the left-hand end of the scale below it, which is the
+   * current value printed twice and no clearer for it.
+   */
+  const effortScale = el(
+    'div',
+    { className: 'effort-scale' },
+    EFFORTS.map(([, label]) => el('span', { textContent: label })),
+  );
+  const showEffortLabel = () => {
+    const at = Number(effortSlider.value) || 0;
+    [...effortScale.children].forEach((span, i) => span.classList.toggle('on', i === at));
+    effortSlider.setAttribute('aria-valuetext', effortAt(effortSlider.value)[1]);
+  };
   let savedEffort = config.ai.effort ?? '';
 
   /**
@@ -5316,6 +5413,8 @@ async function loadSettings() {
   const showModelNote = () => {
     const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
     modelList.replaceChildren(...(chosen?.model?.suggestions ?? []).map((m) => el('option', { value: m })));
+    showModelChips();
+    showEffortLabel();
 
     if (!chosen) {
       const named = `"${command.value.trim() || 'this command'}" is not one of the presets`;
@@ -5353,7 +5452,7 @@ async function loadSettings() {
    * believe the preset they picked took effect when it did not.
    */
   const commandBlock = advanced(
-    'Advanced — the exact command',
+    'Advanced — the exact command, the model and the effort',
     field('Command', command, 'Must be on your PATH.'),
     field(
       'Arguments',
@@ -5361,6 +5460,22 @@ async function loadSettings() {
       '{prompt} is a file holding the prompt, {promptText} inlines it, {sandbox} is the scratch directory.',
     ),
     field('Timeout, seconds', timeout),
+    /*
+     * The model and the effort live here, below the command, because they are
+     * facts about that command: which names are even offered depends on which
+     * CLI is chosen, and neither means anything until one is. Picking a preset
+     * is the whole of what most people need from this panel.
+     */
+    el('div', { className: 'lbl', textContent: 'Model' }),
+    modelChips,
+    modelOther,
+    modelList,
+    modelNote,
+    el('div', { className: 'lbl', textContent: 'Effort' }),
+    effortSlider,
+    effortScale,
+    effortNote,
+    taskFields.length ? advanced('A different model for a particular kind of work', ...taskFields) : null,
   );
   commandBlock.open = !matching;
 
@@ -5382,7 +5497,7 @@ async function loadSettings() {
     timeout.value !== timeout.dataset.stored ||
     model.value !== model.dataset.stored ||
     [...perTask.values()].some((box) => box.value !== box.dataset.stored) ||
-    (effort.value || '') !== savedEffort ||
+    effortValue() !== savedEffort ||
     (engine.value || '') !== savedEngine;
   const markAiUnsaved = () => {
     unsaved.hidden = !aiIsDirty();
@@ -5396,7 +5511,10 @@ async function loadSettings() {
     };
   }
   engine.onchange = markAiUnsaved;
-  effort.onchange = markAiUnsaved;
+  effortSlider.oninput = () => {
+    showEffortLabel();
+    markAiUnsaved();
+  };
   showModelNote();
   markAiUnsaved();
 
@@ -5413,7 +5531,7 @@ async function loadSettings() {
           args: args.value.split(/\s+/).filter(Boolean),
           model: model.value.trim(),
           models: Object.fromEntries([...perTask].map(([key, box]) => [key, box.value.trim()])),
-          effort: effort.value || undefined,
+          effort: effortValue() || undefined,
           timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 180_000,
         },
         latex: { engine: engine.value || undefined },
@@ -5426,7 +5544,7 @@ async function loadSettings() {
      */
     for (const input of [command, args, timeout, model, ...perTask.values()]) input.dataset.stored = input.value;
     savedEngine = engine.value || '';
-    savedEffort = effort.value || '';
+    savedEffort = effortValue();
     markAiUnsaved();
     setStatus('Settings saved');
   };
@@ -5528,14 +5646,6 @@ async function loadSettings() {
      * what is going to run.
      */
     commandBlock,
-    field('Model', model, 'Leave empty for the CLI’s own default.'),
-    modelList,
-    modelNote,
-    field('Effort', effort),
-    effortNote,
-    taskFields.length
-      ? advanced('A different model for a particular kind of work', ...taskFields)
-      : null,
     el('div', { className: 'sandbox-note' }, [
       el('b', {}, 'Confined to a scratch directory. '),
       'The command runs in an empty temporary folder containing only the prompt — never your save folder, ' +
