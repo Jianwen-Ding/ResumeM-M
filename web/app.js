@@ -3428,18 +3428,25 @@ async function addApplication() {
  * ------------------------------------------------------------------ */
 
 let openDraftId = null;
+/*
+ * How many are in the list, so the pane beside it can stop telling you to
+ * pick one when there are none to pick. "Nothing open — pick an application
+ * on the left" over an empty left column is advice that cannot be followed,
+ * printed beside two other paragraphs saying the same thing a third way.
+ */
+let draftsInList = 0;
 
 async function loadDrafts() {
   const { drafts } = await api('/workspace');
   const list = $('#draft-list');
+  draftsInList = drafts.length;
 
   if (drafts.length === 0) {
     setChildren(
       list,
-      el('div', { className: 'empty' }, [
-        el('b', {}, 'Nothing in progress'),
-        'When a posting wants a cover letter or written answers, send it here from the browser extension.',
-      ]),
+      // Short: the paragraph above this box already says where these come
+      // from, and the pane beside it says it once more with what to do.
+      el('div', { className: 'empty' }, [el('b', {}, 'Nothing yet')]),
     );
     if (!openDraftId) renderDraft(null);
     return;
@@ -3692,8 +3699,11 @@ function renderDraft(draft) {
     setChildren(
       panel,
       el('div', { className: 'empty' }, [
-        el('b', {}, 'Nothing open'),
-        'Pick an application on the left, or send one over from the extension.',
+        el('b', {}, draftsInList === 0 ? 'Nothing in progress' : 'Nothing open'),
+        draftsInList === 0
+          ? 'One arrives here when JobHelper finds a posting that wants a cover letter or written answers. ' +
+            'Or start one yourself with + Application, above.'
+          : 'Pick an application on the left.',
       ]),
     );
     return;

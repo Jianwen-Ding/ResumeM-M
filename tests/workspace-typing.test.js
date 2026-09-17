@@ -122,6 +122,57 @@ describe('typing in the Workspace', () => {
 
   const PARAGRAPH = 'Dear Streamly, I have spent the last year building ingest pipelines.';
 
+  /**
+   * Open the app again from scratch, with whatever is in `drafts` now and
+   * nothing selected — which is what arriving at the Workspace actually looks
+   * like, and the one state the fixture above cannot reach because it opens a
+   * draft before every test.
+   */
+  const reopenWorkspace = async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    location.hash = '';
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#resume-select')).not.toBeNull());
+    for (const b of document.querySelectorAll('#tabs button')) b.disabled = false;
+    document.querySelector('button[data-tab="workspace"]').click();
+  };
+
+  /*
+   * "Nothing open — pick an application on the left" over an empty left
+   * column is advice that cannot be followed, and it was printed beside two
+   * other paragraphs saying where applications come from. Three sentences,
+   * one of them wrong.
+   */
+  it('does not tell you to pick one when there are none to pick', async () => {
+    for (const id of Object.keys(drafts)) delete drafts[id];
+    await reopenWorkspace();
+
+    const pane = () => document.querySelector('#draft-editor').textContent;
+    await vi.waitFor(() => expect(pane()).toContain('Nothing in progress'));
+    expect(pane()).not.toMatch(/on the left/i);
+    // It says what would actually put one there.
+    expect(pane()).toMatch(/JobHelper/);
+    expect(pane()).toMatch(/\+ Application/);
+    // And the list beside it does not say the same thing a third time.
+    expect(document.querySelector('#draft-list').textContent.trim()).toBe('Nothing yet');
+  });
+
+  /*
+   * Which is the only empty state the pane can actually show: with anything
+   * in the list the Workspace opens the first one rather than sitting empty,
+   * so "pick one on the left" was unreachable as well as unfollowable. It is
+   * kept for the moment between discarding one and the list reloading.
+   */
+  it('opens the first one rather than showing an empty pane', async () => {
+    await reopenWorkspace();
+    await vi.waitFor(() => expect(document.querySelector('#draft-editor .letter')).not.toBeNull());
+    const pane = document.querySelector('#draft-editor').textContent;
+    expect(pane).not.toContain('Nothing open');
+    expect(pane).not.toContain('Nothing in progress');
+    expect(document.querySelector('.draft-card.selected')).not.toBeNull();
+  });
+
   it('writes the letter without waiting for the caret to leave the box', async () => {
     type(letterBox(), PARAGRAPH);
     expect(savedLetter(), 'nothing is written on the keystroke itself').toBe('');
