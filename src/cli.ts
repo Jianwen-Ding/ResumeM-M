@@ -63,8 +63,59 @@ Environment:
 `;
 
 function arg(argv: string[], name: string): string | undefined {
+  const joined = argv.find((a) => a.startsWith(`--${name}=`));
+  // `--data=/some/save` is how half of every other tool is written, and it
+  // used to resolve to nothing at all — the same silent miss as a flag that
+  // is never read.
+  if (joined) return joined.slice(name.length + 3);
   const i = argv.indexOf(`--${name}`);
   return i >= 0 ? argv[i + 1] : undefined;
+}
+
+/**
+ * Every flag each command takes, so one it does not take can be said out loud.
+ *
+ * `rmm serve --data /tmp/copy` accepted the flag and ignored it for as long as
+ * the flag existed, and a typo like `--dta` still would: it quietly means
+ * "serve the save that happens to be open", which is the one outcome nobody
+ * asking for `--data` wants. An unknown flag is a mistake every time, and
+ * saying so costs one line.
+ */
+const TAKES: Record<string, { value?: string[]; bare?: string[] }> = {
+  build: { bare: ['all'] },
+  feedback: { value: ['focus'] },
+  apply: { value: ['company', 'role', 'url'] },
+  save: { value: ['message', 'm'], bare: ['push'] },
+  voice: { bare: ['dry-run', 'no-ai'] },
+  serve: { value: ['port'] },
+};
+
+/** The first flag this command does not take, with what it does take. */
+function unknownFlag(command: string, rest: string[]): string | null {
+  const spec = TAKES[command] ?? {};
+  // `--data` is every command's, which is the whole point of reading it once.
+  const value = new Set(['data', ...(spec.value ?? [])]);
+  const bare = new Set(spec.bare ?? []);
+
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i] ?? '';
+    if (token === '--') break; // everything after it is a value, by convention
+    if (token === '-m' && value.has('m')) {
+      i++;
+      continue;
+    }
+    if (!token.startsWith('--')) continue;
+    const name = token.slice(2).split('=')[0] ?? '';
+    if (value.has(name)) {
+      if (!token.includes('=')) i++; // its value is not a flag
+      continue;
+    }
+    if (bare.has(name)) continue;
+
+    const known = [...value, ...bare].sort().map((f) => `--${f}`);
+    return `"${token}" is not something ${command ? `\`rmm ${command}\`` : 'rmm'} takes. It takes: ${known.join(', ')}.`;
+  }
+  return null;
 }
 
 /** `-m "message"`, because every other tool that commits accepts it. */
@@ -89,6 +140,13 @@ function fmtFit(r: { pages: number; fits: boolean; overflowPt: number; overflowL
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+
+  const wrong = command && !['help', '--help', '-h'].includes(command) ? unknownFlag(command, rest) : null;
+  if (wrong) {
+    console.error(wrong);
+    return 1;
+  }
+
   const store = new Store(dataDir);
   const repo = Repo.forStore(dataDir);
 

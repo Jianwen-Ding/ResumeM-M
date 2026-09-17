@@ -67,6 +67,33 @@ describe('rmm --data', () => {
    * say one thing, and the command line has to win, or every server started
    * under one exported RMM_DATA shares a store again.
    */
+  it('takes the --data=folder spelling too', async () => {
+    const { stdout } = await rmm(['list', `--data=${save}`]);
+    expect(stdout).toContain('The Folder On The Command Line');
+  });
+
+  /*
+   * The bug this file exists for was a flag that was accepted and discarded.
+   * A typo does the same thing for the same reason — `--dta /tmp/copy` means
+   * "use the save that happens to be open", which is the one outcome nobody
+   * typing it wants.
+   */
+  it('refuses a flag it does not take, and says what it does take', async () => {
+    await expect(rmm(['list', '--dta', save])).rejects.toMatchObject({ code: 1 });
+    const failed = await rmm(['serve', '--prot', '9']).catch((e: { stderr: string }) => e);
+    expect((failed as { stderr: string }).stderr).toContain('"--prot" is not something `rmm serve` takes');
+    expect((failed as { stderr: string }).stderr).toContain('--port');
+  });
+
+  it('does not mistake a flag value for a flag', async () => {
+    // A commit message is free text, and free text can begin with a dash.
+    const said = await rmm(['save', '-m', '--not-a-flag', '--data', save]).catch((e: { stderr: string }) => ({
+      stdout: '',
+      stderr: e.stderr,
+    }));
+    expect(`${said.stdout}${said.stderr ?? ''}`).not.toContain('is not something');
+  });
+
   it('beats RMM_DATA', async () => {
     const other = aSave('The Folder In The Environment');
     try {
