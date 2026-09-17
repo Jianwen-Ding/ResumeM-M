@@ -5303,30 +5303,32 @@ async function loadSettings() {
    * and a line in the prompt everywhere else — which reaches every model,
    * just less precisely.
    */
+  /*
+   * One note each, under the field it is about.
+   *
+   * Both sentences used to be joined into a single line below Effort, so
+   * "Passed as --model" sat under the Effort dropdown, two fields away from
+   * the box it describes, and read as if the effort were the thing being
+   * passed. A note belongs to its field.
+   */
   const modelNote = el('div', { className: 'hint' });
+  const effortNote = el('div', { className: 'hint' });
   const showModelNote = () => {
     const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
     modelList.replaceChildren(...(chosen?.model?.suggestions ?? []).map((m) => el('option', { value: m })));
 
-    const parts = [];
     if (!chosen) {
-      parts.push(
-        `"${command.value.trim() || 'this command'}" is not one of the presets, so neither of these is added to it. ` +
-          'Put the flags your CLI wants in Arguments; the effort still goes into the prompt.',
-      );
-    } else {
-      parts.push(
-        chosen.model
-          ? `Passed as ${chosen.model.flag}. Leave it empty to let ${chosen.command} choose.`
-          : `${chosen.command} has no model switch, so this is ignored.`,
-      );
-      parts.push(
-        chosen.effort
-          ? `Effort is passed as ${chosen.effort.flag}, and said in the prompt as well.`
-          : `${chosen.command} has no effort switch, so effort is asked for in the prompt instead — which every model understands, less precisely than a flag would.`,
-      );
+      const named = `"${command.value.trim() || 'this command'}" is not one of the presets`;
+      modelNote.textContent = `${named}, so this is not added to it. Put the flags your CLI wants in Arguments.`;
+      effortNote.textContent = `${named}, so no effort flag is added — but the effort still goes into the prompt.`;
+      return;
     }
-    modelNote.textContent = parts.join(' ');
+    modelNote.textContent = chosen.model
+      ? `Passed as ${chosen.model.flag}. Leave it empty to let ${chosen.command} choose.`
+      : `${chosen.command} has no model switch, so this is ignored.`;
+    effortNote.textContent = chosen.effort
+      ? `Passed as ${chosen.effort.flag}, and said in the prompt as well.`
+      : `${chosen.command} has no effort switch, so this is asked for in the prompt instead — which every model understands, less precisely than a flag would.`;
   };
 
   const engine = el('select');
@@ -5501,13 +5503,17 @@ async function loadSettings() {
           }),
           el('button', {
             className: 'link',
-            textContent: 'Use the preset’s',
+            // The whole phrase, not a possessive with its noun in the next
+            // node: "Use the preset’s — that saves and tests it." is not a
+            // sentence, and it is the only instruction on a warning about a
+            // command that will not run.
+            textContent: `Put the "${drifted.label}" arguments back`,
             onclick: () => {
               preset.value = drifted.label;
               preset.onchange();
             },
           }),
-          el('span', { textContent: ' — that saves and tests it.' }),
+          el('span', { textContent: ' — that saves them and tests the command.' }),
         ])
       : null,
     /*
@@ -5524,8 +5530,9 @@ async function loadSettings() {
     commandBlock,
     field('Model', model, 'Leave empty for the CLI’s own default.'),
     modelList,
-    field('Effort', effort),
     modelNote,
+    field('Effort', effort),
+    effortNote,
     taskFields.length
       ? advanced('A different model for a particular kind of work', ...taskFields)
       : null,

@@ -203,7 +203,18 @@ describe('the settings panel', () => {
     );
     expect(warning).toBeTruthy();
 
-    warning.querySelector('button.link').click();
+    /*
+     * The button has to say what it does on its own. It read "Use the
+     * preset’s", with the noun in the next node, so the whole instruction
+     * came out as "Use the preset’s — that saves and tests it." on the only
+     * warning that explains why the AI command will not run.
+     */
+    const mend = warning.querySelector('button.link');
+    expect(mend.textContent).toContain('Claude Code');
+    expect(mend.textContent).toMatch(/arguments/i);
+    expect(mend.textContent.trim()).not.toMatch(/[’']s$/);
+
+    mend.click();
     const claude = AI_PRESETS.find((p) => p.command === 'claude');
     await vi.waitFor(() => expect(config.ai.args).toEqual(claude.args));
   });
@@ -264,10 +275,19 @@ describe('the settings panel', () => {
     expect(text()).toContain('has no effort switch');
     expect(text()).toContain('Passed as --model');
 
+    /*
+     * And says it under the field it is about. Both sentences were one line
+     * below Effort, so "Passed as --model" sat two fields from the box it
+     * describes and read as though the effort were what got passed.
+     */
+    const hints = [...document.querySelectorAll('#settings .hint')].map((n) => n.textContent);
+    expect(hints.some((h) => h.includes('--model') && !/effort/i.test(h))).toBe(true);
+    expect(hints.some((h) => /effort switch/i.test(h) && !h.includes('--model'))).toBe(true);
+
     const command = commandBox();
     command.value = 'codex';
     command.dispatchEvent(new Event('input'));
-    await vi.waitFor(() => expect(text()).toContain('Effort is passed as -c'));
+    await vi.waitFor(() => expect(text()).toContain('Passed as -c'));
 
     command.value = 'my-own-cli';
     command.dispatchEvent(new Event('input'));
