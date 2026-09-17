@@ -24,7 +24,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
-import { classifyPage, extractJob, JOB_SHAPED, mergeJobPages, type PageSource } from '../jobs/extract.js';
+import { classifyPage, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, fingerprint, slug, stats } from '../model/applications.js';
@@ -1328,7 +1328,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // of them. A form page is worth offering on even though it describes
       // nothing, which is exactly the case a single score could not express.
       const verdict = classifyPage(current.html, current.url);
-      const score = Math.max(verdict.score, ...trail.map((p) => classifyPage(p.html, p.url).score));
+      /*
+       * And the same question asked of every page of this application.
+       *
+       * The verdict above is about the page you are on, deliberately: a form
+       * page is an `application` even though it describes nothing. But whether
+       * to offer *at all* is a question about the application, not the page —
+       * a careers page that is a heading and an embedded board says nothing
+       * itself, and the posting is in the frame, which arrives here as one of
+       * these. Judging the outer page alone meant the card appeared, read the
+       * frame, and then removed itself.
+       */
+      const others = trail.filter((p) => p !== current).map((p) => classifyPage(p.html, p.url));
+      const score = Math.max(verdict.score, ...others.map((v) => v.score));
+      const anyPageIsAJob = verdict.kind !== 'none' || others.some((v) => v.kind !== 'none');
 
       const baseId = baseResumeId ?? defaultBaseId(data.resumes);
       if (!baseId) throw new Error('The store has no resumes to start from');
@@ -1403,7 +1416,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       res.json({
-        isJobPosting: verdict.kind !== 'none' || score >= JOB_SHAPED,
+        /*
+         * The verdict, and only the verdict.
+         *
+         * `|| score >= JOB_SHAPED` was a second opinion that overrode the
+         * first, and the classifier's whole job is to weigh that score against
+         * what else it can see. So a page that scored well on vocabulary and
+         * had nothing to act on — a news article about the hiring slowdown, a
+         * documentation page headed "Requirements", a forum thread about how
+         * many applications people sent — came back `kind: 'none'` and
+         * `isJobPosting: true`, and the card appeared on all three.
+         */
+        isJobPosting: anyPageIsAJob,
         score,
         kind: verdict.kind,
         why: verdict.why,
