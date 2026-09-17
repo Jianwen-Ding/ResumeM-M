@@ -192,6 +192,13 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
     const qa = fs.readFileSync(path.join(result.dir, 'Test-Person-Answers.md'), 'utf8');
     expect(qa).toContain('## Why us?');
     expect(qa).toContain('Because.');
+    /*
+     * And says whose questions these are. The resume and the letter are
+     * attachments nobody opens again; this is the file you sit with, copying
+     * answers into boxes, often beside another application's — and it began
+     * straight in at "## Why us?" with nothing saying who was asking.
+     */
+    expect(qa.split('\n')[0]).toBe('# Streamly — Intern');
   });
 
   it('skips an empty cover letter rather than writing a blank file', async () => {
