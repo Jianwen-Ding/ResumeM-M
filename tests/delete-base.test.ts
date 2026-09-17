@@ -110,3 +110,55 @@ describe('deleting a resume other resumes are built on', () => {
     expect(temp.store.getResume('newgrad')?.extends).toBe('base');
   });
 });
+
+/*
+ * What the deleted resume *contributed to the document* is kept. What it *was*
+ * is not — those are different things, and the spread that implements the merge
+ * cannot tell them apart on its own.
+ */
+describe('what a child does not inherit from a resume being deleted', () => {
+  it('does not turn every variation into a pinned base', () => {
+    temp.write('resumes/base.yaml', {
+      id: 'base',
+      label: 'Base resume',
+      base: true,
+      notes: 'The one I build from.',
+      generatedFor: { company: 'Acme', role: 'Intern' },
+      choices: { 'edu_neu.dates': 'v_may2026' },
+      sections: [{ kind: 'education', entries: ['edu_neu'] }],
+    });
+
+    temp.store.deleteResume('base');
+
+    for (const id of ['newgrad', 'intern']) {
+      const child = temp.store.getResume(id);
+      expect(child?.base, id).toBeUndefined();
+      expect(child?.notes, id).toBeUndefined();
+      // A resume tailored for one posting must not come back claiming it was
+      // written for another.
+      expect(child?.generatedFor, id).toBeUndefined();
+      // And it keeps its own name.
+      expect(child?.label, id).toBe(id === 'newgrad' ? 'New grad' : 'Summer intern');
+      // While still inheriting what the base actually contributed.
+      expect(child?.choices?.['edu_neu.dates'], id).toBeTruthy();
+      expect(child?.sections?.length, id).toBeGreaterThan(0);
+    }
+  });
+
+  it('keeps those fields when the child set them itself', () => {
+    temp.write('resumes/base.yaml', { id: 'base', label: 'Base', base: true, notes: 'parent note' });
+    temp.write('resumes/newgrad.yaml', {
+      id: 'newgrad',
+      label: 'New grad',
+      extends: 'base',
+      base: true,
+      notes: 'my own note',
+    });
+
+    temp.store.deleteResume('base');
+
+    const child = temp.store.getResume('newgrad');
+    expect(child?.base).toBe(true);
+    expect(child?.notes).toBe('my own note');
+  });
+});

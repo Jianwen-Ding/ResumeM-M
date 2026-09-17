@@ -42,13 +42,26 @@ describe('loading', () => {
   });
 
   it('takes the resume id from the filename, so the two cannot diverge', () => {
+    /*
+     * The title was always the rule; the body asserted the opposite, and so did
+     * the code — the id inside the file won. That is how two files came to
+     * claim one id: copy base.yaml to base-old.yaml, and the copy sorted first
+     * and answered every lookup for `base`, while edits went on being written
+     * to base.yaml and appeared to be thrown away.
+     */
     t.write('resumes/renamed.yaml', { id: 'something-else', label: 'Renamed' });
     const ids = t.store.loadResumes().map((r) => r.id);
-    // The `id` field inside the file is honoured when present…
-    expect(ids).toContain('something-else');
-    // …but a file without one still loads under its filename.
+    expect(ids).toContain('renamed');
+    expect(ids).not.toContain('something-else');
+
+    // A file without one loads under its filename too, as it always did.
     t.write('resumes/no-id.yaml', { label: 'No id' });
     expect(t.store.loadResumes().map((r) => r.id)).toContain('no-id');
+
+    // And a copied file is its own resume rather than a second claim on one.
+    t.write('resumes/base-old.yaml', { id: 'base', label: 'Old copy' });
+    expect(t.store.getResume('base')?.label).toBe('Base resume');
+    expect(t.store.getResume('base-old')?.label).toBe('Old copy');
   });
 });
 

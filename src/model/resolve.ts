@@ -68,21 +68,74 @@ function mergeOnto(base: ResumeSpec, spec: ResumeSpec): ResumeSpec {
  */
 export function absorbBase(child: ResumeSpec, removed: ResumeSpec): ResumeSpec {
   const merged = mergeOnto(removed, child);
+
+  /*
+   * What the parent *contributed to the document* — sections, choices, lists,
+   * layout — the child keeps. What the parent *was*, it does not.
+   *
+   * The spread copies every key the child lacks, and some of those keys are
+   * the parent's identity rather than its content. Deleting a pinned base
+   * turned every tailored variation into a pinned base, and handed each of
+   * them the parent's `generatedFor` — so a resume made for one posting came
+   * back claiming it had been written for another, and the base pickers filled
+   * up with resumes nobody pinned. A child with no label of its own would have
+   * taken the parent's, leaving two resumes with one name and no parent to
+   * explain it.
+   */
+  for (const own of ['label', 'base', 'notes', 'generatedFor'] as const) {
+    if (child[own] === undefined) delete merged[own];
+  }
+
+  merged.id = child.id;
   if (removed.extends) merged.extends = removed.extends;
   else delete merged.extends;
   return merged;
 }
 
-function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpec[] {
+/**
+ * Which of the parent's sections a child's section replaces.
+ *
+ * Matching on `kind` alone is not enough, and `heading` exists precisely
+ * because it is not: a store can hold two `custom` sections, "Awards" and
+ * "Leadership". A child re-stating only Awards replaced *both* of them with
+ * Awards, so the document printed Awards twice and Leadership, with its
+ * entries, was silently gone. Nothing warned, and the editor runs the same
+ * algorithm, so the preview agreed with the wrong answer.
+ *
+ * It cannot simply become an exact match on the heading either, because the
+ * ordinary child does not repeat the heading at all — it just lists different
+ * entries under Experience, and must go on replacing the parent's Experience
+ * rather than adding a second one.
+ *
+ * So: a heading that matches wins first; then a child that named no heading
+ * takes the parent's section of that kind; then a renamed heading is allowed to
+ * take it, but only where the parent has one section of that kind and there is
+ * therefore nothing to be ambiguous about. Whatever is left is a section the
+ * parent never had.
+ */
+export function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpec[] {
   if (override.length === 0) return base;
-  const out = base.map((s) => {
-    const o = override.find((x) => x.kind === s.kind);
-    return o ? o : s;
-  });
+
+  const out = [...base];
+  const claimed = new Set<number>();
+
+  const claim = (o: SectionSpec, where: (s: SectionSpec, i: number) => boolean): boolean => {
+    const at = out.findIndex((s, i) => !claimed.has(i) && s.kind === o.kind && where(s, i));
+    if (at < 0) return false;
+    out[at] = o;
+    claimed.add(at);
+    return true;
+  };
+
+  const heading = (s: SectionSpec) => s.heading ?? '';
+  const onlyOneOfItsKind = (o: SectionSpec) => base.filter((s) => s.kind === o.kind).length === 1;
+
+  let pending = override.filter((o) => !claim(o, (s) => heading(s) === heading(o)));
+  pending = pending.filter((o) => !(heading(o) === '' && claim(o, () => true)));
+  pending = pending.filter((o) => !(onlyOneOfItsKind(o) && claim(o, () => true)));
+
   // Sections the parent never had are appended in the child's order.
-  for (const o of override) {
-    if (!out.some((s) => s.kind === o.kind)) out.push(o);
-  }
+  for (const o of pending) out.push(o);
   return out;
 }
 
@@ -260,6 +313,18 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
         const entry = data.entries.find((e) => e.id === eid);
         if (!entry) {
           warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);
+          continue;
+        }
+        /*
+         * Archiving is how something is taken out of circulation without being
+         * thrown away, and everything else honours it: the master document, the
+         * pickers, the matcher, the AI's view of the store. This did not, so an
+         * archived entry disappeared from every screen and went on being
+         * printed on every resume that listed it. Same treatment as an archived
+         * bullet, which was already handled a few lines up.
+         */
+        if (entry.archived) {
+          warnings.push(`Entry "${eid}" is archived, so it was left off.`);
           continue;
         }
         entries.push(resolveEntry(entry, section, choices, warnings, lists));

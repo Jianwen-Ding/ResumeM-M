@@ -206,8 +206,20 @@ export class Store {
       .filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'))
       .map((f) => {
         const spec = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as ResumeSpec;
-        // Filename is the source of truth for the id so the two cannot diverge.
-        return { ...spec, id: spec?.id ?? path.basename(f).replace(/\.ya?ml$/, '') };
+        /*
+         * Filename is the source of truth for the id, which the comment here
+         * always said and the code did not: it preferred the id written inside
+         * the file, so two files could claim one id. Copying resumes/base.yaml
+         * to resumes/base-old.yaml — an ordinary thing to do in a folder
+         * advertised as hand-editable YAML — made the copy sort first, and from
+         * then on it answered every lookup for `base`. Edits went to base.yaml
+         * and appeared to be thrown away, every child of `base` resolved
+         * through the copy, and the next save wrote the copy's content over the
+         * real file.
+         *
+         * Taken from the name, a copied file is simply its own resume.
+         */
+        return { ...spec, id: path.basename(f).replace(/\.ya?ml$/, '') };
       })
       .filter((r): r is ResumeSpec => Boolean(r && r.id));
   }
@@ -249,6 +261,14 @@ export class Store {
     }
   }
 
+  /** The four files entries are split across, in the order `load` reads them. */
+  private static readonly ENTRY_FILES = [
+    'education.yaml',
+    'experience.yaml',
+    'projects.yaml',
+    'custom.yaml',
+  ] as const;
+
   /**
    * Entries are split across files by kind for readability, so writing one back
    * means knowing which file it came from.
@@ -266,12 +286,33 @@ export class Store {
     }
   }
 
+  /**
+   * An id lives in exactly one of the four files.
+   *
+   * Splitting entries by kind means changing an entry's kind moves it between
+   * files, and writing the new one without removing the old left the same id in
+   * two places at once. `load()` concatenates the four files with no dedupe, so
+   * the store then held two entries with that id — and `resolveResume` takes
+   * the first match, which for education → project is the stale copy. The
+   * master document showed the entry as you had just edited it while the PDF
+   * you actually sent showed the old title and the old bullets, with nothing
+   * anywhere saying so. `deleteEntry` returned at the first file it found a
+   * match in, so the twin could not be cleared from the app either.
+   */
   saveEntry(entry: Entry): void {
     // Normalised on the way out as well as in, so a bad write from the API
     // never becomes a bad file: reads are already safe, but a file that says
     // something impossible is a trap for whoever opens it next.
     const clean = normalizeEntry(entry);
     const rel = this.fileForKind(clean.kind);
+
+    for (const other of Store.ENTRY_FILES) {
+      if (other === rel) continue;
+      const list = this.readYaml<Entry[]>(other, []);
+      const next = list.filter((e) => e.id !== clean.id);
+      if (next.length !== list.length) this.writeYaml(other, next);
+    }
+
     const list = this.readYaml<Entry[]>(rel, []);
     const idx = list.findIndex((e) => e.id === clean.id);
     if (idx >= 0) list[idx] = clean;
@@ -279,16 +320,18 @@ export class Store {
     this.writeYaml(rel, list);
   }
 
+  /** Removes the id from every file, not merely the first one holding it. */
   deleteEntry(id: string): boolean {
-    for (const rel of ['education.yaml', 'experience.yaml', 'projects.yaml', 'custom.yaml']) {
+    let removed = false;
+    for (const rel of Store.ENTRY_FILES) {
       const list = this.readYaml<Entry[]>(rel, []);
       const next = list.filter((e) => e.id !== id);
       if (next.length !== list.length) {
         this.writeYaml(rel, next);
-        return true;
+        removed = true;
       }
     }
-    return false;
+    return removed;
   }
 
   saveSkillGroups(groups: SkillGroup[]): void {
