@@ -925,6 +925,10 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .draft-editor .where { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
 .draft-editor .block { border-top: 1px solid var(--line-soft); padding-top: 14px; margin-top: 16px; }
 .draft-editor .block:first-of-type { border-top: 0; margin-top: 0; }
+/* A section that is offered rather than asked for: present, but not pressing. */
+.draft-editor .block.subtle .block-head h4,
+.draft-editor .block.subtle .hint { color: var(--ink-soft, #5f6368); }
+.draft-editor .block.subtle { opacity: 0.86; }
 .draft-editor .block-head { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
 .draft-editor .block-head h4 { margin: 0; font-size: 13.5px; }
 .draft-editor textarea { min-height: 110px; width: 100%; font-family: inherit; font-size: 13.5px; line-height: 1.6; }
@@ -1329,3 +1333,32 @@ tbody tr { cursor: pointer; }
 
 /* A prompt shown when the AI is off, so you can see what it would have asked. */
 .prompt-dump { max-height: 40vh; overflow: auto; white-space: pre-wrap; font-size: var(--t-sm); background: var(--panel-sunk); padding: 12px; border-radius: var(--radius-sm); }
+
+/* ------------------------------------------------------------------ *
+ * Buttons that run the AI                                             *
+ * ------------------------------------------------------------------ */
+
+/*
+ * Pressing one of these spends minutes, and depending on the command, money.
+ * Pressing anything else is instant. Nothing distinguished them, so the only
+ * way to learn which you had pressed was to wait and see. The mark goes on the
+ * buttons that start AI work and on no others: saying "not AI" on every other
+ * button in the product would be a lot of noise to make a point about four.
+ */
+button.ai-action { display: inline-flex; align-items: center; gap: 5px; }
+.ai-mark { color: var(--accent, #1a73e8); font-size: 0.9em; line-height: 1; }
+button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
+
+.ai-running { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.ai-elapsed { font-variant-numeric: tabular-nums; color: var(--ink-soft, #3c4043); }
+.ai-mark.spin { animation: ai-pulse 1.4s ease-in-out infinite; }
+
+@keyframes ai-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.85); }
+}
+
+/* Movement is information here, not decoration — but not everyone wants it. */
+@media (prefers-reduced-motion: reduce) {
+  .ai-mark.spin { animation: none; }
+}

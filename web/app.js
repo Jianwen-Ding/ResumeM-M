@@ -3260,13 +3260,12 @@ function renderDraft(draft) {
       }
     };
 
-    const letterFeedbackBtn = el('button', {
-      className: 'tiny',
-      textContent: 'Ask for feedback',
+    const letterFeedbackBtn = aiButton({
+      label: 'Ask for feedback',
       title: 'The AI reads what you have written and says what is weak — it does not rewrite it',
-      disabled: !draft.coverLetter.body.trim(),
       onclick: () => askDraftFeedback(draft, {}, notes),
     });
+    letterFeedbackBtn.disabled = !draft.coverLetter.body.trim();
 
     // Longer than the resume's debounce: this one fires on every keystroke,
     // and recompiling mid-word is wasted work.
@@ -3301,9 +3300,8 @@ function renderDraft(draft) {
           }),
           liveChip,
           el('span', { className: 'grow', style: 'flex:1' }),
-          el('button', {
-            className: 'tiny',
-            textContent: 'Draft it',
+          aiButton({
+            label: 'Draft it',
             title: 'Write a first draft from the posting and the letters you have written before',
             onclick: () => generate(draft, 'letter', notes),
           }),
@@ -3316,6 +3314,37 @@ function renderDraft(draft) {
 
     // Show the letter as it stands the moment the draft opens.
     queueMicrotask(compile);
+  } else {
+    /*
+     * A cover letter you decided against, and then wanted.
+     *
+     * Whether one is needed is read off the form when the application is
+     * opened, and that answer was final: the box simply did not exist
+     * afterwards. It is the wrong thing to be final about — the form that asks
+     * is often three pages in, the detection is a guess, and "send one anyway"
+     * is a perfectly ordinary decision to make late. Nothing is lost by
+     * offering: an empty letter is not bundled.
+     */
+    blocks.push(
+      el('div', { className: 'block subtle' }, [
+        el('div', { className: 'block-head' }, [
+          el('h4', {}, 'Cover letter'),
+          el('span', { className: 'badge', textContent: 'not asked for' }),
+          el('span', { className: 'grow', style: 'flex:1' }),
+          el('button', {
+            className: 'tiny',
+            textContent: 'Add one anyway',
+            title: 'This posting did not ask for a letter. Send one regardless.',
+            onclick: async () => {
+              draft.coverLetter = { ...draft.coverLetter, required: true };
+              await save('Cover letter added');
+              renderDraft(draft);
+            },
+          }),
+        ]),
+        el('div', { className: 'hint' }, 'This application did not ask for one.'),
+      ]),
+    );
   }
 
   /* Questions */
@@ -3326,13 +3355,13 @@ function renderDraft(draft) {
         value: q.answer,
         placeholder: 'No stored answer yet — what you write here is saved for next time.',
       });
-      const answerFeedbackBtn = el('button', {
+      const answerFeedbackBtn = aiButton({
         className: 'link',
-        textContent: 'Feedback',
+        label: 'Feedback',
         title: 'The AI reads this answer and says what is weak — it does not rewrite it',
-        disabled: !q.answer?.trim(),
         onclick: () => askDraftFeedback(draft, { questionId: q.id }, notes),
       });
+      answerFeedbackBtn.disabled = !q.answer?.trim();
 
       box.oninput = () => {
         q.answer = box.value;
@@ -3371,9 +3400,9 @@ function renderDraft(draft) {
                 })
               : null,
             el('span', { style: 'flex:1' }),
-            el('button', {
+            aiButton({
               className: 'link',
-              textContent: 'Draft this one',
+              label: 'Draft this one',
               title: 'Write an answer from the posting and the answers you have given before',
               onclick: () => generate(draft, 'questions', notes, { questionId: q.id }),
             }),
@@ -3389,9 +3418,9 @@ function renderDraft(draft) {
         el('div', { className: 'block-head' }, [
           el('h4', {}, `Questions (${draft.questions.length})`),
           el('span', { style: 'flex:1' }),
-          el('button', {
-            className: 'tiny',
-            textContent: 'Fill in what is empty',
+          aiButton({
+            label: 'Fill in what is empty',
+            title: 'Answer every question that is still blank',
             onclick: () => generate(draft, 'questions', notes),
           }),
         ]),
@@ -3456,9 +3485,8 @@ function renderDraft(draft) {
             : 'Works from the posting text; add a link to this draft to read it automatically',
           onclick: () => tailorDraft(draft, notes, false),
         }),
-        el('button', {
-          className: 'tiny',
-          textContent: 'Let the AI choose',
+        aiButton({
+          label: 'Let the AI choose',
           title: 'The AI reads the posting and decides which phrasings and bullets to use',
           onclick: () => tailorDraft(draft, notes, true),
         }),
@@ -3581,8 +3609,63 @@ async function tailorDraft(draft, notes, useAi) {
   }
 }
 
+/**
+ * A button that will run the AI.
+ *
+ * Pressing one spends minutes and, depending on the command, money; pressing
+ * one that does not is instant. Nothing on screen distinguished them, so the
+ * only way to find out which you had pressed was to wait and see. The mark is
+ * on the buttons that start AI work and on no others — labelling the rest
+ * "not AI" would be noise on every button in the product to say something
+ * about four of them.
+ */
+function aiButton({ className = 'tiny', label, title, onclick }) {
+  return el('button', { className: `${className} ai-action`, title: `${title}. Runs your AI command.`, onclick }, [
+    el('span', { className: 'ai-mark', ariaHidden: 'true', textContent: '✦' }),
+    el('span', { textContent: label }),
+  ]);
+}
+
+/**
+ * What the AI is doing, while it does it.
+ *
+ * "Working…" was the whole of it, for something that takes minutes: no way to
+ * tell a run that is thinking from one that has died, and nothing saying the
+ * boxes are still yours to type in meanwhile. A count of seconds is the
+ * cheapest honest thing — it moves, so the panel is visibly alive, and it says
+ * how long you have actually been waiting rather than how long it feels.
+ */
+function showAiProgress(notes, doing) {
+  const started = Date.now();
+  const clock = el('span', { className: 'ai-elapsed', textContent: '0:00' });
+  setChildren(
+    notes,
+    el('div', { className: 'ai-running' }, [
+      el('span', { className: 'ai-mark spin', ariaHidden: 'true', textContent: '✦' }),
+      el('span', { textContent: `${doing}… ` }),
+      clock,
+    ]),
+    el('div', { className: 'hint', textContent: 'Keep writing if you like — nothing you type now will be lost.' }),
+  );
+
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - started) / 1000);
+    clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }, 1000);
+  return () => clearInterval(tick);
+}
+
+const DOING = {
+  letter: 'Writing the cover letter',
+  questions: 'Answering the questions',
+  all: 'Writing the letter and the answers',
+};
+
 async function generate(draft, what, notes, extra = {}) {
-  setChildren(notes, el('div', { textContent: 'Working…' }));
+  const stop = showAiProgress(notes, extra.questionId ? 'Writing the answer' : (DOING[what] ?? 'Working'));
+  // Nothing else starts a second run on top of this one.
+  const buttons = [...($('#draft-editor')?.querySelectorAll('button.ai-action') ?? [])];
+  for (const b of buttons) b.disabled = true;
   try {
     // What is on screen goes first, so the AI works from it and the server's
     // merge has something to protect.
@@ -3605,6 +3688,10 @@ async function generate(draft, what, notes, extra = {}) {
     setStatus('Draft updated');
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  } finally {
+    stop();
+    // `renderDraft` has replaced these, so re-read rather than reusing the list.
+    for (const b of $('#draft-editor')?.querySelectorAll('button.ai-action') ?? []) b.disabled = false;
   }
 }
 
