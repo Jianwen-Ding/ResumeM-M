@@ -1181,10 +1181,25 @@ function bulletBlock(entry, section, bullet, choices) {
   const chosenId = choices[key] ?? bullet.default;
   const chosen = bullet.variants.find((v) => v.id === chosenId) ?? bullet.variants[0];
 
-  wrap.append(el('div', { className: 'bullet-quick-actions toolbar' }, [
+  /*
+   * Quick, and therefore not behind the "…".
+   *
+   * Everything else on a bullet is folded into the disclosure to keep eight
+   * of them readable at once, and this bar was folded in with them by a
+   * filter that took every child except the heading. That put the stepper —
+   * the one control this whole editor exists for, and the one whose own
+   * description is "step through the alternates without opening the list" —
+   * behind a menu. Three bullets with two and three phrasings each, and no
+   * way to see that there was anything to step through.
+   *
+   * It stays out. `alternateStepper` returns nothing when there is only one
+   * wording, so this appears exactly where there is a choice to make.
+   */
+  const quickActions = el('div', { className: 'bullet-quick-actions toolbar' }, [
     alternateStepper(bullet.id, bullet, chosenId),
     phraseFeedbackButton(entry, { bulletId: bullet.id, variantId: chosen?.id ?? chosenId }),
-  ].filter(Boolean)));
+  ].filter(Boolean));
+  wrap.append(quickActions);
 
   wrap.append(
     variantPicker({
@@ -1224,7 +1239,12 @@ function bulletBlock(entry, section, bullet, choices) {
   );
 
   if (chosen?.note) wrap.append(el('div', { className: 'note', textContent: chosen.note }));
-  return attachSourceTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
+  return attachSourceTools(
+    wrap,
+    `${entry.id}/${bullet.id}`,
+    [...wrap.children].filter((child) => child !== head && child !== quickActions),
+    head,
+  );
 }
 
 /** The text a non-list bullet currently resolves to. */
@@ -1343,13 +1363,16 @@ function entryBlock(entry, section, choices) {
           onCommit: (text) => saveFieldText(entry, name, current, text),
         }),
       ]);
-      const actions = [alternateStepper(key, field, current),
-        phraseFeedbackButton(entry, { fieldName: name, variantId: current })].filter(Boolean);
-      line.append(...actions);
+      // Same as on a bullet: the stepper stays out of the disclosure, and
+      // exists at all only where there is more than one wording to step
+      // between. Everything else about the field folds away.
+      const stepper = alternateStepper(key, field, current);
+      const feedback = phraseFeedbackButton(entry, { fieldName: name, variantId: current });
+      line.append(...[stepper, feedback].filter(Boolean));
       const row = el('div', { className: 'field' }, [
         el('div', { className: 'field-label' }, FIELD_LABELS[name] ?? name), line, control,
       ]);
-      box.append(attachSourceTools(row, key, [...actions, control], line, 'field'));
+      box.append(attachSourceTools(row, key, [feedback, control].filter(Boolean), line, 'field'));
       continue;
     }
 
