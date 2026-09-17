@@ -56,6 +56,20 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     $('#project-chip').title = project.current || 'Open or create a save';
     $('#project-status').textContent = open ? `Open Save: ${name}` : 'No Save Open';
     $('#project-banner-path').textContent = project.current || 'Open or create a save to access resumes, applications, and files.';
+    /*
+     * The banner is for the state that stops everything: no save open, so
+     * nothing on any tab can work, and the way out has to be impossible to
+     * miss.
+     *
+     * Once one is open it had nothing left to say. It repeated the chip in
+     * the header word for word — "Save: jh-store" up there, "Open Save:
+     * jh-store" here — and added the folder's full path, so every screen in
+     * the application carried a row of somebody's filesystem across the top
+     * of it, permanently, to answer a question nobody asks twice. The chip
+     * still names the save, and still gives the whole path on hover; Save &
+     * Files gives it in full.
+     */
+    $('#project-banner').hidden = open;
     document.title = open ? `${name} — ResumeM-M` : 'ResumeM-M';
     $('#project-description').textContent = project.openedBy === 'restored'
       ? 'This save was reopened from your last session. All visible resumes and applications belong to this folder.'
