@@ -1,5 +1,5 @@
 import type { LayoutOptions, ResolvedProfile } from '../model/types.js';
-import { inlineTex, runtimeSetup, stablePreamble, tex } from './latex.js';
+import { inlineTex, runtimeSetup, stablePreamble, tex, texHref } from './latex.js';
 
 /**
  * A cover letter, typeset to match the resume.
@@ -79,12 +79,12 @@ function hasSignOff(body: string, name: string): boolean {
 function header(p: ResolvedProfile, spacing: number): string {
   const bits: string[] = [];
   if (p.phone) bits.push(tex(p.phone));
-  if (p.email) bits.push(`\\href{mailto:${p.email}}{\\underline{${tex(p.email)}}}`);
+  if (p.email) bits.push(`\\href{mailto:${texHref(p.email)}}{\\underline{${tex(p.email)}}}`);
   for (const url of [p.linkedin, p.github, p.website]) {
     if (!url) continue;
     const full = /^https?:\/\//.test(url) ? url : `https://${url}`;
     const shown = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    bits.push(`\\href{${full.replace(/([%#])/g, '\\$1')}}{\\underline{${tex(shown)}}}`);
+    bits.push(`\\href{${texHref(full)}}{\\underline{${tex(shown)}}}`);
   }
   if (p.location) bits.push(tex(p.location));
 

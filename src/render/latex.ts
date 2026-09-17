@@ -158,6 +158,27 @@ export function inlineTex(input: string): string {
   return markup(String(input ?? ''), MAX_NESTING);
 }
 
+/**
+ * A link target, made safe to sit inside `\href{...}`.
+ *
+ * Escaping `%` and `#` is the documented recipe, and it was all this did. But
+ * `\`, `{` and `}` are read by TeX before hyperref ever sees the argument: a
+ * lone brace opens or closes a group, and a backslash starts a control
+ * sequence. One of them anywhere in the email, LinkedIn, GitHub or website
+ * field stopped every resume and every cover letter from compiling —
+ * `File ended while scanning use of \hyper@n@rmalise` — which names nothing
+ * the person who pasted a URL could act on, and leaves nothing that still
+ * builds to fix it from.
+ *
+ * None of the three is legal in a URI anyway, so they are percent-encoded:
+ * the link still points where it pointed, and TeX only ever sees `\%`.
+ */
+export function texHref(url: string): string {
+  return url
+    .replace(/[\\{}]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/([%#])/g, '\\$1');
+}
+
 function markup(s: string, depth: number): string {
   if (depth <= 0) return tex(s);
 
@@ -171,7 +192,7 @@ function markup(s: string, depth: number): string {
     const [whole, label, url, bold, italic, code] = m;
 
     if (label !== undefined) {
-      out += `\\href{${url!.replace(/([%#])/g, '\\$1')}}{\\underline{${markup(label, depth - 1)}}}`;
+      out += `\\href{${texHref(url!)}}{\\underline{${markup(label, depth - 1)}}}`;
     } else if (bold !== undefined) {
       out += `\\textbf{${markup(bold, depth - 1)}}`;
     } else if (italic !== undefined) {
@@ -401,12 +422,12 @@ function header(r: ResolvedResume): string {
   const p = r.profile;
   const bits: string[] = [];
   if (p.phone) bits.push(tex(p.phone));
-  if (p.email) bits.push(`\\href{mailto:${p.email}}{\\underline{${tex(p.email)}}}`);
+  if (p.email) bits.push(`\\href{mailto:${texHref(p.email)}}{\\underline{${tex(p.email)}}}`);
   for (const url of [p.linkedin, p.github, p.website]) {
     if (!url) continue;
     const full = /^https?:\/\//.test(url) ? url : `https://${url}`;
     const shown = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    bits.push(`\\href{${full.replace(/([%#])/g, '\\$1')}}{\\underline{${tex(shown)}}}`);
+    bits.push(`\\href{${texHref(full)}}{\\underline{${tex(shown)}}}`);
   }
   if (p.location) bits.push(tex(p.location));
 

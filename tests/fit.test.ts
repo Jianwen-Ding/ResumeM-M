@@ -135,4 +135,29 @@ describe.skipIf(!hasEngine)('other layouts', { timeout: 180_000 }, () => {
     expect(result.fits).toBe(true);
     expect(LatexError).toBeTypeOf('function');
   });
+
+  /*
+   * A link target is read by TeX before hyperref sees it, so `tex()` does not
+   * cover it. A single `{`, `}` or `\` in the email, LinkedIn, GitHub or
+   * website field — a paste that picked up one stray character — used to take
+   * out every resume and every cover letter at once, reporting
+   * "File ended while scanning use of \hyper@n@rmalise": nothing the person who
+   * pasted it could act on, and nothing left that still builds to fix it from.
+   */
+  it('cannot be broken by a stray character in a link', async () => {
+    const contacts = [
+      { email: String.raw`a{b@c.example` },
+      { email: String.raw`a\b@c.example` },
+      { email: 'a@b.com', github: 'github.com/a}b' },
+      { email: 'a@b.com', website: String.raw`example.com/\newpage` },
+      { email: 'a@b.com', linkedin: 'linkedin.com/in/a{b' },
+    ];
+
+    for (const contact of contacts) {
+      const r = resume(1);
+      r.profile = { ...r.profile, ...contact };
+      const result = await compileResume(r);
+      expect(result.pages, JSON.stringify(contact)).toBe(1);
+    }
+  }, 180_000);
 });
