@@ -413,7 +413,20 @@ export interface TailorContext {
  * choosing among your own sentences can't drift, and anything newly written is
  * quarantined until you look at it.
  */
-export function tailorPrompt(data: StoreData, resume: ResolvedResume, job: TailorContext): string {
+export function tailorPrompt(
+  data: StoreData,
+  resume: ResolvedResume,
+  job: TailorContext,
+  /**
+   * Set when the run has the tailoring tools attached.
+   *
+   * The two versions have to agree with what the run can actually do. A model
+   * told to call tools it was never given answers with nothing at all, and a
+   * model handed tools but asked for JSON mostly writes the JSON and leaves
+   * them alone — which throws away the one thing they are for.
+   */
+  options: { tools?: boolean } = {},
+): string {
   const inventory: string[] = [];
   for (const e of data.entries) {
     if (e.archived) continue;
@@ -488,6 +501,33 @@ export function tailorPrompt(data: StoreData, resume: ResolvedResume, job: Tailo
     'the bullet it belongs to, with no new claims. If nothing qualifies, return an empty list — that is',
     'the expected answer most of the time.',
     '',
+    ...(options.tools ? howToUseTheTools() : howToAnswerInJson()),
+    '',
+    `## Posting`,
+    job.company ? `Company: ${job.company}` : '',
+    job.jobTitle ? `Role: ${job.jobTitle}` : '',
+    job.url ? `URL: ${job.url}` : '',
+    '',
+    job.jobDescription.slice(0, 12_000),
+    '',
+    '## Current resume',
+    resumeAsText(resume),
+    '',
+    /*
+     * The inventory is what the tools are for. Pasting tens of kilobytes of
+     * it into the prompt as well would spend the context on something the
+     * model can ask for a piece at a time, and — worse — give it two copies
+     * to disagree with each other about.
+     */
+    ...(options.tools ? [] : ['## Everything available in the store', inventory.join('\n')]),
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** The single-shot contract: one reply, and everything wrong in it is lost. */
+function howToAnswerInJson(): string[] {
+  return [
     'Reply with JSON only, matching this shape:',
     '{',
     '  "choices": { "<bulletId or entryId.field>": "<variantId>" },',
@@ -501,22 +541,37 @@ export function tailorPrompt(data: StoreData, resume: ResolvedResume, job: Tailo
     '  ],',
     '  "reasoning": "<2-4 sentences on what drove the changes>"',
     '}',
+  ];
+}
+
+/**
+ * The same job, done as moves rather than as one answer.
+ *
+ * Worth saying out loud in the prompt that a wrong id is answered rather than
+ * discarded: a model that believes its mistakes are silent hedges, and a
+ * hedging model here means a resume that was not tailored.
+ */
+function howToUseTheTools(): string[] {
+  return [
+    '## How to do it',
     '',
-    `## Posting`,
-    job.company ? `Company: ${job.company}` : '',
-    job.jobTitle ? `Role: ${job.jobTitle}` : '',
-    job.url ? `URL: ${job.url}` : '',
+    'You have a set of tools under `resume`. Use them; do not answer in prose or JSON.',
     '',
-    job.jobDescription.slice(0, 12_000),
+    '1. `read_posting` — what this is for.',
+    '2. `read_resume` — what the page says now, with the id of every line on it.',
+    '3. `read_inventory` — everything else this person has written that could go on it.',
+    '4. Make your changes, one call at a time: `choose_wording`, `reorder_bullets`,',
+    '   `reorder_entries`, `hide`, `show`, `choose_skills`.',
+    '5. `read_resume` again to see what they did.',
+    '6. `finish`, with two to four sentences on what drove them.',
     '',
-    '## Current resume',
-    resumeAsText(resume),
+    'Every call is checked as you make it. If you name an id that does not exist you will be',
+    'told so, and told what the real ones are, while you can still do something about it — so',
+    'there is no reason to guess and no reason to hedge. An id you are unsure of is one call',
+    'away from being confirmed.',
     '',
-    '## Everything available in the store',
-    inventory.join('\n'),
-  ]
-    .filter(Boolean)
-    .join('\n');
+    'Nothing is applied until `finish`, and nothing is applied that you did not ask for.',
+  ];
 }
 
 /** Ask for N shorter phrasings of specific bullets, to claw back overflow. */

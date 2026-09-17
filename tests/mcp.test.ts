@@ -1,0 +1,643 @@
+import { describe, expect, it } from 'vitest';
+import { PassThrough } from 'node:stream';
+import { handle, serve, type ToolDefinition } from '../src/mcp/protocol.js';
+import { TailorSession } from '../src/mcp/session.js';
+import { tailorTools } from '../src/mcp/tools.js';
+import { serverEntry, wireUp } from '../src/mcp/launch.js';
+import { resolveResume } from '../src/model/resolve.js';
+import { applyInclusion, sanitizeAiPlan } from '../src/jobs/aiPlan.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import type { StoreData } from '../src/model/types.js';
+import { makeTempStore } from './helpers.js';
+
+const store = (): StoreData => {
+  const t = makeTempStore();
+  try {
+    return t.store.load();
+  } finally {
+    t.cleanup();
+  }
+};
+
+const POSTING = {
+  company: 'Helios Robotics',
+  jobTitle: 'Platform Engineer',
+  description: 'Streaming ingest, Kafka, and keeping latency down under load.',
+  keywords: ['kafka', 'go'],
+};
+
+function session() {
+  const data = store();
+  return new TailorSession(data, resolveResume('base', data), POSTING);
+}
+
+/**
+ * The whole reason this exists: a move that is wrong is answered *as it is
+ * made*, in words naming what the right answers are — rather than being
+ * dropped in silence at the end of a run, where nothing can be done about it.
+ */
+describe('a tailoring move that is checked when it is made', () => {
+  it('takes a real phrasing for a real bullet', () => {
+    const r = session().choose('b_pipeline', 'v_kafka');
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain('Kafka');
+  });
+
+  it('answers an invented variant by naming the real ones', () => {
+    const r = session().choose('b_pipeline', 'v_invented');
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('v_base');
+    expect(r.text).toContain('v_kafka');
+  });
+
+  it('answers an invented bullet by naming the real ones', () => {
+    const r = session().choose('b_kafka_pipeline', 'v_kafka');
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('b_pipeline');
+    // And says what the two shapes of id look like, which is the mistake.
+    expect(r.text).toContain('edu_neu.dates');
+  });
+
+  it('handles a field the same way a bullet is handled', () => {
+    const s = session();
+    expect(s.choose('edu_neu.dates', 'v_dec2026').ok).toBe(true);
+    expect(s.choose('edu_neu.dates', 'v_nope').ok).toBe(false);
+    expect(s.choose('edu_nowhere.dates', 'v_dec2026').text).toContain('There is no entry');
+  });
+
+  it('never lets a wrong move leave anything behind', () => {
+    const s = session();
+    s.choose('b_pipeline', 'v_invented');
+    s.hide('b_invented');
+    s.order('exp_nowhere', ['b_pipeline']);
+    expect(s.state.plan).toEqual({
+      choices: {},
+      skills: {},
+      enable: [],
+      disable: [],
+      order: {},
+      entryOrder: {},
+      rejected: [],
+    });
+  });
+});
+
+describe('showing, hiding and rearranging', () => {
+  it('shows and hides by the same name', () => {
+    const s = session();
+    expect(s.hide('b_testing').text).toContain('left off');
+    expect(s.show('proj_thing').text).toContain('shown');
+    expect(s.state.plan.disable).toEqual(['b_testing']);
+    expect(s.state.plan.enable).toEqual(['proj_thing']);
+  });
+
+  /*
+   * A model that changes its mind mid-run said both things, and a plan
+   * holding both is a plan that contradicts itself — `applyInclusion` would
+   * then decide by the order the two loops happen to run in.
+   */
+  it('treats a mind changed twice as one decision', () => {
+    const s = session();
+    s.hide('b_testing');
+    s.show('b_testing');
+    expect(s.state.plan.disable).toEqual([]);
+    expect(s.state.plan.enable).toEqual(['b_testing']);
+  });
+
+  it('reorders, and says what the entry will read like', () => {
+    const r = session().order('exp_acme', ['b_testing']);
+    expect(r.ok).toBe(true);
+    // Named first, the rest behind it: nothing is lost by being left out.
+    expect(r.text).toContain('b_testing, b_pipeline');
+  });
+
+  it('refuses an order made of ids that are not that entry’s', () => {
+    const r = session().order('exp_acme', ['b_thing']);
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('b_pipeline');
+  });
+
+  it('says which ids it ignored rather than pretending they took', () => {
+    const r = session().order('exp_acme', ['b_testing', 'b_thing']);
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain('Ignored');
+    expect(r.text).toContain('b_thing');
+  });
+
+  it('names the sections when asked for one that does not exist', () => {
+    const r = session().orderEntries('publications', ['exp_acme']);
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('experience');
+  });
+
+  it('prints skills in the person’s order, not the order it was given them', () => {
+    const s = session();
+    const r = s.skills('sk_lang', ['s_go', 's_py']);
+    expect(r.ok).toBe(true);
+    // The store has Python before Go, and that is a decision its owner made.
+    expect(s.state.plan.skills.sk_lang).toEqual(['s_py', 's_go']);
+  });
+});
+
+describe('what it still cannot do', () => {
+  it('cannot put text on the page, only propose it', () => {
+    const s = session();
+    const r = s.suggest('b_pipeline', 'Kafka', 'Ran a Kafka cluster nobody asked me to run', 'the posting names Kafka');
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain('not on the resume');
+    expect(s.state.suggestions).toHaveLength(1);
+    // And nothing about the page changed.
+    expect(s.state.plan.choices).toEqual({});
+  });
+
+  it('will not take a suggestion for a bullet that does not exist', () => {
+    expect(session().suggest('b_nope', 'x', 'y', 'z').ok).toBe(false);
+  });
+
+  it('stops at three, rather than rewriting the resume one suggestion at a time', () => {
+    const s = session();
+    for (let i = 0; i < 3; i++) expect(s.suggest('b_pipeline', `L${i}`, `text ${i}`, 'why').ok).toBe(true);
+    expect(s.suggest('b_pipeline', 'L4', 'text 4', 'why').ok).toBe(false);
+  });
+});
+
+/**
+ * The tools are useless if the model cannot see what its own moves did — that
+ * was the single-shot version's real problem, more than the parsing.
+ */
+describe('reading the page back', () => {
+  it('shows the resume with the ids the tools take', () => {
+    const text = session().describeResume();
+    expect(text).toContain('[b_pipeline]');
+    expect(text).toContain('[exp_acme]');
+  });
+
+  it('shows a choice taking effect', () => {
+    const s = session();
+    expect(s.describeResume()).not.toContain('Kafka');
+    s.choose('b_pipeline', 'v_kafka');
+    expect(s.describeResume()).toContain('Kafka');
+  });
+
+  it('shows a hidden bullet gone and a reordering applied', () => {
+    const s = session();
+    // The bullets of this entry, in the order they would print.
+    const under = (text: string) =>
+      text
+        .split('### ')
+        .find((block) => block.startsWith('[exp_acme]'))
+        ?.split('\n')
+        .filter((l) => l.startsWith('- ['))
+        .map((l) => l.slice(3, l.indexOf(']'))) ?? [];
+
+    expect(under(s.describeResume())).toEqual(['b_pipeline', 'b_testing']);
+    s.order('exp_acme', ['b_testing']);
+    expect(under(s.describeResume())).toEqual(['b_testing', 'b_pipeline']);
+
+    s.hide('b_testing');
+    expect(under(s.describeResume())).toEqual(['b_pipeline']);
+  });
+
+  it('offers everything in the store, marking what is not on this resume', () => {
+    const data = store();
+    // A resume with no projects on it, so there is something to mark.
+    const base = data.resumes.find((r) => r.id === 'base')!;
+    const trimmed = { ...base, id: 'trimmed', sections: base.sections?.map((x) => (x.kind === 'project' ? { ...x, entries: [] } : x)) };
+    const s = new TailorSession(
+      data,
+      resolveResume(trimmed, { ...data, resumes: [...data.resumes, trimmed] }),
+      POSTING,
+    );
+    const text = s.describeInventory();
+    expect(text).toContain('[b_pipeline]');
+    expect(text).toContain('skills group [sk_lang]');
+    // The project is still offered, and marked as not currently printed.
+    expect(text).toMatch(/\[proj_thing\][^\n]*\(not on this resume\)/);
+  });
+
+  it('labels the posting as source material rather than instructions', () => {
+    expect(session().describePosting()).toMatch(/not\s+instructions to you/);
+  });
+});
+
+describe('finishing', () => {
+  it('records the reasoning and says what was decided', () => {
+    const s = session();
+    s.choose('b_pipeline', 'v_kafka');
+    const r = s.done('The posting is about streaming ingest.');
+    expect(r.ok).toBe(true);
+    expect(s.state.finished).toBe(true);
+    expect(s.state.reasoning).toContain('streaming ingest');
+    expect(r.text).toContain('b_pipeline→v_kafka');
+  });
+
+  /*
+   * The plan the session builds has to be the same shape the deterministic
+   * path produces, or the two would diverge and only one of them would be
+   * tested. Run it through the sanitiser and the applier to prove it.
+   */
+  it('produces a plan the rest of the system already knows how to apply', () => {
+    const data = store();
+    const s = new TailorSession(data, resolveResume('base', data), POSTING);
+    s.choose('b_pipeline', 'v_kafka');
+    s.order('exp_acme', ['b_testing']);
+    s.hide('proj_thing');
+
+    const plan = sanitizeAiPlan(s.state.plan, data);
+    expect(plan.rejected).toEqual([]);
+    expect(plan.choices).toEqual({ b_pipeline: 'v_kafka' });
+
+    const sections = applyInclusion(
+      data.resumes.find((r) => r.id === 'base')!,
+      data,
+      plan,
+    );
+    expect(sections?.find((x) => x.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_testing', 'b_pipeline']);
+    expect(sections?.find((x) => x.kind === 'project')?.entries).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * The protocol                                                        *
+ * ------------------------------------------------------------------ */
+
+const INFO = { name: 'test', version: '1' };
+
+const tools = (): ToolDefinition[] => tailorTools(session());
+
+describe('speaking MCP', () => {
+  it('answers initialize with a version and its capabilities', async () => {
+    const reply = (await handle({ jsonrpc: '2.0', id: 1, method: 'initialize' }, tools(), INFO)) as {
+      result: { protocolVersion: string; capabilities: { tools: unknown }; serverInfo: unknown };
+    };
+    expect(reply.result.protocolVersion).toBe('2024-11-05');
+    expect(reply.result.capabilities.tools).toBeDefined();
+    expect(reply.result.serverInfo).toEqual(INFO);
+  });
+
+  /* A notification has no id and must get no reply; answering one leaves a
+     client trying to match a response to a request it never made. */
+  it('says nothing back to a notification', async () => {
+    expect(await handle({ jsonrpc: '2.0', method: 'notifications/initialized' }, tools(), INFO)).toBeNull();
+  });
+
+  it('lists the tools with their schemas', async () => {
+    const reply = (await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, tools(), INFO)) as {
+      result: { tools: { name: string; description: string; inputSchema: unknown }[] };
+    };
+    const names = reply.result.tools.map((t) => t.name);
+    expect(names).toContain('read_posting');
+    expect(names).toContain('choose_wording');
+    expect(names).toContain('reorder_bullets');
+    expect(names).toContain('finish');
+    for (const t of reply.result.tools) {
+      expect(t.description.length).toBeGreaterThan(40);
+      expect(t.inputSchema).toHaveProperty('type', 'object');
+    }
+  });
+
+  it('runs a tool and gives back its text', async () => {
+    const reply = (await handle(
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_posting', arguments: {} } },
+      tools(),
+      INFO,
+    )) as { result: { content: { text: string }[]; isError: boolean } };
+    expect(reply.result.isError).toBe(false);
+    expect(reply.result.content[0]?.text).toContain('Helios Robotics');
+  });
+
+  /*
+   * A failed move comes back as content with `isError`, not as a JSON-RPC
+   * error — a protocol error is invisible to the model, and a model that
+   * cannot see what went wrong repeats it.
+   */
+  it('hands a rejected move to the model rather than to the transport', async () => {
+    const reply = (await handle(
+      {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'choose_wording', arguments: { target: 'b_nope', variant: 'v_kafka' } },
+      },
+      tools(),
+      INFO,
+    )) as { result: { content: { text: string }[]; isError: boolean }; error?: unknown };
+    expect(reply.error).toBeUndefined();
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('b_pipeline');
+  });
+
+  it('answers a tool that does not exist by naming the ones that do', async () => {
+    const reply = (await handle(
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'rewrite_everything', arguments: {} } },
+      tools(),
+      INFO,
+    )) as { result: { content: { text: string }[]; isError: boolean } };
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('choose_wording');
+  });
+
+  it('complains about a missing argument in words, not by throwing', async () => {
+    const reply = (await handle(
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'choose_wording', arguments: { target: 'b_pipeline' } } },
+      tools(),
+      INFO,
+    )) as { result: { content: { text: string }[]; isError: boolean } };
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('"variant"');
+  });
+
+  it('takes a single id where a list was asked for, because models do that', async () => {
+    const reply = (await handle(
+      {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'reorder_bullets', arguments: { entry: 'exp_acme', bullets: 'b_testing' } },
+      },
+      tools(),
+      INFO,
+    )) as { result: { isError: boolean } };
+    expect(reply.result.isError).toBe(false);
+  });
+
+  it('refuses an unknown method the way JSON-RPC says to', async () => {
+    const reply = (await handle({ jsonrpc: '2.0', id: 8, method: 'resources/list' }, tools(), INFO)) as {
+      error: { code: number };
+    };
+    expect(reply.error.code).toBe(-32601);
+  });
+});
+
+describe('framing', () => {
+  /** Drive the stdio loop and collect what comes back. */
+  async function exchange(lines: string[]): Promise<Record<string, unknown>[]> {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const chunks: string[] = [];
+    output.on('data', (c: Buffer) => chunks.push(c.toString()));
+
+    const done = serve(input, output, tools(), INFO);
+    for (const line of lines) input.write(line);
+    input.end();
+    await done;
+    return chunks
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  it('reads two requests that arrived in one chunk', async () => {
+    const replies = await exchange([
+      `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' })}\n${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })}\n`,
+    ]);
+    expect(replies.map((r) => r.id)).toEqual([1, 2]);
+  });
+
+  it('reads one request that arrived in pieces', async () => {
+    const whole = `${JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/list' })}\n`;
+    const replies = await exchange([whole.slice(0, 12), whole.slice(12, 30), whole.slice(30)]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.id).toBe(9);
+  });
+
+  it('answers a broken line and keeps going', async () => {
+    const replies = await exchange([`not json\n${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' })}\n`]);
+    expect((replies[0]?.error as { code: number }).code).toBe(-32700);
+    expect(replies[1]?.id).toBe(3);
+  });
+
+  it('writes nothing at all for a notification', async () => {
+    const replies = await exchange([`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`]);
+    expect(replies).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Handing it to a CLI                                                 *
+ * ------------------------------------------------------------------ */
+
+describe('wiring a CLI up to it', () => {
+  const sandbox = () => fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-mcp-'));
+  const payload = () => {
+    const data = store();
+    return { data, resume: resolveResume('base', data), posting: POSTING };
+  };
+
+  it('writes the session and a config each CLI can read', () => {
+    const dir = sandbox();
+    const wiring = wireUp(dir, 'claude', payload(), '/somewhere/bin.js');
+    expect(wiring).not.toBeNull();
+    expect(wiring!.args).toContain('--mcp-config');
+
+    const config = JSON.parse(fs.readFileSync(path.join(dir, 'mcp.json'), 'utf8'));
+    expect(config.mcpServers.resume.args).toEqual(['/somewhere/bin.js']);
+    expect(config.mcpServers.resume.env.RMM_TAILOR_SESSION).toContain('tailor-session.json');
+
+    const session = JSON.parse(fs.readFileSync(path.join(dir, 'tailor-session.json'), 'utf8'));
+    expect(session.posting.company).toBe('Helios Robotics');
+    expect(session.out).toBe(wiring!.out);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('puts the config where Gemini looks, since Gemini takes no flag', () => {
+    const dir = sandbox();
+    const wiring = wireUp(dir, 'gemini', payload(), '/somewhere/bin.js');
+    expect(wiring!.args).toEqual([]);
+    expect(fs.existsSync(path.join(dir, '.gemini', 'settings.json'))).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('finds the CLI behind a path', () => {
+    const dir = sandbox();
+    expect(wireUp(dir, '/usr/local/bin/claude', payload(), '/x/bin.js')).not.toBeNull();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /*
+   * Guessing a flag is worse than not trying: one a CLI does not recognise
+   * usually stops it running at all, and a tailoring pass that fails outright
+   * is a worse outcome than one that goes back to asking for JSON.
+   */
+  it('declines to guess for a command it does not know', () => {
+    const dir = sandbox();
+    expect(wireUp(dir, 'my-own-cli', payload(), '/x/bin.js')).toBeNull();
+    expect(fs.existsSync(path.join(dir, 'mcp.json'))).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('declines for agy, whose MCP flag is not something to invent', () => {
+    const dir = sandbox();
+    expect(wireUp(dir, 'agy', payload(), '/x/bin.js')).toBeNull();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * The whole thing, as a real child process                            *
+ * ------------------------------------------------------------------ */
+
+/**
+ * A stand-in for a coding-agent CLI: reads the MCP config it was handed,
+ * spawns the server it names, speaks the protocol, makes a few moves, and
+ * exits — printing nothing to stdout, which is the case that used to be read
+ * as "the command produced nothing".
+ *
+ * Nothing here is mocked. This is `bin.js` over a real pipe, `runAgent`'s own
+ * sandbox, and the decisions read back off disk the way the server reads them.
+ */
+const FAKE_CLI = String.raw`
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+
+const configPath = process.argv[process.argv.indexOf('--mcp-config') + 1];
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.resume;
+const child = spawn(config.command, config.args, {
+  env: { ...process.env, ...config.env },
+  stdio: ['pipe', 'pipe', 'inherit'],
+});
+
+let buffer = '';
+const waiting = new Map();
+child.stdout.setEncoding('utf8');
+child.stdout.on('data', (chunk) => {
+  buffer += chunk;
+  let at;
+  while ((at = buffer.indexOf('\n')) >= 0) {
+    const line = buffer.slice(0, at).trim();
+    buffer = buffer.slice(at + 1);
+    if (!line) continue;
+    const message = JSON.parse(line);
+    waiting.get(message.id)?.(message);
+    waiting.delete(message.id);
+  }
+});
+
+let nextId = 1;
+const call = (method, params) =>
+  new Promise((resolve) => {
+    const id = nextId++;
+    waiting.set(id, resolve);
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+  });
+const tool = (name, args) => call('tools/call', { name, arguments: args });
+
+(async () => {
+  await call('initialize', { protocolVersion: '2024-11-05' });
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+
+  const listed = await call('tools/list', {});
+  if (!listed.result.tools.some((t) => t.name === 'choose_wording')) throw new Error('no tools');
+
+  await tool('read_posting', {});
+  await tool('read_resume', {});
+
+  // A wrong id first, on purpose: the reply should name the right ones.
+  const wrong = await tool('choose_wording', { target: 'b_kafka', variant: 'v_kafka' });
+  if (!wrong.result.isError) throw new Error('a wrong id was accepted');
+  if (!wrong.result.content[0].text.includes('b_pipeline')) throw new Error('the reply did not help');
+
+  await tool('choose_wording', { target: 'b_pipeline', variant: 'v_kafka' });
+  await tool('reorder_bullets', { entry: 'exp_acme', bullets: ['b_testing'] });
+  await tool('hide', { id: 'proj_thing' });
+  await tool('finish', { reasoning: 'The posting is about streaming ingest.' });
+
+  child.stdin.end();
+  child.on('exit', () => process.exit(0));
+})();
+`;
+
+describe('a run that does its work through the tools', () => {
+  it('leaves its decisions behind, having printed nothing', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-mcp-e2e-'));
+    const cliPath = path.join(dir, 'fake-cli.cjs');
+    fs.writeFileSync(cliPath, FAKE_CLI, 'utf8');
+
+    const data = store();
+    const resolved = resolveResume('base', data);
+
+    const { runAgent } = await import('../src/ai/agent.js');
+    const { DEFAULT_CONFIG } = await import('../src/model/types.js');
+
+    const result = await runAgent(
+      {
+        ...DEFAULT_CONFIG,
+        ai: { ...DEFAULT_CONFIG.ai, enabled: true, command: process.execPath, args: [cliPath], timeoutMs: 30_000 },
+      },
+      'the prompt',
+      {
+        wire: (sandbox, command) =>
+          // `command` is node here rather than `claude`, so the real
+          // `wireUp` would decline; the CLI's own spelling is not what this
+          // test is about, and `wiring a CLI up to it` above covers it.
+          wireUp(sandbox, 'claude', { data, resume: resolved, posting: POSTING }, serverEntryForTests()) ??
+          (() => {
+            throw new Error(`could not wire ${command}`);
+          })(),
+        read: (out) => JSON.parse(fs.readFileSync(out, 'utf8')),
+      },
+    );
+
+    // Nothing on stdout, and a full set of decisions: the case that used to
+    // be reported as "the AI command finished without writing anything".
+    expect(result.output).toBe('');
+    const state = result.tools as { plan: Record<string, unknown>; reasoning: string; finished: boolean };
+    expect(state.finished).toBe(true);
+    expect(state.reasoning).toContain('streaming ingest');
+    expect(state.plan.choices).toEqual({ b_pipeline: 'v_kafka' });
+    expect(state.plan.order).toEqual({ exp_acme: ['b_testing'] });
+    expect(state.plan.disable).toEqual(['proj_thing']);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }, 40_000);
+});
+
+/** The compiled entry point, or the source one when running from source. */
+function serverEntryForTests(): string {
+  const compiled = path.resolve('dist/src/mcp/bin.js');
+  if (fs.existsSync(compiled)) return compiled;
+  throw new Error('run `npm run build` first: this test spawns the compiled MCP server');
+}
+
+describe('finding the server to spawn', () => {
+  it('prefers the compiled entry point', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-entry-'));
+    fs.writeFileSync(path.join(dir, 'bin.js'), '');
+    fs.writeFileSync(path.join(dir, 'bin.ts'), '');
+    expect(serverEntry(dir)).toBe(path.join(dir, 'bin.js'));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /*
+   * And falls back to the source one, because `npm run serve` is what the
+   * README says to run and it never builds. Without this the tools would
+   * quietly be a feature only for people who had run `npm run build`.
+   */
+  it('falls back to the source entry point, and says to run it with tsx', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-entry-'));
+    fs.writeFileSync(path.join(dir, 'bin.ts'), '');
+    expect(serverEntry(dir)).toBe(path.join(dir, 'bin.ts'));
+
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-mcp-'));
+    const data = store();
+    wireUp(sandbox, 'claude', { data, resume: resolveResume('base', data), posting: POSTING }, path.join(dir, 'bin.ts'));
+    const config = JSON.parse(fs.readFileSync(path.join(sandbox, 'mcp.json'), 'utf8'));
+    expect(config.mcpServers.resume.command).toBe('npx');
+    expect(config.mcpServers.resume.args[0]).toBe('tsx');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it('says there is none rather than naming a file that is not there', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-entry-'));
+    expect(serverEntry(dir)).toBeNull();
+    // And wiring declines, so the run falls back to asking for JSON.
+    const data = store();
+    expect(wireUp(dir, 'claude', { data, resume: resolveResume('base', data), posting: POSTING }, null)).toBeNull();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});

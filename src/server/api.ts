@@ -1,6 +1,7 @@
 import express, { type Request, type Response, type Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js';
 import {
@@ -19,6 +20,9 @@ import {
   type TailorContext,
 } from '../ai/prompts.js';
 import { AI_PRESETS } from '../ai/presets.js';
+import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
+import { readState } from '../mcp/main.js';
+import type { SessionState } from '../mcp/session.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
@@ -259,6 +263,31 @@ function plainText(field: MaybeVariant | undefined): string {
   if (typeof field === 'string') return field;
   return String((field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? '');
 }
+
+/**
+ * Did the run actually decide anything through its tools?
+ *
+ * A session file exists the moment the server starts, because a run killed
+ * before its first call should still be distinguishable from one that never
+ * started. So "there is a file" is not the question — "is there a move in it"
+ * is, and when there is not, the reply is read as JSON instead.
+ */
+function decidedAnything(state: SessionState): boolean {
+  const { plan, suggestions, reasoning } = state;
+  return (
+    Object.keys(plan.choices).length > 0 ||
+    Object.keys(plan.skills).length > 0 ||
+    Object.keys(plan.order).length > 0 ||
+    Object.keys(plan.entryOrder).length > 0 ||
+    plan.enable.length > 0 ||
+    plan.disable.length > 0 ||
+    suggestions.length > 0 ||
+    Boolean(reasoning)
+  );
+}
+
+/** Where the compiled MCP entry point sits relative to this file. */
+const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
 
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
@@ -1376,23 +1405,71 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
+      let aiVia: 'tools' | 'json' | undefined;
       if (mode === 'ai' && data.config.ai.enabled) {
         const resolved = resolveResume(baseId, data);
+        const posting = {
+          jobTitle: job.title,
+          company: job.company,
+          jobDescription: job.description,
+          url,
+        };
+        /*
+         * The prompt has to agree with what the run will actually have. A
+         * model told to call tools it was never given answers with nothing,
+         * and one handed tools but asked for JSON mostly writes the JSON and
+         * leaves them alone.
+         */
+        const withTools = canWire(data.config.ai.command) && serverEntry(mcpDir) !== null;
         const agent = await runAgent(
           data.config,
-          tailorPrompt(data, resolved, {
-            jobTitle: job.title,
-            company: job.company,
-            jobDescription: job.description,
-            url,
-          }),
+          tailorPrompt(data, resolved, posting, { tools: withTools }),
+          /*
+           * Tools where the CLI can take them, JSON where it cannot.
+           *
+           * The two paths produce the same shape of plan on purpose — the
+           * session builds exactly what `sanitizeAiPlan` already accepts —
+           * so nothing downstream has to know which one ran. What changes is
+           * where the mistakes are caught: through the tools a wrong id is
+           * answered while the model can still fix it, and a reply that
+           * would not have parsed costs nothing because there is no reply to
+           * parse.
+           */
+          {
+            wire: (sandbox, command) =>
+              wireUp(
+                sandbox,
+                command,
+                {
+                  data,
+                  resume: resolved,
+                  posting: {
+                    company: job.company,
+                    jobTitle: job.title,
+                    url,
+                    description: job.description,
+                    keywords: job.keywords,
+                  },
+                },
+                serverEntry(mcpDir),
+              ),
+            read: (out) => readState(out),
+          },
         );
         aiRaw = agent.output;
-        try {
-          aiParsed = extractJson(agent.output);
-        } catch {
-          // A malformed AI reply must not sink the deterministic proposal.
-          aiParsed = null;
+
+        const decided = agent.tools as SessionState | null | undefined;
+        if (decided && decidedAnything(decided)) {
+          aiParsed = { ...decided.plan, suggestions: decided.suggestions, reasoning: decided.reasoning };
+          aiVia = 'tools';
+        } else {
+          try {
+            aiParsed = extractJson(agent.output);
+            aiVia = 'json';
+          } catch {
+            // A malformed AI reply must not sink the deterministic proposal.
+            aiParsed = null;
+          }
         }
       }
 
@@ -1478,6 +1555,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         suggestions: (aiParsed as { suggestions?: unknown[] } | null)?.suggestions ?? [],
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
+        // Which of the two ways the AI answered, so a run that went through
+        // the tools can be told apart from one that got lucky with JSON.
+        aiVia,
         aiRaw: aiParsed ? undefined : aiRaw,
         // What was actually done, not what was asked for: an AI run that came
         // back unusable falls through to the keyword match, and the card has

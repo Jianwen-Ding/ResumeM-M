@@ -14,6 +14,29 @@ export interface AgentResult {
   /** False when `ai.enabled` is off — `output` is then the unexecuted prompt. */
   executed: boolean;
   command?: string;
+  /**
+   * What the run decided through its tools, when it was given any.
+   *
+   * Absent means the run was a plain one, or the CLI ignored the tools and
+   * answered in prose — in which case `output` is still the reply and the
+   * caller falls back to reading JSON out of it, exactly as before.
+   */
+  tools?: unknown;
+}
+
+/**
+ * A set of tools to hand the run, and where its decisions come back.
+ *
+ * Optional because most prompts here want prose back and have nothing to call:
+ * a cover letter is not a set of moves. It is the tailoring pass that is a set
+ * of moves, and that is the one where a single unparseable reply used to throw
+ * the whole run away.
+ */
+export interface AgentTools {
+  /** Given the scratch directory and the command, wire a server into it. */
+  wire: (sandbox: string, command: string) => { args: string[]; out: string; env: Record<string, string> } | null;
+  /** Read back whatever the run decided. */
+  read: (out: string) => unknown;
 }
 
 /**
@@ -34,7 +57,7 @@ export interface AgentResult {
  * What this stops: an agent that decides to "look around the project" ending up
  * in your source tree, your store, or your home directory.
  */
-export async function runAgent(config: StoreConfig, prompt: string): Promise<AgentResult> {
+export async function runAgent(config: StoreConfig, prompt: string, tools?: AgentTools): Promise<AgentResult> {
   if (!config.ai.enabled) {
     return { output: prompt, executed: false };
   }
@@ -43,6 +66,20 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-ai-')));
   const promptFile = path.join(dir, 'prompt.md');
   fs.writeFileSync(promptFile, prompt, 'utf8');
+
+  /*
+   * The tool server, if this run gets one.
+   *
+   * Everything it needs goes into the same scratch directory the child is
+   * already confined to, so the tools do not widen what the run can reach by
+   * one byte: the CLI spawns the server itself over a pipe, and the entire
+   * exchange is two processes and a file that is deleted below.
+   *
+   * `wire` returning null means we do not know how to tell this particular
+   * CLI about a server. That is not a failure — the prompt still asks for
+   * JSON, which is what every run did before any of this existed.
+   */
+  const wiring = tools?.wire(dir, config.ai.command) ?? null;
 
   // `{prompt}` is the prompt file path; `{promptText}` inlines it for CLIs that
   // insist on an argument; `{sandbox}` is the directory the child is confined
@@ -59,9 +96,21 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
    * presets pass the prompt inline, so three of the four were affected.
    */
   const put = (into: string, token: string, value: string) => into.split(token).join(value);
-  const args = config.ai.args.map((a) =>
+  const expanded = config.ai.args.map((a) =>
     put(put(put(a, '{prompt}', promptFile), '{promptText}', prompt), '{sandbox}', dir),
   );
+  /*
+   * In front of the prompt, for the same reason the model and effort flags
+   * are: three of the four presets pass the prompt as the last argument, and
+   * a CLI that takes a positional prompt reads whatever follows it as more
+   * prompt.
+   */
+  const args = (() => {
+    if (!wiring || wiring.args.length === 0) return expanded;
+    const promptAt = expanded.findIndex((a) => a === prompt || a === promptFile || a.endsWith(prompt));
+    if (promptAt < 0) return [...expanded, ...wiring.args];
+    return [...expanded.slice(0, promptAt), ...wiring.args, ...expanded.slice(promptAt)];
+  })();
   const usesFile = config.ai.args.some((a) => a.includes('{prompt}') && !a.includes('{promptText}'));
 
   try {
@@ -77,6 +126,7 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
         // a stray relative path cannot escape it.
         PWD: dir,
         TMPDIR: dir,
+        ...(wiring?.env ?? {}),
       },
     });
 
@@ -112,11 +162,26 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
      * Empty stdout on a clean exit is a failed run, and saying so is the honest
      * answer — the caller already knows how to show that.
      */
+    const decided = wiring ? tools?.read(wiring.out) : undefined;
+
     const output = stdout.trim();
-    if (!output) {
+    /*
+     * Silence is only a failure when there was no other way to answer.
+     *
+     * A CLI that did its work through the tools has already said everything
+     * it had to say, and several of them print nothing to stdout when the
+     * last thing they did was call a tool. Treating that as "the command
+     * produced nothing" would fail the one kind of run that went best.
+     */
+    if (!output && !decided) {
       throw new AgentError(explainSilence(config.ai.command, stderr, config.ai.args));
     }
-    return { output, executed: true, command: `${config.ai.command} ${args.join(' ')}` };
+    return {
+      output,
+      executed: true,
+      command: `${config.ai.command} ${args.join(' ')}`,
+      ...(decided ? { tools: decided } : {}),
+    };
   } catch (err) {
     // Our own refusals already say what happened; re-wrapping them as "AI
     // command failed: AI command failed: …" helps nobody.

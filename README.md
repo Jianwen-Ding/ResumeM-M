@@ -357,6 +357,49 @@ Tailoring asks for a *selection* over phrasings that already exist, which cannot
 drift. New phrasings come back in a separate list, are capped at three, and are
 stored with `suggested: true` until you have looked at them.
 
+### Which model, and how hard it thinks
+
+Settings → Voice & AI has a **Model** box and an **Effort** picker. Both are
+settings rather than arguments you edit by hand: a preset is copied when you
+choose it, so hand-editing the argument line turns your configuration into a
+custom one that then drifts out of date with the preset it came from. They are
+applied to the arguments when the config is loaded, the way the research switch
+is.
+
+Only Codex has a reasoning-effort flag. Rather than invent one for the others —
+a flag a CLI does not recognise usually stops it running at all — effort is also
+said in the prompt, in words, which reaches every model. The panel tells you
+which mechanism is in play for the command you have configured.
+
+### Tailoring through tools, not one big JSON reply
+
+Where the configured CLI supports MCP (Claude Code, Codex and Gemini do), the
+tailoring pass gets a small tool server instead of being asked for one large
+JSON object:
+
+    read_posting      read_resume       read_inventory
+    choose_wording    reorder_bullets   reorder_entries
+    hide              show              choose_skills
+    suggest_wording   review_changes    finish
+
+The difference is where mistakes are caught. A JSON reply is checked once, at
+the end, and everything wrong in it is dropped in silence — an id the model
+half-remembered simply does not happen, and a reply wrapped in prose that will
+not parse loses *every* choice rather than one. A tool call is checked as it is
+made, so a wrong id comes back as "there is no bullet `b_kafka`; the bullets on
+this entry are b_pipeline, b_testing" while the model can still act on it. It
+can also read the page back after each move and see what it actually did.
+
+Nothing about what it is allowed to do changes. Every tool names things that
+already exist; `suggest_wording` takes text and puts it in the same quarantine
+the JSON path does, where a person accepts or declines it.
+
+The server runs inside the same empty scratch directory the CLI is confined to
+— the CLI spawns it over a pipe, there is no port and no token, and the whole
+exchange is two processes and a file that is deleted when the run ends. A CLI
+we do not know how to wire up, or one where MCP is unavailable, falls back to
+asking for JSON, which is what every run did before this existed.
+
 ---
 
 ## Application tracking
