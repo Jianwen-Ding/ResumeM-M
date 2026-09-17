@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { AI_PRESETS } from './presets.js';
 import type { StoreConfig } from '../model/types.js';
 
 const run = promisify(execFile);
@@ -113,7 +114,7 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
      */
     const output = stdout.trim();
     if (!output) {
-      throw new AgentError(explainSilence(config.ai.command, stderr));
+      throw new AgentError(explainSilence(config.ai.command, stderr, config.ai.args));
     }
     return { output, executed: true, command: `${config.ai.command} ${args.join(' ')}` };
   } catch (err) {
@@ -169,7 +170,7 @@ export async function runAgent(config: StoreConfig, prompt: string): Promise<Age
  * stopped to ask for a shell is a run that was configured to do more than it
  * needs to. Say that, and say where the switch is.
  */
-export function explainSilence(command: string, stderr: string): string {
+export function explainSilence(command: string, stderr: string, args: string[] = []): string {
   const said = stderr.trim();
   const lower = said.toLowerCase();
   const head = `The AI command "${command}" finished without writing anything.`;
@@ -178,8 +179,8 @@ export function explainSilence(command: string, stderr: string): string {
     return (
       `${head} It stopped to ask permission to run something on your machine, and nothing was ` +
       `there to answer, so it gave up. ResumeM-M only ever wants text back — it does not need ` +
-      `the AI to run commands, read your files or change anything. Pick a preset in Settings, ` +
-      `which confines the command to a scratch folder, rather than granting it more access.`
+      `the AI to run commands, read your files or change anything. ` +
+      whichSettingIsWrong(command, args)
     );
   }
 
@@ -200,6 +201,60 @@ export function explainSilence(command: string, stderr: string): string {
   // Unrecognised: pass it on, but say plainly that it is the CLI talking.
   return head + (said ? ` The command reported: ${said.slice(0, 400)}` : '');
 }
+
+/**
+ * Which part of the setting is the problem, given what is actually saved.
+ *
+ * "Pick a preset in Settings" was the whole of the advice, and it is useless
+ * to the person who already did. The three cases it could not tell apart:
+ * the command is not one this tool knows, so there is no preset to be using;
+ * it is a preset's command but not its arguments, which is the shape a
+ * half-saved change leaves behind; or it is exactly a preset and the fault is
+ * outside ResumeM-M. Naming the saved command and args makes the second case
+ * — the one that reads as "the preset was ignored" — visible at a glance.
+ */
+function whichSettingIsWrong(command: string, args: string[]): string {
+  const where = 'Voice & AI › AI command';
+  const preset = AI_PRESETS.find((p) => p.command === command);
+
+  if (!preset) {
+    return (
+      `Nothing here is set to "${command}" by any of the presets (${AI_PRESETS.map((p) => p.command).join(', ')}), ` +
+      `so this is a command of your own. Open Settings › ${where} and pick a preset — each one runs ` +
+      `its CLI with every tool switched off and confines it to a scratch folder, which leaves it ` +
+      `nothing to ask permission for. ` + NOTHING_IS_LOST
+    );
+  }
+
+  if (preset.args.join(' ') !== args.join(' ')) {
+    return (
+      `The command matches the "${preset.label}" preset but the arguments saved with it do not ` +
+      `(saved: ${args.join(' ') || 'none'}). That is what a change that was picked but never saved ` +
+      `looks like. Open Settings › ${where}, choose "${preset.label}" again — choosing it saves and ` +
+      `tests it — and check the result line underneath before running anything else. ` + NOTHING_IS_LOST
+    );
+  }
+
+  return (
+    `This is exactly the "${preset.label}" preset, so the permission is being asked for by the CLI ` +
+    `itself rather than by anything ResumeM-M configured — its own settings, or a version whose ` +
+    `flags have moved on from this preset. Run "${command} ${args.join(' ')}" once in a terminal to ` +
+    `see what it wants, and settle it there rather than by loosening the flags saved here. ` +
+    NOTHING_IS_LOST
+  );
+}
+
+/**
+ * The way out that is always available, and that nobody finds on their own.
+ *
+ * Every branch above ends in "go and fix your CLI", which is a task, and it
+ * arrives in the middle of an application. Switching the AI off is not a
+ * downgrade to nothing: the prompt comes back instead of the answer, and it
+ * is a prompt you can paste into any chat window and paste the reply back.
+ */
+const NOTHING_IS_LOST =
+  'If you would rather not deal with it now, switch "Let the tool run the AI command" off: ' +
+  'every AI button then hands you the prompt it would have sent, to paste into a chat of your own.';
 
 export class AgentError extends Error {
   readonly partial?: string;
@@ -282,11 +337,101 @@ export function trimToLetter(output: string): string {
     return /^(hello|hi|greetings|good (morning|afternoon))\b[^.!?]{0,60}[,:]$/i.test(l);
   });
 
-  // No salutation to find, or it is already the first thing: leave it alone.
-  if (salutation <= 0) return text;
+  // No salutation to find: the letter opens straight into prose, so there is
+  // no landmark — only the shape of the things that are not the letter.
+  if (salutation < 0) return dropAgentCommentary(text);
+  // Already the first thing: leave it alone.
+  if (salutation === 0) return text;
 
   // Only skip a preamble, not half the letter: a salutation a long way down is
   // more likely to be quoted inside one than to be the start of one.
   if (salutation > 12) return text;
   return lines.slice(salutation).join('\n').trim();
+}
+
+/**
+ * A paragraph that is the agent talking about the job rather than doing it.
+ *
+ * These CLIs are coding agents, and a coding agent handed a writing task
+ * reaches for the habits it has: write a plan to a file, link the file, raise
+ * the open question. One came back with
+ *
+ *   I have prepared the implementation plan and a candidate-voice-matched
+ *   draft in [cover_letter_plan.md](file:///…/cover_letter_plan.md).
+ *
+ *   ### Key Decision / Question:
+ *   - **Target Company Name**: The posting lists the company name as `Software
+ *     Engineering`. If this is a placeholder…
+ *
+ * and then the letter. There is no salutation to find in a letter that opens
+ * "I want to work on systems where…", so all of that was saved as the letter.
+ *
+ * The prompt now forbids every part of it, which is the real fix; this is the
+ * net under it, and it is a narrow one on purpose. Only these shapes go, only
+ * from the top, only while they keep matching, and never so much that the
+ * letter itself could be what was thrown away.
+ */
+const AGENT_META = new RegExp(
+  [
+    // Markup a letter never opens with: a heading, a rule, a fence, a quote.
+    String.raw`^(?:#{1,6}\s|-{3,}$|\*{3,}$|\x60\x60\x60|>\s)`,
+    // The assistant acknowledging the request.
+    String.raw`^(?:sure|certainly|okay|ok|of course|got it|understood|alright)\b[,.!:]`,
+    // The assistant describing what it just did, or is about to.
+    String.raw`^(?:here(?:'s| is| are)\b|below (?:is|are)\b|i(?:'ve| have) (?:prepared|written|drafted|created|put together|produced|generated)\b|i(?:'ll| will)(?: now)? (?:write|draft|prepare|put together|create|generate)\b)`,
+    // A link to a file it wrote. There is nowhere for the reader to open it.
+    String.raw`\]\(\s*(?:file://|\.{0,2}/)`,
+  ].join('|'),
+  'i',
+);
+
+/** A bullet or a numbered item — part of whatever block it hangs under. */
+const LIST_ITEM = /^\s*(?:[-*+]\s|\d+[.)]\s)/;
+
+/**
+ * What has to be left for the remainder to be a letter at all.
+ *
+ * A proportion of the reply was the obvious rule and the wrong one: the run
+ * this exists for had 470 characters of plan-file commentary over a 330
+ * character letter, so "never drop more than half" kept every word of it. The
+ * question is not how much was dropped, it is whether what is left is a
+ * letter — and a reply whose non-commentary remainder is one short line
+ * ("Let me know.") is a reply with no letter in it, at any ratio.
+ */
+const ENOUGH_LETTER = 120;
+/** And an upper bound on the preamble itself, so nothing runs away. */
+const MOST_PREAMBLE = 2500;
+
+export function dropAgentCommentary(text: string): string {
+  const blocks = text.split(/\n\s*\n/);
+  let cut = 0;
+  // A list under a heading we dropped belongs to it; a list at the very top,
+  // with nothing dropped before it, might be the letter's own.
+  let dropping = false;
+
+  while (cut < blocks.length) {
+    const block = (blocks[cut] ?? '').trim();
+    if (!block) {
+      cut++;
+      continue;
+    }
+    if (AGENT_META.test(block) || (dropping && LIST_ITEM.test(block))) {
+      dropping = true;
+      cut++;
+      continue;
+    }
+    break;
+  }
+
+  if (cut === 0) return text;
+
+  const whole = text.trim();
+  const kept = blocks.slice(cut).join('\n\n').trim();
+  // Nothing left that could be a letter, or a preamble longer than any
+  // preamble plausibly is: this is not a letter with commentary on top, and
+  // guessing which part to keep is how a draft disappears. Hand back what the
+  // model actually said.
+  if (kept.length < ENOUGH_LETTER) return text;
+  if (whole.length - kept.length > MOST_PREAMBLE) return text;
+  return kept;
 }

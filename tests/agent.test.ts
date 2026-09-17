@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { AgentError, extractJson, runAgent, trimToLetter } from '../src/ai/agent.js';
+import { AgentError, explainSilence, extractJson, runAgent, trimToLetter } from '../src/ai/agent.js';
+import { AI_PRESETS } from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 import { repairAiArgs } from '../src/model/store.js';
 
@@ -429,5 +430,104 @@ describe('taking the letter out of what the model wrapped it in', () => {
   it('handles the salutations people actually use', () => {
     expect(trimToLetter('Here you go:\n\nHi there,\n\nBody.')).toBe('Hi there,\n\nBody.');
     expect(trimToLetter('Draft:\n\nTo whom it may concern\n\nBody.')).toContain('To whom it may concern');
+  });
+});
+
+describe('a letter with no salutation to find', () => {
+  // Word for word what a run actually returned, minus the letter's length.
+  const PROSE = [
+    'I want to work on systems where performance and reliability under load actually matter.',
+    '',
+    'At Example Co. I built a Kafka-backed pipeline handling 2M events a day, and cut median',
+    'end-to-end latency from 900ms to 180ms by trimming the bottlenecks between stages.',
+    '',
+    'I would like to bring that to your team and learn how you approach it in production.',
+  ].join('\n');
+
+  it('drops the plan file the agent wrote and linked', () => {
+    const chatty = [
+      'I have prepared the implementation plan and a candidate-voice-matched draft in',
+      '[cover_letter_plan.md](file:///Users/someone/brain/cover_letter_plan.md).',
+      '',
+      '### Key Decision / Question:',
+      '- **Target Company Name**: The posting lists the company name as `Software Engineering`.',
+      '  If this is a placeholder or test input, the plan accommodates it without inventing',
+      '  details. Let me know if you have a specific team in mind.',
+      '',
+      PROSE,
+    ].join('\n');
+
+    const out = trimToLetter(chatty);
+    expect(out).toBe(PROSE);
+    expect(out).not.toContain('cover_letter_plan');
+    expect(out).not.toContain('Key Decision');
+  });
+
+  it('leaves a letter that opens straight into prose', () => {
+    expect(trimToLetter(PROSE)).toBe(PROSE);
+  });
+
+  it('does not touch a first paragraph that merely starts with "I"', () => {
+    // "I'll" on its own used to match the pattern for "I'll write it now",
+    // which would have eaten the opening paragraph of a real letter.
+    const letter = `I'll be blunt: the scheduler work is why I am writing.\n\nSecond paragraph.`;
+    expect(trimToLetter(letter)).toBe(letter);
+  });
+
+  it('hands back the whole reply when nearly all of it looks like commentary', () => {
+    // A refusal, a clarifying question, an error: guessing which half is the
+    // letter is how a draft disappears.
+    const noLetter = 'Here is what I need first:\n\n- Which company is this?\n\n- Which role?';
+    expect(trimToLetter(noLetter)).toBe(noLetter);
+  });
+
+  it('keeps a list that is the reply itself, with no preamble above it', () => {
+    const list = '- One point.\n\n- Another point.';
+    expect(trimToLetter(list)).toBe(list);
+  });
+});
+
+describe('telling someone which part of their AI setting is wrong', () => {
+  const PERMISSION = 'a tool required the "command" permission and was auto-denied';
+  const claude = AI_PRESETS.find((p) => p.command === 'claude')!;
+
+  it('says plainly when the command is not one this tool knows', () => {
+    const said = explainSilence('mycli', PERMISSION, ['--go']);
+    expect(said).toContain('Nothing here is set to "mycli" by any of the presets');
+    expect(said).toContain('claude');
+    expect(said).toMatch(/nothing to ask permission for/);
+  });
+
+  it('names the mismatch when the command is a preset and the arguments are not', () => {
+    /*
+     * The real report: "I did pick a preset, it still failed like this",
+     * about agy — which *is* a preset's command, so "pick a preset" was
+     * advice they had already taken. What a preset picked and never saved
+     * leaves behind is exactly this: the right command, the old arguments.
+     */
+    const said = explainSilence('agy', PERMISSION, ['--mode', 'plan', '--disable-slash-commands']);
+    expect(said).toContain('matches the "Antigravity (agy)" preset but the arguments saved with it do not');
+    expect(said).toContain('saved: --mode plan --disable-slash-commands');
+    expect(said).toMatch(/choosing it saves and tests it/);
+  });
+
+  it('stops blaming the settings when the settings are exactly a preset', () => {
+    const agy = AI_PRESETS.find((p) => p.command === 'agy')!;
+    const said = explainSilence('agy', PERMISSION, agy.args);
+    expect(said).toContain('exactly the "Antigravity (agy)" preset');
+    expect(said).toMatch(/asked for by the CLI\s+itself/);
+    expect(said).not.toMatch(/Pick a preset/);
+  });
+
+  it('always leaves a way out that needs nothing installed', () => {
+    for (const [command, args] of [
+      ['mycli', ['--go']],
+      ['agy', ['--mode', 'plan', '--disable-slash-commands']],
+      ['claude', claude.args],
+    ] as [string, string[]][]) {
+      const said = explainSilence(command, PERMISSION, args);
+      expect(said).toContain('finished without writing anything');
+      expect(said).toMatch(/hands you the prompt it would have sent/);
+    }
   });
 });

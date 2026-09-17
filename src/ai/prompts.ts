@@ -1,5 +1,6 @@
 import { buildVoiceContext, renderVoiceContext } from './voice.js';
 import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
+import { looksLikeCompanyName } from '../jobs/extract.js';
 import type {
   Bullet,
   CoverLetter,
@@ -513,9 +514,39 @@ export function coverLetterPrompt(
     preamble(data),
     '',
     '## Task: draft a cover letter',
-    'Draft a cover letter for the posting below, in the voice described above.',
-    'Ground every claim in the resume; do not introduce experience that is not there.',
-    'Three or four short paragraphs. No "I am writing to express my interest". No restating the resume line by line.',
+    'Write the letter for the posting below, in the voice described above, and write nothing else.',
+    '',
+    ...outputContract('letter'),
+    '',
+    '### What the letter does',
+    '- Three or four paragraphs, 200–320 words. Shorter is better than padded.',
+    '- Opening: why this posting in particular. Name something concrete from it —',
+    '  what the team builds, the problem the role exists to solve, a constraint they',
+    '  mention. "I am writing to express my interest" and "I was excited to see"',
+    '  are not openings; they are throat-clearing.',
+    '- Middle: one or two pieces of work from the resume below, chosen because this',
+    '  posting asks for them. Say what the problem was and what changed. Use the',
+    '  metric that is already in the resume, exactly as it is written there, and',
+    '  invent no others. Do not walk the resume top to bottom.',
+    '- Close: what they want out of the role, in their own terms. One or two',
+    '  sentences. No promise to "hit the ground running", no request for a call.',
+    '- Salutation and sign-off: follow whatever their own letters below do. Where',
+    '  there are none to follow, skip both and start with the first paragraph.',
+    '',
+    '### What never appears',
+    '- A sentence that would be true of any applicant for any job. Test it: if the',
+    '  employer\'s name and the role could be swapped out and the sentence still',
+    '  stood, cut the sentence.',
+    '- Near-verbatim resume bullets. The resume already says what was done; the',
+    '  letter says why it is the relevant thing to have done.',
+    '- The role title more than once, and never as the name of the place — "bring',
+    '  that to Software Engineering" is a letter no one read before sending.',
+    '- passionate, excited, thrilled, proven track record, leverage, synergy,',
+    '  dynamic, fast-paced, cutting-edge, "perfect fit", "as you can see from my',
+    '  resume".',
+    '- Flattery of the company that is not attached to a fact about it.',
+    '',
+    employerNaming(job.company),
     '',
     mayLookThingsUp(data, { company: job.company, jobTitle: job.jobTitle }),
     // Their own letters and answers, in full. A letter that has to be written
@@ -531,8 +562,8 @@ export function coverLetterPrompt(
     }),
     '',
     '## Posting',
-    job.company ? `Company: ${job.company}` : '',
-    job.jobTitle ? `Role: ${job.jobTitle}` : '',
+    companyLine(job.company),
+    job.jobTitle ? `Role: ${job.jobTitle}` : 'Role: not stated on the page.',
     job.jobDescription.slice(0, 8000),
     '',
     '## Resume',
@@ -542,24 +573,120 @@ export function coverLetterPrompt(
     .join('\n');
 }
 
+/**
+ * What to print, and the fact that printing anything else lands in the box.
+ *
+ * These prompts are run through whichever coding-agent CLI the user has
+ * configured, and a coding agent's instinct is to plan: one came back with "I
+ * have prepared the implementation plan and a candidate-voice-matched draft in
+ * cover_letter_plan.md", a markdown heading, and a question about which company
+ * this was for — all of it saved as the cover letter, because the reply *is*
+ * the letter and there is nowhere else for it to go. The rules it needs are
+ * therefore not "be concise" but "there is no side channel here".
+ */
+function outputContract(what: 'letter' | 'answer'): string[] {
+  return [
+    `### What to print`,
+    `- The ${what} itself, as plain prose, ready to paste into a form. Nothing`,
+    `  before it and nothing after it: no "Here is the draft", no notes on what`,
+    `  you did, no summary, no alternatives to choose between.`,
+    `- No markdown. No headings, no bold, no bullet points, no horizontal rules.`,
+    `- Do not write, create or edit any file. Whatever you print is the ${what};`,
+    `  a path to a file you wrote is not something the person can open.`,
+    `- Do not ask a question. Nothing is there to answer it, and a question`,
+    `  printed here arrives as the first line of their ${what}. Where something`,
+    `  you would want to know is missing, write around it.`,
+    `- Never leave a placeholder — no [Company], no [X years], no TODO, no "your`,
+    `  team's <product>". If you cannot fill it truthfully from the material`,
+    `  below, the sentence does not go in.`,
+  ];
+}
+
+/**
+ * How to treat the scraped employer name.
+ *
+ * The name arrives from a page, not from the user, and it is wrong often
+ * enough that the model has to be told which of the two situations it is in.
+ * Saying "the company may be wrong" every time would teach it to hedge on the
+ * names that are right, so the check is made here and only one of the two
+ * paragraphs is sent.
+ */
+function employerNaming(company?: string): string {
+  if (looksLikeCompanyName(company)) {
+    return [
+      '### The employer',
+      `They are applying to ${company?.trim()}. Use that name where a letter would`,
+      'naturally use it — once or twice, not in every paragraph — and spell it exactly',
+      'as it is written here.',
+    ].join('\n');
+  }
+  return [
+    '### The employer',
+    company?.trim()
+      ? `The page gave "${company.trim()}" as the employer, and that does not read like` +
+        '\nthe name of a company — it is likely a department, the job title over again, or' +
+        '\nthe job board\'s own name.'
+      : 'The page never named the employer.',
+    'So do not name them. Write "your team", "this role", "the work described here".',
+    'Do not guess a name, do not infer one from the posting\'s wording, and do not',
+    'address the letter to a name you are unsure of: a letter addressed to the wrong',
+    'thing is worse than one addressed to no one.',
+  ].join('\n');
+}
+
+/** The Company line of a posting, saying plainly when there isn't one worth having. */
+function companyLine(company?: string): string {
+  const name = (company ?? '').trim();
+  if (!name) return 'Company: not named on the page.';
+  if (looksLikeCompanyName(name)) return `Company: ${name}`;
+  return `Company: ${name}  (scraped from the page; not a usable company name — see above)`;
+}
+
 /** Answer an application question, reusing a previous answer where one fits. */
 export function answerPrompt(data: StoreData, question: string, job?: TailorContext): string {
   return [
     preamble(data),
     '',
     '## Task: answer an application question',
-    'Answer the question below in the voice described above.',
-    'If one of the previously written answers already covers it, adapt that answer rather than starting over —',
-    'staying consistent across applications matters more than novelty.',
-    'A cover letter below may already say it better than any of the answers do; take it from there if so.',
-    'Keep it to the length the question implies. No filler.',
+    'Answer the question below in the voice described above, and write nothing else.',
+    '',
+    ...outputContract('answer'),
+    '',
+    '### What the answer does',
+    '- Answers the question that was asked, first and directly. Not the question',
+    '  you would rather answer, and not a paragraph of context before it.',
+    '- Matches the length the question implies: a word limit if one is given, a',
+    '  sentence or two for "how did you hear about us", a short paragraph for',
+    '  "why this role", 150–250 words for anything asking you to describe',
+    '  something. Filling a box to its limit is not a goal.',
+    '- Stands on one concrete thing they actually did, from the material below,',
+    '  rather than on what they believe about themselves.',
+    '- Reuses what they have already written where it fits. If one of the answers',
+    '  below already covers this, adapt it rather than starting over — staying',
+    '  recognisably the same person across a season of applications matters more',
+    '  than novelty. A cover letter below may say it better than any of the',
+    '  answers do; take it from there if so.',
+    '',
+    '### What never appears',
+    '- Restating the question before answering it.',
+    '- A claim about them that is not in the material below — no years of',
+    '  experience you counted yourself, no tool they have not named, no degree,',
+    '  no visa or work-authorisation status, no salary figure. If the question',
+    '  asks for a fact that is genuinely not here, say plainly in one line that it',
+    '  needs filling in, and answer nothing else.',
+    '- passionate, excited, thrilled, proven track record, leverage, dynamic,',
+    '  fast-paced, "perfect fit".',
+    '',
+    employerNaming(job?.company),
     '',
     mayLookThingsUp(data, { company: job?.company, jobTitle: job?.jobTitle }),
     // The closest questions first, and the letters that went with this kind of
     // posting — the same material either way, ranked for this question.
     priorWork(data, { question, job: { company: job?.company, role: job?.jobTitle } }),
     '',
-    job ? `## Posting\n${job.company ?? ''} ${job.jobTitle ?? ''}\n${job.jobDescription.slice(0, 4000)}` : '',
+    job
+      ? `## Posting\n${companyLine(job.company)}\n${job.jobTitle ? `Role: ${job.jobTitle}` : 'Role: not stated on the page.'}\n\n${job.jobDescription.slice(0, 4000)}`
+      : '',
     '',
     `## Question\n${question}`,
   ]

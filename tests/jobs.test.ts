@@ -3,6 +3,7 @@ import {
   classifyPage,
   companyFromUrl,
   employerFallback,
+  looksLikeCompanyName,
   extractJob,
   extractKeywords,
   JOB_SHAPED,
@@ -335,5 +336,60 @@ describe('naming an employer the page does not name', () => {
   it('still says Unknown when there is not even a url', () => {
     expect(employerFallback(undefined)).toBe('Unknown');
     expect(employerFallback('not a url at all')).toBe('Unknown');
+  });
+});
+
+describe('telling a company name from a job title', () => {
+  it('accepts names that are names', () => {
+    for (const name of [
+      'Helios Robotics',
+      'Acme Co.',
+      'Stripe',
+      'Two Sigma',
+      'Palantir Technologies',
+      'Designer Brands Inc.',
+      'Lead Bank',
+      'Acme Software',
+      'Northeastern University',
+      "Moody's",
+      'Épicerie Générale',
+    ]) {
+      expect(looksLikeCompanyName(name), name).toBe(true);
+    }
+  });
+
+  it('refuses a job title standing in for an employer', () => {
+    // The one that reached a letter: "I want to bring that focus to Software
+    // Engineering".
+    for (const name of [
+      'Software Engineering',
+      'Senior Backend Developer',
+      'Engineering',
+      'Product Manager',
+      'Data Scientist',
+      'Summer Internship',
+    ]) {
+      expect(looksLikeCompanyName(name), name).toBe(false);
+    }
+  });
+
+  it('refuses the page furniture every scraper picks up', () => {
+    for (const name of ['Unknown', 'Careers', 'Jobs', 'n/a', 'Apply', 'We are hiring', 'Open Positions', '']) {
+      expect(looksLikeCompanyName(name), name).toBe(false);
+    }
+    expect(looksLikeCompanyName(undefined)).toBe(false);
+  });
+
+  it('refuses a hostname, which employerFallback hands back on purpose', () => {
+    // A true label for a folder, and not a thing you address a letter to.
+    expect(looksLikeCompanyName(employerFallback('https://boards.example.com/gh/acme/jobs/1'))).toBe(false);
+    expect(looksLikeCompanyName('acme.com')).toBe(false);
+  });
+
+  it('refuses a sentence, a list, or a paragraph of marketing', () => {
+    expect(looksLikeCompanyName('Acme is hiring! Apply today.')).toBe(false);
+    expect(looksLikeCompanyName('Acme | Careers | Open Roles')).toBe(false);
+    expect(looksLikeCompanyName('A'.repeat(80))).toBe(false);
+    expect(looksLikeCompanyName('2026')).toBe(false);
   });
 });

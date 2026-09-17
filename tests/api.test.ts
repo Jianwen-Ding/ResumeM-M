@@ -211,6 +211,45 @@ describe('job analysis', () => {
       .expect(200);
     expect(res.body.isJobPosting).toBe(false);
   });
+
+  /*
+   * Tailoring is the feature and was never supposed to be compulsory. Both
+   * modes altered the resume, so every proposal arrived with a list of
+   * changes on it and no way to say "none of these, send what I have".
+   */
+  it('changes nothing at all when asked for nothing', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, url: 'https://boards.greenhouse.io/streamly/jobs/1', baseResumeId: 'intern', tailor: 'none' })
+      .expect(200);
+
+    expect(res.body.tailor).toBe('none');
+    // Still a spec of its own, so the folder and the history name the posting.
+    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.generatedFor.company).toBe('Streamly');
+    // And it selects nothing, so it resolves to exactly the base.
+    expect(res.body.spec.choices).toEqual({});
+    expect(res.body.diff).toEqual([]);
+    expect(res.body.rationale).toEqual([]);
+  });
+
+  it('still matches by keyword when asked to', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'match' })
+      .expect(200);
+    expect(res.body.tailor).toBe('match');
+    expect(res.body.spec.choices.b_pipeline).toBe('v_kafka');
+  });
+
+  it('reads the older useAi flag as the two modes it could express', async () => {
+    const off = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', useAi: false })
+      .expect(200);
+    expect(off.body.tailor).toBe('match');
+    expect(off.body.spec.choices.b_pipeline).toBe('v_kafka');
+  });
 });
 
 describe('autofill', () => {

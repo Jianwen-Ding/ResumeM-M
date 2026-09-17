@@ -1303,7 +1303,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/extension/analyze',
     handler(async (req, res) => {
-      const { url, title, html, pages, baseResumeId, useAi } = req.body as {
+      const { url, title, html, pages, baseResumeId, useAi, tailor } = req.body as {
         url?: string;
         title?: string;
         html?: string;
@@ -1311,7 +1311,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         pages?: PageSource[];
         baseResumeId?: string;
         useAi?: boolean;
+        /**
+         * How much to change, if anything.
+         *
+         * `useAi` could only ever say which of two kinds of tailoring to do,
+         * and left no way to ask for none: every proposal arrived already
+         * altered, and the only account of what had happened was a list of
+         * changes with nothing to undo them. "Send the resume I already have"
+         * is the most ordinary thing anyone wants from this and it was the one
+         * thing it could not be told.
+         */
+        tailor?: 'none' | 'match' | 'ai';
       };
+      const mode = tailor ?? (useAi ? 'ai' : 'match');
 
       /*
        * One application, however many pages it is spread across. The single
@@ -1350,11 +1362,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error(`No resume "${baseId}"`);
 
-      const match = matchVariants(data, base, { keywords: job.keywords });
+      /*
+       * `none` still produces a spec, and deliberately: the application wants
+       * its own copy of the resume so that the folder, the filename and the
+       * version history all name the posting. It simply selects nothing, so
+       * the copy resolves to exactly the base — the diff below comes back
+       * empty and the card says so.
+       */
+      const match =
+        mode === 'none'
+          ? { choices: {}, skills: {}, rationale: [] }
+          : matchVariants(data, base, { keywords: job.keywords });
 
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
-      if (useAi && data.config.ai.enabled) {
+      if (mode === 'ai' && data.config.ai.enabled) {
         const resolved = resolveResume(baseId, data);
         const agent = await runAgent(
           data.config,
@@ -1457,6 +1479,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
         aiRaw: aiParsed ? undefined : aiRaw,
+        // What was actually done, not what was asked for: an AI run that came
+        // back unusable falls through to the keyword match, and the card has
+        // to be able to say so.
+        tailor: mode === 'ai' && !aiParsed ? 'match' : mode,
       });
     }),
   );
