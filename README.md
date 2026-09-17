@@ -438,9 +438,23 @@ local tool. Do not expose it; CORS is open so the extension can reach it from a
 ## Tests
 
 ```bash
-npm test
+npm test              # the whole suite, in Node and jsdom
+npm run test:editor   # the editor, driven in a real browser
 ```
 
-53 unit tests cover resolution, inheritance, escaping, extraction, and matching.
-Six integration tests compile real PDFs to verify the one-page guarantee; they
-skip automatically when no LaTeX engine is installed.
+`npm test` covers resolution, inheritance, escaping, extraction, matching, the
+three-way merge that keeps two edits to one entry from overwriting each other,
+and the editor's own behaviour under jsdom — including the cases where a panel
+reloading used to throw away something you had typed into it. Integration tests
+compile real PDFs to verify the one-page guarantee; they skip automatically
+when no LaTeX engine is installed.
+
+`test:editor` is the other half: it drives the real editor in Chromium, from
+loading the store through compiling, switching a wording, undoing it, writing an
+application and building its files — and it reports how long each step took
+against a budget, because "it works" and "it is worth using" are different
+claims.
+
+It starts its own server on a scratch store, so it never touches yours. Point
+it at a running one with `RMM_SERVER=http://127.0.0.1:4788` if you would rather
+watch it work.
