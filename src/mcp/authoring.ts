@@ -223,8 +223,11 @@ export class AuthoringSession {
         : bad;
     }
 
-    this.state.entries.push({ ...entry, bullets: [] });
-    return ok(`Proposed ${entry.kind} entry [${entry.id}] ${entry.title}. Add its bullets with propose_bullet.`);
+    // Trimmed, because the id was validated trimmed: accepting " exp_acme"
+    // and then storing it with the space makes an id nothing else can address.
+    const id = entry.id.trim();
+    this.state.entries.push({ ...entry, id, title: entry.title.trim(), bullets: [] });
+    return ok(`Proposed ${entry.kind} entry [${id}] ${entry.title.trim()}. Add its bullets with propose_bullet.`);
   }
 
   proposeBullet(entryId: string, bullet: ProposedBullet): MoveResult {
@@ -282,16 +285,24 @@ export class AuthoringSession {
     return lines.join('\n');
   }
 
+  /**
+   * Finish, dropping anything that is not worth showing a person.
+   *
+   * This used to refuse while any proposed entry had no bullets, and told the
+   * model to "withdraw the entry by not proposing it" — which is not something
+   * that can be done after the fact, because there is no tool for it. So a run
+   * that proposed an entry and then found nothing in the material to support
+   * it could never finish, and everything else it had read was thrown away
+   * with it. Dropping the empty ones and saying so keeps the rest.
+   */
   done(notes: string): MoveResult {
     const empty = this.state.entries.filter((e) => e.bullets.length === 0);
-    if (empty.length) {
-      return no(
-        `These entries have no bullets: ${empty.map((e) => e.id).join(', ')}. An entry with no bullets is a heading. ` +
-          `Add them, or withdraw the entry by not proposing it.`,
-      );
-    }
+    this.state.entries = this.state.entries.filter((e) => e.bullets.length > 0);
     this.state.notes = notes.trim();
     this.state.finished = true;
-    return ok(`Recorded.\n${this.describeProposal()}`);
+    const dropped = empty.length
+      ? `Left out, because an entry with no bullets is a heading: ${empty.map((e) => e.id).join(', ')}.\n`
+      : '';
+    return ok(`Recorded.\n${dropped}${this.describeProposal()}`);
   }
 }

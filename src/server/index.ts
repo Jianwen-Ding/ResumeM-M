@@ -146,7 +146,7 @@ export async function startServer(opts: ServerOptions = {}) {
    * to tell two builds apart, and costs one stat per request on a handful of
    * files. Anything cleverer would need a build step to maintain.
    */
-  const buildStamp = (() => {
+  const stampNow = () => {
     const roots = [path.join(projectRoot, 'dist', 'src'), path.join(projectRoot, 'src'), path.join(projectRoot, 'web')];
     let newest = 0;
     const walk = (dir: string, depth = 0) => {
@@ -160,11 +160,25 @@ export async function startServer(opts: ServerOptions = {}) {
     };
     for (const root of roots) walk(root);
     return String(Math.round(newest));
-  })();
+  };
+  const buildStamp = stampNow();
 
-  app.get('/health', (_req, res) => {
+  /*
+   * Comparing servers to each other catches one stale process among several.
+   * It cannot catch all of them being stale together, which is what happens
+   * the moment the code is edited while they are running — and that is the
+   * ordinary case during development, not the exotic one.
+   *
+   * So `?fresh` re-reads the files and says whether anything has been written
+   * since this process started. It is behind a flag because `/health` is
+   * polled, and walking three trees on every poll to answer a question only a
+   * test runner asks is a poor trade.
+   */
+  app.get('/health', (req, res) => {
     const ai = active?.store.loadConfig().ai;
+    const fresh = req.query.fresh !== undefined ? stampNow() : undefined;
     res.json({ ok: true, service: 'resumem-m', build: buildStamp, dataDir: active?.store.root ?? null,
+      ...(fresh === undefined ? {} : { onDisk: fresh, stale: fresh !== buildStamp }),
       projectOpen: Boolean(active), ai: { enabled: ai?.enabled ?? false, command: ai?.command ?? '', configured: Boolean(ai?.command?.trim()) } });
   });
 

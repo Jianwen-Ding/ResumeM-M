@@ -359,12 +359,42 @@ describe('reading material into a proposal', () => {
     expect(authoring().proposeAlternate('b_nope', 'x', 'y', 'Cut median end-to-end latency', 'd1').ok).toBe(false);
   });
 
-  it('refuses to finish with an entry that is only a heading', () => {
+  /*
+   * It used to refuse, and tell the model to "withdraw the entry by not
+   * proposing it" — which cannot be done afterwards, because there is no tool
+   * for it. A run that proposed an entry and then found nothing in the
+   * material to support it could never finish, and everything else it had
+   * read went with it.
+   */
+  it('leaves out an entry that is only a heading, rather than refusing to finish', () => {
     const s = authoring();
     s.proposeEntry({ id: 'exp_vega', kind: 'experience', title: 'Vega Analytics', documentId: 'd1' });
+    s.proposeEntry({ id: 'edu_neu', kind: 'education', title: 'Northeastern University', documentId: 'd1' });
+    s.proposeBullet('exp_vega', {
+      label: 'Ingest',
+      text: 'Built a Kafka-backed ingest pipeline',
+      source: 'Built a Kafka-backed ingest pipeline handling 2M events a day.',
+      documentId: 'd1',
+    });
     const r = s.done('Read the resume.');
-    expect(r.ok).toBe(false);
-    expect(r.text).toContain('exp_vega');
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain('edu_neu');
+    expect(s.state.entries.map((e) => e.id)).toEqual(['exp_vega']);
+    expect(s.state.finished).toBe(true);
+  });
+
+  it('stores an id as it was validated, not as it was typed', () => {
+    const s = authoring();
+    expect(s.proposeEntry({ id: '  exp_vega  ', kind: 'experience', title: ' Vega Analytics ', documentId: 'd1' }).ok).toBe(true);
+    expect(s.state.entries[0]?.id).toBe('exp_vega');
+    expect(s.state.entries[0]?.title).toBe('Vega Analytics');
+    // And the trimmed id is the one propose_bullet has to name.
+    expect(s.proposeBullet('exp_vega', {
+      label: 'Ingest',
+      text: 'Built a Kafka-backed ingest pipeline',
+      source: 'Built a Kafka-backed ingest pipeline handling 2M events a day.',
+      documentId: 'd1',
+    }).ok).toBe(true);
   });
 
   it('says plainly that nothing has been written to the store', () => {
