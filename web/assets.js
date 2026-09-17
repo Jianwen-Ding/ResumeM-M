@@ -12,6 +12,26 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     try { await fn(); } catch (error) { report(error); }
     finally { button.disabled = false; }
   };
+  /*
+   * Whether the job title goes in a produced filename.
+   *
+   * Lives beside the output folder because that is what it is about. Off by
+   * default: most of the time the reviewer opening the attachment already
+   * knows which role they advertised, and a longer name is a worse one. It
+   * earns its place when several applications are open at once and you want to
+   * tell them apart in a file picker without opening them.
+   */
+  async function refreshFileNaming() {
+    const config = await api('/config');
+    const on = Boolean(config.output?.roleInFileName);
+    const box = $('#output-role-name');
+    if (!box) return;
+    box.checked = on;
+    $('#output-name-example').textContent = on
+      ? 'Jane-Doe-Software-Engineer-Resume.pdf'
+      : 'Jane-Doe-Resume.pdf';
+  }
+
   async function refreshProject() {
     project = await api('/projects');
     projectChanged(project.current);
@@ -20,6 +40,7 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     const name = folderName === 'store' ? 'Resume Save' : folderName;
     $('#project-current').textContent = project.current || 'No Save Open';
     $('#project-output').textContent = open ? `Generated Files: ${project.output}` : '';
+    if (open) await refreshFileNaming();
     $('#project-chip').textContent = open ? `Save: ${name}` : 'Open Save…';
     $('#project-chip').title = project.current || 'Open or create a save';
     $('#project-status').textContent = open ? `Open Save: ${name}` : 'No Save Open';
@@ -246,6 +267,30 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     const fallback = [...event.dataTransfer.files];
     try { await importFiles(entries.length ? (await Promise.all(entries.map(readDirectory))).flat() : fallback); } catch (error) { report(error); }
   };
+  const naming = $('#output-role-name');
+  if (naming) {
+    naming.onchange = async () => {
+      naming.disabled = true;
+      try {
+        await api('/config', {
+          method: 'PUT',
+          body: JSON.stringify({ output: { roleInFileName: naming.checked } }),
+        });
+        await refreshFileNaming();
+        status(
+          naming.checked
+            ? 'New files will carry the job title. Files already built keep their names.'
+            : 'New files will leave the job title out. Files already built keep their names.',
+        );
+      } catch (error) {
+        report(error);
+        naming.checked = !naming.checked;
+      } finally {
+        naming.disabled = false;
+      }
+    };
+  }
+
   for (const id of ['asset-watch', 'asset-generate']) $(`#${id}`).onchange = action(async () => {
     await api('/assets/settings', { method: 'PUT', body: JSON.stringify({ watch: $('#asset-watch').checked, generate: $('#asset-generate').checked }) });
   });

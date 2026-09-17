@@ -9,28 +9,48 @@ import { syncCurrent } from './current.js';
 import { resolveResume } from './resolve.js';
 
 /**
- * File naming is a surprising amount of the pain in applying: every portal
- * wants "Firstname Lastname Resume", and renaming a download each time is how
- * the wrong file ends up attached. Bundles are produced already named right.
+ * One hyphenated part of a filename.
+ *
+ * Letters and digits in any alphabet, not only `\w`, which is ASCII: "Jane Doe
+ * Resume rsted.pdf" was going to Ørsted, and a company written in Chinese
+ * vanished from the name entirely. Everything else becomes a separator, and
+ * runs of separators collapse, so nothing comes out with a double hyphen or a
+ * hyphen hanging off either end.
  */
-export function bundleFileName(name: string, company: string | undefined, kind: 'Resume' | 'Cover Letter'): string {
-  const person = name.trim().replace(/\s+/g, ' ');
-  /*
-   * Letters and digits in any alphabet, not only `\w`, which is ASCII.
-   * "Jane Doe Resume rsted.pdf" was going to Ørsted, and a company written in
-   * Chinese vanished from the filename entirely — which also made two
-   * applications share one name in the folder you upload from.
-   *
-   * The rule is otherwise the one that was already here — `\w`, plus spaces
-   * and hyphens — so everything it stripped before is still stripped. Only the
-   * definition of a letter has widened.
-   */
-  const co = company
-    ?.trim()
-    .replace(/[^\p{L}\p{N}_\s-]/gu, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return [person, kind, co].filter(Boolean).join(' ') + '.pdf';
+function namePart(s: string | undefined): string {
+  return String(s ?? '')
+    .replace(/[^\p{L}\p{N}_\s-]/gu, ' ')
+    .replace(/[\s-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/** What a document in a bundle is: the last part of its name. */
+export type DocumentKind = 'Resume' | 'Cover Letter' | 'Answers';
+
+/**
+ * File naming is a surprising amount of the pain in applying: every portal
+ * wants the same shape, and renaming a download each time is how the wrong
+ * file ends up attached. Bundles are produced already named right.
+ *
+ *     FirstName-LastName-<Job Title>-<Document Type>.pdf
+ *
+ * The role rather than the company, because the role is what distinguishes two
+ * applications you are actually working on at once — and because a reviewer
+ * opening the attachment already knows which company they are. It is optional:
+ * without one the name is just the person and the document type.
+ *
+ * `disambiguator` is for the one case the shape above cannot separate on its
+ * own — the same person applying for the same role at two companies at the same
+ * time, whose files share a folder in `out/current`. Nothing else passes it.
+ */
+export function bundleFileName(
+  name: string,
+  role: string | undefined,
+  kind: DocumentKind,
+  { extension = '.pdf', disambiguator }: { extension?: string; disambiguator?: string } = {},
+): string {
+  const parts = [namePart(name), namePart(role), namePart(kind), namePart(disambiguator)];
+  return parts.filter(Boolean).join('-') + extension;
 }
 
 export function slug(s: string): string {
@@ -103,6 +123,13 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const data = store.load();
   const resolved: ResolvedResume = resolveResume(req.resumeId, data);
 
+  /*
+   * The job title goes in the filename only when the setting says so. Off by
+   * default: most of the time the reviewer opening the attachment already
+   * knows which role they advertised, and a longer name is a worse one.
+   */
+  const titled = data.config.output.roleInFileName ? req.role : undefined;
+
   const id = applicationId(req.company, req.role);
   const dir = path.join(store.outDir(), 'applications', id);
   fs.mkdirSync(dir, { recursive: true });
@@ -124,7 +151,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     if (entry.isFile()) fs.rmSync(path.join(dir, entry.name), { force: true });
   }
 
-  const resumeName = bundleFileName(resolved.profile.name, req.company, 'Resume');
+  const resumeName = bundleFileName(resolved.profile.name, titled, 'Resume');
   const pdfPath = path.join(dir, resumeName);
   const compiled = await compileResume(resolved, {
     pdfPath,
@@ -134,7 +161,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const files = [resumeName];
 
   if (req.coverLetter?.trim()) {
-    const letterName = bundleFileName(resolved.profile.name, req.company, 'Cover Letter');
+    const letterName = bundleFileName(resolved.profile.name, titled, 'Cover Letter');
 
     // Typeset to match the resume, with the trusted engine — this is a file
     // that gets uploaded, so it never takes the preview shortcut. The plain
@@ -158,7 +185,16 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   }
 
   if (req.answers?.length) {
-    const qaPath = path.join(dir, 'application-answers.md');
+    /*
+     * Named like the other two rather than `application-answers.md`. A
+     * constant was fine inside a per-application folder and collided for any
+     * two applications at once in the flat one — and the flat folder is the
+     * one you upload from.
+     */
+    const qaPath = path.join(
+      dir,
+      bundleFileName(resolved.profile.name, titled, 'Answers', { extension: '.md' }),
+    );
     fs.writeFileSync(
       qaPath,
       req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n'),

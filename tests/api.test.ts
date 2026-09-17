@@ -588,7 +588,7 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
       })
       .expect(200);
 
-    expect(res.body.files[0]).toContain('Test Person Resume Streamly.pdf');
+    expect(res.body.files[0]).toBe('Test-Person-Resume.pdf');
     expect(t.store.getResume('job-streamly')).toBeDefined();
     expect(fs.existsSync(path.join(res.body.dir, 'source', 'resolved.yaml'))).toBe(true);
   });
@@ -891,8 +891,8 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
       .send({ saveAnswersToBank: true })
       .expect(200);
 
-    expect(done.body.files).toContain('Test Person Resume Streamly.pdf');
-    expect(done.body.files.some((f: string) => f.includes('Cover Letter'))).toBe(true);
+    expect(done.body.files).toContain('Test-Person-Resume.pdf');
+    expect(done.body.files.some((f: string) => f.includes('Cover-Letter'))).toBe(true);
 
     // The application record carries what was actually said.
     const app1 = t.store.load().applications.find((a) => a.company === 'Streamly');
@@ -1110,7 +1110,7 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
     expect(res.body.dir).toContain('applications/');
     expect(res.body.currentDir).toMatch(/current$/);
     expect(res.body.currentDir).not.toContain('applications/');
-    expect(fs.existsSync(path.join(res.body.currentDir, 'Test Person Resume Streamly.pdf'))).toBe(true);
+    expect(fs.existsSync(path.join(res.body.currentDir, 'Test-Person-Resume.pdf'))).toBe(true);
   });
 });
 

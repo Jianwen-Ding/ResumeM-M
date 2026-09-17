@@ -38,19 +38,19 @@ describe('an application id identifies the application', () => {
 });
 
 describe('the file that gets uploaded says who it is for', () => {
-  it('keeps a company name that is not written in ASCII', () => {
-    // "Jane Doe Resume rsted.pdf" went to Ørsted; the CJK case lost the
-    // company from the filename altogether, which is also how two
-    // applications ended up sharing one name in the upload folder.
-    expect(bundleFileName('Jane Doe', 'Ørsted', 'Resume')).toBe('Jane Doe Resume Ørsted.pdf');
-    expect(bundleFileName('Jane Doe', 'Nestlé', 'Resume')).toBe('Jane Doe Resume Nestlé.pdf');
-    expect(bundleFileName('Jane Doe', '北京字节跳动', 'Resume')).toBe('Jane Doe Resume 北京字节跳动.pdf');
+  it('keeps a name that is not written in ASCII', () => {
+    // "Jane Doe Resume rsted.pdf" went to Ørsted; the CJK case lost the word
+    // from the filename altogether, which is also how two applications ended
+    // up sharing one name in the upload folder.
+    expect(bundleFileName('Jane Doe', 'Ørsted Engineer', 'Resume')).toBe('Jane-Doe-Ørsted-Engineer-Resume.pdf');
+    expect(bundleFileName('Zoë Müller', 'Analyst', 'Resume')).toBe('Zoë-Müller-Analyst-Resume.pdf');
+    expect(bundleFileName('张伟', '软件工程师', 'Resume')).toBe('张伟-软件工程师-Resume.pdf');
   });
 
   it('still strips what a filesystem will not take', () => {
-    // The separator, the colon and the wildcard go; the space between words
-    // stays, because it was always a space.
-    expect(bundleFileName('Jane Doe', 'A/B: Test*Co', 'Resume')).toBe('Jane Doe Resume AB TestCo.pdf');
+    // The separator, the colon and the wildcard go, and what is left is joined
+    // by the one separator this scheme uses.
+    expect(bundleFileName('Jane Doe', 'A/B: Test*Co', 'Resume')).toBe('Jane-Doe-A-B-Test-Co-Resume.pdf');
   });
 });
 

@@ -433,6 +433,16 @@ export interface StoreConfig {
     withinProject?: boolean;
     /** Where generated PDFs and application bundles land. */
     dir: string;
+    /**
+     * Put the job title in the filename:
+     * `FirstName-LastName-<Job Title>-<Document Type>.pdf`.
+     *
+     * Off by default, because most of the time it is noise — the reviewer
+     * opening the attachment already knows which role they advertised. It
+     * earns its place when you have several applications open at once and want
+     * to tell them apart in the file picker without opening them.
+     */
+    roleInFileName?: boolean;
   };
 }
 
@@ -460,7 +470,7 @@ export const DEFAULT_CONFIG: StoreConfig = {
     timeoutMs: 180_000,
   },
   git: { autoCommit: true },
-  output: { dir: 'out' },
+  output: { dir: 'out', roleInFileName: false },
 };
 
 export function isVariantField(v: MaybeVariant | undefined): v is VariantField {
