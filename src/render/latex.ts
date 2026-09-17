@@ -285,7 +285,17 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 \\usepackage{scrextend}
 \\usepackage{zref-savepos}
 \\usepackage{zref-abspage}
-\\input{glyphtounicode}
+% Guarded, because \`tectonic\` is the *first* engine this tries and it is
+% XeTeX-based: \`\\pdfgentounicode\` is a pdfTeX primitive that does not exist
+% there, and \`glyphtounicode.tex\` is ~4000 calls to its sibling with no
+% \`\\ifx\` guard of its own. Unguarded, the engine the README recommends would
+% fail on every compile — and the failure would be a wall of undefined control
+% sequences, not a sentence anyone could act on. Where the primitives are
+% missing the PDF is still produced; it just does not carry the extra
+% machine-readability this buys on pdfTeX.
+\\ifdefined\\pdfgentounicode
+  \\input{glyphtounicode}
+\\fi
 
 % Record the page number alongside each saved position, so the fit checker can
 % tell "bottom of page 1" from "bottom of page 2".
@@ -316,7 +326,7 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 }{}{0em}{}[\\color{black}\\titlerule \\vspace{-5\\rmmunit}]
 
 % Make the generated PDF machine readable so ATS parsers get real text.
-\\pdfgentounicode=1
+\\ifdefined\\pdfgentounicode \\pdfgentounicode=1 \\fi
 
 \\newcommand{\\resumeItem}[1]{%
   \\item\\small{%
