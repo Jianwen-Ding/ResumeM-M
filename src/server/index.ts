@@ -11,6 +11,7 @@ import { prepareProject, readProjects, rememberProject, setDefaultFolder, projec
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
+import { localOnly } from './guard.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(here, '..', '..');
@@ -24,6 +25,12 @@ export interface ServerOptions {
   requireProjectSelection?: boolean;
   host?: string;
 }
+
+/** The folder back, but only if a save is actually sitting in it. */
+const isSave = (dir: string) =>
+  fs.existsSync(path.join(dir, 'profile.yaml')) && fs.existsSync(path.join(dir, 'config.yaml'));
+
+const existingStore = (dir: string): string | undefined => (isSave(dir) ? dir : undefined);
 
 function projectSession(store: Store) {
   const repo = Repo.forStore(store.root);
@@ -39,7 +46,30 @@ export async function startServer(opts: ServerOptions = {}) {
   const preferences = readProjects(preferencesFile);
   const fallback = opts.dataDir ?? resolveStoreDir(projectRoot);
   const explicit = !opts.requireProjectSelection && (opts.dataDir ?? process.env.RMM_DATA);
-  const startupFolder = Object.hasOwn(preferences, 'defaultFolder') ? preferences.defaultFolder : preferences.active;
+  /*
+   * Which save to open without being asked.
+   *
+   * A default chosen in the app wins, and choosing "Ask Me on Startup" stores
+   * that as null — which means the chooser, and must stay meaning the chooser.
+   * An older install has no such key and is answered by the save it last had
+   * open.
+   *
+   * Failing all of those, the save at the app's own default location, when
+   * there is already one there. That case is not hypothetical: it is every
+   * install that predates saves being something you pick, where the store sits
+   * exactly where the app has always put it and nothing has ever been written
+   * down about it. Starting those with no save open — a server running, an
+   * editor with nothing in it, and an extension that cannot answer — is worse
+   * than opening the only save on the machine.
+   *
+   * It is `existingStore`, not `fallback`, deliberately: a folder that is not
+   * already a save is left to the chooser rather than created here. Seeding is
+   * for an explicit choice, and quietly conjuring an example store is how
+   * somebody ends up applying with a resume they did not write.
+   */
+  const startupFolder = Object.hasOwn(preferences, 'defaultFolder')
+    ? preferences.defaultFolder
+    : (preferences.active ?? existingStore(fallback));
   const initial = explicit || startupFolder;
   let active: ReturnType<typeof projectSession> | undefined;
   let openedBy: 'launch' | 'restored' | 'selected' | undefined;
@@ -48,7 +78,7 @@ export async function startServer(opts: ServerOptions = {}) {
     try {
       if (explicit) seedStore(path.join(projectRoot, 'data'), initial);
       // Missing or invalid remembered folders return to the chooser, never seed example data.
-      if (!fs.existsSync(path.join(initial, 'profile.yaml')) || !fs.existsSync(path.join(initial, 'config.yaml'))) {
+      if (!isSave(initial)) {
         throw new Error(`Save folder is unavailable: ${initial}. Choose another folder or create a save.`);
       }
       const store = new Store(initial);
@@ -66,9 +96,36 @@ export async function startServer(opts: ServerOptions = {}) {
   }, 5000);
   watcher.unref();
 
-  // JobHelper calls from chrome-extension:// origins. Keep the server on loopback.
+  /*
+   * Who is allowed to call this.
+   *
+   * It answered `*`, which on a server with no password means every page you
+   * visit can read your whole resume store and write to it. That was how a
+   * traversal in an id turned into a page being able to set `ai.command` — the
+   * command this application runs.
+   *
+   * The extension is why the header exists at all, and it asks for
+   * `host_permissions` on loopback, so Chrome exempts it from CORS regardless.
+   * Echoing its origin is belt and braces for an install that has not been
+   * granted them; every other origin gets no header, which is what stops an
+   * ordinary web page from reaching in. The editor is served from here, so it
+   * is same-origin and needs nothing.
+   */
+  const mayCall = (origin: string | undefined) => /^chrome-extension:\/\/[a-p]+$/.test(origin ?? '');
+
+  // Before anything else: the `Host` check that makes DNS rebinding fail, and
+  // the `Origin` check that catches writes CORS never got to preflight.
+  app.use(
+    localOnly({
+      host,
+      allowHosts: (process.env.RMM_ALLOWED_HOSTS ?? '').split(',').filter(Boolean),
+    }),
+  );
+
   app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const origin = req.headers.origin;
+    if (mayCall(origin)) res.setHeader('Access-Control-Allow-Origin', origin!);
+    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-RMM-Project');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
@@ -83,7 +140,7 @@ export async function startServer(opts: ServerOptions = {}) {
   app.use('/api', express.json({ limit: '32mb' }));
   app.get('/api/projects', (_req, res) => {
     const stored = readProjects(preferencesFile);
-    const existing = [...(stored.defaultFolder ? [stored.defaultFolder] : []), fallback, ...stored.recent].filter(dir => fs.existsSync(path.join(dir, 'profile.yaml')) && fs.existsSync(path.join(dir, 'config.yaml')));
+    const existing = [...(stored.defaultFolder ? [stored.defaultFolder] : []), fallback, ...stored.recent].filter(isSave);
     res.json({ recent: [...new Set(existing)], active: active?.store.root ?? null, current: active?.store.root ?? null,
       output: active?.store.outDir() ?? null, defaultFolder: Object.hasOwn(stored, 'defaultFolder') ? stored.defaultFolder : stored.active ?? null, openedBy: openedBy ?? null, startupError,
       suggested: !active && existing.includes(fallback) ? fallback : null,

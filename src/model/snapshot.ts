@@ -1,5 +1,5 @@
 import YAML from 'yaml';
-import { normalizeEntries } from './normalize.js';
+import { normalizeEntries, normalizeProfile } from './normalize.js';
 import type { Entry, Profile, ResumeSpec, SkillGroup, StoreData } from './types.js';
 
 /**
@@ -43,14 +43,24 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
     if (!/^resumes\/[^/]+\.ya?ml$/.test(file)) continue;
     const spec = parse<ResumeSpec | undefined>(text, undefined);
     if (!spec) continue;
-    // Filename is the source of truth for the id, exactly as on disk.
-    resumes.push({ ...spec, id: spec.id ?? file.replace(/^resumes\//, '').replace(/\.ya?ml$/, '') });
+    // Filename is the source of truth for the id, exactly as on disk — where
+    // it now actually is. Both places said this and then preferred the id
+    // written inside the file, so a hand-copied resume file appeared twice
+    // under one id and the history for the real one came back empty.
+    resumes.push({ ...spec, id: file.replace(/^resumes\//, '').replace(/\.ya?ml$/, '') });
   }
 
   return {
-    profile: parse<Profile>(files.get('profile.yaml'), { name: 'Your Name' }),
-    // Same guarantee as a live read: history rebuilds from old commits, and an
-    // old commit is exactly where a malformed field is most likely to live.
+    /*
+     * Normalised, like the live read a few lines from here in store.ts.
+     * Entries were and the profile was not, which matters most exactly here:
+     * history rebuilds from old commits, and an old commit is where a field
+     * that lost its `variants:` in a merge is most likely to live. Unnormalised
+     * it is not a variant field, so the name renders as "[object Object]" — and
+     * the timeline then described a real regression (the name gone from the
+     * PDF) as the name having been changed to that.
+     */
+    profile: normalizeProfile(parse<Profile>(files.get('profile.yaml'), { name: 'Your Name' })),
     entries: normalizeEntries(entries),
     skillGroups: parse<SkillGroup[]>(files.get('skills.yaml'), []),
     resumes,

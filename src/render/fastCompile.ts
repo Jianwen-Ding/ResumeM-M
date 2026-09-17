@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LayoutOptions, ResolvedResume } from '../model/types.js';
-import { renderLatexFastBody, stablePreamble } from './latex.js';
+import { renderLatexFastBody, runtimeSetup, stablePreamble } from './latex.js';
 
 const run = promisify(execFile);
 
@@ -66,32 +66,51 @@ function hashOf(text: string): string {
   return createHash('sha1').update(text).digest('hex').slice(0, 16);
 }
 
-/**
- * Build, or reuse, the precompiled format for one paper size. Paper size is
- * the only thing that changes the stable preamble (`\documentclass` options),
- * so there are at most two formats ever cached.
+/*
+ * The dumped preamble carries the layout.
  *
- * The cache key includes a hash of the preamble text, so editing the template
- * invalidates every cached format the next time the process starts — a stale
- * format is never silently reused across a code change.
+ * A document run against a format built by `mylatexformat` does not execute
+ * its own preamble: the format exists precisely so that work is already done,
+ * and everything in the file before `\begin{document}` is skipped. So the
+ * layout — font size, `\rmmunit`, margins, text width, text height — was being
+ * written out and then thrown away, and the preview was typeset at the article
+ * class defaults: 650pt of text height where 730pt had been asked for, 13.6pt
+ * of leading where 12.6pt had.
+ *
+ * That is not a cosmetic gap. The preview measured a different page from the
+ * one the user was about to send, in both directions — a two-page resume came
+ * back "fits on one page", and a comfortable one came back "about 7 lines too
+ * long" listing shrinking steps that had never been applied to anything.
+ *
+ * Nor can it be fixed from inside the document: `\textheight` and `\topmargin`
+ * only take effect from the next page, and the page has already begun. So the
+ * layout goes into the format, and the key grows a hash of it. Preview only
+ * ever asks for the as-authored layout (compile.ts declines the shortcut for
+ * the fit loop's shrinking attempts), so this stays one format per paper size
+ * in practice rather than one per attempt.
  */
-async function getFormat(paper: LayoutOptions['paper']): Promise<CachedFormat> {
-  const existing = formats.get(paper);
+async function getFormat(paper: LayoutOptions['paper'], layout: LayoutOptions): Promise<CachedFormat> {
+  const preambleText = `${stablePreamble(paper)}\n${runtimeSetup(layout)}`;
+  const key = hashOf(preambleText);
+  const existing = formats.get(key);
   if (existing) return existing;
 
-  const promise = buildFormat(paper).catch((err) => {
-    formats.delete(paper); // do not cache a failed build
+  const promise = buildFormat(paper, preambleText, key).catch((err) => {
+    formats.delete(key); // do not cache a failed build
     throw err;
   });
-  formats.set(paper, promise);
+  formats.set(key, promise);
   return promise;
 }
 
-async function buildFormat(paper: LayoutOptions['paper']): Promise<CachedFormat> {
+async function buildFormat(
+  paper: LayoutOptions['paper'],
+  preambleText: string,
+  key: string,
+): Promise<CachedFormat> {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-  const preambleText = stablePreamble(paper);
-  const jobname = `rmm-${paper}-${hashOf(preambleText)}`;
+  const jobname = `rmm-${paper}-${key}`;
   const fmtPath = path.join(CACHE_DIR, `${jobname}.fmt`);
 
   if (fs.existsSync(fmtPath)) return { path: fmtPath };
@@ -134,7 +153,7 @@ function firstTexError(log: string): string | undefined {
  * only available to the .aux on the run after the one that recorded them.
  */
 export async function compileFast(resume: ResolvedResume, layout: LayoutOptions): Promise<RawCompile> {
-  return compileFastBody(renderLatexFastBody({ ...resume, layout }), layout.paper);
+  return compileFastBody(renderLatexFastBody({ ...resume, layout }), layout.paper, layout);
 }
 
 /**
@@ -142,11 +161,38 @@ export async function compileFast(resume: ResolvedResume, layout: LayoutOptions)
  * a resume or a cover letter. Both are set from the same template, so both
  * load the same precompiled format.
  */
-export async function compileFastBody(body: string, paper: LayoutOptions['paper']): Promise<RawCompile> {
-  const fmt = await getFormat(paper);
+export async function compileFastBody(
+  body: string,
+  paper: LayoutOptions['paper'],
+  layout: LayoutOptions,
+): Promise<RawCompile> {
+  const fmt = await getFormat(paper, layout);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-fast-'));
   const texFile = path.join(dir, 'resume.tex');
-  fs.writeFileSync(texFile, body, 'utf8');
+
+  /*
+   * `\endofdump` first, or the layout is silently discarded.
+   *
+   * A document run against a `mylatexformat` format does not simply begin: the
+   * format scans the file line by line and throws away everything before
+   * `\begin{document}` or `\endofdump`, because that is how it skips the
+   * preamble it has already compiled. The fast bodies put `runtimeSetup` — font
+   * size, `\rmmunit`, margins, text width, text height — above
+   * `\begin{document}`, so every one of those settings was dropped and the
+   * preview was typeset at the article class defaults.
+   *
+   * It was not a cosmetic difference. The preview measured a different page
+   * from the one it displayed, in both directions: a resume that really ran to
+   * two pages came back `fits: true, "room for about 1 more line"`, and one
+   * that fitted with 240pt to spare came back "about 7 lines too long" with a
+   * list of shrinking steps that had never been applied. The one-page
+   * guarantee is the whole point of the tool, and the badge above the preview
+   * was reporting on a document nobody was looking at.
+   *
+   * `\endofdump` tells the format to stop skipping and start executing here.
+   */
+  fs.writeFileSync(texFile, `\endofdump
+${body}`, 'utf8');
 
   try {
     for (let pass = 0; pass < 2; pass++) {

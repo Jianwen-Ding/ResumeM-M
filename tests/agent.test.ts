@@ -123,16 +123,64 @@ describe('runAgent', () => {
     expect(result.output).toBe('HELLO');
   });
 
-  it('falls back to stderr when a command writes nothing to stdout', async () => {
+  /*
+   * This used to fall back to stderr, and the test asserted it. But a CLI that
+   * exits 0 having written a warning to stderr has not answered — and its
+   * warning was taken as the answer: a tool printing "[WARN] api key rotated;
+   * using cached credentials" had that line saved as the user's cover letter,
+   * and as the answer to an application question, under the note "Cover letter
+   * drafted in your voice".
+   */
+  it('refuses a command that exits cleanly having written nothing', async () => {
+    await expect(
+      runAgent(
+        config({
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stderr.write("warned")', '{prompt}'],
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow(/exited without writing anything/);
+  });
+
+  it('says what the command complained about, so the failure is actionable', async () => {
+    await expect(
+      runAgent(
+        config({
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stderr.write("api key rotated")', '{prompt}'],
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow(/api key rotated/);
+  });
+
+  /*
+   * `String.replace` with a string second argument still reads `$&`, `` $` ``,
+   * `$\'` and `$1` in that argument as instructions. Prompts are built from the
+   * user's own store and from postings fetched off the web, so a bullet
+   * mentioning a shell variable was enough: "cut cloud spend by $&" reached the
+   * CLI as "cut cloud spend by {promptText}". Three of the four presets pass
+   * the prompt inline, so three of the four were affected.
+   */
+  it('passes the prompt through exactly, dollar signs and all', async () => {
+    const d = String.fromCharCode(36);
+    const prompt = [
+      'Reduced spend by ' + d + '&, see ' + d + String.fromCharCode(96),
+      ' and ' + d + String.fromCharCode(39) + ' and ' + d + '1 for detail.',
+    ].join('');
+
     const result = await runAgent(
       config({
         enabled: true,
         command: process.execPath,
-        args: ['-e', 'process.stderr.write("warned")', '{prompt}'],
+        args: ['-e', 'process.stdout.write(process.argv[1])', 'X={promptText}'],
       }),
-      'hello',
+      prompt,
     );
-    expect(result.output).toBe('warned');
+    expect(result.output).toBe(`X=${prompt}`);
   });
 
   it('can inline the prompt for CLIs that insist on an argument', async () => {

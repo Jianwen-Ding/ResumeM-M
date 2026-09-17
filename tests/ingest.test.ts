@@ -554,6 +554,33 @@ describe('the awkward bytes', () => {
     await expect(extractText('broken.docx', notAZip)).rejects.toThrow(/no readable document/);
   });
 
+  /*
+   * A 1.2 MB file that unpacks to 1.2 GB. Deflate reaches roughly 1000:1 on
+   * repetitive input, so nothing about the size on disk warns you.
+   *
+   * Uncapped this took 2.5 GB resident before Node happened to refuse the
+   * string, and told the user "Cannot create a string longer than 0x1fffffe8
+   * characters". Slightly smaller and it would have gone through and simply
+   * eaten the machine — in the same process as the editor, so the app goes with
+   * it. A corrupt file whose header lies about its contents arrives here too.
+   */
+  it('refuses a docx that unpacks to far more than a document ever holds', async () => {
+    const zip = makeZip('word/document.xml', Buffer.alloc(64 * 1024 * 1024, 0x20));
+    expect(zip.length).toBeLessThan(200_000); // tiny on disk, enormous unpacked
+
+    const before = process.memoryUsage().rss;
+    await expect(extractText('bomb.docx', zip)).rejects.toThrow(/more than 32 MB|damaged/);
+    // Refused rather than absorbed: the cap is the point, not the message.
+    expect(process.memoryUsage().rss - before).toBeLessThan(256 * 1024 * 1024);
+  });
+
+  it('still reads a real document of ordinary size', async () => {
+    // The cap must not be so eager that a long CV stops working.
+    const body = `<w:p><w:t>${'A sentence about the work. '.repeat(20_000)}</w:t></w:p>`;
+    const out = await extractText('long.docx', makeZip('word/document.xml', Buffer.from(body)));
+    expect(out.text.length).toBeGreaterThan(400_000);
+  });
+
   it('refuses a docx whose entry uses a compression nobody uses', async () => {
     // Method 6 is "imploded": legal in a zip, and not worth carrying a
     // decoder for. Saying so beats pretending the file was empty.

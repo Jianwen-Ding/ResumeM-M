@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inlineTex, renderLatex, tex } from '../src/render/latex.js';
+import { inlineTex, renderLatex, tex, texHref } from '../src/render/latex.js';
 import { DEFAULT_LAYOUT, type ResolvedResume } from '../src/model/types.js';
 
 describe('escaping', () => {
@@ -46,6 +46,36 @@ describe('inline markup', () => {
 
   it('renders a markdown link as \\href', () => {
     expect(inlineTex('[my site](https://example.com)')).toContain('\\href{https://example.com}');
+  });
+});
+
+/*
+ * A link target is read by TeX before hyperref sees it, so the characters that
+ * matter there are not the ones `tex()` handles. One brace or backslash in the
+ * email or the GitHub field — a paste that picked up a stray character — took
+ * out every resume and every cover letter at once, with a LaTeX error that
+ * named nothing the person who pasted it could act on.
+ */
+describe('a link target', () => {
+  it('leaves an ordinary URL exactly as it is', () => {
+    expect(texHref('https://github.com/someone/a_project')).toBe('https://github.com/someone/a_project');
+  });
+
+  it('keeps a fragment and a query working', () => {
+    expect(texHref('https://x.example/p?a=1&b=2#top')).toBe('https://x.example/p?a=1&b=2\\#top');
+  });
+
+  it('percent-encodes the three characters TeX reads first', () => {
+    expect(texHref('https://x.example/a{b}c\\d')).toBe('https://x.example/a\\%7Bb\\%7Dc\\%5Cd');
+  });
+
+  it('does not double-encode a URL that already carries an escape', () => {
+    // `\%20` is how hyperref is told to put one literal `%` in the target.
+    expect(texHref('https://x.example/a%20b')).toBe('https://x.example/a\\%20b');
+  });
+
+  it('handles an address someone mistyped, rather than refusing to build', () => {
+    expect(texHref('a{b@c.example')).toBe('a\\%7Bb@c.example');
   });
 });
 

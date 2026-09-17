@@ -9,6 +9,8 @@ import {
   type MaybeVariant,
   type ResolvedBullet,
   type ResolvedEntry,
+  type Profile,
+  type ResolvedProfile,
   type ResolvedResume,
   type ResolvedSection,
   type ResumeSpec,
@@ -40,30 +42,145 @@ export function flattenSpec(spec: ResumeSpec, all: ResumeSpec[], seen = new Set<
   if (!parent) {
     throw new Error(`Resume "${spec.id}" extends "${spec.extends}", which does not exist`);
   }
-  const base = flattenSpec(parent, all, seen);
+  return mergeOnto(flattenSpec(parent, all, seen), spec);
+}
 
-  const sections = mergeSections(base.sections ?? [], spec.sections ?? []);
+/** One inheritance step: `spec` laid over `base`. */
+function mergeOnto(base: ResumeSpec, spec: ResumeSpec): ResumeSpec {
   return {
     ...base,
     ...spec,
-    sections,
+    sections: mergeSections(base.sections ?? [], spec.sections ?? []),
     choices: { ...(base.choices ?? {}), ...(spec.choices ?? {}) },
     lists: { ...(base.lists ?? {}), ...(spec.lists ?? {}) },
     layout: { ...(base.layout ?? {}), ...(spec.layout ?? {}) },
   };
 }
 
-function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpec[] {
-  if (override.length === 0) return base;
-  const out = base.map((s) => {
-    const o = override.find((x) => x.kind === s.kind);
-    return o ? o : s;
-  });
-  // Sections the parent never had are appended in the child's order.
-  for (const o of override) {
-    if (!out.some((s) => s.kind === o.kind)) out.push(o);
+/**
+ * Rewrite a resume that extends one being deleted, so it stands without it.
+ *
+ * The deleted resume's own contribution is folded in underneath the child's,
+ * and the child is re-pointed at the deleted resume's parent — which is to say
+ * the child resolves to exactly what it resolved to before, because this runs
+ * the same merge `flattenSpec` would have run at render time. Deleting one
+ * resume should not change how any other one looks.
+ */
+export function absorbBase(child: ResumeSpec, removed: ResumeSpec): ResumeSpec {
+  const merged = mergeOnto(removed, child);
+
+  /*
+   * What the parent *contributed to the document* — sections, choices, lists,
+   * layout — the child keeps. What the parent *was*, it does not.
+   *
+   * The spread copies every key the child lacks, and some of those keys are
+   * the parent's identity rather than its content. Deleting a pinned base
+   * turned every tailored variation into a pinned base, and handed each of
+   * them the parent's `generatedFor` — so a resume made for one posting came
+   * back claiming it had been written for another, and the base pickers filled
+   * up with resumes nobody pinned. A child with no label of its own would have
+   * taken the parent's, leaving two resumes with one name and no parent to
+   * explain it.
+   */
+  for (const own of ['label', 'base', 'notes', 'generatedFor'] as const) {
+    if (child[own] === undefined) delete merged[own];
   }
+
+  merged.id = child.id;
+  if (removed.extends) merged.extends = removed.extends;
+  else delete merged.extends;
+  return merged;
+}
+
+/**
+ * Which of the parent's sections a child's section replaces.
+ *
+ * Matching on `kind` alone is not enough, and `heading` exists precisely
+ * because it is not: a store can hold two `custom` sections, "Awards" and
+ * "Leadership". A child re-stating only Awards replaced *both* of them with
+ * Awards, so the document printed Awards twice and Leadership, with its
+ * entries, was silently gone. Nothing warned, and the editor runs the same
+ * algorithm, so the preview agreed with the wrong answer.
+ *
+ * It cannot simply become an exact match on the heading either, because the
+ * ordinary child does not repeat the heading at all — it just lists different
+ * entries under Experience, and must go on replacing the parent's Experience
+ * rather than adding a second one.
+ *
+ * So: a heading that matches wins first; then a child that named no heading
+ * takes the parent's section of that kind; then a renamed heading is allowed to
+ * take it, but only where the parent has one section of that kind and there is
+ * therefore nothing to be ambiguous about. Whatever is left is a section the
+ * parent never had.
+ */
+export function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpec[] {
+  if (override.length === 0) return base;
+
+  const out = [...base];
+  const claimed = new Set<number>();
+
+  /*
+   * What the child states, over what the parent had — not instead of it.
+   *
+   * A child section used to replace its parent's outright, so expressing "hide
+   * one bullet of one entry" meant restating the entry list as well. The editor
+   * duly wrote that list down, and from then on the variation was pinned to the
+   * entries the base had at that moment: anything added to the base afterwards
+   * arrived switched off, because the child was now saying "these entries,
+   * exactly" when all it had ever meant was "this bullet, hidden".
+   *
+   * Absent means inherited, which is how `choices`, `lists` and `layout`
+   * already work one level up in `mergeOnto`.
+   */
+  const over = (parent: SectionSpec, child: SectionSpec): SectionSpec => ({
+    ...parent,
+    ...child,
+    entries: child.entries ?? parent.entries,
+    groups: child.groups ?? parent.groups,
+    bullets:
+      child.bullets || parent.bullets
+        ? { ...(parent.bullets ?? {}), ...(child.bullets ?? {}) }
+        : undefined,
+    items:
+      child.items || parent.items ? { ...(parent.items ?? {}), ...(child.items ?? {}) } : undefined,
+  });
+
+  const claim = (o: SectionSpec, where: (s: SectionSpec, i: number) => boolean): boolean => {
+    const at = out.findIndex((s, i) => !claimed.has(i) && s.kind === o.kind && where(s, i));
+    if (at < 0) return false;
+    out[at] = over(out[at]!, o);
+    claimed.add(at);
+    return true;
+  };
+
+  const heading = (s: SectionSpec) => s.heading ?? '';
+  const onlyOneOfItsKind = (o: SectionSpec) => base.filter((s) => s.kind === o.kind).length === 1;
+
+  let pending = override.filter((o) => !claim(o, (s) => heading(s) === heading(o)));
+  pending = pending.filter((o) => !(heading(o) === '' && claim(o, () => true)));
+  pending = pending.filter((o) => !(onlyOneOfItsKind(o) && claim(o, () => true)));
+
+  // Sections the parent never had are appended in the child's order.
+  for (const o of pending) out.push(o);
   return out;
+}
+
+/**
+ * The choice key for the name on the page.
+ *
+ * Shaped like every other field path — owner, then field — so a resume pins it
+ * with the same mechanism, the editor lists it with the same code, and nothing
+ * had to learn that the profile is a special case.
+ */
+export const PROFILE_NAME_KEY = 'profile.name';
+
+/** The profile with its name decided. */
+export function resolveProfile(
+  profile: Profile,
+  choices: Record<string, string>,
+  warnings: string[],
+): ResolvedProfile {
+  return { ...profile, name: pickField(profile.name, PROFILE_NAME_KEY, choices, warnings) ?? '' };
 }
 
 /**
@@ -145,11 +262,25 @@ function resolveEntry(
   const wantedBullets = section.bullets?.[entry.id];
   const available = (entry.bullets ?? []).filter((b) => !b.archived);
 
+  /*
+   * Archiving means "keep the text, never print it", and that has to hold
+   * however the resume asks for the bullet. It held for the branch below, which
+   * filters, and not for this one — and tailoring writes an explicit list every
+   * time it hides anything, so tailoring a resume brought every bullet you had
+   * retired in that entry back onto the copy you send.
+   */
   const ordered: Bullet[] = wantedBullets
     ? wantedBullets
         .map((id) => {
           const b = (entry.bullets ?? []).find((x) => x.id === id);
-          if (!b) warnings.push(`Entry "${entry.id}" lists bullet "${id}", which does not exist.`);
+          if (!b) {
+            warnings.push(`Entry "${entry.id}" lists bullet "${id}", which does not exist.`);
+            return undefined;
+          }
+          if (b.archived) {
+            warnings.push(`Entry "${entry.id}" lists bullet "${id}", which is archived; leaving it out.`);
+            return undefined;
+          }
           return b;
         })
         .filter((b): b is Bullet => Boolean(b))
@@ -210,6 +341,18 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
           warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);
           continue;
         }
+        /*
+         * Archiving is how something is taken out of circulation without being
+         * thrown away, and everything else honours it: the master document, the
+         * pickers, the matcher, the AI's view of the store. This did not, so an
+         * archived entry disappeared from every screen and went on being
+         * printed on every resume that listed it. Same treatment as an archived
+         * bullet, which was already handled a few lines up.
+         */
+        if (entry.archived) {
+          warnings.push(`Entry "${eid}" is archived, so it was left off.`);
+          continue;
+        }
         entries.push(resolveEntry(entry, section, choices, warnings, lists));
       }
     }
@@ -225,6 +368,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   // Flag choices that matched nothing — usually a renamed id, and silently
   // ignoring them is how a resume quietly reverts to the wrong grad date.
   const knownKeys = new Set<string>();
+  if (isVariantField(data.profile.name)) knownKeys.add(PROFILE_NAME_KEY);
   for (const e of data.entries) {
     for (const f of ['title', 'dates', 'subtitle', 'location'] as const) {
       if (isVariantField(e[f])) knownKeys.add(`${e.id}.${f}`);
@@ -244,7 +388,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   return {
     id: flat.id,
     label: flat.label ?? flat.id,
-    profile: data.profile,
+    profile: resolveProfile(data.profile, choices, warnings),
     sections,
     layout,
     warnings,
@@ -340,7 +484,8 @@ export function buildMaster(data: StoreData): ResolvedResume {
   return {
     id: '__master__',
     label: 'Master document — everything in the store',
-    profile: data.profile,
+    // The master shows the pinned name; it is the store, not a selection.
+    profile: resolveProfile(data.profile, {}, warnings),
     sections: [
       entrySection('education'),
       entrySection('experience'),

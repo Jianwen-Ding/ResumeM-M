@@ -9,6 +9,10 @@ import {
   coverLetterPrompt,
   entryFeedbackPrompt,
   feedbackPrompt,
+  letterFeedbackPrompt,
+  answerFeedbackPrompt,
+  entryDraftPrompt,
+  phrasingDraftPrompt,
   phraseFeedbackPrompt,
   shortenPrompt,
   tailorPrompt,
@@ -23,20 +27,25 @@ import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/an
 import { classifyPage, extractJob, JOB_SHAPED, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
+import { advance, applicationId, buildBundle, fingerprint, slug, stats } from '../model/applications.js';
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
-import { buildMaster, resolveResume } from '../model/resolve.js';
+import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
+import { readRepo } from '../ingest/repo.js';
 import type { Store } from '../model/store.js';
 import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
 import type {
+  AnswerBankItem,
   Application,
+  Bullet,
   CoverLetter,
   Draft,
   DraftQuestion,
   Entry,
+  EntryKind,
+  MaybeVariant,
   Profile,
   ResolvedResume,
   ResumeSpec,
@@ -186,6 +195,69 @@ export interface ApiDeps {
   store: Store;
   repo: Repo;
   jobs?: Jobs;
+}
+
+/**
+ * A drafted entry, made safe to show.
+ *
+ * Whatever the model returned is shaped into the store's own types here — ids
+ * assigned, unknown fields dropped, kind forced to one this understands — so
+ * that nothing downstream has to treat a proposal differently from an entry,
+ * and so a malformed reply cannot smuggle a field in. It is still only a
+ * proposal: the caller saves it or throws it away.
+ */
+function draftedEntry(raw: unknown): Entry {
+  const draft = (raw ?? {}) as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const kinds = ['education', 'experience', 'project', 'skills', 'custom'] as const;
+  const kind = kinds.includes(draft.kind as (typeof kinds)[number]) ? (draft.kind as EntryKind) : 'project';
+  const title = text(draft.title) ?? 'Untitled';
+
+  const bullets: Bullet[] = [];
+  for (const [i, b] of (Array.isArray(draft.bullets) ? draft.bullets : []).entries()) {
+    const list = Array.isArray((b as Record<string, unknown>)?.variants) ? ((b as Record<string, unknown>).variants as unknown[]) : [];
+    const variants: Variant[] = [];
+    for (const [j, v] of list.entries()) {
+      const item = (v ?? {}) as Record<string, unknown>;
+      const body = text(item.text);
+      if (!body) continue;
+      variants.push({
+        id: `v_${slug(String(item.label ?? body).slice(0, 24)) || `alt${j + 1}`}`,
+        label: text(item.label) ?? body.slice(0, 24),
+        text: body,
+        // Drafted, not reviewed — the editor already has a way of showing that.
+        suggested: true,
+      });
+    }
+    if (variants.length === 0) continue;
+    // Ids have to be unique within the bullet, and a model repeating a label
+    // is ordinary rather than exceptional.
+    const seen = new Set<string>();
+    for (const v of variants) {
+      let id = v.id;
+      for (let n = 2; seen.has(id); n++) id = `${v.id}_${n}`;
+      v.id = id;
+      seen.add(id);
+    }
+    bullets.push({ id: `b_${slug(title).slice(0, 20)}_${i + 1}`, default: variants[0]!.id, variants });
+  }
+
+  return {
+    id: `e_${slug(title).slice(0, 40) || Date.now()}`,
+    kind,
+    title,
+    ...(text(draft.subtitle) ? { subtitle: text(draft.subtitle)! } : {}),
+    ...(text(draft.dates) ? { dates: text(draft.dates)! } : {}),
+    ...(text(draft.location) ? { location: text(draft.location)! } : {}),
+    bullets,
+  };
+}
+
+/** The pinned wording of a field that may carry alternates. */
+function plainText(field: MaybeVariant | undefined): string {
+  if (field === undefined) return '';
+  if (typeof field === 'string') return field;
+  return String((field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? '');
 }
 
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
@@ -387,6 +459,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!variantId) throw new Error('Name the alternate to pin');
 
       const data = store.load();
+
+      // The name on the page lives on the profile rather than on an entry, and
+      // pins the same way everything else does.
+      if (key === PROFILE_NAME_KEY) {
+        const field = data.profile.name;
+        if (typeof field === 'string') throw new Error('Your name has no alternates to pin');
+        if (!field.variants.some((v) => v.id === variantId)) throw new Error('No such alternate');
+        const label = field.variants.find((v) => v.id === variantId)?.label ?? variantId;
+        await withCommit(repo, autoCommit(), `Pin "${label}" as the default`, () =>
+          store.saveProfile({ ...data.profile, name: { ...field, default: variantId } }),
+        );
+        res.json({ key, variantId });
+        return;
+      }
+
       const dot = key.indexOf('.');
       const entry = dot > 0
         ? data.entries.find((e) => e.id === key.slice(0, dot))
@@ -410,6 +497,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/skills',
     handler(async (req, res) => {
       const groups = req.body as SkillGroup[];
+      if (!Array.isArray(groups)) throw new Error('Skills have to be a list of groups');
       await withCommit(repo, autoCommit(), 'Update skills', () => store.saveSkillGroups(groups));
       res.json(groups);
     }),
@@ -728,14 +816,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const pdfPath = path.join(store.outDir(), `letter-${name}.pdf`);
 
       // The letter is set to match the resume it will be sent with, so the
-      // pair looks like one document rather than two.
-      const layout = body.resumeId
-        ? resolveResume(String(body.resumeId), data).layout
-        : DEFAULT_LAYOUT;
+      // pair looks like one document rather than two — which now includes the
+      // name at the top, since that is a choice the resume makes.
+      const sentWith = body.resumeId ? resolveResume(String(body.resumeId), data) : undefined;
+      const layout = sentWith?.layout ?? DEFAULT_LAYOUT;
 
       const result = await compileLetter(
         {
-          profile: data.profile,
+          profile: sentWith?.profile ?? resolveProfile(data.profile, {}, []),
           company: body.company,
           role: body.role,
           body: body.body ?? '',
@@ -767,26 +855,53 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/feedback',
     handler(async (req, res) => {
-      const { resumeId, focus, bulletId, entryId, variantId, fieldName, background, master } = req.body as {
-        master?: boolean;
-        resumeId?: string;
-        focus?: string;
-        bulletId?: string;
-        entryId?: string;
-        variantId?: string;
-        fieldName?: 'title' | 'subtitle' | 'dates' | 'location';
-        /** Return a job to collect later instead of holding the request open. */
-        background?: boolean;
-      };
+      const { resumeId, focus, bulletId, entryId, variantId, fieldName, background, master, draftId, questionId } =
+        req.body as {
+          master?: boolean;
+          resumeId?: string;
+          focus?: string;
+          bulletId?: string;
+          entryId?: string;
+          variantId?: string;
+          fieldName?: 'title' | 'subtitle' | 'dates' | 'location';
+          /** An application's cover letter, or one of its questions. */
+          draftId?: string;
+          questionId?: string;
+          /** Return a job to collect later instead of holding the request open. */
+          background?: boolean;
+        };
       const data = store.load();
 
-      if (master && (resumeId || bulletId || entryId || variantId || fieldName)) throw new Error('Choose master feedback or a specific resume/bullet, not both');
+      const resumeTarget = resumeId || bulletId || entryId || variantId || fieldName;
+      if (master && resumeTarget) throw new Error('Choose master feedback or a specific resume/bullet, not both');
+      if (draftId && (master || resumeTarget)) throw new Error('Choose the application or the resume, not both');
+      if (questionId && !draftId) throw new Error('An application is required for feedback on one of its questions');
       if ((resumeId && (entryId || bulletId || variantId || fieldName)) || (bulletId && fieldName)) throw new Error('Choose one feedback target');
       if ((bulletId || fieldName || variantId) && !entryId) throw new Error('An entry is required for phrase or bullet feedback');
       if (variantId && !bulletId && !fieldName) throw new Error('Choose a bullet or heading field for this phrasing');
       let prompt: string;
       let about: string;
-      if (entryId) {
+
+      /*
+       * The letter and the answers were the one part of an application the AI
+       * could write but never read back. Reviewing your own prose is the thing
+       * it is best at and the thing you least want to do at midnight, so they
+       * critique through the same route, the same background jobs, and the
+       * same panel as a resume does.
+       */
+      if (draftId) {
+        const draft = store.getDraft(draftId);
+        if (!draft) throw new Error(`No draft "${draftId}"`);
+        if (questionId) {
+          const question = draft.questions.find((q) => q.id === questionId);
+          if (!question) throw new Error('That question is not on this application any more');
+          prompt = answerFeedbackPrompt(data, draft, question);
+          about = `Answer: ${question.question.slice(0, 60)}`;
+        } else {
+          prompt = letterFeedbackPrompt(data, draft, relevantLetters(data.coverLetters, { company: draft.company, role: draft.role }));
+          about = `Cover letter — ${draft.company}`;
+        }
+      } else if (entryId) {
         const entry = data.entries.find((e) => e.id === entryId);
         if (!entry) throw new Error(`No entry "${entryId}"`);
         if (fieldName) {
@@ -858,6 +973,97 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const result = await runAgent(data.config, prompt);
       res.json(result);
+    }),
+  );
+
+  /**
+   * Draft a new entry, from a repository link or a few lines of notes.
+   *
+   * Proposed, never saved. The store is the thing this tool protects, and a
+   * model writing straight into it is how you end up with a resume that says
+   * something you did not do — so this hands back a draft and the editor asks.
+   */
+  api.post(
+    '/ai/draft-entry',
+    handler(async (req, res) => {
+      const { repoUrl, notes, kind } = req.body as { repoUrl?: string; notes?: string; kind?: string };
+      if (!repoUrl?.trim() && !notes?.trim()) throw new Error('Give a repository link or say a little about it');
+
+      const data = store.load();
+      // Read the repository first: a failure there is about the link, and
+      // saying so beats a vague failure after a minute of the AI thinking.
+      const repo = repoUrl?.trim() ? await readRepo(repoUrl.trim()) : undefined;
+
+      const prompt = entryDraftPrompt(data, { repo, notes, kind });
+      const agent = await runAgent(data.config, prompt);
+      if (!agent.executed) {
+        res.json({ executed: false, prompt: agent.output, repo, entry: null });
+        return;
+      }
+
+      let entry: unknown;
+      try {
+        entry = extractJson(agent.output);
+      } catch {
+        throw new Error('The AI did not return an entry this could read. Try again, or write it by hand.');
+      }
+      res.json({ executed: true, repo, entry: draftedEntry(entry), raw: agent.output });
+    }),
+  );
+
+  /** Another way to say a line that already exists. Proposed, never saved. */
+  api.post(
+    '/ai/draft-phrasing',
+    handler(async (req, res) => {
+      const { entryId, bulletId, fieldName, angle, count } = req.body as {
+        entryId?: string;
+        bulletId?: string;
+        fieldName?: 'title' | 'subtitle' | 'dates' | 'location';
+        angle?: string;
+        count?: number;
+      };
+      if (!entryId) throw new Error('Say which line to rephrase');
+      if (Boolean(bulletId) === Boolean(fieldName)) throw new Error('Choose a bullet or a heading field, not both');
+
+      const data = store.load();
+      const entry = data.entries.find((e) => e.id === entryId);
+      if (!entry) throw new Error(`No entry "${entryId}"`);
+
+      const field = fieldName ? entry[fieldName] : entry.bullets?.find((b) => b.id === bulletId);
+      if (!field) throw new Error('That line is not in the store any more');
+      const texts = typeof field === 'string'
+        ? [field]
+        : (field.variants ?? []).map((v) => String(v.text));
+      if (texts.length === 0) throw new Error('That line has no wording to work from');
+
+      const pinned = typeof field === 'string' ? field
+        : texts[Math.max(0, (field.variants ?? []).findIndex((v: Variant) => v.id === field.default))] ?? texts[0]!;
+
+      const prompt = phrasingDraftPrompt(data, {
+        entryTitle: plainText(entry.title) || entry.id,
+        current: pinned,
+        siblings: texts.filter((t) => t !== pinned),
+        angle,
+        count,
+      });
+      const agent = await runAgent(data.config, prompt);
+      if (!agent.executed) {
+        res.json({ executed: false, prompt: agent.output, variants: [] });
+        return;
+      }
+
+      let parsed: { variants?: { label?: string; text?: string }[] };
+      try {
+        parsed = extractJson(agent.output);
+      } catch {
+        throw new Error('The AI did not return wordings this could read. Try again, or write one by hand.');
+      }
+      const variants = (parsed.variants ?? [])
+        .filter((v) => typeof v?.text === 'string' && v.text.trim())
+        .slice(0, 5)
+        .map((v) => ({ label: String(v.label ?? '').trim() || v.text!.trim().slice(0, 24), text: v.text!.trim() }));
+      if (variants.length === 0) throw new Error('The AI came back with nothing usable.');
+      res.json({ executed: true, variants, raw: agent.output });
     }),
   );
 
@@ -1023,7 +1229,28 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       const result = await runAgent(data.config, answerPrompt(data, question, job));
-      res.json({ ...result, source: result.executed ? 'ai' : 'prompt', match });
+
+      /*
+       * `output` means "text you may use". When the AI did not run, `runAgent`
+       * hands back the prompt it would have sent — which is worth showing
+       * someone, and is not an answer.
+       *
+       * Spread whole, it was: the card put `r.output` straight into the answer
+       * box, so one click on "Draft an answer" with the AI off filled the
+       * employer's form with nine kilobytes beginning "You are helping with a
+       * resume and job-search assistant", and carrying, further down, every
+       * cover letter the user had ever saved and their whole writing corpus.
+       * "Save application folder" then wrote that into application-answers.md
+       * and copied it to the upload folder.
+       *
+       * The separate `prompt` field is what /ai/draft-entry and
+       * /ai/draft-phrasing already use, and what the editor already reads.
+       */
+      if (!result.executed) {
+        res.json({ output: '', executed: false, source: 'prompt', prompt: result.output, match });
+        return;
+      }
+      res.json({ ...result, source: 'ai', match });
     }),
   );
 
@@ -1050,7 +1277,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         existing.default = unique;
       } else {
         answers.push({
-          id: `ans_${slug(question).slice(0, 40) || Date.now()}`,
+          id: answerId(question, answers),
           question: question.trim(),
           default: 'v_1',
           variants: [{ id: 'v_1', label: label ?? 'Saved', text: answer.trim() }],
@@ -1207,7 +1434,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/autofill',
     handler(async (_req, res) => {
       const data = store.load();
-      const p = data.profile;
+      // Resolved: a form field takes a name, not a set of them.
+      const p = resolveProfile(data.profile, {}, []);
       res.json({
         fields: {
           full_name: p.name,
@@ -1360,6 +1588,44 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * Workspace — applications in progress                              *
    * ---------------------------------------------------------------- */
 
+  /**
+   * Change a draft on the copy that is on disk now, not the one this request
+   * read a minute ago.
+   *
+   * Every route below reads the draft, does something slow — fetches a posting,
+   * runs the AI, compiles a bundle, commits to git — and then writes the whole
+   * object back. Meanwhile the person who started it is doing the obvious thing
+   * with the waiting time: writing the notes, or the answer to the question the
+   * AI is not being asked for. The Workspace saves that as they type, and the
+   * reply to the slow request landed on top of it, restoring the draft to what
+   * it held when the button was pressed. Nothing reported it; the text simply
+   * was not there any more.
+   *
+   * So the slow work happens on the copy it read, and only the fields the route
+   * actually produced are applied, to a draft read again at the end.
+   */
+  /**
+   * Which of a draft's written parts differ between two reads of it, named the
+   * way the person who typed them would name them.
+   */
+  const changedText = (now: Draft | undefined, before: Draft): string[] => {
+    if (!now) return [];
+    const changed: string[] = [];
+    if (now.coverLetter.body !== before.coverLetter.body) changed.push('cover letter');
+    const was = new Map(before.questions.map((q) => [q.id, q.answer]));
+    if (now.questions.some((q) => was.has(q.id) && was.get(q.id) !== q.answer)) changed.push('answers');
+    if ((now.notes ?? '') !== (before.notes ?? '')) changed.push('notes');
+    return changed;
+  };
+
+  const reviseDraft = async (id: string, message: string, change: (fresh: Draft) => void): Promise<Draft> =>
+    withCommit(repo, autoCommit(), message, () => {
+      const fresh = store.getDraft(id);
+      if (!fresh) throw new Error(`No draft "${id}"`);
+      change(fresh);
+      return store.saveDraft(fresh);
+    });
+
   api.get(
     '/workspace',
     handler(async (_req, res) => res.json({ drafts: store.loadDrafts() })),
@@ -1400,7 +1666,6 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const data = store.load();
       const id = applicationId(body.company, body.role);
-      const existing = store.getDraft(id);
 
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
@@ -1409,7 +1674,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
       }
 
-      const incoming = body.questions ?? [];
+      /*
+       * Read after that, not before it.
+       *
+       * The extension re-posts the page as you move through an application,
+       * and saving the tailored resume above shells out to git — a real yield,
+       * of the length a person fits several sentences into. A draft read on the
+       * way in and written back on the way out therefore restored the notes and
+       * the answers to what they said when the page loaded. Everything from
+       * here to the write is synchronous, which is what makes the fallbacks
+       * below mean "as it is now" rather than "as it was when this started".
+       */
+      const existing = store.getDraft(id);
+
+      /*
+       * Every other field on a re-opened draft falls back to what is stored;
+       * this one did not, so a second post from a page with no form visible —
+       * which is an ordinary thing for the extension to do — rewrote the draft
+       * with `questions: []` and took every hand-written answer with it.
+       */
+      const incoming = body.questions ?? existing?.questions ?? [];
       const questions: DraftQuestion[] = incoming.map((q, i) => {
         // Never clobber something a human has already written here.
         const prior = existing?.questions.find((x) => x.question === q.question);
@@ -1466,6 +1750,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           status: 'applying',
           resumeId: draft.resumeId,
           source: draft.source,
+          /*
+           * Dated, like one made by hand. The tracker sorts on `appliedAt` and
+           * prints it as the date column, so an application started from the
+           * extension — the one you are working on right now — had a blank date
+           * and sat at the bottom of the list, under everything already sent.
+           * It is the date it started; `trackStatus` records when it was sent.
+           */
+          appliedAt: now,
           history: [{ at: now, status: 'applying', note: 'Workspace opened' }],
         });
       }
@@ -1505,6 +1797,62 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       );
       if (!removed) throw new Error(`No draft "${id}"`);
       res.json({ ok: true });
+    }),
+  );
+
+  /**
+   * Start a variation for this application, to edit by hand.
+   *
+   * Tailoring, above, decides for you — by tag match, or by asking the AI. This
+   * is the other thing you want while working on an application: a resume of
+   * your own that belongs to this posting, inheriting everything from the base
+   * so it stays a thin selection rather than a copy that drifts.
+   *
+   * It is created empty of opinions on purpose. The point is to go and make the
+   * decisions in the builder, which is why this hands back where to go.
+   */
+  api.post(
+    '/workspace/:id/variation',
+    handler(async (req, res) => {
+      const draft = store.getDraft(String(req.params.id));
+      if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
+
+      const { baseResumeId, label } = req.body as { baseResumeId?: string; label?: string };
+      const data = store.load();
+
+      // What it inherits from. Never the draft's own tailored copy, or the
+      // variation would inherit from a thing it is meant to sit beside.
+      let baseId = baseResumeId ?? draft.resumeId ?? defaultBaseId(data.resumes);
+      const seen = new Set<string>();
+      while (baseId && data.resumes.find((r) => r.id === baseId)?.generatedFor && !seen.has(baseId)) {
+        seen.add(baseId);
+        baseId = data.resumes.find((r) => r.id === baseId)?.extends ?? defaultBaseId(data.resumes);
+      }
+      const base = data.resumes.find((r) => r.id === baseId);
+      if (!base) throw new Error('The store has no resume to start from');
+
+      // A name you would recognise in a list a month from now, and an id that
+      // does not quietly overwrite the last variation made for this posting.
+      const wanted = `${slug(draft.company)}-${slug(draft.role)}`.slice(0, 55) || 'variation';
+      let id = wanted;
+      for (let n = 2; data.resumes.some((r) => r.id === id); n++) id = `${wanted}-${n}`.slice(0, 60);
+
+      const spec: ResumeSpec = {
+        id,
+        label: label?.trim() || `${draft.role} — ${draft.company}`,
+        extends: base.id,
+        generatedFor: { url: draft.url, company: draft.company, role: draft.role, at: new Date().toISOString() },
+      };
+
+      await withCommit(repo, autoCommit(), `Start a resume variation for ${draft.company}`, () =>
+        store.saveResume(spec),
+      );
+
+      const saved = await reviseDraft(draft.id, `Attach a variation to ${draft.company}`, (fresh) => {
+        fresh.resumeId = spec.id;
+      });
+
+      res.json({ draft: saved, spec, url: `/#resumes/${encodeURIComponent(spec.id)}/from/${encodeURIComponent(draft.id)}` });
     }),
   );
 
@@ -1595,15 +1943,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => store.saveResume(spec));
 
       // The draft now sends this one, and keeps the posting text for the
-      // letter and the answers to draw on.
-      draft.resumeId = spec.id;
-      draft.jobDescription = job.description || html.slice(0, 20_000);
-      draft.updatedAt = new Date().toISOString();
-      store.saveDraft(draft);
+      // letter and the answers to draw on. Those two fields, and nothing else:
+      // fetching the posting and running the AI take long enough that the
+      // letter and the answers on disk have moved on.
+      const description = job.description || html.slice(0, 20_000);
+      const saved = await reviseDraft(draft.id, `Attach a tailored resume to ${draft.company}`, (fresh) => {
+        fresh.resumeId = spec.id;
+        fresh.jobDescription = description;
+      });
 
       const after = store.load();
       res.json({
-        draft,
+        draft: saved,
         spec,
         fetched,
         usedAi: Boolean(plan),
@@ -1624,7 +1975,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const draft = store.getDraft(id);
       if (!draft) throw new Error(`No draft "${id}"`);
 
-      const { what = 'all', force = false } = req.body as { what?: 'letter' | 'questions' | 'all'; force?: boolean };
+      /*
+       * What the draft held when the button was pressed. Generation runs the AI
+       * once per empty answer and once for the letter, which is minutes, and
+       * the person waiting is usually typing in the boxes it is not filling.
+       * Comparing against this is what tells "the AI wrote this" apart from
+       * "they wrote this while it ran" at the end.
+       */
+      const before = structuredClone(draft);
+
+      const { what = 'all', force = false, questionId } = req.body as {
+        what?: 'letter' | 'questions' | 'all';
+        force?: boolean;
+        /** Just this one question, rather than every empty answer. */
+        questionId?: string;
+      };
       const data = store.load();
       const job: TailorContext = {
         company: draft.company,
@@ -1634,6 +1999,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       };
 
       const notes: string[] = [];
+      let countAnswers = false;
 
       if ((what === 'letter' || what === 'all') && draft.coverLetter.required) {
         if (draft.coverLetter.edited && !force) {
@@ -1649,26 +2015,51 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = trimToLetter(agent.output);
               notes.push('Cover letter drafted in your voice.');
-            } else if (prior[0]) {
+            } else if (!agent.executed && prior[0]) {
+              /*
+               * Only when the AI did not run. This branch used to catch an AI
+               * that ran and returned nothing as well, so an empty reply
+               * silently pasted the letter written to another company into
+               * this application — under a note claiming the AI was off, which
+               * it was not. `relevantLetters` returns its best three whatever
+               * they score, so that company can be entirely unrelated, and
+               * "Complete this application" will bundle the result.
+               */
               draft.coverLetter.body = prior[0].body;
-              notes.push(`AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}.`);
-            } else {
+              notes.push(
+                `AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}. ` +
+                  'It is addressed to them, so read it before sending.',
+              );
+            } else if (!agent.executed) {
               notes.push('AI is off and there are no previous letters to start from.');
+            } else {
+              notes.push('The AI returned nothing, so the letter was left as it was.');
             }
           }
         }
       }
 
       if (what === 'questions' || what === 'all') {
-        for (const q of draft.questions) {
-          if (q.edited && !force) continue;
-          if (q.answer.trim() && q.source === 'bank' && !force) continue;
+        /*
+         * One question, when asked for one. "Fill in what is empty" is the
+         * right bulk action and the wrong one when you are looking at a single
+         * answer you want redone — and redoing that one has to be allowed to
+         * overwrite it, since you asked.
+         */
+        const wanted = questionId ? draft.questions.filter((q) => q.id === questionId) : draft.questions;
+        if (questionId && wanted.length === 0) throw new Error('That question is not on this application any more');
+        const overwrite = force || Boolean(questionId);
+
+        for (const q of wanted) {
+          if (q.edited && !overwrite) continue;
+          if (q.answer.trim() && q.source === 'bank' && !overwrite) continue;
 
           const match = matchAnswer(q.question, data.answers);
-          if (match.confident && !force) {
+          if (match.confident && !overwrite) {
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item?.id;
             q.source = 'bank';
+            q.needsReview = undefined;
             continue;
           }
           const agent = await runAgent(data.config, answerPrompt(data, q.question, job));
@@ -1676,18 +2067,72 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.answer = agent.output.trim();
             q.source = 'ai';
           } else if (match.item) {
+            /*
+             * A match that did not clear the confidence line. `matchAnswer`
+             * draws that line deliberately — above it the answer is safe to
+             * send unread, below it, in its own words, "a starting point the
+             * user should read first". It arrived looking exactly like a
+             * confident one: filled in, unmarked, and carried into the bundle
+             * by "Complete this application" without anyone having read it.
+             */
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item.id;
             q.source = 'bank';
+            q.needsReview = true;
           }
         }
-        const written = draft.questions.filter((q) => q.answer.trim()).length;
-        notes.push(`${written} of ${draft.questions.length} questions have an answer.`);
+        countAnswers = true;
       }
 
-      const saved = await withCommit(repo, autoCommit(), `Draft answers for ${draft.company}`, () =>
-        store.saveDraft(draft),
-      );
+      const saved = await reviseDraft(id, `Draft answers for ${draft.company}`, (fresh) => {
+        /*
+         * The letter is ours to write only if the box has not moved since we
+         * read it. Someone who spent the wait writing their own first paragraph
+         * meant it, and an AI draft landing on top of it is the loss this whole
+         * merge exists to prevent.
+         */
+        if (draft.coverLetter.body !== before.coverLetter.body) {
+          if (fresh.coverLetter.body !== before.coverLetter.body) {
+            notes.push('You edited the cover letter while this was running, so what you wrote was kept.');
+          } else {
+            fresh.coverLetter.body = draft.coverLetter.body;
+          }
+        }
+
+        let kept = 0;
+        for (const produced of draft.questions) {
+          const was = before.questions.find((q) => q.id === produced.id);
+          if (!was || produced.answer === was.answer) continue;
+
+          // Questions the application no longer asks are simply gone.
+          const target = fresh.questions.find((q) => q.id === produced.id);
+          if (!target) continue;
+          if (target.answer !== was.answer) {
+            kept++;
+            continue;
+          }
+          target.answer = produced.answer;
+          target.source = produced.source;
+          target.fromAnswerId = produced.fromAnswerId;
+          target.needsReview = produced.needsReview;
+        }
+        if (kept) {
+          notes.push(
+            kept === 1
+              ? 'One answer you typed while this was running was kept as you wrote it.'
+              : `${kept} answers you typed while this was running were kept as you wrote them.`,
+          );
+        }
+
+        if (countAnswers) {
+          const written = fresh.questions.filter((q) => q.answer.trim()).length;
+          notes.push(
+            questionId
+              ? `Answer drafted. ${written} of ${fresh.questions.length} questions have one.`
+              : `${written} of ${fresh.questions.length} questions have an answer.`,
+          );
+        }
+      });
       res.json({ draft: saved, notes, aiEnabled: data.config.ai.enabled });
     }),
   );
@@ -1767,7 +2212,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             existing.default = vid;
           } else {
             answers.push({
-              id: `ans_${slug(q.question).slice(0, 40) || Date.now()}`,
+              id: answerId(q.question, answers),
               question: q.question,
               default: 'v_1',
               variants: [{ id: 'v_1', label: draft.company, text: q.answer }],
@@ -1777,14 +2222,38 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         store.saveAnswers(answers);
       }
 
-      if (keepDraft) {
-        store.saveDraft({ ...draft, status: 'submitted' });
+      /*
+       * Only the status, never the whole draft: compiling the bundle takes
+       * long enough that writing it back would restore whatever the letter
+       * said before the LaTeX run, over anything typed since.
+       *
+       * And the same reasoning forbids the delete. The Workspace stays live
+       * while the bundle compiles and saves what is typed into it, so a draft
+       * read before the compile and unlinked after it takes those edits with
+       * it — into no file, no bundle and no application record, since all of
+       * those were built from the copy that was read first. When that has
+       * happened, the draft stays, marked submitted, and the reply says why.
+       */
+      const warnings: string[] = [];
+      const typedSince = changedText(store.getDraft(id), draft);
+      if (keepDraft || typedSince.length) {
+        await reviseDraft(id, `Mark ${draft.company} as submitted`, (fresh) => {
+          fresh.status = 'submitted';
+        });
       } else {
         store.deleteDraft(id);
+      }
+      if (typedSince.length && !keepDraft) {
+        warnings.push(
+          `The ${typedSince.join(' and ')} changed while this was compiling, so what was sent does ` +
+            'not include it. The application is kept open with your latest text — read it, then ' +
+            'complete it again to send that version.',
+        );
       }
 
       if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
       res.json({
+        warnings,
         application: app,
         dir: result.dir,
         currentDir: syncCurrent(store).dir,
@@ -1823,6 +2292,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/answers',
     handler(async (req, res) => {
       const answers = req.body as Parameters<typeof store.saveAnswers>[0];
+      // A cast is not a check. Sending `{}` here wrote an object into
+      // answers.yaml, which reads back as an empty list — the whole answer
+      // bank gone, with a 200 and nothing said.
+      if (!Array.isArray(answers)) throw new Error('The answer bank has to be a list of answers');
       await withCommit(repo, autoCommit(), 'Update answer bank', () => store.saveAnswers(answers));
       res.json(answers);
     }),
@@ -1953,24 +2426,102 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const id = String(req.params.id);
       const hash = String(req.params.hash);
-      const relPath = path.posix.join('resumes', `${id}.yaml`);
 
-      let spec: ResumeSpec;
-      try {
-        spec = YAML.parse(await repo.show(hash, relPath)) as ResumeSpec;
-      } catch {
+      /*
+       * A version is the whole resolved document, not one file.
+       *
+       * The timeline defines a version as what this resume *said* at a commit,
+       * which is the resume file, everything it inherits, and the shared text
+       * it points at — profile.yaml, the entry files, skills.yaml. Restore read
+       * back only `resumes/<id>.yaml`, so every version whose change lived in a
+       * shared bullet restored nothing at all: 200 OK, "Restored." on screen,
+       * the document unchanged, and not even a commit in the timeline to show
+       * for it.
+       *
+       * What is restored is this resume's own file, and nothing else. Anything
+       * it inherits belongs to every other resume too, and silently rewriting
+       * those is worse than not restoring: this used to walk the whole
+       * `extends` chain and write every ancestor back at the old commit's
+       * content, so rolling one tailored variation back to last week's version
+       * also rolled `base` back — and with it every other variation that
+       * inherits from `base`. A week of work on the shared resume, gone, under
+       * a confirmation that said only "the current version will be replaced"
+       * and a reply carrying no warnings, because the check below re-resolves
+       * the restored resume, which of course now matches.
+       *
+       * So the result is checked against the version that was asked for, and
+       * whatever still differs is named rather than forced.
+       */
+      const tree = await repo.treeAt(hash);
+      const readAt = async (file: string): Promise<string | undefined> => {
+        const objectId = tree.get(file);
+        return objectId === undefined ? undefined : repo.blob(objectId);
+      };
+
+      const text = await readAt(path.posix.join('resumes', `${id}.yaml`));
+      const restored = text === undefined ? undefined : (YAML.parse(text) as ResumeSpec | null);
+      if (!restored) {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }
-      spec.id = id; // the filename remains the source of truth for the id
+      restored.id = id; // the filename remains the source of truth for the id
 
-      // saveResume() returns nothing, so the response is built from `spec`
+      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () =>
+        store.saveResume(restored),
+      );
+
+      /*
+       * Did it land? Compare what the resume resolves to now against what it
+       * resolved to then. When the two differ, the remainder of that version
+       * lives in text this resume shares with others, and saying so beats
+       * reporting a rollback that only half happened.
+       */
+      const warnings: string[] = [];
+      try {
+        const files = new Map<string, string>();
+        for (const [file, objectId] of tree) {
+          if (isSnapshotFile(file)) files.set(file, await repo.blob(objectId));
+        }
+        const live = store.load();
+        const then = resolveResume(id, { ...live, ...parseSnapshot(files) });
+        const now = resolveResume(id, store.load());
+        if (!sameDocument(then, now)) {
+          warnings.push(
+            'Some of that version is in things this resume shares with others — a bullet, a date, ' +
+              'your profile, or the resume this one is built on — so they were left alone rather ' +
+              'than changed for every resume at once.',
+          );
+          for (const change of diffResumes(now, then).slice(0, 8)) warnings.push(change.text);
+        }
+      } catch {
+        // The comparison is a courtesy; failing it must not fail the restore.
+      }
+
+      // saveResume() returns nothing, so the response is built from the spec
       // itself — the caller wants to know what it was just rolled back to.
-      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () => store.saveResume(spec));
-      res.json(spec);
+      res.json({ ...restored, warnings });
     }),
   );
 
   return api;
+}
+
+
+/*
+ * An id for a question, unique within the bank.
+ *
+ * `ans_${slug(question).slice(0, 40)}` gave two different questions the same id
+ * whenever their first forty characters slugged alike — which is exactly what
+ * happens to a question and the same question with a qualifier on the end:
+ * "Are you legally authorized to work in the United States?" and "…without
+ * sponsorship?" both became `ans_are-you-legally-authorized-to-work-in-th`.
+ * Every lookup uses `find`, so the second was unreachable, and editing it
+ * rewrote the first — after which /autofill handed the browser extension
+ * "No — I need sponsorship" as the answer to "are you authorized to work".
+ */
+function answerId(question: string, taken: AnswerBankItem[]): string {
+  const base = `ans_${slug(question).slice(0, 40)}`;
+  if (base === 'ans_') return `ans_${fingerprint(question)}`;
+  return taken.some((a) => a.id === base) ? `${base}-${fingerprint(question)}` : base;
 }
 
 /** Serve generated PDFs, constrained to the output directory. */

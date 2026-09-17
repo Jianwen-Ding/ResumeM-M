@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LayoutOptions, ResolvedResume } from '../model/types.js';
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
-import { renderLatex } from './latex.js';
+import { renderLatex, unrenderableReason } from './latex.js';
 import { renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
 
 const run = promisify(execFile);
@@ -153,6 +153,17 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
   };
   fs.rmSync(dir, { recursive: true, force: true });
   return result;
+}
+
+/**
+ * Refuse a document whose characters the engine cannot set, with a message that
+ * names them. Thrown as a LatexError because that is what every caller already
+ * knows how to show — the log body carries the same text, so a UI that renders
+ * the log instead of the message still says something useful.
+ */
+function assertRenderable(tex: string): void {
+  const reason = unrenderableReason(tex);
+  if (reason) throw new LatexError(reason, reason);
 }
 
 function firstTexError(log: string): string | undefined {
@@ -303,6 +314,10 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   const base = resume.layout;
   const maxAttempts = opts.maxAttempts ?? 8;
 
+  // Before the fit loop, not inside it: a character the engine cannot set fails
+  // identically on all eight attempts, and the answer is never to shrink.
+  assertRenderable(renderLatex(resume));
+
   // The fast path is only ever a preview convenience. If it is unavailable, or
   // errors on this particular document, every attempt silently falls back to
   // the trusted engine — a resume must always compile correctly, with or
@@ -318,7 +333,14 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     const layout = t === 0 ? base : layoutAt(base, t);
     const tex = renderLatex({ ...resume, layout });
 
-    if (wantFast) {
+    /*
+     * Only the layout as authored. The format the shortcut loads carries the
+     * layout baked in, so every shrinking attempt of the fit loop would dump
+     * and cache a format of its own — fourteen megabytes each. The first
+     * attempt is the one that matters for a live preview and is almost always
+     * the answer; the shrinking steps go to the trusted engine.
+     */
+    if (wantFast && t === 0) {
       try {
         const raw = await compileFast(resume, layout);
         const m = measure(raw.aux, layout, 1);
@@ -414,14 +436,44 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     texPath: opts.texPath,
     tex: best.tex,
     engine,
-    warnings: resume.warnings,
+    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log)],
     log: tail(best.raw.log, 30),
     fastPath: usedFast,
   };
 }
 
+/**
+ * What the log says about the fonts the engine could actually find.
+ *
+ * T1 is a promise the fonts have to keep, and a TeX install without a scalable
+ * T1 face keeps it with METAFONT bitmaps — Type 3, with no ToUnicode map,
+ * which is why the template falls back to setting everything without
+ * ligatures. Worth saying out loud: it is a real difference in the PDF, and
+ * one package fixes it.
+ */
+function fontWarnings(log: string): string[] {
+  if (log.includes('RMM-FONT-FALLBACK')) {
+    return [
+      'Ligatures are switched off because this TeX install has no scalable T1 font. ' +
+        'The PDF stays machine-readable, but dates print as "--" rather than an en dash. ' +
+        'Installing the `lmodern` package restores both.',
+    ];
+  }
+  if (log.includes('RMM-FONT-BITMAP')) {
+    return [
+      'This TeX install has neither `lmodern` nor `microtype`, so the PDF is set in bitmap ' +
+        'fonts. It looks right, but an applicant tracking system cannot read words containing ' +
+        'fi, fl or ff, or the dash in a date range. Installing `lmodern` fixes it.',
+    ];
+  }
+  return [];
+}
+
 function readBaseline(log: string): number | undefined {
-  const m = /RMM-BASELINESKIP:\s*([\d.]+)pt/.exec(log);
+  // The last one. `runtimeSetup` reports the leading again after setting it,
+  // and on the precompiled path the earlier report is the format's default.
+  const all = [...log.matchAll(/RMM-BASELINESKIP:\s*([\d.]+)pt/g)];
+  const m = all[all.length - 1];
   return m ? Number(m[1]) : undefined;
 }
 
@@ -453,13 +505,14 @@ export async function compileLetter(
 ): Promise<LetterCompileResult> {
   const engine = await detectEngine(opts.engine);
   const tex = renderLetterLatex(letter, layout);
+  assertRenderable(tex);
 
   let raw: RawCompile | undefined;
   let usedFast = false;
 
   if (opts.mode === 'preview' && (await hasFastPath())) {
     try {
-      raw = await compileFastBody(renderLetterFastBody(letter, layout), layout.paper);
+      raw = await compileFastBody(renderLetterFastBody(letter, layout), layout.paper, layout);
       usedFast = true;
     } catch {
       raw = undefined; // fall back to the trusted engine

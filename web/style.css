@@ -919,6 +919,9 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .draft-editor { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
 .draft-editor > header { all: unset; display: block; margin-bottom: 4px; }
 .draft-editor h3 { margin: 0; font-size: 16px; }
+/* The title on the left, whether it is saved on the right — the same shape as
+   the builder's toolbar, so the two tabs read alike. */
+.draft-head { display: flex; align-items: center; gap: 10px; }
 .draft-editor .where { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
 .draft-editor .block { border-top: 1px solid var(--line-soft); padding-top: 14px; margin-top: 16px; }
 .draft-editor .block:first-of-type { border-top: 0; margin-top: 0; }
@@ -1286,8 +1289,11 @@ tbody tr { cursor: pointer; }
 #tabs { min-width: 0; overflow-x: auto; }
 #tabs button { white-space: nowrap; }
 #tabs button:disabled { opacity: .4; cursor: default; }
-.project-welcome { max-width: 700px; margin: 35px auto; padding: 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.project-welcome { max-width: 700px; margin: 35px auto; padding: 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); text-align: center; }
 .project-welcome h2 { font-size: 24px; }
+.project-welcome-art { display: block; width: 120px; height: 88px; margin: 4px auto 18px; }
+.project-welcome #project-existing { margin-top: 18px; }
+.project-welcome #project-existing .mono-path { margin: 6px 0 14px; }
 .project-welcome .mono-path { overflow-wrap: anywhere; }
 .project-backup { margin-top: 28px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
 .project-backup > summary { cursor: pointer; font-weight: 650; }
@@ -1308,3 +1314,18 @@ tbody tr { cursor: pointer; }
 @media (hover: none) { .bullet-disclosure:not(.tools-open) .bullet-more { opacity: 1; } }
 .master-source-bullet { border-top: 1px solid var(--line-soft); padding-top: 8px; margin-top: 12px; }
 #resume-view-note { padding: 0 4px; }
+
+/* The trail back to the application that sent you to the builder. */
+.way-back {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 8px 0 2px; padding: 8px 12px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+}
+.way-back button { background: #fff; }
+
+/* The badge and its actions on one line, above an answer box. */
+.row-tight { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* A prompt shown when the AI is off, so you can see what it would have asked. */
+.prompt-dump { max-height: 40vh; overflow: auto; white-space: pre-wrap; font-size: var(--t-sm); background: var(--panel-sunk); padding: 12px; border-radius: var(--radius-sm); }

@@ -115,6 +115,39 @@ export class Repo {
    * error, and should not create an empty commit either.
    */
   async commitAll(message: string, paths?: string[]): Promise<string | undefined> {
+    /*
+     * One commit at a time, per repository.
+     *
+     * `add`, `diff --cached` and `commit` are three separate git processes, and
+     * two overlapping requests interleaved them: "fatal: cannot lock ref 'HEAD'"
+     * or "Unable to create '.git/index.lock'", swallowed by `withCommit` into a
+     * console warning behind a 200. No text was lost — both writes rode into
+     * whichever commit survived — but one edit got no history entry of its own,
+     * and the history is what "restore this version" is built on. A version you
+     * can see in the timeline and cannot go back to is worse than the delay of
+     * waiting a moment for the commit in front.
+     */
+    const previous = Repo.commits.get(this.root) ?? Promise.resolve();
+    let release!: () => void;
+    const finished = new Promise<void>((done) => (release = done));
+    const chained = previous.then(() => finished);
+    Repo.commits.set(this.root, chained);
+
+    await previous;
+    try {
+      return await this.commitNow(message, paths);
+    } finally {
+      release();
+      // Only when nothing queued behind this one, so the next caller either
+      // waits for a real predecessor or starts a fresh chain.
+      if (Repo.commits.get(this.root) === chained) Repo.commits.delete(this.root);
+    }
+  }
+
+  /** Serialised per repository directory by `commitAll`. */
+  private static readonly commits = new Map<string, Promise<void>>();
+
+  private async commitNow(message: string, paths?: string[]): Promise<string | undefined> {
     if (!(await this.isRepo())) return undefined;
     const targets = paths ?? this.scope;
     await this.git(['add', '--', ...targets]);
@@ -124,6 +157,21 @@ export class Repo {
     const staged = await this.git(['diff', '--cached', '--name-only', '--', ...targets]);
     if (!staged.trim()) return undefined;
 
+    /*
+     * No pathspec on the commit itself.
+     *
+     * `git commit -- <paths>` is a *partial* commit, and that had two costs.
+     * Git refuses one outright while a merge is in progress, so anyone who
+     * pulled their store on a second machine and resolved a conflict by hand
+     * could never save again through the app — "fatal: cannot do a partial
+     * commit during a merge" — and the GUI only console.warn'd it, so the
+     * editor reported 200 OK and committed nothing. And a partial commit
+     * records the *working tree* at commit time rather than the index that
+     * `git diff --cached` just checked, so a concurrent write could put a
+     * different version of a file into the commit than the one that was staged.
+     *
+     * The `git add -- targets` above already scopes what goes in.
+     */
     // -c keeps the commit working even if the machine has no global identity.
     await this.git([
       '-c',
@@ -134,8 +182,6 @@ export class Repo {
       '-q',
       '-m',
       message,
-      '--',
-      ...targets,
     ]);
     return (await this.git(['rev-parse', 'HEAD'])).trim();
   }
@@ -150,7 +196,11 @@ export class Repo {
    */
   async pending(): Promise<PendingChange[]> {
     if (!(await this.isRepo())) return [];
-    const out = await this.git(['status', '--porcelain', '-z', '--', ...this.scope]).catch(() => '');
+    // `-uall` because porcelain otherwise collapses a wholly untracked
+    // directory to a single entry, so `rmm save` said "Saved 1 file — drafts/"
+    // and committed six, and the editor's unsaved-work list under-reported the
+    // same way.
+    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...this.scope]).catch(() => '');
 
     const records = out.split('\0');
     const changes: PendingChange[] = [];
@@ -294,7 +344,21 @@ export class Repo {
   async push(): Promise<{ ok: boolean; output: string }> {
     const url = await this.getRemote();
     if (!url) throw new Error('No remote is configured for the store');
-    const branch = (await this.currentBranch()) ?? 'main';
+    /*
+     * A detached HEAD is easy to reach from here — this tool's own history
+     * invites `git checkout <hash>` to look at an old version — and falling
+     * back to the literal 'main' pushed the *stale* branch and reported
+     * success, while the commit just made sat on no branch at all, reachable
+     * only by hash and eligible for collection the moment a branch was checked
+     * out again. The CLI even went on to say the store had never been pushed.
+     */
+    const branch = await this.currentBranch();
+    if (!branch) {
+      throw new Error(
+        'HEAD is detached — the store is not on a branch, so there is nothing to push. ' +
+          'Check a branch out first (git checkout main), then try again.',
+      );
+    }
     try {
       const out = await this.git(['push', '-u', 'origin', branch]);
       return { ok: true, output: out.trim() || `Pushed ${branch} to origin.` };

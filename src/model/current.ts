@@ -22,6 +22,19 @@ const IN_FLIGHT: ApplicationStatus[] = ['applying', 'applied'];
 
 export const CURRENT_DIR = 'current';
 
+/**
+ * What this folder put here last time.
+ *
+ * Without it, "rebuilt from the tracker" meant deleting every name that is not
+ * currently wanted — which is every file the user ever put in the folder
+ * themselves. `out/current` is documented as the folder you point the file
+ * picker at, so keeping a transcript or a signed offer letter in it is the
+ * obvious thing to do, and a plain page load of the Applications tab removed
+ * it. The comment claimed this was already the rule; the manifest is what
+ * makes it true.
+ */
+const MANIFEST = '.rmm-current.json';
+
 export interface CurrentFolder {
   dir: string;
   files: string[];
@@ -36,6 +49,82 @@ export interface CurrentFolder {
   inFlight: number;
 }
 
+/** Trimmed and hyphenated the way `bundleFileName` trims a part, for the same reason. */
+function forFilename(s: string | undefined): string {
+  return String(s ?? '')
+    .replace(/[^\p{L}\p{N}_\s-]/gu, ' ')
+    .replace(/[\s-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function readManifest(dir: string): string[] {
+  try {
+    const raw = fs.readFileSync(path.join(dir, MANIFEST), 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.files) ? parsed.files.filter((f: unknown) => typeof f === 'string') : [];
+  } catch {
+    // No manifest, or an unreadable one. Owning nothing is the safe reading:
+    // it means the next sync deletes nothing it cannot account for.
+    return [];
+  }
+}
+
+/**
+ * Give each in-flight application a name of its own in the flat folder.
+ *
+ * Names are `FirstName-LastName-<Document Type>`, with the job title in the
+ * middle when the setting asks for it. Neither shape is guaranteed unique:
+ * without the title, two roles at one company clash; with it, the same role at
+ * two companies does. Inside one shared folder the last writer would simply
+ * win, and nothing about that was visible — the tracker reported two
+ * applications in flight, the folder held one set of files, and the portal open
+ * in front of you got the other job's resume and the other job's answers.
+ *
+ * So where names clash, the first thing that actually tells the clashing
+ * applications apart is added to all of them: the role, the company, both, or
+ * failing everything the application id. Nothing is added otherwise — the
+ * person uploading knows what they are applying to, and a longer name is a
+ * worse one.
+ */
+function uniqueNames(claims: { name: string; app: Application }[]): Map<string, string> {
+  const groups = new Map<string, { name: string; app: Application }[]>();
+  for (const claim of claims) {
+    const group = groups.get(claim.name) ?? [];
+    group.push(claim);
+    groups.set(claim.name, group);
+  }
+
+  const out = new Map<string, string>(); // `${app.id} ${name}` → final name
+
+  for (const [name, group] of groups) {
+    if (group.length === 1) {
+      out.set(`${group[0]!.app.id} ${name}`, name);
+      continue;
+    }
+
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    const candidates: ((a: Application) => string)[] = [
+      (a) => forFilename(a.role),
+      (a) => forFilename(a.company),
+      (a) => forFilename(`${a.role ?? ''} ${a.company ?? ''}`),
+      (a) => forFilename(a.id),
+    ];
+
+    // The first suffix that gives every one of them a name of its own.
+    const suffix =
+      candidates.find((of) => {
+        const made = group.map((c) => of(c.app));
+        return made.every(Boolean) && new Set(made).size === group.length;
+      }) ?? ((a: Application) => forFilename(a.id));
+
+    for (const claim of group) {
+      out.set(`${claim.app.id} ${name}`, `${stem}-${suffix(claim.app)}${ext}`);
+    }
+  }
+  return out;
+}
+
 /**
  * Rebuild the flat folder from the tracker. Returns what is in it, so the
  * caller can say where to look.
@@ -45,7 +134,7 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   const dir = path.join(store.outDir(), CURRENT_DIR);
   fs.mkdirSync(dir, { recursive: true });
 
-  const wanted = new Map<string, string>(); // file name → where to copy it from
+  const claims: { name: string; app: Application; from: string }[] = [];
   for (const app of apps) {
     if (!IN_FLIGHT.includes(app.status) || !app.snapshotDir) continue;
     const from = path.join(store.outDir(), app.snapshotDir);
@@ -55,14 +144,29 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
       // `source/` holds the .tex and the frozen spec: archive material, not
       // anything you would upload.
       if (!entry.isFile()) continue;
-      wanted.set(entry.name, path.join(from, entry.name));
+      claims.push({ name: entry.name, app, from: path.join(from, entry.name) });
     }
   }
 
-  // Anything no longer in flight leaves. Only files this folder put there are
-  // removed — it is not a general-purpose cleaner of the user's directory.
-  for (const existing of fs.readdirSync(dir)) {
-    if (!wanted.has(existing)) fs.rmSync(path.join(dir, existing), { force: true });
+  const renamed = uniqueNames(claims);
+  const wanted = new Map<string, string>(); // final name → where to copy it from
+  for (const claim of claims) {
+    wanted.set(renamed.get(`${claim.app.id} ${claim.name}`) ?? claim.name, claim.from);
+  }
+
+  // Anything this folder put here and no longer wants leaves. Only those: a
+  // name the manifest does not claim belongs to the user, whatever it is.
+  const ours = readManifest(dir);
+  for (const existing of ours) {
+    if (wanted.has(existing) || existing === MANIFEST) continue;
+    try {
+      // `recursive` because a stale entry may be a directory — without it,
+      // rmSync throws EISDIR and takes the whole Applications tab down with a
+      // message naming no action the user could take.
+      fs.rmSync(path.join(dir, existing), { recursive: true, force: true });
+    } catch {
+      // Locked, or gone already. Not a reason to fail the sync.
+    }
   }
 
   for (const [name, from] of wanted) {
@@ -73,9 +177,18 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
     }
   }
 
+  const files = [...wanted.keys()].sort();
+  try {
+    fs.writeFileSync(path.join(dir, MANIFEST), JSON.stringify({ files }, null, 2), 'utf8');
+  } catch {
+    // A folder that cannot hold the manifest still holds the files. The cost
+    // is that the next sync will not clean up after this one, which is the
+    // side to err on.
+  }
+
   return {
     dir,
-    files: [...wanted.keys()].sort(),
+    files,
     applications: apps.filter((a) => IN_FLIGHT.includes(a.status) && a.snapshotDir).length,
     inFlight: apps.filter((a) => IN_FLIGHT.includes(a.status)).length,
   };

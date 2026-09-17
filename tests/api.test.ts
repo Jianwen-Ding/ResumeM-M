@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
@@ -256,9 +256,16 @@ describe('answers', () => {
       .post('/api/ai/answer')
       .send({ question: 'Why are you interested in this role?', force: true })
       .expect(200);
-    // The AI is off in the fixture, so the prompt comes back instead.
+    /*
+     * The AI is off in the fixture, so the prompt comes back instead — under
+     * `prompt`, not under `output`. `output` means "text you may use", and the
+     * extension read it as exactly that: one click on "Draft an answer" put
+     * nine kilobytes of prompt into the employer's form, carrying every cover
+     * letter the user had saved and their whole writing corpus with it.
+     */
     expect(res.body.source).toBe('prompt');
-    expect(res.body.output).toContain('answer an application question');
+    expect(res.body.output).toBe('');
+    expect(res.body.prompt).toContain('answer an application question');
   });
 
   it('saves a new question and a new phrasing of an existing one', async () => {
@@ -581,7 +588,7 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
       })
       .expect(200);
 
-    expect(res.body.files[0]).toContain('Test Person Resume Streamly.pdf');
+    expect(res.body.files[0]).toBe('Test-Person-Resume.pdf');
     expect(t.store.getResume('job-streamly')).toBeDefined();
     expect(fs.existsSync(path.join(res.body.dir, 'source', 'resolved.yaml'))).toBe(true);
   });
@@ -857,6 +864,156 @@ describe('workspace', () => {
     await request(app).post('/api/workspace/ghost/complete').send({}).expect(400);
     await request(app).put('/api/workspace/ghost').send({}).expect(400);
   });
+
+  /*
+   * Generating is the longest wait in the product: one AI run for the letter
+   * and one for every empty answer, minutes end to end. Nobody sits still for
+   * it — they write the notes, or the answer the AI is not being asked for, and
+   * the Workspace saves that as they type.
+   *
+   * The handler read the draft before the wait and wrote the whole object back
+   * after it, so the reply restored the draft to what it held when the button
+   * was pressed. Everything typed during the wait went, silently, at the exact
+   * moment the screen filled up with the thing that had been asked for.
+   *
+   * The AI here is a real child process that stops until the test releases it,
+   * so the write during the wait is a genuinely concurrent one.
+   */
+  it('keeps what was typed while the AI was running', async () => {
+    const started = path.join(t.dir, 'agent-started');
+    const release = path.join(t.dir, 'agent-release');
+    await request(app)
+      .put('/api/config')
+      .send({
+        ai: {
+          enabled: true,
+          command: process.execPath,
+          args: [
+            '-e',
+            `const fs=require('fs');fs.writeFileSync(${JSON.stringify(started)},'1');` +
+              `const w=new Int32Array(new SharedArrayBuffer(4));` +
+              `while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(w,0,0,10);` +
+              `process.stdout.write('Dear Streamly, the AI wrote this.')`,
+            '{prompt}',
+          ],
+          timeoutMs: 20_000,
+        },
+      })
+      .expect(200);
+
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+
+    // `.then()` is what dispatches a supertest request; holding the builder
+    // alone would leave it unsent until the await below.
+    const generating = request(app).post(`/api/workspace/${id}/generate`).send({ what: 'all' }).then((r) => r);
+
+    // Wait for the AI to be genuinely mid-run before typing anything.
+    await vi.waitFor(() => expect(fs.existsSync(started)).toBe(true), { timeout: 10_000 });
+
+    const mine = { ...t.store.getDraft(id)!, notes: 'Referred by Dana on the platform team.' };
+    mine.questions[1] = { ...mine.questions[1]!, answer: 'The ingest rewrite.', source: 'human', edited: true };
+    await request(app).put(`/api/workspace/${id}`).send(mine).expect(200);
+
+    fs.writeFileSync(release, '1');
+    const res = await generating;
+    expect(res.status).toBe(200);
+
+    // Everything typed during the wait is still there…
+    expect(res.body.draft.notes).toBe('Referred by Dana on the platform team.');
+    expect(res.body.draft.questions[1].answer).toBe('The ingest rewrite.');
+    expect(t.store.getDraft(id)!.notes).toBe('Referred by Dana on the platform team.');
+
+    // …and so is the work that was waited for.
+    expect(res.body.draft.coverLetter.body).toContain('the AI wrote this');
+    expect(res.body.draft.questions[0].answer).toBeTruthy();
+  }, 30_000);
+
+  /*
+   * Re-opening a workspace is something the extension does on its own as you
+   * move through an application, and it saves the tailored resume first — which
+   * shells out to git, a yield of the length a person fits several sentences
+   * into. A draft read on the way in and written back on the way out therefore
+   * restored the notes and the answers to what they said when the page loaded.
+   */
+  it('does not reopen a workspace onto what it said before', async () => {
+    // Auto-commit on, and a real repo, because the yield this races against is
+    // the git commit that saving the tailored resume does.
+    const committing = makeTempStore({ config: { git: { autoCommit: true }, ai: { enabled: false }, output: { dir: 'out' } } });
+    const repo = Repo.forStore(committing.dir);
+    await repo.ensure();
+    const live = express();
+    live.use('/api', createApi({ store: committing.store, repo }));
+
+    const posting = {
+      company: 'Streamly',
+      role: 'Data Platform Intern',
+      source: 'greenhouse.io',
+      questions: [{ question: 'Why are you interested in this role?', required: true }],
+    };
+    const { body } = await request(live).post('/api/workspace').send(posting).expect(200);
+    const id = body.draft.id;
+
+    // The extension re-posts the page — and the person waiting types.
+    const reopening = request(live)
+      .post('/api/workspace')
+      .send({ ...posting, spec: { id: 'job-streamly', label: 'Streamly', extends: 'base' } })
+      .then((r) => r);
+
+    const typed = { ...committing.store.getDraft(id)!, notes: 'Three paragraphs the user typed.' };
+    typed.questions[0] = { ...typed.questions[0]!, answer: 'The ingest rewrite.', edited: true };
+    await request(live).put(`/api/workspace/${id}`).send(typed).expect(200);
+
+    await reopening;
+    const after = committing.store.getDraft(id)!;
+    expect(after.notes).toBe('Three paragraphs the user typed.');
+    expect(after.questions[0]!.answer).toBe('The ingest rewrite.');
+    committing.cleanup();
+  }, 30_000);
+
+  /*
+   * The other side of the same merge: when the letter itself is the box being
+   * typed in, what the person wrote wins over what the AI came back with, and
+   * they are told so rather than left to notice.
+   */
+  it('says so when the letter it drafted is dropped for one you typed', async () => {
+    const started = path.join(t.dir, 'letter-started');
+    const release = path.join(t.dir, 'letter-release');
+    await request(app)
+      .put('/api/config')
+      .send({
+        ai: {
+          enabled: true,
+          command: process.execPath,
+          args: [
+            '-e',
+            `const fs=require('fs');fs.writeFileSync(${JSON.stringify(started)},'1');` +
+              `const w=new Int32Array(new SharedArrayBuffer(4));` +
+              `while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(w,0,0,10);` +
+              `process.stdout.write('Dear Streamly, the AI wrote this.')`,
+            '{prompt}',
+          ],
+          timeoutMs: 20_000,
+        },
+      })
+      .expect(200);
+
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const generating = request(app).post(`/api/workspace/${id}/generate`).send({ what: 'letter' }).then((r) => r);
+    await vi.waitFor(() => expect(fs.existsSync(started)).toBe(true), { timeout: 10_000 });
+
+    const mine = t.store.getDraft(id)!;
+    mine.coverLetter = { ...mine.coverLetter, body: 'Dear Streamly, I started this myself.', edited: true };
+    await request(app).put(`/api/workspace/${id}`).send(mine).expect(200);
+
+    fs.writeFileSync(release, '1');
+    const res = await generating;
+    expect(res.status).toBe(200);
+
+    expect(res.body.draft.coverLetter.body).toBe('Dear Streamly, I started this myself.');
+    expect(res.body.notes.join(' ')).toMatch(/while this was running/);
+  }, 30_000);
 });
 
 describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
@@ -884,8 +1041,8 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
       .send({ saveAnswersToBank: true })
       .expect(200);
 
-    expect(done.body.files).toContain('Test Person Resume Streamly.pdf');
-    expect(done.body.files.some((f: string) => f.includes('Cover Letter'))).toBe(true);
+    expect(done.body.files).toContain('Test-Person-Resume.pdf');
+    expect(done.body.files.some((f: string) => f.includes('Cover-Letter'))).toBe(true);
 
     // The application record carries what was actually said.
     const app1 = t.store.load().applications.find((a) => a.company === 'Streamly');
@@ -898,6 +1055,48 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
 
     // The draft is cleared once filed.
     expect(t.store.getDraft(draft.id)).toBeUndefined();
+  });
+
+  /*
+   * Completing compiles a bundle, which is seconds of real LaTeX, and the
+   * Workspace stays live and saving throughout it. A draft read before the
+   * compile and unlinked after it therefore took everything typed during it
+   * into no file, no bundle and no application record — since all of those were
+   * built from the copy read first.
+   */
+  it('does not discard what was typed while the bundle compiled', async () => {
+    const created = await request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Helios',
+        role: 'Intern',
+        resumeId: 'intern',
+        coverLetterRequired: true,
+        questions: [{ question: 'Why this team?', required: true }],
+      })
+      .expect(200);
+    const id = created.body.draft.id;
+
+    const completing = request(app)
+      .post(`/api/workspace/${id}/complete`)
+      .send({ saveAnswersToBank: false })
+      .then((r) => r);
+
+    // Written while the compile is running, exactly as the autosave would.
+    await new Promise((go) => setTimeout(go, 250));
+    const typed = { ...t.store.getDraft(id)!, notes: 'Referred by Dana on the platform team.' };
+    typed.coverLetter = { ...typed.coverLetter, body: 'A letter written entirely during the compile.' };
+    await request(app).put(`/api/workspace/${id}`).send(typed).expect(200);
+
+    const done = await completing;
+    expect(done.status).toBe(200);
+
+    // It is still there, holding what was typed, and the reply says why.
+    const kept = t.store.getDraft(id);
+    expect(kept?.coverLetter.body).toBe('A letter written entirely during the compile.');
+    expect(kept?.notes).toBe('Referred by Dana on the platform team.');
+    expect(kept?.status).toBe('submitted');
+    expect(done.body.warnings.join(' ')).toMatch(/cover letter and notes changed while this was compiling/i);
   });
 
   it('can keep the draft, marked submitted', async () => {
@@ -1103,7 +1302,7 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
     expect(res.body.dir).toContain('applications/');
     expect(res.body.currentDir).toMatch(/current$/);
     expect(res.body.currentDir).not.toContain('applications/');
-    expect(fs.existsSync(path.join(res.body.currentDir, 'Test Person Resume Streamly.pdf'))).toBe(true);
+    expect(fs.existsSync(path.join(res.body.currentDir, 'Test-Person-Resume.pdf'))).toBe(true);
   });
 });
 
@@ -1141,6 +1340,154 @@ describe('pinning', () => {
     await request(app).put('/api/defaults/edu_neu.dates').send({ variantId: 'v_dec2026' }).expect(200);
     const entry = t.store.load().entries.find((e) => e.id === 'edu_neu');
     expect(typeof entry?.dates === 'object' && entry.dates.default).toBe('v_dec2026');
+  });
+
+  it('critiques an application\'s cover letter and one of its answers', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Altair Labs',
+        role: 'Platform Engineer',
+        source: 'by hand',
+        coverLetterRequired: true,
+        questions: [{ question: 'Why do you want to work here?', required: true }],
+      })
+      .expect(200);
+    const draft = made.body.draft;
+
+    // Something to review. Feedback on an empty box is not feedback.
+    draft.coverLetter.body = 'Dear Altair Labs, I have run Kafka in production for two years.';
+    draft.questions[0].answer = 'Because you publish your infrastructure work.';
+    await request(app).put(`/api/workspace/${draft.id}`).send(draft).expect(200);
+
+    // With the AI off the prompt comes back, which is what lets these assert
+    // what the model would have been shown.
+    const letter = await request(app).post('/api/ai/feedback').send({ draftId: draft.id }).expect(200);
+    expect(letter.body.executed).toBe(false);
+    expect(letter.body.output).toContain('I have run Kafka in production');
+    expect(letter.body.output).toContain('Altair Labs');
+    expect(letter.body.output).toMatch(/do not rewrite/i);
+
+    const answer = await request(app)
+      .post('/api/ai/feedback')
+      .send({ draftId: draft.id, questionId: draft.questions[0].id })
+      .expect(200);
+    expect(answer.body.executed).toBe(false);
+    expect(answer.body.output).toContain('Because you publish your infrastructure work.');
+    expect(answer.body.output).toMatch(/do not rewrite/i);
+  });
+
+  it('will not take the application and the resume as one target', async () => {
+    const res = await request(app)
+      .post('/api/ai/feedback')
+      .send({ draftId: 'whatever', resumeId: 'base' })
+      .expect(400);
+    expect(res.body.error).toMatch(/not both/);
+  });
+
+  it('drafts one answer on request rather than every empty one', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({
+        company: 'Vireo',
+        role: 'Data Scientist',
+        source: 'by hand',
+        questions: [{ question: 'Why this team?' }, { question: 'Describe a hard bug.' }],
+      })
+      .expect(200);
+    const draft = made.body.draft;
+    const [first, second] = draft.questions;
+
+    const res = await request(app)
+      .post(`/api/workspace/${draft.id}/generate`)
+      .send({ what: 'questions', questionId: second.id })
+      .expect(200);
+
+    // The one asked for was considered; the other was not touched.
+    expect(res.body.draft.questions[0].answer).toBe(first.answer);
+    expect(res.body.notes.join(' ')).toMatch(/Answer drafted/);
+  });
+
+  it('says so when the question asked about has gone', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Vireo', role: 'Analyst', source: 'by hand', questions: [{ question: 'Why?' }] })
+      .expect(200);
+    const res = await request(app)
+      .post(`/api/workspace/${made.body.draft.id}/generate`)
+      .send({ what: 'questions', questionId: 'q-gone' })
+      .expect(400);
+    expect(res.body.error).toMatch(/not on this application/);
+  });
+
+  it('starts a plain variation for an application, and says where to go to edit it', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Altair Labs', role: 'Platform Engineer', source: 'by hand' })
+      .expect(200);
+    const draftId = made.body.draft.id;
+
+    const res = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
+
+    // A thin selection over the base, not a copy of it: nothing decided yet,
+    // because deciding is what you are about to go and do.
+    expect(res.body.spec.extends).toBeTruthy();
+    expect(res.body.spec.choices).toBeUndefined();
+    expect(res.body.spec.label).toBe('Platform Engineer — Altair Labs');
+    expect(res.body.draft.resumeId).toBe(res.body.spec.id);
+    // The way there and the way back, in one link, so the two ends cannot
+    // disagree about its shape.
+    expect(res.body.url).toBe(
+      `/#resumes/${encodeURIComponent(res.body.spec.id)}/from/${encodeURIComponent(draftId)}`,
+    );
+
+    // Asked twice, it makes a second one rather than overwriting the first.
+    const again = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
+    expect(again.body.spec.id).not.toBe(res.body.spec.id);
+    // And the second inherits from the base, never from the first — a
+    // variation of a variation of a variation is how a store becomes a maze.
+    expect(again.body.spec.extends).toBe(res.body.spec.extends);
+  });
+
+  it('refuses to start a variation for a draft that is not there', async () => {
+    const res = await request(app).post('/api/workspace/no-such-draft/variation').send({}).expect(400);
+    expect(res.body.error).toMatch(/No draft/);
+  });
+
+  it('pins a form of your name, which lives on the profile rather than an entry', async () => {
+    // The name is a field like any other, so it pins through the same route —
+    // which knew only about entries and told you your name was "not in the
+    // store any more".
+    await request(app)
+      .put('/api/profile')
+      .send({
+        name: {
+          default: 'v_legal',
+          variants: [
+            { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
+            { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+          ],
+        },
+        email: 'test@example.com',
+      })
+      .expect(200);
+
+    await request(app).put('/api/defaults/profile.name').send({ variantId: 'v_known' }).expect(200);
+    const profile = t.store.load().profile;
+    expect(typeof profile.name === 'object' && profile.name.default).toBe('v_known');
+
+    // And the resume prints it, with no choice of its own.
+    const resolved = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
+    expect(resolved.profile.name).toBe('Jason Ding');
+
+    // The form-filling data the extension reads is a name, not a set of them.
+    const autofill = (await request(app).get('/api/autofill').expect(200)).body;
+    expect(autofill.fields.full_name).toBe('Jason Ding');
+  });
+
+  it('says a name with no alternates has none to pin', async () => {
+    const res = await request(app).put('/api/defaults/profile.name').send({ variantId: 'v_any' }).expect(400);
+    expect(res.body.error).toMatch(/no alternates/i);
   });
 
   it('refuses an alternate that does not exist', async () => {

@@ -38,14 +38,39 @@ function scoreVariant(v: Variant, keywords: Map<string, string>): { score: numbe
 
   // A variant that names a technology the posting names is relevant even when
   // nobody remembered to tag it.
-  const text = norm(v.text);
+  const text = spaced(v.text);
   for (const [key, original] of keywords) {
-    if (key.length >= 3 && text.includes(key)) {
+    if (key.length >= 3 && mentions(text, original)) {
       score += 1;
       if (!hits.includes(original)) hits.push(original);
     }
   }
   return { score, hits };
+}
+
+/*
+ * Whole words, not substrings.
+ *
+ * `norm` deletes separators so "front-end" and "frontend" compare equal, and
+ * the keyword test then ran `includes` against one unbroken string. Rust
+ * matched "trust", iOS matched "ratios", and Java matched "ninja validation"
+ * once the space between them was gone. The score moved, the variant was
+ * swapped, and the user was shown "because: Rust, iOS, Java" — an explanation
+ * of a match that was not there, about a resume line they were about to send.
+ *
+ * So the text keeps its word boundaries, and each keyword is looked for both as
+ * it is written and with its separators closed up — which is what made
+ * "front-end" against "frontend" work in the first place.
+ */
+function spaced(s: string): string {
+  return ` ${s.toLowerCase().replace(/[^a-z0-9+#]+/g, ' ').trim()} `;
+}
+
+function mentions(text: string, keyword: string): boolean {
+  const written = spaced(keyword).trim();
+  if (written && text.includes(` ${written} `)) return true;
+  const glued = norm(keyword);
+  return Boolean(glued) && text.includes(` ${glued} `);
 }
 
 export interface MatchOptions {

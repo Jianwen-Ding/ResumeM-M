@@ -1,5 +1,5 @@
-import type { LayoutOptions, Profile } from '../model/types.js';
-import { inlineTex, runtimeSetup, stablePreamble, tex } from './latex.js';
+import type { LayoutOptions, ResolvedProfile } from '../model/types.js';
+import { inlineTex, runtimeSetup, stablePreamble, tex, texHref } from './latex.js';
 
 /**
  * A cover letter, typeset to match the resume.
@@ -15,7 +15,8 @@ import { inlineTex, runtimeSetup, stablePreamble, tex } from './latex.js';
  */
 
 export interface LetterContent {
-  profile: Profile;
+  /** Already resolved: by the time a letter is typeset the name is one name. */
+  profile: ResolvedProfile;
   /** Who it is addressed to, when known. */
   company?: string;
   role?: string;
@@ -47,25 +48,43 @@ function hasGreeting(body: string): boolean {
   return /^(hello|hi|greetings|good (morning|afternoon))\b[^.!?]{0,60}[,:]$/i.test(first);
 }
 
-/** Same question for the sign-off, which people also write themselves. */
+/**
+ * Same question for the sign-off, which people also write themselves.
+ *
+ * A sign-off is a short line of its own, not a word at the end of a sentence.
+ * Matching `\b(sincerely|regards|best|…)\b[,\s]*$` against the last few lines
+ * caught any line *ending* in one of those words — and "I do my best.", "I
+ * would bring my best", "Thank you", "With regards to the on-call rotation, I
+ * am doing my best" are all things people write in the body of a letter. Each
+ * one convinced this that the letter was already signed, so the closing and
+ * the sender's name were left off and the letter went out unsigned.
+ *
+ * The name check had a worse version of the same fault: with an empty name the
+ * pattern collapsed to `^\s*\s*$`, which matches the blank line between any
+ * two paragraphs, so *every* multi-paragraph letter lost its sign-off.
+ */
+const SIGN_OFF_LINE =
+  /^(sincerely|best|best regards|kind regards|warm regards|warmly|regards|yours|yours truly|yours sincerely|yours faithfully|thank you|many thanks|thanks)[,.]?$/i;
+
 function hasSignOff(body: string, name: string): boolean {
-  const tail = body.trimEnd().split('\n').slice(-4).join('\n');
-  return (
-    /\b(sincerely|regards|best|thank you|yours)\b[,\s]*$/im.test(tail) ||
-    new RegExp(`^\\s*${name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'im').test(tail)
-  );
+  const lines = body.trimEnd().split('\n').slice(-4).map((l) => l.trim());
+  if (lines.some((line) => SIGN_OFF_LINE.test(line))) return true;
+
+  const wanted = name.trim();
+  if (!wanted) return false;
+  return lines.some((line) => line.toLowerCase() === wanted.toLowerCase());
 }
 
 /** The sender block: identical to the resume header, so the pair matches. */
-function header(p: Profile, spacing: number): string {
+function header(p: ResolvedProfile, spacing: number): string {
   const bits: string[] = [];
   if (p.phone) bits.push(tex(p.phone));
-  if (p.email) bits.push(`\\href{mailto:${p.email}}{\\underline{${tex(p.email)}}}`);
+  if (p.email) bits.push(`\\href{mailto:${texHref(p.email)}}{\\underline{${tex(p.email)}}}`);
   for (const url of [p.linkedin, p.github, p.website]) {
     if (!url) continue;
     const full = /^https?:\/\//.test(url) ? url : `https://${url}`;
     const shown = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    bits.push(`\\href{${full.replace(/([%#])/g, '\\$1')}}{\\underline{${tex(shown)}}}`);
+    bits.push(`\\href{${texHref(full)}}{\\underline{${tex(shown)}}}`);
   }
   if (p.location) bits.push(tex(p.location));
 
@@ -97,7 +116,7 @@ function paragraphs(body: string): string[] {
  * line. `\parskip` carries the gap between paragraphs so the spacing knob
  * still controls it.
  */
-function letterBody(letter: LetterContent, layout: LayoutOptions): string {
+function letterBody(letter: LetterContent, layout: LayoutOptions, setup = ''): string {
   const p = letter.profile;
   const gap = (mult: number) => `\\vspace{${(mult * layout.spacing).toFixed(1)}pt}`;
 
@@ -132,7 +151,7 @@ function letterBody(letter: LetterContent, layout: LayoutOptions): string {
   }
 
   return `\\begin{document}
-\\zsavepos{rmmstart}
+${setup}\\zsavepos{rmmstart}
 
 ${blocks.join('\n\n')}
 
@@ -150,5 +169,6 @@ export function renderLetterLatex(letter: LetterContent, layout: LayoutOptions):
  * the same arrangement `renderLatexFastBody` uses for a resume.
  */
 export function renderLetterFastBody(letter: LetterContent, layout: LayoutOptions): string {
-  return `${runtimeSetup(layout)}\n${letterBody(letter, layout)}`;
+  // No `runtimeSetup`: the format carries the layout. See fastCompile.ts.
+  return letterBody(letter, layout);
 }

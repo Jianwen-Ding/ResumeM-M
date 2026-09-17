@@ -1,7 +1,7 @@
 import { runAgent } from '../ai/agent.js';
 import type { StoreConfig } from '../model/types.js';
 import { extractText, READABLE } from './text.js';
-import { ingestPrompt, readIngestPlan, segment, sortByRules, type Proposal } from './sort.js';
+import { ingestPrompt, MAX_BLOCKS, readIngestPlan, segment, sortByRules, type Proposal } from './sort.js';
 
 /**
  * Reading a file and working out what is in it, in one call — the editor and
@@ -42,7 +42,9 @@ export async function ingestFile(
 
   if (wantsAi) {
     try {
-      const result = await runAgent(config, ingestPrompt(name, blocks));
+      // Only what fits in a prompt goes to the model; `readIngestPlan` claims
+      // the remainder by rule, so nothing is lost by not showing it.
+      const result = await runAgent(config, ingestPrompt(name, blocks.slice(0, MAX_BLOCKS)));
       items = readIngestPlan(result.output, name, blocks);
     } catch (err) {
       // The rules already produced a usable answer. Saying what went wrong and

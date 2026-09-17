@@ -16,21 +16,48 @@ beforeEach(() => {
 afterEach(() => t.cleanup());
 
 describe('file naming', () => {
+  /*
+   * FirstName-LastName-<Job Title>-<Document Type>.
+   *
+   * The role rather than the company: the role is what distinguishes two
+   * applications someone actually has open at once, and a reviewer opening the
+   * attachment already knows which company they are.
+   */
   it('names files the way portals expect, so nothing is renamed by hand', () => {
-    expect(bundleFileName('Jianwen Ding', 'Streamly', 'Resume')).toBe('Jianwen Ding Resume Streamly.pdf');
-    expect(bundleFileName('Jianwen Ding', 'Streamly', 'Cover Letter')).toBe('Jianwen Ding Cover Letter Streamly.pdf');
+    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Resume')).toBe(
+      'Jianwen-Ding-Software-Engineer-Resume.pdf',
+    );
+    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Cover Letter')).toBe(
+      'Jianwen-Ding-Software-Engineer-Cover-Letter.pdf',
+    );
+    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Answers', { extension: '.md' })).toBe(
+      'Jianwen-Ding-Software-Engineer-Answers.md',
+    );
   });
 
-  it('omits the company when there is not one', () => {
-    expect(bundleFileName('Jianwen Ding', undefined, 'Resume')).toBe('Jianwen Ding Resume.pdf');
+  it('omits the job title when there is not one', () => {
+    expect(bundleFileName('Jianwen Ding', undefined, 'Resume')).toBe('Jianwen-Ding-Resume.pdf');
+    expect(bundleFileName('Jianwen Ding', '   ', 'Resume')).toBe('Jianwen-Ding-Resume.pdf');
   });
 
   it('strips punctuation a filesystem would object to', () => {
-    expect(bundleFileName('Jianwen Ding', 'Acme, Inc. / Beta', 'Resume')).toBe('Jianwen Ding Resume Acme Inc Beta.pdf');
+    expect(bundleFileName('Jianwen Ding', 'Engineer, II / Platform', 'Resume')).toBe(
+      'Jianwen-Ding-Engineer-II-Platform-Resume.pdf',
+    );
   });
 
-  it('collapses runs of whitespace in a name', () => {
-    expect(bundleFileName('  Jianwen   Ding ', 'Acme', 'Resume')).toBe('Jianwen Ding Resume Acme.pdf');
+  it('never produces a double hyphen or one hanging off an end', () => {
+    expect(bundleFileName('  Jianwen   Ding ', ' -- Senior  Engineer -- ', 'Resume')).toBe(
+      'Jianwen-Ding-Senior-Engineer-Resume.pdf',
+    );
+  });
+
+  it('adds the company only where two names would otherwise clash', () => {
+    // Not part of the shape: it appears when `out/current` would hold two
+    // files with one name, and nowhere else.
+    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Resume', { disambiguator: 'Acme Co.' })).toBe(
+      'Jianwen-Ding-Software-Engineer-Resume-Acme-Co.pdf',
+    );
   });
 });
 
@@ -124,8 +151,8 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       source: 'greenhouse',
     });
 
-    expect(result.files).toContain('Test Person Resume Streamly.pdf');
-    expect(fs.existsSync(path.join(result.dir, 'Test Person Resume Streamly.pdf'))).toBe(true);
+    expect(result.files).toContain('Test-Person-Resume.pdf');
+    expect(fs.existsSync(path.join(result.dir, 'Test-Person-Resume.pdf'))).toBe(true);
     expect(fs.existsSync(path.join(result.dir, 'source', 'resume.tex'))).toBe(true);
     expect(fs.existsSync(path.join(result.dir, 'source', 'resolved.yaml'))).toBe(true);
 
@@ -155,14 +182,14 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
 
     // A typeset PDF for the portals that take an upload, and the plain text
     // for the ones with a paste-it-in box.
-    expect(result.files).toContain('Test Person Cover Letter Streamly.pdf');
-    expect(result.files).toContain('Test Person Cover Letter Streamly.txt');
-    const letterPdf = fs.readFileSync(path.join(result.dir, 'Test Person Cover Letter Streamly.pdf'));
+    expect(result.files).toContain('Test-Person-Cover-Letter.pdf');
+    expect(result.files).toContain('Test-Person-Cover-Letter.txt');
+    const letterPdf = fs.readFileSync(path.join(result.dir, 'Test-Person-Cover-Letter.pdf'));
     expect(letterPdf.subarray(0, 4).toString()).toBe('%PDF');
     expect(fs.existsSync(path.join(result.dir, 'source', 'cover-letter.tex'))).toBe(true);
 
-    expect(result.files).toContain('application-answers.md');
-    const qa = fs.readFileSync(path.join(result.dir, 'application-answers.md'), 'utf8');
+    expect(result.files).toContain('Test-Person-Answers.md');
+    const qa = fs.readFileSync(path.join(result.dir, 'Test-Person-Answers.md'), 'utf8');
     expect(qa).toContain('## Why us?');
     expect(qa).toContain('Because.');
   });
@@ -188,6 +215,9 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
   });
 });
 
+/** What a person sees in the folder: the uploads, not the bookkeeping. */
+const visible = (dir: string) => fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
+
 describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_000 }, () => {
   const bundleFor = (company: string, status?: string) =>
     buildBundle(t.store, {
@@ -204,16 +234,19 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
 
     const current = syncCurrent(t.store);
     expect(current.applications).toBe(2);
-    expect(current.files).toContain('Test Person Resume Streamly.pdf');
-    expect(current.files).toContain('Test Person Resume Northwind.pdf');
-    // All in one place, not one folder per application.
-    expect(fs.readdirSync(current.dir).length).toBe(current.files.length);
+    // Same role at two companies is the one clash the shape cannot separate,
+    // so the company is added — to both, not just the loser.
+    expect(current.files).toContain('Test-Person-Resume-Streamly.pdf');
+    expect(current.files).toContain('Test-Person-Resume-Northwind.pdf');
+    // All in one place, not one folder per application. (The dotfile is the
+    // manifest of what this folder put here; it is not one of your uploads.)
+    expect(visible(current.dir).length).toBe(current.files.length);
   });
 
   it('leaves the archived folders exactly as they were', async () => {
     const result = await bundleFor('Streamly');
     syncCurrent(t.store);
-    expect(fs.existsSync(path.join(result.dir, 'Test Person Resume Streamly.pdf'))).toBe(true);
+    expect(fs.existsSync(path.join(result.dir, 'Test-Person-Resume.pdf'))).toBe(true);
     expect(fs.existsSync(path.join(result.dir, 'source', 'resume.tex'))).toBe(true);
   });
 
@@ -231,7 +264,7 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     advance(t.store, result.application.id, 'rejected');
     const after = syncCurrent(t.store);
     expect(after.files).toEqual([]);
-    expect(fs.readdirSync(after.dir)).toEqual([]);
+    expect(visible(after.dir)).toEqual([]);
   });
 
   it('separates "nothing in flight" from "in flight but never built"', async () => {
@@ -252,15 +285,164 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     expect(syncCurrent(t.store).files.length).toBeGreaterThan(0);
   });
 
-  it('is rebuilt from the tracker, so a stale file does not linger', async () => {
-    const result = await bundleFor('Streamly');
+  /*
+   * Rebuilding an application replaces its bundle rather than adding to it.
+   * The id is company, role and date, so a second build the same day writes to
+   * the same folder — and every file whose name changed in between used to sit
+   * beside its replacement, then get copied into the upload folder alongside
+   * it. Two resumes for one job, in the folder whose whole point is that the
+   * file in front of you is the one to send.
+   */
+  it('is rebuilt from the tracker, so a file it placed and no longer wants goes', async () => {
+    await bundleFor('Streamly');
     const current = syncCurrent(t.store);
-    fs.writeFileSync(path.join(current.dir, 'Something Else.pdf'), 'stale');
+    expect(current.files).toContain('Test-Person-Resume.pdf');
+
+    t.write('profile.yaml', { name: 'Test Personne', email: 'test@example.com' });
+    await bundleFor('Streamly');
 
     const after = syncCurrent(t.store);
-    expect(after.files).not.toContain('Something Else.pdf');
-    expect(fs.existsSync(path.join(current.dir, 'Something Else.pdf'))).toBe(false);
-    expect(after.files).toContain('Test Person Resume Streamly.pdf');
-    void result;
+    expect(after.files).toContain('Test-Personne-Resume.pdf');
+    expect(after.files).not.toContain('Test-Person-Resume.pdf');
+    expect(fs.existsSync(path.join(current.dir, 'Test-Person-Resume.pdf'))).toBe(false);
+  });
+
+  /*
+   * The folder you point the file picker at is a folder people keep things in.
+   * Rebuilding it used to mean deleting every name not currently wanted, which
+   * is every file the user ever put there — and a plain GET of the Applications
+   * tab was enough to do it. The comment in current.ts already claimed this was
+   * the rule; nothing implemented it until there was a manifest.
+   */
+  it('never removes a file it did not put there', async () => {
+    await bundleFor('Streamly');
+    const current = syncCurrent(t.store);
+
+    const mine = path.join(current.dir, 'Transcript.pdf');
+    fs.writeFileSync(mine, 'my transcript');
+    fs.mkdirSync(path.join(current.dir, 'transcripts'), { recursive: true });
+    fs.writeFileSync(path.join(current.dir, 'transcripts', 'a.pdf'), 'x');
+
+    // A subdirectory also used to throw EISDIR out of rmSync and take the whole
+    // Applications tab down with it, after the bundle had already been written.
+    const after = syncCurrent(t.store);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(fs.existsSync(path.join(current.dir, 'transcripts', 'a.pdf'))).toBe(true);
+    expect(after.files).toContain('Test-Person-Resume.pdf');
+    expect(after.files).not.toContain('Transcript.pdf');
+  });
+
+  /*
+   * Two roles at one company, both in flight. bundleFileName puts the person
+   * and the company in the name but not the role, and the answers file is
+   * called `application-answers.md` flat — fine inside a per-application
+   * folder, fatal in a shared one. The last writer won, the tracker still
+   * reported two applications in flight, and the portal open in front of you
+   * got the other job's resume and the other job's answers.
+   */
+  it('gives two roles at one company a file each', async () => {
+    await buildBundle(t.store, {
+      company: 'Acme',
+      role: 'Software Engineer',
+      resumeId: 'intern',
+      answers: [{ question: 'Why?', answer: 'I love engineering at Acme.' }],
+    });
+    await buildBundle(t.store, {
+      company: 'Acme',
+      role: 'Product Manager',
+      resumeId: 'intern',
+      answers: [{ question: 'Why?', answer: 'I love product at Acme.' }],
+    });
+
+    const current = syncCurrent(t.store);
+    expect(current.applications).toBe(2);
+
+    // Every name distinct, and every one of them actually on disk.
+    expect(new Set(current.files).size).toBe(current.files.length);
+    for (const f of current.files) expect(fs.existsSync(path.join(current.dir, f))).toBe(true);
+
+    /*
+     * With the job title off — the default — both of these want the same name,
+     * so the suffix has to be the thing that actually tells them apart. The
+     * company does not; the role does.
+     */
+    const resumes = current.files.filter((f) => /Resume/.test(f));
+    expect(resumes).toHaveLength(2);
+    expect(resumes).toContain('Test-Person-Resume-Software-Engineer.pdf');
+    expect(resumes).toContain('Test-Person-Resume-Product-Manager.pdf');
+
+    // And the answers are two files, holding different answers.
+    const answers = current.files.filter((f) => f.endsWith('.md'));
+    expect(answers).toHaveLength(2);
+    const text = answers.map((f) => fs.readFileSync(path.join(current.dir, f), 'utf8'));
+    expect(text.some((x) => /engineering/.test(x))).toBe(true);
+    expect(text.some((x) => /product/.test(x))).toBe(true);
+  });
+});
+
+/*
+ * The job title in a filename is a setting, because most of the time it is
+ * noise: the reviewer opening the attachment already knows which role they
+ * advertised. It earns its place when several applications are open at once.
+ */
+describe.skipIf(!latex)('putting the job title in file names', { timeout: 180_000 }, () => {
+  const withTitle = (on: boolean) =>
+    t.write('config.yaml', {
+      ai: { enabled: false },
+      git: { autoCommit: false },
+      output: { dir: 'out', roleInFileName: on },
+    });
+
+  it('leaves it out by default', async () => {
+    const result = await buildBundle(t.store, {
+      company: 'Streamly',
+      role: 'Data Platform Intern',
+      resumeId: 'intern',
+      coverLetter: 'Dear Streamly,',
+      answers: [{ question: 'Why?', answer: 'Because.' }],
+    });
+    expect(result.files).toContain('Test-Person-Resume.pdf');
+    expect(result.files).toContain('Test-Person-Cover-Letter.pdf');
+    expect(result.files).toContain('Test-Person-Answers.md');
+  });
+
+  it('puts it in when the setting asks for it', async () => {
+    withTitle(true);
+    const result = await buildBundle(t.store, {
+      company: 'Streamly',
+      role: 'Data Platform Intern',
+      resumeId: 'intern',
+      coverLetter: 'Dear Streamly,',
+      answers: [{ question: 'Why?', answer: 'Because.' }],
+    });
+    expect(result.files).toContain('Test-Person-Data-Platform-Intern-Resume.pdf');
+    expect(result.files).toContain('Test-Person-Data-Platform-Intern-Cover-Letter.pdf');
+    expect(result.files).toContain('Test-Person-Data-Platform-Intern-Answers.md');
+  });
+
+  /*
+   * Neither shape is unique on its own — without the title two roles at one
+   * company clash, with it the same role at two companies does — so the flat
+   * folder adds whichever of the two actually tells them apart.
+   */
+  it('separates two roles at one company when the title is off', async () => {
+    for (const role of ['Software Engineer', 'Product Manager']) {
+      await buildBundle(t.store, { company: 'Acme', role, resumeId: 'intern' });
+    }
+    const resumes = syncCurrent(t.store).files.filter((f) => f.endsWith('.pdf'));
+    expect(resumes).toHaveLength(2);
+    expect(resumes).toContain('Test-Person-Resume-Software-Engineer.pdf');
+    expect(resumes).toContain('Test-Person-Resume-Product-Manager.pdf');
+  });
+
+  it('separates one role at two companies when the title is on', async () => {
+    withTitle(true);
+    for (const company of ['Acme', 'Globex']) {
+      await buildBundle(t.store, { company, role: 'Software Engineer', resumeId: 'intern' });
+    }
+    const resumes = syncCurrent(t.store).files.filter((f) => f.endsWith('.pdf'));
+    expect(resumes).toHaveLength(2);
+    expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Acme.pdf');
+    expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Globex.pdf');
   });
 });

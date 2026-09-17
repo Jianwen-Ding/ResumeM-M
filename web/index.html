@@ -41,9 +41,12 @@
           <button id="btn-save-as">Save as variation…</button>
           <button id="btn-feedback">Feedback</button>
           <button id="btn-rebuild" class="tiny">Rebuild</button>
+          <button id="btn-undo" class="tiny" disabled>Undo</button>
+          <button id="btn-redo" class="tiny" disabled>Redo</button>
           <span class="grow"></span>
           <button id="btn-add-entry" title="Add a new education entry, job, or project">+ Entry</button>
         </div>
+        <div id="way-back" class="way-back" hidden></div>
         <p id="resume-view-note" class="hint"></p>
         <p class="hint editor-interaction-hint">Double-click a heading field or bullet to edit and show actions, or use its … button.</p>
         <div id="fit" class="fit idle">Not compiled yet.</div>
@@ -78,6 +81,10 @@
         <div id="project-current" class="mono-path">No Save Open</div>
         <button id="project-close" hidden>Close Save</button>
         <p id="project-output" class="hint mono-path"></p>
+        <div data-project-required hidden>
+          <label class="row"><input id="output-role-name" type="checkbox"> Put the job title in file names</label>
+          <p id="output-name-example" class="hint"></p>
+        </div>
         <label class="lbl" for="project-recents">Recent Saves</label>
         <select id="project-recents"></select>
         <label class="lbl" for="project-mode">Folder Action</label>
@@ -102,8 +109,17 @@
       </aside>
       <div>
         <div id="project-welcome" class="project-welcome">
-          <h2>No Save Open</h2>
-          <p>Open a save folder or create a blank save to begin. Resumes, applications, imported files, and settings belong to that save.</p>
+          <!-- An empty folder with a plus on it. Drawn rather than photographed
+               so it stays sharp at any size and needs no network. -->
+          <svg class="project-welcome-art" viewBox="0 0 120 88" role="img" aria-labelledby="project-welcome-art-title">
+            <title id="project-welcome-art-title">An empty save folder</title>
+            <path d="M8 22a8 8 0 0 1 8-8h27l9 10h60a8 8 0 0 1 8 8v40a8 8 0 0 1-8 8H16a8 8 0 0 1-8-8Z"
+                  fill="var(--accent-soft)" stroke="var(--accent-line)" stroke-width="2" />
+            <path d="M8 34h104" stroke="var(--accent-line)" stroke-width="2" />
+            <path d="M60 44v22M49 55h22" stroke="var(--accent)" stroke-width="4" stroke-linecap="round" />
+          </svg>
+          <h2 id="project-welcome-title">No Save Open</h2>
+          <p id="project-welcome-message">Open a save folder or create a blank save to begin. Resumes, applications, imported files, and settings belong to that save.</p>
           <div id="project-existing"></div>
         </div>
         <div data-project-required hidden>
@@ -144,7 +160,7 @@
         </p>
         <div id="draft-list" class="card-list"></div>
       </div>
-      <div id="draft-editor" class="draft-editor">
+      <div id="draft-editor" class="draft-editor" data-save-host>
         <div class="empty"><b>Nothing open</b>Pick an application on the left, or send one over from the extension.</div>
       </div>
     </div>

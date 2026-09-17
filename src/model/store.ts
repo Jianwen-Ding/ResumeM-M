@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
+import { absorbBase } from './resolve.js';
 import {
   DEFAULT_CONFIG,
   type AnswerBankItem,
@@ -19,7 +21,7 @@ import {
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
 import { applyResearch, repairAiArgs } from '../ai/presets.js';
-import { normalizeAnswers, normalizeEntries, normalizeEntry } from './normalize.js';
+import { normalizeAnswers, normalizeEntries, normalizeEntry, normalizeProfile } from './normalize.js';
 export { repairAiArgs };
 
 /**
@@ -35,12 +37,41 @@ export class Store {
     this.root = path.resolve(root);
   }
 
+  /**
+   * A path inside the store, and never outside it.
+   *
+   * Ids reach here from URLs and from request bodies, and they end up as
+   * filenames — so a resume called `../config` wrote over the store's own
+   * configuration, whose `ai.command` this application executes. With the
+   * server answering any origin, that was a page you visited being able to run
+   * a command on your machine.
+   *
+   * Checked here rather than at each route because there are a dozen routes and
+   * one of them will always be the one that was forgotten. Everything that
+   * becomes a file goes through this function.
+   */
   private file(...p: string[]): string {
-    return path.join(this.root, ...p);
+    /*
+     * Each segment is one name, never a path. Checking only that the result
+     * lands inside the store is not enough: `../config` from the resumes
+     * folder stays inside it and overwrites the store's own configuration,
+     * whose `ai.command` this application executes.
+     */
+    for (const segment of p) {
+      if (segment.includes('/') || segment.includes('\\') || segment.split('.').includes('..')) {
+        throw new Error('That name is not allowed — a name cannot contain a path.');
+      }
+    }
+    const full = path.resolve(this.root, ...p);
+    // And the belt to that pair of braces, in case a segment ever gets through.
+    if (full !== this.root && !full.startsWith(this.root + path.sep)) {
+      throw new Error('That name is not allowed — it points outside the save folder.');
+    }
+    return full;
   }
 
-  private readYaml<T>(rel: string, fallback: T): T {
-    const f = this.file(rel);
+  private readYaml<T>(rel: string | string[], fallback: T): T {
+    const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
     if (!fs.existsSync(f)) return fallback;
     const raw = fs.readFileSync(f, 'utf8');
     if (!raw.trim()) return fallback;
@@ -48,19 +79,54 @@ export class Store {
     return (parsed ?? fallback) as T;
   }
 
-  private writeYaml(rel: string, data: unknown): void {
-    const f = this.file(rel);
+  /*
+   * Every write lands whole, or not at all.
+   *
+   * `fs.writeFileSync` opens with O_TRUNC, so for the length of the write the
+   * file is observably zero bytes and then partially written. A second process
+   * reading it is not hypothetical here — the `rmm` CLI, a second server, a
+   * hand edit while the app is up — and the failure is silent in the worst
+   * way: a YAML list truncated at an item boundary parses cleanly. Reading
+   * applications.yaml during a write returned 130 of 300 applications with no
+   * error, and the next save wrote that list back. A crash or a power cut
+   * mid-write leaves the same truncated file with nothing to recover from.
+   *
+   * Write to a temp file, flush it, rename over the target: rename within a
+   * directory is atomic, so a reader sees either the old file or the new one.
+   * The pattern is already used for projects.json and the asset store; user
+   * data deserves it at least as much.
+   */
+  private writeAtomic(f: string, text: string): void {
     fs.mkdirSync(path.dirname(f), { recursive: true });
+    const temp = `${f}.${randomUUID()}.tmp`;
+    try {
+      const fd = fs.openSync(temp, 'w');
+      try {
+        fs.writeFileSync(fd, text, 'utf8');
+        // So a power cut cannot leave the rename pointing at empty bytes.
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(temp, f);
+    } catch (err) {
+      fs.rmSync(temp, { force: true });
+      throw err;
+    }
+  }
+
+  private writeYaml(rel: string | string[], data: unknown): void {
+    const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
     // lineWidth 0 keeps long bullet text on one line so diffs stay per-bullet
     // instead of reflowing a whole paragraph every time a word changes.
-    fs.writeFileSync(f, YAML.stringify(data, { lineWidth: 0 }), 'utf8');
+    this.writeAtomic(f, YAML.stringify(data, { lineWidth: 0 }));
   }
 
   /** Read every file in the store into one object. */
   load(): StoreData {
     const config = this.loadConfig();
     return {
-      profile: this.readYaml<Profile>('profile.yaml', { name: 'Your Name' }),
+      profile: normalizeProfile(this.readYaml<Profile>('profile.yaml', { name: 'Your Name' })),
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.
@@ -128,8 +194,7 @@ export class Store {
   }
 
   saveVoice(text: string): void {
-    fs.mkdirSync(this.root, { recursive: true });
-    fs.writeFileSync(this.file('voice.md'), text, 'utf8');
+    this.writeAtomic(this.file('voice.md'), text);
   }
 
   /** Resumes live one-per-file so a new variation is a new small file. */
@@ -141,8 +206,20 @@ export class Store {
       .filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'))
       .map((f) => {
         const spec = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as ResumeSpec;
-        // Filename is the source of truth for the id so the two cannot diverge.
-        return { ...spec, id: spec?.id ?? path.basename(f).replace(/\.ya?ml$/, '') };
+        /*
+         * Filename is the source of truth for the id, which the comment here
+         * always said and the code did not: it preferred the id written inside
+         * the file, so two files could claim one id. Copying resumes/base.yaml
+         * to resumes/base-old.yaml — an ordinary thing to do in a folder
+         * advertised as hand-editable YAML — made the copy sort first, and from
+         * then on it answered every lookup for `base`. Edits went to base.yaml
+         * and appeared to be thrown away, every child of `base` resolved
+         * through the copy, and the next save wrote the copy's content over the
+         * real file.
+         *
+         * Taken from the name, a copied file is simply its own resume.
+         */
+        return { ...spec, id: path.basename(f).replace(/\.ya?ml$/, '') };
       })
       .filter((r): r is ResumeSpec => Boolean(r && r.id));
   }
@@ -152,15 +229,45 @@ export class Store {
   }
 
   saveResume(spec: ResumeSpec): void {
-    this.writeYaml(path.join('resumes', `${spec.id}.yaml`), spec);
+    this.writeYaml(['resumes', `${spec.id}.yaml`], spec);
   }
 
+  /**
+   * Deleting a resume must not break the ones built on it.
+   *
+   * Variations are thin — "new grad" is the base plus a handful of choices,
+   * recorded as `extends: base`. Unlinking the base and nothing else left every
+   * variation throwing "extends 'base', which does not exist" from that moment
+   * on, in the editor, the preview and the tracker alike, with nothing in the
+   * UI able to edit `extends` and so no way back but hand-editing YAML.
+   *
+   * So each child absorbs what the deleted resume contributed and re-points at
+   * its parent. The children are written first: if anything fails partway, the
+   * base is still there and they still resolve.
+   */
   deleteResume(id: string): void {
+    const all = this.loadResumes();
+    const removed = all.find((r) => r.id === id);
+
+    if (removed) {
+      for (const child of all) {
+        if (child.extends === id) this.saveResume(absorbBase(child, removed));
+      }
+    }
+
     for (const ext of ['yaml', 'yml']) {
       const f = this.file('resumes', `${id}.${ext}`);
       if (fs.existsSync(f)) fs.unlinkSync(f);
     }
   }
+
+  /** The four files entries are split across, in the order `load` reads them. */
+  private static readonly ENTRY_FILES = [
+    'education.yaml',
+    'experience.yaml',
+    'projects.yaml',
+    'custom.yaml',
+  ] as const;
 
   /**
    * Entries are split across files by kind for readability, so writing one back
@@ -179,29 +286,65 @@ export class Store {
     }
   }
 
+  /**
+   * An id lives in exactly one of the four files.
+   *
+   * Splitting entries by kind means changing an entry's kind moves it between
+   * files, and writing the new one without removing the old left the same id in
+   * two places at once. `load()` concatenates the four files with no dedupe, so
+   * the store then held two entries with that id — and `resolveResume` takes
+   * the first match, which for education → project is the stale copy. The
+   * master document showed the entry as you had just edited it while the PDF
+   * you actually sent showed the old title and the old bullets, with nothing
+   * anywhere saying so. `deleteEntry` returned at the first file it found a
+   * match in, so the twin could not be cleared from the app either.
+   */
   saveEntry(entry: Entry): void {
     // Normalised on the way out as well as in, so a bad write from the API
     // never becomes a bad file: reads are already safe, but a file that says
     // something impossible is a trap for whoever opens it next.
     const clean = normalizeEntry(entry);
     const rel = this.fileForKind(clean.kind);
+
+    /*
+     * The write that adds it comes first, and the ones that remove the old copy
+     * come after.
+     *
+     * Each file is written atomically, but changing an entry's kind touches
+     * two of them and nothing makes the pair atomic. Removing first meant a
+     * window — a full disk, an EIO, a crash — in which the entry was in neither
+     * file, and `load()` simply concatenates the four: the title, the dates and
+     * every phrasing of every bullet, gone, with the error naming the disk
+     * rather than the entry. In this order the same failure leaves the entry in
+     * both files instead, which `load()` resolves in favour of the newer one
+     * and the next successful save tidies up.
+     */
     const list = this.readYaml<Entry[]>(rel, []);
     const idx = list.findIndex((e) => e.id === clean.id);
     if (idx >= 0) list[idx] = clean;
     else list.push(clean);
     this.writeYaml(rel, list);
+
+    for (const other of Store.ENTRY_FILES) {
+      if (other === rel) continue;
+      const stale = this.readYaml<Entry[]>(other, []);
+      const next = stale.filter((e) => e.id !== clean.id);
+      if (next.length !== stale.length) this.writeYaml(other, next);
+    }
   }
 
+  /** Removes the id from every file, not merely the first one holding it. */
   deleteEntry(id: string): boolean {
-    for (const rel of ['education.yaml', 'experience.yaml', 'projects.yaml', 'custom.yaml']) {
+    let removed = false;
+    for (const rel of Store.ENTRY_FILES) {
       const list = this.readYaml<Entry[]>(rel, []);
       const next = list.filter((e) => e.id !== id);
       if (next.length !== list.length) {
         this.writeYaml(rel, next);
-        return true;
+        removed = true;
       }
     }
-    return false;
+    return removed;
   }
 
   saveSkillGroups(groups: SkillGroup[]): void {
@@ -209,7 +352,7 @@ export class Store {
   }
 
   saveProfile(profile: Profile): void {
-    this.writeYaml('profile.yaml', profile);
+    this.writeYaml('profile.yaml', normalizeProfile(profile));
   }
 
   saveApplications(apps: Application[]): void {
@@ -251,6 +394,13 @@ export class Store {
           role: meta.role,
           createdAt: meta.createdAt ?? '',
           tags: meta.tags,
+          // Rebuilt field by field, so a field missed here is a field deleted:
+          // the editor loads a letter and PUTs back exactly what it was given,
+          // and this one was dropped on the way in. Completing an application
+          // tags its letter with the application it belongs to, and opening
+          // that letter once untagged it — after which the per-application
+          // lookup could never match and the application showed no letter.
+          applicationId: meta.applicationId,
           body: m[2] ?? '',
         } satisfies CoverLetter;
       });
@@ -261,7 +411,7 @@ export class Store {
     const dir = this.file('letters');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-    fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${body}`, 'utf8');
+    this.writeAtomic(this.file('letters', `${id}.md`), `---\n${front}\n---\n${body}`);
   }
 
   /**
@@ -299,7 +449,7 @@ export class Store {
     const dir = this.file('corpus');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-    fs.writeFileSync(path.join(dir, `${id}.md`), `---\n${front}\n---\n${text}`, 'utf8');
+    this.writeAtomic(this.file('corpus', `${id}.md`), `---\n${front}\n---\n${text}`);
   }
 
   deleteSample(id: string): boolean {
@@ -321,7 +471,13 @@ export class Store {
       .filter((f) => f.endsWith('.yaml'))
       .map((f) => {
         const draft = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as Draft;
-        return { ...draft, id: draft?.id ?? path.basename(f, '.yaml') };
+        // The filename is the id, the same way it is for resumes, and for the
+        // same reason: an id written inside the file meant that copying a draft
+        // to `d1-backup.yaml` produced two drafts claiming to be `d1`, and that
+        // renaming one left `deleteDraft` unlinking a path that is not there —
+        // so discarding it failed and completing it silently left it on the
+        // list forever.
+        return { ...draft, id: path.basename(f, '.yaml') };
       })
       .filter((d): d is Draft => Boolean(d && d.id))
       .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
@@ -333,7 +489,7 @@ export class Store {
 
   saveDraft(draft: Draft): Draft {
     const next = { ...draft, updatedAt: new Date().toISOString() };
-    this.writeYaml(path.join('drafts', `${draft.id}.yaml`), next);
+    this.writeYaml(['drafts', `${draft.id}.yaml`], next);
     return next;
   }
 

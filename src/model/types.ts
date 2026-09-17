@@ -100,7 +100,15 @@ export interface SkillItem {
 }
 
 export interface Profile {
-  name: string;
+  /**
+   * What goes at the top of the page.
+   *
+   * Alternates, like every other field, because a name is not one fixed thing:
+   * the name on your degree, the name people call you, and the initialled form
+   * that buys a line back on a full page are all yours, and which one belongs
+   * on a given application is a decision worth being able to pin.
+   */
+  name: MaybeVariant;
   phone?: string;
   email?: string;
   linkedin?: string;
@@ -227,10 +235,13 @@ export interface ResolvedSection {
   skillGroups: ResolvedSkillGroup[];
 }
 
+/** A profile with its choices made: the name is one name by the time it prints. */
+export type ResolvedProfile = Omit<Profile, 'name'> & { name: string };
+
 export interface ResolvedResume {
   id: string;
   label: string;
-  profile: Profile;
+  profile: ResolvedProfile;
   sections: ResolvedSection[];
   layout: LayoutOptions;
   /** Non-fatal problems: dangling ids, choices that matched nothing. */
@@ -316,6 +327,13 @@ export interface DraftQuestion {
   fromAnswerId?: string;
   /** How the current text got here. */
   source?: 'bank' | 'ai' | 'human' | 'empty';
+  /**
+   * Set when the text came from a stored answer that only loosely matched.
+   * `matchAnswer` draws the line between "safe to send unread" and "a starting
+   * point the user should read first", and the loose ones used to arrive
+   * looking exactly like the confident ones.
+   */
+  needsReview?: boolean;
   edited?: boolean;
 }
 
@@ -415,6 +433,16 @@ export interface StoreConfig {
     withinProject?: boolean;
     /** Where generated PDFs and application bundles land. */
     dir: string;
+    /**
+     * Put the job title in the filename:
+     * `FirstName-LastName-<Job Title>-<Document Type>.pdf`.
+     *
+     * Off by default, because most of the time it is noise — the reviewer
+     * opening the attachment already knows which role they advertised. It
+     * earns its place when you have several applications open at once and want
+     * to tell them apart in the file picker without opening them.
+     */
+    roleInFileName?: boolean;
   };
 }
 
@@ -422,12 +450,27 @@ export const DEFAULT_CONFIG: StoreConfig = {
   latex: {},
   ai: {
     command: 'claude',
-    args: ['-p', '{prompt}'],
+    /*
+     * The confined Claude invocation, byte for byte the same as the Claude Code
+     * preset in ai/presets.ts. (Stated literally rather than imported, because
+     * presets.ts reads its types from this file; a test asserts the two agree.)
+     *
+     * This used to be `['-p', '{prompt}']` — no scratch directory, no deny
+     * list. It reads like a harmless placeholder, and for the shipped store it
+     * was, because that store's config.yaml carries the full block. But a save
+     * the user creates from the app is written with only `output:` in it, and
+     * loadConfig fills the rest in from here. Switch the AI on in Settings and
+     * the command line was `claude -p /tmp/rmm-ai-xxx/prompt.md` with Bash,
+     * Write, Edit, WebFetch and WebSearch all live, against the user's own
+     * machine — while the Settings panel said the AI could never reach your
+     * save folder, your home directory, or this source tree.
+     */
+    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch'],
     enabled: false,
     timeoutMs: 180_000,
   },
   git: { autoCommit: true },
-  output: { dir: 'out' },
+  output: { dir: 'out', roleInFileName: false },
 };
 
 export function isVariantField(v: MaybeVariant | undefined): v is VariantField {

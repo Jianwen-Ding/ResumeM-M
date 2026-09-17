@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Store } from '../src/model/store.js';
@@ -42,13 +42,26 @@ describe('loading', () => {
   });
 
   it('takes the resume id from the filename, so the two cannot diverge', () => {
+    /*
+     * The title was always the rule; the body asserted the opposite, and so did
+     * the code — the id inside the file won. That is how two files came to
+     * claim one id: copy base.yaml to base-old.yaml, and the copy sorted first
+     * and answered every lookup for `base`, while edits went on being written
+     * to base.yaml and appeared to be thrown away.
+     */
     t.write('resumes/renamed.yaml', { id: 'something-else', label: 'Renamed' });
     const ids = t.store.loadResumes().map((r) => r.id);
-    // The `id` field inside the file is honoured when present…
-    expect(ids).toContain('something-else');
-    // …but a file without one still loads under its filename.
+    expect(ids).toContain('renamed');
+    expect(ids).not.toContain('something-else');
+
+    // A file without one loads under its filename too, as it always did.
     t.write('resumes/no-id.yaml', { label: 'No id' });
     expect(t.store.loadResumes().map((r) => r.id)).toContain('no-id');
+
+    // And a copied file is its own resume rather than a second claim on one.
+    t.write('resumes/base-old.yaml', { id: 'base', label: 'Old copy' });
+    expect(t.store.getResume('base')?.label).toBe('Base resume');
+    expect(t.store.getResume('base-old')?.label).toBe('Old copy');
   });
 });
 
@@ -292,5 +305,101 @@ describe('where an entry is written back', () => {
     t.store.saveEntry({ id: 'proj_new', kind: 'project', title: 'A new thing' });
     const raw = fs.readFileSync(path.join(t.dir, 'projects.yaml'), 'utf8');
     expect(raw).toContain('proj_new');
+  });
+
+  /*
+   * Changing an entry's kind touches two files, and nothing makes the pair
+   * atomic. Each is written atomically on its own, so the question is only
+   * which order leaves the safer wreckage when the second write fails — a full
+   * disk, an EIO, a crash. Removing first left the entry in neither file, and
+   * `load()` simply concatenates the four: the title, the dates and every
+   * phrasing of every bullet, gone, reported as an error about the disk.
+   */
+  it('adds the entry to its new file before taking it out of the old one', () => {
+    t.store.saveEntry({
+      id: 'proj_move',
+      kind: 'project',
+      title: 'Ingest pipeline',
+      bullets: [{ id: 'b1', default: 'v_1', variants: [{ id: 'v_1', label: 'Base', text: 'A sentence worth keeping' }] }],
+    });
+
+    const writes: string[] = [];
+    const real = fs.renameSync;
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation(((from: string, to: string) => {
+      writes.push(path.basename(String(to)));
+      // The second file of the move is where the disk runs out.
+      if (writes.length === 2) throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      return real(from as never, to as never);
+    }) as never);
+
+    try {
+      expect(() =>
+        t.store.saveEntry({ id: 'proj_move', kind: 'experience', title: 'Ingest pipeline' }),
+      ).toThrow(/ENOSPC/);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Still findable, still holding its text — in the new file, with a stale
+    // copy left in the old one that the next successful save clears.
+    const found = t.store.load().entries.filter((e) => e.id === 'proj_move');
+    expect(found.length, 'the entry survived the failed move').toBeGreaterThan(0);
+    expect(writes[0]).toContain('experience');
+  });
+});
+
+describe('a cover letter', () => {
+  /*
+   * Rebuilt field by field on the way in, so a field missed there is a field
+   * deleted: the editor loads a letter and PUTs back exactly what it was
+   * given. Completing an application tags its letter with the application it
+   * belongs to, and opening that letter once untagged it — after which the
+   * per-application lookup could never match.
+   */
+  it('keeps the application it belongs to when it is read back', () => {
+    t.store.saveCoverLetter({
+      id: '2026-03-northwind',
+      title: 'Engineer — Northwind',
+      createdAt: '2026-03-01T00:00:00.000Z',
+      body: 'Dear Northwind,',
+      applicationId: 'app-northwind-engineer',
+    });
+
+    const read = t.store.loadCoverLetters().find((l) => l.id === '2026-03-northwind');
+    expect(read?.applicationId).toBe('app-northwind-engineer');
+
+    // And a round trip through the editor does not quietly drop it.
+    t.store.saveCoverLetter(read!);
+    expect(t.store.loadCoverLetters().find((l) => l.id === '2026-03-northwind')?.applicationId).toBe(
+      'app-northwind-engineer',
+    );
+  });
+});
+
+describe('a draft', () => {
+  /*
+   * The filename is the id, the same way it is for resumes. An id written
+   * inside the file meant a copied draft claimed to be the original, and a
+   * renamed one could not be deleted at all: `deleteDraft` unlinked a path
+   * that was not there, so discarding failed and completing left it on the
+   * list forever.
+   */
+  it('is identified by its filename, not by what the file says it is', () => {
+    t.store.saveDraft({
+      id: 'd1',
+      company: 'Northwind',
+      role: 'Engineer',
+      createdAt: '2026-03-01T00:00:00.000Z',
+      updatedAt: '2026-03-01T00:00:00.000Z',
+      status: 'drafting',
+      coverLetter: { required: false, body: '' },
+      questions: [],
+    });
+    fs.copyFileSync(path.join(t.dir, 'drafts', 'd1.yaml'), path.join(t.dir, 'drafts', 'd1-copy.yaml'));
+
+    expect(t.store.loadDrafts().map((d) => d.id).sort()).toEqual(['d1', 'd1-copy']);
+    expect(t.store.getDraft('d1-copy')?.company).toBe('Northwind');
+    expect(t.store.deleteDraft('d1-copy')).toBe(true);
+    expect(t.store.getDraft('d1')?.company).toBe('Northwind');
   });
 });

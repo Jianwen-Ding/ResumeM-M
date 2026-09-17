@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
@@ -8,14 +9,48 @@ import { syncCurrent } from './current.js';
 import { resolveResume } from './resolve.js';
 
 /**
- * File naming is a surprising amount of the pain in applying: every portal
- * wants "Firstname Lastname Resume", and renaming a download each time is how
- * the wrong file ends up attached. Bundles are produced already named right.
+ * One hyphenated part of a filename.
+ *
+ * Letters and digits in any alphabet, not only `\w`, which is ASCII: "Jane Doe
+ * Resume rsted.pdf" was going to Ørsted, and a company written in Chinese
+ * vanished from the name entirely. Everything else becomes a separator, and
+ * runs of separators collapse, so nothing comes out with a double hyphen or a
+ * hyphen hanging off either end.
  */
-export function bundleFileName(name: string, company: string | undefined, kind: 'Resume' | 'Cover Letter'): string {
-  const person = name.trim().replace(/\s+/g, ' ');
-  const co = company?.trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, ' ');
-  return [person, kind, co].filter(Boolean).join(' ') + '.pdf';
+function namePart(s: string | undefined): string {
+  return String(s ?? '')
+    .replace(/[^\p{L}\p{N}_\s-]/gu, ' ')
+    .replace(/[\s-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/** What a document in a bundle is: the last part of its name. */
+export type DocumentKind = 'Resume' | 'Cover Letter' | 'Answers';
+
+/**
+ * File naming is a surprising amount of the pain in applying: every portal
+ * wants the same shape, and renaming a download each time is how the wrong
+ * file ends up attached. Bundles are produced already named right.
+ *
+ *     FirstName-LastName-<Job Title>-<Document Type>.pdf
+ *
+ * The role rather than the company, because the role is what distinguishes two
+ * applications you are actually working on at once — and because a reviewer
+ * opening the attachment already knows which company they are. It is optional:
+ * without one the name is just the person and the document type.
+ *
+ * `disambiguator` is for the one case the shape above cannot separate on its
+ * own — the same person applying for the same role at two companies at the same
+ * time, whose files share a folder in `out/current`. Nothing else passes it.
+ */
+export function bundleFileName(
+  name: string,
+  role: string | undefined,
+  kind: DocumentKind,
+  { extension = '.pdf', disambiguator }: { extension?: string; disambiguator?: string } = {},
+): string {
+  const parts = [namePart(name), namePart(role), namePart(kind), namePart(disambiguator)];
+  return parts.filter(Boolean).join('-') + extension;
 }
 
 export function slug(s: string): string {
@@ -26,9 +61,34 @@ export function slug(s: string): string {
     .slice(0, 60);
 }
 
+/**
+ * A few characters of a hash, for names a slug cannot represent.
+ *
+ * Ids are meant to be read in a folder listing, so the slug stays the way it
+ * is. But a slug is ASCII-only: a company and role written in Chinese both
+ * reduce to nothing, and every such application collapsed onto the same id —
+ * one tracker row silently replacing the other, and the first one's files
+ * left behind inside the second one's bundle.
+ */
+export function fingerprint(...parts: string[]): string {
+  return createHash('sha1').update(parts.join('\u0000')).digest('hex').slice(0, 8);
+}
+
 export function applicationId(company: string, role: string, at = new Date()): string {
   const date = at.toISOString().slice(0, 10);
-  return `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
+  const readable = `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
+
+  /*
+   * The readable form is kept whenever it actually distinguishes one
+   * application from another. It does not when the names have no ASCII in
+   * them — the slug is empty and the id is just today's date — nor when two
+   * long role names share their first sixty characters, which `slug` truncates
+   * to. Both collapse two applications into one id, and an id is what the
+   * tracker row, the bundle folder and the upload file are all keyed on.
+   */
+  const slugged = `${slug(company)}-${slug(role)}`.replace(/^-|-$/g, '');
+  const faithful = slugged.length > 0 && slug(company).length < 60 && slug(role).length < 60;
+  return faithful ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
 }
 
 export interface BundleRequest {
@@ -63,11 +123,35 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const data = store.load();
   const resolved: ResolvedResume = resolveResume(req.resumeId, data);
 
+  /*
+   * The job title goes in the filename only when the setting says so. Off by
+   * default: most of the time the reviewer opening the attachment already
+   * knows which role they advertised, and a longer name is a worse one.
+   */
+  const titled = data.config.output.roleInFileName ? req.role : undefined;
+
   const id = applicationId(req.company, req.role);
   const dir = path.join(store.outDir(), 'applications', id);
   fs.mkdirSync(dir, { recursive: true });
 
-  const resumeName = bundleFileName(data.profile.name, req.company, 'Resume');
+  /*
+   * A rebuild replaces the bundle; it does not add to it.
+   *
+   * The id is company, role and date, so building the same application twice
+   * in a day writes into the same folder — and every file whose name changed
+   * in between was left sitting beside its replacement. Change how your name
+   * is written, or rebuild without the cover letter you had before, and the
+   * folder holds two resumes or an orphaned letter. Both then get copied into
+   * the flat upload folder, where the whole point is that the file in front of
+   * you is the one to send.
+   *
+   * `source/` stays: it is the archive material, and it is rewritten below.
+   */
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isFile()) fs.rmSync(path.join(dir, entry.name), { force: true });
+  }
+
+  const resumeName = bundleFileName(resolved.profile.name, titled, 'Resume');
   const pdfPath = path.join(dir, resumeName);
   const compiled = await compileResume(resolved, {
     pdfPath,
@@ -77,7 +161,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const files = [resumeName];
 
   if (req.coverLetter?.trim()) {
-    const letterName = bundleFileName(data.profile.name, req.company, 'Cover Letter');
+    const letterName = bundleFileName(resolved.profile.name, titled, 'Cover Letter');
 
     // Typeset to match the resume, with the trusted engine — this is a file
     // that gets uploaded, so it never takes the preview shortcut. The plain
@@ -85,7 +169,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     // into a box as want one attached.
     await compileLetter(
       {
-        profile: data.profile,
+        profile: resolved.profile,
         company: req.company,
         role: req.role,
         body: req.coverLetter,
@@ -101,7 +185,16 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   }
 
   if (req.answers?.length) {
-    const qaPath = path.join(dir, 'application-answers.md');
+    /*
+     * Named like the other two rather than `application-answers.md`. A
+     * constant was fine inside a per-application folder and collided for any
+     * two applications at once in the flat one — and the flat folder is the
+     * one you upload from.
+     */
+    const qaPath = path.join(
+      dir,
+      bundleFileName(resolved.profile.name, titled, 'Answers', { extension: '.md' }),
+    );
     fs.writeFileSync(
       qaPath,
       req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n'),

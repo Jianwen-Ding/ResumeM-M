@@ -91,17 +91,26 @@ async function main(argv: string[]): Promise<number> {
 
     case 'build': {
       const data = store.load();
-      const ids = rest.includes('--all') ? data.resumes.map((r) => r.id) : [rest[0]];
+      const all = rest.includes('--all');
+      const ids = all ? data.resumes.map((r) => r.id) : [rest[0]];
       if (!ids[0]) {
-        console.error('Which resume? Try `rmm list`.');
+        // "Which resume?" is the wrong question when the answer was "all of
+        // them" and there are none.
+        console.error(all ? 'There are no resumes in this save yet.' : 'Which resume? Try `rmm list`.');
         return 1;
       }
       let failed = false;
       for (const id of ids) {
         if (!id) continue;
-        const resolved = resolveResume(id, data);
-        for (const w of resolved.warnings) console.warn(`  ! ${w}`);
         try {
+          /*
+           * Inside the try, so `--all` is a batch rather than a queue that
+           * stops at the first problem. One resume with a dangling `extends`
+           * threw out here and killed the run: the rest were never built and
+           * never mentioned, and the exit code said only that something failed.
+           */
+          const resolved = resolveResume(id, data);
+          for (const w of resolved.warnings) console.warn(`  ! ${w}`);
           const out = path.join(store.outDir(), `${id}.pdf`);
           const result = await compileResume(resolved, {
             pdfPath: out,
@@ -173,6 +182,10 @@ async function main(argv: string[]): Promise<number> {
       }
       const result = await buildBundle(store, { resumeId: id, company, role, url: arg(rest, 'url') });
       if (store.loadConfig().git.autoCommit) {
+        // `commitAll` returns undefined when the store is not a repo yet, so a
+        // CLI-only user with auto-commit on got no history at all and nothing
+        // said so. `voice add` and `serve` already do this.
+        await repo.ensure();
         await repo.commitAll(`Apply: ${company} — ${role}`);
       }
       console.log(`Bundle → ${path.relative(process.cwd(), result.dir)}`);

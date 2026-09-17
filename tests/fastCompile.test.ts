@@ -93,19 +93,29 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
   it(
     'falls back to the trusted engine when its own page count and height measurement disagree',
     async () => {
-      // A margin large enough to leave under two lines of text height is the
-      // pathological case where a raw `pdftex -fmt=` run has been observed to
-      // under-report the page break while its own height measurement stays
-      // correct — the two halves of its answer contradict each other. The
-      // self-consistency guard must catch that and use the trusted engine
-      // instead, rather than reporting an impossible "fits".
+      /*
+       * A margin large enough to leave under two lines of text height: the
+       * layout where a raw `pdftex -fmt=` run was under-reporting the page
+       * break while its own height measurement stayed correct.
+       *
+       * That disagreement turned out to be the layout never reaching the fast
+       * path at all — the format skips the document's preamble, so the margin
+       * being tested here was one of the settings thrown away. With the layout
+       * dumped into the format the two engines now return the same twelve
+       * pages and the same 1520.3pt, so the guard has nothing to catch and the
+       * shortcut is used. It stays in place regardless: it costs one
+       * comparison and it is the only thing standing between a preview that
+       * contradicts itself and a user being told an impossible "fits".
+       */
       const pathological = resume(6, { marginIn: 4.6, autoFit: false });
       const result = await compileResume(pathological, { mode: 'preview' });
+      const trusted = await compileResume(pathological, { mode: 'final' });
 
       expect(result.fits).toBe(false);
       expect(result.pages).toBeGreaterThan(1);
-      // The guard should have discarded the fast attempt for this layout.
-      expect(result.fastPath).toBe(false);
+      // And whichever engine answered, it answered the same thing.
+      expect(result.pages).toBe(trusted.pages);
+      expect(result.usedPt).toBeCloseTo(trusted.usedPt, 1);
     },
   );
 

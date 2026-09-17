@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { compileLetter } from '../src/render/compile.js';
 import { renderLetterFastBody, renderLetterLatex } from '../src/render/letter.js';
-import { DEFAULT_LAYOUT, type Profile } from '../src/model/types.js';
+import { DEFAULT_LAYOUT, type ResolvedProfile } from '../src/model/types.js';
 import { hasLatex } from './helpers.js';
 
 const latex = await hasLatex();
 
-const PROFILE: Profile = {
+const PROFILE: ResolvedProfile = {
   name: 'Test Person',
   email: 'test@example.com',
   phone: '555-0100',

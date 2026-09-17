@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { startServer } from '../src/server/index.js';
 import { makeTempStore } from './helpers.js';
@@ -17,6 +20,112 @@ describe('local desktop server', () => {
     } finally {
       await server.close();
       store.cleanup();
+    }
+  });
+});
+
+/*
+ * Which save is open when nobody has said.
+ *
+ * Saves became something you pick, and the resolution order has to answer four
+ * different people at once: somebody who chose a default, somebody who asked to
+ * be prompted, somebody upgrading from before any of this existed, and somebody
+ * whose machine has nothing on it at all. Getting the third wrong leaves a
+ * server running with an empty editor and an extension that cannot answer,
+ * beside a save sitting exactly where the app has always kept it.
+ */
+describe('choosing a save at startup', () => {
+  const withPreferences = (contents?: unknown) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-prefs-'));
+    const file = path.join(dir, 'projects.json');
+    if (contents !== undefined) fs.writeFileSync(file, JSON.stringify(contents), 'utf8');
+    return { file, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  };
+
+  /** Started the way the resolution order runs, with no environment override. */
+  const start = async (preferencesFile: string, dataDir: string) => {
+    const previous = process.env.RMM_DATA;
+    delete process.env.RMM_DATA;
+    try {
+      return await startServer({ port: 0, preferencesFile, dataDir, requireProjectSelection: true });
+    } finally {
+      if (previous !== undefined) process.env.RMM_DATA = previous;
+    }
+  };
+
+  const openSave = async (server: { port: number }) =>
+    (await fetch(`http://127.0.0.1:${server.port}/health`).then((r) => r.json())).dataDir;
+
+  it('opens the save already at the default location when nothing has been recorded', async () => {
+    const store = makeTempStore();
+    const prefs = withPreferences();
+    const server = await start(prefs.file, store.dir);
+    try {
+      expect(await openSave(server)).toBe(store.dir);
+    } finally {
+      await server.close();
+      prefs.cleanup();
+      store.cleanup();
+    }
+  });
+
+  it('honours a default chosen in the app over that', async () => {
+    const chosen = makeTempStore();
+    const other = makeTempStore();
+    const prefs = withPreferences({ defaultFolder: chosen.dir, recent: [] });
+    const server = await start(prefs.file, other.dir);
+    try {
+      expect(await openSave(server)).toBe(chosen.dir);
+    } finally {
+      await server.close();
+      prefs.cleanup();
+      chosen.cleanup();
+      other.cleanup();
+    }
+  });
+
+  it('still shows the chooser when the app was told to ask every time', async () => {
+    // `null` is the recorded answer to "Ask Me on Startup", and it has to keep
+    // meaning that even though a perfectly good save is sitting right there.
+    const store = makeTempStore();
+    const prefs = withPreferences({ defaultFolder: null, recent: [] });
+    const server = await start(prefs.file, store.dir);
+    try {
+      expect(await openSave(server)).toBeNull();
+    } finally {
+      await server.close();
+      prefs.cleanup();
+      store.cleanup();
+    }
+  });
+
+  it('falls back to the save last open, for an install from before defaults existed', async () => {
+    const last = makeTempStore();
+    const other = makeTempStore();
+    const prefs = withPreferences({ active: last.dir, recent: [last.dir] });
+    const server = await start(prefs.file, other.dir);
+    try {
+      expect(await openSave(server)).toBe(last.dir);
+    } finally {
+      await server.close();
+      prefs.cleanup();
+      last.cleanup();
+      other.cleanup();
+    }
+  });
+
+  it('opens nothing, and creates nothing, when there is no save to open', async () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-nothing-'));
+    const prefs = withPreferences();
+    const server = await start(prefs.file, empty);
+    try {
+      expect(await openSave(server)).toBeNull();
+      // The chooser, not a store conjured out of the bundled example.
+      expect(fs.readdirSync(empty)).toEqual([]);
+    } finally {
+      await server.close();
+      prefs.cleanup();
+      fs.rmSync(empty, { recursive: true, force: true });
     }
   });
 });

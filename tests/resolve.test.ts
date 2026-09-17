@@ -315,3 +315,104 @@ describe('list bullets', () => {
     expect(text).not.toContain('[c_a]');
   });
 });
+
+/*
+ * The name is a field like any other.
+ *
+ * A name is not one fixed thing — the one on your degree, the one people call
+ * you, the initialled form that buys back a line on a full page — and which
+ * belongs on a given application is a decision worth pinning. It goes through
+ * the same machinery as a graduation date rather than a parallel one, so the
+ * thing to check is that nothing about it is special.
+ */
+describe('alternates for the name', () => {
+  // The file's own fixture, with the name given alternates.
+  const withNames = (): StoreData => ({
+    ...store([
+      { id: 'base', label: 'Base', sections: [] },
+      { id: 'short', label: 'Short', extends: 'base', choices: { 'profile.name': 'v_short' } },
+    ]),
+    profile: {
+      name: {
+        default: 'v_legal',
+        variants: [
+          { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
+          { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+          { id: 'v_short', label: 'Initialled', text: 'J. Ding' },
+        ],
+      },
+      email: 'test@example.com',
+    },
+  });
+
+  it('prints the pinned name when a resume says nothing', () => {
+    expect(resolveResume('base', withNames()).profile.name).toBe('Jianwen Ding');
+  });
+
+  it('prints the one a resume asks for', () => {
+    expect(resolveResume('short', withNames()).profile.name).toBe('J. Ding');
+  });
+
+  it('is not reported as a choice matching nothing in the store', () => {
+    // The key has to be known, or pinning it warns on every render.
+    expect(resolveResume('short', withNames()).warnings).toEqual([]);
+  });
+
+  it('falls back to the pinned one when a resume asks for a name that is gone', () => {
+    const data = withNames();
+    data.resumes[1]!.choices = { 'profile.name': 'v_deleted' };
+    const out = resolveResume('short', data);
+    expect(out.profile.name).toBe('Jianwen Ding');
+    expect(out.warnings.join(' ')).toMatch(/v_deleted/);
+  });
+
+  it('leaves a plain string alone, which is what most stores have', () => {
+    const data = store([{ id: 'base', label: 'Base', sections: [] }]);
+    expect(resolveResume('base', data).profile.name).toBe('Test Person');
+  });
+});
+
+
+/*
+ * Archiving a bullet means "keep the text, never print it". That held for a
+ * resume which says nothing about bullets, and not for one that lists them —
+ * and AI tailoring writes an explicit list every time it hides anything, so
+ * the moment you tailored a resume, every bullet you had retired in that entry
+ * came back onto the copy you send.
+ */
+describe('an archived bullet stays archived', () => {
+  const withArchived = (): StoreData => {
+    const data = store([{ id: 'base', label: 'Base', sections: [] }]);
+    data.entries = [
+      {
+        id: 'e1',
+        kind: 'experience',
+        title: 'Acme',
+        bullets: [
+          { id: 'b_keep', default: 'v', variants: [{ id: 'v', label: 'a', text: 'Kept bullet' }] },
+          { id: 'b_old', archived: true, default: 'v', variants: [{ id: 'v', label: 'a', text: 'RETIRED — never print' }] },
+        ],
+      },
+    ];
+    return data;
+  };
+
+  const textOf = (data: StoreData) =>
+    resolveResume('base', data).sections.flatMap((s) => s.entries).flatMap((e) => e.bullets).map((b) => b.text);
+
+  it('is left out when the resume says nothing about bullets', () => {
+    const data = withArchived();
+    data.resumes[0]!.sections = [{ kind: 'experience', entries: ['e1'] }];
+    expect(textOf(data)).toEqual(['Kept bullet']);
+  });
+
+  it('is left out even when the resume names it outright', () => {
+    const data = withArchived();
+    data.resumes[0]!.sections = [{ kind: 'experience', entries: ['e1'], bullets: { e1: ['b_keep', 'b_old'] } }];
+    const out = resolveResume('base', data);
+    expect(out.sections.flatMap((s) => s.entries).flatMap((e) => e.bullets).map((b) => b.text)).toEqual(['Kept bullet']);
+    // Said out loud, because a resume asking for a bullet it cannot have is
+    // worth knowing about rather than silently trimming.
+    expect(out.warnings.join(' ')).toMatch(/b_old/);
+  });
+});

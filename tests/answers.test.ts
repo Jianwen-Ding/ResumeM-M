@@ -135,3 +135,124 @@ describe('letterId', () => {
     expect(letterId(undefined, undefined, new Date('2026-03-04T00:00:00Z'))).toBe('2026-03-04');
   });
 });
+
+/*
+ * The questions applicant tracking systems actually ask, in the wordings they
+ * actually use.
+ *
+ * The premise of the bank is that application questions repeat, so the point is
+ * whether a stored answer is found again when the next system asks the same
+ * thing in its own words — and, just as much, whether it is kept away from a
+ * question that merely looks similar. Sponsorship and work authorization are
+ * the pair that matters: they share a subject, they have opposite answers, and
+ * confusing them puts a false declaration on an application.
+ */
+describe('the same question, asked by another system', () => {
+  const ask = (question: string, stored: string) =>
+    matchAnswer(question, [
+      { id: 'a', question: stored, variants: [{ id: 'v', text: 'The stored answer.' }], default: 'v' },
+    ] as never);
+
+  const reuses = (question: string, stored: string) => Boolean(ask(question, stored).answer);
+
+  it('finds the answer again when the same question comes back word for word', () => {
+    for (const question of [
+      'Why do you want to work here?',
+      'Why us?',
+      'Describe a technical project you are proud of.',
+      'Will you now or in the future require sponsorship?',
+    ]) {
+      expect(reuses(question, question), question).toBe(true);
+    }
+  });
+
+  it('finds it through the wording each system puts round it', () => {
+    expect(reuses('Why do you want to work at Acme?', 'Why do you want to work here?')).toBe(true);
+    expect(
+      reuses(
+        'Will you now or in the future require sponsorship for employment visa status?',
+        'Will you now or in the future require sponsorship?',
+      ),
+    ).toBe(true);
+    expect(
+      reuses('Do you require visa sponsorship now or in the future?', 'Will you now or in the future require sponsorship?'),
+    ).toBe(true);
+    expect(reuses('Tell us about a project you are proud of.', 'Describe a technical project you are proud of.')).toBe(true);
+  });
+
+  it('does not answer a vague question with a specific one', () => {
+    /*
+     * The raw-word fallback was meant only to let a question made of ordinary
+     * words recognise itself. Applied when *either* side emptied out, it made
+     * a short all-stop-word question fully "covered" by any longer question
+     * containing those words — and coverage is weighted 0.7, so these came
+     * back confident, which is not advisory: a confident match is written
+     * straight into the draft as the answer.
+     */
+    expect(reuses('Tell us about you.', 'Tell us about a time you had to learn something quickly.')).toBe(false);
+    expect(reuses('How would you describe it?', 'How would you describe your ideal team?')).toBe(false);
+    expect(reuses('What do you do?', 'Why do you want to work at this company?')).toBe(false);
+  });
+
+  /*
+   * The dangerous shape: the stored question is the asked question plus a
+   * qualifier, and the qualifier is the whole answer.
+   *
+   * Coverage was computed over whichever question was shorter, so a stored
+   * question that merely *added* words scored 1.0 on it. "Are you legally
+   * authorized to work in the United States?" matched a stored "…without
+   * sponsorship?" at 0.914 and came back confident — and a confident match is
+   * not advisory. It is written into the draft, copied into the bundle and the
+   * answers file, and sent. The stored answer was "No. I will require H-1B
+   * sponsorship."
+   */
+  it('does not answer a question with the answer to a narrower one', () => {
+    const pairs: [string, string][] = [
+      [
+        'Are you legally authorized to work in the United States?',
+        'Are you legally authorized to work in the United States without sponsorship?',
+      ],
+      [
+        'Have you ever been convicted of a felony?',
+        'Have you ever been convicted of a felony or misdemeanor involving theft?',
+      ],
+      ['Do you hold a security clearance?', 'Do you hold an active TS/SCI security clearance?'],
+      ['Are you willing to relocate?', 'Are you willing to relocate at your own expense?'],
+    ];
+
+    for (const [asked, stored] of pairs) {
+      const m = ask(asked, stored);
+      expect(m.confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+  });
+
+  it('still reuses a stored question the form has only padded out', () => {
+    // The case the coverage bias exists for, and which must keep working: the
+    // stored question says nothing the asked one did not.
+    const m = ask(
+      'Why are you interested in this role at our company? (500 characters max)',
+      'Why are you interested in this role?',
+    );
+    expect(m.answer).toBeTruthy();
+    expect(m.confident).toBe(true);
+  });
+
+  it('keeps sponsorship and work authorization apart, which have opposite answers', () => {
+    expect(reuses('Are you legally authorized to work in the United States?', 'Will you now or in the future require sponsorship?')).toBe(false);
+    expect(reuses('Will you now or in the future require sponsorship?', 'Are you legally authorized to work in the United States?')).toBe(false);
+  });
+
+  it('does not answer a question it has never been asked', () => {
+    expect(reuses('What are your salary expectations?', 'Why do you want to work here?')).toBe(false);
+    expect(reuses('Describe a time you failed.', 'Describe a technical project you are proud of.')).toBe(false);
+  });
+
+  it('only calls it confident when the question is near enough to send as-is', () => {
+    expect(ask('Why do you want to work here?', 'Why do you want to work here?').confident).toBe(true);
+    // Matched, so it is offered — but the company is named in one and not the
+    // other, which is exactly the sort of thing to read before sending.
+    const loose = ask('Why do you want to work at Acme?', 'Why do you want to work here?');
+    expect(loose.answer).toBeTruthy();
+    expect(loose.confident).toBe(false);
+  });
+});

@@ -12,6 +12,26 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     try { await fn(); } catch (error) { report(error); }
     finally { button.disabled = false; }
   };
+  /*
+   * Whether the job title goes in a produced filename.
+   *
+   * Lives beside the output folder because that is what it is about. Off by
+   * default: most of the time the reviewer opening the attachment already
+   * knows which role they advertised, and a longer name is a worse one. It
+   * earns its place when several applications are open at once and you want to
+   * tell them apart in a file picker without opening them.
+   */
+  async function refreshFileNaming() {
+    const config = await api('/config');
+    const on = Boolean(config.output?.roleInFileName);
+    const box = $('#output-role-name');
+    if (!box) return;
+    box.checked = on;
+    $('#output-name-example').textContent = on
+      ? 'Jane-Doe-Software-Engineer-Resume.pdf'
+      : 'Jane-Doe-Resume.pdf';
+  }
+
   async function refreshProject() {
     project = await api('/projects');
     projectChanged(project.current);
@@ -20,6 +40,7 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     const name = folderName === 'store' ? 'Resume Save' : folderName;
     $('#project-current').textContent = project.current || 'No Save Open';
     $('#project-output').textContent = open ? `Generated Files: ${project.output}` : '';
+    if (open) await refreshFileNaming();
     $('#project-chip').textContent = open ? `Save: ${name}` : 'Open Save…';
     $('#project-chip').title = project.current || 'Open or create a save';
     $('#project-status').textContent = open ? `Open Save: ${name}` : 'No Save Open';
@@ -36,15 +57,36 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     $('#project-mode').querySelector('[value="move"]').disabled = !open;
     setChildren($('#project-recents'), el('option', { value: '', textContent: 'Recent Saves…' }),
       project.recent.filter(p => p !== project.current).map(p => el('option', { value: p, textContent: p })));
-    setChildren($('#project-existing'), project.suggested ? [
-      el('p', { textContent: 'Existing data was found in this folder. Open it as a save to continue working with it.' }),
-      el('p', { className: 'mono-path', textContent: project.suggested }),
-      el('button', { className: 'primary', textContent: 'Open Existing Save', onclick: action(async () => {
-        $('#project-path').value = project.suggested;
-        $('#project-mode').value = 'open';
-        await changeProject();
-      }) }),
-    ] : el('p', { className: 'hint', textContent: 'Choose Open Existing Save or Create Blank Save on the left.' }));
+    /*
+     * There are two ways to have no save open, and they want different things
+     * said. One is a machine with saves on it that simply has not been pointed
+     * at one yet — that wants a list to pick from. The other is a machine with
+     * nothing at all, where a chooser offering nothing to choose reads as a
+     * fault: that one wants to be told plainly that there is no save yet and
+     * offered the one thing that will help, which is making one.
+     */
+    const knownSaves = [project.suggested, ...project.recent].filter(Boolean);
+    const nothingAtAll = !open && knownSaves.length === 0;
+    $('#project-welcome-title').textContent = nothingAtAll ? 'No Save Yet' : 'No Save Open';
+    $('#project-welcome-message').textContent = nothingAtAll
+      ? 'There is nothing to open on this computer yet. Create a save and it becomes the home for your resumes, applications, imported files, and settings.'
+      : 'Open a save folder or create a blank save to begin. Resumes, applications, imported files, and settings belong to that save.';
+
+    setChildren($('#project-existing'), nothingAtAll
+      ? el('button', { className: 'primary', textContent: 'Create a Save…', onclick: () => {
+          $('#project-mode').value = 'create';
+          $('#project-switch').textContent = 'Create Save';
+          $('#project-path').focus();
+        } })
+      : project.suggested ? [
+        el('p', { textContent: 'Existing data was found in this folder. Open it as a save to continue working with it.' }),
+        el('p', { className: 'mono-path', textContent: project.suggested }),
+        el('button', { className: 'primary', textContent: 'Open Existing Save', onclick: action(async () => {
+          $('#project-path').value = project.suggested;
+          $('#project-mode').value = 'open';
+          await changeProject();
+        }) }),
+      ] : el('p', { className: 'hint', textContent: 'Choose Open Existing Save or Create Blank Save on the left.' }));
     $('#project-override').textContent = project.environmentOverride
       ? 'Opened from launch settings. A terminal launched with RMM_DATA will use that folder again.' : '';
     const defaults = [...new Set([project.current, project.defaultFolder, ...project.recent].filter(Boolean))];
@@ -225,6 +267,30 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     const fallback = [...event.dataTransfer.files];
     try { await importFiles(entries.length ? (await Promise.all(entries.map(readDirectory))).flat() : fallback); } catch (error) { report(error); }
   };
+  const naming = $('#output-role-name');
+  if (naming) {
+    naming.onchange = async () => {
+      naming.disabled = true;
+      try {
+        await api('/config', {
+          method: 'PUT',
+          body: JSON.stringify({ output: { roleInFileName: naming.checked } }),
+        });
+        await refreshFileNaming();
+        status(
+          naming.checked
+            ? 'New files will carry the job title. Files already built keep their names.'
+            : 'New files will leave the job title out. Files already built keep their names.',
+        );
+      } catch (error) {
+        report(error);
+        naming.checked = !naming.checked;
+      } finally {
+        naming.disabled = false;
+      }
+    };
+  }
+
   for (const id of ['asset-watch', 'asset-generate']) $(`#${id}`).onchange = action(async () => {
     await api('/assets/settings', { method: 'PUT', body: JSON.stringify({ watch: $('#asset-watch').checked, generate: $('#asset-generate').checked }) });
   });

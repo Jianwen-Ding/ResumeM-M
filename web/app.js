@@ -10,7 +10,9 @@
 
 import { createPreview } from './preview.js';
 import { setupAssets } from './assets.js';
+import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
+import { rebase, same } from './rebase.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -46,6 +48,15 @@ const state = {
   /** Unsaved list-item selections on list bullets, keyed by bullet id. */
   listEdits: null,
   dirty: false,
+  /**
+   * The application that sent you to the builder, if one did.
+   *
+   * Kept so the way back names the posting rather than dropping you at the
+   * Workspace to find it again. `fromDraftId` comes out of the hash and so
+   * survives a reload; `fromDraft` is what it resolved to, for the label.
+   */
+  fromDraftId: null,
+  fromDraft: null,
 };
 
 /** Forget every unsaved edit — used when switching resumes. */
@@ -76,13 +87,113 @@ function setStatus(text, isError = false) {
 }
 
 async function api(path, options = {}) {
+  /*
+   * Undo is recorded here, and only here.
+   *
+   * Every editing action in this file ends as one write of one whole document,
+   * so snapshotting the document either side of the write covers all of them —
+   * deleting a group, adding one, adding a phrasing, renaming, reordering —
+   * without a list of actions that goes stale the moment a button is added.
+   */
+  const docKey = undoing ? null : docKeyFor(path, options.method);
+  const before = docKey ? readDoc(state.store, docKey) : null;
+
   const res = await fetch(`/api${path}`, {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+
+  /*
+   * Recorded here, from the response, rather than from the store on the next
+   * reload. Several actions update the client's copy in place and never
+   * reload — and hanging the "after" snapshot on a reload that may not come
+   * meant those actions were silently unundoable.
+   *
+   * The response is also the better snapshot: these routes hand back what was
+   * actually saved, so a server that normalises or fills in defaults is
+   * reflected, and a redo puts back what really happened.
+   */
+  if (docKey) {
+    const isDelete = String(options.method ?? 'GET').toUpperCase() === 'DELETE';
+    const after = isDelete ? null : documentFrom(body, options.body);
+    history.record({ docKey, before, after, label: undoLabel });
+    undoLabel = 'change';
+    paintUndo();
+  }
   return body;
+}
+
+/**
+ * What was saved, as best the reply tells us.
+ *
+ * Most document routes return the saved document; a couple return an
+ * acknowledgement instead, and for those the body that was sent is the honest
+ * answer.
+ */
+function documentFrom(reply, sentBody) {
+  const acknowledgement = reply && typeof reply === 'object' && !Array.isArray(reply)
+    && Object.keys(reply).length <= 2 && ('ok' in reply || 'key' in reply);
+  if (reply !== undefined && reply !== null && !acknowledgement) return reply;
+  try {
+    return typeof sentBody === 'string' ? JSON.parse(sentBody) : null;
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Undo and redo                                                       *
+ * ------------------------------------------------------------------ */
+
+const history = createHistory({ limit: 60 });
+/** True while an undo/redo is being applied, so it does not record itself. */
+let undoing = false;
+/** What the write in flight should be called, set by the action that starts it. */
+let undoLabel = 'change';
+/** Name the next write, so the menu can say "Undo delete group". */
+function describeNext(label) {
+  undoLabel = label;
+}
+
+async function stepHistory(direction) {
+  const entry = direction === 'undo' ? history.undo() : history.redo();
+  if (!entry) {
+    setStatus(direction === 'undo' ? 'Nothing to undo' : 'Nothing to redo');
+    return;
+  }
+  // Undo reinstates what was there before; redo puts back what the action did.
+  const doc = direction === 'undo' ? entry.before : entry.after;
+  undoing = true;
+  try {
+    const { path, options } = restoreRequest(entry.docKey, doc);
+    await api(path, options);
+    await loadStore();
+    render();
+    scheduleRender();
+    scheduleCommit();
+    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${entry.label}`);
+  } catch (err) {
+    // Put it back on the stack it came off: a failed undo has not happened.
+    if (direction === 'undo') history.redo();
+    else history.undo();
+    setStatus(err.message, true);
+  } finally {
+    undoing = false;
+    paintUndo();
+  }
+}
+
+/** Keep the two buttons honest about what they would do. */
+function paintUndo() {
+  const undoBtn = $('#btn-undo');
+  const redoBtn = $('#btn-redo');
+  if (!undoBtn || !redoBtn) return;
+  undoBtn.disabled = !history.canUndo();
+  redoBtn.disabled = !history.canRedo();
+  undoBtn.title = history.canUndo() ? `Undo ${history.peekUndoLabel()}` : 'Nothing to undo';
+  redoBtn.title = history.canRedo() ? `Redo ${history.peekRedoLabel()}` : 'Nothing to redo';
 }
 
 /** "1 change" / "3 changes" — the `(s)` suffix reads like a form letter. */
@@ -210,22 +321,58 @@ function currentSpec() {
     lists: { ...(base.lists ?? {}), ...(state.listEdits ?? {}) },
   };
 
+  /*
+   * Only what this resume actually changes.
+   *
+   * This wrote the *flattened* chain — the parent's sections with the child's
+   * overrides folded in — back onto the resume being edited. Ticking one bullet
+   * on a variation therefore copied every inherited section down into it, and
+   * from then on the variation was pinned to the entries the base had at that
+   * moment: anything added to the base afterwards arrived switched off.
+   *
+   * A section the user has not touched is left inherited. A section they have
+   * carries only the part they changed, which mergeSections now lays over the
+   * parent's rather than replacing it outright.
+   */
   const touchesSections = state.skillEdits || state.entryEdits || state.bulletEdits;
   if (touchesSections) {
-    spec.sections = resolveSections().map((section) => {
-      if (section.kind === 'skills') {
-        return state.skillEdits
-          ? { ...section, items: { ...(section.items ?? {}), ...state.skillEdits } }
-          : section;
-      }
+    const own = new Map((base.sections ?? []).map((s) => [s.kind, s]));
+    const sections = [];
+
+    for (const section of resolveSections()) {
+      const mine = own.get(section.kind);
       const entries = entrySelection(section);
-      const bullets = { ...(section.bullets ?? {}) };
-      for (const eid of entries) {
-        const entry = state.store.entries.find((e) => e.id === eid);
-        if (entry && state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
+
+      const editedHere =
+        section.kind === 'skills'
+          ? Boolean(state.skillEdits && (section.groups ?? []).some((g) => g in state.skillEdits))
+          : Boolean(state.entryEdits && section.kind in state.entryEdits) ||
+            Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits));
+
+      // Untouched and not already this resume's own: leave it inherited.
+      if (!mine && !editedHere) continue;
+      if (!editedHere) {
+        sections.push(mine);
+        continue;
       }
-      return { ...section, entries, bullets };
-    });
+
+      if (section.kind === 'skills') {
+        sections.push({ ...(mine ?? { kind: section.kind }), items: { ...(mine?.items ?? {}), ...state.skillEdits } });
+        continue;
+      }
+
+      const next = { ...(mine ?? { kind: section.kind }) };
+      // The entry list is only written down when the user changed which
+      // entries show. A bullet the user hid does not pin the entry list.
+      if (state.entryEdits && section.kind in state.entryEdits) next.entries = entries;
+      const bullets = { ...(mine?.bullets ?? {}) };
+      for (const eid of entries) {
+        if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
+      }
+      if (Object.keys(bullets).length > 0) next.bullets = bullets;
+      sections.push(next);
+    }
+    spec.sections = sections;
   }
   return spec;
 }
@@ -233,6 +380,9 @@ function currentSpec() {
 function isVariantField(f) {
   return f && typeof f === 'object' && Array.isArray(f.variants);
 }
+
+/** The choice key for the name on the page. Mirrors PROFILE_NAME_KEY on the server. */
+const PROFILE_NAME_KEY = 'profile.name';
 
 function fieldText(field, choices, key) {
   if (field == null) return '';
@@ -347,6 +497,10 @@ function scheduleCommit() {
  * the page. `keepalive` is what lets the last write survive the tab closing.
  */
 async function flushEdits() {
+  // The Workspace's typing too. Every path out of a page already calls this —
+  // closing the tab, switching resumes, following a deep link — and the draft
+  // was the one thing it did not cover.
+  await flushDraftEdits().catch(() => {});
   await Promise.all([...inlineSaves]);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
@@ -378,14 +532,57 @@ function setSaveState(mode, detail) {
  * Store mutations                                                     *
  * ------------------------------------------------------------------ */
 
+/**
+ * One in-flight write per entry, and what the last one left on the server.
+ *
+ * An entry is saved whole, and the copy an edit is built from is the copy that
+ * was on screen when it started — which is the copy from before any edit still
+ * in flight. Two changes a moment apart therefore both send the old text for
+ * whatever the other one changed, and the second lands on top of the first.
+ * Waiting for each write and rebasing the next onto it is what stops the
+ * second edit from carrying the first one away with it.
+ */
+const entryWrites = new Map(); // id → { queue, server, pending }
+
 async function saveEntry(entry, message) {
-  await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'PUT', body: JSON.stringify(entry) });
-  setStatus(message ?? `Saved ${entry.id}`);
+  describeNext(message ?? 'the change');
+  const id = entry.id;
+  const lane = entryWrites.get(id) ?? { queue: Promise.resolve(), server: null, pending: 0 };
+  entryWrites.set(id, lane);
+  lane.pending++;
+
+  // What this edit was derived from: the store as the client last saw it.
+  const base = state.store?.entries?.find((e) => e.id === id) ?? null;
+
+  // `queue` never rejects, so one failed write does not wedge the ones behind
+  // it — each is still worth attempting on its own.
+  const mine = lane.queue.then(async () => {
+    // Something landed while this edit was being made: keep it, and put only
+    // what this edit actually changed on top of it.
+    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
+    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
+    lane.server = saved?.id ? saved : body;
+    return lane.server;
+  });
+  lane.queue = mine.then(
+    () => {},
+    () => {},
+  );
+
+  try {
+    await mine;
+  } finally {
+    // Once nothing is in flight the client will reload, so the next edit is
+    // built from the server's copy and there is nothing left to rebase onto.
+    if (--lane.pending === 0) entryWrites.delete(id);
+  }
+  setStatus(message ?? `Saved ${id}`);
   await loadStore();
   render();
 }
 
 async function saveResumeSpec(spec, message) {
+  describeNext(message ?? 'the change');
   await api(`/resumes/${encodeURIComponent(spec.id)}`, { method: 'PUT', body: JSON.stringify(spec) });
   setStatus(message ?? `Saved ${spec.id}`);
   await loadStore();
@@ -585,7 +782,20 @@ async function chooseVariant(key, field, current) {
  * The text belongs to the store, not to this resume: editing it here changes it
  * everywhere it appears, which is the whole point of keeping one copy.
  */
+/*
+ * The line as the store holds it is what gets edited; the rendered form is what
+ * gets shown. That was always the intent — the comment below said so — and the
+ * code did the opposite: it put `display(text)` into the box, and `display`
+ * strips `**bold**`, backticks and `*italic*`. Whatever came back was saved
+ * over the original, so editing a bullet to add one word silently deleted its
+ * markup from the shared store, for every resume using that phrasing, and the
+ * bold metric in the PDF turned to body text with nothing having said so.
+ *
+ * `undisplay` was supposed to be the inverse and only ever restored the en
+ * dash. Editing the raw text needs no inverse.
+ */
 function editableLine(text, { onCommit, className = 'text', title } = {}) {
+  const raw = String(text ?? '');
   const node = el('div', {
     // `editable` is what carries the affordance in CSS: a line that merely
     // looks like this one — a list bullet's preview, say — must not invite a
@@ -602,7 +812,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     node.contentEditable = 'false';
     node.classList.remove('editing');
     const next = node.textContent.trim();
-    if (commit && next && next !== display(text)) {
+    if (commit && next && next !== raw) {
       const save = Promise.resolve().then(() => onCommit(next));
       inlineSaves.add(save);
       save.catch(err => setStatus(err.message, true)).finally(() => inlineSaves.delete(save));
@@ -618,7 +828,9 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     editing = true;
     node.contentEditable = 'plaintext-only';
     node.classList.add('editing');
-    node.textContent = display(text); // edit the sentence, not the markup
+    // The sentence as written, markup and all: what is saved is what is shown
+    // here, so there is nothing to lose in translation.
+    node.textContent = raw;
     node.focus();
     // Put the caret where the pointer was, rather than at the start.
     const sel = window.getSelection();
@@ -1140,16 +1352,7 @@ function profileBlock() {
   const profile = state.store.profile ?? {};
   const box = el('div', { className: 'entry profile-entry' });
 
-  box.append(
-    el('div', { className: 'head' }, [
-      editableLine(profile.name || 'Your Name', {
-        className: 'title',
-        title: 'Double-click to edit. This is the name at the top of every resume.',
-        onCommit: (text) => saveProfileField('name', text),
-      }),
-      el('span', { className: 'id', textContent: 'prints at the top of every resume' }),
-    ]),
-  );
+  box.append(el('div', { className: 'head' }, nameHead(profile)));
 
   const grid = el('div', { className: 'profile-grid' });
   for (const [key, label] of PROFILE_FIELDS) {
@@ -1210,7 +1413,149 @@ function profileBlock() {
   return box;
 }
 
+/**
+ * The name at the top of the page, with its alternates.
+ *
+ * A name is not one fixed thing — the one on your degree, the one people call
+ * you, the initialled form that buys back a line on a full page. It is a field
+ * like a graduation date, so it gets the field's controls rather than its own:
+ * the same picker, the same stepper, the same pin.
+ */
+function nameHead(profile) {
+  const field = profile.name;
+  const said = 'prints at the top of every resume';
+
+  if (!isVariantField(field)) {
+    return [
+      editableLine(String(field ?? '') || 'Your Name', {
+        className: 'title',
+        title: 'Double-click to edit. This is the name at the top of every resume.',
+        onCommit: (text) => saveProfileField('name', text),
+      }),
+      el('button', {
+        className: 'link meta-add',
+        textContent: '+ alt',
+        title: 'Give your name a second form — the name people call you, or an initialled one',
+        onclick: () => addNameAlternate(),
+      }),
+      el('span', { className: 'id', textContent: said }),
+    ];
+  }
+
+  const key = PROFILE_NAME_KEY;
+  /*
+   * `effectiveChoices()`, not `state.choices` — which is only what is unsaved.
+   * Every other field renderer uses the merged view; this one did not, so the
+   * moment a name choice was saved or inherited the editor stopped seeing it:
+   * the line showed the pinned name while the PDF printed the chosen one, with
+   * nothing on screen to say which would be sent. Worse, double-clicking to
+   * fix it then edited the *pinned* form, changing it for every other resume.
+   */
+  const current = effectiveChoices()[key] ?? field.default;
+  const chosen = field.variants.find((v) => v.id === current);
+
+  return [
+    editableLine(String(chosen?.text ?? ''), {
+      className: 'title',
+      title: 'Double-click to edit this form of your name.',
+      onCommit: (text) => saveNameText(current, text),
+    }),
+    alternateStepper(key, field, current),
+    variantPicker({
+      key,
+      field,
+      current,
+      addLabel: '+ alternate',
+      onAdd: () => addNameAlternate(),
+      onEdit: null,
+      extraActions: [
+        el('span', { className: 'chip count', textContent: plural(field.variants.length, 'alternate') }),
+        current !== field.default
+          ? el('span', {
+              className: 'chip overridden',
+              textContent: 'changed',
+              title: 'This resume uses a different form of your name from the pinned default',
+            })
+          : null,
+      ].filter(Boolean),
+    }),
+    el('span', { className: 'id', textContent: said }),
+  ].filter(Boolean);
+}
+
+/** Rewrite one form of the name, leaving the others alone. */
+async function saveNameText(variantId, text) {
+  const field = state.store.profile.name;
+  const next = {
+    ...field,
+    variants: field.variants.map((v) => (v.id !== variantId ? v : { ...v, text: undisplay(text) })),
+  };
+  await saveProfileName(next, 'Name updated');
+}
+
+/**
+ * Give the name another form. The name as it stands is kept as the default, so
+ * adding a second one never changes what any existing resume prints.
+ */
+async function addNameAlternate() {
+  const field = state.store.profile.name;
+  const existing = isVariantField(field) ? field : null;
+  const currentText = existing
+    ? (existing.variants.find((v) => v.id === existing.default) ?? existing.variants[0])?.text ?? ''
+    : String(field ?? '');
+
+  const answer = await form('New form of your name', [
+    { name: 'label', label: 'Label', value: '' },
+    { name: 'text', label: 'Name', value: currentText, multiline: false },
+    { name: 'note', label: 'Note to self (optional)', value: '' },
+    ...(!state.masterView ? [{ name: 'useNow', label: 'Use it in this resume straight away', type: 'checkbox', value: true }] : []),
+  ], existing ? null : `"${currentText || '(empty)'}" is kept as the default.`);
+  if (!answer?.text?.trim()) return;
+
+  let id = `v_${slug(answer.label || answer.text)}` || `v_${Date.now()}`;
+  const taken = new Set((existing?.variants ?? []).map((v) => v.id));
+  let n = 2;
+  while (taken.has(id)) id = `v_${slug(answer.label || answer.text)}_${n++}`;
+
+  const added = {
+    id,
+    label: answer.label?.trim() || answer.text.trim().slice(0, 24),
+    text: answer.text.trim(),
+    ...(answer.note?.trim() ? { note: answer.note.trim() } : {}),
+  };
+
+  const next = existing
+    ? { ...existing, variants: [...existing.variants, added] }
+    : {
+        default: 'v_base',
+        variants: [
+          { id: 'v_base', label: currentText.slice(0, 24) || 'Default', text: currentText },
+          added,
+        ],
+      };
+
+  await saveProfileName(next, 'Added another form of your name');
+  if (!state.masterView && answer.useNow) {
+    state.choices[PROFILE_NAME_KEY] = id;
+    markDirty();
+    render();
+  }
+}
+
+async function saveProfileName(name, message) {
+  describeNext(message ?? 'the change');
+  const profile = { ...state.store.profile, name };
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  state.store.profile = profile;
+  setStatus(message);
+  render();
+  scheduleRender();
+  scheduleCommit();
+}
+
 async function saveProfileField(key, text) {
+  const label = (PROFILE_FIELDS.find(([k]) => k === key) ?? [key, key])[1].toLowerCase();
+  describeNext(text.trim() ? `the ${label}` : `removing the ${label}`);
   const profile = { ...state.store.profile };
   if (text.trim()) profile[key] = undisplay(text);
   else delete profile[key];
@@ -1319,6 +1664,12 @@ function renderMasterEditor(editor) {
       el('span', { className: 'name', textContent: SECTION_LABELS[kind] ?? kind }),
       el('span', { className: 'rule' }),
       el('button', { className: 'link', textContent: '+ Add Entry', onclick: () => addEntry(kind) }),
+      el('button', {
+        className: 'link',
+        textContent: '+ Draft with AI',
+        title: 'Paste a repository link, or say a line about it, and get a first draft to edit',
+        onclick: () => draftEntryWithAi(kind),
+      }),
     ]));
     if (!entries.length) editor.append(el('p', { className: 'hint', textContent: 'No source entries yet.' }));
     for (const entry of entries) {
@@ -1359,6 +1710,12 @@ function renderMasterEditor(editor) {
           ]));
           row.append(el('div', { className: 'toolbar' }, [
             el('button', { className: 'tiny', textContent: '+ Phrasing', onclick: () => addBulletVariant(entry, bullet) }),
+            el('button', {
+              className: 'tiny',
+              textContent: 'Draft one',
+              title: 'Ask the AI for another way to say this line — same claim, different wording',
+              onclick: () => draftPhrasings(entry, { bulletId: bullet.id }),
+            }),
             el('button', { className: 'tiny', textContent: 'Compare Phrasings', onclick: () => askBulletFeedback(entry, bullet) }),
           ]));
         }
@@ -1382,6 +1739,79 @@ function renderMasterEditor(editor) {
 /* ------------------------------------------------------------------ *
  * Adding and editing                                                  *
  * ------------------------------------------------------------------ */
+
+/**
+ * Draft an entry from a repository, or from a line of notes.
+ *
+ * The case this is for: you built something, the code is the record of it, and
+ * turning that into three bullets from memory is the part of writing a resume
+ * people put off for weeks. The repository is evidence, so working from it is
+ * not invention — but nothing is written until it has been read, which is why
+ * this shows the draft and asks.
+ */
+async function draftEntryWithAi(kind) {
+  const asked = await form(`New ${kind} entry, drafted`, [
+    { name: 'repoUrl', label: 'Repository link (optional)', value: '' },
+    { name: 'notes', label: 'Or say a little about it', value: '', multiline: true },
+  ], 'Nothing is saved until you have read it. Drafted wordings stay marked unreviewed.');
+  if (!asked || (!asked.repoUrl?.trim() && !asked.notes?.trim())) return;
+
+  setStatus('Reading and drafting…');
+  let result;
+  try {
+    result = await api('/ai/draft-entry', {
+      method: 'POST',
+      body: JSON.stringify({ repoUrl: asked.repoUrl, notes: asked.notes, kind }),
+    });
+  } catch (err) {
+    showModal('Could not draft it', el('pre', { textContent: err.message }));
+    setStatus(err.message, true);
+    return;
+  }
+
+  if (!result.executed) {
+    showModal(
+      'The AI is switched off',
+      el('div', {}, [
+        el('p', { textContent: 'Turn it on in Voice & AI to draft entries. This is the prompt it would have been given:' }),
+        el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+      ]),
+    );
+    setStatus('AI is off');
+    return;
+  }
+
+  await reviewDraftedEntry(result.entry, result.repo, kind);
+}
+
+/** Show what came back and let it be edited before anything is written. */
+async function reviewDraftedEntry(entry, repo, kind) {
+  const lines = (entry.bullets ?? []).flatMap((b) => b.variants.map((v) => `${v.label}: ${v.text}`));
+  const accepted = await showModal(
+    'Draft entry',
+    el('div', {}, [
+      el('p', { className: 'hint', textContent: repo ? `From ${repo.owner}/${repo.name}.` : 'From what you wrote.' }),
+      el('h3', { textContent: entry.title }),
+      el('p', {
+        className: 'hint',
+        textContent: [entry.subtitle, entry.dates, entry.location].filter(Boolean).join(' · '),
+      }),
+      el('ul', {}, lines.map((t) => el('li', { textContent: t }))),
+      el('p', { className: 'hint', textContent: 'Every wording is saved unreviewed, so you can see at a glance what you have not read yet.' }),
+    ]),
+    { okLabel: 'Add it', showCancel: true },
+  );
+  if (!accepted) return;
+
+  // Ids are assigned by the server, but the store is the client's to keep
+  // unique — another entry may have been added since.
+  let id = entry.id;
+  for (let n = 2; state.store.entries.some((e) => e.id === id); n++) id = `${entry.id}_${n}`;
+
+  describeNext(`drafting "${entry.title}"`);
+  await saveEntry({ ...entry, id, kind: entry.kind ?? kind }, `Added "${entry.title}"`);
+  setStatus(`Added "${entry.title}" — every wording is unreviewed`);
+}
 
 async function addEntry(kind) {
   const answer = await form(`New ${kind} entry`, [
@@ -1423,13 +1853,23 @@ async function addEntry(kind) {
     return;
   }
 
-  // A new entry nobody references is invisible, so add it to the section of the
-  // resume being edited — at the root of the chain, so every resume gets it.
+  /*
+   * A new entry nobody references is invisible, so add it to the section of the
+   * resume being edited — at the root of the chain, so every resume gets it.
+   *
+   * From the root's *own* sections, not the flattened chain. Built from the
+   * flattened chain, this carried the child's overrides down onto the base with
+   * it: adding an entry while "New grad" was selected wrote New grad's hidden
+   * coursework line into the base, and every other variation lost it too.
+   */
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) =>
+  const rootEntries = (id2) => resolveSections(root.id).find((s) => s.kind === id2)?.entries ?? [];
+  const sections = (root.sections ?? []).map((s) =>
     s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
   );
-  if (!sections.some((s) => s.kind === kind)) sections.push({ kind, entries: [id] });
+  if (!sections.some((s) => s.kind === kind)) {
+    sections.push({ kind, entries: [...rootEntries(kind), id] });
+  }
   await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   render();
   scheduleRender();
@@ -1462,9 +1902,10 @@ async function removeEntry(entry) {
   if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
   await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
 
-  // Drop the reference too, so the next compile does not warn about it.
+  // Drop the reference too, so the next compile does not warn about it. From
+  // the root's own sections, for the reason given in addEntry.
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) => ({
+  const sections = (root.sections ?? []).map((s) => ({
     ...s,
     entries: (s.entries ?? []).filter((id) => id !== entry.id),
   }));
@@ -1516,6 +1957,89 @@ async function removeBullet(entry, bullet) {
 }
 
 /** Add another phrasing of an existing bullet. */
+/**
+ * Ask for other ways to say a line that already exists.
+ *
+ * Different from drafting an entry: the fact is settled and only the wording
+ * is in question. The failure mode is an alternate that quietly claims more
+ * than the original — hard to catch precisely because it reads better — so
+ * each one is shown against the line it came from before anything is kept,
+ * and kept marked unreviewed after.
+ */
+async function draftPhrasings(entry, target) {
+  const asked = await form('Draft another wording', [
+    { name: 'angle', label: 'Anything to aim for? (optional)', value: '' },
+    { name: 'count', label: 'How many', value: '2' },
+  ], 'Same claim, different wording. Nothing is saved until you have read it.');
+  if (!asked) return;
+
+  setStatus('Drafting…');
+  let result;
+  try {
+    result = await api('/ai/draft-phrasing', {
+      method: 'POST',
+      body: JSON.stringify({ entryId: entry.id, ...target, angle: asked.angle, count: Number(asked.count) || 2 }),
+    });
+  } catch (err) {
+    showModal('Could not draft it', el('pre', { textContent: err.message }));
+    setStatus(err.message, true);
+    return;
+  }
+
+  if (!result.executed) {
+    showModal('The AI is switched off', el('div', {}, [
+      el('p', { textContent: 'Turn it on in Voice & AI to draft wordings. This is the prompt it would have been given:' }),
+      el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+    ]));
+    return;
+  }
+
+  const field = target.fieldName ? entry[target.fieldName] : entry.bullets.find((b) => b.id === target.bulletId);
+  const current = isVariantField(field)
+    ? (field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? ''
+    : String(field ?? '');
+
+  const keep = new Set(result.variants.map((_, i) => i));
+  const accepted = await showModal(
+    'Drafted wordings',
+    el('div', {}, [
+      el('p', { className: 'hint', textContent: 'The line as it stands:' }),
+      el('p', { textContent: current }),
+      el('p', { className: 'hint', textContent: 'Untick anything that says more than that one does.' }),
+      ...result.variants.map((v, i) =>
+        el('label', { className: 'row' }, [
+          el('input', {
+            type: 'checkbox',
+            checked: true,
+            onchange: (e) => (e.target.checked ? keep.add(i) : keep.delete(i)),
+          }),
+          el('span', {}, `${v.label}: ${v.text}`),
+        ]),
+      ),
+    ]),
+    { okLabel: 'Add them', showCancel: true },
+  );
+  if (!accepted || keep.size === 0) return;
+
+  const chosen = result.variants.filter((_, i) => keep.has(i));
+  const existing = isVariantField(field) ? field : { default: 'v_base', variants: [{ id: 'v_base', label: current.slice(0, 24) || 'Default', text: current }] };
+  const taken = new Set(existing.variants.map((v) => v.id));
+  const added = chosen.map((v) => {
+    let id = `v_${slug(v.label || v.text)}`;
+    for (let n = 2; taken.has(id); n++) id = `v_${slug(v.label || v.text)}_${n}`;
+    taken.add(id);
+    return { id, label: v.label, text: v.text, suggested: true };
+  });
+
+  const nextField = { ...existing, variants: [...existing.variants, ...added] };
+  const next = target.fieldName
+    ? { ...entry, [target.fieldName]: nextField }
+    : { ...entry, bullets: entry.bullets.map((b) => (b.id === target.bulletId ? { ...b, ...nextField } : b)) };
+
+  describeNext(`drafting ${plural(added.length, 'wording')}`);
+  await saveEntry(next, `Added ${plural(added.length, 'drafted wording')}`);
+}
+
 async function addBulletVariant(entry, bullet) {
   const current = bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0];
   const answer = await form(`New phrasing — ${bulletName(entry, bullet)}`, [
@@ -1843,13 +2367,20 @@ async function addSkillGroup() {
         .map((text) => ({ id: `s_${slug(text)}`, text })),
     },
   ];
+  describeNext(`adding the group "${answer.name.trim()}"`);
   await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
 
+  // The root's own sections, for the reason given in addEntry: built from the
+  // flattened chain this carried the selected variation's overrides down onto
+  // the base along with the new group.
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) =>
+  const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
   );
-  if (!sections.some((s) => s.kind === 'skills')) sections.push({ kind: 'skills', entries: [], groups: [id] });
+  if (!sections.some((s) => s.kind === 'skills')) {
+    const inherited = resolveSections(root.id).find((s) => s.kind === 'skills');
+    sections.push({ kind: 'skills', entries: [], groups: [...(inherited?.groups ?? []), id] });
+  }
   await saveResumeSpec({ ...root, sections }, 'Skill group added');
   render();
   scheduleRender();
@@ -1862,7 +2393,7 @@ async function removeSkillGroup(group) {
     body: JSON.stringify(state.store.skillGroups.filter((g) => g.id !== group.id)),
   });
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) =>
+  const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
   );
   await saveResumeSpec({ ...root, sections }, 'Group deleted');
@@ -2466,6 +2997,14 @@ async function newDraft() {
 }
 
 async function openDraft(id) {
+  /*
+   * Whatever is in the draft on screen goes to disk before another one
+   * replaces it. Switching drafts is one of the two ways a half-written cover
+   * letter used to disappear — the other being closing the tab — because
+   * nothing but blur ever wrote.
+   */
+  if (draftSave.current && draftSave.current.id !== id) await flushDraftEdits();
+
   openDraftId = id;
   location.hash = `#workspace/${encodeURIComponent(id)}`;
   try {
@@ -2484,6 +3023,97 @@ const SOURCE_LABEL = { bank: 'from your answer bank', ai: 'drafted by AI', human
 let letterTimer = null;
 let letterToken = 0;
 
+/* ------------------------------------------------------------------ *
+ * The Workspace saves as you type                                     *
+ * ------------------------------------------------------------------ *
+ *
+ * It used to save on blur and on nothing else. The cover letter, every
+ * answer and the notes are textareas someone types into for a long time
+ * without clicking anywhere — and the letter's preview retypesets while they
+ * do, which says, convincingly, that the text is being handled. It was not:
+ * reloading the page, closing the tab, or following the link to the resume
+ * builder threw away everything since the last time focus happened to move.
+ *
+ * The builder already had this. The Workspace is where the actual writing
+ * happens, and it had none of it.
+ */
+
+/** The draft being edited, and the machinery keeping it on disk. */
+const draftSave = {
+  /** Set by `renderDraft` so the flush paths can reach the open draft. */
+  current: null,
+  timer: null,
+  /** The write in flight, so anything leaving the page can await it. */
+  pending: null,
+  dirty: false,
+};
+
+function setDraftSaveState(mode, detail) {
+  const chip = $('#draft-save-state');
+  if (!chip) return;
+  chip.className = `save ${mode}`;
+  chip.textContent =
+    mode === 'saving'
+      ? 'Saving…'
+      : mode === 'saved'
+        ? 'All changes saved'
+        : mode === 'failed'
+          ? `Not saved — ${detail ?? 'the server did not accept it'}`
+          : 'Unsaved changes';
+}
+
+/** Write the open draft now. Safe to call when there is nothing to write. */
+async function saveDraftNow(message) {
+  const draft = draftSave.current;
+  if (!draft) return;
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+  if (!draftSave.dirty && !message) return;
+
+  draftSave.dirty = false;
+  setDraftSaveState('saving');
+  const write = api(`/workspace/${encodeURIComponent(draft.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(draft),
+    keepalive: true,
+  })
+    .then(() => {
+      // Only clear the chip if nothing has been typed since this write began.
+      if (!draftSave.dirty) setDraftSaveState('saved');
+      if (message) setStatus(message);
+    })
+    .catch((err) => {
+      draftSave.dirty = true;
+      setDraftSaveState('failed', err.message);
+      throw err;
+    })
+    .finally(() => {
+      if (draftSave.pending === write) draftSave.pending = null;
+    });
+
+  draftSave.pending = write;
+  await write.catch(() => {});
+}
+
+/** A keystroke happened. Same debounce the builder uses. */
+function markDraftDirty() {
+  draftSave.dirty = true;
+  setDraftSaveState('dirty');
+  clearTimeout(draftSave.timer);
+  draftSave.timer = setTimeout(() => {
+    draftSave.timer = null;
+    saveDraftNow().catch(() => {});
+  }, AUTOSAVE_DELAY_MS);
+}
+
+/** Everything typed into the Workspace, on disk, before we go anywhere. */
+async function flushDraftEdits() {
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+  if (draftSave.dirty) await saveDraftNow();
+  await draftSave.pending?.catch(() => {});
+}
+
 function renderDraft(draft) {
   const panel = $('#draft-editor');
   if (!draft) {
@@ -2501,9 +3131,14 @@ function renderDraft(draft) {
 
   /** Persist the draft as it stands, marking edited fields so generation
    *  never overwrites something a human wrote. */
+  draftSave.current = draft;
+  draftSave.dirty = false;
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+
   const save = async (message) => {
-    await api(`/workspace/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: JSON.stringify(draft) });
-    if (message) setStatus(message);
+    draftSave.dirty = true;
+    await saveDraftNow(message);
   };
 
   const blocks = [];
@@ -2566,6 +3201,14 @@ function renderDraft(draft) {
       }
     };
 
+    const letterFeedbackBtn = el('button', {
+      className: 'tiny',
+      textContent: 'Ask for feedback',
+      title: 'The AI reads what you have written and says what is weak — it does not rewrite it',
+      disabled: !draft.coverLetter.body.trim(),
+      onclick: () => askDraftFeedback(draft, {}, notes),
+    });
+
     // Longer than the resume's debounce: this one fires on every keystroke,
     // and recompiling mid-word is wasted work.
     const scheduleLetter = () => {
@@ -2578,9 +3221,16 @@ function renderDraft(draft) {
     letter.oninput = () => {
       draft.coverLetter.body = letter.value;
       draft.coverLetter.edited = true;
+      // The button that reviews this is disabled while there is nothing to
+      // review, and nothing else re-renders the header — so writing a letter
+      // left it dead until the draft was closed and reopened.
+      letterFeedbackBtn.disabled = !letter.value.trim();
+      markDraftDirty();
       scheduleLetter();
     };
-    letter.onblur = () => save();
+    // Blur still writes immediately — it is a strong signal the thought is
+    // finished — but it is no longer the only thing that writes.
+    letter.onblur = () => saveDraftNow().catch(() => {});
 
     blocks.push(
       el('div', { className: 'block' }, [
@@ -2594,9 +3244,11 @@ function renderDraft(draft) {
           el('span', { className: 'grow', style: 'flex:1' }),
           el('button', {
             className: 'tiny',
-            textContent: 'Draft from previous letters',
+            textContent: 'Draft it',
+            title: 'Write a first draft from the posting and the letters you have written before',
             onclick: () => generate(draft, 'letter', notes),
           }),
+          letterFeedbackBtn,
         ]),
         el('div', { className: 'letter-split' }, [letter, letterPane]),
         letterFit,
@@ -2615,12 +3267,22 @@ function renderDraft(draft) {
         value: q.answer,
         placeholder: 'No stored answer yet — what you write here is saved for next time.',
       });
+      const answerFeedbackBtn = el('button', {
+        className: 'link',
+        textContent: 'Feedback',
+        title: 'The AI reads this answer and says what is weak — it does not rewrite it',
+        disabled: !q.answer?.trim(),
+        onclick: () => askDraftFeedback(draft, { questionId: q.id }, notes),
+      });
+
       box.oninput = () => {
         q.answer = box.value;
         q.edited = true;
         q.source = 'human';
+        answerFeedbackBtn.disabled = !box.value.trim();
+        markDraftDirty();
       };
-      box.onblur = () => save();
+      box.onblur = () => saveDraftNow().catch(() => {});
 
       qs.append(
         el('div', { style: 'margin-bottom:16px' }, [
@@ -2628,11 +3290,35 @@ function renderDraft(draft) {
             document.createTextNode(q.question),
             q.required ? el('span', { className: 'badge required', style: 'margin-left:6px', textContent: 'required' }) : null,
           ]),
-          el('div', { style: 'margin-bottom:5px' }, [
+          el('div', { className: 'row-tight', style: 'margin-bottom:5px' }, [
             el('span', {
               className: `badge ${q.edited ? 'human' : (q.source ?? 'empty')}`,
               textContent: q.edited ? SOURCE_LABEL.human : (SOURCE_LABEL[q.source] ?? SOURCE_LABEL.empty),
             }),
+            /*
+             * A stored answer that only loosely matched this question. The
+             * matcher draws that line deliberately — above it an answer is safe
+             * to send unread, below it, in its own words, "a starting point the
+             * user should read first" — and a loose one used to arrive looking
+             * exactly like a confident one. It is the difference between "yes,
+             * I am authorized to work" and "no, I require sponsorship".
+             */
+            !q.edited && q.needsReview
+              ? el('span', {
+                  className: 'badge required',
+                  style: 'margin-left:6px',
+                  textContent: 'read this one first',
+                  title: 'This came from a stored answer to a similar — not identical — question.',
+                })
+              : null,
+            el('span', { style: 'flex:1' }),
+            el('button', {
+              className: 'link',
+              textContent: 'Draft this one',
+              title: 'Write an answer from the posting and the answers you have given before',
+              onclick: () => generate(draft, 'questions', notes, { questionId: q.id }),
+            }),
+            answerFeedbackBtn,
           ]),
           box,
         ]),
@@ -2665,8 +3351,11 @@ function renderDraft(draft) {
 
   /* Notes and actions */
   const notesBox = el('textarea', { value: draft.notes ?? '', placeholder: 'Notes to yourself about this application.' });
-  notesBox.oninput = () => (draft.notes = notesBox.value);
-  notesBox.onblur = () => save();
+  notesBox.oninput = () => {
+    draft.notes = notesBox.value;
+    markDraftDirty();
+  };
+  notesBox.onblur = () => saveDraftNow().catch(() => {});
 
   const resumeSelect = el('select');
   for (const r of state.store.resumes) {
@@ -2679,7 +3368,18 @@ function renderDraft(draft) {
 
   setChildren(
     panel,
-    el('h3', { textContent: `${draft.role}` }),
+    el('div', { className: 'draft-head' }, [
+      el('h3', { textContent: `${draft.role}` }),
+      el('span', { className: 'grow' }),
+      // Says whether what is on screen is on disk. The builder has had one of
+      // these all along; the tab where the writing actually happens did not.
+      el('span', {
+        id: 'draft-save-state',
+        className: 'save saved',
+        title: 'Your letter, answers and notes are written to the save as you type.',
+        textContent: 'All changes saved',
+      }),
+    ]),
     el('div', { className: 'where' }, [
       document.createTextNode(draft.company),
       draft.url ? document.createTextNode(' · ') : null,
@@ -2703,7 +3403,30 @@ function renderDraft(draft) {
           title: 'The AI reads the posting and decides which phrasings and bullets to use',
           onclick: () => tailorDraft(draft, notes, true),
         }),
+        /*
+         * The third thing you want, and the one that was missing: neither
+         * matching nor AI, but going and deciding yourself. Working on an
+         * application is where you notice the resume needs a version for it.
+         */
+        el('button', {
+          className: 'tiny',
+          textContent: 'Start one to edit myself',
+          title: 'Create a variation for this application and open it in the builder',
+          onclick: () => startVariation(draft, notes),
+        }),
       ]),
+      draft.resumeId
+        ? el('div', { className: 'toolbar' }, [
+            el('button', {
+              className: 'link',
+              textContent: 'Open this resume in the builder →',
+              title: 'Edit the resume this application will send, and come back here after',
+              onclick: () => {
+                location.hash = `#resumes/${encodeURIComponent(draft.resumeId)}/from/${encodeURIComponent(draft.id)}`;
+              },
+            }),
+          ])
+        : null,
       el('div', {
         className: 'hint',
         textContent: draft.url
@@ -2743,6 +3466,31 @@ function renderDraft(draft) {
  * Make a resume for this posting from inside the workspace — the same
  * pipeline the extension runs, given a link instead of a page.
  */
+/**
+ * Start a resume variation for this application and go and edit it.
+ *
+ * The walk matters as much as the variation: it lands in the builder already
+ * on the new resume, and the builder knows which application sent it, so the
+ * way back is one click to this posting rather than a hunt through the list.
+ */
+async function startVariation(draft, notes) {
+  try {
+    setStatus('Starting a variation…');
+    const result = await api(`/workspace/${encodeURIComponent(draft.id)}/variation`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    await loadStore();
+    setStatus(`Started "${result.spec.label}"`);
+    // The server hands back where to go, so the two ends cannot disagree about
+    // the shape of the link.
+    location.hash = result.url.slice(result.url.indexOf('#'));
+  } catch (err) {
+    notes.textContent = err.message;
+    setStatus(err.message, true);
+  }
+}
+
 async function tailorDraft(draft, notes, useAi) {
   setChildren(notes, el('div', { textContent: useAi ? 'Reading the posting…' : 'Matching against the posting…' }));
   try {
@@ -2774,12 +3522,12 @@ async function tailorDraft(draft, notes, useAi) {
   }
 }
 
-async function generate(draft, what, notes) {
+async function generate(draft, what, notes, extra = {}) {
   setChildren(notes, el('div', { textContent: 'Working…' }));
   try {
     const res = await api(`/workspace/${encodeURIComponent(draft.id)}/generate`, {
       method: 'POST',
-      body: JSON.stringify({ what }),
+      body: JSON.stringify({ what, ...extra }),
     });
     renderDraft(res.draft);
     const panel = $('#draft-editor .gen-notes');
@@ -2787,6 +3535,40 @@ async function generate(draft, what, notes) {
     setStatus('Draft updated');
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  }
+}
+
+/**
+ * Ask the AI what is wrong with what you have written.
+ *
+ * The letter and the answers were the one part of an application it could
+ * write but never read back — which is the wrong way round, because reviewing
+ * your own prose is the thing it is best at and the thing you least want to do
+ * at midnight.
+ *
+ * It runs as a background job like resume feedback does, and lands in the same
+ * results panel, because a critique takes as long here as it does there and
+ * nobody should watch a spinner for it.
+ */
+async function askDraftFeedback(draft, target, notes) {
+  try {
+    setChildren(notes, el('div', { textContent: 'Reading it…' }));
+    const { job } = await api('/ai/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ draftId: draft.id, ...target, background: true }),
+    });
+    await openJob(job);
+    setChildren(
+      notes,
+      el('div', {
+        textContent: 'Reading it — the feedback will appear in the results indicator, and this keeps working while you write.',
+      }),
+    );
+    watchJobs();
+    return job;
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+    return null;
   }
 }
 
@@ -3512,6 +4294,14 @@ async function loadSettings() {
    * setting that lets the model go and read something they did not choose.
    */
   const research = el('input', { type: 'checkbox', checked: Boolean(config.ai.research) });
+  const researchNote = el('div', { className: 'hint', style: 'margin-bottom:12px' });
+  const showResearchNote = (on) => {
+    researchNote.textContent = on
+      ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
+      : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.';
+  };
+  showResearchNote(config.ai.research);
+
   research.onchange = async () => {
     try {
       await api('/config', { method: 'PUT', body: JSON.stringify({ ai: { research: research.checked } }) });
@@ -3520,7 +4310,15 @@ async function loadSettings() {
           ? 'The AI may look up the company while it writes'
           : 'The AI works only from what you gave it',
       );
-      loadSettings();
+      /*
+       * The paragraph under the checkbox, and nothing else. Rebuilding the
+       * panel from the server was the easy way to update it, and it threw away
+       * the command, the arguments and the timeout as they had been typed —
+       * fields that are deliberately not saved until Save is pressed, because
+       * a half-typed command is not a command. Ticking a checkbox is not a
+       * reason to lose them.
+       */
+      showResearchNote(research.checked);
     } catch (err) {
       research.checked = !research.checked;
       setStatus(err.message, true);
@@ -3599,10 +4397,7 @@ async function loadSettings() {
       research,
       el('span', {}, 'Let it look up the company online'),
     ]),
-    el('div', { className: 'hint', style: 'margin-bottom:12px' },
-      config.ai.research
-        ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
-        : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.'),
+    researchNote,
     config.overrides.ai
       ? el('div', { className: 'override', textContent: 'RMM_AI=0 is set, so the AI stays off whatever this says.' })
       : null,
@@ -3794,6 +4589,12 @@ async function restoreResumeVersion(hash) {
     return;
   }
   try {
+    /*
+     * Before the restore, not after: you reach for an old version precisely
+     * when there are selections on screen, and discarding them silently is
+     * the opposite of what the version history is for.
+     */
+    if (historyResumeId === state.resumeId) await flushEdits();
     await api(`/resumes/${encodeURIComponent(historyResumeId)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });
@@ -3801,6 +4602,7 @@ async function restoreResumeVersion(hash) {
     await loadStore();
     if (historyResumeId === state.resumeId) {
       clearEdits();
+      setSaveState('saved');
       render();
       scheduleRender();
     }
@@ -4040,6 +4842,7 @@ function render() {
       : state.store.resumes.map(option)),
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
+  drawWayBack();
   $('#btn-base').hidden = state.masterView;
   $('#btn-save-as').hidden = state.masterView;
   $('#btn-feedback').textContent = state.masterView ? 'Master Feedback' : 'Resume Feedback';
@@ -4094,6 +4897,59 @@ async function loadStore() {
   if (!state.resumeId) state.masterView = true;
 }
 
+/**
+ * The way back to the application that sent you here.
+ *
+ * Named, because "back to the Workspace" would leave you looking for which of
+ * eleven drafts you had open. You came from one posting; the button says which,
+ * and returns to it rather than to a list.
+ */
+function drawWayBack() {
+  const bar = $('#way-back');
+  if (!bar) return;
+  const draft = state.fromDraft;
+  bar.hidden = !state.fromDraftId;
+  if (!state.fromDraftId) return;
+
+  const where = draft ? `${draft.role} — ${draft.company}` : 'the application you came from';
+  bar.replaceChildren(
+    el('button', {
+      className: 'tiny',
+      textContent: `← Back to ${where}`,
+      title: 'Return to the application you were working on',
+      onclick: () => {
+        location.hash = `#workspace/${encodeURIComponent(state.fromDraftId)}`;
+      },
+    }),
+    el('span', {
+      className: 'faint',
+      textContent: 'This resume is the one that application will send.',
+    }),
+  );
+}
+
+/**
+ * Look up the application named in the hash, for the label on the way back.
+ *
+ * Quietly forgotten if it has gone — completed, or discarded from another
+ * window — because a dead trail back should just not be offered, rather than
+ * being an error about a thing the user never asked for.
+ */
+async function loadFromDraft() {
+  const id = state.fromDraftId;
+  try {
+    const draft = await api(`/workspace/${encodeURIComponent(id)}`);
+    if (state.fromDraftId !== id) return;
+    state.fromDraft = draft;
+  } catch {
+    if (state.fromDraftId === id) {
+      state.fromDraftId = null;
+      state.fromDraft = null;
+    }
+  }
+  render();
+}
+
 /** Switch tabs programmatically, so a deep link lands in the right place. */
 function showTab(name) {
   const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
@@ -4109,6 +4965,44 @@ async function applyHash() {
   if (draft) {
     showTab('workspace');
     await openDraft(decodeURIComponent(draft[1]));
+    return true;
+  }
+
+  /*
+   * `#resumes/<id>` opens the builder on one resume, and the optional
+   * `/from/<draftId>` remembers which application sent you there.
+   *
+   * In the hash rather than in a variable, because the way back has to survive
+   * a reload: you go to the builder to make the decisions, spend twenty
+   * minutes there, refresh, and the trail back to the posting you were
+   * answering should not be the thing that goes missing.
+   */
+  const build = /^#resumes\/([^/]+)(?:\/from\/(.+))?$/.exec(location.hash);
+  if (build) {
+    const wanted = decodeURIComponent(build[1]);
+    state.fromDraftId = build[2] ? decodeURIComponent(build[2]) : null;
+    state.fromDraft = null;
+    showTab('resumes');
+    if (state.store.resumes.some((r) => r.id === wanted)) {
+      /*
+       * Write what is pending before moving. The resume dropdown has always
+       * been careful about this; the hash route was not, so following the way
+       * back — or pressing the browser's own Back button — inside the
+       * auto-save debounce dropped the edit and left the save chip reading
+       * "Unsaved changes" forever, with nothing unsaved and nothing that would
+       * ever save it.
+       */
+      await flushEdits();
+      state.masterView = false;
+      state.resumeId = wanted;
+      clearEdits();
+      setSaveState('saved');
+    } else {
+      setStatus(`No resume "${wanted}" — it may have been deleted.`, true);
+    }
+    if (state.fromDraftId) loadFromDraft().catch(() => undefined);
+    render();
+    scheduleRender();
     return true;
   }
 
@@ -4160,7 +5054,13 @@ async function boot() {
   };
   assetUI = setupAssets({ api, el, setChildren, readAsBase64, flushEdits, isDirty: () => state.dirty,
     reloadStore: async () => { await loadStore(); render(); }, entryName, status: setStatus,
-    projectChanged: dir => { activeProject = dir; }, loadProjectSettings });
+    projectChanged: dir => {
+      activeProject = dir;
+      // A stack of edits to another save is meaningless here and dangerous if
+      // applied: the ids in it belong to somebody else's documents.
+      history.clear();
+      paintUndo();
+    }, loadProjectSettings });
   setupTabs();
   const project = await assetUI.init();
   if (!project.current) { showTab('save'); return; }
@@ -4244,8 +5144,33 @@ async function boot() {
     loadVoice();
   };
 
+  $('#btn-undo').onclick = () => stepHistory('undo');
+  $('#btn-redo').onclick = () => stepHistory('redo');
+  paintUndo();
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) $('#modal-cancel').click();
+    if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) {
+      $('#modal-cancel').click();
+      return;
+    }
+
+    /*
+     * Cmd/Ctrl+Z, and Shift for redo.
+     *
+     * Not while typing: inside a text box the browser's own undo is the one
+     * you want, and hijacking it to revert a whole document because you
+     * pressed it mid-sentence would be startling. Once you leave the box the
+     * edit has been written, and this is the undo that applies.
+     */
+    const meta = e.metaKey || e.ctrlKey;
+    if (!meta || e.key.toLowerCase() !== 'z') return;
+    const el = document.activeElement;
+    const typing = el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable);
+    if (typing) return;
+    if (!$('#modal').classList.contains('hidden')) return;
+
+    e.preventDefault();
+    stepHistory(e.shiftKey ? 'redo' : 'undo');
   });
 }
 
