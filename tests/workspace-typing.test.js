@@ -3,7 +3,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
 
-vi.mock('../web/preview.js', () => ({ createPreview: () => ({ show: async () => {} }) }));
+/*
+ * A stand-in for pdf.js that records what it was asked to do. `clear` matters
+ * here: the real one takes the drawn page down, and the bug was that nothing
+ * took it down — so an emptied letter showed its own last version with "type
+ * a first sentence" written across it.
+ */
+const previewCalls = [];
+vi.mock('../web/preview.js', () => ({
+  createPreview: (frame) => ({
+    show: async (url) => {
+      previewCalls.push(['show', url]);
+      frame.classList.add('loaded');
+      frame.querySelector('.pages')?.replaceChildren(document.createElement('canvas'));
+    },
+    clear: () => {
+      previewCalls.push(['clear']);
+      frame.classList.remove('loaded');
+      frame.querySelector('.pages')?.replaceChildren();
+    },
+  }),
+}));
 vi.mock('../web/assets.js', () => ({
   setupAssets: () => ({ init: async () => ({ current: '/test-save' }), load: async () => {} }),
 }));
@@ -315,5 +335,29 @@ describe('typing in the Workspace', () => {
     const draftIt = [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it'));
     expect(draftIt.classList.contains('ai-action')).toBe(true);
     expect(draftIt.title).toContain('Runs your AI command');
+  });
+  /*
+   * Clearing the letter left the last compiled page on screen with the empty
+   * state drawn over the top of it — two things rendering in the same box, the
+   * letter you had just deleted still legible under the invitation to write
+   * one. Dropping the `loaded` class brings the placeholder back and does
+   * nothing at all about the page pdf.js has already painted.
+   */
+  it('takes the page down when the letter is emptied, not just the class off it', async () => {
+    previewCalls.length = 0;
+    type(letterBox(), PARAGRAPH);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(previewCalls.some(([what]) => what === 'show'), 'a page was drawn to begin with').toBe(true);
+
+    const pane = document.querySelector('#draft-editor .letter-preview');
+    expect(pane.classList.contains('loaded')).toBe(true);
+
+    previewCalls.length = 0;
+    type(letterBox(), '');
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(previewCalls.some(([what]) => what === 'clear'), 'and taken down when there is nothing left').toBe(true);
+    expect(pane.classList.contains('loaded')).toBe(false);
+    expect(pane.querySelector('canvas')).toBeNull();
   });
 });

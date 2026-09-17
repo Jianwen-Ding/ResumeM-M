@@ -28,11 +28,28 @@ export interface AiPlan {
   enable: string[];
   /** Entry and bullet ids to leave off. */
   disable: string[];
+  /**
+   * A new order for the bullets inside an entry, and for the entries inside a
+   * section, keyed by entry id and by section kind.
+   *
+   * A permutation and nothing else. The set of things on the page is decided
+   * by `enable` and `disable`; this only says which comes first. An id that
+   * is not shown is ignored, and anything shown but left out of the list keeps
+   * its place in store order behind whatever was named — so a reply that
+   * reorders two bullets and forgets the other four cannot delete them.
+   *
+   * Worth having because it is the cheapest real tailoring there is. A
+   * posting about streaming ingest wants the Kafka line first, and the model
+   * could not ask for that: it could swap a phrasing or hide a bullet, and
+   * that was the whole vocabulary.
+   */
+  order: Record<string, string[]>;
+  entryOrder: Record<string, string[]>;
   /** What was thrown away, so the caller can say the reply was partly junk. */
   rejected: string[];
 }
 
-const EMPTY: AiPlan = { choices: {}, skills: {}, enable: [], disable: [], rejected: [] };
+const EMPTY: AiPlan = { choices: {}, skills: {}, enable: [], disable: [], order: {}, entryOrder: {}, rejected: [] };
 
 function bulletsOf(data: StoreData): Map<string, { bullet: Bullet; entryId: string }> {
   const out = new Map<string, { bullet: Bullet; entryId: string }>();
@@ -50,7 +67,7 @@ function bulletsOf(data: StoreData): Map<string, { bullet: Bullet; entryId: stri
 export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
   if (!parsed || typeof parsed !== 'object') return EMPTY;
   const raw = parsed as Record<string, unknown>;
-  const plan: AiPlan = { choices: {}, skills: {}, enable: [], disable: [], rejected: [] };
+  const plan: AiPlan = { choices: {}, skills: {}, enable: [], disable: [], order: {}, entryOrder: {}, rejected: [] };
 
   const bullets = bulletsOf(data);
   const entries = new Map(data.entries.map((e) => [e.id, e]));
@@ -128,7 +145,48 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
     }
   }
 
+  /* Ordering. A permutation of what is already there, never a way in. */
+  for (const [entryId, ids] of Object.entries((raw.order as Record<string, unknown>) ?? {})) {
+    const entry = entries.get(entryId);
+    if (!entry || !Array.isArray(ids)) {
+      plan.rejected.push(`order ${entryId}: no such entry`);
+      continue;
+    }
+    const mine = new Set((entry.bullets ?? []).map((b) => b.id));
+    const named = dedupe(ids.filter((i): i is string => typeof i === 'string' && mine.has(i)));
+    if (named.length !== ids.length) plan.rejected.push(`order ${entryId}: dropped ids that are not its bullets`);
+    if (named.length > 0) plan.order[entryId] = named;
+  }
+
+  for (const [kind, ids] of Object.entries((raw.entryOrder as Record<string, unknown>) ?? {})) {
+    if (!Array.isArray(ids)) continue;
+    const mine = new Set(data.entries.filter((e) => e.kind === kind).map((e) => e.id));
+    const named = dedupe(ids.filter((i): i is string => typeof i === 'string' && mine.has(i)));
+    if (named.length !== ids.length) plan.rejected.push(`entryOrder ${kind}: dropped ids that are not ${kind} entries`);
+    if (named.length > 0) plan.entryOrder[kind] = named;
+  }
+
   return plan;
+}
+
+/** First occurrence wins: a repeated id is a mistake, not an instruction. */
+function dedupe(ids: string[]): string[] {
+  return [...new Set(ids)];
+}
+
+/**
+ * The named ones first, in the order given; everything else behind them, in
+ * the order it already had.
+ *
+ * This is what makes ordering safe to accept from a model at all. The result
+ * is always a permutation of `current` — nothing can be added by naming it and
+ * nothing can be dropped by leaving it out.
+ */
+function reorder(current: string[], wanted: string[]): string[] {
+  const named = wanted.filter((id) => current.includes(id));
+  if (named.length === 0) return current;
+  const rest = current.filter((id) => !named.includes(id));
+  return [...named, ...rest];
 }
 
 /**
@@ -138,7 +196,8 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
  * something the person did not arrange.
  */
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
-  if (plan.enable.length === 0 && plan.disable.length === 0) return undefined;
+  const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
+  if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;
 
   const flat = flattenSpec(base, data.resumes);
   const sections = (flat.sections ?? []).map((s) => ({
@@ -192,6 +251,23 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
       const all = (entryById.get(ownerId)?.bullets ?? []).map((b) => b.id);
       const current = new Set([...shown(s, ownerId), id]);
       s.bullets[ownerId] = all.filter((b) => current.has(b));
+    }
+  }
+
+  /*
+   * And last, the order — after showing and hiding have settled what is on
+   * the page, because reordering a list that is about to lose an entry is
+   * work thrown away, and because `shown` has to materialise the default list
+   * before there is anything to permute.
+   */
+  for (const s of sections) {
+    const wanted = plan.entryOrder[s.kind];
+    if (wanted) s.entries = reorder(s.entries, wanted);
+
+    for (const entryId of s.entries) {
+      const order = plan.order[entryId];
+      if (!order) continue;
+      s.bullets[entryId] = reorder(shown(s, entryId), order);
     }
   }
 

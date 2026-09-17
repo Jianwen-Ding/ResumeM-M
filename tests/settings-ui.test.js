@@ -217,4 +217,125 @@ describe('the settings panel', () => {
       expect(document.querySelector('#settings').textContent).not.toContain('not the "Claude Code" preset'),
     );
   });
+  /*
+   * Changing which model tailors a resume used to mean hand-editing the
+   * argument line — which turns a preset into a custom configuration that
+   * then drifts out of date with the preset it came from, the exact failure
+   * behind "I picked a preset and it still ran the old command". It is a
+   * setting now, applied to the arguments on the server.
+   */
+  const boxFor = (label) =>
+    [...document.querySelectorAll('#settings label.f')]
+      .find((f) => f.querySelector('.lbl').textContent === label)
+      ?.querySelector('input, select');
+
+  it('saves a model without touching the preset’s arguments', async () => {
+    const model = boxFor('Model');
+    expect(model).toBeTruthy();
+    expect(model.value).toBe('');
+
+    model.value = 'opus';
+    model.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary').click();
+
+    await vi.waitFor(() => expect(config.ai.model).toBe('opus'));
+    // The arguments are still the ones that were there; the flag is the
+    // server's business, not a hand edit to this box.
+    expect(config.ai.args).toEqual(['-p', '{promptText}']);
+  });
+
+  it('saves an effort level, and offers words rather than numbers', async () => {
+    const effort = boxFor('Effort');
+    expect([...effort.options].map((o) => o.textContent)).toEqual(['As it comes', 'Quick', 'Normal', 'Thorough']);
+
+    effort.value = 'high';
+    effort.dispatchEvent(new Event('change'));
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(config.ai.effort).toBe('high'));
+  });
+
+  /*
+   * Only Codex has a reasoning-effort flag. Saying "Thorough" and having it
+   * silently mean nothing would be the worst version of this.
+   */
+  it('says which mechanism each setting will actually use', async () => {
+    const text = () => document.querySelector('#settings').textContent;
+    // The fixture is claude.
+    expect(text()).toContain('has no effort switch');
+    expect(text()).toContain('Passed as --model');
+
+    const command = commandBox();
+    command.value = 'codex';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(text()).toContain('Effort is passed as -c'));
+
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(text()).toContain('is not one of the presets'));
+  });
+
+  it('offers the chosen CLI’s own model names, and lets you type another', async () => {
+    const options = () => [...document.querySelectorAll('#ai-model-options option')].map((o) => o.value);
+    expect(options()).toEqual(['opus', 'sonnet', 'haiku']);
+
+    const command = commandBox();
+    command.value = 'gemini';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(options()).toContain('gemini-2.5-pro'));
+
+    // A datalist suggests; it does not restrict.
+    expect(boxFor('Model').tagName).toBe('INPUT');
+  });
+
+  it('counts the model and the effort as unsaved changes like everything else', async () => {
+    const flag = () =>
+      [...document.querySelectorAll('#settings .hint.warn')].find((n) => n.textContent === 'Not saved yet.');
+    expect(flag().hidden).toBe(true);
+
+    boxFor('Effort').value = 'low';
+    boxFor('Effort').dispatchEvent(new Event('change'));
+    expect(flag().hidden).toBe(false);
+  });
+  /*
+   * The panel led with a command line and an argument template full of
+   * {promptText} placeholders, which made choosing a preset look like
+   * something you had to understand the machinery to do.
+   */
+  const advancedBlock = () =>
+    [...document.querySelectorAll('#settings details.advanced')].find((d) =>
+      d.querySelector('summary').textContent.includes('exact command'),
+    );
+
+  it('keeps the command line behind a disclosure', () => {
+    const box = advancedBlock();
+    expect(box).toBeTruthy();
+    expect(box.contains(commandBox())).toBe(true);
+    // The fixture's config is claude with drifted arguments, so it is not a
+    // preset and the block opens by itself — see the next test for why.
+    expect(box.open).toBe(true);
+  });
+
+  it('but opens it when what is saved is not a preset, which is when it matters', async () => {
+    const claude = AI_PRESETS.find((p) => p.command === 'claude');
+    config.ai = { ...config.ai, args: [...claude.args] };
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    // Exactly a preset now: the machinery folds away.
+    await vi.waitFor(() => expect(advancedBlock()?.open).toBe(false));
+    expect(advancedBlock().contains(commandBox())).toBe(true);
+  });
+
+  it('leaves the preset, the model and the effort in plain sight', () => {
+    const outside = (label) => {
+      const f = [...document.querySelectorAll('#settings label.f')].find(
+        (n) => n.querySelector('.lbl').textContent === label,
+      );
+      return f && !f.closest('details.advanced');
+    };
+    expect(outside('Model')).toBe(true);
+    expect(outside('Effort')).toBe(true);
+    expect(outside('LaTeX engine')).toBe(true);
+    expect(outside('Command')).toBe(false);
+    expect(outside('Timeout, seconds')).toBe(false);
+  });
 });

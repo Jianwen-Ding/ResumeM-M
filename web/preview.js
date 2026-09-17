@@ -95,5 +95,30 @@ export function createPreview(container) {
     async redraw() {
       if (currentUrl) await this.show(currentUrl);
     },
+
+    /**
+     * Take the page down, because there is nothing to show any more.
+     *
+     * Deleting the last sentence of a cover letter took the `loaded` class
+     * off the frame, which brought the "type a first sentence and it appears
+     * here" placeholder back — over the top of the page pdf.js had already
+     * drawn, which was still sitting there. The two rendered on top of each
+     * other, and the letter the user had just cleared was still legible
+     * underneath the invitation to start writing it.
+     *
+     * Hiding the placeholder instead would have been the wrong half: an empty
+     * letter has no page, and the last one is not a preview of it.
+     *
+     * `token` moves so that a compile already in flight cannot draw its
+     * result into a pane that has since been emptied.
+     */
+    clear() {
+      token++;
+      pages.replaceChildren();
+      container.classList.remove('loaded');
+      current?.destroy();
+      current = null;
+      currentUrl = null;
+    },
   };
 }

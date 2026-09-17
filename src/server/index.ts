@@ -199,7 +199,24 @@ export async function startServer(opts: ServerOptions = {}) {
   });
   app.get('/vendor/marked.js', (_req, res) => res.sendFile(require.resolve('marked')));
   app.get('/vendor/purify.mjs', (_req, res) => res.sendFile(path.join(path.dirname(require.resolve('dompurify')), 'purify.es.mjs')));
-  app.use(express.static(path.join(projectRoot, 'web')));
+  /*
+   * And say so if they are not there.
+   *
+   * A missing `web/` is not a missing file, it is a missing product: the API
+   * answers everything, the editor is a 404, and nothing in between says
+   * which of the two you have. That state shipped once already — see
+   * `findProjectRoot` — and the only reason it was ever noticed is that
+   * somebody pointed a browser at a built server. One line at startup is
+   * cheaper than that.
+   */
+  const webRoot = path.join(projectRoot, 'web');
+  if (!fs.existsSync(path.join(webRoot, 'index.html'))) {
+    console.warn(
+      `ResumeM-M: no editor found at ${webRoot}. The API will answer and every page will 404. ` +
+        `This usually means the server is running from a build that did not carry web/ with it.`,
+    );
+  }
+  app.use(express.static(webRoot));
 
   return new Promise<{ close: () => Promise<void>; port: number }>((resolve, reject) => {
     const server = app.listen(port, host, () => {

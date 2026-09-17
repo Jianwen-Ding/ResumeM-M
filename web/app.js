@@ -1984,8 +1984,11 @@ async function draftEntryWithAi(kind) {
     showModal(
       'The AI is switched off',
       el('div', {}, [
-        el('p', { textContent: 'Turn it on in Voice & AI to draft entries. This is the prompt it would have been given:' }),
-        el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+        el('p', {
+          textContent:
+            'Turn it on under Voice & AI to draft entries. Or copy what it would have been asked and paste it into a chat of your own — the reply comes back as a new entry you can paste in.',
+        }),
+        advanced('Show what it would have been asked', promptBlock(result.prompt)),
       ]),
     );
     setStatus('AI is off');
@@ -2215,8 +2218,11 @@ async function draftPhrasings(entry, target) {
 
   if (!result.executed) {
     showModal('The AI is switched off', el('div', {}, [
-      el('p', { textContent: 'Turn it on in Voice & AI to draft wordings. This is the prompt it would have been given:' }),
-      el('pre', { className: 'prompt-dump', textContent: result.prompt }),
+      el('p', {
+        textContent:
+          'Turn it on under Voice & AI to draft wordings. Or copy what it would have been asked and paste it into a chat of your own.',
+      }),
+      advanced('Show what it would have been asked', promptBlock(result.prompt)),
     ]));
     return;
   }
@@ -2674,6 +2680,53 @@ function scheduleRender({ delay = LIVE_DELAY_MS } = {}) {
  */
 const previews = new WeakMap();
 
+/**
+ * Something the tool needs and the person using it mostly does not.
+ *
+ * The prompts are thousands of words of instructions nobody here wrote, and
+ * they were shown in full every time the AI was switched off — a modal whose
+ * entire content was machinery. The command line and its `{prompt}` templates
+ * are the same kind of thing: necessary, occasionally essential, and not what
+ * anyone opens Settings to look at.
+ *
+ * `<details>` rather than a button that toggles a class, because it is the
+ * one disclosure the browser already knows how to make keyboard- and
+ * screen-reader-accessible, and because it stays open once opened — someone
+ * who needs the command line usually needs it more than once.
+ */
+/**
+ * A prompt, with the one thing anyone actually wants to do to it.
+ *
+ * Reading it is rare; pasting it into a chat window is the whole reason it is
+ * offered at all. Selecting several thousand words out of a scrolling <pre>
+ * by hand is not something to make somebody do.
+ */
+function promptBlock(text) {
+  const body = el('pre', { className: 'prompt-dump', textContent: text ?? '' });
+  const copy = el('button', {
+    className: 'tiny',
+    textContent: 'Copy',
+    onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(text ?? '');
+        copy.textContent = 'Copied';
+        setTimeout(() => (copy.textContent = 'Copy'), 1500);
+      } catch {
+        // No clipboard permission: the text is right there to select.
+        copy.textContent = 'Select it and copy';
+      }
+    },
+  });
+  return el('div', {}, [el('div', { className: 'toolbar' }, [copy]), body]);
+}
+
+function advanced(summary, ...children) {
+  const box = el('details', { className: 'advanced' });
+  box.append(el('summary', { textContent: summary }));
+  for (const child of children) if (child != null && child !== false) box.append(child);
+  return box;
+}
+
 function showPdf(frame, url) {
   let preview = previews.get(frame);
   if (!preview) {
@@ -2683,6 +2736,18 @@ function showPdf(frame, url) {
   return preview.show(url).catch((err) => {
     console.warn('[rmm] preview failed:', err);
   });
+}
+
+/**
+ * Nothing to preview any more.
+ *
+ * The class alone was not enough: it only brings the placeholder back, and
+ * the page already drawn stays where it was — so an emptied cover letter
+ * showed its own last version with "type a first sentence" written across it.
+ */
+function clearPdf(frame) {
+  previews.get(frame)?.clear?.();
+  frame.classList.remove('loaded');
 }
 
 /** The "is what I see current?" indicator that replaced the Preview button. */
@@ -2883,10 +2948,32 @@ async function openJob(job, reveal = true) {
     const full = await api(`/ai/jobs/${encodeURIComponent(job.id)}`);
     if (request !== feedbackRequest) return;
     feedbackShownStatus = full.status;
-    $('#feedback-status').textContent = full.status === 'failed' ? 'Feedback failed'
-      : full.result?.executed ? full.about : 'AI is off — showing the prompt it would run';
-    if (full.status === 'failed') $('#feedback-content').textContent = full.error ?? 'Unknown error';
-    else $('#feedback-content').replaceChildren(renderFeedbackMarkdown(full.result?.output ?? ''));
+    const ran = full.result?.executed;
+    $('#feedback-status').textContent = full.status === 'failed'
+      ? 'Feedback failed'
+      : ran ? full.about : 'The AI is off, so there is no feedback';
+    if (full.status === 'failed') {
+      $('#feedback-content').textContent = full.error ?? 'Unknown error';
+    } else if (!ran) {
+      /*
+       * Not the prompt, dumped into the panel where feedback goes.
+       *
+       * With the AI off this filled the feedback pane with several thousand
+       * words of instructions nobody here wrote, under a heading that said
+       * feedback — which reads as the tool having answered. Say what
+       * happened, and keep the machinery behind a disclosure for the one
+       * person in twenty who wants to paste it somewhere.
+       */
+      $('#feedback-content').replaceChildren(
+        el('p', {
+          textContent:
+            'Nothing was read, because the AI command is switched off. Turn it on under Voice & AI, or copy the request below into a chat of your own and paste what comes back wherever you like.',
+        }),
+        advanced('Show what it would have been asked', promptBlock(full.result?.output ?? '')),
+      );
+    } else {
+      $('#feedback-content').replaceChildren(renderFeedbackMarkdown(full.result?.output ?? ''));
+    }
     const local = feedbackJobs.find(item => item.id === job.id);
     if (local) local.unread = false;
     renderJobChip(feedbackJobs);
@@ -3455,7 +3542,9 @@ function renderDraft(draft) {
 
     const compile = async () => {
       if (!draft.coverLetter.body.trim()) {
-        letterPane.classList.remove('loaded');
+        // The whole page goes, not just the class over it.
+        letterToken++;
+        clearPdf(letterPane);
         letterFit.className = 'fit idle';
         letterFit.textContent = 'Nothing written yet.';
         liveChip.className = 'live ok';
@@ -4844,6 +4933,74 @@ async function loadSettings() {
   };
   showPresetNote();
 
+  /*
+   * Which model, and how hard it should think.
+   *
+   * Two settings rather than two more arguments to hand-edit: a preset is
+   * copied when it is chosen, so editing the argument line to change a model
+   * turns the configuration into a custom one that then drifts out of date
+   * with the preset it came from. These are applied to the arguments on the
+   * server, the way the research switch is, so the saved arguments stay the
+   * preset's own.
+   *
+   * A text box with suggestions rather than a dropdown, because every one of
+   * these CLIs gains models faster than this file can be edited and a closed
+   * list would start refusing names that work.
+   */
+  const modelList = el('datalist', { id: 'ai-model-options' });
+  const model = keptField('ai-model', config.ai.model ?? '', {
+    placeholder: 'Whatever the CLI uses by default',
+  });
+  // `list` is read-only on an input, so assigning it throws rather than
+  // linking the datalist — it has to be set as an attribute.
+  model.setAttribute('list', 'ai-model-options');
+
+  const effort = el('select');
+  for (const [value, label] of [
+    ['', 'As it comes'],
+    ['low', 'Quick'],
+    ['medium', 'Normal'],
+    ['high', 'Thorough'],
+  ]) {
+    effort.append(el('option', { value, textContent: label, selected: (config.ai.effort ?? '') === value }));
+  }
+  let savedEffort = config.ai.effort ?? '';
+
+  /**
+   * What these two will actually do, given the command that is configured.
+   *
+   * Only Codex has a reasoning-effort flag. Saying "Thorough" and having it
+   * silently mean nothing would be the worst version of this, so the panel
+   * says which mechanism is in play: the CLI's own switch where there is one,
+   * and a line in the prompt everywhere else — which reaches every model,
+   * just less precisely.
+   */
+  const modelNote = el('div', { className: 'hint' });
+  const showModelNote = () => {
+    const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
+    modelList.replaceChildren(...(chosen?.model?.suggestions ?? []).map((m) => el('option', { value: m })));
+
+    const parts = [];
+    if (!chosen) {
+      parts.push(
+        `"${command.value.trim() || 'this command'}" is not one of the presets, so neither of these is added to it. ` +
+          'Put the flags your CLI wants in Arguments; the effort still goes into the prompt.',
+      );
+    } else {
+      parts.push(
+        chosen.model
+          ? `Passed as ${chosen.model.flag}. Leave it empty to let ${chosen.command} choose.`
+          : `${chosen.command} has no model switch, so this is ignored.`,
+      );
+      parts.push(
+        chosen.effort
+          ? `Effort is passed as ${chosen.effort.flag}, and said in the prompt as well.`
+          : `${chosen.command} has no effort switch, so effort is asked for in the prompt instead — which every model understands, less precisely than a flag would.`,
+      );
+    }
+    modelNote.textContent = parts.join(' ');
+  };
+
   const engine = el('select');
   for (const e of ['', 'tectonic', 'latexmk', 'pdflatex']) {
     engine.append(
@@ -4851,6 +5008,31 @@ async function loadSettings() {
     );
   }
   let savedEngine = config.latex.engine ?? '';
+
+  /*
+   * The exact invocation, folded away.
+   *
+   * Choosing a preset, a model and an effort level is the whole of what
+   * almost everyone needs, and leading with a command line and an argument
+   * template full of `{promptText}` placeholders made the panel look like
+   * something you had to understand before you could use any of it.
+   *
+   * Open to begin with when what is saved is not a preset, because then it
+   * is the only thing on the panel that says what is actually going to run —
+   * and hiding a command somebody typed themselves is how they come to
+   * believe the preset they picked took effect when it did not.
+   */
+  const commandBlock = advanced(
+    'Advanced — the exact command',
+    field('Command', command, 'Must be on your PATH.'),
+    field(
+      'Arguments',
+      args,
+      '{prompt} is a file holding the prompt, {promptText} inlines it, {sandbox} is the scratch directory.',
+    ),
+    field('Timeout, seconds', timeout),
+  );
+  commandBlock.open = !matching;
 
   const result = el('div', { className: 'result idle', textContent: 'Not tested yet.' });
 
@@ -4868,12 +5050,23 @@ async function loadSettings() {
     command.value !== command.dataset.stored ||
     args.value !== args.dataset.stored ||
     timeout.value !== timeout.dataset.stored ||
+    model.value !== model.dataset.stored ||
+    (effort.value || '') !== savedEffort ||
     (engine.value || '') !== savedEngine;
   const markAiUnsaved = () => {
     unsaved.hidden = !aiIsDirty();
   };
-  for (const input of [command, args, timeout]) input.oninput = markAiUnsaved;
+  for (const input of [command, args, timeout, model]) {
+    input.oninput = () => {
+      markAiUnsaved();
+      // The command decides what the model box can even do, so its note
+      // follows what is typed rather than what was last saved.
+      showModelNote();
+    };
+  }
   engine.onchange = markAiUnsaved;
+  effort.onchange = markAiUnsaved;
+  showModelNote();
   markAiUnsaved();
 
   const save = async () => {
@@ -4887,6 +5080,8 @@ async function loadSettings() {
           // The template is whitespace-separated; `{prompt}` becomes the path
           // to a file holding the prompt, `{promptText}` the prompt itself.
           args: args.value.split(/\s+/).filter(Boolean),
+          model: model.value.trim(),
+          effort: effort.value || undefined,
           timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 180_000,
         },
         latex: { engine: engine.value || undefined },
@@ -4897,8 +5092,9 @@ async function loadSettings() {
      * rather than treat them as unsaved edits and keep them forever — which
      * would mean a change made in another window never arrived here again.
      */
-    for (const input of [command, args, timeout]) input.dataset.stored = input.value;
+    for (const input of [command, args, timeout, model]) input.dataset.stored = input.value;
     savedEngine = engine.value || '';
+    savedEffort = effort.value || '';
     markAiUnsaved();
     setStatus('Settings saved');
   };
@@ -4947,6 +5143,7 @@ async function loadSettings() {
     }
     command.value = chosen.command;
     args.value = chosen.args.join(' ');
+    showModelNote();
     markAiUnsaved();
     return saveAndTest();
   };
@@ -4983,18 +5180,27 @@ async function loadSettings() {
           el('span', { textContent: ' — that saves and tests it.' }),
         ])
       : null,
-    field('Command', command, 'Must be on your PATH.'),
-    field(
-      'Arguments',
-      args,
-      '{prompt} is a file holding the prompt, {promptText} inlines it, {sandbox} is the scratch directory.',
-    ),
+    /*
+     * The exact invocation, folded away.
+     *
+     * Choosing a preset, a model and an effort level is the whole of what
+     * almost everyone needs, and leading with a command line and an argument
+     * template full of `{promptText}` placeholders made the panel look like
+     * something you had to understand before you could use any of it. It is
+     * still one click away, and it opens by itself when what is saved is not
+     * a preset — because then it is the only thing on the panel that explains
+     * what is going to run.
+     */
+    commandBlock,
+    field('Model', model, 'Leave empty for the CLI’s own default.'),
+    modelList,
+    field('Effort', effort),
+    modelNote,
     el('div', { className: 'sandbox-note' }, [
       el('b', {}, 'Confined to a scratch directory. '),
       'The command runs in an empty temporary folder containing only the prompt — never your save folder, ' +
         'your home directory, or this source tree. The presets add each CLI’s own read-only flags on top.',
     ]),
-    field('Timeout, seconds', timeout),
     field('LaTeX engine', engine, 'Auto-detect tries tectonic, then latexmk, then pdflatex.'),
     el('div', { className: 'row' }, [
       el('button', { className: 'primary', textContent: 'Save', onclick: () => save().catch((e) => setStatus(e.message, true)) }),
