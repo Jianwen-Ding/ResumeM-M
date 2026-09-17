@@ -53,9 +53,16 @@ let resolvedEngine: Engine | undefined;
 export async function detectEngine(preferred?: Engine): Promise<Engine> {
   if (preferred) {
     if (await hasBinary(preferred)) return preferred;
+    /*
+     * Both ways out, nearest first. This named config.yaml and nothing else,
+     * which sends someone to a text file to change a setting that has a
+     * dropdown in Voice & AI — and which they most likely set from that
+     * dropdown in the first place.
+     */
     throw new Error(
       `LaTeX engine "${preferred}" is configured but not installed. ` +
-        `Install it, or set latex.engine in config.yaml to one of: ${ENGINE_ORDER.join(', ')}.`,
+        `Change it under Voice & AI → LaTeX engine (Auto-detect works if any of ` +
+        `${ENGINE_ORDER.join(', ')} is installed), or install "${preferred}".`,
     );
   }
   if (resolvedEngine) return resolvedEngine;
@@ -65,9 +72,13 @@ export async function detectEngine(preferred?: Engine): Promise<Engine> {
       return e;
     }
   }
+  /*
+   * Nothing installed at all, so there is no setting that helps: this one is
+   * genuinely a thing to go and install, and says which is least trouble.
+   */
   throw new Error(
-    'No LaTeX engine found. Install tectonic (recommended, self-contained) ' +
-      'or a TeX distribution providing latexmk/pdflatex.',
+    'No LaTeX engine found, so nothing can be typeset. Install tectonic — one binary, ' +
+      'fetches what it needs — or a TeX distribution providing latexmk or pdflatex.',
   );
 }
 

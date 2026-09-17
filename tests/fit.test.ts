@@ -110,6 +110,20 @@ describe('engine selection', () => {
   it('rejects an engine that is not installed, naming the alternatives', async () => {
     await expect(detectEngine('not-an-engine' as never)).rejects.toThrow(/not-an-engine/);
   });
+
+  /*
+   * The message is the whole of the user's experience here: nothing typesets,
+   * and this line is the only thing between that and "the button does
+   * nothing". It used to send them to config.yaml — a text file — to change a
+   * setting that has a dropdown in the editor, and which they had most likely
+   * set from that dropdown in the first place.
+   */
+  it('points at the control that changes it, not at a file to edit', async () => {
+    const failed = await detectEngine('not-an-engine' as never).catch((e: Error) => e.message);
+    expect(failed).toContain('Voice & AI');
+    expect(failed).toContain('Auto-detect');
+    expect(failed).not.toContain('config.yaml');
+  });
 });
 
 describe.skipIf(!hasEngine)('other layouts', { timeout: 180_000 }, () => {
