@@ -4916,7 +4916,7 @@ function form(title, fields, note) {
 
     for (const f of fields) {
       if (f.type === 'checkbox') {
-        const cb = el('input', { type: 'checkbox', checked: Boolean(f.value), id: `f_${f.name}` });
+        const cb = el('input', { type: 'checkbox', checked: Boolean(f.value), id: `f_${f.name}`, name: f.name });
         inputs[f.name] = { get: () => cb.checked };
         content.append(
           el('label', { className: 'form-label', style: 'display:flex;gap:7px;align-items:center;cursor:pointer' }, [
@@ -4926,10 +4926,10 @@ function form(title, fields, note) {
         );
         continue;
       }
-      content.append(el('div', { className: 'form-label', textContent: f.label }));
+      content.append(el('label', { className: 'form-label', htmlFor: `f_${f.name}`, textContent: f.label }));
 
       if (f.type === 'select') {
-        const sel = el('select', { style: 'width:100%' });
+        const sel = el('select', { style: 'width:100%', name: f.name, id: `f_${f.name}` });
         for (const o of f.options) {
           sel.append(
             el('option', {
@@ -4944,9 +4944,11 @@ function form(title, fields, note) {
         continue;
       }
 
+      // Named, so the field is identifiable — by a test, by the browser, and by
+       // anything reading the form other than a person looking at it.
       const input = f.multiline
-        ? el('textarea', { value: f.value ?? '', style: f.tall ? 'min-height:220px' : '' })
-        : el('input', { type: 'text', value: f.value ?? '' });
+        ? el('textarea', { value: f.value ?? '', style: f.tall ? 'min-height:220px' : '', name: f.name, id: `f_${f.name}` })
+        : el('input', { type: 'text', value: f.value ?? '', name: f.name, id: `f_${f.name}` });
       if (f.disabled) {
         input.disabled = true;
         input.title = 'This field has alternates — edit it through its dropdown.';
@@ -5260,6 +5262,15 @@ async function boot() {
   $('#btn-feedback').onclick = () => askFeedback(state.masterView);
   $('#btn-rebuild').onclick = renderPreview;
   $('#btn-add-entry').onclick = async () => {
+    /*
+     * Both ways in, from the button people actually press.
+     *
+     * Drafting with the AI existed, but only from a link in the master view —
+     * so the obvious button gave you a blank form and nothing said the other
+     * way was there. The blank form stays the default: it is instant, and the
+     * AI only ever proposes text you then edit.
+     */
+    const aiOn = Boolean(state.store?.config?.ai?.enabled);
     const answer = await form('Add an entry', [
       {
         name: 'kind',
@@ -5273,8 +5284,25 @@ async function boot() {
           { value: 'custom', label: 'Additional' },
         ],
       },
+      {
+        name: 'how',
+        label: 'Start from',
+        type: 'select',
+        value: 'blank',
+        options: [
+          { value: 'blank', label: 'A blank entry I fill in myself' },
+          {
+            value: 'ai',
+            label: aiOn
+              ? '✦ A draft from the AI — a repository link, or a line about it'
+              : '✦ A draft from the AI (off — you will get the prompt to paste)',
+          },
+        ],
+      },
     ]);
-    if (answer?.kind) addEntry(answer.kind);
+    if (!answer?.kind) return;
+    if (answer.how === 'ai') draftEntryWithAi(answer.kind);
+    else addEntry(answer.kind);
   };
   // Anything the AI was still doing when the tab was closed is picked up here.
   refreshJobs().catch(() => {});

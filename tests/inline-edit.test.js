@@ -293,3 +293,70 @@ describe('editing a variation', () => {
     }
   });
 });
+
+/*
+ * Drafting an entry with the AI existed, but only from a link inside the
+ * master view — so the button everyone actually presses gave a blank form and
+ * nothing on it said the other way was there.
+ */
+describe('adding an entry', () => {
+  let drafted;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    location.hash = '';
+    const fixture = makeTempStore();
+    const data = fixture.store.load();
+    fixture.cleanup();
+    drafted = [];
+
+    vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+      let result = {};
+      if (url === '/api/store') result = data;
+      else if (url === '/api/ai/jobs') result = { jobs: [] };
+      else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
+      else if (String(url).includes('/ai/draft-entry')) {
+        drafted.push(JSON.parse(options.body ?? '{}'));
+        result = { entry: null, prompt: 'the prompt' };
+      }
+      return { ok: true, json: async () => structuredClone(result) };
+    }));
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#resume-select')).not.toBeNull());
+  });
+
+  const fill = async (values) => {
+    await vi.waitFor(() => expect(document.querySelector('#modal select')).not.toBeNull());
+    for (const [name, value] of Object.entries(values)) {
+      const field = document.querySelector(`#modal [name="${name}"]`);
+      expect(field, name).toBeTruthy();
+      field.value = value;
+    }
+    [...document.querySelectorAll('#modal button')].find((b) => /save|add|ok/i.test(b.textContent))?.click();
+  };
+
+  it('offers the AI as a way to start, from the button people press', async () => {
+    document.querySelector('#btn-add-entry').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal [name="how"]')).not.toBeNull());
+
+    const how = document.querySelector('#modal [name="how"]');
+    const options = [...how.options].map((o) => o.textContent);
+    expect(options.some((o) => /blank/i.test(o)), 'writing it yourself').toBe(true);
+    expect(options.some((o) => /AI/.test(o)), 'and letting the AI draft it').toBe(true);
+    // The blank form stays the default: it is instant, and nothing is spent.
+    expect(how.value).toBe('blank');
+  });
+
+  it('asks the AI when that is what was chosen', async () => {
+    document.querySelector('#btn-add-entry').click();
+    await fill({ kind: 'project', how: 'ai' });
+
+    // The AI path opens its own form; what matters is that it was taken.
+    await vi.waitFor(() =>
+      expect(document.querySelector('#modal')?.textContent ?? '').toMatch(/repository|describe|link|draft/i),
+    );
+  });
+});
