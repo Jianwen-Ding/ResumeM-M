@@ -3552,12 +3552,25 @@ function renderDraft(draft) {
   notesBox.onblur = () => saveDraftNow().catch(() => {});
 
   const resumeSelect = el('select');
+  /*
+   * A placeholder when nothing is attached yet.
+   *
+   * Without one the select showed the first resume in the list as though it
+   * had been chosen, while the draft had no resume at all — so the panel said
+   * "Send: Base resume" and building the files answered "400 Bad Request".
+   * An empty choice is the honest thing to show when no choice has been made.
+   */
+  if (!draft.resumeId) resumeSelect.append(el('option', { value: '', textContent: '— choose a resume —' }));
   for (const r of state.store.resumes) {
     resumeSelect.append(el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }));
   }
-  resumeSelect.onchange = () => {
+  resumeSelect.onchange = async () => {
+    if (!resumeSelect.value) return;
     draft.resumeId = resumeSelect.value;
-    save('Resume changed');
+    await save('Resume changed');
+    // Attaching one is what unlocks building the files, and the button that
+    // does it is drawn from `draft`, so the panel has to be drawn again.
+    renderDraft(draft);
   };
 
   setChildren(
@@ -3629,11 +3642,24 @@ function renderDraft(draft) {
       notesBox,
     ]),
     el('div', { className: 'block' }, [
+      /*
+       * An application with no resume on it cannot be built, and pressing the
+       * button said so with a bare "400 Bad Request" in the corner. Which
+       * resume to send is the one decision this tool exists to help with, so
+       * it is not one to guess at — but it is one to ask for plainly, next to
+       * the button that needs it, rather than after the fact.
+       */
+      draft.resumeId
+        ? null
+        : el('div', { className: 'hint warn' }, 'Choose a resume above before building the files.'),
       el('div', { className: 'toolbar' }, [
         el('button', {
           className: 'primary',
           textContent: 'Build files and record it',
-          title: 'Compile the resume, name the files, and log the answers in the application history',
+          title: draft.resumeId
+            ? 'Compile the resume, name the files, and log the answers in the application history'
+            : 'Pick a resume for this application first — tailor one, or start one to edit yourself',
+          disabled: !draft.resumeId,
           onclick: () => completeDraft(draft, notes),
         }),
         el('button', { textContent: 'Save', onclick: () => save('Saved') }),

@@ -1362,3 +1362,10 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 @media (prefers-reduced-motion: reduce) {
   .ai-mark.spin { animation: none; }
 }
+
+/*
+ * A hint that is about something missing rather than something optional. Not
+ * an error — nothing has gone wrong — but it is the reason the button beside
+ * it will not do anything, so it should not read like a footnote.
+ */
+.hint.warn { color: var(--warn); font-weight: 500; }
