@@ -138,6 +138,90 @@ describe('editing a line in place', () => {
 });
 
 /*
+ * Two edits, close enough together that the first has not come back yet.
+ *
+ * An entry is saved whole: the editor takes the copy it rendered from, changes
+ * one wording in it, and sends the result. The copy on screen only refreshes
+ * when a save comes back, so an edit made a moment later is built from the text
+ * as it was *before* the first edit — and sending it puts that old text back.
+ * Fix a sentence, then fix the one under it, and the first fix is gone: from
+ * the store, from every resume sharing the phrasing, silently.
+ */
+describe('two edits in quick succession', () => {
+  let data;
+  let release;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    const fixture = makeTempStore();
+    data = fixture.store.load();
+    fixture.cleanup();
+    release = [];
+
+    vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+      const body = options.body ? JSON.parse(options.body) : null;
+      let result = {};
+      if (url === '/api/store') result = data;
+      else if (url === '/api/ai/jobs') result = { jobs: [] };
+      else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
+      else if (url.startsWith('/api/entries/') && options.method === 'PUT') {
+        // Held open until the test says so, which is what makes the second
+        // edit land while the first is still in the air.
+        await new Promise((go) => release.push(go));
+        data.entries = data.entries.map((entry) => (entry.id === body.id ? body : entry));
+        result = body;
+      }
+      return { ok: true, json: async () => structuredClone(result) };
+    }));
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#resume-select')).not.toBeNull());
+    const selector = document.querySelector('#resume-select');
+    selector.value = '__master__';
+    selector.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(document.querySelector('.master-source-variant')).not.toBeNull());
+  });
+
+  const lineFor = (startsWith) =>
+    [...document.querySelectorAll('.master-source-variant')]
+      .find((node) => node.querySelector('.text').textContent.startsWith(startsWith))
+      .querySelector('.editable');
+
+  const edit = (line, text) => {
+    line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    line.textContent = text;
+    line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  };
+
+  const stored = (variantId) =>
+    data.entries
+      .find((e) => e.id === 'exp_acme')
+      .bullets.find((b) => b.id === 'b_pipeline')
+      .variants.find((v) => v.id === variantId).text;
+
+  it('keeps the first edit when the second is made before it comes back', async () => {
+    // Both taken from the same render, as they would be by someone typing.
+    const first = lineFor('Built a pipeline handling');
+    const second = lineFor('Built a Kafka pipeline');
+
+    edit(first, 'Built a pipeline handling 4M events/day');
+    await vi.advanceTimersByTimeAsync(150);
+    edit(second, 'Built the Kafka ingest path');
+
+    await vi.waitFor(() => expect(release.length).toBeGreaterThan(0));
+    for (let n = 0; n < 4 && (release.length || n < 2); n++) {
+      release.shift()?.();
+      await vi.advanceTimersByTimeAsync(50);
+    }
+
+    expect(stored('v_kafka')).toBe('Built the Kafka ingest path');
+    expect(stored('v_base'), 'the edit made first').toBe('Built a pipeline handling 4M events/day');
+  });
+});
+
+/*
  * What a variation writes down when you change one thing on it.
  *
  * A variation is meant to be thin — the base plus a few decisions. Both of

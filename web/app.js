@@ -12,6 +12,7 @@ import { createPreview } from './preview.js';
 import { setupAssets } from './assets.js';
 import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
+import { rebase, same } from './rebase.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -531,10 +532,51 @@ function setSaveState(mode, detail) {
  * Store mutations                                                     *
  * ------------------------------------------------------------------ */
 
+/**
+ * One in-flight write per entry, and what the last one left on the server.
+ *
+ * An entry is saved whole, and the copy an edit is built from is the copy that
+ * was on screen when it started — which is the copy from before any edit still
+ * in flight. Two changes a moment apart therefore both send the old text for
+ * whatever the other one changed, and the second lands on top of the first.
+ * Waiting for each write and rebasing the next onto it is what stops the
+ * second edit from carrying the first one away with it.
+ */
+const entryWrites = new Map(); // id → { queue, server, pending }
+
 async function saveEntry(entry, message) {
   describeNext(message ?? 'the change');
-  await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'PUT', body: JSON.stringify(entry) });
-  setStatus(message ?? `Saved ${entry.id}`);
+  const id = entry.id;
+  const lane = entryWrites.get(id) ?? { queue: Promise.resolve(), server: null, pending: 0 };
+  entryWrites.set(id, lane);
+  lane.pending++;
+
+  // What this edit was derived from: the store as the client last saw it.
+  const base = state.store?.entries?.find((e) => e.id === id) ?? null;
+
+  // `queue` never rejects, so one failed write does not wedge the ones behind
+  // it — each is still worth attempting on its own.
+  const mine = lane.queue.then(async () => {
+    // Something landed while this edit was being made: keep it, and put only
+    // what this edit actually changed on top of it.
+    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
+    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
+    lane.server = saved?.id ? saved : body;
+    return lane.server;
+  });
+  lane.queue = mine.then(
+    () => {},
+    () => {},
+  );
+
+  try {
+    await mine;
+  } finally {
+    // Once nothing is in flight the client will reload, so the next edit is
+    // built from the server's copy and there is nothing left to rebase onto.
+    if (--lane.pending === 0) entryWrites.delete(id);
+  }
+  setStatus(message ?? `Saved ${id}`);
   await loadStore();
   render();
 }
