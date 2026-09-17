@@ -341,6 +341,29 @@ describe('the settings panel', () => {
     await vi.waitFor(() => expect(text()).toContain('is not one of the presets'));
   });
 
+  /*
+   * A command that is not a preset has nothing to build a model menu out of —
+   * the names come from the preset — and nothing to attach either setting to.
+   * Showing the pair greyed out, or full of another CLI's model names, would
+   * be offering a choice that does nothing.
+   */
+  it('takes the model and the effort away when the command is not a preset', async () => {
+    const block = () => effortSlider().closest('div');
+    const command = commandBox();
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+
+    await vi.waitFor(() => expect(block().hidden).toBe(true));
+    expect(document.querySelector('#settings').textContent).toContain('is not one of the presets');
+    // And the heading over it stops promising what is no longer inside.
+    expect(advancedBlock().querySelector('summary').textContent).toBe('Advanced — the exact command');
+
+    command.value = 'claude';
+    command.dispatchEvent(new Event('input'));
+    await vi.waitFor(() => expect(block().hidden).toBe(false));
+    expect(advancedBlock().querySelector('summary').textContent).toContain('the model and the effort');
+  });
+
   it('follows the command: the buttons are whichever CLI is configured', async () => {
     expect(modelChips().map((b) => b.textContent)).toContain('opus');
 
@@ -350,12 +373,6 @@ describe('the settings panel', () => {
     await vi.waitFor(() => expect(modelChips().map((b) => b.textContent)).toContain('gemini-2.5-pro'));
     expect(modelChips().map((b) => b.textContent)).not.toContain('opus');
 
-    // A CLI with no names of its own leaves the box, which is the only thing
-    // that can express a model it has never heard of.
-    command.value = 'my-own-cli';
-    command.dispatchEvent(new Event('input'));
-    await vi.waitFor(() => expect(document.querySelector('#settings .model-chips').hidden).toBe(true));
-    expect(document.querySelector('#settings .model-other').hidden).toBe(false);
   });
 
   it('counts the model and the effort as unsaved changes like everything else', async () => {
@@ -421,44 +438,73 @@ describe('the settings panel', () => {
    * tailoring resumes" — one model for all of it is the wrong shape, and
    * hand-editing the argument line per task is not a way to express it.
    */
-  it('lets a kind of work name its own model, behind a disclosure', async () => {
-    const box = [...document.querySelectorAll('#settings details.advanced')].find((d) =>
+  const taskBlock = () =>
+    [...document.querySelectorAll('#settings details.advanced')].find((d) =>
       d.querySelector('summary').textContent.includes('particular kind of work'),
     );
+  /** The radio for one kind of work and one column of the grid. */
+  const gridCell = (row, column) =>
+    [...taskBlock().querySelectorAll('tbody tr')]
+      .find((tr) => tr.querySelector('th.what')?.textContent === row)
+      ?.querySelector(`input[value="${column}"]`);
+
+  /*
+   * It was four text boxes, each asking for a model name from memory, and no
+   * way to see at a glance that three of them said the same thing. As a grid
+   * it is one look: every row has one mark, and the column it is in is the
+   * answer.
+   */
+  it('lays the kinds of work against the models, behind a disclosure', async () => {
+    const box = taskBlock();
     expect(box).toBeTruthy();
-    // Folded away: almost nobody needs it, and four more boxes at the top
-    // would make choosing a preset look like a configuration exercise.
+    // Folded away: almost nobody needs it, and putting it at the top would
+    // make choosing a preset look like a configuration exercise.
     expect(box.open).toBe(false);
 
-    const labels = [...box.querySelectorAll('label.f .lbl')].map((n) => n.textContent);
-    expect(labels).toEqual([
+    const columns = [...box.querySelectorAll('thead th')].map((n) => n.textContent);
+    expect(columns).toEqual(['For', 'Same as above', 'opus', 'sonnet', 'haiku', 'Another…']);
+
+    const rows = [...box.querySelectorAll('tbody th.what')].map((n) => n.textContent);
+    expect(rows).toEqual([
       'Tailoring a resume',
       'Writing letters and answers',
       'Reviewing what you wrote',
       'Drafting new entries and wordings',
     ]);
-    // Empty means "whatever Model says", which is what it does.
-    for (const input of box.querySelectorAll('input')) {
-      expect(input.value).toBe('');
-      expect(input.placeholder).toBe('Same as above');
+
+    // Exactly one mark per row, and to begin with it is "same as above" —
+    // which is what an empty per-task model does.
+    for (const tr of box.querySelectorAll('tbody tr:not(.other-row)')) {
+      expect([...tr.querySelectorAll('input:checked')]).toHaveLength(1);
     }
+    for (const row of rows) expect(gridCell(row, '').checked).toBe(true);
   });
 
   it('saves the one it is given, and leaves the rest alone', async () => {
-    const box = [...document.querySelectorAll('#settings details.advanced')].find((d) =>
-      d.querySelector('summary').textContent.includes('particular kind of work'),
-    );
-    const forWriting = [...box.querySelectorAll('label.f')].find(
-      (f) => f.querySelector('.lbl').textContent === 'Writing letters and answers',
-    ).querySelector('input');
-
-    forWriting.value = 'astra';
-    forWriting.dispatchEvent(new Event('input'));
+    gridCell('Writing letters and answers', 'sonnet').click();
     document.querySelector('#settings button.primary').click();
 
-    await vi.waitFor(() => expect(config.ai.models.write).toBe('astra'));
+    await vi.waitFor(() => expect(config.ai.models.write).toBe('sonnet'));
     expect(config.ai.models.tailor).toBe('');
     expect(config.ai.models.review).toBe('');
+    // And the row shows it, while the others still say "same as above".
+    expect(gridCell('Writing letters and answers', 'sonnet').checked).toBe(true);
+    expect(gridCell('Tailoring a resume', '').checked).toBe(true);
+  });
+
+  it('still takes a model name that is not on the grid', async () => {
+    const otherRow = () =>
+      gridCell('Reviewing what you wrote', 'other').closest('tr').nextElementSibling;
+    expect(otherRow().hidden).toBe(true);
+
+    gridCell('Reviewing what you wrote', 'other').click();
+    expect(otherRow().hidden).toBe(false);
+
+    const box = otherRow().querySelector('input');
+    box.value = 'terra';
+    box.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(config.ai.models.review).toBe('terra'));
   });
 
   it('counts a per-task model as an unsaved change like everything else', () => {
@@ -466,12 +512,7 @@ describe('the settings panel', () => {
       [...document.querySelectorAll('#settings .hint.warn')].find((n) => n.textContent === 'Not saved yet.');
     expect(flag().hidden).toBe(true);
 
-    const box = [...document.querySelectorAll('#settings details.advanced')].find((d) =>
-      d.querySelector('summary').textContent.includes('particular kind of work'),
-    );
-    const first = box.querySelector('input');
-    first.value = 'luna';
-    first.dispatchEvent(new Event('input'));
+    gridCell('Tailoring a resume', 'opus').click();
     expect(flag().hidden).toBe(false);
   });
 });

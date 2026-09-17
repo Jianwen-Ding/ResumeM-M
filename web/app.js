@@ -5340,14 +5340,98 @@ async function loadSettings() {
    * does.
    */
   const perTask = new Map();
-  const taskFields = AI_TASKS.map((task) => {
+  for (const task of AI_TASKS) {
     const box = keptField(`ai-model-${task.key}`, config.ai.models?.[task.key] ?? '', {
-      placeholder: 'Same as above',
+      placeholder: 'A model name',
     });
     box.setAttribute('list', 'ai-model-options');
     perTask.set(task.key, box);
-    return field(task.label, box, task.note);
-  });
+  }
+
+  /*
+   * Four kinds of work down the side, the models across the top.
+   *
+   * It was four text boxes, one per kind of work, each asking you to type a
+   * model name from memory — and no way to see at a glance that three of them
+   * say the same thing. As a grid the whole arrangement is one look: every row
+   * has exactly one mark on it, and the column it is in is the answer.
+   *
+   * Radio buttons rather than styled cells, because that is what this is: one
+   * choice per row, out of a named set. Arrow keys move along a row and screen
+   * readers read the column heading with the cell, both for free.
+   */
+  const taskGrid = el('table', { className: 'model-grid' });
+  const taskOther = new Map();
+  let gridColumns = null;
+
+  const paintTaskGrid = (names) => {
+    const columns = JSON.stringify(names);
+    if (columns === gridColumns) {
+      // Same columns: only the marks can have moved, and rebuilding would take
+      // the focus out of a name somebody is halfway through typing.
+      for (const task of AI_TASKS) {
+        const value = perTask.get(task.key).value.trim();
+        const listed = names.includes(value);
+        for (const radio of taskGrid.querySelectorAll(`input[name="ai-task-${task.key}"]`)) {
+          radio.checked = radio.value === (listed || !value ? value : 'other');
+        }
+        taskOther.get(task.key).hidden = listed || !value;
+      }
+      return;
+    }
+    gridColumns = columns;
+
+    const head = el('tr', {}, [
+      el('th', { className: 'what', scope: 'col', textContent: 'For' }),
+      el('th', { scope: 'col', textContent: 'Same as above' }),
+      ...names.map((m) => el('th', { scope: 'col', textContent: m })),
+      el('th', { scope: 'col', textContent: 'Another…' }),
+    ]);
+
+    const rows = AI_TASKS.flatMap((task) => {
+      const box = perTask.get(task.key);
+      const value = box.value.trim();
+      const listed = names.includes(value);
+      const choose = (v) => {
+        if (v !== 'other') box.value = v;
+        box.oninput();
+        taskOther.get(task.key).hidden = v !== 'other';
+        if (v === 'other') box.focus();
+      };
+      const cell = (value_, on) => {
+        const radio = el('input', {
+          type: 'radio',
+          name: `ai-task-${task.key}`,
+          value: value_,
+          checked: on,
+          onchange: () => choose(value_),
+        });
+        // By setAttribute: el() builds with Object.assign, and a hyphenated
+        // key there sets a plain property no attribute ever sees — the same
+        // trap as `list` on an input. A bare radio in a grid has no other name.
+        const said = value_ === '' ? 'same as above' : value_ === 'other' ? 'another model' : value_;
+        radio.setAttribute('aria-label', `${task.label}: ${said}`);
+        return el('td', {}, [radio]);
+      };
+
+      const otherRow = el('tr', { className: 'other-row', hidden: listed || !value }, [
+        el('td', { colSpan: String(names.length + 3) }, [box]),
+      ]);
+      taskOther.set(task.key, otherRow);
+
+      return [
+        el('tr', {}, [
+          el('th', { className: 'what', scope: 'row', title: task.note, textContent: task.label }),
+          cell('', !value),
+          ...names.map((m) => cell(m, value === m)),
+          cell('other', Boolean(value) && !listed),
+        ]),
+        otherRow,
+      ];
+    });
+
+    setChildren(taskGrid, el('thead', {}, [head]), el('tbody', {}, rows));
+  };
 
   /*
    * Effort as a slider, because it is one axis and four stops on it.
@@ -5410,16 +5494,62 @@ async function loadSettings() {
    */
   const modelNote = el('div', { className: 'hint' });
   const effortNote = el('div', { className: 'hint' });
+  /*
+   * A command that is not a preset gets neither control, and is told so.
+   *
+   * There is nothing to build a model menu out of — the names come from the
+   * preset — and nothing to attach either setting to, so showing the pair
+   * greyed out or full of a stranger's model names would be offering a choice
+   * that does nothing. What stays is one line saying where the equivalent
+   * lives: the flags go in Arguments, and the effort still reaches the model
+   * through the prompt, which is true of every command.
+   */
+  const noPresetNote = el('div', { className: 'hint' });
+  /*
+   * The disclosure's own heading follows what is inside it: with no preset
+   * there is no model and no effort in there, and a summary that promises
+   * both is a promise the block does not keep.
+   */
+  let commandSummary = null;
+  /*
+   * The model and the effort, as one thing that appears and disappears.
+   *
+   * Built here rather than inline below because `setChildren` returns what
+   * `replaceChildren` returns, which is nothing — passing its result as a
+   * child put `undefined` in the tree and the whole block simply was not
+   * there.
+   */
+  const modelAndEffort = el('div', {}, [
+    el('div', { className: 'lbl', textContent: 'Model' }),
+    modelChips,
+    modelOther,
+    modelList,
+    modelNote,
+    el('div', { className: 'lbl', textContent: 'Effort' }),
+    effortSlider,
+    effortScale,
+    effortNote,
+    advanced('A different model for a particular kind of work', taskGrid),
+  ]);
   const showModelNote = () => {
     const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
     modelList.replaceChildren(...(chosen?.model?.suggestions ?? []).map((m) => el('option', { value: m })));
     showModelChips();
+    paintTaskGrid(chosen?.model?.suggestions ?? []);
     showEffortLabel();
 
+    modelAndEffort.hidden = !chosen;
+    noPresetNote.hidden = Boolean(chosen);
+    if (commandSummary) {
+      commandSummary.textContent = chosen
+        ? 'Advanced — the exact command, the model and the effort'
+        : 'Advanced — the exact command';
+    }
     if (!chosen) {
-      const named = `"${command.value.trim() || 'this command'}" is not one of the presets`;
-      modelNote.textContent = `${named}, so this is not added to it. Put the flags your CLI wants in Arguments.`;
-      effortNote.textContent = `${named}, so no effort flag is added — but the effort still goes into the prompt.`;
+      noPresetNote.textContent =
+        `"${command.value.trim() || 'this command'}" is not one of the presets, so there is no model or effort to ` +
+        'choose here: put the flags it wants in Arguments. The effort is still asked for in the prompt, which ' +
+        'reaches every model.';
       return;
     }
     modelNote.textContent = chosen.model
@@ -5464,19 +5594,14 @@ async function loadSettings() {
      * The model and the effort live here, below the command, because they are
      * facts about that command: which names are even offered depends on which
      * CLI is chosen, and neither means anything until one is. Picking a preset
-     * is the whole of what most people need from this panel.
+     * is the whole of what most people need from this panel — and a command
+     * that is not a preset gets this whole block hidden rather than a pair of
+     * controls that cannot do anything.
      */
-    el('div', { className: 'lbl', textContent: 'Model' }),
-    modelChips,
-    modelOther,
-    modelList,
-    modelNote,
-    el('div', { className: 'lbl', textContent: 'Effort' }),
-    effortSlider,
-    effortScale,
-    effortNote,
-    taskFields.length ? advanced('A different model for a particular kind of work', ...taskFields) : null,
+    modelAndEffort,
+    noPresetNote,
   );
+  commandSummary = commandBlock.querySelector('summary');
   commandBlock.open = !matching;
 
   const result = el('div', { className: 'result idle', textContent: 'Not tested yet.' });

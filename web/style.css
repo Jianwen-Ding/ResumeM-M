@@ -1435,6 +1435,49 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 }
 /* The stop you are on, which is why there is no separate readout above. */
 .effort-scale span.on { color: var(--ink); font-weight: 600; }
+
+/*
+ * A model per kind of work, as a grid.
+ *
+ * It was four text boxes, each asking for a model name from memory, and no
+ * way to see at a glance that three of them said the same thing. Kinds of
+ * work down the side and models across the top: every row has one mark on it,
+ * and the column it sits in is the answer.
+ */
+/*
+ * Not the applications table: the rules above dress a `table` as a data
+ * panel — a card, a shadow, uppercase headings with letter-spacing — and this
+ * is a form control that happens to have rows and columns. Every one of those
+ * is turned back off here rather than avoided by not using a table, because a
+ * table is what this is and the headings have to be readable by a screen
+ * reader as headings.
+ */
+.model-grid {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0 2px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.model-grid th,
+.model-grid td {
+  font-size: var(--t-sm);
+  text-transform: none;
+  letter-spacing: 0;
+  background: transparent;
+  text-align: center;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.model-grid thead th { font-weight: 500; color: var(--muted); white-space: nowrap; border-bottom: 1px solid var(--line); }
+.model-grid th.what { text-align: left; font-weight: 400; color: var(--ink-soft); white-space: normal; width: 42%; }
+.model-grid tbody th.what { padding-left: 0; }
+.model-grid tbody tr:last-child td, .model-grid tbody tr:last-child th { border-bottom: 0; }
+.model-grid input[type=radio] { accent-color: var(--accent); cursor: pointer; margin: 0; }
+.model-grid tr.other-row td { padding: 2px 0 6px; text-align: left; }
+.model-grid tr.other-row input { width: 100%; }
 /* The end labels sit under the ends of the track rather than centred on them. */
 .effort-scale span:first-child { text-align: left; }
 .effort-scale span:last-child { text-align: right; }
