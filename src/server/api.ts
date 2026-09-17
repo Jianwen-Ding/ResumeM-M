@@ -8,6 +8,7 @@ import {
   answerPrompt,
   bulletFeedbackPrompt,
   coverLetterPrompt,
+  resumeAsText,
   entryFeedbackPrompt,
   feedbackPrompt,
   letterFeedbackPrompt,
@@ -284,6 +285,42 @@ function decidedAnything(state: SessionState): boolean {
     suggestions.length > 0 ||
     Boolean(reasoning)
   );
+}
+
+/**
+ * The writing tools, for a run that is drafting a letter or an answer.
+ *
+ * Shaped as a helper because four endpoints want the same thing and the
+ * difference between them is only which draft they are working on.
+ */
+function writingTools(
+  data: StoreData,
+  resolved: ReturnType<typeof resolveResume>,
+  job: { company?: string; jobTitle?: string; jobDescription: string; url?: string },
+  draft: { coverLetter: { required: boolean; body: string }; questions: Draft['questions'] },
+): Parameters<typeof runAgent>[2] {
+  return {
+    wire: (sandbox, command) =>
+      wireUp(
+        sandbox,
+        command,
+        {
+          kind: 'write',
+          data,
+          resume: resolved,
+          posting: {
+            company: job.company,
+            jobTitle: job.jobTitle,
+            url: job.url,
+            description: job.jobDescription,
+          },
+          draft,
+          resumeText: resumeAsText(resolved),
+        },
+        serverEntry(mcpDir),
+      ),
+    read: (out) => readState(out),
+  };
 }
 
 /** Where the compiled MCP entry point sits relative to this file. */
@@ -1174,12 +1211,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const result = await runAgent(
         configForTask(data.config, 'write'),
-        coverLetterPrompt(data, resolved, job, prior),
+        coverLetterPrompt(data, resolved, job, prior, { tools: canWire(data.config.ai.command) && serverEntry(mcpDir) !== null }),
+        writingTools(data, resolved, job, { coverLetter: { required: true, body: '' }, questions: [] }),
       );
 
-      // Models sometimes introduce the letter before writing it. The letter
-      // starts at its salutation, so that is where it is taken from.
-      const body = result.executed ? trimToLetter(result.output) : '';
+      /*
+       * The letter the tools were handed, where there was one.
+       *
+       * A letter passed as the argument to `save_letter` cannot have prose
+       * accidentally prepended to it, which is the failure `trimToLetter`
+       * exists to clean up after. That path is still here for every run that
+       * answered the old way.
+       */
+      const written = (result.tools as { letter?: string } | undefined)?.letter?.trim();
+      const body = written || (result.executed ? trimToLetter(result.output) : '');
       let saved: CoverLetter | undefined;
       if (save && body.trim()) {
         saved = {

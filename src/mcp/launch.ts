@@ -105,6 +105,10 @@ export function wireUp(
   session: Omit<SessionFile, 'out'>,
   entry: string | null,
 ): Wiring | null {
+  // Same file, same name, whichever kind of session it is: a CLI is told
+  // about a server once, so three names would be three configs to keep in
+  // step with each other for no gain.
+
   const preset = presetFor(command);
   const build = preset ? WIRING[preset] : undefined;
   if (!build || !entry) return null;

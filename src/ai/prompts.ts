@@ -599,6 +599,8 @@ export function coverLetterPrompt(
   job: TailorContext,
   /** Letters the caller judged relevant. Bare text still works. */
   priorLetters: (CoverLetter | string)[],
+  /** Set when the run has the writing tools attached; see `tailorPrompt`. */
+  options: { tools?: boolean } = {},
 ): string {
   return [
     preamble(data),
@@ -606,7 +608,7 @@ export function coverLetterPrompt(
     '## Task: draft a cover letter',
     'Write the letter for the posting below, in the voice described above, and write nothing else.',
     '',
-    ...outputContract('letter'),
+    ...(options.tools ? howToUseTheWritingTools() : outputContract('letter')),
     '',
     '### What the letter does',
     '- Three or four paragraphs, 200–320 words. Shorter is better than padded.',
@@ -1128,4 +1130,35 @@ export function phrasingDraftPrompt(
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/**
+ * The same job, done as moves.
+ *
+ * Shorter than the JSON contract it replaces, because half of that contract
+ * was about the shape of the reply — no markdown, no preamble, no questions
+ * back — and a letter passed as an argument to `save_letter` cannot have
+ * prose accidentally prepended to it. What is left is the part that was
+ * always the point: check before you claim, and look at what they wrote
+ * before.
+ */
+function howToUseTheWritingTools(): string[] {
+  return [
+    '## How to do it',
+    '',
+    'You have a set of tools under `resume`. Use them; do not answer in prose.',
+    '',
+    '1. `read_posting`, then `read_resume` — what this is for, and what it is written from.',
+    '2. `read_work` — what the form asks for, and anything already typed into it.',
+    '3. `find_my_letters` — search what they have sent before for what this posting is about.',
+    '   Where one already says the thing well, adapt it.',
+    '4. `check_claim` before writing any sentence that says they did something, and for',
+    '   every number. The resume is the only thing that can support the letter, and a',
+    '   metric rounded from memory is found in an interview rather than here.',
+    '5. `save_letter`, and `save_answer` for each question.',
+    '6. `finish`, saying what you leaned on.',
+    '',
+    'Every call is checked as you make it, and a wrong id comes back naming the right ones.',
+    'Nothing you print outside a tool call is kept, so there is no reason to print anything.',
+  ];
 }

@@ -430,6 +430,39 @@ exchange is two processes and a file that is deleted when the run ends. A CLI
 we do not know how to wire up, or one where MCP is unavailable, falls back to
 asking for JSON, which is what every run did before this existed.
 
+Writing gets the same treatment, with the tools the job actually needs:
+
+    read_posting     read_resume      read_work
+    find_my_letters  find_my_answers  check_claim
+    save_letter      save_answer      finish
+
+`check_claim` is the one worth pointing at. A letter is read beside the resume
+that supports it, so "does the resume actually say 2M events a day" is the
+question it most needs answered — and it is a lookup, which a model doing it
+from memory mid-sentence is about to get wrong. Ask, and it says which part of
+the claim the resume carries and quotes the lines. `find_my_letters` is a
+search rather than three pre-selected samples: ranking is a guess made before
+anyone knows what the letter needs to say. And `save_letter` takes the letter
+as an argument, which means an agent's habit of explaining itself first cannot
+put "I have prepared the implementation plan in cover_letter_plan.md" at the
+top of somebody's cover letter — a real run, and the reason `trimToLetter`
+exists.
+
+And getting started — turning an old resume, some cover letters and a README
+into a store — has:
+
+    list_documents   read_document   read_store
+    propose_entry    propose_bullet  propose_alternate
+    propose_skill    review_proposal finish
+
+This is the one place the AI writes text that ends up on a resume, so the line
+moves rather than disappearing, and it moves in exactly one place. Nothing is
+written to the store: the session builds a proposal you accept entry by entry.
+And every bullet must quote the sentence in your material it is a rewording
+of — checked, not requested. A model that has to point at what it is
+paraphrasing cannot invent a job, which is the difference between "read what I
+wrote" and "write me a resume".
+
 ---
 
 ## Application tracking
