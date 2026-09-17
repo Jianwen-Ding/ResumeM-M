@@ -133,6 +133,27 @@ export function extractKeywords(text: string): string[] {
   return [...found];
 }
 
+/**
+ * What to call an employer a page never names.
+ *
+ * "Unknown" is not an answer. It went into resume labels, cover letter titles
+ * and the Workspace list as the name of the application, so a bare
+ * application form — which is most of them, and the ones that say least about
+ * who is hiring — produced "Apply — Unknown" in the resume picker, and two
+ * such applications were indistinguishable.
+ *
+ * The host is the one thing always known and always recognisable: you were
+ * just there. A placeholder either way, but a true one.
+ */
+export function employerFallback(url?: string): string {
+  if (!url) return 'Unknown';
+  try {
+    return new URL(url).hostname.replace(/^www\./, '') || 'Unknown';
+  } catch {
+    return 'Unknown';
+  }
+}
+
 export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
   const ld = fromJsonLd(html);
   const text = stripTags(html);
@@ -272,6 +293,75 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   const against = countIn(text, AGAINST);
   if (against > 0) add(-Math.min(against * 2, 6), 'looks like an ordinary page');
 
+  /*
+   * Whether there is anything here to act on.
+   *
+   * Everything above this line counts vocabulary, and vocabulary alone turns
+   * out to describe a great many pages that are not postings: a news article
+   * about the hiring slowdown quotes "minimum qualifications", "years of
+   * experience" and "equal opportunity employer" because it is *about*
+   * postings; a documentation page headed "Requirements" talks about
+   * responsibilities, benefits and compensation while meaning none of them;
+   * a forum thread about how many applications people sent is full of the
+   * words and is not one. All three scored as postings, and the card appeared
+   * on all three.
+   *
+   * What a posting has that none of them has is somewhere to go: a way to
+   * apply, a form to fill in, a declaration of what it is, or an address on a
+   * system that exists only for this. That is also exactly what the tool needs
+   * in order to be any use — a posting you cannot act on is not one it can
+   * help with — so requiring it costs nothing that was worth having.
+   */
+  /*
+   * Or the page plainly names one role.
+   *
+   * Requiring somewhere to apply is too strict on its own: plenty of careers
+   * sites describe a role on one page and keep the Apply button a link away,
+   * and those are exactly the pages worth reading, because the description is
+   * what a tailored resume is tailored to. What they have that an article
+   * about hiring does not is a title that is a job title — "Platform Engineer
+   * at Cygnus" rather than "The tech hiring slowdown, explained".
+   *
+   * A title that opens with an interrogative or an article is a sentence about
+   * something, not the name of a post. That one test separates every real
+   * posting in the fixtures from every page that merely talks about postings.
+   */
+  const heading = (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '')
+    .concat(' ')
+    .concat(/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1] ?? '');
+  const named = stripTags(heading).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
+  /*
+   * And the role word has to be the *end* of it, give or take a level.
+   * "Platform Engineer" is a post; "Software Engineer salaries" is a page
+   * about what posts pay, and merely containing the word was enough to let it
+   * through.
+   */
+  const namesARole =
+    named.split(/\s+/).length <= 8 &&
+    (ENDS_WITH_ROLE.test(named) || LEADS_WITH_ROLE.test(named)) &&
+    !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my)\b/i.test(named);
+
+  const hasFields = /<(input|textarea|select)\b/i.test(html);
+  /*
+   * Being on an applicant tracking system, or having an Apply link, is not on
+   * its own enough — and both were. A board's own feed is on a board; the page
+   * after you press submit is on the tracker and is the one page where a card
+   * is pure noise; a careers landing page saying "nothing open, write to us
+   * anyway" has an Apply link and no role to apply for.
+   *
+   * What every real posting has instead is that it is *about one role*: its
+   * title names the post, or it declares itself with structured data, or it is
+   * the form itself — asking for a resume, or asking enough of the questions a
+   * form asks. That, and nothing weaker.
+   */
+  const actionable =
+    /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    uploadsResume ||
+    namesARole ||
+    (formish >= 3 && hasFields);
+  if (namesARole) why.push('names a role');
+  else if (actionable) why.push('somewhere to apply');
+
   // Which kind, in the order that decides what the tool should offer. A form
   // wins over a description, because the form is what you are about to fill
   // in — and a page that is both is still, at this moment, the form.
@@ -281,6 +371,19 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   else if (listish >= 2) kind = 'listing';
   else if (forumHiring) kind = 'discussion';
   else if (score >= JOB_SHAPED) kind = 'posting';
+
+  /*
+   * A board of many roles has nowhere to apply *on it* — applying happens one
+   * link further in — and it describes enough of the work to read as a posting
+   * on vocabulary alone. It is a listing, which is what the tool should have
+   * been calling it, and listings are judged on their own evidence: a list of
+   * roles and a forum saying it is hiring are both actionable in the sense
+   * that matters, by way of the links they carry.
+   */
+  if (!actionable && kind === 'posting' && listish >= 2) kind = 'listing';
+
+  // Everything else has to have somewhere to go.
+  if (!actionable && kind !== 'listing' && kind !== 'discussion') kind = 'none';
 
   if (score < JOB_SHAPED) kind = 'none';
   return { kind, score, why };
@@ -295,6 +398,27 @@ export function classifyPage(html: string, url?: string): PageVerdict {
  * signals above are what keep that from meaning "every page".
  */
 export const JOB_SHAPED = 3;
+
+/**
+ * Words that name a post rather than describe one.
+ *
+ * Not a taxonomy of every job there is — it does not need to be, because this
+ * only ever decides whether a page that already reads like a posting is
+ * allowed to be one without an Apply button on it. Anything missing here still
+ * gets in through the button, the form, the structured data or the host.
+ */
+const ROLE_WORDS =
+  /\b(engineer|developer|programmer|scientist|analyst|designer|manager|director|architect|administrator|consultant|specialist|technician|researcher|intern|internship|associate|coordinator|accountant|nurse|physician|teacher|professor|writer|editor|marketer|recruiter|counsel|attorney|paralegal|therapist|chef|driver|technologist|strategist|producer|operator|advisor|apprentice|fellow|lead|head of|officer|assistant|representative|agent)\b/i;
+/**
+ * The role word has to end the title, give or take a level — "Platform
+ * Engineer", "Software Engineer II". "Software Engineer salaries" is a page
+ * about what the post pays, and merely containing the word let it through.
+ */
+const ENDS_WITH_ROLE = new RegExp(`${ROLE_WORDS.source}\\s*(?:\\b(?:i{1,3}|iv|v|\\d+)\\b\\s*)?$`, 'i');
+
+/** Or lead it: "Head of Platform" names a post as plainly as any of them. */
+const LEADS_WITH_ROLE = /^(head|director|vp|vice president|chief|lead)\s+of\b/i;
+
 
 /**
  * Cheap confidence that a page is a job posting at all. Kept as the number,

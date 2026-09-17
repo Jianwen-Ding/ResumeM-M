@@ -21,15 +21,26 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
    * earns its place when several applications are open at once and you want to
    * tell them apart in a file picker without opening them.
    */
+  /*
+   * Shown as the names themselves rather than described, because the only
+   * question anyone has here is what the file in the picker will be called.
+   * The second shape shows both files: it is the one that cannot tell a resume
+   * from a cover letter on its own, and seeing the type come back on exactly
+   * the two that would have clashed explains that better than a sentence.
+   */
+  const NAME_EXAMPLES = {
+    type: 'Jane-Doe-Resume.pdf, Jane-Doe-Cover-Letter.pdf',
+    title: 'Jane-Doe-Software-Engineer-Resume.pdf, Jane-Doe-Software-Engineer-Cover-Letter.pdf',
+    'title-type': 'Jane-Doe-Software-Engineer-Resume.pdf, Jane-Doe-Software-Engineer-Cover-Letter.pdf',
+  };
+
   async function refreshFileNaming() {
     const config = await api('/config');
-    const on = Boolean(config.output?.roleInFileName);
-    const box = $('#output-role-name');
-    if (!box) return;
-    box.checked = on;
-    $('#output-name-example').textContent = on
-      ? 'Jane-Doe-Software-Engineer-Resume.pdf'
-      : 'Jane-Doe-Resume.pdf';
+    const shape = config.output?.fileNames ?? 'type';
+    const picker = $('#output-file-names');
+    if (!picker) return;
+    picker.value = shape;
+    $('#output-name-example').textContent = NAME_EXAMPLES[shape] ?? NAME_EXAMPLES.type;
   }
 
   async function refreshProject() {
@@ -45,6 +56,20 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     $('#project-chip').title = project.current || 'Open or create a save';
     $('#project-status').textContent = open ? `Open Save: ${name}` : 'No Save Open';
     $('#project-banner-path').textContent = project.current || 'Open or create a save to access resumes, applications, and files.';
+    /*
+     * The banner is for the state that stops everything: no save open, so
+     * nothing on any tab can work, and the way out has to be impossible to
+     * miss.
+     *
+     * Once one is open it had nothing left to say. It repeated the chip in
+     * the header word for word — "Save: jh-store" up there, "Open Save:
+     * jh-store" here — and added the folder's full path, so every screen in
+     * the application carried a row of somebody's filesystem across the top
+     * of it, permanently, to answer a question nobody asks twice. The chip
+     * still names the save, and still gives the whole path on hover; Save &
+     * Files gives it in full.
+     */
+    $('#project-banner').hidden = open;
     document.title = open ? `${name} — ResumeM-M` : 'ResumeM-M';
     $('#project-description').textContent = project.openedBy === 'restored'
       ? 'This save was reopened from your last session. All visible resumes and applications belong to this folder.'
@@ -75,7 +100,10 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     setChildren($('#project-existing'), nothingAtAll
       ? el('button', { className: 'primary', textContent: 'Create a Save…', onclick: () => {
           $('#project-mode').value = 'create';
-          $('#project-switch').textContent = 'Create Save';
+          // Through the one handler, so the button and the field's label both
+          // follow. Setting the button text here left the label saying "Folder
+          // to open" above a box you are about to create a folder in.
+          $('#project-mode').onchange?.();
           $('#project-path').focus();
         } })
       : project.suggested ? [
@@ -84,6 +112,7 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
         el('button', { className: 'primary', textContent: 'Open Existing Save', onclick: action(async () => {
           $('#project-path').value = project.suggested;
           $('#project-mode').value = 'open';
+          $('#project-mode').onchange?.();
           await changeProject();
         }) }),
       ] : el('p', { className: 'hint', textContent: 'Choose Open Existing Save or Create Blank Save on the left.' }));
@@ -245,9 +274,27 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     location.hash = 'save';
     location.reload();
   });
-  $('#project-mode').onchange = () => {
-    $('#project-switch').textContent = ({ open: 'Open Save', create: 'Create Save', move: 'Move Save' })[$('#project-mode').value];
+  /*
+   * The button already followed the action; the field above it did not.
+   *
+   * It was labelled "Save Folder" — the same two words as the heading at the
+   * top of this column, which names the save that is currently open. Two
+   * different things with one name, four hundred pixels apart, and the one
+   * that means "type a path here" is the second.
+   */
+  const PATH_LABEL = {
+    open: 'Folder to open',
+    create: 'Where to create it',
+    move: 'Where to move it',
   };
+  $('#project-mode').onchange = () => {
+    const mode = $('#project-mode').value;
+    $('#project-switch').textContent = ({ open: 'Open Save', create: 'Create Save', move: 'Move Save' })[mode];
+    const label = document.querySelector('label[for="project-path"]');
+    if (label) label.textContent = PATH_LABEL[mode] ?? 'Folder to open';
+  };
+  // The markup ships the "open" wording; run once so a restored mode agrees.
+  $('#project-mode').onchange?.();
   $('#project-recents').onchange = event => { $('#project-path').value = event.target.value; $('#project-mode').value = 'open'; $('#project-mode').onchange(); };
   const native = window.webkit?.messageHandlers?.chooseProjectFolder;
   $('#project-browse').hidden = !native;
@@ -267,24 +314,22 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
     const fallback = [...event.dataTransfer.files];
     try { await importFiles(entries.length ? (await Promise.all(entries.map(readDirectory))).flat() : fallback); } catch (error) { report(error); }
   };
-  const naming = $('#output-role-name');
+  const naming = $('#output-file-names');
   if (naming) {
+    let lastShape = naming.value;
     naming.onchange = async () => {
       naming.disabled = true;
       try {
         await api('/config', {
           method: 'PUT',
-          body: JSON.stringify({ output: { roleInFileName: naming.checked } }),
+          body: JSON.stringify({ output: { fileNames: naming.value } }),
         });
+        lastShape = naming.value;
         await refreshFileNaming();
-        status(
-          naming.checked
-            ? 'New files will carry the job title. Files already built keep their names.'
-            : 'New files will leave the job title out. Files already built keep their names.',
-        );
+        status('New files will use that shape. Files already built keep their names.');
       } catch (error) {
         report(error);
-        naming.checked = !naming.checked;
+        naming.value = lastShape;
       } finally {
         naming.disabled = false;
       }

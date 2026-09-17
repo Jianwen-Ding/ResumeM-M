@@ -36,7 +36,7 @@ describe('the settings panel', () => {
       ai: { enabled: false, research: false, command: 'claude', args: ['-p', '{promptText}'], timeoutMs: 180_000 },
       latex: { engine: '' },
       git: { autoCommit: false },
-      output: { dir: 'out', roleInFileName: false },
+      output: { dir: 'out', fileNames: 'type' },
       overrides: {},
     };
 
@@ -87,6 +87,34 @@ describe('the settings panel', () => {
     expect(commandBox().value).toBe('my-own-cli --with-a-flag');
   });
 
+  /*
+   * And across a tab switch, which is the one that actually bit. The panel is
+   * rebuilt from the server every time the Voice tab is opened, so looking at
+   * another tab and coming back was enough to delete a command that had been
+   * typed but — as is normal for a field with a Save button — not yet saved.
+   */
+  it('keeps a command you are still typing across a tab switch', async () => {
+    const command = commandBox();
+    command.value = 'my-own-cli --with-a-flag';
+    command.dispatchEvent(new Event('input'));
+
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(commandBox().value).toBe('my-own-cli --with-a-flag');
+  });
+
+  // The other half: a field nobody has touched must still show what the store
+  // says, or a change made in another window would never arrive in this one.
+  it('still refreshes a command you have not touched', async () => {
+    config.ai = { ...config.ai, command: 'changed-elsewhere' };
+
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.waitFor(() => expect(commandBox().value).toBe('changed-elsewhere'));
+  });
+
   it('still explains what the switch now means', async () => {
     const research = checkboxes()[1];
     expect(document.querySelector('#settings').textContent).toContain('works only from the posting');
@@ -96,6 +124,25 @@ describe('the settings panel', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('#settings').textContent).toContain('read about the company before writing'),
     );
+  });
+
+  /*
+   * And once saved, the field must go back to following the store. Keeping
+   * "it differs from what was last loaded" as the test forever would mean a
+   * field stayed pinned to its own value after being saved, and a change made
+   * in another window never arrived here again.
+   */
+  it('follows the store again once the command has been saved', async () => {
+    const command = commandBox();
+    command.value = 'my-own-cli';
+    command.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary, #settings button').click();
+    await vi.waitFor(() => expect(config.ai.command).toBe('my-own-cli'));
+
+    config.ai = { ...config.ai, command: 'changed-elsewhere' };
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.waitFor(() => expect(commandBox().value).toBe('changed-elsewhere'));
   });
 
   it('puts the switch back where it was when the save is refused', async () => {

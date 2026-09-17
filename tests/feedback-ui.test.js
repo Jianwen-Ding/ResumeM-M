@@ -158,19 +158,45 @@ describe('feedback while editing', () => {
     selector.value = 'newgrad';
     selector.dispatchEvent(new Event('change'));
     await vi.waitFor(() => expect(document.querySelector('.bullet-disclosure .stepper')).not.toBeNull());
-    const block = [...document.querySelectorAll('.bullet-disclosure')].find(node => node.dataset.toolsKey.endsWith('/b_pipeline'));
+    const find = () =>
+      [...document.querySelectorAll('.bullet-disclosure')].find(node => node.dataset.toolsKey.endsWith('/b_pipeline'));
+
+    const block = find();
     expect(block.querySelector('.variant-row').hidden).toBe(true);
-    expect(block.querySelector('.bullet-quick-actions').hidden).toBe(true);
     expect(block.querySelector('.toggle input').checked).toBe(true);
-    block.querySelector('.bullet-more').click();
-    const previousText = block.querySelector('.editable').textContent;
+
+    /*
+     * The quick actions are not part of what folds away, and this case used
+     * to assert that they were.
+     *
+     * The disclosure exists so that eight bullets can be read at once, and
+     * it was handed "every child except the heading" to hide — which swept
+     * up the bar holding the stepper. That put the one control this editor
+     * exists for behind a menu, on bullets whose whole point is that they
+     * have two or three wordings, with nothing on screen to say so. The
+     * stepper is quick or it is nothing: its own description is "step
+     * through the alternates without opening the list".
+     */
+    expect(block.querySelector('.bullet-quick-actions').hidden).toBe(false);
+
+    // So it can be used without opening anything first.
+    const first = block.querySelector('.editable').textContent;
     block.querySelector('.stepper button:last-child').click();
-    const updated = [...document.querySelectorAll('.bullet-disclosure')].find(node => node.dataset.toolsKey.endsWith('/b_pipeline'));
-    expect(updated.querySelector('.editable').textContent).not.toBe(previousText);
-    expect(updated.querySelector('.variant-row').hidden).toBe(false);
-    expect(updated.querySelector('.bullet-more').getAttribute('aria-label')).toBe('Hide bullet actions');
-    updated.querySelector('.bullet-more').click();
-    expect(updated.querySelector('.variant-row').hidden).toBe(true);
-    expect(updated.querySelector('.editable').textContent).not.toBe(previousText);
+    expect(find().querySelector('.editable').textContent).not.toBe(first);
+    expect(find().querySelector('.variant-row').hidden).toBe(true);
+
+    // And the rest of the bullet's actions, once opened, stay open across
+    // the repaint that cycling a wording causes.
+    find().querySelector('.bullet-more').click();
+    const second = find().querySelector('.editable').textContent;
+    find().querySelector('.stepper button:last-child').click();
+    expect(find().querySelector('.editable').textContent).not.toBe(second);
+    expect(find().querySelector('.variant-row').hidden).toBe(false);
+    expect(find().querySelector('.bullet-more').getAttribute('aria-label')).toBe('Hide bullet actions');
+
+    const third = find().querySelector('.editable').textContent;
+    find().querySelector('.bullet-more').click();
+    expect(find().querySelector('.variant-row').hidden).toBe(true);
+    expect(find().querySelector('.editable').textContent).toBe(third);
   });
 });

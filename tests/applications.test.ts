@@ -386,12 +386,13 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
  * advertised. It earns its place when several applications are open at once.
  */
 describe.skipIf(!latex)('putting the job title in file names', { timeout: 180_000 }, () => {
-  const withTitle = (on: boolean) =>
+  const shaped = (fileNames: 'type' | 'title' | 'title-type') =>
     t.write('config.yaml', {
       ai: { enabled: false },
       git: { autoCommit: false },
-      output: { dir: 'out', roleInFileName: on },
+      output: { dir: 'out', fileNames },
     });
+  const withTitle = (on: boolean) => shaped(on ? 'title-type' : 'type');
 
   it('leaves it out by default', async () => {
     const result = await buildBundle(t.store, {
@@ -418,6 +419,55 @@ describe.skipIf(!latex)('putting the job title in file names', { timeout: 180_00
     expect(result.files).toContain('Test-Person-Data-Platform-Intern-Resume.pdf');
     expect(result.files).toContain('Test-Person-Data-Platform-Intern-Cover-Letter.pdf');
     expect(result.files).toContain('Test-Person-Data-Platform-Intern-Answers.md');
+  });
+
+  /*
+   * The third shape leaves the document type out, which is the shortest name
+   * and the one that cannot tell two documents of one application apart. The
+   * resume and the cover letter would both be
+   * `Test-Person-Data-Platform-Intern.pdf`, and the second would quietly
+   * replace the first in the folder you upload from.
+   */
+  it('brings the type back only where a name would otherwise be claimed twice', async () => {
+    shaped('title');
+    const result = await buildBundle(t.store, {
+      company: 'Streamly',
+      role: 'Data Platform Intern',
+      resumeId: 'intern',
+      coverLetter: 'Dear Streamly,',
+      answers: [{ question: 'Why?', answer: 'Because.' }],
+    });
+
+    // The two PDFs would have collided, so both say which they are.
+    expect(result.files).toContain('Test-Person-Data-Platform-Intern-Resume.pdf');
+    expect(result.files).toContain('Test-Person-Data-Platform-Intern-Cover-Letter.pdf');
+    // The answers file never clashed — a different extension — so it stays short.
+    expect(result.files).toContain('Test-Person-Data-Platform-Intern.md');
+  });
+
+  /*
+   * And the same name whether or not the letter was written this time. Deciding
+   * from what the bundle happens to contain would mean a resume built alone is
+   * `…-Intern.pdf` and the same resume rebuilt with a letter is
+   * `…-Intern-Resume.pdf` — the file renaming itself for a reason that has
+   * nothing to do with it, in the folder you upload from.
+   */
+  it('names the resume the same whether or not a letter came with it', async () => {
+    shaped('title');
+    const alone = await buildBundle(t.store, {
+      company: 'Streamly',
+      role: 'Data Platform Intern',
+      resumeId: 'intern',
+    });
+    expect(alone.files).toEqual(['Test-Person-Data-Platform-Intern-Resume.pdf']);
+
+    const together = await buildBundle(t.store, {
+      company: 'Streamly',
+      role: 'Data Platform Intern',
+      resumeId: 'intern',
+      coverLetter: 'Dear Streamly,',
+    });
+    expect(together.files[0]).toBe('Test-Person-Data-Platform-Intern-Resume.pdf');
   });
 
   /*

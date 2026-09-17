@@ -33,6 +33,35 @@ const el = (tag, props = {}, children = []) => {
   return node;
 };
 
+/**
+ * A text field that waits for a Save button, and survives its panel being
+ * rebuilt around it.
+ *
+ * Most of this editor saves as you go, and the handful of fields that do not
+ * are the ones a reload can silently destroy — the AI command, its arguments,
+ * the timeout, the git remote. Each of those lives in a panel that is
+ * rebuilt wholesale from the server whenever it is shown, or whenever a
+ * button elsewhere in it finishes: press "Save History" and the remote URL
+ * you were halfway through typing is replaced by the empty one on disk.
+ *
+ * Half-typed is exactly the state worth keeping. The reason these fields wait
+ * for a button is that a half-typed command should not be *run*, which is not
+ * an argument for deleting it.
+ *
+ * So the new field looks for the one it is replacing, and keeps what is in it
+ * when that differs from what the store last supplied. A field nobody has
+ * touched still refreshes, or a change made in another window would never
+ * arrive here.
+ */
+function keptField(name, stored, props = {}) {
+  const previous = document.querySelector(`[data-keeps="${name}"]`);
+  const edited = previous != null && previous.value !== previous.dataset.stored;
+  const input = el('input', { type: 'text', ...props, value: edited ? previous.value : stored });
+  input.dataset.keeps = name;
+  input.dataset.stored = stored;
+  return input;
+}
+
 const state = {
   store: null,
   resumeId: null,
@@ -118,9 +147,16 @@ async function api(path, options = {}) {
   if (docKey) {
     const isDelete = String(options.method ?? 'GET').toUpperCase() === 'DELETE';
     const after = isDelete ? null : documentFrom(body, options.body);
-    history.record({ docKey, before, after, label: undoLabel });
-    undoLabel = 'change';
-    paintUndo();
+    if (openGroup) {
+      // One user action, however many requests it takes. The group records the
+      // lot as a single step once it finishes.
+      if (!openGroup.before.has(docKey)) openGroup.before.set(docKey, before);
+      openGroup.after.set(docKey, after);
+    } else {
+      history.record({ docKey, before, after, label: undoLabel });
+      undoLabel = 'change';
+      paintUndo();
+    }
   }
   return body;
 }
@@ -150,6 +186,58 @@ function documentFrom(reply, sentBody) {
 const history = createHistory({ limit: 60 });
 /** True while an undo/redo is being applied, so it does not record itself. */
 let undoing = false;
+
+/**
+ * The action currently being performed, when it is more than one request.
+ *
+ * A step of undo should be a thing the user did, and several of the editor's
+ * actions are not one request: deleting an entry writes the entry and the
+ * resume that referenced it; adding one writes the entry and the section that
+ * lists it. Recorded per request those cost two presses each, and the state
+ * between the presses is one no action ever produced — an entry that exists
+ * with nothing pointing at it.
+ *
+ * `watch` is for the actions whose write is not a whole-document PUT at all.
+ * Adding a phrasing is `POST …/variants`, which `docKeyFor` rightly ignores,
+ * so it was simply not undoable: the only way back was to find the phrasing
+ * and delete it. Naming the document it changes makes it a step like any
+ * other, without this file having to know what the route does.
+ */
+let openGroup = null;
+
+async function undoGroup(label, watch, run) {
+  if (openGroup) return run(); // nested: the outermost action owns the step
+  openGroup = { label, before: new Map(), after: new Map() };
+  for (const key of watch ?? []) openGroup.before.set(key, readDoc(state.store, key));
+
+  try {
+    return await run();
+  } finally {
+    const group = openGroup;
+    openGroup = null;
+    try {
+      /*
+       * Read the end state back rather than trusting what was sent. A watched
+       * document changed by a POST has no reply to snapshot, and the server
+       * normalises and fills in defaults besides — so the only honest "after"
+       * is the store as it now is.
+       */
+      if (group.before.size) {
+        await loadStore();
+        const changes = [...group.before.keys()].map((docKey) => ({
+          docKey,
+          before: group.before.get(docKey) ?? null,
+          after: group.after.has(docKey) ? group.after.get(docKey) : readDoc(state.store, docKey),
+        }));
+        history.record({ changes, label });
+        paintUndo();
+      }
+    } catch {
+      // A step that cannot be recorded is not a reason to fail the action the
+      // user asked for; it only means this one cannot be taken back.
+    }
+  }
+}
 /** What the write in flight should be called, set by the action that starts it. */
 let undoLabel = 'change';
 /** Name the next write, so the menu can say "Undo delete group". */
@@ -164,11 +252,25 @@ async function stepHistory(direction) {
     return;
   }
   // Undo reinstates what was there before; redo puts back what the action did.
-  const doc = direction === 'undo' ? entry.before : entry.after;
+  // In reverse for an undo, so a step that created a document and then pointed
+  // something at it is taken apart in the order it was put together.
+  const changes = direction === 'undo' ? [...entry.changes].reverse() : entry.changes;
   undoing = true;
   try {
-    const { path, options } = restoreRequest(entry.docKey, doc);
-    await api(path, options);
+    for (const change of changes) {
+      const { path, options } = restoreRequest(change.docKey, direction === 'undo' ? change.before : change.after);
+      await api(path, options);
+    }
+    /*
+     * The selections on screen are dropped, not kept.
+     *
+     * A resume is a thin overlay and the editor holds the unsaved part of it
+     * in `state.choices` and friends. Undoing a selection change put the old
+     * spec back on disk and left that overlay untouched, so the next render
+     * re-applied exactly what had just been undone and the next auto-save
+     * wrote it out again. From the outside, Ctrl+Z did nothing at all.
+     */
+    clearEdits();
     await loadStore();
     render();
     scheduleRender();
@@ -246,8 +348,20 @@ function optionText(variant) {
 }
 
 /** Turn a label into a usable id fragment. */
+/*
+ * The same shape the server makes, because they name the same things.
+ *
+ * This produced underscores and the server's `slug` produces hyphens, so a
+ * filename derived here came out `kafka_heavy_variation` in a folder where
+ * every other file is `intern-kafka.yaml` and
+ * `job-helios-platform-engineer.yaml`. Two functions with one name and two
+ * answers, and the visible result was a store that looked like two people had
+ * been at it.
+ *
+ * Ids already stored keep whatever they were given; nothing regenerates them.
+ */
 function slug(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
 }
 
 /* ------------------------------------------------------------------ *
@@ -544,40 +658,63 @@ function setSaveState(mode, detail) {
  */
 const entryWrites = new Map(); // id → { queue, server, pending }
 
-async function saveEntry(entry, message) {
-  describeNext(message ?? 'the change');
-  const id = entry.id;
+/**
+ * Run something that changes one entry in that entry's lane.
+ *
+ * Every route that touches an entry goes through here, not only the whole-entry
+ * PUT: adding a phrasing, adding an entry and deleting one each have their own
+ * endpoint, and a queue that only some writes respect is worse than no queue.
+ * A delete that overtakes a PUT still sitting in the lane gets recreated by it
+ * — `PUT /entries/:id` has no existence check — as an orphan no resume
+ * references, and a phrasing added beside a queued write is deleted by it.
+ */
+async function inEntryLane(id, run) {
   const lane = entryWrites.get(id) ?? { queue: Promise.resolve(), server: null, pending: 0 };
   entryWrites.set(id, lane);
   lane.pending++;
 
-  // What this edit was derived from: the store as the client last saw it.
-  const base = state.store?.entries?.find((e) => e.id === id) ?? null;
-
   // `queue` never rejects, so one failed write does not wedge the ones behind
   // it — each is still worth attempting on its own.
-  const mine = lane.queue.then(async () => {
-    // Something landed while this edit was being made: keep it, and put only
-    // what this edit actually changed on top of it.
-    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
-    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
-    lane.server = saved?.id ? saved : body;
-    return lane.server;
-  });
+  const mine = lane.queue.then(() => run(lane));
   lane.queue = mine.then(
     () => {},
     () => {},
   );
 
   try {
-    await mine;
+    return await mine;
   } finally {
-    // Once nothing is in flight the client will reload, so the next edit is
-    // built from the server's copy and there is nothing left to rebase onto.
-    if (--lane.pending === 0) entryWrites.delete(id);
+    await loadStore();
+    /*
+     * The server's own copy, read back, so anything a differently-shaped write
+     * did to this entry is what the next edit in the lane rebases onto.
+     *
+     * And the lane is only released after that reload, not before it. `state
+     * .store` still shows the pre-write entry for the length of that request,
+     * so an edit started inside that window would otherwise open a fresh lane,
+     * find nothing to rebase onto, and PUT the stale entry whole — undoing the
+     * write that had just landed.
+     */
+    lane.server = state.store?.entries?.find((e) => e.id === id) ?? lane.server;
+    if (--lane.pending === 0 && entryWrites.get(id) === lane) entryWrites.delete(id);
   }
+}
+
+async function saveEntry(entry, message) {
+  describeNext(message ?? 'the change');
+  const id = entry.id;
+  // What this edit was derived from: the store as the client last saw it.
+  const base = state.store?.entries?.find((e) => e.id === id) ?? null;
+
+  await inEntryLane(id, async (lane) => {
+    // Something landed while this edit was being made: keep it, and put only
+    // what this edit actually changed on top of it.
+    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
+    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
+    lane.server = saved?.id ? saved : body;
+  });
+
   setStatus(message ?? `Saved ${id}`);
-  await loadStore();
   render();
 }
 
@@ -737,12 +874,31 @@ function pinControl(key, field, current) {
   });
 }
 
+/**
+ * Which document "Make default" actually changes.
+ *
+ * `PUT /defaults/:key` is a route of its own, so nothing about it looks like a
+ * whole-document write and it recorded no undo step. It always lands on the
+ * profile or on one entry, and which is decided by the same reading of the key
+ * the server does — `entryId.field` for a heading, a bare bullet id otherwise.
+ */
+function documentBehind(key) {
+  if (key === PROFILE_NAME_KEY) return 'profile';
+  const dot = String(key).indexOf('.');
+  if (dot > 0) return `entry:${key.slice(0, dot)}`;
+  const owner = (state.store?.entries ?? []).find((e) => (e.bullets ?? []).some((b) => b.id === key));
+  return owner ? `entry:${owner.id}` : null;
+}
+
 async function pinDefault(key, variantId) {
   try {
-    await api(`/defaults/${encodeURIComponent(key)}`, {
-      method: 'PUT',
-      body: JSON.stringify({ variantId }),
-    });
+    const doc = documentBehind(key);
+    await undoGroup('pin the default wording', doc ? [doc] : [], () =>
+      api(`/defaults/${encodeURIComponent(key)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ variantId }),
+      }),
+    );
     await loadStore();
     setStatus('Pinned as the default everywhere');
     render();
@@ -896,9 +1052,9 @@ function alternateStepper(key, field, currentId) {
   };
 
   return el('div', { className: 'stepper', title: 'Other ways to say this' }, [
-    el('button', { className: 'step', textContent: '‹', title: 'Previous wording', onclick: () => go(-1) }),
+    el('button', { className: 'step', textContent: '‹', title: 'Previous wording', ariaLabel: 'Previous wording', onclick: () => go(-1) }),
     el('span', { className: 'count', textContent: `${at + 1}/${ids.length}` }),
-    el('button', { className: 'step', textContent: '›', title: 'Next wording', onclick: () => go(1) }),
+    el('button', { className: 'step', textContent: '›', title: 'Next wording', ariaLabel: 'Next wording', onclick: () => go(1) }),
   ]);
 }
 
@@ -937,10 +1093,17 @@ function listItems(entry, bullet) {
     };
     chip.append(cb, item.text);
     chip.append(
-      el('span', {
+      /*
+       * A button, because it was a span: clickable with a mouse and reachable
+       * by nothing else. There is no keyboard route to deleting an item, and
+       * a screen reader is told only that there is an "×" here.
+       */
+      el('button', {
+        type: 'button',
         className: 'x',
         textContent: '×',
         title: 'Delete this item from the save',
+        ariaLabel: `Delete "${item.text}" from the save`,
         onclick: (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
@@ -1037,10 +1200,25 @@ function bulletBlock(entry, section, bullet, choices) {
   const chosenId = choices[key] ?? bullet.default;
   const chosen = bullet.variants.find((v) => v.id === chosenId) ?? bullet.variants[0];
 
-  wrap.append(el('div', { className: 'bullet-quick-actions toolbar' }, [
+  /*
+   * Quick, and therefore not behind the "…".
+   *
+   * Everything else on a bullet is folded into the disclosure to keep eight
+   * of them readable at once, and this bar was folded in with them by a
+   * filter that took every child except the heading. That put the stepper —
+   * the one control this whole editor exists for, and the one whose own
+   * description is "step through the alternates without opening the list" —
+   * behind a menu. Three bullets with two and three phrasings each, and no
+   * way to see that there was anything to step through.
+   *
+   * It stays out. `alternateStepper` returns nothing when there is only one
+   * wording, so this appears exactly where there is a choice to make.
+   */
+  const quickActions = el('div', { className: 'bullet-quick-actions toolbar' }, [
     alternateStepper(bullet.id, bullet, chosenId),
     phraseFeedbackButton(entry, { bulletId: bullet.id, variantId: chosen?.id ?? chosenId }),
-  ].filter(Boolean)));
+  ].filter(Boolean));
+  wrap.append(quickActions);
 
   wrap.append(
     variantPicker({
@@ -1080,7 +1258,12 @@ function bulletBlock(entry, section, bullet, choices) {
   );
 
   if (chosen?.note) wrap.append(el('div', { className: 'note', textContent: chosen.note }));
-  return attachSourceTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
+  return attachSourceTools(
+    wrap,
+    `${entry.id}/${bullet.id}`,
+    [...wrap.children].filter((child) => child !== head && child !== quickActions),
+    head,
+  );
 }
 
 /** The text a non-list bullet currently resolves to. */
@@ -1199,13 +1382,16 @@ function entryBlock(entry, section, choices) {
           onCommit: (text) => saveFieldText(entry, name, current, text),
         }),
       ]);
-      const actions = [alternateStepper(key, field, current),
-        phraseFeedbackButton(entry, { fieldName: name, variantId: current })].filter(Boolean);
-      line.append(...actions);
+      // Same as on a bullet: the stepper stays out of the disclosure, and
+      // exists at all only where there is more than one wording to step
+      // between. Everything else about the field folds away.
+      const stepper = alternateStepper(key, field, current);
+      const feedback = phraseFeedbackButton(entry, { fieldName: name, variantId: current });
+      line.append(...[stepper, feedback].filter(Boolean));
       const row = el('div', { className: 'field' }, [
         el('div', { className: 'field-label' }, FIELD_LABELS[name] ?? name), line, control,
       ]);
-      box.append(attachSourceTools(row, key, [...actions, control], line, 'field'));
+      box.append(attachSourceTools(row, key, [feedback, control].filter(Boolean), line, 'field'));
       continue;
     }
 
@@ -1299,10 +1485,13 @@ function skillsBlock(section) {
       };
       chip.append(cb, item.text);
       chip.append(
-        el('span', {
+        // As above: a button, and named for the skill it deletes.
+        el('button', {
+          type: 'button',
           className: 'x',
           textContent: '×',
           title: 'Delete this skill from the save',
+          ariaLabel: `Delete "${item.text}" from the save`,
           onclick: (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
@@ -1377,6 +1566,7 @@ function profileBlock() {
               className: 'link',
               textContent: '×',
               title: `Remove ${label.toLowerCase()} from the header`,
+              ariaLabel: `Remove ${label.toLowerCase()} from the header`,
               onclick: () => saveProfileField(key, ''),
             })
           : null,
@@ -1398,7 +1588,13 @@ function profileBlock() {
           title: 'Double-click to edit. Used to fill forms, never printed on a resume.',
           onCommit: (text) => saveAutofillField(key, text),
         }),
-        el('button', { className: 'link', textContent: '×', title: 'Remove', onclick: () => saveAutofillField(key, '') }),
+        el('button', {
+          className: 'link',
+          textContent: '×',
+          title: `Remove ${key.replace(/_/g, ' ')}`,
+          ariaLabel: `Remove ${key.replace(/_/g, ' ')}`,
+          onclick: () => saveAutofillField(key, ''),
+        }),
       ]),
     );
   }
@@ -1843,10 +2039,13 @@ async function addEntry(kind) {
       : [],
   };
 
-  await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+  // In the entry's lane like every other write to it, so a phrasing or an edit
+  // queued against the same id cannot cross with this one.
+  await inEntryLane(id, async (lane) => {
+    lane.server = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+  });
 
   if (state.masterView) {
-    await loadStore();
     render();
     scheduleRender();
     setStatus('Added to the master. Select it in a tailored resume when needed.');
@@ -1900,16 +2099,29 @@ async function editEntry(entry) {
 
 async function removeEntry(entry) {
   if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
-  await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+  // The entry and the resume that pointed at it are one thing the user did, so
+  // they are one press of Ctrl+Z — not two, with an orphaned reference in
+  // between that no action ever produces.
+  await undoGroup(`delete ${entryName(entry)}`, [], async () => {
+    /*
+     * In the lane, so a whole-entry write still queued behind it goes first.
+     * `PUT /entries/:id` has no existence check, so a delete that overtook one
+     * saw the entry recreated a moment later as an orphan no resume references.
+     */
+    await inEntryLane(entry.id, async (lane) => {
+      await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+      lane.server = null;
+    });
 
-  // Drop the reference too, so the next compile does not warn about it. From
-  // the root's own sections, for the reason given in addEntry.
-  const root = chain(state.resumeId)[0];
-  const sections = (root.sections ?? []).map((s) => ({
-    ...s,
-    entries: (s.entries ?? []).filter((id) => id !== entry.id),
-  }));
-  await saveResumeSpec({ ...root, sections }, `Deleted ${entry.id}`);
+    // Drop the reference too, so the next compile does not warn about it. From
+    // the root's own sections, for the reason given in addEntry.
+    const root = chain(state.resumeId)[0];
+    const sections = (root.sections ?? []).map((s) => ({
+      ...s,
+      entries: (s.entries ?? []).filter((id) => id !== entry.id),
+    }));
+    await saveResumeSpec({ ...root, sections }, `Deleted ${entry.id}`);
+  });
   render();
   scheduleRender();
 }
@@ -2051,9 +2263,19 @@ async function addBulletVariant(entry, bullet) {
   ], 'Starts from the current wording so you can adjust rather than retype.');
   if (!answer?.text?.trim()) return;
 
-  const variant = await api(
-    `/entries/${encodeURIComponent(entry.id)}/bullets/${encodeURIComponent(bullet.id)}/variants`,
-    {
+  /*
+   * Adding a phrasing is a POST to a sub-resource, so nothing about it looks
+   * like a whole-document write and it recorded no undo step at all — the only
+   * way back was to find the new phrasing and delete it by hand. Naming the
+   * document it changes makes it a step like any other.
+   *
+   * In the lane too: a whole-entry write queued beside this one would
+   * otherwise rebase onto a copy of the entry without the new phrasing in it,
+   * and delete it.
+   */
+  const variant = await undoGroup(`add phrasing to ${bulletName(entry, bullet)}`, [`entry:${entry.id}`], () =>
+    inEntryLane(entry.id, () =>
+    api(`/entries/${encodeURIComponent(entry.id)}/bullets/${encodeURIComponent(bullet.id)}/variants`, {
       method: 'POST',
       body: JSON.stringify({
         label: answer.label?.trim() || 'New phrasing',
@@ -2061,7 +2283,8 @@ async function addBulletVariant(entry, bullet) {
         tags: answer.tags ? answer.tags.split(',').map((t) => t.trim()).filter(Boolean) : undefined,
         note: answer.note?.trim() || undefined,
       }),
-    },
+    }),
+    ),
   );
 
   if (!state.masterView && answer.useNow) {
@@ -2492,19 +2715,39 @@ async function renderPreview() {
 }
 
 async function saveAsVariation() {
+  /*
+   * The name first, because that is the thing anyone is actually deciding.
+   *
+   * The id was first and therefore focused, so the field you landed in asked
+   * for a filename — and the note underneath named the resume this one
+   * inherits from by *its* id too, so the sentence read `Inherits from
+   * "newgrad"` about a resume called "New grad". The id still has a box,
+   * because the store is files and some people care what they are called; it
+   * is no longer the question you are asked first.
+   */
+  const parentLabel = resumeById(state.resumeId)?.label ?? state.resumeId;
   const answer = await form('Save as variation', [
-    { name: 'id', label: 'Id — becomes the filename', value: `${state.resumeId}-variant` },
-    { name: 'label', label: 'Label', value: `${resumeById(state.resumeId)?.label ?? state.resumeId} variation` },
-  ], `Inherits from "${state.resumeId}", so later edits there still reach it.`);
-  if (!answer?.id?.trim()) return;
+    { name: 'label', label: 'Name', value: `${parentLabel} variation` },
+    { name: 'id', label: 'Filename', value: `${state.resumeId}-variant` },
+  ], `Inherits from ${parentLabel}, so later edits there still reach it.`);
+  if (!answer) return;
+
+  /*
+   * A cleared filename is not a reason to do nothing silently. It used to be:
+   * the guard returned, the modal closed, and the variation you had just
+   * named simply did not exist.
+   */
+  const chosenLabel = answer.label?.trim();
+  const chosenId = slug(answer.id?.trim() || chosenLabel || '');
+  if (!chosenId) return;
 
   // A variation is the whole bundle: which entries and bullets are switched
   // on, which phrasings are used, and which list items are shown. Saving only
   // the phrasings would silently drop half of what you just did.
   const built = currentSpec();
   const spec = {
-    id: answer.id.trim(),
-    label: answer.label?.trim() || answer.id.trim(),
+    id: chosenId,
+    label: chosenLabel || chosenId,
     extends: state.resumeId,
     choices: { ...state.choices },
     ...(state.listEdits ? { lists: { ...state.listEdits } } : {}),
@@ -2778,17 +3021,28 @@ async function openApplication(id) {
   setChildren(panel, skeleton('detail', 3));
 
   try {
-    const { application: a, resume, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
+    const { application: a, resume, extendsLabel, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
 
     const sections = [];
 
     sections.push(
       el('div', { className: 'sect' }, [
         el('h4', {}, 'Resume sent'),
-        el('div', { className: 'file', textContent: resume ? `${resume.label} (${resume.id})` : (a.resumeId ?? '—') }),
-        resume?.extends
-          ? el('div', { className: 'hint', textContent: `Built on ${resume.extends}.` })
-          : null,
+        /*
+         * By its label. This printed "Summer intern (intern)" — the id in
+         * brackets after the name, in a monospace face, which is the sort of
+         * thing the rest of the editor stopped doing a while ago. The id is
+         * still there on hover for anyone who wants to go looking in the
+         * folder.
+         */
+        el('div', {
+          className: 'file',
+          textContent: resume ? resume.label : (a.resumeId ?? '—'),
+          title: resume ? `Stored as ${resume.id}.yaml` : '',
+        }),
+        // And the base by its name too: "Built on base." was an id with a
+        // full stop after it, not a sentence.
+        extendsLabel ? el('div', { className: 'hint', textContent: `Built on ${extendsLabel}.` }) : null,
       ]),
     );
 
@@ -3002,13 +3256,36 @@ async function openDraft(id) {
    * replaces it. Switching drafts is one of the two ways a half-written cover
    * letter used to disappear — the other being closing the tab — because
    * nothing but blur ever wrote.
+   *
+   * Unconditionally, including when the id is the same one. `renderDraft`
+   * repaints from the copy it is handed and resets the dirty flag, so an edit
+   * not written first is not merely overwritten on screen — it is dropped
+   * before it ever leaves the browser, where no amount of care on the server
+   * can save it. Re-opening the same draft is what `tailorDraft` does when it
+   * finishes, which is minutes of waiting spent typing.
    */
-  if (draftSave.current && draftSave.current.id !== id) await flushDraftEdits();
+  if (draftSave.current) await flushDraftEdits();
 
   openDraftId = id;
   location.hash = `#workspace/${encodeURIComponent(id)}`;
   try {
-    renderDraft(await api(`/workspace/${encodeURIComponent(id)}`));
+    let draft = await api(`/workspace/${encodeURIComponent(id)}`);
+    // Another draft was opened while this one was being fetched; that one owns
+    // the panel now, and painting this over it would be a draft nobody chose.
+    if (openDraftId !== id) return;
+
+    /*
+     * And the same again for the fetch itself, which is where this actually
+     * bit: the panel stays live and typeable while it runs, so anything
+     * written during it was thrown away by the repaint at the end. Writing it
+     * and re-reading costs one request and cannot paint over it.
+     */
+    if (draftSave.dirty) {
+      await flushDraftEdits();
+      draft = await api(`/workspace/${encodeURIComponent(id)}`);
+      if (openDraftId !== id) return;
+    }
+    renderDraft(draft);
   } catch (err) {
     setStatus(err.message, true);
   }
@@ -3201,13 +3478,12 @@ function renderDraft(draft) {
       }
     };
 
-    const letterFeedbackBtn = el('button', {
-      className: 'tiny',
-      textContent: 'Ask for feedback',
+    const letterFeedbackBtn = aiButton({
+      label: 'Ask for feedback',
       title: 'The AI reads what you have written and says what is weak — it does not rewrite it',
-      disabled: !draft.coverLetter.body.trim(),
       onclick: () => askDraftFeedback(draft, {}, notes),
     });
+    letterFeedbackBtn.disabled = !draft.coverLetter.body.trim();
 
     // Longer than the resume's debounce: this one fires on every keystroke,
     // and recompiling mid-word is wasted work.
@@ -3242,9 +3518,8 @@ function renderDraft(draft) {
           }),
           liveChip,
           el('span', { className: 'grow', style: 'flex:1' }),
-          el('button', {
-            className: 'tiny',
-            textContent: 'Draft it',
+          aiButton({
+            label: 'Draft it',
             title: 'Write a first draft from the posting and the letters you have written before',
             onclick: () => generate(draft, 'letter', notes),
           }),
@@ -3257,6 +3532,37 @@ function renderDraft(draft) {
 
     // Show the letter as it stands the moment the draft opens.
     queueMicrotask(compile);
+  } else {
+    /*
+     * A cover letter you decided against, and then wanted.
+     *
+     * Whether one is needed is read off the form when the application is
+     * opened, and that answer was final: the box simply did not exist
+     * afterwards. It is the wrong thing to be final about — the form that asks
+     * is often three pages in, the detection is a guess, and "send one anyway"
+     * is a perfectly ordinary decision to make late. Nothing is lost by
+     * offering: an empty letter is not bundled.
+     */
+    blocks.push(
+      el('div', { className: 'block subtle' }, [
+        el('div', { className: 'block-head' }, [
+          el('h4', {}, 'Cover letter'),
+          el('span', { className: 'badge', textContent: 'not asked for' }),
+          el('span', { className: 'grow', style: 'flex:1' }),
+          el('button', {
+            className: 'tiny',
+            textContent: 'Add one anyway',
+            title: 'This posting did not ask for a letter. Send one regardless.',
+            onclick: async () => {
+              draft.coverLetter = { ...draft.coverLetter, required: true };
+              await save('Cover letter added');
+              renderDraft(draft);
+            },
+          }),
+        ]),
+        el('div', { className: 'hint' }, 'This application did not ask for one.'),
+      ]),
+    );
   }
 
   /* Questions */
@@ -3267,13 +3573,13 @@ function renderDraft(draft) {
         value: q.answer,
         placeholder: 'No stored answer yet — what you write here is saved for next time.',
       });
-      const answerFeedbackBtn = el('button', {
+      const answerFeedbackBtn = aiButton({
         className: 'link',
-        textContent: 'Feedback',
+        label: 'Feedback',
         title: 'The AI reads this answer and says what is weak — it does not rewrite it',
-        disabled: !q.answer?.trim(),
         onclick: () => askDraftFeedback(draft, { questionId: q.id }, notes),
       });
+      answerFeedbackBtn.disabled = !q.answer?.trim();
 
       box.oninput = () => {
         q.answer = box.value;
@@ -3312,9 +3618,9 @@ function renderDraft(draft) {
                 })
               : null,
             el('span', { style: 'flex:1' }),
-            el('button', {
+            aiButton({
               className: 'link',
-              textContent: 'Draft this one',
+              label: 'Draft this one',
               title: 'Write an answer from the posting and the answers you have given before',
               onclick: () => generate(draft, 'questions', notes, { questionId: q.id }),
             }),
@@ -3330,9 +3636,9 @@ function renderDraft(draft) {
         el('div', { className: 'block-head' }, [
           el('h4', {}, `Questions (${draft.questions.length})`),
           el('span', { style: 'flex:1' }),
-          el('button', {
-            className: 'tiny',
-            textContent: 'Fill in what is empty',
+          aiButton({
+            label: 'Fill in what is empty',
+            title: 'Answer every question that is still blank',
             onclick: () => generate(draft, 'questions', notes),
           }),
         ]),
@@ -3358,12 +3664,25 @@ function renderDraft(draft) {
   notesBox.onblur = () => saveDraftNow().catch(() => {});
 
   const resumeSelect = el('select');
+  /*
+   * A placeholder when nothing is attached yet.
+   *
+   * Without one the select showed the first resume in the list as though it
+   * had been chosen, while the draft had no resume at all — so the panel said
+   * "Send: Base resume" and building the files answered "400 Bad Request".
+   * An empty choice is the honest thing to show when no choice has been made.
+   */
+  if (!draft.resumeId) resumeSelect.append(el('option', { value: '', textContent: '— choose a resume —' }));
   for (const r of state.store.resumes) {
     resumeSelect.append(el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }));
   }
-  resumeSelect.onchange = () => {
+  resumeSelect.onchange = async () => {
+    if (!resumeSelect.value) return;
     draft.resumeId = resumeSelect.value;
-    save('Resume changed');
+    await save('Resume changed');
+    // Attaching one is what unlocks building the files, and the button that
+    // does it is drawn from `draft`, so the panel has to be drawn again.
+    renderDraft(draft);
   };
 
   setChildren(
@@ -3397,9 +3716,8 @@ function renderDraft(draft) {
             : 'Works from the posting text; add a link to this draft to read it automatically',
           onclick: () => tailorDraft(draft, notes, false),
         }),
-        el('button', {
-          className: 'tiny',
-          textContent: 'Let the AI choose',
+        aiButton({
+          label: 'Let the AI choose',
           title: 'The AI reads the posting and decides which phrasings and bullets to use',
           onclick: () => tailorDraft(draft, notes, true),
         }),
@@ -3436,11 +3754,24 @@ function renderDraft(draft) {
       notesBox,
     ]),
     el('div', { className: 'block' }, [
+      /*
+       * An application with no resume on it cannot be built, and pressing the
+       * button said so with a bare "400 Bad Request" in the corner. Which
+       * resume to send is the one decision this tool exists to help with, so
+       * it is not one to guess at — but it is one to ask for plainly, next to
+       * the button that needs it, rather than after the fact.
+       */
+      draft.resumeId
+        ? null
+        : el('div', { className: 'hint warn' }, 'Choose a resume above before building the files.'),
       el('div', { className: 'toolbar' }, [
         el('button', {
           className: 'primary',
           textContent: 'Build files and record it',
-          title: 'Compile the resume, name the files, and log the answers in the application history',
+          title: draft.resumeId
+            ? 'Compile the resume, name the files, and log the answers in the application history'
+            : 'Pick a resume for this application first — tailor one, or start one to edit yourself',
+          disabled: !draft.resumeId,
           onclick: () => completeDraft(draft, notes),
         }),
         el('button', { textContent: 'Save', onclick: () => save('Saved') }),
@@ -3522,19 +3853,89 @@ async function tailorDraft(draft, notes, useAi) {
   }
 }
 
+/**
+ * A button that will run the AI.
+ *
+ * Pressing one spends minutes and, depending on the command, money; pressing
+ * one that does not is instant. Nothing on screen distinguished them, so the
+ * only way to find out which you had pressed was to wait and see. The mark is
+ * on the buttons that start AI work and on no others — labelling the rest
+ * "not AI" would be noise on every button in the product to say something
+ * about four of them.
+ */
+function aiButton({ className = 'tiny', label, title, onclick }) {
+  return el('button', { className: `${className} ai-action`, title: `${title}. Runs your AI command.`, onclick }, [
+    el('span', { className: 'ai-mark', ariaHidden: 'true', textContent: '✦' }),
+    el('span', { textContent: label }),
+  ]);
+}
+
+/**
+ * What the AI is doing, while it does it.
+ *
+ * "Working…" was the whole of it, for something that takes minutes: no way to
+ * tell a run that is thinking from one that has died, and nothing saying the
+ * boxes are still yours to type in meanwhile. A count of seconds is the
+ * cheapest honest thing — it moves, so the panel is visibly alive, and it says
+ * how long you have actually been waiting rather than how long it feels.
+ */
+function showAiProgress(notes, doing) {
+  const started = Date.now();
+  const clock = el('span', { className: 'ai-elapsed', textContent: '0:00' });
+  setChildren(
+    notes,
+    el('div', { className: 'ai-running' }, [
+      el('span', { className: 'ai-mark spin', ariaHidden: 'true', textContent: '✦' }),
+      el('span', { textContent: `${doing}… ` }),
+      clock,
+    ]),
+    el('div', { className: 'hint', textContent: 'Keep writing if you like — nothing you type now will be lost.' }),
+  );
+
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - started) / 1000);
+    clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }, 1000);
+  return () => clearInterval(tick);
+}
+
+const DOING = {
+  letter: 'Writing the cover letter',
+  questions: 'Answering the questions',
+  all: 'Writing the letter and the answers',
+};
+
 async function generate(draft, what, notes, extra = {}) {
-  setChildren(notes, el('div', { textContent: 'Working…' }));
+  const stop = showAiProgress(notes, extra.questionId ? 'Writing the answer' : (DOING[what] ?? 'Working'));
+  // Nothing else starts a second run on top of this one.
+  const buttons = [...($('#draft-editor')?.querySelectorAll('button.ai-action') ?? [])];
+  for (const b of buttons) b.disabled = true;
   try {
+    // What is on screen goes first, so the AI works from it and the server's
+    // merge has something to protect.
+    await flushDraftEdits();
     const res = await api(`/workspace/${encodeURIComponent(draft.id)}/generate`, {
       method: 'POST',
       body: JSON.stringify({ what, ...extra }),
     });
-    renderDraft(res.draft);
+
+    /*
+     * Anything typed *during* the run has been saved by the autosave and
+     * merged by the server, so the reply in hand is already out of date.
+     * Writing what is still pending and re-reading is one extra request and
+     * cannot show a version of the draft that is nobody's.
+     */
+    await flushDraftEdits();
+    renderDraft(await api(`/workspace/${encodeURIComponent(draft.id)}`));
     const panel = $('#draft-editor .gen-notes');
     if (panel) setChildren(panel, ...res.notes.map((n) => el('div', { textContent: n })));
     setStatus('Draft updated');
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  } finally {
+    stop();
+    // `renderDraft` has replaced these, so re-read rather than reusing the list.
+    for (const b of $('#draft-editor')?.querySelectorAll('button.ai-action') ?? []) b.disabled = false;
   }
 }
 
@@ -3772,9 +4173,44 @@ const SAMPLE_KINDS = [
   { value: 'other', label: 'Something else you wrote' },
 ];
 
+/**
+ * The notes as the server last gave them, so an edit can be told from a
+ * reload. See `loadVoice`.
+ */
+let voiceAsLoaded = null;
+
+/** Whether the notes box holds something that has not been saved. */
+const voiceIsDirty = () => voiceAsLoaded !== null && $('#voice')?.value !== voiceAsLoaded;
+
+/** Show or hide the "not saved yet" note beside the Save button. */
+function markVoiceUnsaved() {
+  const flag = $('#voice-unsaved');
+  if (flag) flag.hidden = !voiceIsDirty();
+}
+
 async function loadVoice() {
   const data = await api('/voice');
-  $('#voice').value = data.voice ?? '';
+  const box = $('#voice');
+  const fromStore = data.voice ?? '';
+
+  /*
+   * Everything else here is reloaded, but the notes are not — not while they
+   * hold something unsaved.
+   *
+   * This runs on six occasions, and five of them are something else
+   * happening in the same panel: adding a writing sample, editing one,
+   * dropping a file, accepting what was read out of it. The notes box is the
+   * one field in the editor with no autosave — it has a Save button instead —
+   * so typing a note and then adding a sample, which is an entirely ordinary
+   * order to do those two things in, replaced what had just been typed with
+   * the older copy from disk. No warning, and nothing to undo it with.
+   */
+  if (voiceIsDirty()) markVoiceUnsaved();
+  else {
+    box.value = fromStore;
+    voiceAsLoaded = fromStore;
+    markVoiceUnsaved();
+  }
   $('#voice-preview').textContent = data.preview;
 
   // What is actually being sent, and how much of what exists fits.
@@ -4137,9 +4573,9 @@ async function loadProjectSettings() {
     } catch (error) { autoCommit.checked = !autoCommit.checked; setStatus(error.message, true); }
   };
 
-  const remote = el('input', {
-    type: 'text',
-    value: info.remote.url ?? '',
+  // Rebuilt by "Save History" further down this same panel, so a URL being
+  // typed has to survive that. See `keptField`.
+  const remote = keptField('git-remote', info.remote.url ?? '', {
     placeholder: 'git@github.com:you/my-resume-save.git',
   });
   const result = el('div', {
@@ -4335,9 +4771,23 @@ async function loadSettings() {
       setStatus(err.message, true);
     }
   };
-  const command = el('input', { type: 'text', value: config.ai.command });
-  const args = el('input', { type: 'text', value: (config.ai.args ?? []).join(' ') });
-  const timeout = el('input', { type: 'text', value: String(Math.round(config.ai.timeoutMs / 1000)) });
+  /*
+   * The three fields that wait for the Save button, and therefore the three
+   * that a reload can throw away.
+   *
+   * This whole panel is rebuilt from the server whenever it is shown, and it
+   * is shown every time the Voice tab is opened. A command typed and not yet
+   * saved — which is the normal state of a command, since it is only saved
+   * when you say so — was replaced by the old one by nothing more than
+   * looking at another tab and coming back.
+   *
+   * Half-typed is exactly the state worth keeping here. The reason these
+   * three do not save themselves is that a half-typed command is not a
+   * command; that is an argument for not *running* it, not for deleting it.
+   */
+  const command = keptField('ai-command', config.ai.command);
+  const args = keptField('ai-args', (config.ai.args ?? []).join(' '));
+  const timeout = keptField('ai-timeout', String(Math.round(config.ai.timeoutMs / 1000)));
 
   const preset = el('select');
   for (const p of AI_PRESETS) preset.append(el('option', { value: p.label, textContent: p.label }));
@@ -4384,6 +4834,12 @@ async function loadSettings() {
         latex: { engine: engine.value || undefined },
       }),
     });
+    /*
+     * These now match the store, so the next rebuild should refresh them
+     * rather than treat them as unsaved edits and keep them forever — which
+     * would mean a change made in another window never arrived here again.
+     */
+    for (const input of [command, args, timeout]) input.dataset.stored = input.value;
     setStatus('Settings saved');
   };
 
@@ -4759,7 +5215,7 @@ function form(title, fields, note) {
 
     for (const f of fields) {
       if (f.type === 'checkbox') {
-        const cb = el('input', { type: 'checkbox', checked: Boolean(f.value), id: `f_${f.name}` });
+        const cb = el('input', { type: 'checkbox', checked: Boolean(f.value), id: `f_${f.name}`, name: f.name });
         inputs[f.name] = { get: () => cb.checked };
         content.append(
           el('label', { className: 'form-label', style: 'display:flex;gap:7px;align-items:center;cursor:pointer' }, [
@@ -4769,10 +5225,10 @@ function form(title, fields, note) {
         );
         continue;
       }
-      content.append(el('div', { className: 'form-label', textContent: f.label }));
+      content.append(el('label', { className: 'form-label', htmlFor: `f_${f.name}`, textContent: f.label }));
 
       if (f.type === 'select') {
-        const sel = el('select', { style: 'width:100%' });
+        const sel = el('select', { style: 'width:100%', name: f.name, id: `f_${f.name}` });
         for (const o of f.options) {
           sel.append(
             el('option', {
@@ -4787,9 +5243,11 @@ function form(title, fields, note) {
         continue;
       }
 
+      // Named, so the field is identifiable — by a test, by the browser, and by
+       // anything reading the form other than a person looking at it.
       const input = f.multiline
-        ? el('textarea', { value: f.value ?? '', style: f.tall ? 'min-height:220px' : '' })
-        : el('input', { type: 'text', value: f.value ?? '' });
+        ? el('textarea', { value: f.value ?? '', style: f.tall ? 'min-height:220px' : '', name: f.name, id: `f_${f.name}` })
+        : el('input', { type: 'text', value: f.value ?? '', name: f.name, id: `f_${f.name}` });
       if (f.disabled) {
         input.disabled = true;
         input.title = 'This field has alternates — edit it through its dropdown.';
@@ -5103,6 +5561,15 @@ async function boot() {
   $('#btn-feedback').onclick = () => askFeedback(state.masterView);
   $('#btn-rebuild').onclick = renderPreview;
   $('#btn-add-entry').onclick = async () => {
+    /*
+     * Both ways in, from the button people actually press.
+     *
+     * Drafting with the AI existed, but only from a link in the master view —
+     * so the obvious button gave you a blank form and nothing said the other
+     * way was there. The blank form stays the default: it is instant, and the
+     * AI only ever proposes text you then edit.
+     */
+    const aiOn = Boolean(state.store?.config?.ai?.enabled);
     const answer = await form('Add an entry', [
       {
         name: 'kind',
@@ -5116,8 +5583,25 @@ async function boot() {
           { value: 'custom', label: 'Additional' },
         ],
       },
+      {
+        name: 'how',
+        label: 'Start from',
+        type: 'select',
+        value: 'blank',
+        options: [
+          { value: 'blank', label: 'A blank entry I fill in myself' },
+          {
+            value: 'ai',
+            label: aiOn
+              ? '✦ A draft from the AI — a repository link, or a line about it'
+              : '✦ A draft from the AI (off — you will get the prompt to paste)',
+          },
+        ],
+      },
     ]);
-    if (answer?.kind) addEntry(answer.kind);
+    if (!answer?.kind) return;
+    if (answer.how === 'ai') draftEntryWithAi(answer.kind);
+    else addEntry(answer.kind);
   };
   // Anything the AI was still doing when the tab was closed is picked up here.
   refreshJobs().catch(() => {});
@@ -5138,8 +5622,15 @@ async function boot() {
   $('#btn-add-answer').onclick = addAnswer;
   $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
   wireVoiceDrop();
+  // Typing is what makes the box differ from the store, so it is what turns
+  // the note on — and what stops `loadVoice` overwriting it.
+  $('#voice').oninput = markVoiceUnsaved;
   $('#btn-save-voice').onclick = async () => {
-    await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: $('#voice').value }) });
+    const saved = $('#voice').value;
+    await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: saved }) });
+    // Before the reload, or the box still counts as edited and `loadVoice`
+    // would politely decline to refresh the very thing it just saved.
+    voiceAsLoaded = saved;
     setStatus('Notes saved');
     loadVoice();
   };
@@ -5168,6 +5659,17 @@ async function boot() {
     const typing = el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable);
     if (typing) return;
     if (!$('#modal').classList.contains('hidden')) return;
+
+    /*
+     * Only where the history belongs.
+     *
+     * This undo is the resume builder's, and it reverted a resume edit from
+     * whichever tab happened to be open — so Ctrl+Z while reading the
+     * Applications list, or with a cover letter on screen, silently rolled back
+     * an edit made somewhere the user was not looking. Anywhere else the key
+     * does nothing, which is the honest answer: there is nothing here it means.
+     */
+    if (!$('#tab-resumes')?.classList.contains('active')) return;
 
     e.preventDefault();
     stepHistory(e.shiftKey ? 'redo' : 'undo');

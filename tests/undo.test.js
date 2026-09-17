@@ -143,6 +143,75 @@ describe('restoreRequest', () => {
 describe('createHistory', () => {
   const edit = (n, over = {}) => ({ docKey: `entry:e${n}`, before: { id: `e${n}`, v: 0 }, after: { id: `e${n}`, v: n }, label: `edit ${n}`, ...over });
 
+  /*
+   * A step is a thing the user did, not a request the editor sent, and the two
+   * are often not one-to-one: deleting an entry writes the entry and the resume
+   * that referenced it. Recorded per request those cost two presses of Ctrl+Z
+   * each — and the state in between is one no action ever produces, an entry
+   * that exists with nothing pointing at it.
+   */
+  it('takes several documents as one step', () => {
+    const history = createHistory({});
+    const recorded = history.record({
+      label: 'delete Acme Co.',
+      changes: [
+        { docKey: 'entry:job_acme', before: { id: 'job_acme' }, after: null },
+        { docKey: 'resume:base', before: { id: 'base', sections: ['job_acme'] }, after: { id: 'base', sections: [] } },
+      ],
+    });
+
+    expect(recorded).toBe(true);
+    expect(history.size()).toEqual({ undo: 1, redo: 0 });
+
+    const undone = history.undo();
+    expect(undone.changes).toHaveLength(2);
+    expect(undone.label).toBe('delete Acme Co.');
+    // One press puts both back.
+    expect(history.canUndo()).toBe(false);
+  });
+
+  it('drops the documents a step did not actually change', () => {
+    const history = createHistory({});
+    history.record({
+      label: 'rename',
+      changes: [
+        { docKey: 'entry:a', before: { id: 'a', t: 'one' }, after: { id: 'a', t: 'two' } },
+        // Written, but identical — a resume re-saved with the same selections.
+        { docKey: 'resume:base', before: { id: 'base' }, after: { id: 'base' } },
+      ],
+    });
+    expect(history.undo().changes.map((c) => c.docKey)).toEqual(['entry:a']);
+  });
+
+  it('is not a step at all when nothing in it changed', () => {
+    const history = createHistory({});
+    expect(
+      history.record({
+        label: 'no-op',
+        changes: [{ docKey: 'entry:a', before: { id: 'a' }, after: { id: 'a' } }],
+      }),
+    ).toBe(false);
+    expect(history.canUndo()).toBe(false);
+  });
+
+  it('keeps a multi-document step whole through undo and redo', () => {
+    const history = createHistory({});
+    history.record({
+      label: 'add an entry and list it',
+      changes: [
+        { docKey: 'entry:new', before: null, after: { id: 'new' } },
+        { docKey: 'resume:base', before: { id: 'base', sections: [] }, after: { id: 'base', sections: ['new'] } },
+      ],
+    });
+
+    const undone = history.undo();
+    expect(undone.changes.map((c) => c.before)).toEqual([null, { id: 'base', sections: [] }]);
+
+    const redone = history.redo();
+    expect(redone.changes.map((c) => c.after)).toEqual([{ id: 'new' }, { id: 'base', sections: ['new'] }]);
+    expect(history.canUndo()).toBe(true);
+  });
+
   it('starts empty', () => {
     const history = createHistory({});
     expect(history.canUndo()).toBe(false);
@@ -163,9 +232,10 @@ describe('createHistory', () => {
 
     const undone = history.undo();
     expect(undone.label).toBe('edit 2');
-    expect(undone.docKey).toBe('entry:e2');
-    expect(undone.before).toEqual({ id: 'e2', v: 0 });
-    expect(undone.after).toEqual({ id: 'e2', v: 2 });
+    expect(undone.changes).toHaveLength(1);
+    expect(undone.changes[0].docKey).toBe('entry:e2');
+    expect(undone.changes[0].before).toEqual({ id: 'e2', v: 0 });
+    expect(undone.changes[0].after).toEqual({ id: 'e2', v: 2 });
     expect(history.peekUndoLabel()).toBe('edit 1');
     expect(history.peekRedoLabel()).toBe('edit 2');
     expect(history.canRedo()).toBe(true);
@@ -253,13 +323,13 @@ describe('createHistory', () => {
     store.entries[0].bullets[0].phrasings.length = 0;
 
     const entry = history.undo();
-    expect(entry.before.org).toBe('Northeastern');
-    expect(entry.before.bullets[0].phrasings).toEqual(['One']);
-    expect(entry.after.org).toBe('MIT');
+    expect(entry.changes[0].before.org).toBe('Northeastern');
+    expect(entry.changes[0].before.bullets[0].phrasings).toEqual(['One']);
+    expect(entry.changes[0].after.org).toBe('MIT');
 
     // And the entry handed out is itself a copy: scribbling on it is harmless.
-    entry.before.org = 'scribbled';
-    expect(history.redo().before.org).toBe('Northeastern');
+    entry.changes[0].before.org = 'scribbled';
+    expect(history.redo().changes[0].before.org).toBe('Northeastern');
   });
 
   it('clears both stacks when the open save changes', () => {
@@ -286,13 +356,13 @@ describe('createHistory', () => {
     expect(history.peekUndoLabel()).toBe('delete group');
 
     const undone = history.undo();
-    expect(restoreRequest(undone.docKey, undone.before)).toEqual({
+    expect(restoreRequest(undone.changes[0].docKey, undone.changes[0].before)).toEqual({
       path: '/skills?commit=0',
       options: { method: 'PUT', body: JSON.stringify([{ id: 'langs', label: 'Languages', items: ['TypeScript'] }]) },
     });
 
     const redone = history.redo();
-    expect(restoreRequest(redone.docKey, redone.after)).toEqual({
+    expect(restoreRequest(redone.changes[0].docKey, redone.changes[0].after)).toEqual({
       path: '/skills?commit=0',
       options: { method: 'PUT', body: JSON.stringify([]) },
     });
@@ -309,12 +379,12 @@ describe('createHistory', () => {
     history.record({ docKey, before, after: readDoc(store, docKey), label: 'add entry' });
 
     const undone = history.undo();
-    expect(restoreRequest(undone.docKey, undone.before)).toEqual({
+    expect(restoreRequest(undone.changes[0].docKey, undone.changes[0].before)).toEqual({
       path: '/entries/new_job',
       options: { method: 'DELETE' },
     });
     const redone = history.redo();
-    expect(restoreRequest(redone.docKey, redone.after).options.method).toBe('PUT');
+    expect(restoreRequest(redone.changes[0].docKey, redone.changes[0].after).options.method).toBe('PUT');
   });
 });
 

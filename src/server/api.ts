@@ -24,7 +24,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
-import { classifyPage, extractJob, JOB_SHAPED, mergeJobPages, type PageSource } from '../jobs/extract.js';
+import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, applicationId, buildBundle, fingerprint, slug, stats } from '../model/applications.js';
@@ -1155,7 +1155,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (save && body.trim()) {
         saved = {
           id: letterId(job.company, job.jobTitle),
-          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? 'Unknown'}`,
+          // Named for where it came from when the page never said who is
+          // hiring — see `employerFallback`.
+          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerFallback(job.url)}`,
           company: job.company,
           role: job.jobTitle,
           createdAt: new Date().toISOString(),
@@ -1328,7 +1330,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // of them. A form page is worth offering on even though it describes
       // nothing, which is exactly the case a single score could not express.
       const verdict = classifyPage(current.html, current.url);
-      const score = Math.max(verdict.score, ...trail.map((p) => classifyPage(p.html, p.url).score));
+      /*
+       * And the same question asked of every page of this application.
+       *
+       * The verdict above is about the page you are on, deliberately: a form
+       * page is an `application` even though it describes nothing. But whether
+       * to offer *at all* is a question about the application, not the page —
+       * a careers page that is a heading and an embedded board says nothing
+       * itself, and the posting is in the frame, which arrives here as one of
+       * these. Judging the outer page alone meant the card appeared, read the
+       * frame, and then removed itself.
+       */
+      const others = trail.filter((p) => p !== current).map((p) => classifyPage(p.html, p.url));
+      const score = Math.max(verdict.score, ...others.map((v) => v.score));
+      const anyPageIsAJob = verdict.kind !== 'none' || others.some((v) => v.kind !== 'none');
 
       const baseId = baseResumeId ?? defaultBaseId(data.resumes);
       if (!baseId) throw new Error('The store has no resumes to start from');
@@ -1371,8 +1386,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           }
         : match;
 
-      const specId = `job-${slug(job.company ?? 'unknown')}-${slug(job.title ?? 'role')}`.slice(0, 60);
-      const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${job.company ?? 'Unknown'}`, finalMatch, {
+      /*
+       * "Apply — Unknown" was the label in the resume picker for every bare
+       * application form, and there is more than one of those. Named for
+       * where it came from instead — see `employerFallback`.
+       */
+      const employer = job.company ?? employerFallback(url);
+      const specId = `job-${slug(employer)}-${slug(job.title ?? 'role')}`.slice(0, 60);
+      const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${employer}`, finalMatch, {
         url,
         company: job.company,
         role: job.title,
@@ -1403,7 +1424,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       res.json({
-        isJobPosting: verdict.kind !== 'none' || score >= JOB_SHAPED,
+        /*
+         * The verdict, and only the verdict.
+         *
+         * `|| score >= JOB_SHAPED` was a second opinion that overrode the
+         * first, and the classifier's whole job is to weigh that score against
+         * what else it can see. So a page that scored well on vocabulary and
+         * had nothing to act on — a news article about the hiring slowdown, a
+         * documentation page headed "Requirements", a forum thread about how
+         * many applications people sent — came back `kind: 'none'` and
+         * `isJobPosting: true`, and the card appeared on all three.
+         */
+        isJobPosting: anyPageIsAJob,
         score,
         kind: verdict.kind,
         why: verdict.why,
@@ -1494,9 +1526,23 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
               .map((e) => e.name)
           : [];
 
+      /*
+       * The base by the name its owner gave it.
+       *
+       * `extends` is an id, and the detail pane printed it raw — "Built on
+       * base." is not a sentence, it is a filename with a full stop after it.
+       * Resolved here because the pane has only this one response to work
+       * from and no reason to hold the whole store.
+       */
+      const sent = app.resumeId ? (store.getResume(app.resumeId) ?? null) : null;
+      const extendsLabel = sent?.extends
+        ? (store.getResume(sent.extends)?.label ?? sent.extends)
+        : undefined;
+
       res.json({
         application: app,
-        resume: app.resumeId ? (store.getResume(app.resumeId) ?? null) : null,
+        resume: sent,
+        extendsLabel,
         letter: letter ?? (app.coverLetter ? { id: null, body: app.coverLetter, title: 'As sent' } : null),
         files,
         dir: dir ?? null,
@@ -1660,7 +1706,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         resumeId?: string;
         spec?: ResumeSpec;
         coverLetterRequired?: boolean;
-        questions?: { question: string; required?: boolean }[];
+        /** What the extension has already been written into, if anything. */
+        coverLetter?: string;
+        questions?: { question: string; required?: boolean; answer?: string }[];
       };
       if (!body.company || !body.role) throw new Error('company and role are required');
 
@@ -1699,6 +1747,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const prior = existing?.questions.find((x) => x.question === q.question);
         if (prior?.edited) return { ...prior, required: q.required ?? prior.required };
 
+        /*
+         * An answer that came with the request was written by hand somewhere
+         * else — in the extension's card, on the page before this one — and
+         * beats both the bank and anything stored. The button that sends it
+         * says it is handing the questions over; handing them over without the
+         * answers meant writing them twice.
+         */
+        if (q.answer?.trim()) {
+          return {
+            id: prior?.id ?? `q${i + 1}`,
+            question: q.question,
+            required: q.required,
+            answer: q.answer,
+            source: 'human',
+            edited: true,
+          };
+        }
+
         const match = matchAnswer(q.question, data.answers);
         return {
           id: prior?.id ?? `q${i + 1}`,
@@ -1726,11 +1792,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           required: Boolean(body.coverLetterRequired),
           body: '',
         },
+
         questions,
         notes: existing?.notes,
       };
       if (body.coverLetterRequired !== undefined && !draft.coverLetter.edited) {
         draft.coverLetter.required = body.coverLetterRequired;
+      }
+      /*
+       * A letter written in the card comes with it, and is treated as written
+       * by hand — because it was. Only over an empty box: a draft already
+       * holding a letter is the one being worked on.
+       */
+      if (body.coverLetter?.trim() && !draft.coverLetter.body.trim()) {
+        draft.coverLetter = { required: true, body: body.coverLetter, edited: true };
       }
 
       const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
@@ -2001,9 +2076,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const notes: string[] = [];
       let countAnswers = false;
 
+      /*
+       * What the letter step says it did, held back until the merge below has
+       * decided whether it actually happened. Pushed as it went, the reply read
+       * "Cover letter drafted in your voice." immediately above "You edited the
+       * cover letter while this was running, so what you wrote was kept" — two
+       * sentences in one panel, one of them about a letter that was thrown
+       * away.
+       */
+      const letterNotes: string[] = [];
+
       if ((what === 'letter' || what === 'all') && draft.coverLetter.required) {
         if (draft.coverLetter.edited && !force) {
-          notes.push('Cover letter left alone — you have edited it.');
+          letterNotes.push('Cover letter left alone — you have edited it.');
         } else {
           const resumeId = draft.resumeId ?? data.resumes[0]?.id;
           const prior = relevantLetters(data.coverLetters, { company: draft.company, role: draft.role });
@@ -2014,7 +2099,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             );
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = trimToLetter(agent.output);
-              notes.push('Cover letter drafted in your voice.');
+              letterNotes.push('Cover letter drafted in your voice.');
             } else if (!agent.executed && prior[0]) {
               /*
                * Only when the AI did not run. This branch used to catch an AI
@@ -2026,14 +2111,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
                * "Complete this application" will bundle the result.
                */
               draft.coverLetter.body = prior[0].body;
-              notes.push(
+              letterNotes.push(
                 `AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}. ` +
                   'It is addressed to them, so read it before sending.',
               );
             } else if (!agent.executed) {
-              notes.push('AI is off and there are no previous letters to start from.');
+              letterNotes.push('AI is off and there are no previous letters to start from.');
             } else {
-              notes.push('The AI returned nothing, so the letter was left as it was.');
+              letterNotes.push('The AI returned nothing, so the letter was left as it was.');
             }
           }
         }
@@ -2096,13 +2181,35 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             notes.push('You edited the cover letter while this was running, so what you wrote was kept.');
           } else {
             fresh.coverLetter.body = draft.coverLetter.body;
+            notes.push(...letterNotes);
           }
+        } else {
+          // Nothing was written, so whatever the step has to say about the
+          // letter — left alone, AI off, nothing returned — still stands.
+          notes.push(...letterNotes);
         }
 
         let kept = 0;
         for (const produced of draft.questions) {
           const was = before.questions.find((q) => q.id === produced.id);
-          if (!was || produced.answer === was.answer) continue;
+          if (!was) continue;
+          /*
+           * Not "the text changed": the loop above sets `needsReview`,
+           * `source` and `fromAnswerId` on their own, and skipping when the
+           * text stayed the same dropped exactly those. The case that matters
+           * is an answer already holding "Yes." that a loose bank match wants
+           * to flag — "are you authorized to work?" answered from "…without
+           * sponsorship?" — where the text is identical and the badge saying
+           * to read it first is the whole point. Losing it also left `source`
+           * at 'ai', so completing filed it into the answer bank as something
+           * the user had written.
+           */
+          const producedSomething =
+            produced.answer !== was.answer ||
+            produced.source !== was.source ||
+            produced.fromAnswerId !== was.fromAnswerId ||
+            produced.needsReview !== was.needsReview;
+          if (!producedSomething) continue;
 
           // Questions the application no longer asks are simply gone.
           const target = fresh.questions.find((q) => q.id === produced.id);

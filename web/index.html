@@ -39,7 +39,7 @@
           <span id="save-state" class="save saved" title="Edits are written to the save as you make them, and committed once you stop.">All changes saved</span>
           <span id="live-state" class="live ok" title="The preview recompiles itself whenever you change something. Click to force one.">Live</span>
           <button id="btn-save-as">Save as variation…</button>
-          <button id="btn-feedback">Feedback</button>
+          <button id="btn-feedback" class="ai-action" title="The AI reads this resume and says what is weak. Runs your AI command."><span class="ai-mark" aria-hidden="true">✦</span><span>Feedback</span></button>
           <button id="btn-rebuild" class="tiny">Rebuild</button>
           <button id="btn-undo" class="tiny" disabled>Undo</button>
           <button id="btn-redo" class="tiny" disabled>Redo</button>
@@ -82,14 +82,19 @@
         <button id="project-close" hidden>Close Save</button>
         <p id="project-output" class="hint mono-path"></p>
         <div data-project-required hidden>
-          <label class="row"><input id="output-role-name" type="checkbox"> Put the job title in file names</label>
+          <label class="row" for="output-file-names">File names</label>
+          <select id="output-file-names">
+            <option value="type">Name and document type</option>
+            <option value="title">Name and job title</option>
+            <option value="title-type">Name, job title and document type</option>
+          </select>
           <p id="output-name-example" class="hint"></p>
         </div>
         <label class="lbl" for="project-recents">Recent Saves</label>
         <select id="project-recents"></select>
         <label class="lbl" for="project-mode">Folder Action</label>
         <select id="project-mode"><option value="open">Open Existing Save</option><option value="create">Create Blank Save</option><option value="move">Move Current Save</option></select>
-        <label class="lbl" for="project-path">Save Folder</label>
+        <label class="lbl" for="project-path">Folder to open</label>
         <input id="project-path" placeholder="~/Documents/My Resume Save">
         <div class="toolbar"><button id="project-browse" hidden>Choose Folder…</button><button id="project-switch">Open Save</button></div>
         <p class="hint">Create and Move use an empty or new folder. Move copies your files and history, switches future saves, and keeps the old folder as a backup.</p>
@@ -214,9 +219,15 @@
 
   <!-- History: what the store looked like at any point, from git. -->
   <section id="tab-history" class="tab">
+    <!--
+      Describes what is on the screen. It used to end "Pick a commit to see
+      exactly what moved", which is the older design: every version now shows
+      what moved on its own card, so the instruction asked for a click that
+      does nothing and implied the list was hiding something.
+    -->
     <p class="hint">
-      Every change to the save is committed, so this is the record of what you
-      sent and when. Pick a commit to see exactly what moved.
+      Every change to the save is committed once you stop editing, so one
+      sitting is one version. Each shows what moved, and can be restored.
     </p>
     <div class="toolbar">
       <select id="history-resume" title="Whose version history to show"></select>
@@ -276,7 +287,14 @@
             say.
           </p>
           <textarea id="voice" spellcheck="false"></textarea>
-          <div class="toolbar"><button id="btn-save-voice">Save notes</button></div>
+          <!--
+            The one field here with no autosave, so it is the one field that
+            has to say when it is holding something the store does not.
+          -->
+          <div class="toolbar">
+            <button id="btn-save-voice">Save notes</button>
+            <span id="voice-unsaved" class="hint warn" hidden>Not saved yet.</span>
+          </div>
           <p class="hint">This is exactly what gets prepended to every request:</p>
           <pre id="voice-preview" class="voice-preview"></pre>
         </details>

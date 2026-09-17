@@ -163,4 +163,126 @@ describe('rebasing one edit onto another', () => {
     const theirs = entry();
     expect('note' in rebase(base, ours, theirs)).toBe(false);
   });
+
+  /*
+   * The cases below are the ones an adversarial read of the merge turned up.
+   * Each of them lost wording that the merge exists to keep.
+   */
+
+  it('keeps both of two additions that picked the same id', () => {
+    // Not unlikely: the editor derives `b_acme_4` from its own copy of the
+    // entry, so two additions made before the first save returns collide.
+    const base = entry();
+    const made = (text) => ({ id: 'b_acme_4', default: 'v_1', variants: [{ id: 'v_1', label: 'B', text }] });
+    const ours = entry();
+    ours.bullets.push(made('The one I just typed'));
+    const theirs = entry();
+    theirs.bullets.push(made('The one that landed first'));
+
+    const texts = rebase(base, ours, theirs).bullets.map((b) => b.variants[0].text);
+    expect(texts).toContain('The one I just typed');
+    expect(texts).toContain('The one that landed first');
+    // And under ids of their own, since two bullets cannot share one.
+    const ids = rebase(base, ours, theirs).bullets.map((b) => b.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('keeps a phrasing the other edit rewrote while this one deleted the bullet', () => {
+    const base = entry();
+    const ours = entry();
+    ours.bullets = ours.bullets.filter((b) => b.id !== 'b_oncall');
+    const theirs = entry();
+    theirs.bullets[1].variants[0].text = 'Ran the on-call rota for twelve services';
+
+    const kept = rebase(base, ours, theirs).bullets.find((b) => b.id === 'b_oncall');
+    expect(kept?.variants[0].text).toBe('Ran the on-call rota for twelve services');
+  });
+
+  it('leaves a bullet where it was put rather than at the bottom', () => {
+    const base = entry();
+    const ours = entry();
+    ours.bullets.unshift({ id: 'b_new', default: 'v_1', variants: [{ id: 'v_1', label: 'B', text: 'First' }] });
+    const theirs = entry();
+    theirs.bullets[0].variants[0].text = 'Built a pipeline, reworded';
+
+    const merged = rebase(base, ours, theirs);
+    expect(merged.bullets.map((b) => b.id)).toEqual(['b_new', 'b_pipeline', 'b_oncall']);
+    expect(merged.bullets[1].variants[0].text).toBe('Built a pipeline, reworded');
+  });
+
+  it('keeps an order this edit chose, even when the other one changed a wording', () => {
+    const base = entry();
+    const ours = entry();
+    ours.bullets.reverse();
+    const theirs = entry();
+    theirs.bullets[0].variants[0].text = 'Built a pipeline, reworded';
+
+    expect(rebase(base, ours, theirs).bullets.map((b) => b.id)).toEqual(['b_oncall', 'b_pipeline']);
+  });
+
+  it('keeps an order the other edit chose when this one did not touch it', () => {
+    const base = entry();
+    const theirs = entry();
+    theirs.bullets.reverse();
+    const ours = { ...entry(), dates: '2023 — 2025' };
+
+    expect(rebase(base, ours, theirs).bullets.map((b) => b.id)).toEqual(['b_oncall', 'b_pipeline']);
+  });
+
+  it('does not throw away a set of alternates to save one word', () => {
+    // One edit typed into a plain field; the other gave that field alternates.
+    const base = { ...entry(), location: 'Boston' };
+    const ours = { ...base, location: 'Boston, MA' };
+    const theirs = {
+      ...base,
+      location: {
+        default: 'v_1',
+        variants: [
+          { id: 'v_1', label: 'Boston', text: 'Boston' },
+          { id: 'v_2', label: 'Remote', text: 'Remote' },
+        ],
+      },
+    };
+
+    const merged = rebase(base, ours, theirs);
+    expect(merged.location.variants).toHaveLength(2);
+    expect(merged.location.variants[0].text).toBe('Boston, MA');
+    expect(merged.location.variants[1].text).toBe('Remote');
+
+    // And the same when the two edits arrive the other way round.
+    const other = rebase(base, theirs, ours);
+    expect(other.location.variants).toHaveLength(2);
+    expect(other.location.variants[0].text).toBe('Boston, MA');
+  });
+
+  it('merges tags rather than letting one list replace the other', () => {
+    const base = { ...entry(), tags: ['backend', 'go'] };
+    const ours = { ...base, tags: ['backend', 'go', 'kafka'] };
+    const theirs = { ...base, tags: ['backend', 'go', 'kubernetes'] };
+
+    expect(rebase(base, ours, theirs).tags).toEqual(['backend', 'go', 'kafka', 'kubernetes']);
+  });
+
+  it('does not bring back a tag this edit removed', () => {
+    const base = { ...entry(), tags: ['backend', 'go'] };
+    const ours = { ...base, tags: ['backend'] };
+    const theirs = { ...base, tags: ['backend', 'go', 'kubernetes'] };
+
+    expect(rebase(base, ours, theirs).tags).toEqual(['backend', 'kubernetes']);
+  });
+
+  it('never produces a list with one thing in it twice', () => {
+    const base = entry();
+    const ours = entry();
+    ours.bullets.reverse();
+    ours.bullets.push({ id: 'b_ours', default: 'v_1', variants: [{ id: 'v_1', label: 'B', text: 'Ours' }] });
+    const theirs = entry();
+    theirs.bullets.unshift({ id: 'b_theirs', default: 'v_1', variants: [{ id: 'v_1', label: 'B', text: 'Theirs' }] });
+    theirs.bullets[2].variants[0].text = 'Rewritten';
+
+    const ids = rebase(base, ours, theirs).bullets.map((b) => b.id);
+    expect(new Set(ids).size, ids.join(',')).toBe(ids.length);
+    expect(ids).toContain('b_ours');
+    expect(ids).toContain('b_theirs');
+  });
 });

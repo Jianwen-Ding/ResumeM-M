@@ -166,6 +166,101 @@ describe('typing in the Workspace', () => {
     expect(drafts[draftId].notes).toBe('Referred by someone on the team.');
   });
 
+  /*
+   * Whether a letter is wanted is read off the form when the application is
+   * opened, and that answer used to be final — the box simply did not exist
+   * afterwards. It is the wrong thing to be final about: the form that asks is
+   * often three pages in, the detection is a guess, and "send one anyway" is an
+   * ordinary decision to make late.
+   */
+  it('can take a cover letter on an application that did not ask for one', async () => {
+    // Switch to the draft that wants no letter.
+    const other = [...document.querySelectorAll('.draft-card')].find((c) => c.textContent.includes('Northwind'));
+    drafts.other.coverLetter.required = false;
+    other.click();
+    await vi.waitFor(() =>
+      expect(document.querySelector('#draft-editor').textContent).toContain('did not ask for one'),
+    );
+    expect(document.querySelector('#draft-editor .letter'), 'no letter box yet').toBeNull();
+
+    const add = [...document.querySelectorAll('#draft-editor button')].find(
+      (b) => b.textContent === 'Add one anyway',
+    );
+    expect(add, 'a way to add one').toBeTruthy();
+    add.click();
+
+    await vi.waitFor(() => expect(document.querySelector('#draft-editor .letter')).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(drafts.other.coverLetter.required, 'and it is remembered').toBe(true);
+
+    // And it is a real letter box: what is typed into it is saved.
+    type(document.querySelector('#draft-editor .letter'), 'Dear Northwind, I am writing anyway.');
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(drafts.other.coverLetter.body).toBe('Dear Northwind, I am writing anyway.');
+  });
+
+  /*
+   * Pressing an AI button spends minutes and, depending on the command, money.
+   * Pressing anything else is instant. Nothing on screen distinguished them, so
+   * the only way to learn which you had pressed was to wait and see.
+   */
+  it('marks the buttons that run the AI, and only those', async () => {
+    const buttons = [...document.querySelectorAll('#draft-editor button')];
+    const named = (label) => buttons.find((b) => b.textContent.includes(label));
+
+    for (const label of ['Draft it', 'Ask for feedback']) {
+      const b = named(label);
+      expect(b, label).toBeTruthy();
+      expect(b.classList.contains('ai-action'), `${label} is marked`).toBe(true);
+      expect(b.title, `${label} says what it runs`).toMatch(/Runs your AI command/);
+    }
+
+    // And the ones that are not AI are left plain, rather than labelled "not AI".
+    const plain = buttons.filter((b) => !b.classList.contains('ai-action'));
+    expect(plain.length, 'most buttons are not AI').toBeGreaterThan(0);
+    for (const b of plain) expect(b.title ?? '').not.toMatch(/Runs your AI command/);
+  });
+
+  /*
+   * "Working…" was the whole of it, for something that takes minutes: no way
+   * to tell a run that is thinking from one that has died.
+   */
+  it('says what the AI is doing, and for how long', async () => {
+    let release;
+    const held = new Promise((go) => (release = go));
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+      if (String(url).endsWith('/generate')) {
+        await held;
+        return { ok: true, json: async () => ({ draft: drafts[draftId], notes: ['Cover letter drafted in your voice.'] }) };
+      }
+      return realFetch(url, options);
+    }));
+
+    const draftIt = [...document.querySelectorAll('#draft-editor button')].find((b) =>
+      b.textContent.includes('Draft it'),
+    );
+    draftIt.click();
+
+    let running = null;
+    await vi.waitFor(() => {
+      running = document.querySelector('#draft-editor .ai-running');
+      expect(running).not.toBeNull();
+    });
+
+    // It says what it is doing, that it is safe to keep typing, and nothing
+    // else can start a second run on top of this one.
+    expect(running.textContent).toContain('Writing the cover letter');
+    expect(running.parentElement.textContent).toContain('nothing you type now will be lost');
+    expect(draftIt.disabled).toBe(true);
+
+    // And there is a clock, which is what tells a live run from a dead one.
+    expect(running.querySelector('.ai-elapsed')?.textContent).toBe('0:00');
+
+    release();
+    await vi.waitFor(() => expect(document.querySelector('#draft-editor .ai-running')).toBeNull());
+  });
+
   it('does not write on every keystroke', async () => {
     const before = requests.filter((r) => r.method === 'PUT').length;
     for (const text of ['D', 'De', 'Dea', 'Dear', 'Dear ', 'Dear S']) type(letterBox(), text);
