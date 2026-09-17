@@ -309,20 +309,32 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     .concat(' ')
     .concat(/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1] ?? '');
   const named = stripTags(heading).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
+  /*
+   * And the role word has to be the *end* of it, give or take a level.
+   * "Platform Engineer" is a post; "Software Engineer salaries" is a page
+   * about what posts pay, and merely containing the word was enough to let it
+   * through.
+   */
   const namesARole =
     named.split(/\s+/).length <= 8 &&
-    ROLE_WORDS.test(named) &&
+    (ENDS_WITH_ROLE.test(named) || LEADS_WITH_ROLE.test(named)) &&
     !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my)\b/i.test(named);
 
-  const applyLink =
-    /<a\b[^>]*href=["'][^"']*\b(apply|application)\b/i.test(html) ||
-    /<(?:a|button)\b[^>]*>[^<]{0,60}\b(apply|submit application|start application)\b/i.test(html);
   const hasFields = /<(input|textarea|select)\b/i.test(html);
+  /*
+   * Being on an applicant tracking system, or having an Apply link, is not on
+   * its own enough — and both were. A board's own feed is on a board; the page
+   * after you press submit is on the tracker and is the one page where a card
+   * is pure noise; a careers landing page saying "nothing open, write to us
+   * anyway" has an Apply link and no role to apply for.
+   *
+   * What every real posting has instead is that it is *about one role*: its
+   * title names the post, or it declares itself with structured data, or it is
+   * the form itself — asking for a resume, or asking enough of the questions a
+   * form asks. That, and nothing weaker.
+   */
   const actionable =
     /"@type"\s*:\s*"?JobPosting/i.test(html) ||
-    ATS.test(link) ||
-    BOARD.test(link) ||
-    applyLink ||
     uploadsResume ||
     namesARole ||
     (formish >= 3 && hasFields);
@@ -376,6 +388,16 @@ export const JOB_SHAPED = 3;
  */
 const ROLE_WORDS =
   /\b(engineer|developer|programmer|scientist|analyst|designer|manager|director|architect|administrator|consultant|specialist|technician|researcher|intern|internship|associate|coordinator|accountant|nurse|physician|teacher|professor|writer|editor|marketer|recruiter|counsel|attorney|paralegal|therapist|chef|driver|technologist|strategist|producer|operator|advisor|apprentice|fellow|lead|head of|officer|assistant|representative|agent)\b/i;
+/**
+ * The role word has to end the title, give or take a level — "Platform
+ * Engineer", "Software Engineer II". "Software Engineer salaries" is a page
+ * about what the post pays, and merely containing the word let it through.
+ */
+const ENDS_WITH_ROLE = new RegExp(`${ROLE_WORDS.source}\\s*(?:\\b(?:i{1,3}|iv|v|\\d+)\\b\\s*)?$`, 'i');
+
+/** Or lead it: "Head of Platform" names a post as plainly as any of them. */
+const LEADS_WITH_ROLE = /^(head|director|vp|vice president|chief|lead)\s+of\b/i;
+
 
 /**
  * Cheap confidence that a page is a job posting at all. Kept as the number,
