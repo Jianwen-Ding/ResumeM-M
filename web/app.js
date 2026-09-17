@@ -320,22 +320,58 @@ function currentSpec() {
     lists: { ...(base.lists ?? {}), ...(state.listEdits ?? {}) },
   };
 
+  /*
+   * Only what this resume actually changes.
+   *
+   * This wrote the *flattened* chain — the parent's sections with the child's
+   * overrides folded in — back onto the resume being edited. Ticking one bullet
+   * on a variation therefore copied every inherited section down into it, and
+   * from then on the variation was pinned to the entries the base had at that
+   * moment: anything added to the base afterwards arrived switched off.
+   *
+   * A section the user has not touched is left inherited. A section they have
+   * carries only the part they changed, which mergeSections now lays over the
+   * parent's rather than replacing it outright.
+   */
   const touchesSections = state.skillEdits || state.entryEdits || state.bulletEdits;
   if (touchesSections) {
-    spec.sections = resolveSections().map((section) => {
-      if (section.kind === 'skills') {
-        return state.skillEdits
-          ? { ...section, items: { ...(section.items ?? {}), ...state.skillEdits } }
-          : section;
-      }
+    const own = new Map((base.sections ?? []).map((s) => [s.kind, s]));
+    const sections = [];
+
+    for (const section of resolveSections()) {
+      const mine = own.get(section.kind);
       const entries = entrySelection(section);
-      const bullets = { ...(section.bullets ?? {}) };
-      for (const eid of entries) {
-        const entry = state.store.entries.find((e) => e.id === eid);
-        if (entry && state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
+
+      const editedHere =
+        section.kind === 'skills'
+          ? Boolean(state.skillEdits && (section.groups ?? []).some((g) => g in state.skillEdits))
+          : Boolean(state.entryEdits && section.kind in state.entryEdits) ||
+            Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits));
+
+      // Untouched and not already this resume's own: leave it inherited.
+      if (!mine && !editedHere) continue;
+      if (!editedHere) {
+        sections.push(mine);
+        continue;
       }
-      return { ...section, entries, bullets };
-    });
+
+      if (section.kind === 'skills') {
+        sections.push({ ...(mine ?? { kind: section.kind }), items: { ...(mine?.items ?? {}), ...state.skillEdits } });
+        continue;
+      }
+
+      const next = { ...(mine ?? { kind: section.kind }) };
+      // The entry list is only written down when the user changed which
+      // entries show. A bullet the user hid does not pin the entry list.
+      if (state.entryEdits && section.kind in state.entryEdits) next.entries = entries;
+      const bullets = { ...(mine?.bullets ?? {}) };
+      for (const eid of entries) {
+        if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
+      }
+      if (Object.keys(bullets).length > 0) next.bullets = bullets;
+      sections.push(next);
+    }
+    spec.sections = sections;
   }
   return spec;
 }
@@ -700,7 +736,20 @@ async function chooseVariant(key, field, current) {
  * The text belongs to the store, not to this resume: editing it here changes it
  * everywhere it appears, which is the whole point of keeping one copy.
  */
+/*
+ * The line as the store holds it is what gets edited; the rendered form is what
+ * gets shown. That was always the intent — the comment below said so — and the
+ * code did the opposite: it put `display(text)` into the box, and `display`
+ * strips `**bold**`, backticks and `*italic*`. Whatever came back was saved
+ * over the original, so editing a bullet to add one word silently deleted its
+ * markup from the shared store, for every resume using that phrasing, and the
+ * bold metric in the PDF turned to body text with nothing having said so.
+ *
+ * `undisplay` was supposed to be the inverse and only ever restored the en
+ * dash. Editing the raw text needs no inverse.
+ */
 function editableLine(text, { onCommit, className = 'text', title } = {}) {
+  const raw = String(text ?? '');
   const node = el('div', {
     // `editable` is what carries the affordance in CSS: a line that merely
     // looks like this one — a list bullet's preview, say — must not invite a
@@ -717,7 +766,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     node.contentEditable = 'false';
     node.classList.remove('editing');
     const next = node.textContent.trim();
-    if (commit && next && next !== display(text)) {
+    if (commit && next && next !== raw) {
       const save = Promise.resolve().then(() => onCommit(next));
       inlineSaves.add(save);
       save.catch(err => setStatus(err.message, true)).finally(() => inlineSaves.delete(save));
@@ -733,7 +782,9 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     editing = true;
     node.contentEditable = 'plaintext-only';
     node.classList.add('editing');
-    node.textContent = display(text); // edit the sentence, not the markup
+    // The sentence as written, markup and all: what is saved is what is shown
+    // here, so there is nothing to lose in translation.
+    node.textContent = raw;
     node.focus();
     // Put the caret where the pointer was, rather than at the start.
     const sel = window.getSelection();
@@ -1756,13 +1807,23 @@ async function addEntry(kind) {
     return;
   }
 
-  // A new entry nobody references is invisible, so add it to the section of the
-  // resume being edited — at the root of the chain, so every resume gets it.
+  /*
+   * A new entry nobody references is invisible, so add it to the section of the
+   * resume being edited — at the root of the chain, so every resume gets it.
+   *
+   * From the root's *own* sections, not the flattened chain. Built from the
+   * flattened chain, this carried the child's overrides down onto the base with
+   * it: adding an entry while "New grad" was selected wrote New grad's hidden
+   * coursework line into the base, and every other variation lost it too.
+   */
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) =>
+  const rootEntries = (id2) => resolveSections(root.id).find((s) => s.kind === id2)?.entries ?? [];
+  const sections = (root.sections ?? []).map((s) =>
     s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
   );
-  if (!sections.some((s) => s.kind === kind)) sections.push({ kind, entries: [id] });
+  if (!sections.some((s) => s.kind === kind)) {
+    sections.push({ kind, entries: [...rootEntries(kind), id] });
+  }
   await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   render();
   scheduleRender();
@@ -1795,9 +1856,10 @@ async function removeEntry(entry) {
   if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
   await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
 
-  // Drop the reference too, so the next compile does not warn about it.
+  // Drop the reference too, so the next compile does not warn about it. From
+  // the root's own sections, for the reason given in addEntry.
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) => ({
+  const sections = (root.sections ?? []).map((s) => ({
     ...s,
     entries: (s.entries ?? []).filter((id) => id !== entry.id),
   }));
@@ -2262,11 +2324,17 @@ async function addSkillGroup() {
   describeNext(`adding the group "${answer.name.trim()}"`);
   await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
 
+  // The root's own sections, for the reason given in addEntry: built from the
+  // flattened chain this carried the selected variation's overrides down onto
+  // the base along with the new group.
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) =>
+  const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
   );
-  if (!sections.some((s) => s.kind === 'skills')) sections.push({ kind: 'skills', entries: [], groups: [id] });
+  if (!sections.some((s) => s.kind === 'skills')) {
+    const inherited = resolveSections(root.id).find((s) => s.kind === 'skills');
+    sections.push({ kind: 'skills', entries: [], groups: [...(inherited?.groups ?? []), id] });
+  }
   await saveResumeSpec({ ...root, sections }, 'Skill group added');
   render();
   scheduleRender();
@@ -2279,7 +2347,7 @@ async function removeSkillGroup(group) {
     body: JSON.stringify(state.store.skillGroups.filter((g) => g.id !== group.id)),
   });
   const root = chain(state.resumeId)[0];
-  const sections = resolveSections().map((s) =>
+  const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
   );
   await saveResumeSpec({ ...root, sections }, 'Group deleted');

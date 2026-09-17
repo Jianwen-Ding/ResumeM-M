@@ -119,10 +119,36 @@ export function mergeSections(base: SectionSpec[], override: SectionSpec[]): Sec
   const out = [...base];
   const claimed = new Set<number>();
 
+  /*
+   * What the child states, over what the parent had — not instead of it.
+   *
+   * A child section used to replace its parent's outright, so expressing "hide
+   * one bullet of one entry" meant restating the entry list as well. The editor
+   * duly wrote that list down, and from then on the variation was pinned to the
+   * entries the base had at that moment: anything added to the base afterwards
+   * arrived switched off, because the child was now saying "these entries,
+   * exactly" when all it had ever meant was "this bullet, hidden".
+   *
+   * Absent means inherited, which is how `choices`, `lists` and `layout`
+   * already work one level up in `mergeOnto`.
+   */
+  const over = (parent: SectionSpec, child: SectionSpec): SectionSpec => ({
+    ...parent,
+    ...child,
+    entries: child.entries ?? parent.entries,
+    groups: child.groups ?? parent.groups,
+    bullets:
+      child.bullets || parent.bullets
+        ? { ...(parent.bullets ?? {}), ...(child.bullets ?? {}) }
+        : undefined,
+    items:
+      child.items || parent.items ? { ...(parent.items ?? {}), ...(child.items ?? {}) } : undefined,
+  });
+
   const claim = (o: SectionSpec, where: (s: SectionSpec, i: number) => boolean): boolean => {
     const at = out.findIndex((s, i) => !claimed.has(i) && s.kind === o.kind && where(s, i));
     if (at < 0) return false;
-    out[at] = o;
+    out[at] = over(out[at]!, o);
     claimed.add(at);
     return true;
   };
