@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { Repo } from '../git/repo.js';
-import { resolveStoreDir, seedStore } from '../model/location.js';
+import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
 import { createApi, createPdfRouter } from './api.js';
 import { prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
@@ -14,7 +14,7 @@ import { Jobs } from './jobs.js';
 import { localOnly } from './guard.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(here, '..', '..');
+const projectRoot = findProjectRoot(here);
 const require = createRequire(import.meta.url);
 
 export interface ServerOptions {

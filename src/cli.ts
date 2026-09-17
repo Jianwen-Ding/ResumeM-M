@@ -7,7 +7,7 @@ import { feedbackPrompt } from './ai/prompts.js';
 import { Repo } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
-import { resolveStoreDir, seedStore } from './model/location.js';
+import { findProjectRoot, resolveStoreDir, seedStore } from './model/location.js';
 import { buildBundle, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
@@ -15,7 +15,7 @@ import { compileResume, OverflowError } from './render/compile.js';
 import type { WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
 const dataDir = resolveStoreDir(projectRoot);
 seedStore(path.join(projectRoot, 'data'), dataDir);
 

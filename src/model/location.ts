@@ -4,6 +4,38 @@ import path from 'node:path';
 import { readProjects } from './projects.js';
 
 /**
+ * The directory the shipped files live in, found rather than counted to.
+ *
+ * `path.resolve(here, '..', '..')` was the rule, and it is right exactly once.
+ * Under `tsx`, `src/server/index.ts` is two levels down and lands on the
+ * repository. Compiled, `dist/src/server/index.js` is three, and two levels up
+ * is `dist/` — which has no `web/` in it, because TypeScript emits JavaScript
+ * and nothing else. So a built server answered every API call and served the
+ * editor as a 404, which is also what the macOS app is: a WKWebView pointed at
+ * that server, showing nothing.
+ *
+ * The same off-by-one moved the seed data, so a freshly built install also
+ * looked for `dist/data` and found no example store to copy.
+ *
+ * Looking for the thing instead of counting to it survives both layouts, and
+ * the one after that.
+ */
+export function findProjectRoot(from: string): string {
+  let dir = from;
+  // Six is more than any layout here needs and stops a symlink loop dead.
+  for (let i = 0; i < 6; i++) {
+    if (fs.existsSync(path.join(dir, 'web', 'index.html')) && fs.existsSync(path.join(dir, 'package.json'))) {
+      return dir;
+    }
+    const up = path.dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  // Nothing found: keep the old answer rather than inventing a new failure.
+  return path.resolve(from, '..', '..');
+}
+
+/**
  * Where the working store lives.
  *
  * Deliberately not inside the application's source tree. The store is your

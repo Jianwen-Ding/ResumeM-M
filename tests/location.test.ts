@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isEmptyStore, resolveStoreDir, seedStore } from '../src/model/location.js';
+import { findProjectRoot, isEmptyStore, resolveStoreDir, seedStore } from '../src/model/location.js';
 
 describe('resolveStoreDir', () => {
   const original = process.env.RMM_DATA;
@@ -140,5 +140,62 @@ describe('seedStore', () => {
     const seeded = seedStore(missingFrom, to);
     expect(seeded).toBe(false);
     expect(fs.existsSync(to)).toBe(false);
+  });
+});
+
+/**
+ * The layout is not the same before and after a build, and one of the two was
+ * getting a 404 for the whole editor.
+ */
+describe('finding the files that ship with the tool', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-root-'));
+    fs.mkdirSync(path.join(root, 'web'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'web', 'index.html'), '<!doctype html>');
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"resumem-m"}');
+  });
+
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it('finds it from the source tree, which is two levels down', () => {
+    const from = path.join(root, 'src', 'server');
+    fs.mkdirSync(from, { recursive: true });
+    expect(findProjectRoot(from)).toBe(fs.realpathSync(root));
+  });
+
+  /*
+   * The one that was broken. `here/../..` from the compiled server is `dist`,
+   * which holds JavaScript and nothing else — no `web`, no `data`. The server
+   * answered every API call and served the editor as a 404, and the macOS app
+   * is a WKWebView pointed at that server.
+   */
+  it('finds it from the compiled tree, which is three', () => {
+    const from = path.join(root, 'dist', 'src', 'server');
+    fs.mkdirSync(from, { recursive: true });
+    expect(findProjectRoot(from)).toBe(fs.realpathSync(root));
+    expect(findProjectRoot(from)).not.toBe(fs.realpathSync(path.join(root, 'dist')));
+  });
+
+  it('finds it from the compiled CLI, which is two below the same root', () => {
+    const from = path.join(root, 'dist', 'src');
+    fs.mkdirSync(from, { recursive: true });
+    expect(findProjectRoot(from)).toBe(fs.realpathSync(root));
+  });
+
+  it('is not fooled by a package.json with no web beside it', () => {
+    // `dist` gets no package.json today, but a bundler could put one there.
+    fs.mkdirSync(path.join(root, 'dist', 'src', 'server'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'dist', 'package.json'), '{"type":"module"}');
+    expect(findProjectRoot(path.join(root, 'dist', 'src', 'server'))).toBe(fs.realpathSync(root));
+  });
+
+  it('gives the old answer rather than a new failure when there is nothing to find', () => {
+    const lost = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-lost-'));
+    const from = path.join(lost, 'a', 'b');
+    fs.mkdirSync(from, { recursive: true });
+    expect(findProjectRoot(from)).toBe(path.resolve(from, '..', '..'));
+    fs.rmSync(lost, { recursive: true, force: true });
   });
 });
