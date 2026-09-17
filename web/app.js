@@ -1040,9 +1040,9 @@ function alternateStepper(key, field, currentId) {
   };
 
   return el('div', { className: 'stepper', title: 'Other ways to say this' }, [
-    el('button', { className: 'step', textContent: '‹', title: 'Previous wording', onclick: () => go(-1) }),
+    el('button', { className: 'step', textContent: '‹', title: 'Previous wording', ariaLabel: 'Previous wording', onclick: () => go(-1) }),
     el('span', { className: 'count', textContent: `${at + 1}/${ids.length}` }),
-    el('button', { className: 'step', textContent: '›', title: 'Next wording', onclick: () => go(1) }),
+    el('button', { className: 'step', textContent: '›', title: 'Next wording', ariaLabel: 'Next wording', onclick: () => go(1) }),
   ]);
 }
 
@@ -1081,10 +1081,17 @@ function listItems(entry, bullet) {
     };
     chip.append(cb, item.text);
     chip.append(
-      el('span', {
+      /*
+       * A button, because it was a span: clickable with a mouse and reachable
+       * by nothing else. There is no keyboard route to deleting an item, and
+       * a screen reader is told only that there is an "×" here.
+       */
+      el('button', {
+        type: 'button',
         className: 'x',
         textContent: '×',
         title: 'Delete this item from the save',
+        ariaLabel: `Delete "${item.text}" from the save`,
         onclick: (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
@@ -1466,10 +1473,13 @@ function skillsBlock(section) {
       };
       chip.append(cb, item.text);
       chip.append(
-        el('span', {
+        // As above: a button, and named for the skill it deletes.
+        el('button', {
+          type: 'button',
           className: 'x',
           textContent: '×',
           title: 'Delete this skill from the save',
+          ariaLabel: `Delete "${item.text}" from the save`,
           onclick: (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
@@ -1544,6 +1554,7 @@ function profileBlock() {
               className: 'link',
               textContent: '×',
               title: `Remove ${label.toLowerCase()} from the header`,
+              ariaLabel: `Remove ${label.toLowerCase()} from the header`,
               onclick: () => saveProfileField(key, ''),
             })
           : null,
@@ -1565,7 +1576,13 @@ function profileBlock() {
           title: 'Double-click to edit. Used to fill forms, never printed on a resume.',
           onCommit: (text) => saveAutofillField(key, text),
         }),
-        el('button', { className: 'link', textContent: '×', title: 'Remove', onclick: () => saveAutofillField(key, '') }),
+        el('button', {
+          className: 'link',
+          textContent: '×',
+          title: `Remove ${key.replace(/_/g, ' ')}`,
+          ariaLabel: `Remove ${key.replace(/_/g, ' ')}`,
+          onclick: () => saveAutofillField(key, ''),
+        }),
       ]),
     );
   }
