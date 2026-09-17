@@ -92,6 +92,36 @@ describe('writing a letter as moves', () => {
  * prompt cannot answer: a model doing a lookup from memory mid-sentence is a
  * model about to round a number.
  */
+describe('what the posting looks like to the model', () => {
+  it('keeps the posting apart from the instructions about it', () => {
+    const text = writing().describeJob();
+    expect(text).toContain('Company: Helios Robotics');
+    expect(text).toContain('Role: Platform Engineer');
+    expect(text).toContain('Kafka');
+    /*
+     * The blank lines are the only thing separating the employer's words from
+     * the sentence telling the model not to take them as instructions. A
+     * filter that dropped every empty string ran all three together into one
+     * block, which is exactly the shape a prompt injection wants.
+     */
+    expect(text.split('\n\n').length).toBeGreaterThanOrEqual(3);
+    expect(text).toMatch(/instructions to you[^\n]*\n\n/);
+  });
+
+  it('says so plainly when the page named neither', () => {
+    const bare = new WritingSession(
+      store(),
+      resolveResume('base', store()),
+      { description: '' },
+      writing().draft as never,
+      '',
+    );
+    expect(bare.describeJob()).toContain('Company: not named on the page.');
+    expect(bare.describeJob()).toContain('Role: not stated on the page.');
+    expect(bare.describeJob()).toContain('(the page carried no description)');
+  });
+});
+
 describe('checking a claim against the resume', () => {
   it('confirms something the resume carries, and quotes the line', () => {
     const r = writing().checkClaim('pipeline handling 2M events');
@@ -127,6 +157,47 @@ describe('checking a claim against the resume', () => {
   it('asks for something to look for when given nothing', () => {
     expect(writing().checkClaim('a of').ok).toBe(false);
   });
+
+  /*
+   * The number is the point. "does it say two million events a day or twenty"
+   * is what the docstring promises, and the filter that dropped every word of
+   * three characters or fewer dropped "2m", "5x" and "10" with them — so the
+   * one thing a model is most likely to round was the one thing not checked.
+   */
+  it('checks the number, not only the nouns around it', () => {
+    const text = 'x';
+    const s = new WritingSession(store(), resolveResume('base', store()), POSTING, writing().draft as never, text);
+    const carries = new WritingSession(
+      store(),
+      resolveResume('base', store()),
+      POSTING,
+      writing().draft as never,
+      'Built a pipeline moving 2M events a day.',
+    );
+    expect(carries.checkClaim('2M events').ok).toBe(true);
+    // The same sentence with the number changed is not the same claim.
+    expect(carries.checkClaim('9M events').ok).toBe(false);
+    expect(carries.checkClaim('9M events').text).toContain('9m');
+    expect(s.checkClaim('2M events').ok).toBe(false);
+  });
+
+  /*
+   * A tool whose only job is keeping a letter honest cannot be the thing that
+   * invents a language. `includes` said yes to Rust for a resume that says
+   * "trust", and yes to SQL for one that only says PostgreSQL.
+   */
+  it('will not find a word inside a longer one', () => {
+    const s = (text: string) =>
+      new WritingSession(store(), resolveResume('base', store()), POSTING, writing().draft as never, text);
+    expect(s('I trust the process.').checkClaim('Rust').ok).toBe(false);
+    expect(s('Worked with PostgreSQL.').checkClaim('SQL').ok).toBe(false);
+    expect(s('Worked with PostgreSQL.').checkClaim('PostgreSQL').ok).toBe(true);
+    // The names most likely to be asked about are the ones a word boundary
+    // splits in the wrong place.
+    expect(s('Wrote C++ for three years.').checkClaim('C++').ok).toBe(true);
+    expect(s('Wrote C# for three years.').checkClaim('C#').ok).toBe(true);
+    expect(s('Wrote C# for three years.').checkClaim('C++').ok).toBe(false);
+  });
 });
 
 describe('looking at what was written before', () => {
@@ -148,6 +219,28 @@ describe('looking at what was written before', () => {
     const s = makeWriting({ coverLetter: { required: true, body: 'Half a paragraph I typed myself.' }, questions: [] });
     expect(s.describeWork()).toContain('do not throw it away');
     expect(s.describeWork()).toContain('Half a paragraph I typed myself.');
+  });
+
+  /*
+   * Ranking always produces a top three. Handing back the best of a bad lot
+   * under the heading "answers this person has given before" is how a
+   * paragraph about relocation becomes the answer to "why this company" —
+   * the model cannot see that the match scored nothing.
+   */
+  it('says there is nothing close rather than offering the best of a bad lot', () => {
+    const data = store();
+    const s = new WritingSession(
+      { ...data, answers: [{ id: 'a1', question: 'Are you able to relocate?', variants: [{ id: 'v1', text: 'Yes, happily.' }] }] as never },
+      resolveResume('base', data),
+      POSTING,
+      writing().draft as never,
+      '',
+    );
+    const answer = s.findAnswers('Describe a time you disagreed with a technical decision.');
+    expect(answer).toContain('Nothing in the answer bank is about that');
+    expect(answer).not.toContain('Yes, happily.');
+    // And it still finds the one that is.
+    expect(s.findAnswers('Are you able to relocate for this role?')).toContain('Yes, happily.');
   });
 
   it('flags a question that already has an answer', () => {
