@@ -107,6 +107,23 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const dir = path.join(store.outDir(), 'applications', id);
   fs.mkdirSync(dir, { recursive: true });
 
+  /*
+   * A rebuild replaces the bundle; it does not add to it.
+   *
+   * The id is company, role and date, so building the same application twice
+   * in a day writes into the same folder — and every file whose name changed
+   * in between was left sitting beside its replacement. Change how your name
+   * is written, or rebuild without the cover letter you had before, and the
+   * folder holds two resumes or an orphaned letter. Both then get copied into
+   * the flat upload folder, where the whole point is that the file in front of
+   * you is the one to send.
+   *
+   * `source/` stays: it is the archive material, and it is rewritten below.
+   */
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isFile()) fs.rmSync(path.join(dir, entry.name), { force: true });
+  }
+
   const resumeName = bundleFileName(resolved.profile.name, req.company, 'Resume');
   const pdfPath = path.join(dir, resumeName);
   const compiled = await compileResume(resolved, {

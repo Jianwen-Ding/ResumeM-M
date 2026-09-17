@@ -188,6 +188,9 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
   });
 });
 
+/** What a person sees in the folder: the uploads, not the bookkeeping. */
+const visible = (dir: string) => fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
+
 describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_000 }, () => {
   const bundleFor = (company: string, status?: string) =>
     buildBundle(t.store, {
@@ -206,8 +209,9 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     expect(current.applications).toBe(2);
     expect(current.files).toContain('Test Person Resume Streamly.pdf');
     expect(current.files).toContain('Test Person Resume Northwind.pdf');
-    // All in one place, not one folder per application.
-    expect(fs.readdirSync(current.dir).length).toBe(current.files.length);
+    // All in one place, not one folder per application. (The dotfile is the
+    // manifest of what this folder put here; it is not one of your uploads.)
+    expect(visible(current.dir).length).toBe(current.files.length);
   });
 
   it('leaves the archived folders exactly as they were', async () => {
@@ -231,7 +235,7 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     advance(t.store, result.application.id, 'rejected');
     const after = syncCurrent(t.store);
     expect(after.files).toEqual([]);
-    expect(fs.readdirSync(after.dir)).toEqual([]);
+    expect(visible(after.dir)).toEqual([]);
   });
 
   it('separates "nothing in flight" from "in flight but never built"', async () => {
@@ -252,15 +256,92 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     expect(syncCurrent(t.store).files.length).toBeGreaterThan(0);
   });
 
-  it('is rebuilt from the tracker, so a stale file does not linger', async () => {
-    const result = await bundleFor('Streamly');
+  /*
+   * Rebuilding an application replaces its bundle rather than adding to it.
+   * The id is company, role and date, so a second build the same day writes to
+   * the same folder — and every file whose name changed in between used to sit
+   * beside its replacement, then get copied into the upload folder alongside
+   * it. Two resumes for one job, in the folder whose whole point is that the
+   * file in front of you is the one to send.
+   */
+  it('is rebuilt from the tracker, so a file it placed and no longer wants goes', async () => {
+    await bundleFor('Streamly');
     const current = syncCurrent(t.store);
-    fs.writeFileSync(path.join(current.dir, 'Something Else.pdf'), 'stale');
+    expect(current.files).toContain('Test Person Resume Streamly.pdf');
+
+    t.write('profile.yaml', { name: 'Test Personne', email: 'test@example.com' });
+    await bundleFor('Streamly');
 
     const after = syncCurrent(t.store);
-    expect(after.files).not.toContain('Something Else.pdf');
-    expect(fs.existsSync(path.join(current.dir, 'Something Else.pdf'))).toBe(false);
+    expect(after.files).toContain('Test Personne Resume Streamly.pdf');
+    expect(after.files).not.toContain('Test Person Resume Streamly.pdf');
+    expect(fs.existsSync(path.join(current.dir, 'Test Person Resume Streamly.pdf'))).toBe(false);
+  });
+
+  /*
+   * The folder you point the file picker at is a folder people keep things in.
+   * Rebuilding it used to mean deleting every name not currently wanted, which
+   * is every file the user ever put there — and a plain GET of the Applications
+   * tab was enough to do it. The comment in current.ts already claimed this was
+   * the rule; nothing implemented it until there was a manifest.
+   */
+  it('never removes a file it did not put there', async () => {
+    await bundleFor('Streamly');
+    const current = syncCurrent(t.store);
+
+    const mine = path.join(current.dir, 'Transcript.pdf');
+    fs.writeFileSync(mine, 'my transcript');
+    fs.mkdirSync(path.join(current.dir, 'transcripts'), { recursive: true });
+    fs.writeFileSync(path.join(current.dir, 'transcripts', 'a.pdf'), 'x');
+
+    // A subdirectory also used to throw EISDIR out of rmSync and take the whole
+    // Applications tab down with it, after the bundle had already been written.
+    const after = syncCurrent(t.store);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(fs.existsSync(path.join(current.dir, 'transcripts', 'a.pdf'))).toBe(true);
     expect(after.files).toContain('Test Person Resume Streamly.pdf');
-    void result;
+    expect(after.files).not.toContain('Transcript.pdf');
+  });
+
+  /*
+   * Two roles at one company, both in flight. bundleFileName puts the person
+   * and the company in the name but not the role, and the answers file is
+   * called `application-answers.md` flat — fine inside a per-application
+   * folder, fatal in a shared one. The last writer won, the tracker still
+   * reported two applications in flight, and the portal open in front of you
+   * got the other job's resume and the other job's answers.
+   */
+  it('gives two roles at one company a file each', async () => {
+    await buildBundle(t.store, {
+      company: 'Acme',
+      role: 'Software Engineer',
+      resumeId: 'intern',
+      answers: [{ question: 'Why?', answer: 'I love engineering at Acme.' }],
+    });
+    await buildBundle(t.store, {
+      company: 'Acme',
+      role: 'Product Manager',
+      resumeId: 'intern',
+      answers: [{ question: 'Why?', answer: 'I love product at Acme.' }],
+    });
+
+    const current = syncCurrent(t.store);
+    expect(current.applications).toBe(2);
+
+    // Every name distinct, and every one of them actually on disk.
+    expect(new Set(current.files).size).toBe(current.files.length);
+    for (const f of current.files) expect(fs.existsSync(path.join(current.dir, f))).toBe(true);
+
+    const resumes = current.files.filter((f) => /Resume/.test(f));
+    expect(resumes).toHaveLength(2);
+    expect(resumes.some((f) => /Software Engineer/.test(f))).toBe(true);
+    expect(resumes.some((f) => /Product Manager/.test(f))).toBe(true);
+
+    // And the answers are two files, holding different answers.
+    const answers = current.files.filter((f) => f.endsWith('.md'));
+    expect(answers).toHaveLength(2);
+    const text = answers.map((f) => fs.readFileSync(path.join(current.dir, f), 'utf8'));
+    expect(text.some((x) => /engineering/.test(x))).toBe(true);
+    expect(text.some((x) => /product/.test(x))).toBe(true);
   });
 });

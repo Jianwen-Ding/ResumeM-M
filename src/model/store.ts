@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
@@ -78,12 +79,47 @@ export class Store {
     return (parsed ?? fallback) as T;
   }
 
+  /*
+   * Every write lands whole, or not at all.
+   *
+   * `fs.writeFileSync` opens with O_TRUNC, so for the length of the write the
+   * file is observably zero bytes and then partially written. A second process
+   * reading it is not hypothetical here — the `rmm` CLI, a second server, a
+   * hand edit while the app is up — and the failure is silent in the worst
+   * way: a YAML list truncated at an item boundary parses cleanly. Reading
+   * applications.yaml during a write returned 130 of 300 applications with no
+   * error, and the next save wrote that list back. A crash or a power cut
+   * mid-write leaves the same truncated file with nothing to recover from.
+   *
+   * Write to a temp file, flush it, rename over the target: rename within a
+   * directory is atomic, so a reader sees either the old file or the new one.
+   * The pattern is already used for projects.json and the asset store; user
+   * data deserves it at least as much.
+   */
+  private writeAtomic(f: string, text: string): void {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const temp = `${f}.${randomUUID()}.tmp`;
+    try {
+      const fd = fs.openSync(temp, 'w');
+      try {
+        fs.writeFileSync(fd, text, 'utf8');
+        // So a power cut cannot leave the rename pointing at empty bytes.
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(temp, f);
+    } catch (err) {
+      fs.rmSync(temp, { force: true });
+      throw err;
+    }
+  }
+
   private writeYaml(rel: string | string[], data: unknown): void {
     const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
-    fs.mkdirSync(path.dirname(f), { recursive: true });
     // lineWidth 0 keeps long bullet text on one line so diffs stay per-bullet
     // instead of reflowing a whole paragraph every time a word changes.
-    fs.writeFileSync(f, YAML.stringify(data, { lineWidth: 0 }), 'utf8');
+    this.writeAtomic(f, YAML.stringify(data, { lineWidth: 0 }));
   }
 
   /** Read every file in the store into one object. */
@@ -158,8 +194,7 @@ export class Store {
   }
 
   saveVoice(text: string): void {
-    fs.mkdirSync(this.root, { recursive: true });
-    fs.writeFileSync(this.file('voice.md'), text, 'utf8');
+    this.writeAtomic(this.file('voice.md'), text);
   }
 
   /** Resumes live one-per-file so a new variation is a new small file. */
@@ -313,7 +348,7 @@ export class Store {
     const dir = this.file('letters');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-    fs.writeFileSync(this.file('letters', `${id}.md`), `---\n${front}\n---\n${body}`, 'utf8');
+    this.writeAtomic(this.file('letters', `${id}.md`), `---\n${front}\n---\n${body}`);
   }
 
   /**
@@ -351,7 +386,7 @@ export class Store {
     const dir = this.file('corpus');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
-    fs.writeFileSync(this.file('corpus', `${id}.md`), `---\n${front}\n---\n${text}`, 'utf8');
+    this.writeAtomic(this.file('corpus', `${id}.md`), `---\n${front}\n---\n${text}`);
   }
 
   deleteSample(id: string): boolean {
