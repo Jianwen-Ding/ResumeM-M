@@ -544,40 +544,63 @@ function setSaveState(mode, detail) {
  */
 const entryWrites = new Map(); // id → { queue, server, pending }
 
-async function saveEntry(entry, message) {
-  describeNext(message ?? 'the change');
-  const id = entry.id;
+/**
+ * Run something that changes one entry in that entry's lane.
+ *
+ * Every route that touches an entry goes through here, not only the whole-entry
+ * PUT: adding a phrasing, adding an entry and deleting one each have their own
+ * endpoint, and a queue that only some writes respect is worse than no queue.
+ * A delete that overtakes a PUT still sitting in the lane gets recreated by it
+ * — `PUT /entries/:id` has no existence check — as an orphan no resume
+ * references, and a phrasing added beside a queued write is deleted by it.
+ */
+async function inEntryLane(id, run) {
   const lane = entryWrites.get(id) ?? { queue: Promise.resolve(), server: null, pending: 0 };
   entryWrites.set(id, lane);
   lane.pending++;
 
-  // What this edit was derived from: the store as the client last saw it.
-  const base = state.store?.entries?.find((e) => e.id === id) ?? null;
-
   // `queue` never rejects, so one failed write does not wedge the ones behind
   // it — each is still worth attempting on its own.
-  const mine = lane.queue.then(async () => {
-    // Something landed while this edit was being made: keep it, and put only
-    // what this edit actually changed on top of it.
-    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
-    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
-    lane.server = saved?.id ? saved : body;
-    return lane.server;
-  });
+  const mine = lane.queue.then(() => run(lane));
   lane.queue = mine.then(
     () => {},
     () => {},
   );
 
   try {
-    await mine;
+    return await mine;
   } finally {
-    // Once nothing is in flight the client will reload, so the next edit is
-    // built from the server's copy and there is nothing left to rebase onto.
-    if (--lane.pending === 0) entryWrites.delete(id);
+    await loadStore();
+    /*
+     * The server's own copy, read back, so anything a differently-shaped write
+     * did to this entry is what the next edit in the lane rebases onto.
+     *
+     * And the lane is only released after that reload, not before it. `state
+     * .store` still shows the pre-write entry for the length of that request,
+     * so an edit started inside that window would otherwise open a fresh lane,
+     * find nothing to rebase onto, and PUT the stale entry whole — undoing the
+     * write that had just landed.
+     */
+    lane.server = state.store?.entries?.find((e) => e.id === id) ?? lane.server;
+    if (--lane.pending === 0 && entryWrites.get(id) === lane) entryWrites.delete(id);
   }
+}
+
+async function saveEntry(entry, message) {
+  describeNext(message ?? 'the change');
+  const id = entry.id;
+  // What this edit was derived from: the store as the client last saw it.
+  const base = state.store?.entries?.find((e) => e.id === id) ?? null;
+
+  await inEntryLane(id, async (lane) => {
+    // Something landed while this edit was being made: keep it, and put only
+    // what this edit actually changed on top of it.
+    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
+    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
+    lane.server = saved?.id ? saved : body;
+  });
+
   setStatus(message ?? `Saved ${id}`);
-  await loadStore();
   render();
 }
 
@@ -1843,10 +1866,13 @@ async function addEntry(kind) {
       : [],
   };
 
-  await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+  // In the entry's lane like every other write to it, so a phrasing or an edit
+  // queued against the same id cannot cross with this one.
+  await inEntryLane(id, async (lane) => {
+    lane.server = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+  });
 
   if (state.masterView) {
-    await loadStore();
     render();
     scheduleRender();
     setStatus('Added to the master. Select it in a tailored resume when needed.');
@@ -1900,7 +1926,15 @@ async function editEntry(entry) {
 
 async function removeEntry(entry) {
   if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
-  await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+  /*
+   * In the lane, so a whole-entry write still queued behind it goes first.
+   * `PUT /entries/:id` has no existence check, so a delete that overtook one
+   * saw the entry recreated a moment later as an orphan no resume references.
+   */
+  await inEntryLane(entry.id, async (lane) => {
+    await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+    lane.server = null;
+  });
 
   // Drop the reference too, so the next compile does not warn about it. From
   // the root's own sections, for the reason given in addEntry.
@@ -2051,9 +2085,11 @@ async function addBulletVariant(entry, bullet) {
   ], 'Starts from the current wording so you can adjust rather than retype.');
   if (!answer?.text?.trim()) return;
 
-  const variant = await api(
-    `/entries/${encodeURIComponent(entry.id)}/bullets/${encodeURIComponent(bullet.id)}/variants`,
-    {
+  // In the lane: a whole-entry write queued beside this one would otherwise
+  // rebase onto a copy of the entry that does not have the new phrasing in it,
+  // and delete it.
+  const variant = await inEntryLane(entry.id, () =>
+    api(`/entries/${encodeURIComponent(entry.id)}/bullets/${encodeURIComponent(bullet.id)}/variants`, {
       method: 'POST',
       body: JSON.stringify({
         label: answer.label?.trim() || 'New phrasing',
@@ -2061,7 +2097,7 @@ async function addBulletVariant(entry, bullet) {
         tags: answer.tags ? answer.tags.split(',').map((t) => t.trim()).filter(Boolean) : undefined,
         note: answer.note?.trim() || undefined,
       }),
-    },
+    }),
   );
 
   if (!state.masterView && answer.useNow) {
@@ -3002,13 +3038,36 @@ async function openDraft(id) {
    * replaces it. Switching drafts is one of the two ways a half-written cover
    * letter used to disappear — the other being closing the tab — because
    * nothing but blur ever wrote.
+   *
+   * Unconditionally, including when the id is the same one. `renderDraft`
+   * repaints from the copy it is handed and resets the dirty flag, so an edit
+   * not written first is not merely overwritten on screen — it is dropped
+   * before it ever leaves the browser, where no amount of care on the server
+   * can save it. Re-opening the same draft is what `tailorDraft` does when it
+   * finishes, which is minutes of waiting spent typing.
    */
-  if (draftSave.current && draftSave.current.id !== id) await flushDraftEdits();
+  if (draftSave.current) await flushDraftEdits();
 
   openDraftId = id;
   location.hash = `#workspace/${encodeURIComponent(id)}`;
   try {
-    renderDraft(await api(`/workspace/${encodeURIComponent(id)}`));
+    let draft = await api(`/workspace/${encodeURIComponent(id)}`);
+    // Another draft was opened while this one was being fetched; that one owns
+    // the panel now, and painting this over it would be a draft nobody chose.
+    if (openDraftId !== id) return;
+
+    /*
+     * And the same again for the fetch itself, which is where this actually
+     * bit: the panel stays live and typeable while it runs, so anything
+     * written during it was thrown away by the repaint at the end. Writing it
+     * and re-reading costs one request and cannot paint over it.
+     */
+    if (draftSave.dirty) {
+      await flushDraftEdits();
+      draft = await api(`/workspace/${encodeURIComponent(id)}`);
+      if (openDraftId !== id) return;
+    }
+    renderDraft(draft);
   } catch (err) {
     setStatus(err.message, true);
   }
@@ -3525,11 +3584,22 @@ async function tailorDraft(draft, notes, useAi) {
 async function generate(draft, what, notes, extra = {}) {
   setChildren(notes, el('div', { textContent: 'Working…' }));
   try {
+    // What is on screen goes first, so the AI works from it and the server's
+    // merge has something to protect.
+    await flushDraftEdits();
     const res = await api(`/workspace/${encodeURIComponent(draft.id)}/generate`, {
       method: 'POST',
       body: JSON.stringify({ what, ...extra }),
     });
-    renderDraft(res.draft);
+
+    /*
+     * Anything typed *during* the run has been saved by the autosave and
+     * merged by the server, so the reply in hand is already out of date.
+     * Writing what is still pending and re-reading is one extra request and
+     * cannot show a version of the draft that is nobody's.
+     */
+    await flushDraftEdits();
+    renderDraft(await api(`/workspace/${encodeURIComponent(draft.id)}`));
     const panel = $('#draft-editor .gen-notes');
     if (panel) setChildren(panel, ...res.notes.map((n) => el('div', { textContent: n })));
     setStatus('Draft updated');

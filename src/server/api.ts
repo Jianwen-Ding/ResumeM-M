@@ -2001,9 +2001,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const notes: string[] = [];
       let countAnswers = false;
 
+      /*
+       * What the letter step says it did, held back until the merge below has
+       * decided whether it actually happened. Pushed as it went, the reply read
+       * "Cover letter drafted in your voice." immediately above "You edited the
+       * cover letter while this was running, so what you wrote was kept" — two
+       * sentences in one panel, one of them about a letter that was thrown
+       * away.
+       */
+      const letterNotes: string[] = [];
+
       if ((what === 'letter' || what === 'all') && draft.coverLetter.required) {
         if (draft.coverLetter.edited && !force) {
-          notes.push('Cover letter left alone — you have edited it.');
+          letterNotes.push('Cover letter left alone — you have edited it.');
         } else {
           const resumeId = draft.resumeId ?? data.resumes[0]?.id;
           const prior = relevantLetters(data.coverLetters, { company: draft.company, role: draft.role });
@@ -2014,7 +2024,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             );
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = trimToLetter(agent.output);
-              notes.push('Cover letter drafted in your voice.');
+              letterNotes.push('Cover letter drafted in your voice.');
             } else if (!agent.executed && prior[0]) {
               /*
                * Only when the AI did not run. This branch used to catch an AI
@@ -2026,14 +2036,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
                * "Complete this application" will bundle the result.
                */
               draft.coverLetter.body = prior[0].body;
-              notes.push(
+              letterNotes.push(
                 `AI is off — started from your letter to ${prior[0].company ?? 'a previous company'}. ` +
                   'It is addressed to them, so read it before sending.',
               );
             } else if (!agent.executed) {
-              notes.push('AI is off and there are no previous letters to start from.');
+              letterNotes.push('AI is off and there are no previous letters to start from.');
             } else {
-              notes.push('The AI returned nothing, so the letter was left as it was.');
+              letterNotes.push('The AI returned nothing, so the letter was left as it was.');
             }
           }
         }
@@ -2096,13 +2106,35 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             notes.push('You edited the cover letter while this was running, so what you wrote was kept.');
           } else {
             fresh.coverLetter.body = draft.coverLetter.body;
+            notes.push(...letterNotes);
           }
+        } else {
+          // Nothing was written, so whatever the step has to say about the
+          // letter — left alone, AI off, nothing returned — still stands.
+          notes.push(...letterNotes);
         }
 
         let kept = 0;
         for (const produced of draft.questions) {
           const was = before.questions.find((q) => q.id === produced.id);
-          if (!was || produced.answer === was.answer) continue;
+          if (!was) continue;
+          /*
+           * Not "the text changed": the loop above sets `needsReview`,
+           * `source` and `fromAnswerId` on their own, and skipping when the
+           * text stayed the same dropped exactly those. The case that matters
+           * is an answer already holding "Yes." that a loose bank match wants
+           * to flag — "are you authorized to work?" answered from "…without
+           * sponsorship?" — where the text is identical and the badge saying
+           * to read it first is the whole point. Losing it also left `source`
+           * at 'ai', so completing filed it into the answer bank as something
+           * the user had written.
+           */
+          const producedSomething =
+            produced.answer !== was.answer ||
+            produced.source !== was.source ||
+            produced.fromAnswerId !== was.fromAnswerId ||
+            produced.needsReview !== was.needsReview;
+          if (!producedSomething) continue;
 
           // Questions the application no longer asks are simply gone.
           const target = fresh.questions.find((q) => q.id === produced.id);
