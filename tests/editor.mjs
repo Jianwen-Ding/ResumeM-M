@@ -16,6 +16,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,23 +74,59 @@ async function serve() {
   if (process.env.RMM_SERVER) return { url: process.env.RMM_SERVER, close: async () => {} };
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-editor-store-'));
-  const port = 4700 + Math.floor(Math.random() * 200);
+
+  /*
+   * A port nobody else has, asked of the operating system rather than
+   * guessed.
+   *
+   * This picked at random from 4700-4899, and `stdio: 'ignore'` swallows the
+   * EADDRINUSE when something is already there. The wait below then found a
+   * perfectly healthy server on that port — somebody else's — and the run
+   * carried on and wrote resumes, applications and bundles into their store.
+   * On a machine with a scratch server in that range it happened about once
+   * in forty runs, silently, and the comment above this function promises
+   * exactly the opposite.
+   */
+  const port = await new Promise((done, fail) => {
+    const probe = net.createServer();
+    probe.once('error', fail);
+    probe.listen(0, '127.0.0.1', () => {
+      const chosen = probe.address().port;
+      probe.close(() => done(chosen));
+    });
+  });
+
   const child = spawn('npx', ['tsx', 'src/server/index.ts'], {
     cwd: root,
     env: { ...process.env, RMM_DATA: dir, PORT: String(port), RMM_AUTOCOMMIT: '0', RMM_AI: '0' },
     stdio: 'ignore',
   });
 
+  /*
+   * And it has to be *ours*. Between the probe closing and the server
+   * binding there is a gap somebody could take the port in, so healthy is not
+   * the question — whose is. `/health` names the folder it is serving.
+   */
   const url = `http://127.0.0.1:${port}`;
-  for (let attempt = 0; attempt < 60; attempt++) {
+  let mine = false;
+  for (let attempt = 0; attempt < 60 && !mine; attempt++) {
     try {
       const res = await fetch(`${url}/health`);
-      if (res.ok && (await res.json()).projectOpen) break;
-    } catch {
+      const health = res.ok ? await res.json() : {};
+      if (health.projectOpen && health.dataDir === dir) mine = true;
+      else if (health.projectOpen) {
+        throw new Error(
+          `Something else is already on port ${port}, serving ${health.dataDir}. ` +
+            'Refusing to run against a store this test did not create.',
+        );
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('Something else')) throw err;
       // Not up yet.
     }
-    await new Promise((go) => setTimeout(go, 500));
+    if (!mine) await new Promise((go) => setTimeout(go, 500));
   }
+  if (!mine) throw new Error(`The test server never came up on ${url}.`);
   return {
     url,
     close: async () => {
