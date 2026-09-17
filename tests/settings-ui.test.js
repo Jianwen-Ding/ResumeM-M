@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
-import { AI_PRESETS } from '../src/ai/presets.ts';
+import { AI_PRESETS, AI_TASKS } from '../src/ai/presets.ts';
 
 vi.mock('../web/preview.js', () => ({ createPreview: () => ({ show: async () => {} }) }));
 vi.mock('../web/assets.js', () => ({
@@ -48,7 +48,7 @@ describe('the settings panel', () => {
       else if (url === '/api/ai/jobs') result = { jobs: [] };
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/voice') result = { voice: '' };
-      else if (url === '/api/ai/presets') result = { presets: AI_PRESETS };
+      else if (url === '/api/ai/presets') result = { presets: AI_PRESETS, tasks: AI_TASKS };
       else if (url === '/api/config/test-ai') result = { ok: true, command: config.ai.command, ms: 1200, output: 'ok' };
       else if (url === '/api/config' && options.method === 'PUT') {
         config = { ...config, ...body, ai: { ...config.ai, ...(body.ai ?? {}) } };
@@ -337,5 +337,63 @@ describe('the settings panel', () => {
     expect(outside('LaTeX engine')).toBe(true);
     expect(outside('Command')).toBe(false);
     expect(outside('Timeout, seconds')).toBe(false);
+  });
+  /*
+   * "terra for resume review, astra for cover letter drafting, luna for
+   * tailoring resumes" — one model for all of it is the wrong shape, and
+   * hand-editing the argument line per task is not a way to express it.
+   */
+  it('lets a kind of work name its own model, behind a disclosure', async () => {
+    const box = [...document.querySelectorAll('#settings details.advanced')].find((d) =>
+      d.querySelector('summary').textContent.includes('particular kind of work'),
+    );
+    expect(box).toBeTruthy();
+    // Folded away: almost nobody needs it, and four more boxes at the top
+    // would make choosing a preset look like a configuration exercise.
+    expect(box.open).toBe(false);
+
+    const labels = [...box.querySelectorAll('label.f .lbl')].map((n) => n.textContent);
+    expect(labels).toEqual([
+      'Tailoring a resume',
+      'Writing letters and answers',
+      'Reviewing what you wrote',
+      'Drafting new entries and wordings',
+    ]);
+    // Empty means "whatever Model says", which is what it does.
+    for (const input of box.querySelectorAll('input')) {
+      expect(input.value).toBe('');
+      expect(input.placeholder).toBe('Same as above');
+    }
+  });
+
+  it('saves the one it is given, and leaves the rest alone', async () => {
+    const box = [...document.querySelectorAll('#settings details.advanced')].find((d) =>
+      d.querySelector('summary').textContent.includes('particular kind of work'),
+    );
+    const forWriting = [...box.querySelectorAll('label.f')].find(
+      (f) => f.querySelector('.lbl').textContent === 'Writing letters and answers',
+    ).querySelector('input');
+
+    forWriting.value = 'astra';
+    forWriting.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary').click();
+
+    await vi.waitFor(() => expect(config.ai.models.write).toBe('astra'));
+    expect(config.ai.models.tailor).toBe('');
+    expect(config.ai.models.review).toBe('');
+  });
+
+  it('counts a per-task model as an unsaved change like everything else', () => {
+    const flag = () =>
+      [...document.querySelectorAll('#settings .hint.warn')].find((n) => n.textContent === 'Not saved yet.');
+    expect(flag().hidden).toBe(true);
+
+    const box = [...document.querySelectorAll('#settings details.advanced')].find((d) =>
+      d.querySelector('summary').textContent.includes('particular kind of work'),
+    );
+    const first = box.querySelector('input');
+    first.value = 'luna';
+    first.dispatchEvent(new Event('input'));
+    expect(flag().hidden).toBe(false);
   });
 });

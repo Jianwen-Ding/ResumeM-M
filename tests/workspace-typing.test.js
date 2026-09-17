@@ -360,4 +360,40 @@ describe('typing in the Workspace', () => {
     expect(pane.classList.contains('loaded')).toBe(false);
     expect(pane.querySelector('canvas')).toBeNull();
   });
+  /*
+   * A feedback run has had a chip in the toolbar since it went into the
+   * background, and that chip is why a feedback run is something you can
+   * start and then go back to work. A draft had nothing of the kind: the
+   * progress bar lives in the panel that started it, so opening the resume
+   * builder while a cover letter was being written left no trace anywhere
+   * that anything was.
+   */
+  it('says in the toolbar that something is being written, and stops when it is', async () => {
+    const chip = () => document.querySelector('#drafting-chip');
+    expect(chip().className).toContain('hidden');
+
+    const heading = [...document.querySelectorAll('#draft-editor .block-head')].find((h) =>
+      h.textContent.includes('Cover letter'),
+    );
+    [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it')).click();
+
+    await vi.waitFor(() => expect(chip().className).not.toContain('hidden'));
+    // Named, and counting — so a run that has died is distinguishable from one
+    // that is merely slow, which is the whole question after the first minute.
+    expect(chip().textContent).toContain('Writing the cover letter');
+    expect(chip().textContent).toMatch(/\d+:\d\d/);
+
+    // The run finishes — the fixture's server answers immediately — and the
+    // chip goes with it rather than sitting there for the rest of the session.
+    await vi.waitFor(() => expect(chip().className).toContain('hidden'));
+  });
+
+  it('takes you back to the draft it is talking about', async () => {
+    const heading = [...document.querySelectorAll('#draft-editor .block-head')].find((h) =>
+      h.textContent.includes('Cover letter'),
+    );
+    [...heading.querySelectorAll('button')].find((b) => b.textContent.includes('Draft it')).click();
+    await vi.waitFor(() => expect(document.querySelector('#drafting-chip').onclick).toBeTypeOf('function'));
+    expect(document.querySelector('#drafting-chip').style.cursor).toBe('pointer');
+  });
 });

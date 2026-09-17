@@ -1968,6 +1968,7 @@ async function draftEntryWithAi(kind) {
   if (!asked || (!asked.repoUrl?.trim() && !asked.notes?.trim())) return;
 
   setStatus('Reading and drafting…');
+  const stopChip = startDrafting(`Drafting a ${kind} entry`, () => showTab('resumes'));
   let result;
   try {
     result = await api('/ai/draft-entry', {
@@ -1978,6 +1979,8 @@ async function draftEntryWithAi(kind) {
     showModal('Could not draft it', el('pre', { textContent: err.message }));
     setStatus(err.message, true);
     return;
+  } finally {
+    stopChip();
   }
 
   if (!result.executed) {
@@ -2204,6 +2207,7 @@ async function draftPhrasings(entry, target) {
   if (!asked) return;
 
   setStatus('Drafting…');
+  const stopChip = startDrafting('Drafting another wording', () => showTab('resumes'));
   let result;
   try {
     result = await api('/ai/draft-phrasing', {
@@ -2214,6 +2218,8 @@ async function draftPhrasings(entry, target) {
     showModal('Could not draft it', el('pre', { textContent: err.message }));
     setStatus(err.message, true);
     return;
+  } finally {
+    stopChip();
   }
 
   if (!result.executed) {
@@ -3943,7 +3949,12 @@ async function startVariation(draft, notes) {
 }
 
 async function tailorDraft(draft, notes, useAi) {
-  setChildren(notes, el('div', { textContent: useAi ? 'Reading the posting…' : 'Matching against the posting…' }));
+  const doing = useAi ? 'Reading the posting' : 'Matching against the posting';
+  setChildren(notes, el('div', { textContent: `${doing}…` }));
+  // In the toolbar too, so leaving this panel does not lose the only sign it
+  // is running. `useAi` runs for minutes; the match is instant and the chip
+  // is gone before anyone reads it, which is the right amount of noise.
+  const stopChip = startDrafting(doing, () => openDraft(draft.id));
   try {
     const res = await api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
       method: 'POST',
@@ -3970,6 +3981,8 @@ async function tailorDraft(draft, notes, useAi) {
     await openDraft(draft.id);
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+  } finally {
+    stopChip();
   }
 }
 
@@ -3999,8 +4012,68 @@ function aiButton({ className = 'tiny', label, title, onclick }) {
  * cheapest honest thing — it moves, so the panel is visibly alive, and it says
  * how long you have actually been waiting rather than how long it feels.
  */
-function showAiProgress(notes, doing) {
+/**
+ * Everything the AI is writing right now, so the toolbar can say so.
+ *
+ * Feedback has had a chip up there since it went into the background, and it
+ * is the reason a feedback run is something you can start and then go back to
+ * work: the sign that it is happening follows you between tabs. A draft had
+ * nothing of the kind — the progress bar lives in the panel that started it,
+ * so opening the resume builder while a cover letter was being written left
+ * no trace anywhere that anything was.
+ *
+ * Which is the same question in both cases: is it still going, and where is
+ * it. So it gets the same answer, in the same place.
+ */
+const drafting = new Map();
+let draftingSeq = 0;
+let draftingTimer = null;
+
+function startDrafting(what, go) {
+  const id = ++draftingSeq;
+  drafting.set(id, { what, started: Date.now(), go });
+  renderDraftingChip();
+  // One timer for however many are running, started on the first and stopped
+  // with the last.
+  draftingTimer ??= setInterval(renderDraftingChip, 1000);
+  return () => {
+    drafting.delete(id);
+    renderDraftingChip();
+    if (drafting.size === 0 && draftingTimer) {
+      clearInterval(draftingTimer);
+      draftingTimer = null;
+    }
+  };
+}
+
+function renderDraftingChip() {
+  const chip = $('#drafting-chip');
+  if (!chip) return;
+  const running = [...drafting.values()];
+  if (running.length === 0) {
+    chip.className = 'jobs-chip hidden';
+    chip.textContent = '';
+    chip.onclick = null;
+    return;
+  }
+
+  // The oldest, because it is the one that has been waited on longest and the
+  // one most likely to be worth looking at.
+  const oldest = running.reduce((a, b) => (a.started <= b.started ? a : b));
+  const s = Math.round((Date.now() - oldest.started) / 1000);
+  const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  chip.className = 'jobs-chip working';
+  chip.textContent =
+    running.length > 1 ? `${oldest.what}, and ${running.length - 1} more · ${clock}` : `${oldest.what} · ${clock}`;
+  chip.title = running.map((r) => r.what).join('\n');
+  chip.onclick = oldest.go ?? null;
+  // A chip that cannot take you anywhere should not look as though it could.
+  chip.style.cursor = oldest.go ? 'pointer' : 'default';
+}
+
+function showAiProgress(notes, doing, go) {
   const started = Date.now();
+  const stopChip = startDrafting(doing, go);
   const clock = el('span', { className: 'ai-elapsed', textContent: '0:00' });
   setChildren(
     notes,
@@ -4016,7 +4089,10 @@ function showAiProgress(notes, doing) {
     const s = Math.round((Date.now() - started) / 1000);
     clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }, 1000);
-  return () => clearInterval(tick);
+  return () => {
+    clearInterval(tick);
+    stopChip();
+  };
 }
 
 const DOING = {
@@ -4026,7 +4102,13 @@ const DOING = {
 };
 
 async function generate(draft, what, notes, extra = {}) {
-  const stop = showAiProgress(notes, extra.questionId ? 'Writing the answer' : (DOING[what] ?? 'Working'));
+  const stop = showAiProgress(
+    notes,
+    extra.questionId ? 'Writing the answer' : (DOING[what] ?? 'Working'),
+    // Where to go back to: the chip is only worth having if it can take you
+    // to the thing it is telling you about.
+    () => openDraft(draft.id),
+  );
   // Nothing else starts a second run on top of this one.
   const buttons = [...($('#draft-editor')?.querySelectorAll('button.ai-action') ?? [])];
   for (const b of buttons) b.disabled = true;
@@ -4072,6 +4154,11 @@ async function generate(draft, what, notes, extra = {}) {
  * nobody should watch a spinner for it.
  */
 async function askDraftFeedback(draft, target, notes) {
+  /*
+   * Not a `startDrafting`: this one hands off to a background job, which has
+   * had its own chip since it went into the background. Two chips for one
+   * run would be worse than none.
+   */
   try {
     setChildren(notes, el('div', { textContent: 'Reading it…' }));
     const { job } = await api('/ai/feedback', {
@@ -4671,12 +4758,14 @@ async function editSample(sample) {
  * but not in this file is how a config ends up broken.
  */
 let AI_PRESETS = [];
+let AI_TASKS = [];
 const CUSTOM_PRESET = { label: 'Custom…', command: '', args: [], note: '' };
 
 async function loadAiPresets() {
   if (AI_PRESETS.length > 0) return AI_PRESETS;
-  const { presets } = await api('/ai/presets').catch(() => ({ presets: [] }));
+  const { presets, tasks } = await api('/ai/presets').catch(() => ({ presets: [], tasks: [] }));
   AI_PRESETS = [...presets, CUSTOM_PRESET];
+  AI_TASKS = tasks ?? [];
   return AI_PRESETS;
 }
 
@@ -4955,6 +5044,25 @@ async function loadSettings() {
   // linking the datalist — it has to be set as an attribute.
   model.setAttribute('list', 'ai-model-options');
 
+  /*
+   * And a model per kind of work, for when one is not enough.
+   *
+   * Behind a disclosure because almost nobody needs it: the box above is the
+   * answer for most people, and four more boxes at the top of the panel would
+   * make choosing a preset look like a configuration exercise. Each is empty
+   * by default, which reads as "whatever Model says" and is exactly what it
+   * does.
+   */
+  const perTask = new Map();
+  const taskFields = AI_TASKS.map((task) => {
+    const box = keptField(`ai-model-${task.key}`, config.ai.models?.[task.key] ?? '', {
+      placeholder: 'Same as above',
+    });
+    box.setAttribute('list', 'ai-model-options');
+    perTask.set(task.key, box);
+    return field(task.label, box, task.note);
+  });
+
   const effort = el('select');
   for (const [value, label] of [
     ['', 'As it comes'],
@@ -5051,12 +5159,13 @@ async function loadSettings() {
     args.value !== args.dataset.stored ||
     timeout.value !== timeout.dataset.stored ||
     model.value !== model.dataset.stored ||
+    [...perTask.values()].some((box) => box.value !== box.dataset.stored) ||
     (effort.value || '') !== savedEffort ||
     (engine.value || '') !== savedEngine;
   const markAiUnsaved = () => {
     unsaved.hidden = !aiIsDirty();
   };
-  for (const input of [command, args, timeout, model]) {
+  for (const input of [command, args, timeout, model, ...perTask.values()]) {
     input.oninput = () => {
       markAiUnsaved();
       // The command decides what the model box can even do, so its note
@@ -5081,6 +5190,7 @@ async function loadSettings() {
           // to a file holding the prompt, `{promptText}` the prompt itself.
           args: args.value.split(/\s+/).filter(Boolean),
           model: model.value.trim(),
+          models: Object.fromEntries([...perTask].map(([key, box]) => [key, box.value.trim()])),
           effort: effort.value || undefined,
           timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 180_000,
         },
@@ -5092,7 +5202,7 @@ async function loadSettings() {
      * rather than treat them as unsaved edits and keep them forever — which
      * would mean a change made in another window never arrived here again.
      */
-    for (const input of [command, args, timeout, model]) input.dataset.stored = input.value;
+    for (const input of [command, args, timeout, model, ...perTask.values()]) input.dataset.stored = input.value;
     savedEngine = engine.value || '';
     savedEffort = effort.value || '';
     markAiUnsaved();
@@ -5196,6 +5306,9 @@ async function loadSettings() {
     modelList,
     field('Effort', effort),
     modelNote,
+    taskFields.length
+      ? advanced('A different model for a particular kind of work', ...taskFields)
+      : null,
     el('div', { className: 'sandbox-note' }, [
       el('b', {}, 'Confined to a scratch directory. '),
       'The command runs in an empty temporary folder containing only the prompt — never your save folder, ' +

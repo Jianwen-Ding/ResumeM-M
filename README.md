@@ -371,6 +371,19 @@ a flag a CLI does not recognise usually stops it running at all — effort is al
 said in the prompt, in words, which reaches every model. The panel tells you
 which mechanism is in play for the command you have configured.
 
+Under **A different model for a particular kind of work**, each kind can name
+its own and fall back to the one above when it does not:
+
+| | |
+| --- | --- |
+| Tailoring a resume | Choosing which of your wordings suit a posting, and what order they go in |
+| Writing letters and answers | Drafting in your voice |
+| Reviewing what you wrote | Reading a resume, a letter or an answer and saying what is weak |
+| Drafting new entries and wordings | Reading a repository or a note. The one that runs while you wait |
+
+Four rather than one per endpoint: switches nobody adjusts are worse than
+fewer that get used.
+
 ### Tailoring through tools, not one big JSON reply
 
 Where the configured CLI supports MCP (Claude Code, Codex and Gemini do), the

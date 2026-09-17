@@ -19,7 +19,7 @@ import {
   tailorPrompt,
   type TailorContext,
 } from '../ai/prompts.js';
-import { AI_PRESETS } from '../ai/presets.js';
+import { AI_PRESETS, AI_TASKS, configForTask } from '../ai/presets.js';
 import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
 import { readState } from '../mcp/main.js';
 import type { SessionState } from '../mcp/session.js';
@@ -561,7 +561,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * copy of a fact about external programs — a preset fixed in one place
    * and not the other is how a config ends up broken.
    */
-  api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS })));
+  api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS, tasks: AI_TASKS })));
 
   api.put(
     '/config',
@@ -995,12 +995,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       if (background) {
-        const job = jobs.start('feedback', about, () => runAgent(data.config, prompt));
+        const job = jobs.start('feedback', about, () => runAgent(configForTask(data.config, 'review'), prompt));
         res.json({ job });
         return;
       }
 
-      const result = await runAgent(data.config, prompt);
+      const result = await runAgent(configForTask(data.config, 'review'), prompt);
       res.json(result);
     }),
   );
@@ -1024,7 +1024,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const repo = repoUrl?.trim() ? await readRepo(repoUrl.trim()) : undefined;
 
       const prompt = entryDraftPrompt(data, { repo, notes, kind });
-      const agent = await runAgent(data.config, prompt);
+      const agent = await runAgent(configForTask(data.config, 'author'), prompt);
       if (!agent.executed) {
         res.json({ executed: false, prompt: agent.output, repo, entry: null });
         return;
@@ -1075,7 +1075,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         angle,
         count,
       });
-      const agent = await runAgent(data.config, prompt);
+      const agent = await runAgent(configForTask(data.config, 'author'), prompt);
       if (!agent.executed) {
         res.json({ executed: false, prompt: agent.output, variants: [] });
         return;
@@ -1128,7 +1128,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
-      const result = await runAgent(data.config, tailorPrompt(data, resolved, job));
+      const result = await runAgent(configForTask(data.config, 'tailor'), tailorPrompt(data, resolved, job));
       if (!result.executed) return res.json({ ...result, parsed: null });
 
       const parsed = extractJson<{
@@ -1148,7 +1148,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const data = store.load();
       const resolved = resolveResume(resumeId, data);
       const bullets = resolved.sections.flatMap((s) => s.entries.flatMap((e) => e.bullets));
-      const result = await runAgent(data.config, shortenPrompt(data, bullets, linesToCut ?? 2));
+      const result = await runAgent(configForTask(data.config, 'tailor'), shortenPrompt(data, bullets, linesToCut ?? 2));
       res.json(result);
     }),
   );
@@ -1173,7 +1173,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
 
       const result = await runAgent(
-        data.config,
+        configForTask(data.config, 'write'),
         coverLetterPrompt(data, resolved, job, prior),
       );
 
@@ -1259,7 +1259,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return;
       }
 
-      const result = await runAgent(data.config, answerPrompt(data, question, job));
+      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job));
 
       /*
        * `output` means "text you may use". When the AI did not run, `runAgent`
@@ -1422,7 +1422,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          */
         const withTools = canWire(data.config.ai.command) && serverEntry(mcpDir) !== null;
         const agent = await runAgent(
-          data.config,
+          configForTask(data.config, 'tailor'),
           tailorPrompt(data, resolved, posting, { tools: withTools }),
           /*
            * Tools where the CLI can take them, JSON where it cannot.
@@ -2091,7 +2091,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
       if (useAi && data.config.ai.enabled) {
         const agent = await runAgent(
-          data.config,
+          configForTask(data.config, 'tailor'),
           tailorPrompt(data, resolveResume(baseId!, data), {
             jobTitle: draft.role,
             company: draft.company,
@@ -2200,7 +2200,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           const prior = relevantLetters(data.coverLetters, { company: draft.company, role: draft.role });
           if (resumeId) {
             const agent = await runAgent(
-              data.config,
+              configForTask(data.config, 'write'),
               coverLetterPrompt(data, resolveResume(resumeId, data), job, prior),
             );
             if (agent.executed && agent.output.trim()) {
@@ -2253,7 +2253,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.needsReview = undefined;
             continue;
           }
-          const agent = await runAgent(data.config, answerPrompt(data, q.question, job));
+          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job));
           if (agent.executed && agent.output.trim()) {
             q.answer = agent.output.trim();
             q.source = 'ai';

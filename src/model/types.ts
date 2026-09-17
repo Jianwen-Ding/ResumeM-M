@@ -437,6 +437,14 @@ export interface StoreConfig {
      * default: every one of these tools picks a sensible model on its own.
      */
     model?: string;
+    /**
+     * And a model per kind of work, where one is not enough.
+     *
+     * Overrides `model` for that kind only. Absent or empty means "whatever
+     * `model` says", which is what almost everyone wants and is why this is
+     * a second setting rather than four required ones.
+     */
+    models?: Partial<Record<'tailor' | 'write' | 'review' | 'author', string>>;
     effort?: 'low' | 'medium' | 'high';
     timeoutMs: number;
   };

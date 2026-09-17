@@ -413,3 +413,73 @@ export function effortInstruction(effort?: AiEffort): string {
   }
   return '';
 }
+
+/* ------------------------------------------------------------------ *
+ * Which model does which job                                          *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The kinds of work this asks an AI to do.
+ *
+ * One model for all of it is the wrong shape, and obviously so once the list
+ * is written down: tailoring is a selection problem over a fixed inventory
+ * and rewards a model that will sit with it; drafting a letter is a writing
+ * problem in somebody else's voice; reading a repository and proposing an
+ * entry is neither, and is the one that runs while you wait. These are
+ * different enough to be worth different answers, and expensive enough that
+ * using the careful model for all five is a real cost.
+ *
+ * Grouped as coarsely as the work allows. Six switches nobody adjusts are
+ * worse than three that get used.
+ */
+export const AI_TASKS = [
+  {
+    key: 'tailor',
+    label: 'Tailoring a resume',
+    note: 'Choosing which of your wordings suit a posting, and what order they go in.',
+  },
+  {
+    key: 'write',
+    label: 'Writing letters and answers',
+    note: 'Drafting a cover letter or an application answer in your voice.',
+  },
+  {
+    key: 'review',
+    label: 'Reviewing what you wrote',
+    note: 'Reading a resume, a letter or an answer and saying what is weak.',
+  },
+  {
+    key: 'author',
+    label: 'Drafting new entries and wordings',
+    note: 'Reading a repository or a note and proposing something to add. Runs while you wait.',
+  },
+] as const;
+
+export type AiTask = (typeof AI_TASKS)[number]['key'];
+
+/** The model this kind of work should use, falling back to the one model. */
+export function modelFor(ai: { model?: string; models?: Partial<Record<AiTask, string>> }, task: AiTask): string {
+  return (ai.models?.[task] ?? '').trim() || (ai.model ?? '').trim();
+}
+
+/**
+ * The config a particular kind of work should run with.
+ *
+ * Returns the same object when nothing differs, so the twelve call sites can
+ * wrap themselves in this without anybody wondering whether it costs
+ * something.
+ */
+export function configForTask<T extends { ai: { command: string; args: string[]; model?: string; models?: Partial<Record<AiTask, string>>; effort?: AiEffort } }>(
+  config: T,
+  task: AiTask,
+): T {
+  const model = modelFor(config.ai, task);
+  if (model === (config.ai.model ?? '').trim()) return config;
+  return {
+    ...config,
+    ai: {
+      ...config.ai,
+      args: applyModelAndEffort(config.ai.command, config.ai.args, { model, effort: config.ai.effort }),
+    },
+  };
+}

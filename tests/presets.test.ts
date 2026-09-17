@@ -8,6 +8,9 @@ import {
   applyModelAndEffort,
   applyResearch,
   effortInstruction,
+  AI_TASKS,
+  configForTask,
+  modelFor,
   matchPreset,
   repairAiArgs,
 } from '../src/ai/presets.js';
@@ -388,5 +391,65 @@ describe('choosing a model and an effort level', () => {
     expect(effortInstruction('low')).toMatch(/Work quickly/);
     expect(effortInstruction('medium')).toBe('');
     expect(effortInstruction(undefined)).toBe('');
+  });
+});
+
+/**
+ * One model for everything is the wrong shape, and obviously so once the list
+ * is written down: tailoring is a selection problem over a fixed inventory,
+ * writing a letter is a writing problem in somebody else's voice, and reading
+ * a repository is neither — and is the one that runs while you wait.
+ */
+describe('a different model for a different kind of work', () => {
+  const claude = AI_PRESETS.find((p) => p.command === 'claude')!;
+  const base = { command: 'claude', args: claude.args, enabled: true, timeoutMs: 1000 };
+
+  it('falls back to the one model when a kind of work names none', () => {
+    expect(modelFor({ model: 'opus' }, 'tailor')).toBe('opus');
+    expect(modelFor({ model: 'opus', models: {} }, 'write')).toBe('opus');
+    expect(modelFor({ model: 'opus', models: { write: '  ' } }, 'write')).toBe('opus');
+  });
+
+  it('uses the one it names when it names one', () => {
+    expect(modelFor({ model: 'opus', models: { write: 'sonnet' } }, 'write')).toBe('sonnet');
+    // And the others are unaffected.
+    expect(modelFor({ model: 'opus', models: { write: 'sonnet' } }, 'tailor')).toBe('opus');
+  });
+
+  it('manages with no default at all', () => {
+    expect(modelFor({ models: { tailor: 'opus' } }, 'tailor')).toBe('opus');
+    expect(modelFor({}, 'review')).toBe('');
+  });
+
+  it('rewrites the arguments for that kind of work and nothing else', () => {
+    const config = { ai: { ...base, model: 'opus', models: { write: 'haiku' } } };
+    const writing = configForTask(config, 'write');
+    expect(writing.ai.args).toContain('haiku');
+    expect(writing.ai.args).not.toContain('opus');
+    // The config it was given is untouched: twelve call sites share it.
+    expect(config.ai.args).toBe(claude.args);
+  });
+
+  it('hands back the same object when nothing differs, so a call site costs nothing', () => {
+    const config = { ai: { ...base, model: 'opus' } };
+    expect(configForTask(config, 'tailor')).toBe(config);
+  });
+
+  it('carries the effort setting along, rather than dropping it on the way', () => {
+    const codex = AI_PRESETS.find((p) => p.command === 'codex')!;
+    const config = {
+      ai: { command: 'codex', args: codex.args, model: 'gpt-5', models: { tailor: 'o4-mini' }, effort: 'high' as const },
+    };
+    const tailoring = configForTask(config, 'tailor');
+    expect(tailoring.ai.args).toContain('o4-mini');
+    expect(tailoring.ai.args).toContain('model_reasoning_effort=high');
+  });
+
+  it('names the kinds of work in words a person would use', () => {
+    expect(AI_TASKS.map((t) => t.key)).toEqual(['tailor', 'write', 'review', 'author']);
+    for (const t of AI_TASKS) {
+      expect(t.label[0]).toBe(t.label[0]?.toUpperCase());
+      expect(t.note.length).toBeGreaterThan(20);
+    }
   });
 });
