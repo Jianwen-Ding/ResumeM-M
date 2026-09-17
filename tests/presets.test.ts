@@ -169,15 +169,41 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
 
   it('repairs a config saved with that prompt argument still on the end', () => {
     const broken = ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit', '{prompt}'];
-    expect(repairAiArgs('claude', broken)).toEqual(broken.slice(0, -1));
-    expect(repairAiArgs('/usr/local/bin/claude', broken)).toEqual(broken.slice(0, -1));
-    // A custom set-up that puts the prompt somewhere workable is left alone.
-    expect(repairAiArgs('claude', ['-p', '{promptText}', '--disallowedTools', 'Bash'])).toEqual([
+    const repaired = repairAiArgs('claude', broken);
+    expect(repaired).not.toContain('{prompt}');
+    expect(repairAiArgs('/usr/local/bin/claude', broken)).toEqual(repaired);
+    // A custom set-up that puts the prompt somewhere workable keeps it there.
+    expect(repairAiArgs('claude', ['-p', '{promptText}', '--disallowedTools', 'Bash']).slice(0, 2)).toEqual([
       '-p',
       '{promptText}',
-      '--disallowedTools',
-      'Bash',
     ]);
+  });
+
+  /*
+   * The deny list used to stop at Bash, Write, Edit and the web, which left
+   * reading — and reading is what sent the model looking at the machine, which
+   * is what made macOS ask whether ResumeM-M could see the user's Music
+   * library. A preset is copied when it is chosen rather than referenced, so
+   * a config saved back then keeps the short list forever.
+   */
+  it('widens a deny list saved before reading was understood to be the problem', () => {
+    const old = ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch'];
+    const now = repairAiArgs('claude', old).join(' ');
+    for (const tool of ['Read', 'Glob', 'Grep', 'Task']) expect(now, tool).toContain(tool);
+    // And what was already denied stays denied.
+    for (const tool of ['Bash', 'Write', 'Edit', 'WebFetch']) expect(now, tool).toContain(tool);
+    // Nothing else about the invocation moves.
+    expect(repairAiArgs('claude', old).slice(0, 4)).toEqual(['-p', '--add-dir', '{sandbox}', '--disallowedTools']);
+  });
+
+  it('does not hand the web back to a config that had research switched on', () => {
+    // Research is the one thing allowed to have taken the web tools out, so
+    // widening the rest must not quietly put them back.
+    const researching = ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit'];
+    const now = repairAiArgs('claude', researching).join(' ');
+    expect(now).toContain('Read');
+    expect(now).not.toContain('WebFetch');
+    expect(now).not.toContain('WebSearch');
   });
 
   it('gets past Codex’s git check, and does not hang on its stdin', { timeout: 30_000 }, async () => {
@@ -258,7 +284,9 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
     // Everything else about the confinement is untouched: the model may read
     // the company's careers page, not the user's files.
     expect(open).toContain('--add-dir');
-    expect(open.join(' ')).toContain('Bash,Write,Edit');
+    for (const tool of ['Bash', 'Write', 'Edit', 'Read', 'Glob', 'Grep']) {
+      expect(open.join(' '), tool).toContain(tool);
+    }
 
     expect(applyResearch('claude', open, false).join(' ')).toContain('WebFetch');
   });

@@ -42,8 +42,24 @@ export const AI_PRESETS: AiPreset[] = [
      * Stdin also has no length limit, and these prompts run to tens of
      * kilobytes.
      */
-    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch'],
-    note: 'Runs with every file-touching and network tool disallowed.',
+    /*
+     * Every tool denied, not only the ones that write.
+     *
+     * The deny list used to be Bash, Write, Edit and the web — which left
+     * reading. This tool asks a model for a paragraph of prose and gives it
+     * the whole prompt on stdin; there is nothing it needs to look at, and a
+     * model that can look will, because looking is usually the right instinct.
+     * What it looked at was the machine: one glob of a home directory is
+     * enough for macOS to ask the user whether ResumeM-M may read their Music
+     * library, which is a baffling thing to be asked while writing a cover
+     * letter. And in headless mode a tool that needs a permission nobody can
+     * grant is auto-denied, which is how a run produced nothing at all.
+     *
+     * Research adds the two web tools back, and only those — see
+     * `applyResearch`. Nothing else is ever put back.
+     */
+    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,Read,Glob,Grep,Task,TodoWrite,SlashCommand,WebFetch,WebSearch'],
+    note: 'Runs with every tool denied: it is asked for text and can reach for nothing.',
     researchNote: 'Web search and fetch are allowed; nothing else changes.',
   },
   {
@@ -146,10 +162,39 @@ export function repairAiArgs(command: string, args: string[]): string[] {
    * have gone.
    */
   if (named(/(^|[\\/])claude(\.exe)?$/i) && args.includes('--disallowedTools')) {
-    const after = args.slice(args.indexOf('--disallowedTools') + 2);
+    let out = [...args];
+    const after = out.slice(out.indexOf('--disallowedTools') + 2);
     if (after.length === 1 && (after[0] === '{prompt}' || after[0] === '{promptText}')) {
-      return args.slice(0, -1);
+      out = out.slice(0, -1);
     }
+
+    /*
+     * A config saved before the deny list covered reading keeps the old one
+     * forever, and that is the list that let the model go looking at the
+     * machine. Widened in place, so a research setting or a flag the user
+     * added by hand survives.
+     */
+    const at = out.indexOf('--disallowedTools');
+    let end = at + 1;
+    while (end < out.length && !out[end]!.startsWith('-')) end++;
+    const listed = new Set(
+      out
+        .slice(at + 1, end)
+        .flatMap((token) => token.split(','))
+        .map((t) => t.trim())
+        .filter(Boolean),
+    );
+    if (listed.has('Bash') && !listed.has('Read')) {
+      // Research is the one thing allowed to have removed the web tools, so
+      // what it took out stays out.
+      const researching = !listed.has('WebFetch');
+      for (const tool of CONFINED_TOOLS) {
+        if (researching && WEB_TOOLS.includes(tool)) continue;
+        listed.add(tool);
+      }
+      out.splice(at + 1, end - at - 1, [...listed].join(','));
+    }
+    return out;
   }
   return args;
 }
@@ -161,6 +206,15 @@ export function repairAiArgs(command: string, args: string[]): string[] {
 
 /** The tools a CLI needs in order to read anything on the web. */
 const WEB_TOOLS = ['WebFetch', 'WebSearch'];
+
+/**
+ * Everything the confined preset denies.
+ *
+ * Named here rather than only in the preset, so `repairAiArgs` can widen a
+ * config that was saved when the list was shorter — which is every config
+ * saved before reading was understood to be the problem.
+ */
+const CONFINED_TOOLS = 'Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,Read,Glob,Grep,Task,TodoWrite,SlashCommand,WebFetch,WebSearch'.split(',');
 
 /**
  * Make the arguments agree with the research setting.

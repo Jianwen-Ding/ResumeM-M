@@ -474,7 +474,7 @@ export const DEFAULT_CONFIG: StoreConfig = {
      * machine — while the Settings panel said the AI could never reach your
      * save folder, your home directory, or this source tree.
      */
-    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,Write,Edit,WebFetch,WebSearch'],
+    args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,Read,Glob,Grep,Task,TodoWrite,SlashCommand,WebFetch,WebSearch'],
     enabled: false,
     timeoutMs: 180_000,
   },
