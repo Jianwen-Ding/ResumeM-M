@@ -2029,7 +2029,12 @@ async function waitForJob(id, every = 2000) {
  * asking about a bullet you did not write.
  */
 async function readMaterial(notes) {
-  const stop = showAiProgress(notes, 'Reading your material', () => showTab('voice'));
+  const stop = showAiProgress(
+    notes,
+    'Reading your material',
+    () => showTab('voice'),
+    'This takes a few minutes for a few files. You can go and work on something else — it carries on.',
+  );
   let result;
   try {
     /*
@@ -2082,6 +2087,7 @@ async function readMaterial(notes) {
   ]));
 
   let added = 0;
+  const failures = [];
   for (const entry of entries) {
     const accepted = await showModal(
       `From your material — ${entry.title}`,
@@ -2107,23 +2113,32 @@ async function readMaterial(notes) {
     let id = entry.id;
     for (let n = 2; state.store.entries.some((e) => e.id === id); n++) id = `${entry.id}_${n}`;
     describeNext(`adding "${entry.title}" from your material`);
-    await saveEntry(
-      {
-        id,
-        kind: entry.kind,
-        title: entry.title,
-        ...(entry.subtitle ? { subtitle: entry.subtitle } : {}),
-        ...(entry.dates ? { dates: entry.dates } : {}),
-        ...(entry.location ? { location: entry.location } : {}),
-        bullets: (entry.bullets ?? []).map((b, i) => ({
-          id: `${id}_b${i + 1}`,
-          default: 'v_read',
-          variants: [{ id: 'v_read', label: b.label || 'From your material', text: b.text, suggested: true }],
-        })),
-      },
-      `Added "${entry.title}" from your material`,
-    );
-    added++;
+    /*
+     * One failing save must not take the rest of the list with it. You have
+     * just said yes to eleven things one at a time; a throw on the fourth
+     * would drop seven you had already agreed to, silently.
+     */
+    try {
+      await saveEntry(
+        {
+          id,
+          kind: entry.kind,
+          title: entry.title,
+          ...(entry.subtitle ? { subtitle: entry.subtitle } : {}),
+          ...(entry.dates ? { dates: entry.dates } : {}),
+          ...(entry.location ? { location: entry.location } : {}),
+          bullets: (entry.bullets ?? []).map((b, i) => ({
+            id: `${id}_b${i + 1}`,
+            default: 'v_read',
+            variants: [{ id: 'v_read', label: b.label || 'From your material', text: b.text, suggested: true }],
+          })),
+        },
+        `Added "${entry.title}" from your material`,
+      );
+      added++;
+    } catch (err) {
+      failures.push(`${entry.title}: ${err.message}`);
+    }
   }
 
   for (const alt of alternates) {
@@ -2143,20 +2158,34 @@ async function readMaterial(notes) {
     );
     if (!accepted) continue;
     describeNext('adding a wording from your material');
-    await saveEntry(
-      {
-        ...entry,
-        bullets: entry.bullets.map((b) =>
-          b.id !== alt.bulletId
-            ? b
-            : { ...b, variants: [...b.variants, { id: `v_read_${Date.now().toString(36)}`, label: alt.label || 'From your material', text: alt.text, suggested: true }] },
-        ),
-      },
-      'Added a wording from your material',
-    );
-    added++;
+    try {
+      await saveEntry(
+        {
+          ...entry,
+          bullets: entry.bullets.map((b) =>
+            b.id !== alt.bulletId
+              ? b
+              : { ...b, variants: [...b.variants, { id: `v_read_${Date.now().toString(36)}`, label: alt.label || 'From your material', text: alt.text, suggested: true }] },
+          ),
+        },
+        'Added a wording from your material',
+      );
+      added++;
+    } catch (err) {
+      failures.push(`${alt.bulletId}: ${err.message}`);
+    }
   }
 
+  if (failures.length > 0) {
+    // Said, not swallowed: you agreed to these, and a silent "nothing
+    // happened" is the worst possible answer to that.
+    setChildren(
+      notes,
+      el('div', { textContent: `Added ${plural(added, 'thing')}.` }),
+      el('div', { className: 'err', textContent: `${plural(failures.length, 'one')} could not be saved:` }),
+      ...failures.map((f) => el('div', { className: 'hint', textContent: f })),
+    );
+  }
   setStatus(added ? `Added ${plural(added, 'thing')} from your material` : 'Nothing added');
 }
 
@@ -4229,7 +4258,7 @@ function renderDraftingChip() {
   chip.style.cursor = oldest.go ? 'pointer' : 'default';
 }
 
-function showAiProgress(notes, doing, go) {
+function showAiProgress(notes, doing, go, hint = 'Keep writing if you like — nothing you type now will be lost.') {
   const started = Date.now();
   const stopChip = startDrafting(doing, go);
   const clock = el('span', { className: 'ai-elapsed', textContent: '0:00' });
@@ -4240,7 +4269,10 @@ function showAiProgress(notes, doing, go) {
       el('span', { textContent: `${doing}… ` }),
       clock,
     ]),
-    el('div', { className: 'hint', textContent: 'Keep writing if you like — nothing you type now will be lost.' }),
+    // The reassurance depends on what is running. "Keep writing" is the right
+    // thing to say beside a letter being drafted and a strange thing to say
+    // beside a pile of files being read, where there is nothing to type into.
+    el('div', { className: 'hint', textContent: hint }),
   );
 
   const tick = setInterval(() => {

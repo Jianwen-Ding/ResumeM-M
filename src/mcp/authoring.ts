@@ -49,8 +49,8 @@ export interface ProposedBullet {
   text: string;
   /** The sentence in the material this came from. Required. */
   source: string;
-  /** Which document that sentence is in. */
-  documentId: string;
+  /** Which document that sentence is in. Absent means the entry's own. */
+  documentId?: string;
   tags?: string[];
 }
 
@@ -191,6 +191,19 @@ export class AuthoringSession {
     if (!KINDS.includes(entry.kind)) return no(`"${entry.kind}" is not a kind of entry. They are: ${KINDS.join(', ')}.`);
     if (!entry.title?.trim()) return no('An entry needs a title — the employer, the school, or the project’s name.');
     if (!entry.id?.trim()) return no('An entry needs an id, like exp_acme or proj_ingest.');
+    /*
+     * Ids are used as keys elsewhere — `entryId.field` in a resume's choices,
+     * split on the first dot — so one with a dot, a slash or a space in it is
+     * an id that half the store cannot address. Refused here rather than
+     * quietly rewritten, because a model that is told will use a real one and
+     * a model that is corrected will keep sending the same thing.
+     */
+    if (!/^[a-z0-9][a-z0-9_-]*$/i.test(entry.id.trim())) {
+      return no(
+        `"${entry.id}" will not work as an id: use letters, digits, hyphens and underscores only, ` +
+          `like exp_vega or proj-ingest. Dots and spaces are used to address fields elsewhere.`,
+      );
+    }
     if (this.existing.entryIds.includes(entry.id)) {
       return no(`There is already an entry called "${entry.id}" in the store. Choose another id, or propose an alternate wording on its bullets instead.`);
     }

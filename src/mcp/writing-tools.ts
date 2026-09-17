@@ -282,7 +282,14 @@ export function authoringTools(session: AuthoringSession): ToolDefinition[] {
           session.proposeBullet(entry, {
             text: body,
             source,
-            documentId: typeof args.document === 'string' ? args.document.trim() : '',
+            /*
+             * Undefined rather than empty, because the session falls back to
+             * the entry's own document with `??` — and `'' ?? x` is `''`, so
+             * an empty string turned the documented fallback into "there is
+             * no document \"\"", which is a confusing answer to a model that
+             * simply left an optional argument out.
+             */
+            documentId: typeof args.document === 'string' && args.document.trim() ? args.document.trim() : undefined,
             label: typeof args.label === 'string' ? args.label : '',
           }),
         );

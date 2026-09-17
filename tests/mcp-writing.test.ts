@@ -587,3 +587,81 @@ describe('reading material, over the endpoint', () => {
     }
   });
 });
+
+/*
+ * Arguments a model leaves out, which it does constantly. Every one of these
+ * has to come back as a sentence it can act on rather than as a confusing
+ * error about something it did not say.
+ */
+describe('the arguments a model actually sends', () => {
+  it('falls back to the entry’s document when the bullet does not name one', () => {
+    const s = authoring();
+    s.proposeEntry({ id: 'exp_vega', kind: 'experience', title: 'Vega Analytics', documentId: 'd1' });
+    const r = s.proposeBullet('exp_vega', {
+      label: 'Ingest',
+      text: 'Built a Kafka-backed ingest pipeline',
+      source: 'Built a Kafka-backed ingest pipeline handling 2M events a day.',
+    } as never);
+    expect(r.ok, r.text).toBe(true);
+  });
+
+  it('does the same over the protocol, where an omitted argument is not undefined', async () => {
+    /*
+     * The tool layer used to turn a missing `document` into an empty string,
+     * and `'' ?? entry.documentId` is `''` — so the documented fallback became
+     * `There is no document ""`, which is a baffling answer to a model that
+     * simply left an optional argument out.
+     */
+    const session = authoring();
+    const tools = authoringTools(session);
+    const call = (name: string, args: Record<string, unknown>) =>
+      handle({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, tools, INFO) as Promise<{
+        result: { content: { text: string }[]; isError: boolean };
+      }>;
+
+    await call('propose_entry', { id: 'exp_vega', kind: 'experience', title: 'Vega Analytics', document: 'd1' });
+    const reply = await call('propose_bullet', {
+      entry: 'exp_vega',
+      text: 'Built a Kafka-backed ingest pipeline',
+      source: 'Built a Kafka-backed ingest pipeline handling 2M events a day.',
+    });
+    expect(reply.result.isError, reply.result.content[0]?.text).toBe(false);
+  });
+
+  it('still refuses when the named document is not one that was supplied', () => {
+    const s = authoring();
+    s.proposeEntry({ id: 'exp_vega', kind: 'experience', title: 'Vega Analytics', documentId: 'd1' });
+    const r = s.proposeBullet('exp_vega', {
+      label: 'x',
+      text: 'y',
+      source: 'Built a Kafka-backed ingest pipeline handling 2M events a day.',
+      documentId: 'd9',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('d1');
+  });
+});
+
+/*
+ * Ids are keys elsewhere: a resume addresses a field as `entryId.field` and
+ * splits on the first dot, so an id with a dot, a slash or a space in it is
+ * one half the store cannot address.
+ */
+describe('ids a model might propose', () => {
+  const propose = (id: string) =>
+    authoring().proposeEntry({ id, kind: 'experience', title: 'Vega Analytics', documentId: 'd1' });
+
+  it('takes the shapes the store already uses', () => {
+    for (const id of ['exp_vega', 'proj-ingest', 'edu2024', 'X']) {
+      expect(propose(id).ok, id).toBe(true);
+    }
+  });
+
+  it('refuses one that would break addressing, and says what to use', () => {
+    for (const id of ['exp.vega', 'exp vega', '../etc/passwd', 'exp/vega', '_leading', '']) {
+      const r = propose(id);
+      expect(r.ok, id).toBe(false);
+    }
+    expect(propose('exp.vega').text).toContain('exp_vega');
+  });
+});
