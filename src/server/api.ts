@@ -1588,6 +1588,30 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * Workspace — applications in progress                              *
    * ---------------------------------------------------------------- */
 
+  /**
+   * Change a draft on the copy that is on disk now, not the one this request
+   * read a minute ago.
+   *
+   * Every route below reads the draft, does something slow — fetches a posting,
+   * runs the AI, compiles a bundle, commits to git — and then writes the whole
+   * object back. Meanwhile the person who started it is doing the obvious thing
+   * with the waiting time: writing the notes, or the answer to the question the
+   * AI is not being asked for. The Workspace saves that as they type, and the
+   * reply to the slow request landed on top of it, restoring the draft to what
+   * it held when the button was pressed. Nothing reported it; the text simply
+   * was not there any more.
+   *
+   * So the slow work happens on the copy it read, and only the fields the route
+   * actually produced are applied, to a draft read again at the end.
+   */
+  const reviseDraft = async (id: string, message: string, change: (fresh: Draft) => void): Promise<Draft> =>
+    withCommit(repo, autoCommit(), message, () => {
+      const fresh = store.getDraft(id);
+      if (!fresh) throw new Error(`No draft "${id}"`);
+      change(fresh);
+      return store.saveDraft(fresh);
+    });
+
   api.get(
     '/workspace',
     handler(async (_req, res) => res.json({ drafts: store.loadDrafts() })),
@@ -1798,11 +1822,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         store.saveResume(spec),
       );
 
-      draft.resumeId = spec.id;
-      draft.updatedAt = new Date().toISOString();
-      store.saveDraft(draft);
+      const saved = await reviseDraft(draft.id, `Attach a variation to ${draft.company}`, (fresh) => {
+        fresh.resumeId = spec.id;
+      });
 
-      res.json({ draft, spec, url: `/#resumes/${encodeURIComponent(spec.id)}/from/${encodeURIComponent(draft.id)}` });
+      res.json({ draft: saved, spec, url: `/#resumes/${encodeURIComponent(spec.id)}/from/${encodeURIComponent(draft.id)}` });
     }),
   );
 
@@ -1893,15 +1917,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => store.saveResume(spec));
 
       // The draft now sends this one, and keeps the posting text for the
-      // letter and the answers to draw on.
-      draft.resumeId = spec.id;
-      draft.jobDescription = job.description || html.slice(0, 20_000);
-      draft.updatedAt = new Date().toISOString();
-      store.saveDraft(draft);
+      // letter and the answers to draw on. Those two fields, and nothing else:
+      // fetching the posting and running the AI take long enough that the
+      // letter and the answers on disk have moved on.
+      const description = job.description || html.slice(0, 20_000);
+      const saved = await reviseDraft(draft.id, `Attach a tailored resume to ${draft.company}`, (fresh) => {
+        fresh.resumeId = spec.id;
+        fresh.jobDescription = description;
+      });
 
       const after = store.load();
       res.json({
-        draft,
+        draft: saved,
         spec,
         fetched,
         usedAi: Boolean(plan),
@@ -1922,6 +1949,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const draft = store.getDraft(id);
       if (!draft) throw new Error(`No draft "${id}"`);
 
+      /*
+       * What the draft held when the button was pressed. Generation runs the AI
+       * once per empty answer and once for the letter, which is minutes, and
+       * the person waiting is usually typing in the boxes it is not filling.
+       * Comparing against this is what tells "the AI wrote this" apart from
+       * "they wrote this while it ran" at the end.
+       */
+      const before = structuredClone(draft);
+
       const { what = 'all', force = false, questionId } = req.body as {
         what?: 'letter' | 'questions' | 'all';
         force?: boolean;
@@ -1937,6 +1973,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       };
 
       const notes: string[] = [];
+      let countAnswers = false;
 
       if ((what === 'letter' || what === 'all') && draft.coverLetter.required) {
         if (draft.coverLetter.edited && !force) {
@@ -2018,17 +2055,58 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.needsReview = true;
           }
         }
-        const written = draft.questions.filter((q) => q.answer.trim()).length;
-        notes.push(
-          questionId
-            ? `Answer drafted. ${written} of ${draft.questions.length} questions have one.`
-            : `${written} of ${draft.questions.length} questions have an answer.`,
-        );
+        countAnswers = true;
       }
 
-      const saved = await withCommit(repo, autoCommit(), `Draft answers for ${draft.company}`, () =>
-        store.saveDraft(draft),
-      );
+      const saved = await reviseDraft(id, `Draft answers for ${draft.company}`, (fresh) => {
+        /*
+         * The letter is ours to write only if the box has not moved since we
+         * read it. Someone who spent the wait writing their own first paragraph
+         * meant it, and an AI draft landing on top of it is the loss this whole
+         * merge exists to prevent.
+         */
+        if (draft.coverLetter.body !== before.coverLetter.body) {
+          if (fresh.coverLetter.body !== before.coverLetter.body) {
+            notes.push('You edited the cover letter while this was running, so what you wrote was kept.');
+          } else {
+            fresh.coverLetter.body = draft.coverLetter.body;
+          }
+        }
+
+        let kept = 0;
+        for (const produced of draft.questions) {
+          const was = before.questions.find((q) => q.id === produced.id);
+          if (!was || produced.answer === was.answer) continue;
+
+          // Questions the application no longer asks are simply gone.
+          const target = fresh.questions.find((q) => q.id === produced.id);
+          if (!target) continue;
+          if (target.answer !== was.answer) {
+            kept++;
+            continue;
+          }
+          target.answer = produced.answer;
+          target.source = produced.source;
+          target.fromAnswerId = produced.fromAnswerId;
+          target.needsReview = produced.needsReview;
+        }
+        if (kept) {
+          notes.push(
+            kept === 1
+              ? 'One answer you typed while this was running was kept as you wrote it.'
+              : `${kept} answers you typed while this was running were kept as you wrote them.`,
+          );
+        }
+
+        if (countAnswers) {
+          const written = fresh.questions.filter((q) => q.answer.trim()).length;
+          notes.push(
+            questionId
+              ? `Answer drafted. ${written} of ${fresh.questions.length} questions have one.`
+              : `${written} of ${fresh.questions.length} questions have an answer.`,
+          );
+        }
+      });
       res.json({ draft: saved, notes, aiEnabled: data.config.ai.enabled });
     }),
   );
@@ -2119,7 +2197,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       if (keepDraft) {
-        store.saveDraft({ ...draft, status: 'submitted' });
+        // Only the status. Compiling the bundle took long enough that writing
+        // the whole draft back would restore whatever the letter said before
+        // the LaTeX run, over anything typed since.
+        await reviseDraft(id, `Mark ${draft.company} as submitted`, (fresh) => {
+          fresh.status = 'submitted';
+        });
       } else {
         store.deleteDraft(id);
       }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
@@ -864,6 +864,114 @@ describe('workspace', () => {
     await request(app).post('/api/workspace/ghost/complete').send({}).expect(400);
     await request(app).put('/api/workspace/ghost').send({}).expect(400);
   });
+
+  /*
+   * Generating is the longest wait in the product: one AI run for the letter
+   * and one for every empty answer, minutes end to end. Nobody sits still for
+   * it — they write the notes, or the answer the AI is not being asked for, and
+   * the Workspace saves that as they type.
+   *
+   * The handler read the draft before the wait and wrote the whole object back
+   * after it, so the reply restored the draft to what it held when the button
+   * was pressed. Everything typed during the wait went, silently, at the exact
+   * moment the screen filled up with the thing that had been asked for.
+   *
+   * The AI here is a real child process that stops until the test releases it,
+   * so the write during the wait is a genuinely concurrent one.
+   */
+  it('keeps what was typed while the AI was running', async () => {
+    const started = path.join(t.dir, 'agent-started');
+    const release = path.join(t.dir, 'agent-release');
+    await request(app)
+      .put('/api/config')
+      .send({
+        ai: {
+          enabled: true,
+          command: process.execPath,
+          args: [
+            '-e',
+            `const fs=require('fs');fs.writeFileSync(${JSON.stringify(started)},'1');` +
+              `const w=new Int32Array(new SharedArrayBuffer(4));` +
+              `while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(w,0,0,10);` +
+              `process.stdout.write('Dear Streamly, the AI wrote this.')`,
+            '{prompt}',
+          ],
+          timeoutMs: 20_000,
+        },
+      })
+      .expect(200);
+
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+
+    // `.then()` is what dispatches a supertest request; holding the builder
+    // alone would leave it unsent until the await below.
+    const generating = request(app).post(`/api/workspace/${id}/generate`).send({ what: 'all' }).then((r) => r);
+
+    // Wait for the AI to be genuinely mid-run before typing anything.
+    await vi.waitFor(() => expect(fs.existsSync(started)).toBe(true), { timeout: 10_000 });
+
+    const mine = { ...t.store.getDraft(id)!, notes: 'Referred by Dana on the platform team.' };
+    mine.questions[1] = { ...mine.questions[1]!, answer: 'The ingest rewrite.', source: 'human', edited: true };
+    await request(app).put(`/api/workspace/${id}`).send(mine).expect(200);
+
+    fs.writeFileSync(release, '1');
+    const res = await generating;
+    expect(res.status).toBe(200);
+
+    // Everything typed during the wait is still there…
+    expect(res.body.draft.notes).toBe('Referred by Dana on the platform team.');
+    expect(res.body.draft.questions[1].answer).toBe('The ingest rewrite.');
+    expect(t.store.getDraft(id)!.notes).toBe('Referred by Dana on the platform team.');
+
+    // …and so is the work that was waited for.
+    expect(res.body.draft.coverLetter.body).toContain('the AI wrote this');
+    expect(res.body.draft.questions[0].answer).toBeTruthy();
+  }, 30_000);
+
+  /*
+   * The other side of the same merge: when the letter itself is the box being
+   * typed in, what the person wrote wins over what the AI came back with, and
+   * they are told so rather than left to notice.
+   */
+  it('says so when the letter it drafted is dropped for one you typed', async () => {
+    const started = path.join(t.dir, 'letter-started');
+    const release = path.join(t.dir, 'letter-release');
+    await request(app)
+      .put('/api/config')
+      .send({
+        ai: {
+          enabled: true,
+          command: process.execPath,
+          args: [
+            '-e',
+            `const fs=require('fs');fs.writeFileSync(${JSON.stringify(started)},'1');` +
+              `const w=new Int32Array(new SharedArrayBuffer(4));` +
+              `while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(w,0,0,10);` +
+              `process.stdout.write('Dear Streamly, the AI wrote this.')`,
+            '{prompt}',
+          ],
+          timeoutMs: 20_000,
+        },
+      })
+      .expect(200);
+
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const generating = request(app).post(`/api/workspace/${id}/generate`).send({ what: 'letter' }).then((r) => r);
+    await vi.waitFor(() => expect(fs.existsSync(started)).toBe(true), { timeout: 10_000 });
+
+    const mine = t.store.getDraft(id)!;
+    mine.coverLetter = { ...mine.coverLetter, body: 'Dear Streamly, I started this myself.', edited: true };
+    await request(app).put(`/api/workspace/${id}`).send(mine).expect(200);
+
+    fs.writeFileSync(release, '1');
+    const res = await generating;
+    expect(res.status).toBe(200);
+
+    expect(res.body.draft.coverLetter.body).toBe('Dear Streamly, I started this myself.');
+    expect(res.body.notes.join(' ')).toMatch(/while this was running/);
+  }, 30_000);
 });
 
 describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
