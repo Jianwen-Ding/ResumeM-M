@@ -6,14 +6,27 @@ import { isEmptyStore, resolveStoreDir, seedStore } from '../src/model/location.
 
 describe('resolveStoreDir', () => {
   const original = process.env.RMM_DATA;
+  const originalProjects = process.env.RMM_PROJECTS_FILE;
   let projectRoot: string;
 
   beforeEach(() => {
     projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-project-'));
+    /*
+     * Point the remembered-projects file at somewhere that does not exist.
+     *
+     * `resolveStoreDir` consults it before anything else, so these tests were
+     * reading whichever save the developer happened to have open in the app —
+     * and failing, with a diff between two absolute paths and no hint that the
+     * cause was outside the repository. A test that depends on the machine it
+     * runs on is not testing the code.
+     */
+    process.env.RMM_PROJECTS_FILE = path.join(projectRoot, 'no-such-projects.json');
   });
 
   afterEach(() => {
     fs.rmSync(projectRoot, { recursive: true, force: true });
+    if (originalProjects === undefined) delete process.env.RMM_PROJECTS_FILE;
+    else process.env.RMM_PROJECTS_FILE = originalProjects;
     if (original === undefined) delete process.env.RMM_DATA;
     else process.env.RMM_DATA = original;
   });

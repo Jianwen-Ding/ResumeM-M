@@ -360,3 +360,83 @@ describe('remotes', () => {
     expect(await repo.currentBranch()).toBeTruthy();
   });
 });
+
+/*
+ * The store is a git repository people also use as one — they clone it to a
+ * second machine, pull, and resolve a conflict by hand. Every one of these
+ * states used to end with the app reporting success having committed nothing.
+ */
+describe('a store someone has also used git on', () => {
+  const seed = (repo: Repo) => {
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: First\n');
+    return repo.commitAll('first');
+  };
+
+  it('can still save while a merge is in progress', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await seed(repo);
+
+    // Two branches that touch the same line, merged into a conflict the user
+    // has resolved in their editor but not committed.
+    git(['checkout', '-q', '-b', 'other']);
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Other\n');
+    await repo.commitAll('other side');
+    git(['checkout', '-q', '-']);
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Mine\n');
+    await repo.commitAll('my side');
+    try {
+      git(['merge', 'other']);
+    } catch {
+      // The conflict is the point.
+    }
+    expect(fs.existsSync(path.join(root, '.git', 'MERGE_HEAD'))).toBe(true);
+
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Resolved\n');
+    const hash = await repo.commitAll('resolved the conflict');
+
+    // `git commit -- <paths>` is a partial commit, which git refuses outright
+    // during a merge: "fatal: cannot do a partial commit during a merge". The
+    // editor reported 200 OK and committed nothing, every time, forever.
+    expect(hash).toBeTruthy();
+    expect(git(['show', '-s', '--format=%s', 'HEAD']).trim()).toBe('resolved the conflict');
+  });
+
+  it('refuses to push a detached HEAD rather than pushing the wrong branch', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    const first = await seed(repo);
+
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Second\n');
+    await repo.commitAll('second');
+
+    // Looking at an old version — which this tool's own history invites.
+    git(['checkout', '-q', first!]);
+    git(['remote', 'add', 'origin', path.join(root, 'nowhere.git')]);
+
+    /*
+     * The branch fell back to the literal 'main', so this pushed the *stale*
+     * branch and reported success while the commit just made sat on no branch
+     * at all — reachable only by hash, and collectable the moment a branch was
+     * checked out again.
+     */
+    await expect(repo.push()).rejects.toThrow(/detached/i);
+  });
+
+  it('counts the files in an untracked folder, not the folder', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await seed(repo);
+
+    fs.mkdirSync(path.join(root, 'drafts'), { recursive: true });
+    for (const n of ['a', 'b', 'c']) {
+      fs.writeFileSync(path.join(root, 'drafts', `${n}.yaml`), `id: ${n}\n`);
+    }
+
+    // Porcelain collapses a wholly untracked directory to one entry, so this
+    // said "1 file" and then committed three.
+    const pending = await repo.pending();
+    expect(pending.length).toBe(3);
+    expect(pending.every((p) => p.path.endsWith('.yaml'))).toBe(true);
+  });
+});

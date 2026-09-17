@@ -317,4 +317,56 @@ describe('restoring a version', () => {
     const res = await request(app).post('/api/resumes/newgrad/history/0000000000000000/restore');
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
+
+  /*
+   * A version is the whole resolved document. The timeline says so — an edit to
+   * a shared bullet appears as a version of every resume that prints it — but
+   * restore read back only `resumes/<id>.yaml`, so those versions restored
+   * nothing at all: 200 OK, "Restored." on screen, the document unchanged, and
+   * not even a commit in the timeline to show for it.
+   */
+  it('restores what it can, and says what it could not', async () => {
+    const before = await request(app).get('/api/resumes/newgrad/resolved').expect(200);
+    const original = await history();
+    const originalHash = original[0]!.hash;
+
+    // A change in shared text: this bullet is printed by every resume.
+    const entry = t.store.load().entries.find((e) => e.id === 'exp_acme')!;
+    const bullet = entry.bullets![0]!;
+    await request(app)
+      .put(`/api/entries/${entry.id}`)
+      .send({
+        ...entry,
+        bullets: [
+          { ...bullet, variants: bullet.variants.map((v) => ({ ...v, text: 'REWRITTEN SHARED BULLET' })) },
+          ...entry.bullets!.slice(1),
+        ],
+      })
+      .expect(200);
+
+    const restored = await request(app)
+      .post(`/api/resumes/newgrad/history/${originalHash}/restore`)
+      .expect(200);
+
+    // It does not silently claim success on something it did not do.
+    expect(restored.body.warnings.join(' ')).toMatch(/shares with others/i);
+    expect(restored.body.warnings.length).toBeGreaterThan(1);
+
+    void before;
+  });
+
+  it('rolls back the resumes this one inherits from, not only its own file', async () => {
+    const original = (await history())[0]!.hash;
+
+    // The change is in the parent: the child's own file never moves.
+    const base = t.store.getResume('base')!;
+    await request(app)
+      .put('/api/resumes/base')
+      .send({ ...base, choices: { ...(base.choices ?? {}), 'edu_neu.dates': 'v_dec2026' } })
+      .expect(200);
+
+    await request(app).post(`/api/resumes/newgrad/history/${original}/restore`).expect(200);
+
+    expect(t.store.getResume('base')?.choices?.['edu_neu.dates']).not.toBe('v_dec2026');
+  });
 });

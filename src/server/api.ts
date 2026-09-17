@@ -27,7 +27,7 @@ import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/an
 import { classifyPage, extractJob, JOB_SHAPED, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, applicationId, buildBundle, slug, stats } from '../model/applications.js';
+import { advance, applicationId, buildBundle, fingerprint, slug, stats } from '../model/applications.js';
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
@@ -37,6 +37,7 @@ import { readRepo } from '../ingest/repo.js';
 import type { Store } from '../model/store.js';
 import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
 import type {
+  AnswerBankItem,
   Application,
   Bullet,
   CoverLetter,
@@ -1276,7 +1277,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         existing.default = unique;
       } else {
         answers.push({
-          id: `ans_${slug(question).slice(0, 40) || Date.now()}`,
+          id: answerId(question, answers),
           question: question.trim(),
           default: 'v_1',
           variants: [{ id: 'v_1', label: label ?? 'Saved', text: answer.trim() }],
@@ -1995,6 +1996,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item?.id;
             q.source = 'bank';
+            q.needsReview = undefined;
             continue;
           }
           const agent = await runAgent(data.config, answerPrompt(data, q.question, job));
@@ -2002,9 +2004,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.answer = agent.output.trim();
             q.source = 'ai';
           } else if (match.item) {
+            /*
+             * A match that did not clear the confidence line. `matchAnswer`
+             * draws that line deliberately — above it the answer is safe to
+             * send unread, below it, in its own words, "a starting point the
+             * user should read first". It arrived looking exactly like a
+             * confident one: filled in, unmarked, and carried into the bundle
+             * by "Complete this application" without anyone having read it.
+             */
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item.id;
             q.source = 'bank';
+            q.needsReview = true;
           }
         }
         const written = draft.questions.filter((q) => q.answer.trim()).length;
@@ -2097,7 +2108,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             existing.default = vid;
           } else {
             answers.push({
-              id: `ans_${slug(q.question).slice(0, 40) || Date.now()}`,
+              id: answerId(q.question, answers),
               question: q.question,
               default: 'v_1',
               variants: [{ id: 'v_1', label: draft.company, text: q.answer }],
@@ -2287,24 +2298,102 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const id = String(req.params.id);
       const hash = String(req.params.hash);
-      const relPath = path.posix.join('resumes', `${id}.yaml`);
 
-      let spec: ResumeSpec;
-      try {
-        spec = YAML.parse(await repo.show(hash, relPath)) as ResumeSpec;
-      } catch {
+      /*
+       * A version is the whole resolved document, not one file.
+       *
+       * The timeline defines a version as what this resume *said* at a commit,
+       * which is the resume file, everything it inherits, and the shared text
+       * it points at — profile.yaml, the entry files, skills.yaml. Restore read
+       * back only `resumes/<id>.yaml`, so every version whose change lived in a
+       * shared bullet restored nothing at all: 200 OK, "Restored." on screen,
+       * the document unchanged, and not even a commit in the timeline to show
+       * for it.
+       *
+       * What is restored here is this resume's own chain — its file and the
+       * ones it extends. Shared text is deliberately not rolled back, because
+       * it belongs to every other resume too and silently rewriting those is
+       * worse than not restoring. Instead the result is checked against the
+       * version that was asked for, and anything still differing is named.
+       */
+      const tree = await repo.treeAt(hash);
+      const readAt = async (file: string): Promise<string | undefined> => {
+        const objectId = tree.get(file);
+        return objectId === undefined ? undefined : repo.blob(objectId);
+      };
+
+      const chain: ResumeSpec[] = [];
+      const seen = new Set<string>();
+      for (let want: string | undefined = id; want && !seen.has(want); ) {
+        seen.add(want);
+        const text = await readAt(path.posix.join('resumes', `${want}.yaml`));
+        if (text === undefined) break;
+        const spec = YAML.parse(text) as ResumeSpec;
+        if (!spec) break;
+        spec.id = want; // the filename remains the source of truth for the id
+        chain.push(spec);
+        want = spec.extends;
+      }
+      if (chain.length === 0) {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }
-      spec.id = id; // the filename remains the source of truth for the id
 
-      // saveResume() returns nothing, so the response is built from `spec`
+      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () => {
+        for (const spec of chain) store.saveResume(spec);
+      });
+
+      /*
+       * Did it land? Compare what the resume resolves to now against what it
+       * resolved to then. When the two differ, the remainder of that version
+       * lives in text this resume shares with others, and saying so beats
+       * reporting a rollback that only half happened.
+       */
+      const warnings: string[] = [];
+      try {
+        const files = new Map<string, string>();
+        for (const [file, objectId] of tree) {
+          if (isSnapshotFile(file)) files.set(file, await repo.blob(objectId));
+        }
+        const live = store.load();
+        const then = resolveResume(id, { ...live, ...parseSnapshot(files) });
+        const now = resolveResume(id, store.load());
+        if (!sameDocument(then, now)) {
+          warnings.push(
+            'Some of that version is in text this resume shares with others — a bullet, a date, ' +
+              'or your profile — so it was left alone rather than changed for every resume at once.',
+          );
+          for (const change of diffResumes(now, then).slice(0, 8)) warnings.push(change.text);
+        }
+      } catch {
+        // The comparison is a courtesy; failing it must not fail the restore.
+      }
+
+      // saveResume() returns nothing, so the response is built from the spec
       // itself — the caller wants to know what it was just rolled back to.
-      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () => store.saveResume(spec));
-      res.json(spec);
+      res.json({ ...chain[0]!, warnings });
     }),
   );
 
   return api;
+}
+
+
+/*
+ * An id for a question, unique within the bank.
+ *
+ * `ans_${slug(question).slice(0, 40)}` gave two different questions the same id
+ * whenever their first forty characters slugged alike — which is exactly what
+ * happens to a question and the same question with a qualifier on the end:
+ * "Are you legally authorized to work in the United States?" and "…without
+ * sponsorship?" both became `ans_are-you-legally-authorized-to-work-in-th`.
+ * Every lookup uses `find`, so the second was unreachable, and editing it
+ * rewrote the first — after which /autofill handed the browser extension
+ * "No — I need sponsorship" as the answer to "are you authorized to work".
+ */
+function answerId(question: string, taken: AnswerBankItem[]): string {
+  const base = `ans_${slug(question).slice(0, 40)}`;
+  if (base === 'ans_') return `ans_${fingerprint(question)}`;
+  return taken.some((a) => a.id === base) ? `${base}-${fingerprint(question)}` : base;
 }
 
 /** Serve generated PDFs, constrained to the output directory. */
