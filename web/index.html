@@ -281,7 +281,14 @@
             say.
           </p>
           <textarea id="voice" spellcheck="false"></textarea>
-          <div class="toolbar"><button id="btn-save-voice">Save notes</button></div>
+          <!--
+            The one field here with no autosave, so it is the one field that
+            has to say when it is holding something the store does not.
+          -->
+          <div class="toolbar">
+            <button id="btn-save-voice">Save notes</button>
+            <span id="voice-unsaved" class="hint warn" hidden>Not saved yet.</span>
+          </div>
           <p class="hint">This is exactly what gets prepended to every request:</p>
           <pre id="voice-preview" class="voice-preview"></pre>
         </details>

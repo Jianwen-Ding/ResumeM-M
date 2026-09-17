@@ -4061,9 +4061,44 @@ const SAMPLE_KINDS = [
   { value: 'other', label: 'Something else you wrote' },
 ];
 
+/**
+ * The notes as the server last gave them, so an edit can be told from a
+ * reload. See `loadVoice`.
+ */
+let voiceAsLoaded = null;
+
+/** Whether the notes box holds something that has not been saved. */
+const voiceIsDirty = () => voiceAsLoaded !== null && $('#voice')?.value !== voiceAsLoaded;
+
+/** Show or hide the "not saved yet" note beside the Save button. */
+function markVoiceUnsaved() {
+  const flag = $('#voice-unsaved');
+  if (flag) flag.hidden = !voiceIsDirty();
+}
+
 async function loadVoice() {
   const data = await api('/voice');
-  $('#voice').value = data.voice ?? '';
+  const box = $('#voice');
+  const fromStore = data.voice ?? '';
+
+  /*
+   * Everything else here is reloaded, but the notes are not — not while they
+   * hold something unsaved.
+   *
+   * This runs on six occasions, and five of them are something else
+   * happening in the same panel: adding a writing sample, editing one,
+   * dropping a file, accepting what was read out of it. The notes box is the
+   * one field in the editor with no autosave — it has a Save button instead —
+   * so typing a note and then adding a sample, which is an entirely ordinary
+   * order to do those two things in, replaced what had just been typed with
+   * the older copy from disk. No warning, and nothing to undo it with.
+   */
+  if (voiceIsDirty()) markVoiceUnsaved();
+  else {
+    box.value = fromStore;
+    voiceAsLoaded = fromStore;
+    markVoiceUnsaved();
+  }
   $('#voice-preview').textContent = data.preview;
 
   // What is actually being sent, and how much of what exists fits.
@@ -5455,8 +5490,15 @@ async function boot() {
   $('#btn-add-answer').onclick = addAnswer;
   $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
   wireVoiceDrop();
+  // Typing is what makes the box differ from the store, so it is what turns
+  // the note on — and what stops `loadVoice` overwriting it.
+  $('#voice').oninput = markVoiceUnsaved;
   $('#btn-save-voice').onclick = async () => {
-    await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: $('#voice').value }) });
+    const saved = $('#voice').value;
+    await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: saved }) });
+    // Before the reload, or the box still counts as edited and `loadVoice`
+    // would politely decline to refresh the very thing it just saved.
+    voiceAsLoaded = saved;
     setStatus('Notes saved');
     loadVoice();
   };
