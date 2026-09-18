@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_STYLE,
+  endsBeforeItStarts,
   formatPeriod,
   inferStyle,
   parsePeriod,
@@ -151,5 +152,87 @@ describe('putting entries in order', () => {
     // "2024" against "Nov. 2024" — the bare year covers November, so it does
     // not sort below it.
     expect(key('2024')).toBeGreaterThanOrEqual(key('Nov. 2024') as number);
+  });
+});
+
+/*
+ * A range that finishes before it begins.
+ *
+ * The date control takes any year from 1900 to 2100 at either end and asks
+ * nothing further, which is correct while you are editing — moving both ends
+ * of a range means passing through a state where only one of them has moved.
+ * But nothing downstream looked again, so a 6 typed for a 4 printed
+ * "Jul. 2026 -- Dec. 2024" onto the one document that has to be right.
+ *
+ * The rule has to be generous, because the cost is lopsided: one false
+ * complaint about a perfectly good date and the warnings stop being read.
+ */
+describe('noticing a date that runs backwards', () => {
+  const backwards = (text: string) => endsBeforeItStarts(parsePeriod(text));
+
+  it('says so when the end is before the start', () => {
+    expect(backwards('Jul. 2026 -- Dec. 2024')).toBe(true);
+    expect(backwards('2026 -- 2024')).toBe(true);
+  });
+
+  it('leaves an ordinary range alone', () => {
+    for (const text of ['Jul. 2024 -- Dec. 2024', 'Sep. 2022 -- May 2026', '2021 -- 2024', 'Jan. 2023 -- Present']) {
+      expect(backwards(text), text).toBe(false);
+    }
+  });
+
+  /*
+   * The retreat, and the reason for it. An earlier version compared months
+   * as well, and called "Winter 2024 -- Spring 2024" a mistake — which it is
+   * not. It is how a pair of academic terms is written, and the only reason
+   * it looked wrong is that this file decides winter means December.
+   *
+   * Nor can the ambiguity be resolved after the fact: `parsePeriod` keeps
+   * the start's season and drops the end's, so by the time anything asks,
+   * "Dec. 2024 -- Spring 2024" is a March with no sign it was ever a season.
+   * A co-op running into the next year and a typo look identical.
+   */
+  it('says nothing about a month that moves backwards inside one year', () => {
+    for (const text of [
+      'Winter 2024 -- Spring 2024',
+      'Dec. 2024 -- Spring 2024',
+      'Dec. 2024 -- Mar. 2024',
+      'Fall 2024 -- Summer 2024',
+    ]) {
+      expect(backwards(text), text).toBe(false);
+    }
+  });
+
+  it('reads a bare year against a month as the same year, not an inversion', () => {
+    expect(backwards('2024 -- 2024')).toBe(false);
+    expect(backwards('Dec. 2024 -- 2024')).toBe(false);
+    expect(endsBeforeItStarts({ start: { year: 2024, month: 12 }, end: { year: 2024 } })).toBe(false);
+    expect(endsBeforeItStarts({ start: { year: 2024 }, end: { year: 2024, month: 1 } })).toBe(false);
+  });
+
+  /*
+   * Still going has no end to be wrong about. An entry switched to ongoing
+   * keeps whatever was in `end` until the next save rewrites it, and
+   * complaining about a value that prints nothing would be a warning with no
+   * way to clear it.
+   */
+  it('has nothing to say about something still going', () => {
+    expect(endsBeforeItStarts({ start: { year: 2026 }, end: { year: 2024 }, ongoing: true })).toBe(false);
+  });
+
+  it('has nothing to say about half a date, or none', () => {
+    expect(endsBeforeItStarts(undefined)).toBe(false);
+    expect(endsBeforeItStarts({})).toBe(false);
+    expect(endsBeforeItStarts({ start: { year: 2024 } })).toBe(false);
+    expect(endsBeforeItStarts({ end: { year: 2024 } })).toBe(false);
+  });
+
+  /*
+   * An expected end is still an end. A graduation date typed before the year
+   * you started is the same mistake, and the word in front of it does not
+   * make it one the reader will forgive.
+   */
+  it('still says so when the end is one that has not happened yet', () => {
+    expect(backwards('Sep. 2028 -- Expected May 2027')).toBe(true);
   });
 });

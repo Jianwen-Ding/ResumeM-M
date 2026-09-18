@@ -1,4 +1,4 @@
-import { sortKey, startKey } from './period.js';
+import { endsBeforeItStarts, sortKey, startKey } from './period.js';
 import {
   DEFAULT_LAYOUT,
   isListBullet,
@@ -270,8 +270,20 @@ function resolveEntry(
    * time it hides anything, so tailoring a resume brought every bullet you had
    * retired in that entry back onto the copy you send.
    */
-  const ordered: Bullet[] = wantedBullets
-    ? wantedBullets
+  /*
+   * In the master's order, unless this resume arranged them itself. See
+   * `orderedBullets` — the resume says which lines, the master says what
+   * order, and a resume that disagrees with the master is one that was
+   * dragged and is left exactly as it is.
+   */
+  const asked = wantedBullets
+    ? bulletsAreHandOrdered(section, entry.id)
+      ? wantedBullets
+      : orderedBullets(wantedBullets, entry)
+    : undefined;
+
+  const ordered: Bullet[] = asked
+    ? asked
         .map((id) => {
           const b = (entry.bullets ?? []).find((x) => x.id === id);
           if (!b) {
@@ -287,11 +299,28 @@ function resolveEntry(
         .filter((b): b is Bullet => Boolean(b))
     : available;
 
+  const title = pickField(entry.title, `${entry.id}.title`, choices, warnings) ?? entry.id;
+  const dates = pickField(entry.dates, `${entry.id}.dates`, choices, warnings);
+
+  /*
+   * A date that runs backwards, said once, where the person can still do
+   * something about it. See `endsBeforeItStarts`: the control accepts any
+   * year at either end because it has to, so this is the only place the
+   * mistake is ever noticed — and a resume reading "Jul. 2026 -- Dec. 2024"
+   * is exactly the document this program exists to stop somebody sending.
+   *
+   * Named by its title rather than its id, because this one is read by the
+   * person editing and `exp_example_co` is not what they call it.
+   */
+  if (endsBeforeItStarts(entry.period)) {
+    warnings.push(`"${title}" ends before it starts${dates ? ` — it reads "${dates}"` : ''}. Check the dates.`);
+  }
+
   return {
     id: entry.id,
     kind: entry.kind,
-    title: pickField(entry.title, `${entry.id}.title`, choices, warnings) ?? entry.id,
-    dates: pickField(entry.dates, `${entry.id}.dates`, choices, warnings),
+    title,
+    dates,
     subtitle: pickField(entry.subtitle, `${entry.id}.subtitle`, choices, warnings),
     location: pickField(entry.location, `${entry.id}.location`, choices, warnings),
     bullets: ordered
@@ -364,6 +393,84 @@ export function adoptDateOrder(
     }
   }
   return { adopted, handOrdered };
+}
+
+/**
+ * The lines of one entry, in the order the master document puts them.
+ *
+ * The master is the inventory: every entry, every phrasing, in one place. It
+ * is also the only place an order can be stated once and mean something
+ * everywhere, which is what makes it the right place to keep the house order
+ * for the lines inside an entry. Entries themselves are ordered by date,
+ * because a career has an order already and it is not a matter of taste; the
+ * lines inside a job are a matter of taste, and repeating that taste on every
+ * variation by hand is the work this removes.
+ *
+ * So a resume's bullet list says *which* lines it shows, and the master says
+ * what order they come in — with one exception, which is the resume that was
+ * arranged by hand. That exception needs no field of its own to record it.
+ * Hiding a line rewrites the resume's list straight out of the master's order
+ * (see `setBulletIncluded`), so a list that disagrees with the master can only
+ * have got that way by somebody dragging it. Disagreement *is* the record.
+ *
+ * Which means rearranging the master restacks every resume that has not been
+ * arranged by hand, and leaves alone every one that has — including the ones
+ * arranged before any of this existed, whose arrangement would otherwise be
+ * thrown away by the upgrade that introduced the feature.
+ */
+export function orderedBullets(selected: string[], entry: Entry): string[] {
+  const master = (entry.bullets ?? []).map((b) => b.id);
+  const at = (id: string) => master.indexOf(id);
+  // A line the master has never heard of keeps its place at the end rather
+  // than sorting to the front on an index of -1.
+  const known = selected.filter((id) => at(id) >= 0).sort((a, b) => at(a) - at(b));
+  return [...known, ...selected.filter((id) => at(id) < 0)];
+}
+
+/**
+ * Whether this resume arranged an entry's lines itself.
+ *
+ * Read from the section rather than guessed at. See `SectionSpec.bulletOrder`
+ * for why guessing cannot work: a list that disagrees with the master looks
+ * hand-arranged, and every resume that was following the master disagrees
+ * with it the moment the master moves.
+ */
+export function bulletsAreHandOrdered(section: SectionSpec, entryId: string): boolean {
+  return section.bulletOrder?.[entryId] === 'manual';
+}
+
+/**
+ * Mark the entries whose lines were arranged before the master had a say.
+ *
+ * The same one-time question `adoptDateOrder` asks of a section, asked of an
+ * entry's lines: this resume disagrees with the master, and nothing here has
+ * ever been able to record whether that was deliberate — so read it as
+ * deliberate, once, and write it down. Being wrong that way leaves a resume
+ * arranged as it already was; being wrong the other way silently restacks a
+ * document somebody has proofread and sent.
+ *
+ * Nothing is written to disk here. The mark rides along on the next save of
+ * that resume, exactly as `adoptDateOrder`'s does.
+ */
+export function adoptBulletOrder(sections: SectionSpec[], entries: Entry[]): SectionSpec[] {
+  return sections.map((section) => {
+    const listed = Object.entries(section.bullets ?? {});
+    if (listed.length === 0) return section;
+
+    const found: Record<string, 'manual'> = { ...(section.bulletOrder ?? {}) };
+    let added = false;
+    for (const [entryId, selected] of listed) {
+      if (found[entryId]) continue;
+      const entry = entries.find((e) => e.id === entryId);
+      if (!entry) continue;
+      const byMaster = orderedBullets(selected, entry);
+      if (selected.some((id, i) => id !== byMaster[i])) {
+        found[entryId] = 'manual';
+        added = true;
+      }
+    }
+    return added ? { ...section, bulletOrder: found } : section;
+  });
 }
 
 export function orderedEntries(section: SectionSpec, entries: Entry[]): string[] {

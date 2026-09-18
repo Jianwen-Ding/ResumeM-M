@@ -49,7 +49,13 @@ export interface SessionFile {
   resumeText?: string;
   /** For `author`: the material handed over, and what is already in the store. */
   documents?: SourceDocument[];
-  existing?: { entryIds: string[]; bulletIds: string[]; skillGroups: { id: string; name: string }[] };
+  existing?: {
+    entryIds: string[];
+    bulletIds: string[];
+    skillGroups: { id: string; name: string }[];
+    /** Each entry's lines, in the order the master holds them. */
+    bulletsByEntry?: Record<string, string[]>;
+  };
   /** Where to write what was decided. */
   out: string;
 }
@@ -105,8 +111,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
  * The one place the three differ. Everything around it — saving after every
  * call, the framing, the empty state written up front — is the same for all
  * three, which is why they share a program.
+ *
+ * Exported for its own sake rather than only for `main`: getting this wrong
+ * hands an agent a different job's tools, which it will use, and the session
+ * file it writes back will look entirely well-formed. That is worth asserting
+ * somewhere other than through a spawned process.
  */
-function build(file: SessionFile): { session: { state: unknown }; tools: ToolDefinition[] } {
+export function build(file: SessionFile): { session: { state: unknown }; tools: ToolDefinition[] } {
   if (file.kind === 'write') {
     const session = new WritingSession(
       file.data,
@@ -120,7 +131,7 @@ function build(file: SessionFile): { session: { state: unknown }; tools: ToolDef
   if (file.kind === 'author') {
     const session = new AuthoringSession(
       file.documents ?? [],
-      file.existing ?? { entryIds: [], bulletIds: [], skillGroups: [] },
+      file.existing ?? { entryIds: [], bulletIds: [], skillGroups: [], bulletsByEntry: {} },
     );
     return { session, tools: authoringTools(session) };
   }

@@ -14,6 +14,8 @@ import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
+import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
+import { bulletsAreHandOrdered, mergeSections, orderedBullets } from './sections.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -95,6 +97,7 @@ function clearEdits() {
   state.skillEdits = null;
   state.entryEdits = null;
   state.bulletEdits = null;
+  state.bulletOrderEdits = null;
   state.listEdits = null;
   state.collapsedEdits = null;
   state.orderEdits = null;
@@ -393,14 +396,19 @@ function effectiveChoices() {
   return Object.assign({}, ...chain(state.resumeId).map((s) => s.choices ?? {}), state.choices);
 }
 
-/** Flattened section list through the chain, child replacing parent by kind. */
+/** Flattened section list through the chain, each child laid over its parent. */
 function resolveSections(id = state.resumeId) {
+  /*
+   * Through the shared rule, rather than the `child ?? parent` this used to
+   * do. See web/sections.js: replacing the parent's section outright meant a
+   * child that mentioned only bullets was read as a section with no entries,
+   * so saving a bullet reorder emptied the section out of the editor on the
+   * next load while the PDF went on printing it.
+   */
   let sections = [];
   for (const spec of chain(id)) {
     if (!spec.sections?.length) continue;
-    const next = sections.map((base) => spec.sections.find((o) => o.kind === base.kind) ?? base);
-    for (const o of spec.sections) if (!next.some((x) => x.kind === o.kind)) next.push(o);
-    sections = next;
+    sections = mergeSections(sections, spec.sections);
   }
   return sections;
 }
@@ -455,7 +463,8 @@ function currentSpec() {
    * carries only the part they changed, which mergeSections now lays over the
    * parent's rather than replacing it outright.
    */
-  const touchesSections = state.skillEdits || state.entryEdits || state.bulletEdits || state.orderEdits;
+  const touchesSections =
+    state.skillEdits || state.entryEdits || state.bulletEdits || state.orderEdits || state.bulletOrderEdits;
   if (touchesSections) {
     const own = new Map((base.sections ?? []).map((s) => [s.kind, s]));
     const sections = [];
@@ -469,7 +478,8 @@ function currentSpec() {
           ? Boolean(state.skillEdits && (section.groups ?? []).some((g) => g in state.skillEdits))
           : Boolean(state.entryEdits && section.kind in state.entryEdits) ||
             Boolean(state.orderEdits && section.kind in state.orderEdits) ||
-            Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits));
+            Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits)) ||
+            Boolean(state.bulletOrderEdits && entries.some((eid) => eid in state.bulletOrderEdits));
 
       // Untouched and not already this resume's own: leave it inherited.
       if (!mine && !editedHere) continue;
@@ -498,6 +508,20 @@ function currentSpec() {
         if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
       }
       if (Object.keys(bullets).length > 0) next.bullets = bullets;
+
+      /*
+       * Which entries arranged their own lines, rather than taking the
+       * master's order. Written whenever it was decided here, and cleared
+       * outright when the last one goes back to following the master, so a
+       * resume that follows it everywhere says so by holding nothing.
+       */
+      const byHand = { ...(mine?.bulletOrder ?? {}) };
+      for (const [eid, mode] of Object.entries(state.bulletOrderEdits ?? {})) {
+        if (mode === 'manual') byHand[eid] = 'manual';
+        else delete byHand[eid];
+      }
+      if (Object.keys(byHand).length > 0) next.bulletOrder = byHand;
+      else delete next.bulletOrder;
       sections.push(next);
     }
     spec.sections = sections;
@@ -1578,9 +1602,10 @@ function entryBlock(entry, section, choices) {
      * is on because you want it: you just are not editing it right now. There
      * was no way to say that.
      *
-     * Kept in the browser rather than in the save, because it is about the
-     * screen in front of you and not about the document. Nothing here changes
-     * what compiles, and nothing here can be lost in a way that matters.
+     * Nothing here changes what compiles. It is still kept in the save
+     * rather than in this browser, per resume — see `collapsedIds`: which
+     * entries you are done with is a fact about the document you are
+     * building, and it should still be true on another machine.
      */
     el('button', {
       className: 'fold',
@@ -1661,11 +1686,27 @@ function entryBlock(entry, section, choices) {
         ].filter(Boolean),
       });
       if (chosen?.note) control.append(el('div', { className: 'note', textContent: chosen.note }));
+      /*
+       * A graduation date is a date too.
+       *
+       * This is the case the variant system was built for — one education
+       * entry, two endings — and it was the one place the date control did not
+       * reach, because it only replaced plain-string fields. So the field most
+       * likely to hold a date was the last one still asking you to type
+       * "Sep. 2022 -- May 2026" by hand, and to type it the same way twice.
+       *
+       * Each alternate gets its own control, editing its own text: they are
+       * different dates, which is the entire point of there being two. The
+       * entry's sort order still comes from the default one.
+       */
+      const asDate = name === 'dates' && parsePeriod(String(chosen?.text ?? ''));
       const line = el('div', { className: 'field-line' }, [
-        editableLine(String(chosen?.text ?? ''), {
-          className: 'text field-text',
-          onCommit: (text) => saveFieldText(entry, name, current, text),
-        }),
+        asDate
+          ? variantDateEditor(entry, name, current, asDate)
+          : editableLine(String(chosen?.text ?? ''), {
+              className: 'text field-text',
+              onCommit: (text) => saveFieldText(entry, name, current, text),
+            }),
       ]);
       // Same as on a bullet: the stepper stays out of the disclosure, and
       // exists at all only where there is more than one wording to step
@@ -1740,7 +1781,32 @@ function entryBlock(entry, section, choices) {
     box.append(meta);
   }
 
-  for (const bullet of entry.bullets ?? []) {
+  /*
+   * In the order this resume shows them, not the order the store holds them.
+   *
+   * The same bug the entry list had, and the reason dragging a bullet did
+   * nothing you could see: the drop rewrote the selection, the selection is
+   * what compiles, and this loop then drew the bullets in `entry.bullets`
+   * order regardless. So the PDF moved and the editor did not — which reads as
+   * the handle being broken, and is worse than that, because the document
+   * quietly disagreed with the screen.
+   *
+   * Bullets that are switched off follow the ones that are on, so turning one
+   * off does not make it unreachable.
+   */
+  /*
+   * Which lines, from this resume; what order, from the master — unless this
+   * resume was arranged by hand, which is recorded by the two disagreeing.
+   * See `orderedBullets`.
+   */
+  const picked = bulletSelection(section, entry);
+  const byHand = handOrdered(section, entry.id);
+  const shown = byHand ? picked : orderedBullets(picked, entry);
+  const ordered = [
+    ...shown.map((id) => (entry.bullets ?? []).find((b) => b.id === id)).filter(Boolean),
+    ...(entry.bullets ?? []).filter((b) => !shown.includes(b.id)),
+  ];
+  for (const bullet of ordered) {
     if (bullet.archived) continue;
     box.append(bulletBlock(entry, section, bullet, choices));
   }
@@ -1748,7 +1814,25 @@ function entryBlock(entry, section, choices) {
   box.append(
     el('div', { className: 'add-row' }, [
       el('button', { className: 'link', textContent: '+ Add bullet', onclick: () => addBullet(entry) }),
-    ]),
+      /*
+       * Said out loud, and undoable. Arranging the lines here detaches this
+       * entry from the master's order, so rearranging the master will no
+       * longer restack it — which is right, and is also the sort of thing
+       * that has to be visible or it is a rule you discover by being
+       * surprised.
+       */
+      byHand
+        ? el('span', { className: 'by-hand' }, [
+            el('span', { textContent: 'Lines arranged here' }),
+            el('button', {
+              className: 'link',
+              textContent: 'Follow the master’s order',
+              title: 'Put these lines back in the order the master document puts them, and follow it again',
+              onclick: () => followMasterOrder(entry, section),
+            }),
+          ])
+        : null,
+    ].filter(Boolean)),
   );
   box.className = 'entry';
   return dropTarget(box, {
@@ -1823,10 +1907,63 @@ function entryGrip(section, entry) {
   });
 }
 
-function setBulletOrder(entry, ordered) {
+function setBulletOrder(entry, ordered, { byHand = true } = {}) {
   state.bulletEdits = { ...(state.bulletEdits ?? {}), [entry.id]: ordered };
+  /*
+   * Dragging here is this resume saying it wants its own order, and that has
+   * to be written down rather than inferred from the order itself — see
+   * `SectionSpec.bulletOrder`. Without it, the next rearrangement of the
+   * master would restack this entry and throw the arrangement away.
+   */
+  state.bulletOrderEdits = { ...(state.bulletOrderEdits ?? {}), [entry.id]: byHand ? 'manual' : null };
   markDirty();
   render();
+}
+
+/** Whether this entry's lines were arranged here, including unsaved changes. */
+function handOrdered(section, entryId) {
+  const edited = state.bulletOrderEdits?.[entryId];
+  if (edited !== undefined) return edited === 'manual';
+  return bulletsAreHandOrdered(section, entryId);
+}
+
+/**
+ * Put this entry's lines back in the master's order.
+ *
+ * The way out of a hand arrangement, and the reason the arrangement can be
+ * made at all without it being a one-way door. A resume that disagrees with
+ * the master stops following it — deliberately — and this is how you say you
+ * are done disagreeing.
+ */
+function followMasterOrder(entry, section) {
+  setBulletOrder(entry, orderedBullets(bulletSelection(section, entry), entry), { byHand: false });
+  setStatus('Back in the master’s order');
+}
+
+/**
+ * Reorder the lines of an entry in the master itself, which is the order
+ * every resume that has not been arranged by hand will follow.
+ *
+ * This writes the entry, not a resume: the master is the shared inventory,
+ * and an order set here is the one the documents inherit.
+ */
+async function setMasterBulletOrder(entry, ordered) {
+  const bullets = ordered.map((id) => (entry.bullets ?? []).find((b) => b.id === id)).filter(Boolean);
+  // Anything the drag did not name — archived lines are still in the file and
+  // are not shown here — keeps its place at the end rather than being dropped.
+  const rest = (entry.bullets ?? []).filter((b) => !ordered.includes(b.id));
+  const next = { ...entry, bullets: [...bullets, ...rest] };
+
+  // On screen first: `saveEntry` redraws from the store the client is holding,
+  // which has not heard about this yet. Same reason as `saveEntryPeriod`.
+  const held = state.store?.entries?.find((e) => e.id === entry.id);
+  if (held) held.bullets = next.bullets;
+  render();
+
+  await saveEntry(next, 'Lines reordered');
+  await loadStore();
+  render();
+  scheduleRender();
 }
 
 function dropBullet(entry, section, moved, onto, side) {
@@ -1835,6 +1972,33 @@ function dropBullet(entry, section, moved, onto, side) {
   const at = list.indexOf(onto);
   const before = side === 'after' ? (list[at + 1] ?? null) : onto;
   setBulletOrder(entry, moveBefore(list, moved, before));
+}
+
+/** The order shown in the master, which is the entry's own line order. */
+function masterBulletIds(entry) {
+  return (entry.bullets ?? []).map((b) => b.id);
+}
+
+function dropMasterBullet(entry, moved, onto, side) {
+  const list = masterBulletIds(entry);
+  if (!list.includes(moved)) return;
+  const at = list.indexOf(onto);
+  const before = side === 'after' ? (list[at + 1] ?? null) : onto;
+  setMasterBulletOrder(entry, moveBefore(list, moved, before)).catch((err) => setStatus(err.message, true));
+}
+
+function masterBulletGrip(entry, bullet) {
+  const list = masterBulletIds(entry);
+  if (!list.includes(bullet.id) || list.length < 2) return null;
+  return dragHandle({
+    kind: 'master-bullet',
+    id: bullet.id,
+    label: 'this line, for every resume',
+    onStep: (delta) =>
+      setMasterBulletOrder(entry, moveBy(masterBulletIds(entry), bullet.id, delta)).catch((err) =>
+        setStatus(err.message, true),
+      ),
+  });
 }
 
 function bulletGrip(entry, section, bullet) {
@@ -2299,6 +2463,15 @@ function renderMasterEditor(editor) {
       }
       for (const bullet of entry.bullets ?? []) {
         const row = el('div', { className: 'master-source-bullet' });
+        /*
+         * Arranged here, followed everywhere. The master is the one place an
+         * order can be stated once and mean something on every resume, so
+         * this is where the lines inside an entry are put in order — every
+         * resume that has not been arranged by hand takes this order, and
+         * rearranging it here restacks all of them.
+         */
+        const grip = masterBulletGrip(entry, bullet);
+        if (grip) row.append(grip);
         if (Array.isArray(bullet.items)) {
           row.append(el('div', { className: 'text', textContent: `${bullet.prefix ?? ''} ${bullet.items.map(item => item.text).join(bullet.separator ?? ', ')}` }));
           row.append(el('button', { className: 'tiny', textContent: '+ Item', onclick: () => addListItem(entry, bullet) }));
@@ -2324,7 +2497,13 @@ function renderMasterEditor(editor) {
         const actions = [...row.querySelectorAll('.phrase-feedback, :scope > button, :scope > .toolbar')];
         const anchor = row.querySelector('.phrase-line') ?? row;
         attachSourceTools(row, `${entry.id}/${bullet.id}`, actions, anchor);
-        box.append(row);
+        box.append(
+          dropTarget(row, {
+            kind: 'master-bullet',
+            id: bullet.id,
+            onDrop: (moved, side) => dropMasterBullet(entry, moved, bullet.id, side),
+          }),
+        );
       }
       box.append(el('button', { className: 'tiny', textContent: '+ Bullet', onclick: () => addBullet(entry) }));
       editor.append(box);
@@ -2454,8 +2633,9 @@ async function readMaterial(notes) {
   const proposal = result.proposal ?? {};
   const entries = proposal.entries ?? [];
   const alternates = proposal.alternates ?? [];
+  const orders = proposal.orders ?? [];
 
-  if (entries.length === 0 && alternates.length === 0) {
+  if (entries.length === 0 && alternates.length === 0 && orders.length === 0) {
     setChildren(notes, el('div', {}, [
       el('p', {
         textContent:
@@ -2471,7 +2651,8 @@ async function readMaterial(notes) {
     el('p', {
       textContent:
         `Read ${plural(result.read?.length ?? 0, 'file')}. ` +
-        `${plural(entries.length, 'entry', 'entries')} and ${plural(alternates.length, 'other wording')} to look at. ` +
+        `${plural(entries.length, 'entry', 'entries')}, ${plural(alternates.length, 'other wording')}` +
+        `${orders.length ? ` and ${plural(orders.length, 'entry', 'entries')} to reorder` : ''} to look at. ` +
         'Nothing is saved yet.',
     }),
     proposal.notes ? el('p', { className: 'hint', textContent: proposal.notes }) : null,
@@ -2564,6 +2745,52 @@ async function readMaterial(notes) {
       added++;
     } catch (err) {
       failures.push(`${alt.bulletId}: ${err.message}`);
+    }
+  }
+
+  /*
+   * And the orders, last, because accepting one moves every resume that has
+   * not arranged its own lines — so it is the proposal with the widest
+   * reach and the one worth meeting after the small additive ones.
+   *
+   * Shown as the two orders side by side rather than as a list of ids. The
+   * question being asked is "does this read better", and that cannot be
+   * answered from `b_ec_pipeline, b_ec_testing`.
+   */
+  for (const order of orders) {
+    const entry = state.store.entries.find((e) => e.id === order.entryId);
+    if (!entry) continue;
+    const textOf = (id) => {
+      const bullet = (entry.bullets ?? []).find((b) => b.id === id);
+      if (!bullet) return id;
+      return String((bullet.variants?.find((v) => v.id === bullet.default) ?? bullet.variants?.[0])?.text ?? id);
+    };
+    const now = (entry.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
+    const wanted = order.bullets.filter((id) => now.includes(id));
+
+    const accepted = await showModal(
+      `A different order — ${fieldText(entry.title, effectiveChoices(), `${entry.id}.title`) || entry.id}`,
+      el('div', {}, [
+        el('p', { className: 'hint', textContent: order.why }),
+        el('p', { className: 'hint', textContent: 'It reads now:' }),
+        el('ol', {}, now.map((id) => el('li', { textContent: textOf(id) }))),
+        el('p', { className: 'hint', textContent: 'It would read:' }),
+        el('ol', {}, wanted.map((id) => el('li', { textContent: textOf(id) }))),
+        el('p', {
+          className: 'hint',
+          textContent:
+            'This is the master’s order, so it moves every resume that has not arranged its own lines. The ones ' +
+            'you arranged yourself stay as they are.',
+        }),
+      ]),
+      { okLabel: 'Use this order', showCancel: true, cancelLabel: 'Leave it' },
+    );
+    if (!accepted) continue;
+    try {
+      await setMasterBulletOrder(entry, wanted);
+      added++;
+    } catch (err) {
+      failures.push(`${order.entryId}: ${err.message}`);
     }
   }
 
@@ -2968,7 +3195,19 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
  * itself moved.
  */
 function dateEditor(entry) {
-  const period = entry.period ? structuredClone(entry.period) : {};
+  return datesControl(entry.period, (period) => saveEntryPeriod(entry, period));
+}
+
+/**
+ * The control itself, given a date and somewhere to send the new one.
+ *
+ * Separate from what it is bound to, because it is bound to two different
+ * things: the entry's own date, where the server renders the words, and one
+ * alternate of a field, where this side does. The controls are the same either
+ * way, and so is what counts as a date.
+ */
+function datesControl(from, onChange) {
+  const period = from ? structuredClone(from) : {};
   const wrap = el('div', { className: 'dates' });
 
   const commit = () => {
@@ -2978,7 +3217,7 @@ function dateEditor(entry) {
     if (!next.start?.year) return;
     if (next.ongoing) delete next.end;
     if (!next.end?.year) delete next.end;
-    saveEntryPeriod(entry, next);
+    onChange(next);
   };
 
   /** One end of the range: a month that may be blank, and a year. */
@@ -3039,7 +3278,56 @@ function dateEditor(entry) {
   wrap.append(end('start', 'From'));
   if (!period.ongoing) wrap.append(end('end', 'to'));
   wrap.append(switches);
+  /*
+   * A range that runs backwards, said beside the control that made it.
+   *
+   * Not refused: changing both ends means passing through a moment where
+   * only one of them has moved, and a control that rejected that state
+   * would be unusable. The resume's warnings say it too — see
+   * `endsBeforeItStarts` — but by then you have looked away from the dates,
+   * and this is the half-second where fixing it is free.
+   */
+  if (endsBeforeItStarts(period)) {
+    wrap.append(
+      el('span', {
+        className: 'date-wrong',
+        role: 'status',
+        textContent: 'ends before it starts',
+        title: 'The end of this range is earlier than its start. Nothing has been changed — check the two years.',
+      }),
+    );
+  }
   return wrap;
+}
+
+/**
+ * The date control, bound to one alternate of a field rather than to the entry.
+ *
+ * The words are written here rather than by the server, because the server
+ * only renders the entry's own `dates` and these are phrasings of a field —
+ * rewriting one of several from a period is a thing only the person editing
+ * that one alternate has any business asking for. The style still comes from
+ * the rest of the store, so the form written here is the form already in use,
+ * and `tests/date-agreement.test.js` holds this side and the server's to the
+ * same answers.
+ */
+function variantDateEditor(entry, name, variantId, period) {
+  return datesControl(period, (next) => {
+    const style = inferStyle(storeDateTexts());
+    const text = formatPeriod(next, style);
+    if (text) saveFieldText(entry, name, variantId, text);
+  });
+}
+
+/** Every date already written down, for working out how this store writes them. */
+function storeDateTexts() {
+  const out = [];
+  for (const entry of state.store?.entries ?? []) {
+    const field = entry.dates;
+    if (typeof field === 'string') out.push(field);
+    else if (field?.variants) for (const v of field.variants) out.push(String(v.text ?? ''));
+  }
+  return out.filter(Boolean);
 }
 
 /** A checkbox with its words, which is two elements every single time. */
@@ -6117,9 +6405,36 @@ async function loadSettings() {
   const modelChips = el('div', { className: 'chip-set model-chips' });
   const modelOther = el('div', { className: 'model-other', hidden: true }, [model]);
   const typedModel = () => model.value.trim();
+
+  /*
+   * What the chosen command says it takes, asked of the command itself.
+   *
+   * The written suggestions go stale, and had: the Claude CLI documents
+   * `fable`, `opus` and `sonnet` while the list in the source said `opus`,
+   * `sonnet`, `haiku`. So the buttons are built from the server's answer,
+   * which puts the question to the command that is actually configured — a
+   * path to a particular build gets that build's answer — and which falls back
+   * to the written list whenever the command cannot be asked. Nothing here can
+   * leave the picker empty.
+   *
+   * Held per command for as long as the panel is open, because the chips are
+   * redrawn on every keystroke in the command box and the answer does not
+   * change between two of them.
+   */
+  const fromCli = new Map();
+  const askAboutModels = async (cmd) => {
+    if (!cmd || fromCli.has(cmd)) return;
+    fromCli.set(cmd, null); // in flight, so a keystroke does not ask twice
+    const answer = await api(`/ai/models?command=${encodeURIComponent(cmd)}`).catch(() => null);
+    fromCli.set(cmd, answer);
+    if (command.value.trim() === cmd) showModelChips();
+  };
+
   const showModelChips = () => {
     const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
-    const names = chosen?.model?.suggestions ?? [];
+    const said = fromCli.get(command.value.trim());
+    if (said === undefined) void askAboutModels(command.value.trim());
+    const names = said?.models?.length ? said.models : (chosen?.model?.suggestions ?? []);
     const listed = names.includes(typedModel());
     // Nothing to choose between: the box is the only control that makes sense.
     modelChips.hidden = names.length === 0;

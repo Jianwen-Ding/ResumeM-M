@@ -1,3 +1,18 @@
+/*
+ * Dates, for the browser.
+ *
+ * A mirror of `src/model/period.ts`, which the editor cannot import: that one
+ * is TypeScript compiled for node and this is a script the browser loads
+ * directly, and the build has no path between them — the same split that
+ * forced `orderEntryIds` into reorder.js.
+ *
+ * Duplication is tolerable; drift is not. If the two disagree, the control
+ * shows one date and the resume prints another, and both look right on their
+ * own. `tests/date-agreement.test.js` pins them against one table of the
+ * shapes people actually write, in both directions, so a change to either side
+ * fails rather than shipping.
+ */
+
 /**
  * Dates on a resume, as dates rather than as words.
  *
@@ -26,49 +41,7 @@
  * assert exactly that over a corpus rather than over examples chosen to pass.
  */
 
-/** A point in time at the granularity a resume uses: a year, or a month in one. */
-export interface DatePoint {
-  year: number;
-  /** 1-12. Absent means the year as a whole. */
-  month?: number;
-}
-
-/**
- * When something happened.
- *
- * `end` absent with `ongoing` false is a single date — an award, a talk, a
- * one-day certification — which is a real shape and not a range missing half
- * of itself.
- */
-export interface Period {
-  start?: DatePoint;
-  end?: DatePoint;
-  /** No end yet: prints as the store's word for it, usually "Present". */
-  ongoing?: boolean;
-  /** Not yet reached: a graduation date, printed with "Expected" in front. */
-  expected?: boolean;
-  /**
-   * The season the text named, kept so "Summer 2024" can be printed back as
-   * itself. The month carries the sort order; this carries the words.
-   */
-  season?: Season;
-}
-
-export type Season = 'spring' | 'summer' | 'fall' | 'winter';
-
-/** How this store writes a date, read back out of the store itself. */
-export interface DateStyle {
-  /** `Sep.` | `Sep` | `September` | `09` */
-  month: 'abbrDot' | 'abbr' | 'long' | 'numeric';
-  /** What sits between the two ends, spaces included. */
-  range: string;
-  /** The word for an end that has not happened. */
-  present: string;
-  /** The word that marks a date as not yet reached. */
-  expected: string;
-}
-
-export const DEFAULT_STYLE: DateStyle = {
+export const DEFAULT_STYLE = {
   // `--` is an en dash in LaTeX, and it is what the bundled store uses.
   month: 'abbrDot',
   range: ' -- ',
@@ -87,8 +60,8 @@ const ABBR = LONG.map((m) => m.slice(0, 3));
  * 2024" is saying something a sort should be able to act on. The month is the
  * one the season starts in, which is what a reader would assume.
  */
-const SEASON_MONTH: Record<Season, number> = { spring: 3, summer: 6, fall: 9, winter: 12 };
-const SEASON_WORDS: Record<string, Season> = {
+const SEASON_MONTH = { spring: 3, summer: 6, fall: 9, winter: 12 };
+const SEASON_WORDS = {
   spring: 'spring',
   summer: 'summer',
   fall: 'fall',
@@ -120,7 +93,7 @@ const RANGE_SEPARATORS = [
 /** The `(expected)` that people write after the date instead of before it. */
 const TRAILING_EXPECTED = /\s*\((expected|anticipated|projected)\)\s*$/i;
 
-function monthFromWord(word: string): { month: number; how: DateStyle['month']; season?: Season } | null {
+function monthFromWord(word) {
   const clean = word.replace(/\.$/, '').toLowerCase();
   const season = SEASON_WORDS[clean];
   if (season) return { month: SEASON_MONTH[season], how: 'long', season };
@@ -140,10 +113,10 @@ function monthFromWord(word: string): { month: number; how: DateStyle['month']; 
 /**
  * One end of a range: a year, a month and a year, or a season and a year.
  *
- * Returns the spelling it found as well as the value, because the spelling is
+ * Returns the spelling it found, because the spelling is
  * what lets the formatter put the text back the way it was.
  */
-function parsePoint(raw: string): { point: DatePoint; how?: DateStyle['month']; season?: Season } | null {
+function parsePoint(raw) {
   const text = raw.trim().replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
   if (!text) return null;
 
@@ -172,7 +145,7 @@ function parsePoint(raw: string): { point: DatePoint; how?: DateStyle['month']; 
   const words = text.split(' ');
   if (words.length === 2) {
     const [a = '', b = ''] = words;
-    for (const [word, year] of [[a, b], [b, a]] as const) {
+    for (const [word, year] of [[a, b], [b, a]] ) {
       if (!/^\d{4}$/.test(year)) continue;
       const month = monthFromWord(word);
       if (month) {
@@ -188,7 +161,7 @@ function parsePoint(raw: string): { point: DatePoint; how?: DateStyle['month']; 
 }
 
 /** Split a range on the first separator that leaves something on both sides. */
-function splitRange(text: string): { left: string; right: string; separator: string } | null {
+function splitRange(text) {
   for (const separator of RANGE_SEPARATORS) {
     const at = text.indexOf(separator);
     if (at <= 0) continue;
@@ -209,7 +182,7 @@ function splitRange(text: string): { left: string; right: string; separator: str
  * "Ongoing since university" are things people put in this field, and the
  * right response is to leave the text alone and sort that entry by hand.
  */
-export function parsePeriod(raw: string): Period | undefined {
+export function parsePeriod(raw) {
   if (typeof raw !== 'string') return undefined;
   let text = raw.trim();
   if (!text) return undefined;
@@ -258,8 +231,8 @@ export function parsePeriod(raw: string): Period | undefined {
 }
 
 /** How one date string spells things, for inferring a whole store's habit. */
-export function styleOf(raw: string): Partial<DateStyle> {
-  const found: Partial<DateStyle> = {};
+export function styleOf(raw) {
+  const found = {};
   const text = String(raw ?? '');
 
   const split = splitRange(text);
@@ -293,8 +266,8 @@ export function styleOf(raw: string): Partial<DateStyle> {
  * outlier should not decide the shape of every date the program writes from
  * then on.
  */
-export function inferStyle(samples: string[]): DateStyle {
-  const votes: Record<keyof DateStyle, Map<string, number>> = {
+export function inferStyle(samples) {
+  const votes = {
     month: new Map(),
     range: new Map(),
     present: new Map(),
@@ -303,15 +276,15 @@ export function inferStyle(samples: string[]): DateStyle {
 
   for (const sample of samples) {
     const found = styleOf(sample);
-    for (const key of Object.keys(votes) as (keyof DateStyle)[]) {
+    for (const key of Object.keys(votes)) {
       const value = found[key];
       if (value === undefined) continue;
       votes[key].set(value, (votes[key].get(value) ?? 0) + 1);
     }
   }
 
-  const winner = <K extends keyof DateStyle>(key: K): DateStyle[K] => {
-    let best: string | undefined;
+  const winner = (key) => {
+    let best;
     let count = 0;
     for (const [value, n] of votes[key]) {
       if (n > count) {
@@ -319,13 +292,13 @@ export function inferStyle(samples: string[]): DateStyle {
         count = n;
       }
     }
-    return (best ?? DEFAULT_STYLE[key]) as DateStyle[K];
+    return best ?? DEFAULT_STYLE[key];
   };
 
   return { month: winner('month'), range: winner('range'), present: winner('present'), expected: winner('expected') };
 }
 
-function formatMonth(month: number, how: DateStyle['month']): string {
+function formatMonth(month, how) {
   const name = LONG[month - 1] ?? '';
   if (how === 'long') return name;
   if (how === 'numeric') return String(month).padStart(2, '0');
@@ -340,7 +313,7 @@ function formatMonth(month: number, how: DateStyle['month']): string {
   return how === 'abbrDot' && short !== name ? `${short}.` : short;
 }
 
-function formatPoint(point: DatePoint, style: DateStyle, season?: Season): string {
+function formatPoint(point, style, season) {
   if (season) return `${season[0]?.toUpperCase()}${season.slice(1)} ${point.year}`;
   if (point.month === undefined) return String(point.year);
   if (style.month === 'numeric') return `${String(point.month).padStart(2, '0')}/${point.year}`;
@@ -355,7 +328,7 @@ function formatPoint(point: DatePoint, style: DateStyle, season?: Season): strin
  * is a projection. Putting it in front of the whole thing produced "Expected
  * Sep. 2022 -- May 2027", which says something false about the start.
  */
-export function formatPeriod(period: Period | undefined, style: DateStyle = DEFAULT_STYLE): string {
+export function formatPeriod(period, style = DEFAULT_STYLE) {
   if (!period?.start) return '';
   const soon = period.expected ? `${style.expected} ` : '';
   const start = formatPoint(period.start, style, period.season);
@@ -376,7 +349,7 @@ export function formatPeriod(period: Period | undefined, style: DateStyle = DEFA
  * — an expected graduation — sorts by when it will be, which puts a degree in
  * progress above a job that ended last year, and that is also right.
  */
-export function sortKey(period: Period | undefined): number | undefined {
+export function sortKey(period) {
   if (!period?.start) return undefined;
   if (period.ongoing) return Number.MAX_SAFE_INTEGER;
   const point = period.end ?? period.start;
@@ -384,46 +357,17 @@ export function sortKey(period: Period | undefined): number | undefined {
 }
 
 /** The earlier edge, for sorting oldest-first without reversing the other key. */
-export function startKey(period: Period | undefined): number | undefined {
+export function startKey(period) {
   if (!period?.start) return undefined;
   return period.start.year * 100 + (period.start.month ?? 1);
 }
 
 /**
- * A range that finishes before it begins.
- *
- * The date control takes any year between 1900 and 2100 at either end and
- * asks nothing further, which is right while you are editing — changing both
- * ends of a range means passing through a moment where only one of them has
- * moved, and a control that fought you there would be unusable. But nothing
- * downstream ever looked again, so a mistyped digit printed "Jul. 2026 --
- * Dec. 2024" onto a document whose entire purpose is to be correct, and
- * sorted the entry by an end date that never happened.
- *
- * It is one keystroke away — the end year typed into the start field, a 6 for
- * a 4 — and it is equally what an imported file can already contain. So it is
- * said out loud, in the warnings the editor and `rmm build` both show, and
- * nowhere is anything refused or rewritten: the only thing the program is
- * entitled to do about somebody's dates is point at them.
- *
- * Only the year is compared, and that is a deliberate retreat from a version
- * of this that compared months too. "Winter 2024 -- Spring 2024" is an
- * ordinary way to write an academic term, and the month for a season is one
- * this file made up — winter is December here — so the finer check called
- * that date wrong. It is not wrong. Nor is "Dec. 2024 -- Spring 2024", a
- * co-op running into the next year, and the parse cannot even tell you a
- * season was involved: only the start's season is kept, so by the time this
- * sees the period the end is an ordinary March.
- *
- * So the rule is the one no reading rescues: the end year is before the start
- * year. "Jul. 2026 -- Dec. 2024" is wrong however you read it. A month-level
- * inversion inside one year is left alone — it is ambiguous, and it is picked
- * from a menu rather than typed, which is not where the slip happens anyway.
- * A warning that fires on somebody's real dates costs the credibility of
- * every other warning, and that is the more expensive mistake by far.
+ * A range that finishes before it begins. See `period.ts` for why this is
+ * said rather than refused; `tests/date-agreement.test.js` holds the two
+ * copies to the same answer.
  */
-export function endsBeforeItStarts(period: Period | undefined): boolean {
-  // Still going has no end to be wrong about, whatever is left in `end`.
+export function endsBeforeItStarts(period) {
   if (!period?.start?.year || !period.end?.year || period.ongoing) return false;
   return period.end.year < period.start.year;
 }

@@ -416,3 +416,65 @@ describe('an archived bullet stays archived', () => {
     expect(out.warnings.join(' ')).toMatch(/b_old/);
   });
 });
+
+/*
+ * A date that runs backwards, reported where somebody will see it.
+ *
+ * The control accepts any year at either end, because it has to — moving
+ * both ends of a range means passing through a state where only one of them
+ * has moved. So nothing anywhere looked at the result, and a 6 typed for a 4
+ * printed "Jul. 2026 -- Dec. 2024" onto the one document that has to be
+ * right. It is equally what a hand-written or imported YAML file can already
+ * contain, which is why the check lives here rather than only in the editor:
+ * this is the path every resume takes on its way to a page.
+ */
+describe('a date that ends before it starts', () => {
+  const dated = (period: Entry['period'], dates?: string): StoreData => {
+    const data = store([{ id: 'base', label: 'Base', sections: [{ kind: 'experience', entries: ['exp'] }] }]);
+    data.entries = [{ ...expEntry, dates, period }];
+    return data;
+  };
+
+  it('is said out loud, naming the entry as the user names it', () => {
+    const said = resolveResume('base', dated({ start: { year: 2026, month: 7 }, end: { year: 2024, month: 12 } }, 'Jul. 2026 -- Dec. 2024')).warnings;
+    expect(said.join(' ')).toMatch(/Example Co\./);
+    expect(said.join(' ')).toMatch(/ends before it starts/i);
+  });
+
+  it('quotes the words that will print, so it can be found on the page', () => {
+    const said = resolveResume('base', dated({ start: { year: 2026 }, end: { year: 2024 } }, 'Jul. 2026 -- Dec. 2024')).warnings;
+    expect(said.join(' ')).toContain('Jul. 2026 -- Dec. 2024');
+  });
+
+  it('still says it for an entry whose date has no words yet', () => {
+    const said = resolveResume('base', dated({ start: { year: 2026 }, end: { year: 2024 } })).warnings;
+    expect(said.join(' ')).toMatch(/ends before it starts/i);
+  });
+
+  /*
+   * And says nothing otherwise. A warning that fires on good dates is a
+   * warning nobody reads, which costs more than the one it was added for.
+   */
+  it('says nothing about an ordinary date', () => {
+    for (const period of [
+      { start: { year: 2024, month: 7 }, end: { year: 2024, month: 12 } },
+      { start: { year: 2024 }, end: { year: 2024 } },
+      { start: { year: 2024, month: 7 }, ongoing: true },
+      { start: { year: 2024 } },
+      undefined,
+    ] as Entry['period'][]) {
+      const said = resolveResume('base', dated(period)).warnings.join(' ');
+      expect(said, JSON.stringify(period)).not.toMatch(/ends before it starts/i);
+    }
+  });
+
+  /*
+   * Nothing is rewritten. The only thing this program is entitled to do
+   * about somebody's dates is point at them — the entry prints exactly the
+   * words it was given, backwards or not.
+   */
+  it('changes nothing about what prints', () => {
+    const out = resolveResume('base', dated({ start: { year: 2026 }, end: { year: 2024 } }, 'Jul. 2026 -- Dec. 2024'));
+    expect(out.sections[0]?.entries[0]?.dates).toBe('Jul. 2026 -- Dec. 2024');
+  });
+});

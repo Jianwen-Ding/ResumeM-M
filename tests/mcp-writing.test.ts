@@ -275,6 +275,7 @@ function authoring(docs: SourceDocument[] = [RESUME_DOC]) {
     entryIds: ['exp_acme'],
     bulletIds: ['b_pipeline', 'b_testing'],
     skillGroups: [{ id: 'sk_lang', name: 'Languages' }],
+    bulletsByEntry: { exp_acme: ['b_pipeline', 'b_testing'] },
   });
 }
 
@@ -469,6 +470,7 @@ describe('both sets of tools, as tools', () => {
       'propose_entry',
       'propose_bullet',
       'propose_alternate',
+      'propose_order',
       'propose_skill',
       'review_proposal',
       'finish',
@@ -489,6 +491,214 @@ describe('both sets of tools, as tools', () => {
     expect(reply.error).toBeUndefined();
     expect(reply.result.isError).toBe(true);
     expect(reply.result.content[0]?.text).toContain('a sentence rather than a letter');
+  });
+
+  /*
+   * `propose_order` through the transport rather than through the session.
+   *
+   * The session method had eight tests and the tool handler around it had
+   * none — the argument parsing, the guards, the list coercion, every line
+   * an agent's call actually goes through before reaching the method. A
+   * typo there is a tool that errors for the agent while every unit test
+   * passes, which is the shape this whole session has been finding.
+   */
+  it('takes an order through the transport, the way an agent sends one', async () => {
+    const session = authoring();
+    const reply = (await handle(
+      {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'tools/call',
+        params: {
+          name: 'propose_order',
+          arguments: { entry: 'exp_acme', bullets: ['b_testing'], why: 'The posting is about testing.' },
+        },
+      },
+      authoringTools(session),
+      INFO,
+    )) as { result: { content: { text: string }[]; isError?: boolean } };
+    expect(reply.result.isError).toBeFalsy();
+    expect(reply.result.content[0]?.text).toContain('b_testing');
+    expect(session.state.orders[0]?.bullets).toEqual(['b_testing', 'b_pipeline']);
+  });
+
+  /* One id rather than a list of one, which is a thing models do. */
+  it('takes a single line id as well as a list', async () => {
+    const session = authoring();
+    const reply = (await handle(
+      {
+        jsonrpc: '2.0',
+        id: 6,
+        method: 'tools/call',
+        params: { name: 'propose_order', arguments: { entry: 'exp_acme', bullets: 'b_testing', why: 'why' } },
+      },
+      authoringTools(session),
+      INFO,
+    )) as { result: { isError?: boolean } };
+    expect(reply.result.isError).toBeFalsy();
+    expect(session.state.orders[0]?.bullets).toEqual(['b_testing', 'b_pipeline']);
+  });
+
+  it('says which argument was wrong when the lines are not a list of ids', async () => {
+    const reply = (await handle(
+      {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'propose_order', arguments: { entry: 'exp_acme', bullets: [1, 2], why: 'why' } },
+      },
+      authoringTools(authoring()),
+      INFO,
+    )) as { result: { content: { text: string }[]; isError: boolean } };
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('"bullets"');
+  });
+
+  it('asks for the reason when it is missing, rather than proposing without one', async () => {
+    const reply = (await handle(
+      {
+        jsonrpc: '2.0',
+        id: 8,
+        method: 'tools/call',
+        params: { name: 'propose_order', arguments: { entry: 'exp_acme', bullets: ['b_testing'] } },
+      },
+      authoringTools(authoring()),
+      INFO,
+    )) as { result: { content: { text: string }[]; isError: boolean } };
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('"why"');
+  });
+
+  /*
+   * Every remaining tool, through the transport.
+   *
+   * The sessions underneath these are thoroughly tested; the handlers around
+   * them were not, and the handler is every line an agent's call passes
+   * through before reaching the session — the argument parsing, the guards,
+   * the coercions. A mistake there is a tool that fails for the agent while
+   * the unit tests stay green, which is exactly how two reorder tools spent
+   * weeks reporting success and moving nothing.
+   *
+   * Asserted on the reply rather than on the session, because the reply is
+   * what the agent gets. A handler that reaches the session and then returns
+   * the wrong shape is as broken as one that never reaches it.
+   */
+  const callWriting = (name: string, args: Record<string, unknown>, session = writing()) =>
+    handle(
+      { jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name, arguments: args } },
+      writingTools(session),
+      INFO,
+    ) as Promise<{ result: { content: { text: string }[]; isError?: boolean } }>;
+
+  const callAuthoring = (name: string, args: Record<string, unknown>, session = authoring()) =>
+    handle(
+      { jsonrpc: '2.0', id: 98, method: 'tools/call', params: { name, arguments: args } },
+      authoringTools(session),
+      INFO,
+    ) as Promise<{ result: { content: { text: string }[]; isError?: boolean } }>;
+
+  it('searches the letters already written', async () => {
+    const reply = await callWriting('find_my_letters', { about: 'ingest' });
+    expect(reply.result.isError).toBeFalsy();
+    expect(reply.result.content[0]?.text.length).toBeGreaterThan(0);
+  });
+
+  it('searches the answers already given', async () => {
+    const reply = await callWriting('find_my_answers', { question: 'Why this role?' });
+    expect(reply.result.isError).toBeFalsy();
+    expect(reply.result.content[0]?.text.length).toBeGreaterThan(0);
+  });
+
+  it('checks a claim against the resume', async () => {
+    const reply = await callWriting('check_claim', { claim: 'cut latency from 900ms to 180ms' });
+    expect(reply.result.content[0]?.text.length).toBeGreaterThan(0);
+  });
+
+  it('saves an answer to a question the form asked', async () => {
+    const session = writing();
+    const reply = await callWriting(
+      'save_answer',
+      { question: 'q1', body: 'Because the ingest work is the part of this I have done most of.' },
+      session,
+    );
+    expect(reply.result.isError).toBeFalsy();
+  });
+
+  /*
+   * Finishing having written nothing is refused, which is the better half of
+   * this to assert: an agent that calls `finish` first and stops would
+   * otherwise hand back an empty draft that looks deliberate.
+   */
+  it('will not finish a writing session that has written nothing', async () => {
+    const reply = await callWriting('finish', { reasoning: 'Adapted the Everclear letter.' });
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toMatch(/nothing has been written/i);
+  });
+
+  it('finishes once something has been written, and says what it leaned on', async () => {
+    const session = writing();
+    await callWriting('save_answer', { question: 'q1', body: 'Because the ingest work is what I have done most of.' }, session);
+    const reply = await callWriting('finish', { reasoning: 'Adapted the Everclear letter.' }, session);
+    expect(reply.result.isError).toBeFalsy();
+    expect(session.state.finished).toBe(true);
+  });
+
+  it('refuses to finish with nothing said', async () => {
+    const reply = await callWriting('finish', {});
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('"reasoning"');
+  });
+
+  it('reads a document by id, and refuses one that is not there', async () => {
+    const good = await callAuthoring('read_document', { id: 'd1' });
+    expect(good.result.isError).toBeFalsy();
+    const bad = await callAuthoring('read_document', { id: 'nope' });
+    expect(bad.result.isError).toBe(true);
+  });
+
+  it('proposes another wording for a bullet that exists', async () => {
+    const session = authoring();
+    const reply = await callAuthoring(
+      'propose_alternate',
+      {
+        bullet: 'b_pipeline',
+        text: 'Cut median end-to-end latency from 900ms to 180ms.',
+        source: 'Cut median end-to-end latency from 900ms to 180ms.',
+        document: 'd1',
+      },
+      session,
+    );
+    expect(reply.result.isError).toBeFalsy();
+    expect(session.state.alternates).toHaveLength(1);
+  });
+
+  it('refuses a wording that is not in the material', async () => {
+    const reply = await callAuthoring('propose_alternate', {
+      bullet: 'b_pipeline',
+      text: 'Led the company to record profits.',
+      source: 'Led the company to record profits.',
+      document: 'd1',
+    });
+    expect(reply.result.isError).toBe(true);
+  });
+
+  it('proposes a skill for a group that exists', async () => {
+    const session = authoring();
+    const reply = await callAuthoring(
+      'propose_skill',
+      { group: 'sk_lang', text: 'Kafka', source: 'Built the Kafka ingest pipeline', document: 'd1' },
+      session,
+    );
+    // Either it lands or it says why; what it must not do is throw at the
+    // transport, which is what this is really asking.
+    expect(reply.result.content[0]?.text.length).toBeGreaterThan(0);
+  });
+
+  it('finishes the authoring session with its notes', async () => {
+    const session = authoring();
+    const reply = await callAuthoring('finish', { notes: 'The dates in the review disagree with the resume.' }, session);
+    expect(reply.result.isError).toBeFalsy();
+    expect(session.state.finished).toBe(true);
   });
 
   it('complains about a missing argument in words', async () => {
@@ -786,5 +996,99 @@ describe('ids a model might propose', () => {
       expect(r.ok, id).toBe(false);
     }
     expect(propose('exp.vega').text).toContain('exp_vega');
+  });
+});
+
+/*
+ * Proposing an order for lines that are already in the store.
+ *
+ * The one proposal here that puts no words anywhere, and the one with the
+ * widest reach: the master decides what order the lines inside an entry come
+ * in, and every resume that has not arranged its own follows it. So it needs
+ * no quotation — nothing is being claimed about the person's history, only
+ * about which of their own lines a reader should meet first — and it is
+ * still a proposal, because accepting it moves every document at once.
+ */
+describe('proposing a different order for lines already in the store', () => {
+  it('takes an order for an entry that exists', () => {
+    const s = authoring();
+    const out = s.proposeOrder('exp_acme', ['b_testing'], 'The posting is about testing.');
+    expect(out.ok).toBe(true);
+    expect(s.state.orders).toEqual([
+      { entryId: 'exp_acme', bullets: ['b_testing', 'b_pipeline'], why: 'The posting is about testing.' },
+    ]);
+  });
+
+  /* Naming only what moves, the same as the tailoring tool of this shape. */
+  it('keeps the lines that were not named, behind the ones that were', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'why');
+    expect(s.state.orders[0]?.bullets).toEqual(['b_testing', 'b_pipeline']);
+  });
+
+  it('refuses an entry the store does not have', () => {
+    const out = authoring().proposeOrder('exp_nope', ['b_testing'], 'why');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/no entry/i);
+  });
+
+  it('refuses lines that belong to something else, and says whose they are not', () => {
+    const out = authoring().proposeOrder('exp_acme', ['b_elsewhere'], 'why');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/none of those/i);
+  });
+
+  /*
+   * The order it is already in is not a proposal. Accepting one writes the
+   * entry and moves every resume that follows it, so an empty one costs a
+   * write and a decision for nothing.
+   */
+  it('refuses the order it is already in', () => {
+    const out = authoring().proposeOrder('exp_acme', ['b_pipeline', 'b_testing'], 'why');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/already in/i);
+  });
+
+  /* The reason is the whole of what the person is judging. */
+  it('refuses an order with no reason given', () => {
+    const out = authoring().proposeOrder('exp_acme', ['b_testing'], '   ');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/why/i);
+  });
+
+  it('replaces an earlier order for the same entry rather than stacking two', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'first thought');
+    s.proposeOrder('exp_acme', ['b_pipeline', 'b_testing'], 'second thought').text;
+    // The second is the order it already has, so it is refused and the first stands.
+    expect(s.state.orders).toHaveLength(1);
+    expect(s.state.orders[0]?.why).toBe('first thought');
+  });
+
+  it('says so in the proposal the person reads', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'why');
+    expect(s.describeProposal()).toMatch(/exp_acme/);
+    expect(s.describeProposal()).toMatch(/reordered/i);
+  });
+
+  /* An order on its own is a proposal worth finishing with. */
+  it('is enough on its own to be worth showing', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'why');
+    const out = s.done('Nothing new to add, but the lines read better this way.');
+    expect(out.ok).toBe(true);
+    expect(s.state.finished).toBe(true);
+    expect(s.state.orders).toHaveLength(1);
+  });
+
+  it('has nothing to say about an entry with no lines', () => {
+    const s = new AuthoringSession([RESUME_DOC], {
+      entryIds: ['exp_bare'],
+      bulletIds: [],
+      skillGroups: [],
+      bulletsByEntry: { exp_bare: [] },
+    });
+    expect(s.proposeOrder('exp_bare', ['b_x'], 'why').ok).toBe(false);
   });
 });

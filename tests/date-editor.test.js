@@ -212,3 +212,120 @@ describe('editing the date on an entry', () => {
     expect(saved).toHaveLength(0);
   });
 });
+
+/*
+ * A graduation date, which is the case the variant system was built for: one
+ * education entry, two endings, chosen per resume. It was also the last place
+ * still asking you to type "Sep. 2022 -- May 2026" by hand — and to type it
+ * the same way twice, since there are two of them.
+ */
+describe('editing a graduation date that has alternates', () => {
+  let saved;
+
+  async function openEdu() {
+    vi.resetModules();
+    saved = [];
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#resumes';
+
+    const fixture = makeTempStore();
+    const loaded = fixture.store.load();
+    fixture.cleanup();
+
+    const entries = normalizeEntries([
+      {
+        id: 'edu',
+        kind: 'experience',
+        title: 'Northeastern',
+        dates: {
+          default: 'v_may',
+          variants: [
+            { id: 'v_may', label: 'May 2026 (new grad)', text: 'Sep. 2022 -- May 2026' },
+            { id: 'v_dec', label: 'Dec 2026 (intern)', text: 'Sep. 2022 -- Dec. 2026' },
+          ],
+        },
+      },
+      // A second entry, so the store has a habit for the style to be read from.
+      { id: 'j1', kind: 'experience', title: 'Everclear', dates: 'Jul. 2024 -- Dec. 2024' },
+    ]);
+
+    const data = {
+      ...loaded,
+      entries,
+      skillGroups: [],
+      resumes: [{ id: 'base', label: 'Base', base: true, sections: [{ kind: 'experience', entries: ['edu', 'j1'] }] }],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init) => {
+        if (String(url).startsWith('/api/entries/') && init?.method === 'PUT') {
+          const body = JSON.parse(init.body);
+          saved.push(body);
+          const at = data.entries.findIndex((e) => e.id === body.id);
+          if (at >= 0) data.entries[at] = { ...data.entries[at], ...body };
+          return { ok: true, json: async () => body };
+        }
+        let result = {};
+        if (url === '/api/store') result = data;
+        else if (url === '/api/ai/jobs') result = { jobs: [] };
+        else if (url === '/api/render') {
+          result = { pages: 1, fits: true, overflowLines: -4, adjustments: [], warnings: [], pdfUrl: '/pdf/x.pdf' };
+        }
+        return { ok: true, json: async () => structuredClone(result) };
+      }),
+    );
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#editor .field .dates')).not.toBeNull());
+  }
+
+  const eduDates = () => document.querySelector('#editor .field .dates');
+
+  it('offers the date as a date, not as a line of text to retype', async () => {
+    await openEdu();
+    const [from, to] = [...eduDates().querySelectorAll('.date-end')];
+    expect(from.querySelector('.date-month').value).toBe('9');
+    expect(from.querySelector('.date-year').value).toBe('2022');
+    expect(to.querySelector('.date-month').value).toBe('5');
+    expect(to.querySelector('.date-year').value).toBe('2026');
+  });
+
+  /*
+   * The words are written on this side for an alternate, so the assertion that
+   * matters is that they come back in the store's own spelling — "May" with no
+   * full stop after it, and the "--" this store separates with.
+   */
+  it('writes the alternate back in the spelling the store already uses', async () => {
+    await openEdu();
+    const to = [...eduDates().querySelectorAll('.date-end')][1];
+    const month = to.querySelector('.date-month');
+    month.value = '6';
+    month.dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(0));
+    const field = saved.at(-1).dates;
+    const chosen = field.variants.find((v) => v.id === 'v_may');
+    expect(chosen.text).toBe('Sep. 2022 -- Jun. 2026');
+  });
+
+  it('leaves the other alternate exactly as it was', async () => {
+    await openEdu();
+    const to = [...eduDates().querySelectorAll('.date-end')][1];
+    to.querySelector('.date-year').value = '2027';
+    to.querySelector('.date-year').dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(0));
+    const other = saved.at(-1).dates.variants.find((v) => v.id === 'v_dec');
+    expect(other.text).toBe('Sep. 2022 -- Dec. 2026');
+  });
+
+  it('can say a graduation has not happened yet', async () => {
+    await openEdu();
+    const notYet = [...eduDates().querySelectorAll('.date-switch')].find((l) => l.textContent.includes('Not yet'));
+    notYet.querySelector('input').click();
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(0));
+    const chosen = saved.at(-1).dates.variants.find((v) => v.id === 'v_may');
+    expect(chosen.text).toBe('Sep. 2022 -- Expected May 2026');
+  });
+});

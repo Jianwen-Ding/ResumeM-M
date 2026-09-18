@@ -91,7 +91,12 @@ export function tailorTools(session: TailorSession): ToolDefinition[] {
         'bullet of an entry more attention than the last, so the line this posting is about belongs at the top. Name ' +
         'only what moves — anything you leave out keeps its place behind what you named, and nothing can be added or ' +
         'lost this way. Do not use it where the bullets read as a sequence, such as a project that goes design, ' +
-        'build, measure.',
+        'build, measure. ' +
+        'This order belongs to this resume alone, and is the one thing that takes an entry out of the house order: ' +
+        'lines normally sit in the order the master document holds them, and rearranging the master moves them on ' +
+        'every resume at once. An entry you reorder here stops following the master and keeps what you gave it. So ' +
+        'reorder where this posting wants a different emphasis, not where the order is simply wrong — the second is ' +
+        'a fix for the master, and belongs there.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -113,7 +118,11 @@ export function tailorTools(session: TailorSession): ToolDefinition[] {
       description:
         'Put a section’s entries in a different order. Use it sparingly: a reader takes the order of jobs as a fact ' +
         'about dates and reads a rearranged one as a gap. It is safe for projects, and for two roles that overlap ' +
-        'in time.',
+        'in time. ' +
+        'Sections normally keep themselves in date order, and using this turns that off for this section on this ' +
+        'resume — so the arrangement you give is the one that prints, and an entry added later will not sort itself ' +
+        'into place. That is the right trade when the order is a decision, and the wrong one when you are only ' +
+        'restating the order the dates already produce.',
       inputSchema: {
         type: 'object',
         properties: {

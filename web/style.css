@@ -1593,6 +1593,12 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
  * with six bullets is fifty-odd grips on screen, and a column of visible
  * handles down the left reads as decoration long before it reads as an
  * affordance. Focus shows it too, because the keyboard path goes through it.
+ *
+ * Quiet, though, not absent. This was `opacity: 0`, which is a feature you
+ * can only find if you already know it is there — you have to happen to put
+ * the pointer on the one row that reveals it. Reported as lines that could
+ * not be dragged at all. A third of full is enough to read as a handle when
+ * you look for one and still disappear into the page when you are not.
  */
 .grip {
   border: 0;
@@ -1601,7 +1607,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 0 4px;
   line-height: 1;
   color: var(--muted);
-  opacity: 0;
+  opacity: .32;
   transition: opacity .12s ease;
   font-size: 15px;
 }
@@ -1682,3 +1688,38 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 .date-switches { display: inline-flex; align-items: center; gap: 10px; }
 .date-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--t-sm); cursor: pointer; }
 .date-switch:hover { color: var(--fg); }
+
+/* An entry whose lines were arranged here rather than in the master. Stated
+   quietly beside the add-line button: it is a fact about this resume, not a
+   problem with it. */
+.by-hand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+/* The grip in the master sits ahead of the line rather than inside the
+   header row, because a master line has no header row of its own. */
+.master-source-bullet { position: relative; }
+.master-source-bullet > .grip { position: absolute; left: -18px; top: 6px; }
+.master-source-bullet:hover > .grip { opacity: 1; }
+
+/* A range that runs backwards. Beside the two years that say so, and warn
+   rather than bad: nothing is broken and nothing has been refused — the
+   document is simply about to claim something that did not happen. */
+.date-wrong {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+}
+.date-wrong::before { content: '!'; font-weight: 700; }

@@ -290,6 +290,86 @@ const INFO = { name: 'test', version: '1' };
 
 const tools = (): ToolDefinition[] => tailorTools(session());
 
+/*
+ * Every tailoring tool, through the transport.
+ *
+ * The session underneath these is thoroughly tested and the handlers around
+ * them were not — and the handler is every line an agent's call passes
+ * through before reaching the session. `reorder_entries` is the reason this
+ * block exists: it spent weeks reporting success and moving nothing, and no
+ * test ever sent it through the path an agent uses.
+ */
+describe('every tailoring tool, as an agent calls it', () => {
+  const call = (name: string, args: Record<string, unknown>, list = tools()) =>
+    handle({ jsonrpc: '2.0', id: 42, method: 'tools/call', params: { name, arguments: args } }, list, INFO) as Promise<{
+      result: { content: { text: string }[]; isError?: boolean };
+    }>;
+
+  it('puts an entry’s bullets in a different order', async () => {
+    const reply = await call('reorder_bullets', { entry: 'exp_acme', bullets: ['b_testing'] });
+    expect(reply.result.isError).toBeFalsy();
+    expect(reply.result.content[0]?.text).toContain('b_testing');
+  });
+
+  it('puts a section’s entries in a different order', async () => {
+    const reply = await call('reorder_entries', { section: 'experience', entries: ['exp_acme'] });
+    expect(reply.result.isError).toBeFalsy();
+  });
+
+  it('says which argument was wrong when the ids are not a list', async () => {
+    const reply = await call('reorder_bullets', { entry: 'exp_acme', bullets: 7 });
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('"bullets"');
+  });
+
+  it('hides something, and shows it again', async () => {
+    const list = tools();
+    const hidden = await call('hide', { id: 'b_testing' }, list);
+    expect(hidden.result.isError).toBeFalsy();
+    const shown = await call('show', { id: 'b_testing' }, list);
+    expect(shown.result.isError).toBeFalsy();
+  });
+
+  it('refuses to hide something that is not there', async () => {
+    const reply = await call('hide', { id: 'b_nowhere' });
+    expect(reply.result.isError).toBe(true);
+  });
+
+  it('chooses which skills a group shows', async () => {
+    const reply = await call('choose_skills', { group: 'sk_lang', items: ['s_go'] });
+    expect(reply.result.content[0]?.text.length).toBeGreaterThan(0);
+  });
+
+  it('suggests a wording, which is a suggestion rather than a change', async () => {
+    const reply = await call('suggest_wording', {
+      bullet: 'b_pipeline',
+      text: 'Built the Kafka ingest pipeline that cut latency to 180ms.',
+      why: 'The posting names Kafka twice.',
+    });
+    expect(reply.result.isError).toBeFalsy();
+  });
+
+  it('refuses a suggestion with no reason behind it', async () => {
+    const reply = await call('suggest_wording', { bullet: 'b_pipeline', text: 'Something.' });
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('"why"');
+  });
+
+  it('reviews what it has decided, and finishes', async () => {
+    const list = tools();
+    const review = await call('review_changes', {}, list);
+    expect(review.result.content[0]?.text.length).toBeGreaterThan(0);
+    const done = await call('finish', { reasoning: 'Kafka is what this posting is about.' }, list);
+    expect(done.result.isError).toBeFalsy();
+  });
+
+  it('refuses to finish without saying what drove it', async () => {
+    const reply = await call('finish', {});
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('"reasoning"');
+  });
+});
+
 describe('speaking MCP', () => {
   it('answers initialize with a version and its capabilities', async () => {
     const reply = (await handle({ jsonrpc: '2.0', id: 1, method: 'initialize' }, tools(), INFO)) as {

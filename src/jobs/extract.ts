@@ -576,9 +576,50 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   if (formish > 0) add(Math.min(formish, 4), `${formish} words a form uses`);
   if (listish > 0) add(Math.min(listish, 3), `${listish} words a list of roles uses`);
 
-  // A file input beside the word résumé is the clearest application-form
-  // signal there is, and it costs one regex.
-  const uploadsResume = /<input[^>]+type=["']?file/i.test(html) && /\b(resum|cv)\b/i.test(text);
+  /*
+   * Does the page ask who you are?
+   *
+   * The difference between a page that *is* an application and a page that
+   * *talks about* applications, which turns out to be the whole of the
+   * false-positive problem and not what I expected it to be. A pull request on
+   * a repository about job tooling, and a chat window discussing a cover
+   * letter, both carry the vocabulary in quantity — because that is genuinely
+   * the subject — and both have the furniture: one long textarea to type into
+   * and a file picker for attachments. No amount of word counting separates
+   * them from a form, because the words really are there.
+   *
+   * What separates them is that neither has the slightest interest in your
+   * name. Every application form ever written asks for it, nearly always
+   * beside an email address; a comment box and a chat composer never do,
+   * because the site already knows who you are.
+   *
+   * Structural rather than a list of hosts, deliberately: blocking github.com
+   * and the chat sites would fix the two pages that were reported and nothing
+   * else, and would be wrong the first time somebody posts a job in a
+   * repository.
+   */
+  const asksWhoYouAre =
+    /<input\b[^>]*\btype\s*=\s*["']?email/i.test(html) ||
+    /<(?:input|textarea)\b[^>]*\b(?:name|id|placeholder|aria-label|autocomplete)\s*=\s*["'][^"']*(?:first[\s_-]*name|last[\s_-]*name|full[\s_-]*name|your[\s_-]*name|e-?mail)[^"']*["']/i.test(html) ||
+    /<label\b[^>]*>\s*(?:your |full |first |last )?(?:name|e-?mail)\b/i.test(html);
+
+  /*
+   * A file input beside the word résumé is the clearest application-form
+   * signal there is — once it is on a form that is collecting *you*. Without
+   * that condition it fires on any page with an attachment button that happens
+   * to mention a resume, which is exactly the chat window and the pull request.
+   */
+  /*
+   * `\b(resum|cv)\b` matched neither "resume" nor "resumes" nor "résumé": the
+   * boundary after "resum" wants a non-word character and finds the "e". So
+   * this — the largest single award in the scorer, and on its own comment the
+   * clearest application-form signal there is — fired on "cv" alone, and every
+   * real form saying "Upload your resume" scored three points under. The
+   * extension's own copy of this had the same fault and was fixed first; this
+   * one was missed, and a unit test on the form fixture is what found it.
+   */
+  const uploadsResume =
+    /<input[^>]+type=["']?file/i.test(html) && /\bcv\b|résum|resum/i.test(text) && asksWhoYouAre;
   if (uploadsResume) add(3, 'asks for a resume file');
 
   const forumHiring = FORUM.test(link) && /\b(hiring|who is hiring|looking for|we are hiring)\b/i.test(text);
@@ -648,11 +689,17 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * the form itself — asking for a resume, or asking enough of the questions a
    * form asks. That, and nothing weaker.
    */
+  /*
+   * "Asking enough of the questions a form asks" has to mean the page is
+   * asking *you*, not that the words appear in it. `formish >= 3 && hasFields`
+   * was satisfied by any page with a textarea that discussed applications
+   * three times, which is a chat window, a pull request, and a support thread.
+   */
   const actionable =
     /"@type"\s*:\s*"?JobPosting/i.test(html) ||
     uploadsResume ||
     namesARole ||
-    (formish >= 3 && hasFields);
+    (formish >= 3 && hasFields && asksWhoYouAre);
   if (namesARole) why.push('names a role');
   else if (actionable) why.push('somewhere to apply');
 
@@ -660,7 +707,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   // wins over a description, because the form is what you are about to fill
   // in — and a page that is both is still, at this moment, the form.
   let kind: PageKind = 'none';
-  if (formish >= 3 || uploadsResume) kind = 'application';
+  if ((formish >= 3 && hasFields && asksWhoYouAre) || uploadsResume) kind = 'application';
   else if (described >= 3 || /"@type"\s*:\s*"?JobPosting/i.test(html)) kind = 'posting';
   else if (listish >= 2) kind = 'listing';
   else if (forumHiring) kind = 'discussion';
