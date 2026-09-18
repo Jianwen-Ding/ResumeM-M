@@ -189,9 +189,9 @@ export function findApplication(apps: Application[], company: string, role: stri
  * one you would most like to be reminded about before writing another letter.
  */
 export function alreadySent(apps: Application[], company: string, role: string): Application | undefined {
-  const key = `${slug(company)} ${slug(role)}`;
+  const key = `${slug(company)}\u0000${slug(role)}`;
   return apps
-    .filter((a) => `${slug(a.company)} ${slug(a.role)}` === key)
+    .filter((a) => `${slug(a.company)}\u0000${slug(a.role)}` === key)
     .filter((a) => a.status !== 'interested' && a.status !== 'applying')
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
 }

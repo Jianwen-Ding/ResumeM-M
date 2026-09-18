@@ -220,14 +220,14 @@ export class Repo {
     if (!(await this.isRepo())) return [];
     // A repo with no commits yet makes `git log` fail rather than print
     // nothing; an empty history is not an error to a caller.
-    const out = await this.git(['log', `-${limit}`, '--pretty=format:%H%aI%s']).catch(
+    const out = await this.git(['log', `-${limit}`, '--pretty=format:%H%x01%aI%x01%s']).catch(
       () => '',
     );
     return out
       .split('\n')
       .filter(Boolean)
       .map((line) => {
-        const [hash = '', date = '', message = ''] = line.split('');
+        const [hash = '', date = '', message = ''] = line.split('\u0001');
         return { hash, date, message };
       });
   }
@@ -250,7 +250,7 @@ export class Repo {
       'log',
       `-${limit}`,
       '--follow',
-      '--pretty=format:%H%aI%s',
+      '--pretty=format:%H%x01%aI%x01%s',
       '--',
       relPath,
     ]).catch(() => '');
@@ -258,7 +258,7 @@ export class Repo {
       .split('\n')
       .filter(Boolean)
       .map((line) => {
-        const [hash = '', date = '', message = ''] = line.split('');
+        const [hash = '', date = '', message = ''] = line.split('\u0001');
         return { hash, date, message };
       });
   }
@@ -384,7 +384,7 @@ export class Repo {
     ]).catch(() => '');
     if (!meta.trim()) return undefined;
 
-    const [full = '', date = '', author = '', subject = '', body = ''] = meta.split('');
+    const [full = '', date = '', author = '', subject = '', body = ''] = meta.split('\u0001');
 
     // --numstat gives added/removed counts per file without parsing the patch.
     const stat = await this.git(['show', '--numstat', '--pretty=format:', hash]);

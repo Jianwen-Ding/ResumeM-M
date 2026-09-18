@@ -94,6 +94,36 @@ describe('rmm --data', () => {
     expect(`${said.stdout}${said.stderr ?? ''}`).not.toContain('is not something');
   });
 
+  /*
+   * A flag, its value, and the resume id all arrive in one list, and every
+   * command that takes an id was reading the first thing in that list.
+   *
+   * So `rmm check --data ~/other-save my-resume` looked up a resume called
+   * "--data" and said it did not exist, while the same words in the other
+   * order worked — and the message named the resume rather than the ordering,
+   * so there was nothing in it to act on. The flag is documented as belonging
+   * to every command; putting it first is the ordering most tools teach.
+   */
+  it('finds the positional argument behind a flag', async () => {
+    const { stdout } = await rmm(['feedback', '--data', save, 'the-folder-on-the-command-line']);
+    expect(stdout).toContain('AI is disabled');
+  });
+
+  /*
+   * The same bug wearing different clothes. `voice add` took everything that
+   * did not start with a dash as a file to read, which includes the folder
+   * `--data` names — so the command failed with "EISDIR: illegal operation on
+   * a directory" naming a path the person had typed as a save, not as a file.
+   */
+  it('does not read a flag value as a file to ingest', async () => {
+    const letter = path.join(save, 'letter.txt');
+    fs.writeFileSync(letter, 'Dear hiring manager,\n\nI would like to work at your company.\n\nRegards,\nSomeone\n');
+
+    const { stdout, stderr } = await rmm(['voice', 'add', '--data', save, '--no-ai', '--dry-run', letter]);
+    expect(stderr).not.toContain('EISDIR');
+    expect(stdout).toContain('1 piece of writing');
+  });
+
   it('beats RMM_DATA', async () => {
     const other = aSave('The Folder In The Environment');
     try {

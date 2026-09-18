@@ -6416,18 +6416,35 @@ function render() {
   const select = $('#resume-select');
   const option = (r) => el('option', { value: r.id, textContent: r.label, selected: r.id === state.resumeId });
 
-  // Bases in their own group. A store fills up with resumes tailored for one
-  // posting each; the two or three you actually build from should not have to
-  // be found among them.
-  const bases = state.store.resumes.filter((r) => r.base);
-  const rest = state.store.resumes.filter((r) => !r.base);
+  /*
+   * Bases in their own group. A store fills up with resumes tailored for one
+   * posting each; the two or three you actually build from should not have to
+   * be found among them.
+   *
+   * That grouping only appeared once something had been pinned, and nothing is
+   * pinned in a store nobody has pinned anything in — which is every store to
+   * begin with. So the list stayed flat for exactly the people who had not yet
+   * found the pin, growing by one per application until the documents worth
+   * starting from were scattered alphabetically through everything ever sent.
+   *
+   * A resume the extension built for a posting is named `job-<company>-<role>`
+   * by the server, and nothing else is named that way. The extension's own
+   * picker already falls back to it for this reason; this is the same answer
+   * on this side of the round trip. A pin still wins where there is one —
+   * pinning a tailored resume is a perfectly reasonable thing to do with a
+   * good one, and a guess made from a name must not quietly overrule it.
+   */
+  const forAPosting = (r) => /^job-/.test(r.id ?? '');
+  const pinned = state.store.resumes.filter((r) => r.base);
+  const mine = pinned.length > 0 ? pinned : state.store.resumes.filter((r) => !forAPosting(r));
+  const rest = state.store.resumes.filter((r) => !mine.includes(r));
   select.replaceChildren(
     el('option', { value: '__master__', textContent: 'Master Document — All Source Content' }),
-    ...(bases.length > 0
+    ...(mine.length > 0 && rest.length > 0
       ? [
-          el('optgroup', { label: 'Bases' }, bases.map(option)),
-          rest.length > 0 ? el('optgroup', { label: 'Variations' }, rest.map(option)) : null,
-        ].filter(Boolean)
+          el('optgroup', { label: pinned.length > 0 ? 'Bases' : 'Your resumes' }, mine.map(option)),
+          el('optgroup', { label: pinned.length > 0 ? 'Variations' : 'Built for a posting' }, rest.map(option)),
+        ]
       : state.store.resumes.map(option)),
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
