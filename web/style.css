@@ -1583,3 +1583,53 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 /* A search box that shares its toolbar with a heading and a button, rather
    than one that owns the row. */
 .toolbar input.narrow { max-width: 190px; }
+
+/* ------------------------------------------------------------------ *
+ * Arranging: grips, drop lines, and folded entries                     *
+ * ------------------------------------------------------------------ */
+
+/*
+ * The grip is quiet until the row is under the pointer. Eight entries each
+ * with six bullets is fifty-odd grips on screen, and a column of visible
+ * handles down the left reads as decoration long before it reads as an
+ * affordance. Focus shows it too, because the keyboard path goes through it.
+ */
+.grip {
+  border: 0;
+  background: none;
+  cursor: grab;
+  padding: 0 4px;
+  line-height: 1;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity .12s ease;
+  font-size: 15px;
+}
+.entry-head:hover .grip,
+.bullet-head:hover .grip,
+.grip:focus-visible { opacity: 1; }
+.grip:active { cursor: grabbing; }
+.dragging { opacity: .45; }
+
+/*
+ * Where it will land, drawn as a line between rows rather than a box around
+ * one. A highlighted row says "into this"; a resume has no "into", only a
+ * running order, and the line is the only mark that says which gap.
+ */
+.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.drop-after { box-shadow: 0 2px 0 0 var(--accent); }
+
+/* Folded but switched on: the header alone, and nothing about how it prints
+   has changed. Distinct from `.entry.off`, which is the switched-off case. */
+.entry.folded { padding-bottom: 6px; }
+.entry.folded .entry-head { margin-bottom: 0; }
+.fold {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}
+.fold:hover { color: var(--fg); }

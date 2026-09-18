@@ -163,15 +163,25 @@ export interface SectionSpec {
   /**
    * Whether this list is the order, or only the membership.
    *
-   * `'manual'` — and absent, which every store written before this means —
-   * says the list above is the order, exactly as it always was. A store does
-   * not start sorting itself because the program learned how.
+   * `'newest'` is what a resume wants nearly always — most recent first is not
+   * a preference so much as the convention every reader of the document
+   * already has — so it is what a new section gets, and it is maintained from
+   * `Entry.period` rather than by hand.
    *
-   * `'newest'` and `'oldest'` sort by `Entry.period` at render time and leave
-   * the stored list alone, so switching back to manual restores the order that
-   * was there rather than whatever the sort last produced. Entries whose dates
-   * could not be read keep their relative positions at the end: an entry the
-   * program cannot place is one it should not move.
+   * `'manual'` says the list above is the order. It is what you get by
+   * dragging something, because dragging is an instruction and a sort that
+   * immediately undid it would make the handle a lie.
+   *
+   * Absent is the shape of every section written before any of this existed,
+   * and it means manual — see `adoptDateOrder`, which upgrades the ones where
+   * doing so provably changes nothing and leaves the rest alone. A store does
+   * not silently rearrange a document that has already been sent.
+   *
+   * Sorting happens at render time and leaves the stored list alone, so
+   * turning it off gives back the order that was there rather than whatever
+   * the sort last produced. Entries whose dates could not be read keep their
+   * relative positions at the end: an entry the program cannot place is one it
+   * should not move.
    */
   order?: 'manual' | 'newest' | 'oldest';
   /**
@@ -213,6 +223,17 @@ export interface ResumeSpec {
   lists?: Record<string, string[]>;
   /** Rendering knobs; merged over defaults and the parent's. */
   layout?: Partial<LayoutOptions>;
+  /**
+   * Entry ids folded away in the editor for this resume.
+   *
+   * A view preference, and it prints nothing — but it belongs to the resume
+   * rather than to the browser, because which entries you are done with is a
+   * fact about the document you are building and it should still be true on
+   * another machine, or after the save is cloned. Kept per resume and not
+   * inherited through `extends`: folding is about the list in front of you,
+   * and a variation is a different list.
+   */
+  collapsed?: string[];
   notes?: string;
   /** Set when the extension generated this for a specific posting. */
   generatedFor?: { url?: string; company?: string; role?: string; at?: string };

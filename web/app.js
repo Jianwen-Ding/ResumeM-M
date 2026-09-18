@@ -13,6 +13,7 @@ import { setupAssets } from './assets.js';
 import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
+import { moveBefore, moveBy } from './reorder.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -95,6 +96,7 @@ function clearEdits() {
   state.entryEdits = null;
   state.bulletEdits = null;
   state.listEdits = null;
+  state.collapsedEdits = null;
   state.dirty = false;
 }
 
@@ -433,6 +435,10 @@ function currentSpec() {
     ...base,
     choices: { ...(base.choices ?? {}), ...state.choices },
     lists: { ...(base.lists ?? {}), ...(state.listEdits ?? {}) },
+    // Folding prints nothing, so this never reaches the renderer — but it has
+    // to ride along on the save, or it is a preference that lasts until the
+    // page is reloaded.
+    ...(state.collapsedEdits ? { collapsed: state.collapsedEdits } : {}),
   };
 
   /*
@@ -530,10 +536,19 @@ function bulletName(entry, bullet) {
  * preview live: there is no way to change something and be left looking at a
  * stale page, and nothing to press to catch up.
  */
-function markDirty(message = 'Changed') {
+/**
+ * Something changed, so save it — and recompile, unless it cannot show.
+ *
+ * `recompile: false` is for changes that alter the save without altering the
+ * document: folding an entry away in the editor is the whole of that category
+ * today. Recompiling for those is not merely wasted work, it is visibly wrong
+ * — the preview flickers and the fit line goes to "Compiling…" because
+ * somebody collapsed a heading.
+ */
+function markDirty(message = 'Changed', { recompile = true } = {}) {
   state.dirty = true;
   if (message !== 'Changed') setStatus(message);
-  scheduleRender();
+  if (recompile) scheduleRender();
   scheduleAutoSave();
 }
 
@@ -1168,6 +1183,7 @@ function bulletBlock(entry, section, bullet, choices) {
   const wrap = el('div', { className: 'bullet' });
 
   const head = el('div', { className: 'bullet-head' }, [
+    bulletGrip(entry, section, bullet),
     toggle({
       on: included,
       title: 'Showing on this variation',
@@ -1193,7 +1209,10 @@ function bulletBlock(entry, section, bullet, choices) {
         ]),
       ]),
     );
-    return attachSourceTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head);
+    return asBulletTarget(
+      attachSourceTools(wrap, `${entry.id}/${bullet.id}`, [...wrap.children].filter(child => child !== head), head),
+      entry, section, bullet,
+    );
   }
 
   const key = bullet.id;
@@ -1272,14 +1291,26 @@ function bulletBlock(entry, section, bullet, choices) {
   );
 
   if (chosen?.note) wrap.append(el('div', { className: 'note', textContent: chosen.note }));
-  return attachSourceTools(
-    wrap,
-    `${entry.id}/${bullet.id}`,
-    // The bar itself stays visible for the stepper; the button inside it
-    // does not.
-    [...[...wrap.children].filter((child) => child !== head && child !== quickActions), phraseFeedback].filter(Boolean),
-    head,
+  return asBulletTarget(
+    attachSourceTools(
+      wrap,
+      `${entry.id}/${bullet.id}`,
+      // The bar itself stays visible for the stepper; the button inside it
+      // does not.
+      [...[...wrap.children].filter((child) => child !== head && child !== quickActions), phraseFeedback].filter(Boolean),
+      head,
+    ),
+    entry, section, bullet,
   );
+}
+
+/** A bullet row that accepts another bullet dropped onto it. */
+function asBulletTarget(row, entry, section, bullet) {
+  return dropTarget(row, {
+    kind: 'bullet',
+    id: bullet.id,
+    onDrop: (moved, side) => dropBullet(entry, section, moved, bullet.id, side),
+  });
 }
 
 /** The text a non-list bullet currently resolves to. */
@@ -1307,6 +1338,126 @@ function setEntryIncluded(section, entry, checked) {
   state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
 }
 
+/* ------------------------------------------------------------------ *
+ * Arranging: moving things, and folding them away                      *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The grip that lets something be moved, by mouse or by keyboard.
+ *
+ * Dragging is how anyone expects to reorder a list, and it is also the one
+ * interaction that is unavailable to somebody who is not using a mouse — so
+ * the same handle takes Alt with the arrow keys. That is not a consolation
+ * prize: it is the faster way to move one line up by one, which is most of
+ * what actually gets done here.
+ *
+ * `kind` keeps bullets from being dropped into the entry list and the other
+ * way round, since both are drag sources on the same screen.
+ */
+function dragHandle({ kind, id, label, onMove, onStep }) {
+  const grip = el('button', {
+    className: 'grip',
+    type: 'button',
+    draggable: true,
+    title: `Drag to reorder ${label}, or Alt with the up and down arrows`,
+    'aria-label': `Reorder ${label}`,
+    textContent: '⠿',
+  });
+
+  grip.addEventListener('dragstart', (ev) => {
+    /*
+     * Held in a variable as well as in the DataTransfer, because `dragover`
+     * cannot read the payload — every browser blanks it during the drag, by
+     * design, so a page cannot snoop at what is being dragged over it. The
+     * DataTransfer is still set so a drop outside the app is a sensible
+     * no-op rather than a silent one.
+     */
+    dragging = { kind, id };
+    ev.dataTransfer?.setData('text/plain', `${kind}:${id}`);
+    if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+    grip.closest('[data-drag-id]')?.classList.add('dragging');
+  });
+  grip.addEventListener('dragend', () => {
+    dragging = null;
+    grip.closest('[data-drag-id]')?.classList.remove('dragging');
+    for (const row of document.querySelectorAll('.drop-before, .drop-after')) {
+      row.classList.remove('drop-before', 'drop-after');
+    }
+  });
+
+  grip.addEventListener('keydown', (ev) => {
+    if (!ev.altKey || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return;
+    ev.preventDefault();
+    onStep(ev.key === 'ArrowUp' ? -1 : 1);
+  });
+
+  // Held so the row's own drop handler can tell what is being dragged without
+  // reading the DataTransfer, which is empty during `dragover` in every
+  // browser by design.
+  grip.dataset.dragKind = kind;
+  void onMove;
+  return grip;
+}
+
+/** What is currently being dragged, since `dragover` cannot see the payload. */
+let dragging = null;
+
+/**
+ * Make a row a drop target for its own kind of thing.
+ *
+ * The drop lands *before* the row it is over, which is the rule that makes a
+ * list reorderable at all — without a way to express "after the last one", the
+ * bottom position is unreachable. The row's lower half therefore means after.
+ */
+function dropTarget(row, { kind, id, onDrop }) {
+  row.dataset.dragId = id;
+
+  row.addEventListener('dragover', (ev) => {
+    if (dragging?.kind !== kind || dragging.id === id) return;
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+    const box = row.getBoundingClientRect();
+    const after = ev.clientY > box.top + box.height / 2;
+    row.classList.toggle('drop-before', !after);
+    row.classList.toggle('drop-after', after);
+  });
+  row.addEventListener('dragleave', () => row.classList.remove('drop-before', 'drop-after'));
+  row.addEventListener('drop', (ev) => {
+    if (dragging?.kind !== kind) return;
+    ev.preventDefault();
+    const after = row.classList.contains('drop-after');
+    row.classList.remove('drop-before', 'drop-after');
+    onDrop(dragging.id, after ? 'after' : 'before');
+    dragging = null;
+  });
+  return row;
+}
+
+/**
+ * Which entries are folded away, for the resume that is open.
+ *
+ * On the resume rather than in the browser. Folding prints nothing, but which
+ * entries you are done with is a fact about the document you are building, and
+ * it should still be true on another machine or after the save is cloned — a
+ * preference kept in localStorage is a preference that exists on one computer.
+ *
+ * Not inherited through `extends`: folding is about the list in front of you,
+ * and a variation is a different list.
+ */
+function collapsedIds() {
+  return state.collapsedEdits ?? resumeById(state.resumeId)?.collapsed ?? [];
+}
+
+function setCollapsed(entryId, folded) {
+  const next = new Set(collapsedIds());
+  if (folded) next.add(entryId);
+  else next.delete(entryId);
+  state.collapsedEdits = [...next];
+  // Saved, but not recompiled: folding changes the editor and not the page.
+  markDirty('Changed', { recompile: false });
+  render();
+}
+
 function entryBlock(entry, section, choices) {
   const included = entrySelection(section).includes(entry.id);
 
@@ -1331,14 +1482,43 @@ function entryBlock(entry, section, choices) {
     return row;
   }
 
+  const folded = collapsedIds().includes(entry.id);
   const box = el('div', {});
   const head = el('div', { className: 'entry-head' }, [
+    entryGrip(section, entry),
     toggle({
       on: included,
       title: 'Showing on this variation',
       onChange: (checked) => setEntryIncluded(section, entry, checked),
     }),
+    /*
+     * Folding, for an entry that is switched *on*.
+     *
+     * Switching one off already collapsed it, which covers the entries you are
+     * not using — and those were never the ones filling the screen. The entry
+     * with six bullets, four of them with three phrasings each, is on, and it
+     * is on because you want it: you just are not editing it right now. There
+     * was no way to say that.
+     *
+     * Kept in the browser rather than in the save, because it is about the
+     * screen in front of you and not about the document. Nothing here changes
+     * what compiles, and nothing here can be lost in a way that matters.
+     */
+    el('button', {
+      className: 'fold',
+      type: 'button',
+      title: folded ? 'Show this entry’s lines' : 'Fold this entry away, without switching it off',
+      'aria-expanded': folded ? 'false' : 'true',
+      textContent: folded ? '▸' : '▾',
+      onclick: () => setCollapsed(entry.id, !folded),
+    }),
     el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || 'Untitled' }),
+    folded
+      ? el('span', {
+          className: 'chip count',
+          textContent: plural((entry.bullets ?? []).filter((b) => !b.archived).length, 'line'),
+        })
+      : null,
     el('span', { className: 'grow' }),
     entryFeedbackButton(entry),
     el('div', { className: 'entry-actions' }, [
@@ -1357,6 +1537,17 @@ function entryBlock(entry, section, choices) {
     ]),
   ]);
   box.append(head);
+
+  // Folded: the header and nothing else. Everything below is reachable again
+  // in one click, and the entry goes on printing exactly as it did.
+  if (folded) {
+    box.className = 'entry folded';
+    return dropTarget(box, {
+      kind: 'entry',
+      id: entry.id,
+      onDrop: (moved, side) => dropEntry(section, moved, entry.id, side),
+    });
+  }
 
   /*
    * Heading fields get weight in proportion to how much there is to decide.
@@ -1463,7 +1654,81 @@ function entryBlock(entry, section, choices) {
     ]),
   );
   box.className = 'entry';
-  return box;
+  return dropTarget(box, {
+    kind: 'entry',
+    id: entry.id,
+    onDrop: (moved, side) => dropEntry(section, moved, entry.id, side),
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Reordering entries and bullets                                       *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Where a section's order is written.
+ *
+ * `entrySelection` is the list of ids this resume shows, in the order it shows
+ * them, which means reordering and including are the same field — and that is
+ * right: an entry's position and whether it is there at all are both this
+ * resume's business rather than the store's. Moving one on a variation does
+ * not move it on the resume it inherits from.
+ */
+function setEntryOrder(section, ordered) {
+  state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+  markDirty();
+  render();
+}
+
+function dropEntry(section, moved, onto, side) {
+  const list = entrySelection(section);
+  // Only entries this resume actually shows can be reordered: the ones below
+  // are the store's other entries, offered so they can be switched on, and
+  // they have no position yet to move.
+  if (!list.includes(moved)) return;
+  const at = list.indexOf(onto);
+  const before = side === 'after' ? (list[at + 1] ?? null) : onto;
+  setEntryOrder(section, moveBefore(list, moved, before));
+}
+
+function entryGrip(section, entry) {
+  const list = entrySelection(section);
+  if (!list.includes(entry.id) || list.length < 2) {
+    // Nothing to move it among. A grip that cannot do anything is a button
+    // that has to be explained.
+    return null;
+  }
+  return dragHandle({
+    kind: 'entry',
+    id: entry.id,
+    label: 'this entry',
+    onStep: (delta) => setEntryOrder(section, moveBy(entrySelection(section), entry.id, delta)),
+  });
+}
+
+function setBulletOrder(entry, ordered) {
+  state.bulletEdits = { ...(state.bulletEdits ?? {}), [entry.id]: ordered };
+  markDirty();
+  render();
+}
+
+function dropBullet(entry, section, moved, onto, side) {
+  const list = bulletSelection(section, entry);
+  if (!list.includes(moved)) return;
+  const at = list.indexOf(onto);
+  const before = side === 'after' ? (list[at + 1] ?? null) : onto;
+  setBulletOrder(entry, moveBefore(list, moved, before));
+}
+
+function bulletGrip(entry, section, bullet) {
+  const list = bulletSelection(section, entry);
+  if (!list.includes(bullet.id) || list.length < 2) return null;
+  return dragHandle({
+    kind: 'bullet',
+    id: bullet.id,
+    label: 'this line',
+    onStep: (delta) => setBulletOrder(entry, moveBy(bulletSelection(section, entry), bullet.id, delta)),
+  });
 }
 
 function skillsBlock(section) {
@@ -1845,10 +2110,18 @@ function renderEditor() {
       continue;
     }
 
-    // Everything of this kind in the store, with the entries this resume
-    // already lists first. Showing only the included ones would make a
-    // toggled-off entry disappear, with no way to bring it back.
-    const listed = section.entries ?? [];
+    /*
+     * Everything of this kind in the store, with the entries this resume
+     * already lists first. Showing only the included ones would make a
+     * toggled-off entry disappear, with no way to bring it back.
+     *
+     * `entrySelection` rather than `section.entries`, because the first is
+     * this resume's list *including anything unsaved* and the second is only
+     * what was last written down. Reading the saved one meant a reorder
+     * changed the spec that compiles and did not change the list on screen —
+     * the preview moved and the editor did not.
+     */
+    const listed = entrySelection(section);
     const entries = [
       ...listed.map((eid) => state.store.entries.find((e) => e.id === eid)).filter(Boolean),
       ...state.store.entries.filter((e) => e.kind === section.kind && !e.archived && !listed.includes(e.id)),

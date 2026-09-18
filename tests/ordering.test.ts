@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { orderedEntries } from '../src/model/resolve.js';
+import { adoptDateOrder, orderedEntries } from '../src/model/resolve.js';
 import { normalizeEntries } from '../src/model/normalize.js';
 import type { Entry, SectionSpec } from '../src/model/types.js';
 
@@ -143,5 +143,82 @@ describe('reading dates out of a store that predates them', () => {
       { id: 'e', kind: 'experience', title: 'T', dates: '2019', period: { start: { year: 2024, month: 3 } } },
     ]);
     expect(entry?.period).toEqual({ start: { year: 2024, month: 3 } });
+  });
+});
+
+/*
+ * Most of the time a resume should keep itself in date order — that is the
+ * convention every reader of the document already has, so it should not be a
+ * setting anybody has to find. But a section written before ordering existed
+ * says nothing about what it wants, and reading "says nothing" as "sort me"
+ * would rearrange documents that have been proofread and sent.
+ */
+describe('adopting date order without rearranging anything', () => {
+  const dated = normalizeEntries([
+    { id: 'now', kind: 'experience', title: 'Current', dates: 'Jan. 2025 -- Present' },
+    { id: 'mid', kind: 'experience', title: 'Middle', dates: 'Jul. 2024 -- Dec. 2024' },
+    { id: 'old', kind: 'experience', title: 'Oldest', dates: 'Jun. 2019 -- Aug. 2019' },
+  ]);
+
+  it('takes over a section that is already in date order, since nothing moves', () => {
+    const { adopted, handOrdered } = adoptDateOrder(
+      [{ kind: 'experience', entries: ['now', 'mid', 'old'] }],
+      dated,
+    );
+    expect(adopted[0]?.order).toBe('newest');
+    expect(handOrdered).toEqual([]);
+    // And the list itself is untouched: the order is now maintained, not rewritten.
+    expect(adopted[0]?.entries).toEqual(['now', 'mid', 'old']);
+  });
+
+  /*
+   * The case the whole function exists for. A project pulled to the top for
+   * one application, or a job held back, is a decision — and a migration that
+   * silently undid it would change a document its author had already checked.
+   */
+  it('leaves a hand-ordered section alone, and says which ones those are', () => {
+    const sections = [{ kind: 'experience' as const, entries: ['old', 'now', 'mid'] }];
+    const { adopted, handOrdered } = adoptDateOrder(sections, dated);
+    expect(adopted[0]?.order).toBeUndefined();
+    expect(handOrdered).toHaveLength(1);
+    expect(handOrdered[0]?.entries).toEqual(['old', 'now', 'mid']);
+  });
+
+  it('never touches a section that has already said what it wants', () => {
+    for (const order of ['manual', 'newest', 'oldest'] as const) {
+      const { adopted, handOrdered } = adoptDateOrder([{ kind: 'experience', entries: ['old', 'now'], order }], dated);
+      expect(adopted[0]?.order).toBe(order);
+      expect(handOrdered).toEqual([]);
+    }
+  });
+
+  it('adopts a section too short to be out of order', () => {
+    for (const entries of [[], ['now']]) {
+      expect(adoptDateOrder([{ kind: 'experience', entries }], dated).adopted[0]?.order).toBe('newest');
+    }
+  });
+
+  /*
+   * Skills have no dates and never will. Marking them sorted would be a lie
+   * that the editor would then have to draw a control for.
+   */
+  it('leaves skills out of it entirely', () => {
+    const { adopted } = adoptDateOrder([{ kind: 'skills', entries: [], groups: ['g'] }], dated);
+    expect(adopted[0]?.order).toBeUndefined();
+  });
+
+  /*
+   * A section whose entries cannot be dated sorts to itself, because undated
+   * entries keep their positions — so it adopts, harmlessly, and the next
+   * dated entry added to it lands where it belongs.
+   */
+  it('adopts a section of undated entries, which sorting cannot move', () => {
+    const vague = normalizeEntries([
+      { id: 'a', kind: 'project', title: 'A', dates: 'Various' },
+      { id: 'b', kind: 'project', title: 'B', dates: 'Ongoing' },
+    ]);
+    const { adopted, handOrdered } = adoptDateOrder([{ kind: 'project', entries: ['a', 'b'] }], vague);
+    expect(adopted[0]?.order).toBe('newest');
+    expect(handOrdered).toEqual([]);
   });
 });

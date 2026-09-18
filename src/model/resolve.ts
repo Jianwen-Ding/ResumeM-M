@@ -319,6 +319,53 @@ function resolveEntry(
  * is not older than 2019 and it is not newer, and pretending either way puts a
  * line of somebody's resume somewhere they did not choose.
  */
+/**
+ * Turn a hand-ordered section into a date-ordered one, where that is provably
+ * a no-op.
+ *
+ * Most of the time a resume should keep itself in date order, and most of the
+ * time it already is: people list jobs newest-first because that is what the
+ * document is for. But a section written before ordering existed says nothing
+ * about what it wants, and reading "says nothing" as "sort me" would rearrange
+ * documents that have been proofread and sent — for the sake of a setting the
+ * author never saw.
+ *
+ * So the question asked is narrower and answerable: would sorting this section
+ * change it? If not, it is already a date-ordered section that has been
+ * maintained by hand, and saying so out loud costs the user nothing and means
+ * the next entry they add lands in the right place by itself. If it would
+ * change, the order is a decision — a project pulled to the top for one
+ * application, a job held back — and the only right move is to leave it and
+ * let the editor offer the sort as a button.
+ *
+ * Returns the sections it would change, rather than changing them, so the
+ * caller decides whether this is a migration or a question.
+ */
+export function adoptDateOrder(
+  sections: SectionSpec[],
+  entries: Entry[],
+): { adopted: SectionSpec[]; handOrdered: SectionSpec[] } {
+  const adopted: SectionSpec[] = [];
+  const handOrdered: SectionSpec[] = [];
+
+  for (const section of sections) {
+    if (section.order !== undefined || section.kind === 'skills') {
+      adopted.push(section);
+      continue;
+    }
+    const ids = section.entries ?? [];
+    const sorted = orderedEntries({ ...section, order: 'newest' }, entries);
+    // One entry cannot be out of order, and neither can none.
+    if (ids.length < 2 || sorted.every((id, i) => id === ids[i])) {
+      adopted.push({ ...section, order: 'newest' });
+    } else {
+      adopted.push(section);
+      handOrdered.push(section);
+    }
+  }
+  return { adopted, handOrdered };
+}
+
 export function orderedEntries(section: SectionSpec, entries: Entry[]): string[] {
   const ids = section.entries ?? [];
   if (section.order !== 'newest' && section.order !== 'oldest') return ids;
