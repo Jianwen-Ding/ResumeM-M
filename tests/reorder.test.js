@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
+import { normalizeEntries } from '../src/model/normalize.ts';
 
 vi.mock('../web/preview.js', () => ({ createPreview: () => ({ show: async () => {} }) }));
 vi.mock('../web/assets.js', () => ({
@@ -41,12 +42,18 @@ afterEach(() => {
  */
 function serve() {
   const bullet = (id, text) => ({ id, default: 'v', variants: [{ id: 'v', label: 'Neutral', text }] });
-  const entries = [
+  /*
+   * Through the same normaliser the server runs on the way out of `/api/store`,
+   * which is where `period` comes from. Serving raw entries gave the editor a
+   * store with no dates in it — every entry "undated", no sorting possible —
+   * which is a shape the browser never actually sees.
+   */
+  const entries = normalizeEntries([
     { id: 'j1', kind: 'experience', title: 'Everclear', dates: 'Jul. 2024 -- Dec. 2024',
       bullets: [bullet('b1', 'Built the pipeline'), bullet('b2', 'Cut the latency'), bullet('b3', 'Wrote the runbook')] },
     { id: 'j2', kind: 'experience', title: 'Northwind', dates: 'Jun. 2023 -- Aug. 2023', bullets: [bullet('b4', 'Shipped the thing')] },
     { id: 'j3', kind: 'experience', title: 'Helios', dates: 'Jan. 2022 -- May 2022', bullets: [bullet('b5', 'Held the pager')] },
-  ];
+  ]);
 
   const fixture = makeTempStore();
   const loaded = fixture.store.load();
@@ -319,5 +326,91 @@ describe('where a fold is remembered', () => {
     expect(renders()).toBe(before);
     // And it still saved, which is the other half of the bargain.
     await vi.waitFor(() => expect(savedSpecs().at(-1)?.collapsed).toEqual(['j1']), { timeout: 4000 });
+  });
+});
+
+/*
+ * The order a section is in, chosen beside the heading it applies to.
+ *
+ * Newest first is what a resume wants nearly always, so it is the default and
+ * the dates maintain it. The interesting requirement is the interaction with
+ * dragging: a drop that the sort immediately undid would be a handle that
+ * visibly does nothing.
+ */
+describe('choosing what decides a section’s order', () => {
+  const entries = () => [...document.querySelectorAll('#editor .entry:not(.off):not(.profile-entry)')];
+  const titles = () => entries().map((e) => e.querySelector('.title')?.textContent);
+  const orderBy = () => document.querySelector('#editor .order-by');
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#resumes';
+    serve();
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(entries().length).toBe(3));
+  });
+
+  it('offers the three ways a section can be ordered', () => {
+    expect([...orderBy().options].map((o) => o.value)).toEqual(['newest', 'oldest', 'manual']);
+  });
+
+  /*
+   * The fixture's sections carry no `order`, which is what every store written
+   * before this looked like, and the editor must not pretend otherwise.
+   */
+  it('says a section with no setting is in the order you arranged', () => {
+    expect(orderBy().value).toBe('manual');
+    expect(titles()).toEqual(['Everclear', 'Northwind', 'Helios']);
+  });
+
+  it('sorts newest first when asked, reading the dates', async () => {
+    orderBy().value = 'newest';
+    orderBy().dispatchEvent(new window.Event('change'));
+    // Everclear ends Dec 2024, Northwind Aug 2023, Helios May 2022.
+    await vi.waitFor(() => expect(titles()).toEqual(['Everclear', 'Northwind', 'Helios']));
+
+    orderBy().value = 'oldest';
+    orderBy().dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(titles()).toEqual(['Helios', 'Northwind', 'Everclear']));
+  });
+
+  /*
+   * The one that matters. With a sort running, a drop rewrites the list and
+   * the sort puts it straight back — unless dragging also turns the sort off,
+   * which is the only reading of a drag that makes sense.
+   */
+  it('turns the sort off when something is dragged, so the drop survives', async () => {
+    orderBy().value = 'oldest';
+    orderBy().dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(titles()).toEqual(['Helios', 'Northwind', 'Everclear']));
+
+    dragOnto(entries()[2], entries()[0]);
+    await vi.waitFor(() => expect(titles()).toEqual(['Everclear', 'Helios', 'Northwind']));
+    expect(orderBy().value).toBe('manual');
+  });
+
+  it('writes the choice onto the resume that gets saved', async () => {
+    orderBy().value = 'newest';
+    orderBy().dispatchEvent(new window.Event('change'));
+    await vi.waitFor(async () => {
+      const saved = globalThis.fetch.mock.calls
+        .filter(([url]) => String(url).startsWith('/api/resumes/'))
+        .map(([, init]) => JSON.parse(init?.body ?? '{}'));
+      expect(saved.at(-1)?.sections?.[0]?.order).toBe('newest');
+    }, { timeout: 4000 });
+  });
+
+  /*
+   * Sorting leaves entries it cannot date at the bottom, which is right and is
+   * also the sort of thing that reads as a bug when nobody has said so.
+   */
+  it('says how many entries it could not date', async () => {
+    expect(document.querySelector('#editor .order-control .chip')).toBeNull();
+    orderBy().value = 'newest';
+    orderBy().dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(orderBy().value).toBe('newest'));
+    // Every entry in this fixture has a readable date, so there is nothing to say.
+    expect(document.querySelector('#editor .order-control .chip')).toBeNull();
   });
 });

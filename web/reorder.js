@@ -40,3 +40,57 @@ export function moveBy(list, id, delta) {
   out.splice(to, 0, id);
   return out;
 }
+
+/*
+ * Date order, for the editor's own list.
+ *
+ * The same rule the renderer applies in `src/model/resolve.ts`, and it has to
+ * be, or the editor shows one order and the PDF prints another — which is the
+ * worst failure available here, because both look right on their own.
+ *
+ * It exists twice because the two halves cannot share a module: the renderer is
+ * TypeScript compiled for node, this is a script the browser loads directly,
+ * and the build has no path between them. `tests/order-agreement.test.js`
+ * pins the two against one table of cases so a change to either shows up as a
+ * failure rather than as a document that does not match its editor.
+ */
+
+/** How recent something is: what is still running beats everything finished. */
+export function sortKeyOf(period) {
+  if (!period?.start) return undefined;
+  if (period.ongoing) return Number.MAX_SAFE_INTEGER;
+  const point = period.end ?? period.start;
+  return point.year * 100 + (point.month ?? 12);
+}
+
+/** When something began, for reading a career forwards. */
+export function startKeyOf(period) {
+  if (!period?.start) return undefined;
+  return period.start.year * 100 + (period.start.month ?? 1);
+}
+
+/**
+ * `ids` in the order this section prints them.
+ *
+ * Undated entries are not placed: they keep their order relative to each other
+ * and follow the dated ones, because an entry the program cannot date is one it
+ * has no business moving.
+ */
+export function orderEntryIds(ids, entries, order) {
+  if (order !== 'newest' && order !== 'oldest') return [...ids];
+
+  const keyOf = (id) => {
+    const entry = entries.find((e) => e.id === id);
+    return order === 'oldest' ? startKeyOf(entry?.period) : sortKeyOf(entry?.period);
+  };
+
+  const dated = [];
+  const undated = [];
+  for (const id of ids) {
+    const key = keyOf(id);
+    if (key === undefined) undated.push(id);
+    else dated.push({ id, key });
+  }
+  dated.sort((a, b) => (order === 'oldest' ? a.key - b.key : b.key - a.key));
+  return [...dated.map((d) => d.id), ...undated];
+}

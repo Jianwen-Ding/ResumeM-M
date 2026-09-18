@@ -1633,3 +1633,16 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   line-height: 1;
 }
 .fold:hover { color: var(--fg); }
+
+/* The section's ordering, beside the heading it applies to rather than in a
+   settings panel: it is a property of this list, decided while looking at it. */
+.order-control { display: inline-flex; align-items: center; gap: 6px; }
+.order-by {
+  font-size: var(--t-sm);
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+}
+.order-by:hover, .order-by:focus-visible { color: var(--fg); border-color: var(--line-strong, var(--line)); }

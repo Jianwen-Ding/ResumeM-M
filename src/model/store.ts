@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { absorbBase } from './resolve.js';
+import { absorbBase, adoptDateOrder } from './resolve.js';
 import {
   DEFAULT_CONFIG,
   type AnswerBankItem,
@@ -502,14 +502,28 @@ export class Store {
   /** Read every file in the store into one object. */
   load(): StoreData {
     const config = this.loadConfig();
+    const entries = this.loadEntries();
     return {
       profile: normalizeProfile(this.readYaml<Profile>('profile.yaml', { name: 'Your Name' })),
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.
-      entries: this.loadEntries(),
+      entries,
       skillGroups: normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', [])),
-      resumes: this.loadResumes(),
+      /*
+       * A section that has never said how it wants to be ordered is asked the
+       * one question that can be answered safely — would sorting it change
+       * anything? — and takes over its own date order where the answer is no.
+       * See `adoptDateOrder`. Nothing is written to disk here: the section is
+       * only recorded as date-ordered when the resume is next saved, and a
+       * section where sorting *would* move something is left exactly alone for
+       * the editor to offer rather than decide.
+       */
+      resumes: this.loadResumes().map((resume) =>
+        resume.sections
+          ? { ...resume, sections: adoptDateOrder(resume.sections, entries).adopted }
+          : resume,
+      ),
       applications: normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])),
       coverLetters: this.loadCoverLetters(),
       drafts: this.loadDrafts(),

@@ -13,7 +13,7 @@ import { setupAssets } from './assets.js';
 import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
-import { moveBefore, moveBy } from './reorder.js';
+import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -97,6 +97,7 @@ function clearEdits() {
   state.bulletEdits = null;
   state.listEdits = null;
   state.collapsedEdits = null;
+  state.orderEdits = null;
   state.dirty = false;
 }
 
@@ -454,7 +455,7 @@ function currentSpec() {
    * carries only the part they changed, which mergeSections now lays over the
    * parent's rather than replacing it outright.
    */
-  const touchesSections = state.skillEdits || state.entryEdits || state.bulletEdits;
+  const touchesSections = state.skillEdits || state.entryEdits || state.bulletEdits || state.orderEdits;
   if (touchesSections) {
     const own = new Map((base.sections ?? []).map((s) => [s.kind, s]));
     const sections = [];
@@ -467,6 +468,7 @@ function currentSpec() {
         section.kind === 'skills'
           ? Boolean(state.skillEdits && (section.groups ?? []).some((g) => g in state.skillEdits))
           : Boolean(state.entryEdits && section.kind in state.entryEdits) ||
+            Boolean(state.orderEdits && section.kind in state.orderEdits) ||
             Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits));
 
       // Untouched and not already this resume's own: leave it inherited.
@@ -485,6 +487,12 @@ function currentSpec() {
       // The entry list is only written down when the user changed which
       // entries show. A bullet the user hid does not pin the entry list.
       if (state.entryEdits && section.kind in state.entryEdits) next.entries = entries;
+      /*
+       * What decides the order, written down whenever it was chosen here — and
+       * only then, so a section left alone stays inherited rather than being
+       * pinned to whatever it happened to be when something else was edited.
+       */
+      if (state.orderEdits && section.kind in state.orderEdits) next.order = state.orderEdits[section.kind];
       const bullets = { ...(mine?.bullets ?? {}) };
       for (const eid of entries) {
         if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
@@ -1433,6 +1441,76 @@ function dropTarget(row, { kind, id, onDrop }) {
   return row;
 }
 
+/* ------------------------------------------------------------------ *
+ * What decides the order of a section                                  *
+ * ------------------------------------------------------------------ */
+
+/** How this section is ordered right now, including unsaved changes. */
+function sectionOrder(section) {
+  return state.orderEdits?.[section.kind] ?? section.order ?? 'manual';
+}
+
+function setSectionOrder(section, order) {
+  state.orderEdits = { ...(state.orderEdits ?? {}), [section.kind]: order };
+  markDirty();
+  render();
+}
+
+const ORDER_LABELS = {
+  newest: 'Newest first',
+  oldest: 'Oldest first',
+  manual: 'In the order you arranged',
+};
+
+/**
+ * Newest first, oldest first, or the order you put them in.
+ *
+ * Newest first is what a resume wants nearly always — it is not so much a
+ * preference as the convention every reader of the document already has — so
+ * it is what a new section gets, and the dates maintain it. Dragging switches
+ * to manual on its own, because dragging is an instruction and a sort that
+ * immediately undid it would make the handle a lie.
+ *
+ * A section carried over from before any of this existed says nothing about
+ * what it wants, and `adoptDateOrder` on the server has already taken over the
+ * ones where sorting provably changes nothing. This is how the rest get asked
+ * rather than told: they read "In the order you arranged", which is true, and
+ * one click sorts them.
+ */
+function orderControl(section) {
+  const current = sectionOrder(section);
+  const select = el('select', {
+    className: 'order-by',
+    title: 'What decides the order of this section',
+    onchange: (ev) => setSectionOrder(section, ev.target.value),
+  });
+  for (const [value, label] of Object.entries(ORDER_LABELS)) {
+    select.append(el('option', { value, textContent: label, selected: value === current }));
+  }
+
+  /*
+   * How many of these the program cannot place. Sorting quietly leaves them at
+   * the bottom, which is right and is also the sort of thing that reads as a
+   * bug when you have not been told — "why is that project last?".
+   */
+  const undated =
+    current === 'manual'
+      ? 0
+      : entrySelection(section).filter((id) => !state.store.entries.find((e) => e.id === id)?.period).length;
+
+  return el('span', { className: 'order-control' }, [
+    el('label', { className: 'sr-only', htmlFor: '' }, 'Order'),
+    select,
+    undated > 0
+      ? el('span', {
+          className: 'chip',
+          textContent: `${undated} undated`,
+          title: 'These have no date the program could read, so they keep their place at the end. Fix the date to sort them.',
+        })
+      : null,
+  ].filter(Boolean));
+}
+
 /**
  * Which entries are folded away, for the resume that is open.
  *
@@ -1676,12 +1754,28 @@ function entryBlock(entry, section, choices) {
  */
 function setEntryOrder(section, ordered) {
   state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+  /*
+   * Dragging is an instruction, so it also turns the sort off.
+   *
+   * Without this the drop lands, the list is rewritten, and the date sort puts
+   * everything straight back — a handle that visibly does nothing, which is
+   * worse than no handle at all. The sort is still one click away in the
+   * heading, and turning it back on restores date order without having lost
+   * anything: the arrangement stays in the list underneath.
+   */
+  if (sectionOrder(section) !== 'manual') {
+    state.orderEdits = { ...(state.orderEdits ?? {}), [section.kind]: 'manual' };
+    setStatus('Arranged by hand — the date sort for this section is off');
+  }
   markDirty();
   render();
 }
 
 function dropEntry(section, moved, onto, side) {
-  const list = entrySelection(section);
+  // The order on screen, which is what the user was aiming at. Dropping
+  // against the stored list while a sort is on would move things relative to
+  // an order nobody can see.
+  const list = orderEntryIds(entrySelection(section), state.store.entries, sectionOrder(section));
   // Only entries this resume actually shows can be reordered: the ones below
   // are the store's other entries, offered so they can be switched on, and
   // they have no position yet to move.
@@ -1702,7 +1796,11 @@ function entryGrip(section, entry) {
     kind: 'entry',
     id: entry.id,
     label: 'this entry',
-    onStep: (delta) => setEntryOrder(section, moveBy(entrySelection(section), entry.id, delta)),
+    onStep: (delta) =>
+      setEntryOrder(
+        section,
+        moveBy(orderEntryIds(entrySelection(section), state.store.entries, sectionOrder(section)), entry.id, delta),
+      ),
   });
 }
 
@@ -2095,6 +2193,7 @@ function renderEditor() {
     const heading = el('div', { className: 'section-heading' }, [
       el('span', { className: 'name', textContent: SECTION_LABELS[section.kind] ?? section.kind }),
       el('span', { className: 'rule' }),
+      section.kind !== 'skills' ? orderControl(section) : null,
       section.kind !== 'skills'
         ? el('button', {
             className: 'link',
@@ -2121,7 +2220,7 @@ function renderEditor() {
      * changed the spec that compiles and did not change the list on screen —
      * the preview moved and the editor did not.
      */
-    const listed = entrySelection(section);
+    const listed = orderEntryIds(entrySelection(section), state.store.entries, sectionOrder(section));
     const entries = [
       ...listed.map((eid) => state.store.entries.find((e) => e.id === eid)).filter(Boolean),
       ...state.store.entries.filter((e) => e.kind === section.kind && !e.archived && !listed.includes(e.id)),
