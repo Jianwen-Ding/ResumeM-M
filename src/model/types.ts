@@ -185,10 +185,31 @@ export interface SectionSpec {
    */
   order?: 'manual' | 'newest' | 'oldest';
   /**
-   * Per-entry bullet inclusion and ordering. Absent entry => all non-archived
-   * bullets in store order.
+   * Which lines each entry shows. Absent entry => all non-archived bullets.
+   *
+   * The order of this list is only honoured where `bulletOrder` says the
+   * lines were arranged here; otherwise the master decides, and this is read
+   * as a set. See `orderedBullets`.
    */
   bullets?: Record<string, string[]>;
+  /**
+   * Entries whose lines were put in order on this resume rather than in the
+   * master document.
+   *
+   * Absent means the master decides, which is the default and the point: an
+   * order stated once in the inventory is the order every document takes, so
+   * rearranging the master restacks all of them. Dragging a line inside one
+   * resume is that resume saying it wants its own order, and is the only
+   * thing that writes this.
+   *
+   * It has to be recorded rather than inferred. The obvious inference —
+   * "this list disagrees with the master, so somebody must have dragged it"
+   * — is true right up until the master moves, at which point every resume
+   * that was faithfully following it suddenly disagrees with it too, and
+   * they all detach at once. Which is the exact opposite of what the setting
+   * is for.
+   */
+  bulletOrder?: Record<string, 'manual'>;
   /** For skills sections: group ids, and optionally which items within them. */
   groups?: string[];
   items?: Record<string, string[]>;

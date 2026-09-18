@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { absorbBase, adoptDateOrder } from './resolve.js';
+import { absorbBase, adoptBulletOrder, adoptDateOrder } from './resolve.js';
 import {
   DEFAULT_CONFIG,
   type AnswerBankItem,
@@ -589,9 +589,19 @@ export class Store {
        * section where sorting *would* move something is left exactly alone for
        * the editor to offer rather than decide.
        */
+      /*
+       * And the same question about the lines inside an entry — see
+       * `adoptBulletOrder`. A resume arranged before the master had a say
+       * carries no record of having been arranged, and reading it as
+       * deliberate is the only reading that cannot silently restack a
+       * document somebody already sent.
+       */
       resumes: this.loadResumes().map((resume) =>
         resume.sections
-          ? { ...resume, sections: adoptDateOrder(resume.sections, entries).adopted }
+          ? {
+              ...resume,
+              sections: adoptBulletOrder(adoptDateOrder(resume.sections, entries).adopted, entries),
+            }
           : resume,
       ),
       applications: normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])),

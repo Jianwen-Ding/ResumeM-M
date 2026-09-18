@@ -1689,6 +1689,24 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 .date-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--t-sm); cursor: pointer; }
 .date-switch:hover { color: var(--fg); }
 
+/* An entry whose lines were arranged here rather than in the master. Stated
+   quietly beside the add-line button: it is a fact about this resume, not a
+   problem with it. */
+.by-hand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+/* The grip in the master sits ahead of the line rather than inside the
+   header row, because a master line has no header row of its own. */
+.master-source-bullet { position: relative; }
+.master-source-bullet > .grip { position: absolute; left: -18px; top: 6px; }
+.master-source-bullet:hover > .grip { opacity: 1; }
+
 /* A range that runs backwards. Beside the two years that say so, and warn
    rather than bad: nothing is broken and nothing has been refused — the
    document is simply about to claim something that did not happen. */

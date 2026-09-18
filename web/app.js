@@ -15,7 +15,7 @@ import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
-import { mergeSections } from './sections.js';
+import { bulletsAreHandOrdered, mergeSections, orderedBullets } from './sections.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -97,6 +97,7 @@ function clearEdits() {
   state.skillEdits = null;
   state.entryEdits = null;
   state.bulletEdits = null;
+  state.bulletOrderEdits = null;
   state.listEdits = null;
   state.collapsedEdits = null;
   state.orderEdits = null;
@@ -462,7 +463,8 @@ function currentSpec() {
    * carries only the part they changed, which mergeSections now lays over the
    * parent's rather than replacing it outright.
    */
-  const touchesSections = state.skillEdits || state.entryEdits || state.bulletEdits || state.orderEdits;
+  const touchesSections =
+    state.skillEdits || state.entryEdits || state.bulletEdits || state.orderEdits || state.bulletOrderEdits;
   if (touchesSections) {
     const own = new Map((base.sections ?? []).map((s) => [s.kind, s]));
     const sections = [];
@@ -476,7 +478,8 @@ function currentSpec() {
           ? Boolean(state.skillEdits && (section.groups ?? []).some((g) => g in state.skillEdits))
           : Boolean(state.entryEdits && section.kind in state.entryEdits) ||
             Boolean(state.orderEdits && section.kind in state.orderEdits) ||
-            Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits));
+            Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits)) ||
+            Boolean(state.bulletOrderEdits && entries.some((eid) => eid in state.bulletOrderEdits));
 
       // Untouched and not already this resume's own: leave it inherited.
       if (!mine && !editedHere) continue;
@@ -505,6 +508,20 @@ function currentSpec() {
         if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
       }
       if (Object.keys(bullets).length > 0) next.bullets = bullets;
+
+      /*
+       * Which entries arranged their own lines, rather than taking the
+       * master's order. Written whenever it was decided here, and cleared
+       * outright when the last one goes back to following the master, so a
+       * resume that follows it everywhere says so by holding nothing.
+       */
+      const byHand = { ...(mine?.bulletOrder ?? {}) };
+      for (const [eid, mode] of Object.entries(state.bulletOrderEdits ?? {})) {
+        if (mode === 'manual') byHand[eid] = 'manual';
+        else delete byHand[eid];
+      }
+      if (Object.keys(byHand).length > 0) next.bulletOrder = byHand;
+      else delete next.bulletOrder;
       sections.push(next);
     }
     spec.sections = sections;
@@ -1777,7 +1794,14 @@ function entryBlock(entry, section, choices) {
    * Bullets that are switched off follow the ones that are on, so turning one
    * off does not make it unreachable.
    */
-  const shown = bulletSelection(section, entry);
+  /*
+   * Which lines, from this resume; what order, from the master — unless this
+   * resume was arranged by hand, which is recorded by the two disagreeing.
+   * See `orderedBullets`.
+   */
+  const picked = bulletSelection(section, entry);
+  const byHand = handOrdered(section, entry.id);
+  const shown = byHand ? picked : orderedBullets(picked, entry);
   const ordered = [
     ...shown.map((id) => (entry.bullets ?? []).find((b) => b.id === id)).filter(Boolean),
     ...(entry.bullets ?? []).filter((b) => !shown.includes(b.id)),
@@ -1790,7 +1814,25 @@ function entryBlock(entry, section, choices) {
   box.append(
     el('div', { className: 'add-row' }, [
       el('button', { className: 'link', textContent: '+ Add bullet', onclick: () => addBullet(entry) }),
-    ]),
+      /*
+       * Said out loud, and undoable. Arranging the lines here detaches this
+       * entry from the master's order, so rearranging the master will no
+       * longer restack it — which is right, and is also the sort of thing
+       * that has to be visible or it is a rule you discover by being
+       * surprised.
+       */
+      byHand
+        ? el('span', { className: 'by-hand' }, [
+            el('span', { textContent: 'Lines arranged here' }),
+            el('button', {
+              className: 'link',
+              textContent: 'Follow the master’s order',
+              title: 'Put these lines back in the order the master document puts them, and follow it again',
+              onclick: () => followMasterOrder(entry, section),
+            }),
+          ])
+        : null,
+    ].filter(Boolean)),
   );
   box.className = 'entry';
   return dropTarget(box, {
@@ -1865,10 +1907,63 @@ function entryGrip(section, entry) {
   });
 }
 
-function setBulletOrder(entry, ordered) {
+function setBulletOrder(entry, ordered, { byHand = true } = {}) {
   state.bulletEdits = { ...(state.bulletEdits ?? {}), [entry.id]: ordered };
+  /*
+   * Dragging here is this resume saying it wants its own order, and that has
+   * to be written down rather than inferred from the order itself — see
+   * `SectionSpec.bulletOrder`. Without it, the next rearrangement of the
+   * master would restack this entry and throw the arrangement away.
+   */
+  state.bulletOrderEdits = { ...(state.bulletOrderEdits ?? {}), [entry.id]: byHand ? 'manual' : null };
   markDirty();
   render();
+}
+
+/** Whether this entry's lines were arranged here, including unsaved changes. */
+function handOrdered(section, entryId) {
+  const edited = state.bulletOrderEdits?.[entryId];
+  if (edited !== undefined) return edited === 'manual';
+  return bulletsAreHandOrdered(section, entryId);
+}
+
+/**
+ * Put this entry's lines back in the master's order.
+ *
+ * The way out of a hand arrangement, and the reason the arrangement can be
+ * made at all without it being a one-way door. A resume that disagrees with
+ * the master stops following it — deliberately — and this is how you say you
+ * are done disagreeing.
+ */
+function followMasterOrder(entry, section) {
+  setBulletOrder(entry, orderedBullets(bulletSelection(section, entry), entry), { byHand: false });
+  setStatus('Back in the master’s order');
+}
+
+/**
+ * Reorder the lines of an entry in the master itself, which is the order
+ * every resume that has not been arranged by hand will follow.
+ *
+ * This writes the entry, not a resume: the master is the shared inventory,
+ * and an order set here is the one the documents inherit.
+ */
+async function setMasterBulletOrder(entry, ordered) {
+  const bullets = ordered.map((id) => (entry.bullets ?? []).find((b) => b.id === id)).filter(Boolean);
+  // Anything the drag did not name — archived lines are still in the file and
+  // are not shown here — keeps its place at the end rather than being dropped.
+  const rest = (entry.bullets ?? []).filter((b) => !ordered.includes(b.id));
+  const next = { ...entry, bullets: [...bullets, ...rest] };
+
+  // On screen first: `saveEntry` redraws from the store the client is holding,
+  // which has not heard about this yet. Same reason as `saveEntryPeriod`.
+  const held = state.store?.entries?.find((e) => e.id === entry.id);
+  if (held) held.bullets = next.bullets;
+  render();
+
+  await saveEntry(next, 'Lines reordered');
+  await loadStore();
+  render();
+  scheduleRender();
 }
 
 function dropBullet(entry, section, moved, onto, side) {
@@ -1877,6 +1972,33 @@ function dropBullet(entry, section, moved, onto, side) {
   const at = list.indexOf(onto);
   const before = side === 'after' ? (list[at + 1] ?? null) : onto;
   setBulletOrder(entry, moveBefore(list, moved, before));
+}
+
+/** The order shown in the master, which is the entry's own line order. */
+function masterBulletIds(entry) {
+  return (entry.bullets ?? []).map((b) => b.id);
+}
+
+function dropMasterBullet(entry, moved, onto, side) {
+  const list = masterBulletIds(entry);
+  if (!list.includes(moved)) return;
+  const at = list.indexOf(onto);
+  const before = side === 'after' ? (list[at + 1] ?? null) : onto;
+  setMasterBulletOrder(entry, moveBefore(list, moved, before)).catch((err) => setStatus(err.message, true));
+}
+
+function masterBulletGrip(entry, bullet) {
+  const list = masterBulletIds(entry);
+  if (!list.includes(bullet.id) || list.length < 2) return null;
+  return dragHandle({
+    kind: 'master-bullet',
+    id: bullet.id,
+    label: 'this line, for every resume',
+    onStep: (delta) =>
+      setMasterBulletOrder(entry, moveBy(masterBulletIds(entry), bullet.id, delta)).catch((err) =>
+        setStatus(err.message, true),
+      ),
+  });
 }
 
 function bulletGrip(entry, section, bullet) {
@@ -2341,6 +2463,15 @@ function renderMasterEditor(editor) {
       }
       for (const bullet of entry.bullets ?? []) {
         const row = el('div', { className: 'master-source-bullet' });
+        /*
+         * Arranged here, followed everywhere. The master is the one place an
+         * order can be stated once and mean something on every resume, so
+         * this is where the lines inside an entry are put in order — every
+         * resume that has not been arranged by hand takes this order, and
+         * rearranging it here restacks all of them.
+         */
+        const grip = masterBulletGrip(entry, bullet);
+        if (grip) row.append(grip);
         if (Array.isArray(bullet.items)) {
           row.append(el('div', { className: 'text', textContent: `${bullet.prefix ?? ''} ${bullet.items.map(item => item.text).join(bullet.separator ?? ', ')}` }));
           row.append(el('button', { className: 'tiny', textContent: '+ Item', onclick: () => addListItem(entry, bullet) }));
@@ -2366,7 +2497,13 @@ function renderMasterEditor(editor) {
         const actions = [...row.querySelectorAll('.phrase-feedback, :scope > button, :scope > .toolbar')];
         const anchor = row.querySelector('.phrase-line') ?? row;
         attachSourceTools(row, `${entry.id}/${bullet.id}`, actions, anchor);
-        box.append(row);
+        box.append(
+          dropTarget(row, {
+            kind: 'master-bullet',
+            id: bullet.id,
+            onDrop: (moved, side) => dropMasterBullet(entry, moved, bullet.id, side),
+          }),
+        );
       }
       box.append(el('button', { className: 'tiny', textContent: '+ Bullet', onclick: () => addBullet(entry) }));
       editor.append(box);

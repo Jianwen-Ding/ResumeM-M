@@ -858,6 +858,110 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * Arranging every resume at once                                   *
+     * -------------------------------------------------------------- *
+     * The master document is the inventory, and the one place an order
+     * can be stated once and mean something everywhere — so it owns the
+     * order of the lines inside an entry, and every resume that has not
+     * arranged its own follows it. Entries stay ordered by date: the
+     * order of a career is not a matter of taste.
+     *
+     * Worth driving rather than unit-testing alone, because the whole
+     * claim is about two screens agreeing: a line is moved on one, and
+     * the other has to have moved with it.
+     * -------------------------------------------------------------- */
+
+    console.log('\nArranging every resume at once');
+    {
+      const linesOf = (entryId) =>
+        page.$$eval(`#editor .entry[data-drag-id="${entryId}"] .bullet:not(.off)`, (rows) =>
+          rows.map((r) => r.dataset.dragId),
+        );
+      const backToResume = async () => {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+      };
+
+      await backToResume();
+      /*
+       * An entry this resume has *not* arranged for itself, which by now is
+       * not every entry: the drag above deliberately made one of them
+       * hand-arranged, and a hand-arranged entry is exactly the one that
+       * must not follow. `.by-hand` is the note the editor puts on those, so
+       * it is also the way to tell them apart from outside.
+       */
+      const target = await page.evaluate(() => {
+        for (const e of document.querySelectorAll('#editor > [data-drag-id]')) {
+          if (e.querySelector('.by-hand')) continue;
+          if (e.querySelectorAll('.bullet:not(.off)').length >= 2) return e.dataset.dragId;
+        }
+        return null;
+      });
+      const arranged = await page.evaluate(() => {
+        const e = [...document.querySelectorAll('#editor > [data-drag-id]')].find((x) => x.querySelector('.by-hand'));
+        return e ? { id: e.dataset.dragId, lines: [...e.querySelectorAll('.bullet:not(.off)')].map((b) => b.dataset.dragId) } : null;
+      });
+      check('an entry that arranged its own lines says so', Boolean(arranged), arranged?.id ?? 'none marked');
+
+      if (!target) {
+        check('there is an entry still following the master', false, 'none');
+      } else {
+        const before = await linesOf(target);
+
+        await page.locator('#resume-select').selectOption('__master__');
+        await page.locator('#editor .master-source-entry').first().waitFor({ timeout: 30_000 });
+        const grips = await page.locator('#editor .master-source-bullet .grip').count();
+        check('the master offers a handle on each of its lines', grips > 0, `${grips} handles`);
+
+        const dropped = await page.evaluate(({ a, b }) => {
+          const rows = [...document.querySelectorAll('.master-source-bullet[data-drag-id]')];
+          const from = rows.find((r) => r.dataset.dragId === a);
+          const onto = rows.find((r) => r.dataset.dragId === b);
+          if (!from || !onto) return false;
+          const dt = new DataTransfer();
+          const box = onto.getBoundingClientRect();
+          const y = box.bottom - 2;
+          const grip = from.querySelector('.grip');
+          grip.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+          onto.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }));
+          onto.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }));
+          grip.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+          return true;
+        }, { a: before[0], b: before[1] });
+        check('a line in the master can be picked up', dropped);
+        await page.waitForTimeout(3500);
+
+        // The master writes the entry itself, because the order is the
+        // store's rather than any one resume's.
+        const store = await (await fetch(`${server.url}/api/store`)).json();
+        const held = (store.entries.find((e) => e.id === target)?.bullets ?? []).map((b) => b.id);
+        check('and moving it there moves it in the save itself',
+          held.indexOf(before[0]) > held.indexOf(before[1]), held.join(', '));
+
+        await backToResume();
+        const after = await linesOf(target);
+        check('and the entry that never arranged its own lines follows',
+          after.indexOf(before[0]) > after.indexOf(before[1]),
+          `${before.join(', ')} → ${after.join(', ')}`);
+
+        /*
+         * And the other half of the same rule, which is the half that makes
+         * the first half safe: an entry arranged on this resume stays where
+         * it was put. Without this the check above passes just as well for a
+         * version that restacks everything, arrangements included.
+         */
+        if (arranged) {
+          const still = await linesOf(arranged.id);
+          check('while the one arranged here is left exactly as it was',
+            still.join(',') === arranged.lines.join(','),
+            `${arranged.lines.join(', ')} → ${still.join(', ')}`);
+        }
+        await sameAsDocument('after the master was rearranged');
+      }
+    }
+
+    /* -------------------------------------------------------------- *
      * Going back to an earlier version                                 *
      * -------------------------------------------------------------- *
      * Restore is the most destructive button in the editor: it writes

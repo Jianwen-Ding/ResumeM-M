@@ -83,3 +83,28 @@ export function mergeSections(base, override) {
   for (const o of pending) out.push(o);
   return out;
 }
+
+/**
+ * The lines of one entry, in the order the master document puts them.
+ *
+ * A mirror of `orderedBullets` in `src/model/resolve.ts`; see there for why
+ * the master owns this order and a resume only says which lines it shows.
+ */
+export function orderedBullets(selected, entry) {
+  const master = (entry.bullets ?? []).map((b) => b.id);
+  const at = (id) => master.indexOf(id);
+  const known = selected.filter((id) => at(id) >= 0).sort((a, b) => at(a) - at(b));
+  return [...known, ...selected.filter((id) => at(id) < 0)];
+}
+
+/**
+ * Whether this resume arranged an entry's lines itself.
+ *
+ * Read from the section, never inferred. A list that disagrees with the
+ * master looks hand-arranged — and every resume faithfully following the
+ * master disagrees with it the moment the master moves, so inferring it
+ * detaches all of them at once. See `SectionSpec.bulletOrder`.
+ */
+export function bulletsAreHandOrdered(section, entryId) {
+  return section?.bulletOrder?.[entryId] === 'manual';
+}
