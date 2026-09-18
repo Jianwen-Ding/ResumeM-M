@@ -203,3 +203,71 @@ describe('deleting an answer from the bank', () => {
     expect(putAnswers).toBeNull();
   });
 });
+
+/*
+ * And the other half of the model.
+ *
+ * A line had "Delete phrasing" from the day the alternates could be added.
+ * The heading fields — a role, a degree, a location, a graduation date — and
+ * your own name did not, so they collected alternates and never lost one: a
+ * degree line a model drafted, a company name tried two ways, a location from
+ * before you moved. The only way back was to open the YAML, which is the one
+ * thing this editor exists so you never have to do.
+ */
+describe('deleting an alternate of a heading field', () => {
+  beforeEach(() => open());
+
+  /** The education entry's dates carry two alternates in the fixture. */
+  const fieldWithAlternates = () =>
+    [...document.querySelectorAll('.variant-row')].find((r) =>
+      [...r.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Delete alternate'),
+    );
+
+  it('offers it where the field has more than one', () => {
+    expect(fieldWithAlternates()).toBeTruthy();
+  });
+
+  it('takes that alternate out and leaves the other', async () => {
+    buttonIn(fieldWithAlternates(), 'Delete alternate').click();
+    await confirmIt();
+
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(0));
+    const written = saved.at(-1);
+    const field = ['title', 'dates', 'subtitle', 'location']
+      .map((n) => written[n])
+      .find((f) => f && typeof f === 'object' && Array.isArray(f.variants));
+    expect(field.variants).toHaveLength(1);
+  });
+
+  /*
+   * Something has to be the pinned wording, the same as on a line: `default`
+   * naming an alternate that is gone resolves to a warning on every build,
+   * for a reason nobody would connect to this.
+   */
+  it('moves the pin when the pinned alternate is the one deleted', async () => {
+    buttonIn(fieldWithAlternates(), 'Delete alternate').click();
+    await confirmIt();
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(0));
+
+    const written = saved.at(-1);
+    for (const name of ['title', 'dates', 'subtitle', 'location']) {
+      const f = written[name];
+      if (!f || typeof f !== 'object' || !Array.isArray(f.variants)) continue;
+      expect(f.variants.some((v) => v.id === f.default), `${name} still pins one it has`).toBe(true);
+    }
+  });
+
+  it('says which field keeps what, before anything goes', async () => {
+    buttonIn(fieldWithAlternates(), 'Delete alternate').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    expect(document.querySelector('#modal').textContent).toMatch(/keeps its other/i);
+  });
+
+  it('leaves the save alone when the confirmation is declined', async () => {
+    buttonIn(fieldWithAlternates(), 'Delete alternate').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    document.querySelector('#modal-cancel').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal').classList.contains('hidden')).toBe(true));
+    expect(saved).toEqual([]);
+  });
+});

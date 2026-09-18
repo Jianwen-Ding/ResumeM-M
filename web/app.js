@@ -1740,6 +1740,20 @@ function entryBlock(entry, section, choices) {
         addLabel: '+ alternate',
         onAdd: () => addFieldAlternate(entry, name),
         onEdit: chosen ? () => editFieldVariant(entry, name, chosen) : null,
+        // Beside "+ alternate", because adding and removing one are the same
+        // act in two directions. Only where there is more than one: the last
+        // alternate of a field is not a thing to delete, it is a field that
+        // should go back to being a plain string.
+        trailingActions: [
+          field.variants.length > 1 && chosen
+            ? el('button', {
+                className: 'tiny danger',
+                textContent: 'Delete alternate',
+                title: 'Remove this wording from the save — every resume loses it',
+                onclick: () => removeFieldAlternate(entry, name, chosen),
+              })
+            : null,
+        ],
         extraActions: [
           el('span', { className: 'chip count', textContent: plural(field.variants.length, 'alternate') }),
           current !== field.default
@@ -2292,6 +2306,18 @@ function nameHead(profile) {
       addLabel: '+ alternate',
       onAdd: () => addNameAlternate(),
       onEdit: null,
+      // As on a heading field: adding and removing an alternate are the same
+      // act, and the last form of your name is not one to delete.
+      trailingActions: [
+        field.variants.length > 1 && chosen
+          ? el('button', {
+              className: 'tiny danger',
+              textContent: 'Delete alternate',
+              title: 'Remove this form of your name from the save',
+              onclick: () => removeNameAlternate(chosen),
+            })
+          : null,
+      ],
       extraActions: [
         el('span', { className: 'chip count', textContent: plural(field.variants.length, 'alternate') }),
         current !== field.default
@@ -3546,6 +3572,77 @@ async function removeBulletVariant(entry, bullet, variant) {
     markDirty();
   }
   scheduleRender();
+}
+
+/**
+ * Take an alternate back off a heading field.
+ *
+ * The same act as deleting one wording of a line, on the other half of the
+ * model — a role, a degree, a location, a graduation date. Lines had this and
+ * headings did not, so a heading collected alternates and never lost one: an
+ * AI-drafted degree line, a company name you tried two ways, a location from
+ * before you moved. The only way back was to open the YAML.
+ *
+ * Never the last one. A field with one alternate left is a field that should
+ * be a plain string, and collapsing it back to one is a different act with a
+ * different answer — so this refuses, and says which act you wanted.
+ */
+async function removeFieldAlternate(entry, name, variant) {
+  const field = entry[name];
+  if (!isVariantField(field) || field.variants.length < 2) {
+    setStatus('A field needs at least one wording', true);
+    return;
+  }
+  const left = field.variants.length - 1;
+  const ok = await confirmModal(
+    `Delete “${String(variant.text).slice(0, 60)}${String(variant.text).length > 60 ? '…' : ''}”?`,
+    `This wording is removed from the save. ${FIELD_LABELS[name] ?? name} keeps its other ${plural(left, 'alternate')}.`,
+  );
+  if (!ok) return;
+
+  const remaining = field.variants.filter((v) => v.id !== variant.id);
+  const key = `${entry.id}.${name}`;
+  await saveEntry(
+    {
+      ...entry,
+      // Something has to be the default; see the note in removeBulletVariant.
+      [name]: { ...field, variants: remaining, default: field.default === variant.id ? remaining[0].id : field.default },
+    },
+    'Alternate deleted',
+  );
+  if (state.choices[key] === variant.id) {
+    const { [key]: _gone, ...rest } = state.choices;
+    state.choices = rest;
+    markDirty();
+  }
+  scheduleRender();
+}
+
+/** And the same for the profile name, which carries alternates like any field. */
+async function removeNameAlternate(variant) {
+  const field = state.store.profile.name;
+  if (!isVariantField(field) || field.variants.length < 2) {
+    setStatus('Your name needs at least one form', true);
+    return;
+  }
+  const left = field.variants.length - 1;
+  const ok = await confirmModal(
+    `Delete “${String(variant.text)}”?`,
+    `This form of your name is removed from the save. It keeps its other ${plural(left, 'form')}.`,
+  );
+  if (!ok) return;
+
+  const remaining = field.variants.filter((v) => v.id !== variant.id);
+  await saveProfileName(
+    { ...field, variants: remaining, default: field.default === variant.id ? remaining[0].id : field.default },
+    'Deleted a form of your name',
+  );
+  if (state.choices[PROFILE_NAME_KEY] === variant.id) {
+    const { [PROFILE_NAME_KEY]: _gone, ...rest } = state.choices;
+    state.choices = rest;
+    markDirty();
+    render();
+  }
 }
 
 /**
