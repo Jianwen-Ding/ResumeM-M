@@ -713,6 +713,75 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     expect(res.body.report.overflowLines).toBeGreaterThan(0);
   });
 
+  /*
+   * The document as written, before auto-fit touches it.
+   *
+   * Auto-fit is a search — compile, measure, shrink, compile again — and on a
+   * resume slightly too long it costs seven compiles where a fitting one costs
+   * one. Measured on the bundled store: 0.47s against 6.8s. The editor spent
+   * all of it holding the previous page on screen with no page count and
+   * nothing moving, which is what gets reported as the preview freezing, and it
+   * arrives exactly when somebody is trying to cut a line and needs to see what
+   * they cut. So the preview asks for this first and gets the truth in half a
+   * second; the fitted compile is a second request and only when it is needed.
+   */
+  const OVER_LONG = {
+    id: 'spills',
+    label: 'Spills',
+    extends: 'base',
+    // The margin the overflow test below proves spills this store's base
+    // resume. A gentler one did not, and the assertions passed vacuously.
+    layout: { marginIn: 4.6 },
+  };
+
+  it('reports the real spill when asked for the document as written', async () => {
+    const asWritten = await request(app)
+      .post('/api/render')
+      .send({ spec: OVER_LONG, fit: 'as-written' })
+      .expect(200);
+
+    expect(asWritten.body.fits).toBe(false);
+    expect(asWritten.body.pages).toBeGreaterThan(1);
+    // Nothing was shrunk to get there, which is the whole point of asking.
+    expect(asWritten.body.adjustments).toEqual([]);
+  });
+
+  it('shrinks the same document when it is not asked for as written', async () => {
+    const fitted = await request(app).post('/api/render').send({ spec: OVER_LONG }).expect(200);
+    expect(fitted.body.adjustments.length).toBeGreaterThan(0);
+  });
+
+  /*
+   * Two different files, which matters because the editor shows one and then
+   * swaps in the other: sharing a path would have the browser draw whichever
+   * compile finished last, on a url it had already cached.
+   */
+  it('keeps the two compiles in separate files', async () => {
+    const asWritten = await request(app).post('/api/render').send({ spec: OVER_LONG, fit: 'as-written' }).expect(200);
+    const fitted = await request(app).post('/api/render').send({ spec: OVER_LONG }).expect(200);
+
+    expect(asWritten.body.pdfUrl).toContain('as-written');
+    expect(fitted.body.pdfUrl).not.toContain('as-written');
+    const strip = (u: string) => u.split('?')[0];
+    expect(strip(asWritten.body.pdfUrl)).not.toBe(strip(fitted.body.pdfUrl));
+    // And both are actually there to be drawn.
+    await request(app).get(strip(asWritten.body.pdfUrl)!).expect(200);
+    await request(app).get(strip(fitted.body.pdfUrl)!).expect(200);
+  });
+
+  /*
+   * A resume that fits is the common case and must not pay for any of this:
+   * one compile, no shrinking, and the same answer either way.
+   */
+  it('gives the same answer for a resume that fits, whichever way it is asked', async () => {
+    const asWritten = await request(app).post('/api/render').send({ resumeId: 'newgrad', fit: 'as-written' }).expect(200);
+    const fitted = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    expect(asWritten.body.fits).toBe(true);
+    expect(fitted.body.fits).toBe(true);
+    expect(asWritten.body.pages).toBe(fitted.body.pages);
+    expect(asWritten.body.adjustments).toEqual([]);
+  });
+
   it('serves the compiled PDF and 404s for anything else', async () => {
     await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
     const pdf = await request(app).get('/pdf/newgrad.pdf').expect(200);
