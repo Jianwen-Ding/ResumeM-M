@@ -1,5 +1,6 @@
 import type { ResumeSpec, StoreData, Variant } from '../model/types.js';
 import { isVariantField } from '../model/types.js';
+import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
 
 /**
  * Deterministic variant matching on tags and keyword overlap. This runs with
@@ -82,21 +83,83 @@ export interface MatchOptions {
   threshold?: number;
   /** Tags that should never be auto-selected (e.g. `short`, used for fitting). */
   excludeTags?: string[];
+  /**
+   * What kind of hire the posting is for, when it says clearly. Drives a
+   * different and much narrower rule than keywords — see `considerLevel`.
+   */
+  level?: LevelVerdict | null;
 }
 
 export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOptions): MatchResult {
   const keywords = new Map(opts.keywords.map((k) => [norm(k), k]));
   const threshold = opts.threshold ?? 3;
   const exclude = new Set((opts.excludeTags ?? ['short']).map(norm));
+  const levelTags = opts.level ? tagsForLevel(opts.level.level) : null;
+  const levelWhy = opts.level?.why ?? [];
 
   const current = base.choices ?? {};
   const choices: Record<string, string> = {};
   const rationale: MatchResult['rationale'] = [];
 
-  const consider = (key: string, variants: Variant[], defaultId: string) => {
+  const tagged = (v: Variant, set: Set<string>): boolean => (v.tags ?? []).some((t) => set.has(norm(t)));
+
+  /**
+   * Pick on the posting's level, if the applicant marked anything for it.
+   *
+   * Different in kind from the scoring below, and that difference is the whole
+   * reason a date is allowed through here. Scoring reads the posting's
+   * vocabulary and infers; this reads a tag the applicant wrote on their own
+   * variant, which is an instruction left for exactly this moment — "this
+   * ending is the one for internships". Nothing is inferred about the text, so
+   * there is no way for a posting to talk a fact into changing. It either
+   * matches an instruction or it does nothing.
+   *
+   * Returns whether it decided, so a field it left alone can still fall
+   * through to keyword scoring.
+   */
+  const considerLevel = (key: string, selectable: Variant[], currentId: string, defaultId: string): boolean => {
+    if (!levelTags) return false;
+    const currentVariant = selectable.find((v) => v.id === currentId);
+
+    const marked = selectable.filter((v) => tagged(v, levelTags));
+    if (marked.length > 0) {
+      // Already on one of them: the applicant's instruction is satisfied.
+      if (marked.some((v) => v.id === currentId)) return true;
+      const pick = marked
+        .map((v) => ({ v, ...scoreVariant(v, keywords) }))
+        .reduce((a, b) => (b.score > a.score ? b : a)).v;
+      choices[key] = pick.id;
+      rationale.push({ key, from: currentId, to: pick.id, because: levelWhy });
+      return true;
+    }
+
+    /*
+     * Nothing marked for this level, but the wording in place is marked for a
+     * different one. That is the ordinary two-variant setup: a plain ending
+     * and an "intern" ending, with the intern one selected from the last
+     * application. Leaving it would carry an internship's graduation date onto
+     * a new grad application, which is the exact failure this exists to stop.
+     *
+     * Only the field's own default is offered as the way off it. Any other
+     * unmarked variant would be a guess about which neutral wording was meant,
+     * and the default is the one the applicant already named as the answer
+     * when nothing else applies.
+     */
+    if (!currentVariant || !tagged(currentVariant, ALL_LEVEL_TAGS)) return false;
+    const fallback = selectable.find((v) => v.id === defaultId);
+    if (!fallback || fallback.id === currentId || tagged(fallback, ALL_LEVEL_TAGS)) return false;
+    choices[key] = fallback.id;
+    rationale.push({ key, from: currentId, to: fallback.id, because: levelWhy });
+    return true;
+  };
+
+  const consider = (key: string, variants: Variant[], defaultId: string, keywordsApply = true) => {
     const currentId = current[key] ?? defaultId;
     const selectable = variants.filter((v) => !(v.tags ?? []).some((t) => exclude.has(norm(t))));
     if (selectable.length < 2) return;
+
+    if (considerLevel(key, selectable, currentId, defaultId)) return;
+    if (!keywordsApply) return;
 
     const scored = selectable.map((v) => ({ v, ...scoreVariant(v, keywords) }));
     const currentScore = scored.find((s) => s.v.id === currentId)?.score ?? 0;
@@ -112,10 +175,12 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
     if (entry.archived) continue;
     for (const f of ['title', 'dates', 'subtitle', 'location'] as const) {
       const field = entry[f];
+      if (!isVariantField(field)) continue;
       // Dates are never matched on keywords — graduation date is a fact about
-      // the applicant, not something a job posting gets to influence.
-      if (f === 'dates') continue;
-      if (isVariantField(field)) consider(`${entry.id}.${f}`, field.variants, field.default);
+      // the applicant, not something a job posting's vocabulary gets to
+      // influence. A tag naming the posting's level still reaches them, because
+      // that is the applicant's own instruction rather than the posting's.
+      consider(`${entry.id}.${f}`, field.variants, field.default, f !== 'dates');
     }
     for (const b of entry.bullets ?? []) {
       if (b.archived) continue;

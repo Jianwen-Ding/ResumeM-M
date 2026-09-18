@@ -11,6 +11,7 @@ import {
   mergeJobPages,
   roleFromUrl,
 } from '../src/jobs/extract.js';
+import { detectLevel } from '../src/jobs/level.js';
 import { matchVariants } from '../src/jobs/match.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
 
@@ -300,6 +301,108 @@ describe('variant matching', () => {
     const loose = matchVariants(data, base, { keywords: ['kafka'] });
     const strict = matchVariants(data, base, { keywords: ['kafka'], threshold: 99 });
     expect(Object.keys(strict.choices).length).toBeLessThanOrEqual(Object.keys(loose.choices).length);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+/**
+ * The one signal allowed to reach a date: a tag the applicant wrote on their
+ * own variant, naming the kind of posting it belongs on.
+ */
+describe('matching on the posting’s level', () => {
+  const intern = detectLevel({ title: 'Software Engineer Intern' });
+  const newgrad = detectLevel({ title: 'Software Engineer, New Grad' });
+
+  it('picks the ending marked for internships on an internship posting', () => {
+    const result = matchVariants(data, base, { keywords: [], level: intern });
+    expect(result.choices['edu.dates']).toBe('v_dec');
+  });
+
+  it('switches back off it when the next posting is a new grad role', () => {
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu.dates': 'v_dec' } };
+    const result = matchVariants(data, onIntern, { keywords: [], level: newgrad });
+    expect(result.choices['edu.dates']).toBe('v_may');
+  });
+
+  it('leaves the date alone when it is already the right one', () => {
+    const result = matchVariants(data, base, { keywords: [], level: newgrad });
+    expect(result.choices['edu.dates']).toBeUndefined();
+  });
+
+  it('leaves the date alone when the posting names no level', () => {
+    const result = matchVariants(data, base, { keywords: [], level: null });
+    expect(result.choices['edu.dates']).toBeUndefined();
+  });
+
+  it('says which word in the posting moved it', () => {
+    const result = matchVariants(data, base, { keywords: [], level: intern });
+    const change = result.rationale.find((r) => r.key === 'edu.dates');
+    expect(change).toMatchObject({ from: 'v_may', to: 'v_dec' });
+    expect(change?.because).toEqual(['intern']);
+  });
+
+  /*
+   * The setup most people will actually have: one plain wording and one marked
+   * for internships, with the intern one left selected from the last
+   * application. Nothing is marked `newgrad`, so the only honest move is back
+   * to the default — and it has to happen, because otherwise an internship's
+   * graduation date rides onto a new grad application.
+   */
+  it('falls back to the default when only the other level is marked', () => {
+    const oneSided: StoreData = {
+      ...data,
+      entries: [
+        {
+          id: 'edu2',
+          kind: 'education',
+          title: 'University',
+          dates: {
+            default: 'v_plain',
+            variants: [
+              { id: 'v_plain', label: 'Plain', text: 'May 2026' },
+              { id: 'v_intern', label: 'Expected', text: 'Expected May 2026', tags: ['intern'] },
+            ],
+          },
+        },
+      ],
+    };
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu2.dates': 'v_intern' } };
+    expect(matchVariants(oneSided, onIntern, { keywords: [], level: newgrad }).choices['edu2.dates']).toBe('v_plain');
+    // And it stays put on the posting it was written for.
+    expect(matchVariants(oneSided, onIntern, { keywords: [], level: intern }).choices['edu2.dates']).toBeUndefined();
+  });
+
+  it('still refuses to pick a date out of the posting’s vocabulary', () => {
+    // `v_dec` is tagged `streaming` as well as `intern`. A streaming posting
+    // that says nothing about level must not reach it.
+    const result = matchVariants(data, base, { keywords: ['streaming'], level: null });
+    expect(result.choices['edu.dates']).toBeUndefined();
+  });
+
+  it('will not select a fitting variant even when it carries the level tag', () => {
+    const reserved: StoreData = {
+      ...data,
+      entries: [
+        {
+          id: 'exp2',
+          kind: 'experience',
+          title: 'Example Co.',
+          bullets: [
+            {
+              id: 'b_role',
+              default: 'v_long',
+              variants: [
+                { id: 'v_long', label: 'Long', text: 'Built an event pipeline' },
+                { id: 'v_other', label: 'Other', text: 'Built an event bus' },
+                { id: 'v_tight', label: 'Tight', text: 'Built a pipeline', tags: ['intern', 'short'] },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(matchVariants(reserved, base, { keywords: [], level: intern }).choices.b_role).toBeUndefined();
   });
 });
 

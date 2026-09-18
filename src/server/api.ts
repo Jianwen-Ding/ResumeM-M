@@ -35,6 +35,7 @@ import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
+import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
@@ -1719,7 +1720,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const match =
         mode === 'none'
           ? { choices: {}, skills: {}, rationale: [] }
-          : matchVariants(data, base, { keywords: job.keywords });
+          : matchVariants(data, base, { keywords: job.keywords, level: detectLevel(job) });
 
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
@@ -2610,7 +2611,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');
 
-      const match = matchVariants(data, base, { keywords: job.keywords });
+      const match = matchVariants(data, base, { keywords: job.keywords, level: detectLevel(job) });
 
       let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
       // Why the AI did not tailor this one; see the same field on `/analyze`.
