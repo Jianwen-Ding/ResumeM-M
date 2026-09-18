@@ -243,6 +243,45 @@ async function main() {
       }
     }
 
+    /** The ids the editor is showing, in the order it is showing them. */
+    const shown = (selector) => page.$$eval(selector, (rows) => rows.map((r) => r.dataset.dragId));
+
+    /*
+     * The one invariant underneath all of these: the list on the screen is
+     * the document that will print.
+     *
+     * Every bug in this area has been a version of the two disagreeing. A
+     * drag that moved the PDF and not the editor. A saved bullet reorder
+     * that emptied a section out of the editor while the PDF went on
+     * printing it. Each was found by hand, reported as something else, and
+     * each was invisible to a test that only looked at one side.
+     *
+     * So this asks both and compares. `#editor > [data-drag-id]` is exactly
+     * the entries this resume includes, in the order it shows them — the
+     * ones it leaves out are drawn without a drag id, because an entry with
+     * no position cannot be moved. `/resolved` is what the renderer will be
+     * handed. They have to be the same sequence, entry for entry and line
+     * for line, or one of the two is lying.
+     */
+    const sameAsDocument = async (when) => {
+      const id = await page.locator('#resume-select').inputValue();
+      const onScreen = await page.evaluate(() =>
+        [...document.querySelectorAll('#editor > [data-drag-id]')].map((e) => ({
+          id: e.dataset.dragId,
+          lines: [...e.querySelectorAll('.bullet:not(.off)')].map((x) => x.dataset.dragId ?? '?'),
+        })),
+      );
+      const resolved = await (await fetch(`${server.url}/api/resumes/${encodeURIComponent(id)}/resolved`)).json();
+      const inDocument = (resolved.sections ?? []).flatMap((s) =>
+        (s.entries ?? []).map((e) => ({ id: e.id, lines: (e.bullets ?? []).map((b) => b.id) })),
+      );
+
+      const say = (list) => list.map((e) => `${e.id}[${e.lines.join(' ')}]`).join(' ');
+      const agree = JSON.stringify(onScreen) === JSON.stringify(inDocument);
+      check(`the editor and the document agree — ${when}`, agree,
+        agree ? '' : `screen: ${say(onScreen)} | document: ${say(inDocument)}`);
+    };
+
     /* -------------------------------------------------------------- *
      * Arranging it                                                     *
      * -------------------------------------------------------------- *
@@ -263,6 +302,7 @@ async function main() {
     console.log('\nArranging it');
     await page.locator('#tabs button[data-tab="resumes"]').click();
     await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+    await sameAsDocument('before anything is moved');
 
     /*
      * A date is a control, not a string.
@@ -410,8 +450,6 @@ async function main() {
         { fromId, ontoId, kind, side },
       );
 
-    /** The ids the editor is showing, in the order it is showing them. */
-    const shown = (selector) => page.$$eval(selector, (rows) => rows.map((r) => r.dataset.dragId));
 
     {
       /*
@@ -481,7 +519,21 @@ async function main() {
        * level down — and the level where it was broken, because bullets
        * were drawn in the store's order while entries were drawn in the
        * resume's.
+       *
+       * On a fresh page, deliberately. Everything above this has already
+       * made edits, and an edit to which entries a section shows makes the
+       * next save write the entry list down — which is exactly the thing
+       * whose absence caused the damage. Run straight after those, a
+       * bullet drag saves a section that happens to carry entries anyway
+       * and looks perfectly safe; run as somebody actually does it, on a
+       * page they just opened, it saves bullets alone. Falsifying this
+       * against the old merge is what showed the difference: the check
+       * below passed on the broken build until the reload was added.
        */
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.locator('#tabs button[data-tab="resumes"]').click();
+      await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+
       const pair = await page.evaluate(() => {
         for (const entry of document.querySelectorAll('#editor .entry')) {
           const rows = [...entry.querySelectorAll('[data-drag-id]')].filter((r) =>
@@ -531,6 +583,7 @@ async function main() {
         check('and the line is still where it was dropped',
           kept.indexOf(first) > kept.indexOf(second) && kept.includes(first),
           kept.join(', ') || '(the entry is gone)');
+        await sameAsDocument('after a line was dragged and the page reloaded');
 
         /*
          * The same shape, reached the commoner way.
@@ -554,6 +607,7 @@ async function main() {
           check('hiding a line leaves the entry it belongs to in the resume', there === 1, `${there} found`);
           const lines = await shown(`#editor .entry[data-drag-id="${inEntry}"] [data-drag-id]`);
           check('and the lines that were not hidden are still on it', lines.length > 0, lines.join(', ') || '(none)');
+          await sameAsDocument('after a line was hidden and the page reloaded');
         }
       }
     }

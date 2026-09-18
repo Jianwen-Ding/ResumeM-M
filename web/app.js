@@ -395,7 +395,7 @@ function effectiveChoices() {
   return Object.assign({}, ...chain(state.resumeId).map((s) => s.choices ?? {}), state.choices);
 }
 
-/** Flattened section list through the chain, child replacing parent by kind. */
+/** Flattened section list through the chain, each child laid over its parent. */
 function resolveSections(id = state.resumeId) {
   /*
    * Through the shared rule, rather than the `child ?? parent` this used to
