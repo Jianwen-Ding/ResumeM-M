@@ -1,4 +1,14 @@
-import type { AnswerBankItem, Bullet, Entry, MaybeVariant, Profile, Variant, VariantField } from './types.js';
+import type {
+  AnswerBankItem,
+  Application,
+  ApplicationStatus,
+  Bullet,
+  Entry,
+  MaybeVariant,
+  Profile,
+  Variant,
+  VariantField,
+} from './types.js';
 
 /**
  * Making the store's shape true before anything reads it.
@@ -106,6 +116,41 @@ export function normalizeAnswers(answers: unknown): AnswerBankItem[] {
         default: settleDefault(variants, item.default),
       } as AnswerBankItem;
     });
+}
+
+/**
+ * The four stages that were dropped, and what they became.
+ *
+ * `oa` was a rung of its own between applied and interview; it is an
+ * interview stage by any useful reading — they came back and there is
+ * something to prepare for. The three endings differed only in whose decision
+ * it was, which the history already records in words.
+ *
+ * Read on the way in rather than migrated on disk: a file written by an older
+ * version, or by hand, keeps working, and nothing is rewritten under someone
+ * who has not asked for it.
+ */
+const RETIRED_STATUSES: Record<string, ApplicationStatus> = {
+  oa: 'interview',
+  rejected: 'closed',
+  ghosted: 'closed',
+  withdrawn: 'closed',
+};
+
+const STAGES: ApplicationStatus[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
+
+/** What this application's stage is called now. */
+export function normalizeStatus(status: unknown): ApplicationStatus {
+  const said = String(status ?? '').trim();
+  if ((STAGES as string[]).includes(said)) return said as ApplicationStatus;
+  return RETIRED_STATUSES[said] ?? 'interested';
+}
+
+export function normalizeApplications(apps: unknown): Application[] {
+  if (!Array.isArray(apps)) return [];
+  return apps
+    .filter((a) => a && typeof a === 'object')
+    .map((a) => ({ ...(a as Application), status: normalizeStatus((a as Application).status) }));
 }
 
 /**

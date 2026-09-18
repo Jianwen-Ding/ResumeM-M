@@ -129,6 +129,86 @@ export function applicationId(company: string, role: string, at = new Date()): s
   return faithful ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
 }
 
+/**
+ * "One entry and two wordings", from the resolver's count of what it could
+ * not find. Undefined when it found everything, so the caller can ask
+ * whether there is anything to say by asking whether this is there.
+ */
+export function describeLost(lost: { kind: 'entry' | 'wording' }[]): string | undefined {
+  if (lost.length === 0) return undefined;
+  const entries = lost.filter((l) => l.kind === 'entry').length;
+  const wordings = lost.filter((l) => l.kind === 'wording').length;
+  const parts: string[] = [];
+  if (entries > 0) parts.push(`${entries} ${entries === 1 ? 'entry' : 'entries'}`);
+  if (wordings > 0) parts.push(`${wordings} ${wordings === 1 ? 'wording' : 'wordings'}`);
+  const what = parts.join(' and ');
+  const verb = entries + wordings === 1 ? 'is' : 'are';
+  return `${what} this resume chose ${verb} no longer in your store.`;
+}
+
+/**
+ * The application this company and role already has, whatever day it began.
+ *
+ * An id carries the date it was made, which is right for a folder name and
+ * wrong for identity: an application opened before midnight and sent after it
+ * asks for an id that does not exist, and a second row appears for the same
+ * job. That is not a hypothetical — it is what the suite found on the stroke
+ * of midnight, three systems in a row reporting a submission against a
+ * tracker row that was still "applying" because the send had quietly created
+ * its own.
+ *
+ * Identity is the company and the role. The most recent one still being
+ * worked on is the one meant; failing that, simply the most recent, because
+ * the same job applied for twice a year apart is two applications and the one
+ * you are touching now is the later.
+ */
+export function findApplication(apps: Application[], company: string, role: string): Application | undefined {
+  const key = `${slug(company)}\u0000${slug(role)}`;
+  const same = apps.filter((a) => `${slug(a.company)}\u0000${slug(a.role)}` === key);
+  if (same.length === 0) return undefined;
+
+  const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
+  const unsent = same.filter((a) => a.status === 'interested' || a.status === 'applying');
+  return (unsent.length > 0 ? unsent : same).sort(byNewest)[0];
+}
+
+/**
+ * Have I sent this one before?
+ *
+ * The other half of `findApplication`, and a different question. That one
+ * answers "which row does this belong to", and prefers one still being worked
+ * on, because the point is not to file a second row for a job already open.
+ * This one asks whether there is a row that has already gone out — which is
+ * something a person standing in front of the posting wants to know before
+ * they spend twenty minutes on it again.
+ *
+ * `applying` and `interested` do not count: those are this application, or an
+ * intention to make it, and saying "you already applied" about a draft you
+ * are in the middle of would be a lie told confidently. Everything past
+ * sending counts, `closed` included — a job you were turned down for is the
+ * one you would most like to be reminded about before writing another letter.
+ */
+export function alreadySent(apps: Application[], company: string, role: string): Application | undefined {
+  const key = `${slug(company)} ${slug(role)}`;
+  return apps
+    .filter((a) => `${slug(a.company)} ${slug(a.role)}` === key)
+    .filter((a) => a.status !== 'interested' && a.status !== 'applying')
+    .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
+}
+
+/** The same question about a workspace, whose id is made the same way. */
+export function findDraft<T extends { id: string; company: string; role: string; status: string; updatedAt?: string }>(
+  drafts: T[],
+  company: string,
+  role: string,
+): T | undefined {
+  const key = `${slug(company)}\u0000${slug(role)}`;
+  const same = drafts.filter((d) => `${slug(d.company)}\u0000${slug(d.role)}` === key);
+  if (same.length === 0) return undefined;
+  const open = same.filter((d) => d.status !== 'submitted');
+  return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
+}
+
 export interface BundleRequest {
   company: string;
   role: string;
@@ -149,6 +229,22 @@ export interface BundleResult {
   pages: number;
   fits: boolean;
   warnings: string[];
+  /**
+   * What the resume asked for and the store no longer has, in a sentence.
+   *
+   * Separate from `warnings`, which also carries typography notes about the
+   * TeX install — true, worth saying once, and not worth putting in front of
+   * somebody about to attach a file. This is the other kind: an entry the
+   * spec lists and the store has lost, a choice pointing at a wording that
+   * has been renamed. The resume still compiles; it is simply not the one
+   * that was on screen, and nothing said so.
+   *
+   * A sentence and not the warnings themselves, because those name ids —
+   * right for the editor, where you would go and fix them, and meaningless
+   * in a card that is about to attach a file: nobody has ever typed
+   * "b_ec_pipeline".
+   */
+  missing?: string;
 }
 
 /**
@@ -174,7 +270,13 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     data.config.output.fileNames ?? 'type',
   ) as [string, string, string];
 
-  const id = applicationId(req.company, req.role);
+  /*
+   * The row this job already has, if it has one — see `findApplication`. The
+   * folder is named after it, so a bundle built the day after the
+   * application was opened lands in that application's folder rather than in
+   * a second one beside it.
+   */
+  const id = findApplication(data.applications, req.company, req.role)?.id ?? applicationId(req.company, req.role);
   const dir = path.join(store.outDir(), 'applications', id);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -295,6 +397,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     pages: compiled.pages,
     fits: compiled.fits,
     warnings: compiled.warnings,
+    missing: describeLost(resolved.lost ?? []),
   };
 }
 
@@ -330,7 +433,13 @@ export function stats(apps: Application[]): TrackerStats {
   const since = (days: number) =>
     apps.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
 
-  const responded = apps.filter((a) => ['oa', 'interview', 'offer'].includes(a.status)).length;
+  /*
+   * A response is somebody coming back to you. `closed` is not counted: it
+   * covers a rejection, which is a reply, and being ghosted, which is the
+   * absence of one, and the tracker cannot tell them apart — counting it
+   * either way would state something the data does not know.
+   */
+  const responded = apps.filter((a) => ['interview', 'offer'].includes(a.status)).length;
   // "Applying" has not been sent yet, so it cannot have drawn a response.
   const sent = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying').length;
 

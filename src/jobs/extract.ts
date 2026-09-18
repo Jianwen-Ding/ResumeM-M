@@ -100,14 +100,42 @@ function metaContent(html: string, names: string[]): string | undefined {
 /** Known boards put the company somewhere predictable in the URL. */
 export function companyFromUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
+  /*
+   * Where each system puts the employer's name in its own addresses.
+   *
+   * Two shapes, and every one of these is one or the other: the company as a
+   * path segment under the system's host, or as a subdomain of it. Worth
+   * keeping up because this is the only source that is *certain* — a name in
+   * the address was put there by the system, where og:site_name is whatever
+   * the CMS was configured with and a heading is whatever the page says.
+   */
   const patterns: [RegExp, number][] = [
     [/boards\.greenhouse\.io\/([^/?#]+)/i, 1],
     [/job-boards\.greenhouse\.io\/([^/?#]+)/i, 1],
-    [/jobs\.lever\.co\/([^/?#]+)/i, 1],
+    [/jobs\.(?:eu\.)?lever\.co\/([^/?#]+)/i, 1],
     [/([\w-]+)\.wd\d+\.myworkdayjobs\.com/i, 1],
     [/jobs\.ashbyhq\.com\/([^/?#]+)/i, 1],
     [/apply\.workable\.com\/([^/?#]+)/i, 1],
+    [/([\w-]+)\.workable\.com/i, 1],
     [/([\w-]+)\.breezy\.hr/i, 1],
+    [/(?:careers|jobs)\.smartrecruiters\.com\/([^/?#]+)/i, 1],
+    [/([\w-]+)\.recruitee\.com/i, 1],
+    [/([\w-]+)\.teamtailor\.com/i, 1],
+    [/([\w-]+)\.applytojob\.com/i, 1],
+    [/([\w-]+)\.bamboohr\.com/i, 1],
+    [/ats\.rippling\.com\/([^/?#]+)/i, 1],
+    [/([\w-]+)\.jobs\.personio\.(?:de|com)/i, 1],
+    [/([\w-]+)\.pinpointhq\.com/i, 1],
+    [/comeet\.com\/jobs\/([^/?#]+)/i, 1],
+    [/([\w-]+)\.zohorecruit\.com/i, 1],
+    [/([\w-]+)\.icims\.com/i, 1],
+    [/jobs\.jobvite\.com\/([^/?#]+)/i, 1],
+    [/([\w-]+)\.avature\.net/i, 1],
+    [/([\w-]+)\.eightfold\.ai/i, 1],
+    [/([\w-]+)\.dayforcehcm\.com/i, 1],
+    [/([\w-]+)\.freshteam\.com/i, 1],
+    [/([\w-]+)\.homerun\.co/i, 1],
+    [/([\w-]+)\.jobylon\.com/i, 1],
   ];
   for (const [re, group] of patterns) {
     const m = re.exec(url);
@@ -145,13 +173,52 @@ export function extractKeywords(text: string): string[] {
  * The host is the one thing always known and always recognisable: you were
  * just there. A placeholder either way, but a true one.
  */
+/**
+ * Hosts that belong to the system rather than to the employer.
+ *
+ * A posting on `boards.greenhouse.io` is not a job at Greenhouse, and one on
+ * `indeed.com` is not a job at Indeed. When one of these is all there is, the
+ * address is kept as it stands: it says where the application came from,
+ * which is honest, where a tidied "Greenhouse" would be a lie.
+ */
+const NOT_THE_EMPLOYER =
+  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
+
+/**
+ * The employer's name when nothing on the page gave one.
+ *
+ * It used to be the bare hostname, so applications were filed under
+ * "careers.acme-corp.com" — which is where it came from rather than who it is
+ * with, and reads as a mistake in a tracker, a folder name and a letter.
+ *
+ * A company's own careers site is almost always its domain with a word in
+ * front, so that word comes off and the rest is tidied: `careers.acme-corp.com`
+ * is Acme Corp. An address that belongs to the system, an IP, or anything that
+ * does not survive `looksLikeCompanyName` is left exactly as it was — better
+ * plainly the address than a confident wrong name.
+ */
 export function employerFallback(url?: string): string {
   if (!url) return 'Unknown';
+  let host: string;
   try {
-    return new URL(url).hostname.replace(/^www\./, '') || 'Unknown';
+    host = new URL(url).hostname.replace(/^www\./, '');
   } catch {
     return 'Unknown';
   }
+  if (!host) return 'Unknown';
+  if (NOT_THE_EMPLOYER.test(host)) return host;
+  // An address, not a name: nothing to tidy into an employer.
+  if (/^[\d.]+$/.test(host) || /^\[/.test(host) || !host.includes('.')) return host;
+
+  const labels = host.split('.');
+  // Drop the public suffix — one label, or two for the `co.uk` family.
+  const suffix = labels.length > 2 && /^(co|com|org|net|ac|gov)$/i.test(labels.at(-2) ?? '') ? 2 : 1;
+  const named = labels.slice(0, -suffix).filter((label) => !/^(careers?|jobs?|apply|recruiting|hire|hiring|work|talent|join|people)$/i.test(label));
+  const pretty = (named.at(-1) ?? '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+  return pretty && looksLikeCompanyName(pretty) ? pretty : host;
 }
 
 /**
@@ -221,7 +288,14 @@ export function looksLikeCompanyName(name?: string): boolean {
  * "Apply", which is not a job and cannot be searched for later.
  */
 const NOT_A_ROLE =
-  /^(apply|apply now|apply here|application|job application|submit application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
+  /*
+   * "Apply for this job" is the same segment with more words in it, and the
+   * rule matched the whole string or nothing — so a title reading "Apply for
+   * this job — Novena Health" got the phrase treated as a name. Anything
+   * that starts with applying, and says nothing after it but where or how,
+   * is the page talking about itself.
+   */
+  /^(apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
 
 /** A page title's parts, in the order they were written. */
 function titleParts(pageTitle?: string): string[] {
@@ -260,26 +334,57 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
    * segment that reads like a job, then a heading that does, and only then
    * the old answer — which is still right for every title shaped "Role | Site".
    */
-  const rawTitle =
-    ld?.title ??
-    metaContent(html, ['og:title', 'twitter:title']) ??
-    parts.find((part) => !NOT_A_ROLE.test(part) && ROLE_NOUN.test(part)) ??
-    headingRole(html) ??
-    parts.find((part) => !NOT_A_ROLE.test(part));
+  const declared = ld?.title ?? metaContent(html, ['og:title', 'twitter:title']);
+  const roleish = parts.find((part) => !NOT_A_ROLE.test(part) && ROLE_NOUN.test(part)) ?? headingRole(html);
+  const leftover = parts.find((part) => !NOT_A_ROLE.test(part));
 
-  const company =
+  /** Every way of knowing the employer that does not go through the title. */
+  const namedCompany =
     ld?.company ??
     companyFromUrl(url) ??
     metaContent(html, ['og:site_name']) ??
     // "Software Engineer Intern at Acme" is the common page-title shape.
-    /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim() ??
-    /*
-     * Or the other half of the title, which is where these systems put it:
-     * "Apply — Novena Health", "Platform Engineer | Halewood Group". Held to
-     * `looksLikeCompanyName`, so a second role, a sentence or a hostname in
-     * that position is refused rather than filed as the employer.
-     */
-    parts.find((part) => part !== rawTitle && !NOT_A_ROLE.test(part) && looksLikeCompanyName(part));
+    /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim();
+
+  /*
+   * "Apply — Acme" names the employer, not the job.
+   *
+   * A bare application form usually titles itself with the word about the
+   * page and the company: "Apply", "Application", "Careers", and then who
+   * for. Dropping the page word leaves one segment, and taking it as the role
+   * filed Acme as the job and the address the form was served from as the
+   * employer — inverted, and the employer was the only thing the page
+   * actually said. It is only this reading when nothing names a role
+   * anywhere and nothing else names the company; a title that carries a job
+   * word, or a site that declares its own name, is answered as before.
+   */
+  const onlyTheEmployer =
+    !declared && !roleish && !namedCompany && Boolean(leftover) && !ROLE_NOUN.test(leftover!) && looksLikeCompanyName(leftover);
+
+  /*
+   * And a hostname is not the job either.
+   *
+   * `looksLikeCompanyName` already refuses one as the employer — "Apply —
+   * jobs.acme.com" names nobody — but refusing it there only moved it: with
+   * no other candidate it was filed as the role instead. It is the address,
+   * wherever it is put.
+   */
+  const addressShaped = (part?: string) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test((part ?? '').trim());
+
+  const rawTitle = declared ?? roleish ?? (onlyTheEmployer || addressShaped(leftover) ? undefined : leftover);
+
+  const company =
+    namedCompany ??
+    (onlyTheEmployer
+      ? leftover
+      : /*
+         * Or the other half of the title, which is where these systems put it:
+         * "Apply — Novena Health", "Platform Engineer | Halewood Group". Held
+         * to `looksLikeCompanyName`, so a second role, a sentence or a
+         * hostname in that position is refused rather than filed as the
+         * employer.
+         */
+        parts.find((part) => part !== rawTitle && !NOT_A_ROLE.test(part) && looksLikeCompanyName(part)));
 
   // Page titles routinely carry the company along; the company has its own
   // field, and repeating it in the role reads badly everywhere it is shown.

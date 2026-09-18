@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { Repo, cloneRepo } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
-import { createApi, createPdfRouter } from './api.js';
+import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
 import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
@@ -36,7 +36,7 @@ function projectSession(store: Store) {
   const repo = Repo.forStore(store.root);
   const assets = new Assets(store, repo);
   const jobs = new Jobs();
-  return { store, assets, jobs, api: createApi({ store, repo, jobs }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store) };
+  return { store, assets, jobs, api: createApi({ store, repo, jobs }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store), current: createCurrentRouter(store) };
 }
 
 export async function startServer(opts: ServerOptions = {}) {
@@ -177,7 +177,18 @@ export async function startServer(opts: ServerOptions = {}) {
   app.get('/health', (req, res) => {
     const ai = active?.store.loadConfig().ai;
     const fresh = req.query.fresh !== undefined ? stampNow() : undefined;
+    /*
+     * The output folder as well as the save.
+     *
+     * Two saves side by side — `~/resumes/personal` and `~/resumes/work` —
+     * resolve `out` to the same place, because it is a sibling of the save
+     * rather than part of it. They then share `out/current`, whose manifest
+     * says which files it put there, and each one tidies away the other's.
+     * Nothing in a single server can see that; a caller running several can,
+     * and the test pool does exactly this.
+     */
     res.json({ ok: true, service: 'resumem-m', build: buildStamp, dataDir: active?.store.root ?? null,
+      outDir: active?.store.outDir() ?? null,
       ...(fresh === undefined ? {} : { onDisk: fresh, stale: fresh !== buildStamp }),
       projectOpen: Boolean(active), ai: { enabled: ai?.enabled ?? false, command: ai?.command ?? '', configured: Boolean(ai?.command?.trim()) } });
   });
@@ -199,9 +210,35 @@ export async function startServer(opts: ServerOptions = {}) {
       res.json({ defaultFolder: readProjects(preferencesFile).defaultFolder });
     } catch (error) { res.status(400).json({ error: (error as Error).message }); }
   });
+  /*
+   * A write meant for a save that is no longer open.
+   *
+   * This has always guarded the editor, whose two windows can disagree about
+   * which save is open. The browser extension never sent the header, and it
+   * is the caller that most needs it: an application takes pages and minutes
+   * to write, and the editor can be pointed at another save meanwhile. Filing
+   * it then wrote the application into whichever save happened to be open,
+   * saved its tailored resume there, and typeset the PDFs from that save's
+   * profile and wordings — a 200, files that were not the ones on screen, and
+   * a row in somebody else's tracker. `/extension/analyze` hands the save
+   * back now, and the extension says which one it means.
+   *
+   * So the refusal names both, because by this point the two readers of it
+   * are a window that should reload and an application that should be filed
+   * somewhere else.
+   */
   app.use('/api', (req, res, next) => {
-    if (req.headers['x-rmm-project'] && req.headers['x-rmm-project'] !== active?.store.root) {
-      res.status(409).json({ error: 'The active save changed in another window. Reload before saving.' }); return;
+    const meant = req.headers['x-rmm-project'];
+    if (typeof meant === 'string' && meant && meant !== active?.store.root) {
+      res.status(409).json({
+        kind: 'other-save',
+        save: active?.store.root ?? null,
+        error: active
+          ? `ResumeM-M has "${path.basename(active.store.root)}" open now, and this was written against ` +
+            `"${path.basename(meant)}". Reload the editor, or open that save again, before saving.`
+          : `No save is open in ResumeM-M. This was written against "${path.basename(meant)}" — open it again before saving.`,
+      });
+      return;
     }
     if (switching) { res.status(409).json({ error: 'The save is changing. Try again in a moment.' }); return; }
     next();
@@ -253,6 +290,14 @@ export async function startServer(opts: ServerOptions = {}) {
   app.use('/pdf', (req, res, next) => {
     if (!active) { res.status(409).json({ error: 'No Save Open' }); return; }
     active.pdf(req, res, next);
+  });
+  /*
+   * The flat folder as a page, so "where are the files" has an answer you can
+   * click from a job board rather than only a path you can paste.
+   */
+  app.use('/current', (req, res, next) => {
+    if (!active) { res.status(409).type('html').send('<p>No save is open in ResumeM-M.</p>'); return; }
+    active.current(req, res, next);
   });
   app.get('/vendor/marked.js', (_req, res) => res.sendFile(require.resolve('marked')));
   app.get('/vendor/purify.mjs', (_req, res) => res.sendFile(path.join(path.dirname(require.resolve('dompurify')), 'purify.es.mjs')));

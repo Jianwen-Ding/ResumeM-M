@@ -3201,7 +3201,94 @@ async function askSourceFeedback(target) {
  * Applications                                                        *
  * ------------------------------------------------------------------ */
 
-const STATUSES = ['interested', 'applying', 'applied', 'oa', 'interview', 'offer', 'rejected', 'ghosted', 'withdrawn'];
+/**
+ * What each stage is called, and what it is called in the file.
+ *
+ * The file keeps short keys because they are hand-edited and matched in code;
+ * the dropdown showed them raw, so the tracker offered `interested` and
+ * `applying` as if the reader were expected to know the schema. It is a
+ * ladder and it reads like one: not applied, applying, applied, interviewing,
+ * got it — and closed, for the ones that end.
+ */
+const STATUSES = [
+  ['interested', 'Not applied'],
+  ['applying', 'Applying'],
+  ['applied', 'Applied'],
+  ['interview', 'Interviewing'],
+  ['offer', 'Got it!'],
+  ['closed', 'Closed'],
+];
+
+/** The stage under the name the reader knows it by, wherever it is printed. */
+const statusLabel = (s) => STATUSES.find(([key]) => key === s)?.[1] ?? s;
+
+/* ---- The one unserious thing in here ---------------------------------- *
+ *
+ * Dragging a row to "Got it!" is the only event in this whole program that
+ * is unambiguously good news, and it looked exactly like moving it to
+ * "Closed". It is a job search: the software can be pleased for you once.
+ *
+ * Deliberately cheap — emoji, two keyframes, no assets and no network — and
+ * it turns itself off from the banner it appears in, because the first
+ * question anyone has about a thing like this is how to stop it.            */
+
+const CELEBRATE = 'rmm.celebrate';
+const celebrating = () => localStorage.getItem(CELEBRATE) !== 'off';
+
+const CATS = ['🐱', '😸', '😻', '😹', '🐈', '🐈‍⬛', '🙀', '🎉', '✨', '🎊'];
+
+function celebrate(company) {
+  if (!celebrating()) return;
+
+  const stage = el('div', { className: 'party' });
+  for (let i = 0; i < 60; i++) {
+    stage.append(
+      el('span', {
+        className: 'cat',
+        textContent: CATS[Math.floor(Math.random() * CATS.length)],
+        // Scattered across the top, each falling at its own pace, so it reads
+        // as confetti rather than as a row of identical cats.
+        style: `left:${Math.random() * 100}%;
+                font-size:${18 + Math.random() * 34}px;
+                animation-delay:${Math.random() * 1.6}s;
+                animation-duration:${2.4 + Math.random() * 2.2}s;
+                --spin:${Math.random() > 0.5 ? 1 : -1};`,
+      }),
+    );
+  }
+
+  const banner = el('div', { className: 'party-banner' }, [
+    el('div', { className: 'shout', textContent: 'GOT IT!!!' }),
+    el('div', { textContent: company ? `${company} said yes.` : 'They said yes.' }),
+    el('button', {
+      className: 'link',
+      textContent: 'turn this off',
+      onclick: () => {
+        localStorage.setItem(CELEBRATE, 'off');
+        stage.remove();
+        setStatus('No more cats. Clear the site data, or set rmm.celebrate, to bring them back.');
+      },
+    }),
+  ]);
+  stage.append(banner);
+  document.body.append(stage);
+  setTimeout(() => stage.remove(), 6000);
+}
+
+/**
+ * When this application actually went out.
+ *
+ * `appliedAt` is when the row was started, which for anything begun from the
+ * extension is the moment the posting was opened — days before it was sent,
+ * and sometimes never sent at all. The history knows better: the first time
+ * the status became `applied` is the day it left.
+ */
+function sentOn(a) {
+  const went = (a.history ?? []).find((h) => h.status === 'applied');
+  if (went?.at) return went.at.slice(0, 10);
+  // Rows from before the history was kept, or filed straight as applied.
+  return ['applied', 'interview', 'offer', 'closed'].includes(a.status) ? (a.appliedAt?.slice(0, 10) ?? '') : '';
+}
 
 let openApplicationId = null;
 
@@ -3214,7 +3301,9 @@ async function loadApplications() {
   if (files) {
     setChildren(
       files,
-      el('span', { className: 'meta-label', textContent: 'Ready to upload' }),
+      // The same page the extension opens, from the tab that lists what is in
+      // it: a path is for the upload dialog, a link is for everything else.
+      el('a', { className: 'meta-label', href: '/current', target: '_blank', textContent: 'Ready to upload' }),
       el('span', { className: 'mono-path', textContent: current?.dir ?? '' }),
       el('span', {
         className: 'hint',
@@ -3245,7 +3334,7 @@ async function loadApplications() {
     wrap.replaceChildren(
       el('div', { className: 'empty' }, [
         el('b', {}, 'Nothing tracked yet'),
-        'Applications land here when you use “Save application folder” in the browser extension, or run ',
+        'Applications land here when you use “Prepare to submit” in the browser extension, or run ',
         el('code', {}, 'rmm apply'),
         '.',
       ]),
@@ -3257,20 +3346,32 @@ async function loadApplications() {
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))
     .map((a) => {
       const sel = el('select');
-      for (const s of STATUSES) sel.append(el('option', { value: s, textContent: s, selected: s === a.status }));
+      for (const [s, label] of STATUSES) {
+        sel.append(el('option', { value: s, textContent: label, selected: s === a.status }));
+      }
       sel.onchange = async () => {
+        const moved = sel.value;
         await api(`/applications/${encodeURIComponent(a.id)}/status`, {
           method: 'POST',
-          body: JSON.stringify({ status: sel.value }),
+          body: JSON.stringify({ status: moved }),
         });
         setStatus('Status updated');
+        // Once, on the way in — not every time the list repaints with an
+        // offer already on it.
+        if (moved === 'offer' && a.status !== 'offer') celebrate(a.company);
         loadApplications();
       };
       const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
-        el('td', { textContent: a.appliedAt?.slice(0, 10) ?? '' }),
+        // Both dates get the same treatment: "2026-09-" over "17" is not a
+        // date, and wrapping the narrowest column steals two lines of height
+        // from every row to save nothing.
+        el('td', { className: 'when', textContent: a.appliedAt?.slice(0, 10) ?? '' }),
         el('td', { textContent: a.company }),
         el('td', { textContent: a.role }),
         el('td', {}, [sel]),
+        // Blank, not a dash: an em-dash in a date column reads as a date that
+        // failed to load rather than as one that has not happened.
+        el('td', { className: 'when', textContent: sentOn(a) }),
         el('td', {}, [
           a.coverLetter ? el('span', { className: 'chip count', textContent: 'letter' }) : null,
           a.answers?.length
@@ -3302,7 +3403,17 @@ async function loadApplications() {
   wrap.replaceChildren(
     el('table', {}, [
       el('thead', {}, [
-        el('tr', {}, ['Date', 'Company', 'Role', 'Status', 'Sent', ''].map((h) => el('th', { textContent: h }))),
+        /*
+         * Two dates, because there are two. "Started" is when the row opened —
+         * usually the day the posting was read — and "Sent" is the day it went
+         * out. The column that said "Sent" held the letter and the answers
+         * that went with it, which is neither.
+         */
+        el(
+          'tr',
+          {},
+          ['Started', 'Company', 'Role', 'Status', 'Sent', 'Enclosed', ''].map((h) => el('th', { textContent: h })),
+        ),
       ]),
       el('tbody', {}, rows),
     ]),
@@ -3383,7 +3494,7 @@ async function openApplication(id) {
             a.history.map((h) =>
               el('div', { className: 'tl' }, [
                 el('span', { className: 'when', textContent: h.at?.slice(0, 10) ?? '' }),
-                el('span', { textContent: `${h.status}${h.note ? ` — ${h.note}` : ''}` }),
+                el('span', { textContent: `${statusLabel(h.status)}${h.note ? ` — ${h.note}` : ''}` }),
               ]),
             ),
           ),
@@ -3408,7 +3519,9 @@ async function openApplication(id) {
   } catch (err) {
     setChildren(panel, el('div', { className: 'err', textContent: err.message }));
   }
-  loadApplications();
+  // As in `openDraft`: the row has to be marked as the selected one, and a
+  // failure to repaint should say so rather than land in the console.
+  loadApplications().catch((err) => setStatus(err.message, true));
 }
 
 async function addApplication() {
@@ -3452,43 +3565,64 @@ async function loadDrafts() {
     return;
   }
 
+  /*
+   * Still being written first, already sent underneath.
+   *
+   * Sending it does not close the space — the follow-up question, the portal
+   * that rejected the upload, and the recruiter who asks for the letter again
+   * all want the thing you wrote rather than a snapshot of it. But it is no
+   * longer work, so it stops competing with work: below the live ones, greyed,
+   * and gone on its own two weeks after the last keystroke.
+   */
+  const sent = (d) => d.status === 'submitted';
+  const ordered = [...drafts].sort((a, b) => Number(sent(a)) - Number(sent(b)));
+  const firstSent = ordered.findIndex(sent);
+
   setChildren(
     list,
-    ...drafts.map((d) => {
+    ...ordered.flatMap((d, at) => {
       const answered = d.questions.filter((q) => q.answer.trim()).length;
       const letterDone = !d.coverLetter.required || Boolean(d.coverLetter.body.trim());
       const ready = letterDone && answered === d.questions.length;
 
-      return el(
+      const card = el(
         'div',
         {
-          className: `draft-card${d.id === openDraftId ? ' selected' : ''}`,
+          className: `draft-card${d.id === openDraftId ? ' selected' : ''}${sent(d) ? ' sent' : ''}`,
           onclick: () => openDraft(d.id),
         },
         [
           el('div', { className: 'co', textContent: d.company }),
           el('div', { className: 'role', textContent: d.role }),
           el('div', { className: 'bits' }, [
-            d.coverLetter.required
+            // What is missing only matters while it can still be added.
+            !sent(d) && d.coverLetter.required
               ? el('span', {
                   className: `badge ${d.coverLetter.body.trim() ? 'done' : 'required'}`,
                   textContent: d.coverLetter.body.trim() ? 'letter written' : 'letter needed',
                 })
               : null,
-            d.questions.length
+            !sent(d) && d.questions.length
               ? el('span', {
                   className: `badge ${answered === d.questions.length ? 'done' : 'required'}`,
                   textContent: `${answered}/${d.questions.length} answered`,
                 })
               : null,
-            ready ? el('span', { className: 'badge done', textContent: 'ready' }) : null,
+            !sent(d) && ready ? el('span', { className: 'badge done', textContent: 'ready' }) : null,
+            sent(d) ? el('span', { className: 'badge sent', textContent: 'sent' }) : null,
           ]),
         ],
       );
+
+      // One heading before the first of them, saying what the greying means.
+      return at === firstSent
+        ? [el('div', { className: 'list-head', textContent: 'Sent — still open to edit' }), card]
+        : [card];
     }),
   );
 
-  if (!openDraftId && drafts[0]) openDraft(drafts[0].id);
+  // Open something being worked on, not something already gone.
+  if (!openDraftId && ordered[0]) openDraft(ordered.find((d) => !sent(d))?.id ?? ordered[0].id);
 }
 
 /**
@@ -3591,7 +3725,11 @@ async function openDraft(id) {
   } catch (err) {
     setStatus(err.message, true);
   }
-  loadDrafts();
+  // Repaint the list so the newly-open one is marked. Floating, because the
+  // panel is already drawn and nothing waits on it — but not unhandled: a
+  // dropped promise here is a console error nobody reads and a list quietly
+  // out of step with the panel beside it.
+  loadDrafts().catch((err) => setStatus(err.message, true));
 }
 
 const SOURCE_LABEL = { bank: 'from your answer bank', ai: 'drafted by AI', human: 'written by you', empty: 'not answered' };
@@ -6363,6 +6501,26 @@ async function applyHash() {
     return true;
   }
 
+  /*
+   * `#applications/<id>` opens the tracker on one application.
+   *
+   * The card in the browser can now say "you applied to this on the twelfth of
+   * March" while you are standing on the posting, and the honest next question
+   * is "what did I send them?". Without a way through, the answer is: open the
+   * editor, find the tracker, and scroll back through everything since March.
+   */
+  const tracked = /^#applications\/(.+)$/.exec(location.hash);
+  if (tracked) {
+    // Set before the tab is shown, because showing it loads the list and the
+    // row marks itself as the selected one while it renders. Done afterwards,
+    // the link opened the right record beside a table with nothing
+    // highlighted in it, and nothing on screen connected the two.
+    openApplicationId = decodeURIComponent(tracked[1]);
+    showTab('applications');
+    await openApplication(openApplicationId).catch(() => undefined);
+    return true;
+  }
+
   // A bare `#voice` or `#applications` opens that tab. The extension links
   // here when it needs to send someone to a setting, and a link that lands on
   // the wrong tab is worse than no link.
@@ -6425,18 +6583,26 @@ async function boot() {
   await loadStore();
   render();
 
-  // A deep link means the user came here to write, not to look at a resume;
-  // skip the compile they did not ask for.
-  const deepLinked = await applyHash().catch(() => false);
-  if (!deepLinked) showTab('resumes');
-  window.addEventListener('hashchange', () => applyHash().catch(() => {}));
-
   $('#resume-select').onchange = async (e) => {
     const next = e.target.value;
     // Save what is on screen before leaving it: clearEdits() is about to throw
     // the unsaved overlay away.
     await flushEdits();
-    if (state.dirty) { e.target.value = state.masterView ? '__master__' : state.resumeId; return; }
+    /*
+     * A save that did not land is not a reason to say nothing.
+     *
+     * Refusing to switch is right — the alternative is throwing away an edit
+     * — but this put the dropdown back and left it there, so picking another
+     * resume looked like a control that does not work. The usual cause is one
+     * failed request, so try it once more; if it still will not save, say so
+     * and leave the edit where it can still be rescued.
+     */
+    if (state.dirty) await autoSave().catch(() => {});
+    if (state.dirty) {
+      e.target.value = state.masterView ? '__master__' : state.resumeId;
+      setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
+      return;
+    }
     clearTimeout(renderTimer);
     renderToken++;
     state.masterView = next === '__master__';
@@ -6573,6 +6739,28 @@ async function boot() {
     e.preventDefault();
     stepHistory(e.shiftKey ? 'redo' : 'undo');
   });
+
+  /*
+   * Last, because it waits.
+   *
+   * Following a deep link opens a resume, which is a request and a compile,
+   * and every line above this used to sit behind that wait — so between the
+   * toolbar being drawn and this finishing, the resume dropdown was a full
+   * list of resumes attached to nothing. Picking one did not change anything
+   * and did not say anything: the next repaint simply put the old name back.
+   * It is a thin window on a fast machine and a wide one on a loaded machine
+   * or a big save, and it is exactly when someone reaches for that dropdown,
+   * because the first thing you do on arriving is choose what to work on.
+   *
+   * Wiring is assignment; nothing here needs the deep link to have happened.
+   * So the controls are live the moment they are on screen, and this — the
+   * part that talks to the server — happens after.
+   */
+  window.addEventListener('hashchange', () => applyHash().catch(() => {}));
+  // A deep link means the user came here to write, not to look at a resume;
+  // skip the compile they did not ask for.
+  const deepLinked = await applyHash().catch(() => false);
+  if (!deepLinked) showTab('resumes');
 }
 
 boot().catch((err) => setStatus(err.message, true));

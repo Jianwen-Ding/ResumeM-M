@@ -488,7 +488,7 @@ on a resume.
 
 ## Application tracking
 
-`rmm apply` (or the extension's "Save application folder") writes:
+`rmm apply` (or the extension's "Prepare to submit") writes:
 
 ```
 out/applications/2026-09-16-streamly-software-engineer-intern/
@@ -504,11 +504,39 @@ and records the application in `applications.yaml` with its status history. The
 snapshot is the point: six weeks later, when they ask about "the pipeline
 project", the file that went out is still there, byte for byte.
 
+The same files also land together in `out/current` — one flat folder holding
+everything still in flight, already named, so a portal's file picker has one
+place to be pointed at. It is browsable at
+[`/current`](http://127.0.0.1:4600/current) as well as on disk, which is what
+the extension's "Open the folder" opens.
+
+Preparing the files is what records an application as sent. The step that
+actually sends it happens inside a portal where nothing here can see it, and
+the button pressed afterwards to confirm is the one nobody presses — by then
+the tab is on a confirmation page. Wrong in the rare direction is cheap to fix
+("Not sent after all" in the extension, or the status dropdown here); wrong in
+the other means applying twice.
+
+The Workspace keeps a sent application open for a fortnight, below the ones
+still being written and greyed out — the portal that rejects an upload, and the
+question that comes back a week later, both want the letter you wrote rather
+than a snapshot of it. After a fortnight without a keystroke it lets itself go;
+the application record keeps everything that went out.
+
 ### Saving
 
 Every mutation made through the app is auto-committed to git, scoped to the
 store directory. For everything else — YAML you edited by hand, a store that is
 not a repository yet, auto-commit switched off — there is one command:
+
+Everything in the save folder is in the history, with nothing left out: the
+tracker and its whole status history, the voice notes, the writing corpus, the
+letters, the answer bank, the Workspace — including half-written applications —
+every resume, the profile, the settings, and all of `out/`. That last one means
+both the snapshot of each application, byte for byte what was sent, and the
+compiled previews beside it. Previews are rebuilt on every recompile, so they
+do make the history larger than the YAML alone would; that is the price of "a
+clone of the save is the save", and it is the right way round.
 
 ```bash
 rmm save                              # commit everything in the store

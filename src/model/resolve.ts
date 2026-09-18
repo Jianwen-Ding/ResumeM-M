@@ -311,6 +311,17 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   if (!spec) throw new Error(`No resume named "${String(specOrId)}"`);
 
   const warnings: string[] = [];
+  /*
+   * The same complaints, countable.
+   *
+   * The sentences below are for the editor and the log, and they name ids
+   * because that is what you would go and fix. Somebody about to attach a
+   * file needs the other half of it — that one of their jobs is missing —
+   * without being shown "b_ec_pipeline", which names nothing they have ever
+   * typed. So the two kinds that mean "this is not the resume you were
+   * looking at" are counted as they are found.
+   */
+  const lost: { kind: 'entry' | 'wording'; id: string }[] = [];
   const flat = flattenSpec(spec, data.resumes);
   const choices = flat.choices ?? {};
   const lists = flat.lists ?? {};
@@ -339,6 +350,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
         const entry = data.entries.find((e) => e.id === eid);
         if (!entry) {
           warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);
+          lost.push({ kind: 'entry', id: eid });
           continue;
         }
         /*
@@ -376,7 +388,10 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
     for (const b of e.bullets ?? []) knownKeys.add(b.id);
   }
   for (const key of Object.keys(choices)) {
-    if (!knownKeys.has(key)) warnings.push(`Choice "${key}" does not match any field or bullet in the store.`);
+    if (!knownKeys.has(key)) {
+      warnings.push(`Choice "${key}" does not match any field or bullet in the store.`);
+      lost.push({ kind: 'wording', id: key });
+    }
   }
 
   const layout: LayoutOptions = {
@@ -392,6 +407,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
     sections,
     layout,
     warnings,
+    lost,
   };
 }
 

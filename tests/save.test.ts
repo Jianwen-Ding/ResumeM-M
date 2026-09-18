@@ -200,3 +200,59 @@ describe('Repo.pending', () => {
     expect(await repo.pending()).toEqual([{ path: 'resumes/new grad.yaml', state: 'modified' }]);
   });
 });
+
+
+/*
+ * Everything in the save is in the save.
+ *
+ * `out/` lives inside a save made through the app, so the compiled previews
+ * and the flat upload folder are versioned along with the snapshots of what
+ * was sent. That is deliberate, and it is what "my work is in git" is taken
+ * to mean: nothing in the folder is quietly left out of the history, and a
+ * clone of the save is the save.
+ *
+ * It was briefly not true — previews were ignored to keep the history small —
+ * and small was not what was wanted.
+ */
+describe('what goes into the history', () => {
+  const tracked = () =>
+    execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
+      .split('\n')
+      .filter(Boolean);
+
+  it('keeps everything in the save folder, previews and snapshots alike', async () => {
+    write('profile.yaml', 'name: Test Person\n');
+    write('voice.md', 'I write plainly.\n');
+    write('corpus/letter-1.md', '---\nkind: letter\n---\nDear sir\n');
+    write('applications.yaml', '- id: a\n  company: Acme\n');
+    write('out/base.pdf', '%PDF-1.7 a preview\n');
+    write('out/current/Test-Person-Resume.pdf', '%PDF-1.7 ready to upload\n');
+    write('out/applications/2026-09-16-acme-swe/Test-Person-Resume.pdf', '%PDF-1.7 what was sent\n');
+    write('out/applications/2026-09-16-acme-swe/source/resolved.yaml', 'spec: {}\n');
+
+    await saveStore(repo);
+
+    const files = tracked();
+    for (const kept of [
+      'profile.yaml',
+      'voice.md',
+      'corpus/letter-1.md',
+      'applications.yaml',
+      'out/base.pdf',
+      'out/current/Test-Person-Resume.pdf',
+      'out/applications/2026-09-16-acme-swe/Test-Person-Resume.pdf',
+      'out/applications/2026-09-16-acme-swe/source/resolved.yaml',
+    ]) {
+      expect(files, kept).toContain(kept);
+    }
+  });
+
+  it('notices a recompiled preview as something to save', async () => {
+    write('profile.yaml', 'name: Test Person\n');
+    write('out/base.pdf', '%PDF-1.7 one\n');
+    await saveStore(repo);
+
+    write('out/base.pdf', '%PDF-1.7 two\n');
+    expect(await repo.pending()).toEqual([{ path: 'out/base.pdf', state: 'modified' }]);
+  });
+});

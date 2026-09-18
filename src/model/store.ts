@@ -21,7 +21,7 @@ import {
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
 import { applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
-import { normalizeAnswers, normalizeEntries, normalizeEntry, normalizeProfile } from './normalize.js';
+import { normalizeAnswers, normalizeApplications, normalizeEntries, normalizeEntry, normalizeProfile } from './normalize.js';
 export { repairAiArgs };
 
 /**
@@ -138,7 +138,7 @@ export class Store {
       ]),
       skillGroups: this.readYaml<SkillGroup[]>('skills.yaml', []),
       resumes: this.loadResumes(),
-      applications: this.readYaml<Application[]>('applications.yaml', []),
+      applications: normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])),
       coverLetters: this.loadCoverLetters(),
       drafts: this.loadDrafts(),
       samples: this.loadSamples(),
@@ -367,7 +367,7 @@ export class Store {
   }
 
   upsertApplication(app: Application): Application[] {
-    const apps = this.readYaml<Application[]>('applications.yaml', []);
+    const apps = normalizeApplications(this.readYaml<Application[]>('applications.yaml', []));
     const idx = apps.findIndex((a) => a.id === app.id);
     if (idx >= 0) apps[idx] = app;
     else apps.push(app);

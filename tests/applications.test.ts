@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { advance, applicationId, buildBundle, bundleFileName, slug, stats } from '../src/model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, bundleFileName, describeLost, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
@@ -85,6 +85,42 @@ describe('slug and id', () => {
   });
 });
 
+/*
+ * Nine stages became five and an ending, and a store written by the version
+ * with nine has to keep working — nobody's tracker should empty itself
+ * because the vocabulary changed underneath it.
+ */
+describe('the stages that were retired', () => {
+  it('reads an older file into the stages that are left', () => {
+    t.store.saveApplications([
+      { id: 'a', company: 'A', role: 'r', status: 'oa' as never },
+      { id: 'b', company: 'B', role: 'r', status: 'rejected' as never },
+      { id: 'c', company: 'C', role: 'r', status: 'ghosted' as never },
+      { id: 'd', company: 'D', role: 'r', status: 'withdrawn' as never },
+      { id: 'e', company: 'E', role: 'r', status: 'interview' },
+      // Not a stage at all — a typo, or a file from somewhere else.
+      { id: 'f', company: 'F', role: 'r', status: 'maybe?' as never },
+    ]);
+
+    const byId = new Map(t.store.load().applications.map((a) => [a.id, a.status]));
+    // An assessment is an interview stage: they came back, and there is
+    // something to prepare for.
+    expect(byId.get('a')).toBe('interview');
+    // Three ways of being over, which differed only in whose decision it was.
+    expect(byId.get('b')).toBe('closed');
+    expect(byId.get('c')).toBe('closed');
+    expect(byId.get('d')).toBe('closed');
+    expect(byId.get('e')).toBe('interview');
+    expect(byId.get('f')).toBe('interested');
+  });
+
+  it('leaves the file alone until something else writes it', () => {
+    t.store.saveApplications([{ id: 'a', company: 'A', role: 'r', status: 'ghosted' as never }]);
+    t.store.load();
+    expect(fs.readFileSync(path.join(t.dir, 'applications.yaml'), 'utf8')).toContain('ghosted');
+  });
+});
+
 describe('status history', () => {
   beforeEach(() => {
     t.store.saveApplications([
@@ -93,15 +129,55 @@ describe('status history', () => {
   });
 
   it('appends rather than overwriting, so the path through is kept', () => {
-    advance(t.store, 'a1', 'oa', 'online assessment sent');
-    const app = advance(t.store, 'a1', 'interview');
-    expect(app.status).toBe('interview');
+    advance(t.store, 'a1', 'interview', 'online assessment sent');
+    const app = advance(t.store, 'a1', 'offer');
+    expect(app.status).toBe('offer');
     expect(app.history).toHaveLength(2);
     expect(app.history?.[0]?.note).toBe('online assessment sent');
   });
 
   it('names the application that does not exist', () => {
     expect(() => advance(t.store, 'nope', 'applied')).toThrow(/nope/);
+  });
+});
+
+describe('have I sent this one before', () => {
+  const apps: Application[] = [
+    { id: 'old', company: 'Helios', role: 'Platform Engineer', status: 'closed', appliedAt: '2026-03-12T09:00:00Z' },
+    { id: 'new', company: 'Helios', role: 'Platform Engineer', status: 'applying', appliedAt: '2026-09-18T09:00:00Z' },
+    { id: 'else', company: 'Lyra', role: 'Platform Engineer', status: 'applied', appliedAt: '2026-05-01T09:00:00Z' },
+    { id: 'want', company: 'Vega', role: 'Data Scientist', status: 'interested', appliedAt: '2026-06-01T09:00:00Z' },
+  ];
+
+  it('answers with the one that went, not the one being written now', () => {
+    // `findApplication` prefers the open row; this asks the opposite question
+    // and must not be satisfied by the draft the person is in the middle of.
+    expect(alreadySent(apps, 'Helios', 'Platform Engineer')?.id).toBe('old');
+  });
+
+  it('does not count an application that has only been thought about', () => {
+    expect(alreadySent(apps, 'Vega', 'Data Scientist')).toBeUndefined();
+  });
+
+  it('is about this job, not this role anywhere', () => {
+    expect(alreadySent(apps, 'Helios', 'Data Scientist')).toBeUndefined();
+    expect(alreadySent(apps, 'Rigel', 'Platform Engineer')).toBeUndefined();
+  });
+
+  it('reads the company and the role the way ids are made, not letter by letter', () => {
+    expect(alreadySent(apps, 'helios', 'platform  engineer')?.id).toBe('old');
+  });
+
+  it('takes the most recent when a job has been applied for more than once', () => {
+    const twice: Application[] = [
+      ...apps,
+      { id: 'later', company: 'Helios', role: 'Platform Engineer', status: 'applied', appliedAt: '2026-08-01T09:00:00Z' },
+    ];
+    expect(alreadySent(twice, 'Helios', 'Platform Engineer')?.id).toBe('later');
+  });
+
+  it('has nothing to say about a store with nothing in it', () => {
+    expect(alreadySent([], 'Helios', 'Platform Engineer')).toBeUndefined();
   });
 });
 
@@ -112,7 +188,7 @@ describe('stats', () => {
   const apps: Application[] = [
     { id: '1', company: 'A', role: 'r', status: 'applied', appliedAt: daysAgo(1) },
     { id: '2', company: 'B', role: 'r', status: 'interview', appliedAt: daysAgo(3) },
-    { id: '3', company: 'C', role: 'r', status: 'rejected', appliedAt: daysAgo(20) },
+    { id: '3', company: 'C', role: 'r', status: 'closed', appliedAt: daysAgo(20) },
     { id: '4', company: 'D', role: 'r', status: 'offer', appliedAt: daysAgo(40) },
     { id: '5', company: 'E', role: 'r', status: 'interested' },
   ];
@@ -268,7 +344,7 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     const result = await bundleFor('Streamly');
     expect(syncCurrent(t.store).files.length).toBeGreaterThan(0);
 
-    advance(t.store, result.application.id, 'rejected');
+    advance(t.store, result.application.id, 'closed');
     const after = syncCurrent(t.store);
     expect(after.files).toEqual([]);
     expect(visible(after.dir)).toEqual([]);
@@ -501,5 +577,54 @@ describe.skipIf(!latex)('putting the job title in file names', { timeout: 180_00
     expect(resumes).toHaveLength(2);
     expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Acme.pdf');
     expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Globex.pdf');
+  });
+});
+
+
+/*
+ * A resume built from a proposal the store has moved on from.
+ *
+ * The browser extension makes its proposal minutes — or pages, or a trip to
+ * the editor and back — before the folder is written, and the store can
+ * change in between. That is not an error: the resume still compiles, it is
+ * simply no longer the one that was on screen. Nothing said so, and the card
+ * announced "these files are named and ready to attach" over a resume with
+ * somebody's main job missing from it.
+ */
+describe('saying what the store no longer has', () => {
+  it('counts rather than naming ids', () => {
+    expect(describeLost([])).toBeUndefined();
+    expect(describeLost([{ kind: 'entry' }])).toBe('1 entry this resume chose is no longer in your store.');
+    expect(describeLost([{ kind: 'wording' }, { kind: 'wording' }])).toBe(
+      '2 wordings this resume chose are no longer in your store.',
+    );
+    expect(describeLost([{ kind: 'entry' }, { kind: 'wording' }])).toBe(
+      '1 entry and 1 wording this resume chose are no longer in your store.',
+    );
+  });
+
+  it.skipIf(!latex)('reports it on the bundle, without stopping it', { timeout: 180_000 }, async () => {
+    t.store.saveResume({
+      id: 'stale',
+      label: 'Built before the change',
+      sections: [{ kind: 'experience', entries: ['exp_acme', 'exp_gone'] }],
+      choices: { b_renamed_since: 'v_1' },
+    });
+
+    const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'stale' });
+
+    // Written, because a resume missing one entry is still a resume, and
+    // refusing to write it would leave somebody with nothing to attach.
+    expect(result.files.some((f) => f.endsWith('.pdf'))).toBe(true);
+    expect(result.missing).toBe('1 entry and 1 wording this resume chose are no longer in your store.');
+
+    // And the sentence is about the store, not about this machine's LaTeX —
+    // which is what the warnings beside it are for.
+    expect(result.missing).not.toMatch(/ligature|font/i);
+  });
+
+  it.skipIf(!latex)('says nothing when the store has everything it asked for', { timeout: 180_000 }, async () => {
+    const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'intern' });
+    expect(result.missing).toBeUndefined();
   });
 });

@@ -116,6 +116,68 @@ describe('company from url', () => {
   });
 });
 
+/*
+ * Who the application is with, when the page never said.
+ *
+ * It used to be the bare hostname, so a job was filed under
+ * "careers.acme-corp.com" — where it came from rather than who it is with,
+ * which reads as a mistake in a tracker, in a folder name and in a letter.
+ */
+describe('naming the employer from the address alone', () => {
+  it('reads a company careers site as the company', () => {
+    expect(employerFallback('https://careers.acme-corp.com/jobs/1')).toBe('Acme Corp');
+    expect(employerFallback('https://jobs.northwind.io/openings/9')).toBe('Northwind');
+    expect(employerFallback('https://www.vega.co.uk/careers/8')).toBe('Vega');
+  });
+
+  /*
+   * A posting on a board is not a job at the board. When that is all there
+   * is, the address stays as it is: it says where the application came from,
+   * which is honest, where a tidied "Greenhouse" would be a lie.
+   */
+  it('never turns the system into the employer', () => {
+    expect(employerFallback('https://boards.greenhouse.io/x/jobs/1')).toBe('boards.greenhouse.io');
+    expect(employerFallback('https://www.indeed.com/viewjob?jk=1')).toBe('indeed.com');
+  });
+
+  it('leaves an address that is not a name alone', () => {
+    expect(employerFallback('http://127.0.0.1:35267/gh/acme/jobs/9910')).toBe('127.0.0.1');
+    expect(employerFallback('http://localhost:4600/x')).toBe('localhost');
+    expect(employerFallback(undefined)).toBe('Unknown');
+  });
+});
+
+/*
+ * The address is the one source that is certain: a name in it was put there
+ * by the system, where og:site_name is whatever the CMS was configured with
+ * and a heading is whatever the page says.
+ */
+describe('the employer named in an address', () => {
+  const cases: [string, string][] = [
+    ['https://boards.greenhouse.io/streamly/jobs/1', 'Streamly'],
+    ['https://jobs.eu.lever.co/vega-labs/8f21', 'Vega Labs'],
+    ['https://careers.smartrecruiters.com/HalewoodGroup/743', 'HalewoodGroup'],
+    ['https://novena.recruitee.com/o/platform-engineer', 'Novena'],
+    ['https://kestrel.teamtailor.com/jobs/9', 'Kestrel'],
+    ['https://tarn.applytojob.com/apply/x', 'Tarn'],
+    ['https://arden.bamboohr.com/careers/12', 'Arden'],
+    ['https://ats.rippling.com/quillon/jobs/1', 'Quillon'],
+    ['https://nordhaus.jobs.personio.de/job/188', 'Nordhaus'],
+    ['https://harbourline.pinpointhq.com/postings/1', 'Harbourline'],
+    ['https://www.comeet.com/jobs/quillon/12.ABC', 'Quillon'],
+    ['https://brightwater.icims.com/jobs/2201/apply', 'Brightwater'],
+    ['https://jobs.jobvite.com/ridgeway/job/oX', 'Ridgeway'],
+    ['https://kestrel-aero.avature.net/careers/JobDetail/1', 'Kestrel Aero'],
+    ['https://lumen.eightfold.ai/careers/job?id=1', 'Lumen'],
+    ['https://meridian.dayforcehcm.com/CandidatePortal/en-US/x', 'Meridian'],
+  ];
+  for (const [url, expected] of cases) {
+    it(`reads ${expected} out of ${new URL(url).hostname}`, () => {
+      expect(companyFromUrl(url)).toBe(expected);
+    });
+  }
+});
+
 describe('keywords', () => {
   it('matches on word boundaries so "go" does not fire on "going"', () => {
     expect(extractKeywords('We are going to the category')).not.toContain('go');
@@ -442,5 +504,55 @@ describe('telling a company name from a job title', () => {
     expect(looksLikeCompanyName('Acme | Careers | Open Roles')).toBe(false);
     expect(looksLikeCompanyName('A'.repeat(80))).toBe(false);
     expect(looksLikeCompanyName('2026')).toBe(false);
+  });
+});
+
+/*
+ * The title of a bare application form, which names one thing.
+ *
+ * Nobody writes a page title for an application step: the system writes it,
+ * and it comes out as the word for the step and who it is for — "Apply —
+ * Acme", "Apply for this job — Novena Health". Taking the first segment that
+ * is not page furniture then filed Acme as the *job* and the address the form
+ * was served from as the *employer*, which is inverted, and the employer was
+ * the only thing the page actually said.
+ *
+ * Found by looking at the tracker: a row reading "127.0.0.1 / Acme".
+ */
+describe('a form whose title is the employer and nothing else', () => {
+  const form = '<html><body><p>Submit application. Upload your resume and cover letter.</p></body></html>';
+  const read = (title: string, url = 'http://127.0.0.1:45227/gh/acme/jobs/9910') => extractJob(form, url, title);
+
+  it('reads the one remaining segment as who, not as what', () => {
+    expect(read('Apply — Acme')).toMatchObject({ company: 'Acme', title: undefined });
+  });
+
+  it('knows the applying phrase however many words it takes', () => {
+    expect(read('Apply for this job — Novena Health').company).toBe('Novena Health');
+    expect(read('Apply to this role — Halewood Group').company).toBe('Halewood Group');
+    expect(read('Start your application — Kestrel Aerospace').company).toBe('Kestrel Aerospace');
+  });
+
+  it('files an address as neither', () => {
+    // `looksLikeCompanyName` already refused a hostname as the employer; with
+    // nothing else to be, it was landing as the role instead.
+    const job = read('Apply — jobs.acme.com');
+    expect(job.company).toBeUndefined();
+    expect(job.title).toBeUndefined();
+  });
+
+  it('leaves a title that does name a job exactly as it was', () => {
+    expect(read('Data Platform Intern | Streamly')).toMatchObject({
+      company: 'Streamly',
+      title: 'Data Platform Intern',
+    });
+    expect(read('Platform Engineer at Helios')).toMatchObject({ company: 'Helios', title: 'Platform Engineer' });
+  });
+
+  it('does not invent an employer when the page declares one', () => {
+    // og:site_name is the site talking about itself, and it wins over a
+    // segment of the title either way.
+    const declared = '<html><head><meta property="og:site_name" content="Greenhouse"></head><body><p>Submit application.</p></body></html>';
+    expect(extractJob(declared, 'http://127.0.0.1:9/x', 'Apply — Acme').company).toBe('Greenhouse');
   });
 });

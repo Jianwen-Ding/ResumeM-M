@@ -3,7 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createApi, createPdfRouter } from '../src/server/api.js';
+import { createApi, createPdfRouter, createCurrentRouter } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
 import type { Entry } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
@@ -20,6 +20,7 @@ beforeEach(() => {
   app = express();
   app.use('/api', createApi({ store: t.store, repo }));
   app.use('/pdf', createPdfRouter(t.store));
+  app.use('/current', createCurrentRouter(t.store));
 });
 afterEach(() => t.cleanup());
 
@@ -291,6 +292,43 @@ describe('job analysis', () => {
       const later = await sent({ company: 'Vela', role: 'Backend Engineer' }).expect(200);
       expect(later.body.changed).toBe(false);
       expect(later.body.application.status).toBe('interview');
+    });
+
+    /*
+     * Midnight, which the suite found by running through it.
+     *
+     * An id carries the date it was made. An application opened before
+     * midnight asks, on being sent, for an id with today's date on it — which
+     * does not exist — so the send filed a second application of its own and
+     * left the one being worked on at "applying" for ever. Three systems in a
+     * row reported it before anyone noticed what the clock had done.
+     */
+    it('finds the application it opened yesterday', async () => {
+      await request(app)
+        .post('/api/workspace')
+        .send({ company: 'Halcyon', role: 'Platform Engineer', coverLetterRequired: true })
+        .expect(200);
+
+      // Age both, exactly as a night does.
+      const yesterday = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString();
+      const apps = t.store.load().applications.map((a) =>
+        a.company === 'Halcyon' ? { ...a, id: a.id.replace(/^\d{4}-\d{2}-\d{2}/, yesterday.slice(0, 10)), appliedAt: yesterday } : a,
+      );
+      t.store.saveApplications(apps);
+      const draft = t.store.loadDrafts().find((d) => d.company === 'Halcyon')!;
+      t.store.deleteDraft(draft.id);
+      t.store.saveDraft({ ...draft, id: draft.id.replace(/^\d{4}-\d{2}-\d{2}/, yesterday.slice(0, 10)) });
+
+      const res = await sent({ company: 'Halcyon', role: 'Platform Engineer' }).expect(200);
+      expect(res.body.changed).toBe(true);
+      expect(res.body.application.status).toBe('applied');
+
+      // One row, not two: the one that was already there.
+      const after = t.store.load().applications.filter((a) => a.company === 'Halcyon');
+      expect(after).toHaveLength(1);
+      expect(after[0]!.id).toContain(yesterday.slice(0, 10));
+      expect(t.store.loadDrafts().filter((d) => d.company === 'Halcyon')).toHaveLength(1);
+      expect(t.store.loadDrafts().find((d) => d.company === 'Halcyon')?.status).toBe('submitted');
     });
 
     it('needs to know which application it is', async () => {
@@ -935,6 +973,46 @@ describe('workspace', () => {
     await request(app).delete(`/api/workspace/${body.draft.id}`).expect(400);
   });
 
+  /*
+   * A sent space is not a closed one, and not a permanent one either.
+   *
+   * It stays listed so the follow-up question, or the portal that rejected the
+   * upload, opens the thing that was written rather than a snapshot of it —
+   * and it lets itself out a fortnight later so the Workspace stays a list of
+   * live work instead of becoming a second, worse tracker.
+   */
+  it('keeps a sent workspace, and lets it go once it is a fortnight stale', async () => {
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const age = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    /*
+     * Aged on disk, because `saveDraft` stamps `updatedAt` with now — which is
+     * the whole point of the field: the clock this counts is the last time
+     * anything was written, not a date anyone can set.
+     */
+    const sent = t.store.getDraft(id)!;
+    const leave = (status: string, days: number) => {
+      const file = path.join(t.dir, 'drafts', `${id}.yaml`);
+      t.store.saveDraft({ ...sent, status: status as typeof sent.status });
+      fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${age(days)}"`), 'utf8');
+    };
+
+    leave('submitted', 3);
+    let list = await request(app).get('/api/workspace').expect(200);
+    expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
+
+    // Still being written, and old: that is somebody's unfinished application,
+    // not litter.
+    leave('drafting', 400);
+    list = await request(app).get('/api/workspace').expect(200);
+    expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
+
+    leave('submitted', 15);
+    list = await request(app).get('/api/workspace').expect(200);
+    expect(list.body.drafts).toHaveLength(0);
+  });
+
   it('falls back to the closest previous letter when the AI is off', async () => {
     const { body } = await open().expect(200);
     const res = await request(app)
@@ -1199,8 +1277,17 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
     const bank = t.store.load().answers.find((a) => a.question.startsWith('Describe'));
     expect(bank?.variants.at(-1)?.text).toBe('I built a pipeline.');
 
-    // The draft is cleared once filed.
-    expect(t.store.getDraft(draft.id)).toBeUndefined();
+    /*
+     * And the space stays, marked as sent.
+     *
+     * Filing it used to delete the draft, which is the harsher reading of
+     * "finished": the letter and the answers went behind a tracker row and
+     * could only be read as a snapshot afterwards. A portal that rejects the
+     * upload and a question that comes back a week later both want the thing
+     * you wrote, so it stays open — quietly, below the live ones, until
+     * `retireStaleDrafts` lets it go a fortnight after the last keystroke.
+     */
+    expect(t.store.getDraft(draft.id)?.status).toBe('submitted');
   });
 
   /*
@@ -1449,6 +1536,51 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
     expect(res.body.currentDir).toMatch(/current$/);
     expect(res.body.currentDir).not.toContain('applications/');
     expect(fs.existsSync(path.join(res.body.currentDir, 'Test-Person-Resume.pdf'))).toBe(true);
+  });
+
+  /*
+   * And the same folder as something you can click.
+   *
+   * A path answers the upload dialog and nothing else: from a job board, in a
+   * browser, it is a string. This is the page the extension's "Open the
+   * folder" opens, so what it lists has to be what is in the folder.
+   */
+  it('serves the flat folder as a page, and the files in it', async () => {
+    await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+
+    const page = await request(app).get('/current').expect(200);
+    expect(page.headers['content-type']).toContain('html');
+    expect(page.text).toContain('Test-Person-Resume.pdf');
+    expect(page.text).toContain('Ready to upload');
+
+    const file = await request(app).get('/current/Test-Person-Resume.pdf').expect(200);
+    expect(file.headers['content-type']).toContain('application/pdf');
+
+    await request(app).get('/current/not-a-file.pdf').expect(404);
+    await request(app).get('/current/..%2F..%2Fetc%2Fpasswd').expect(404);
+  });
+
+  /*
+   * Preparing the files is what files the application now — so the space it
+   * was written in stops asking to be finished, without being taken away.
+   */
+  it('marks the workspace as sent when its files are prepared', async () => {
+    const opened = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+
+    await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern', status: 'applied' })
+      .expect(200);
+
+    const drafts = await request(app).get('/api/workspace').expect(200);
+    const still = drafts.body.drafts.find((d: { id: string }) => d.id === opened.body.draft.id);
+    expect(still?.status).toBe('submitted');
   });
 });
 
