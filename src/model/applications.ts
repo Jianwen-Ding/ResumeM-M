@@ -410,13 +410,41 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     handOver(stage, dir);
 
     const now = new Date().toISOString();
-    const status: ApplicationStatus = req.status ?? 'applied';
+    /*
+     * What this build knows, on top of what the tracker already knew.
+     *
+     * This used to write the row from scratch every time, which was survivable
+     * while the only thing that called it was a person pressing the filing
+     * button once. Building stages the files now, so it runs on every build,
+     * and three things that were theoretical became ordinary.
+     *
+     * The status could go backwards. Staging asks for `applying`; if you had
+     * already submitted the form on the page — or the run staging while you
+     * did landed afterwards — the row went from `applied` back to `applying`
+     * and the tracker said you had not sent something you had. An application
+     * missing from the list is the one you apply for twice, so never
+     * backwards: a status already past the one being asked for stands.
+     *
+     * The history was replaced rather than appended to, so every rebuild threw
+     * away the record of what had happened to this application — which is the
+     * whole point of keeping one.
+     *
+     * And `appliedAt` was stamped afresh, so the day you applied drifted to
+     * the day you last rebuilt.
+     */
+    const ORDER: ApplicationStatus[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
+    const asked: ApplicationStatus = req.status ?? 'applied';
+    const before = store.load().applications.find((a) => a.id === id);
+    const status =
+      before && ORDER.indexOf(before.status) > ORDER.indexOf(asked) ? before.status : asked;
+
     const application: Application = {
+      ...before,
       id,
       company: req.company,
       role: req.role,
       url: req.url,
-      appliedAt: now,
+      appliedAt: before?.appliedAt ?? now,
       status,
       resumeId: req.resumeId,
       snapshotDir: path.relative(store.outDir(), dir),
@@ -424,7 +452,10 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
       notes: req.notes,
       answers: req.answers,
       coverLetter: req.coverLetter?.trim() || undefined,
-      history: [{ at: now, status, note: 'Bundle created' }],
+      history: [
+        ...(before?.history ?? []),
+        { at: now, status, note: before ? 'Files rebuilt' : 'Bundle created' },
+      ],
     };
     store.upsertApplication(application);
     // The files also land in the flat folder, ready for the upload dialog that

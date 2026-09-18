@@ -238,6 +238,47 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
     expect(t.store.load().applications).toHaveLength(1);
   });
 
+  /*
+   * Building the files again must not undo what the tracker knows.
+   *
+   * Survivable while the only caller was a person pressing the filing button
+   * once. Building stages the files now — so that the folder you attach from
+   * has something in it before the dialog opens — which means this runs on
+   * every build, and three theoretical problems became ordinary ones.
+   */
+  describe('building again, over an application that already exists', () => {
+    const staged = { company: 'Streamly', role: 'Intern', resumeId: 'intern', status: 'applying' as const };
+
+    it('never moves the status backwards', async () => {
+      await buildBundle(t.store, { ...staged, status: 'applied' });
+      // The form was submitted on the page; a build lands afterwards.
+      const again = await buildBundle(t.store, staged);
+      expect(again.application.status).toBe('applied');
+      expect(t.store.load().applications).toHaveLength(1);
+    });
+
+    it('but still moves it forwards when that is what was asked', async () => {
+      await buildBundle(t.store, staged);
+      const sent = await buildBundle(t.store, { ...staged, status: 'applied' });
+      expect(sent.application.status).toBe('applied');
+    });
+
+    it('keeps the history rather than starting it again', async () => {
+      await buildBundle(t.store, staged);
+      const again = await buildBundle(t.store, { ...staged, status: 'applied' });
+      expect(again.application.history?.length).toBeGreaterThan(1);
+      expect(again.application.history?.[0]?.status).toBe('applying');
+    });
+
+    it('keeps the day it was applied for, rather than the day it was last built', async () => {
+      const first = await buildBundle(t.store, { ...staged, status: 'applied' });
+      const when = first.application.appliedAt;
+      await new Promise((r) => setTimeout(r, 10));
+      const again = await buildBundle(t.store, staged);
+      expect(again.application.appliedAt).toBe(when);
+    });
+  });
+
   it('freezes the choices that were actually used', async () => {
     const result = await buildBundle(t.store, { company: 'Acme', role: 'Intern', resumeId: 'intern' });
     const snapshot = YAML.parse(fs.readFileSync(path.join(result.dir, 'source', 'resolved.yaml'), 'utf8'));
