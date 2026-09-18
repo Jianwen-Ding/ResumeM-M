@@ -153,6 +153,29 @@ describe('when the AI is in the loop', () => {
     expect(t.store.load().resumes.map((r) => r.id)).toContain(res.body.spec.id);
   });
 
+  it('still makes a resume when the model will not start', async () => {
+    // The same hole as on `/analyze`, one endpoint along: the button says
+    // "with AI", and a command that is not there must not turn it into an
+    // error. The resume is the keyword match, and the reason comes back
+    // beside it.
+    t = makeTempStore({
+      config: {
+        ai: { ...DEFAULT_CONFIG.ai, enabled: true, command: '/nonexistent/model-cli', args: ['{prompt}'], timeoutMs: 5_000 },
+        git: { autoCommit: false },
+        output: { dir: 'out' },
+      },
+    });
+    app = express();
+    app.use(express.json());
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+
+    const draft = await openSpace();
+    const res = await tailor(draft.id, { useAi: true }).expect(200);
+    expect(res.body.usedAi).toBe(false);
+    expect(res.body.aiFailed).toBeTruthy();
+    expect(t.store.load().resumes.map((r) => r.id)).toContain(res.body.spec.id);
+  });
+
   it('reports what it refused to do, rather than doing it quietly', async () => {
     // A plan naming a wording that is not in the store: the sanitiser drops
     // it, and the editor shows what was dropped beside what was kept.
@@ -161,5 +184,93 @@ describe('when the AI is in the loop', () => {
     const res = await tailor(draft.id, { useAi: true }).expect(200);
     expect(res.body.spec.choices.b_pipeline).not.toBe('v_invented');
     expect(res.body.rejected.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The same questions for the endpoint the extension actually calls.
+ *
+ * `/extension/analyze` is the busiest route in the product — it runs on every
+ * posting the extension decides is a posting. Its AI-off path is well covered
+ * elsewhere; what was not covered is what happens when the AI is on, which is
+ * how most people will run it.
+ */
+describe('analysing a posting with the AI switched on', () => {
+  const JOB_HTML = `<html><head><title>SWE Intern at Streamly</title>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"JobPosting","title":"Data Platform Intern",
+"hiringOrganization":{"@type":"Organization","name":"Streamly"},
+"description":"<p>Kafka streaming infrastructure in Go and Python, Kubernetes on AWS. Distributed systems. Minimum qualifications: BS in Computer Science.</p>"}
+</script></head><body>Apply now</body></html>`;
+
+  const analyze = (body: unknown) =>
+    request(app).post('/api/extension/analyze').send(body as object);
+
+  it('takes the plan the model returned as JSON', async () => {
+    serve(JSON.stringify({ choices: { b_testing: 'v_base' }, reasoning: 'Testing is named in the posting.' }));
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+    expect(res.body.aiUsed).toBe(true);
+    expect(res.body.aiReasoning).toMatch(/Testing is named/);
+    expect(res.body.tailor).toBe('ai');
+  });
+
+  /*
+   * And falls back to the keyword match when it cannot.
+   *
+   * This is the one that matters. The match is deterministic and runs with the
+   * AI switched off entirely; a model returning prose is a bad minute, not a
+   * reason for the extension to offer nothing on a posting the person is
+   * looking at right now.
+   */
+  it('still proposes a resume when the model returns prose', async () => {
+    serve('Sure! Here are my thoughts on how to tailor this resume for you.');
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+
+    expect(res.body.isJobPosting).toBe(true);
+    expect(res.body.aiUsed).toBe(false);
+    // And says so rather than letting the card claim the AI tailored it.
+    expect(res.body.tailor).toBe('match');
+    expect(res.body.aiRaw).toMatch(/my thoughts/);
+    // The deterministic match is still there underneath it.
+    expect(res.body.spec.choices.b_pipeline).toBe('v_kafka');
+    expect(res.body.rationale.some((r: { key: string }) => r.key === 'b_pipeline')).toBe(true);
+  });
+
+  it('discards a choice the model invented', async () => {
+    // The AI selects; it never writes. Anything that is not an id it could
+    // have chosen from is dropped before it reaches a resume.
+    serve(JSON.stringify({ choices: { b_pipeline: 'v_nonexistent' } }));
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+    expect(res.body.spec.choices.b_pipeline).not.toBe('v_nonexistent');
+  });
+
+  /*
+   * A CLI that is not there at all.
+   *
+   * The commonest way this fails in use — `claude` off this process's PATH, a
+   * renamed binary, a half-finished install — and it used to throw, become a
+   * 502, and leave the extension showing an error instead of a card. On every
+   * posting, until the configuration was fixed, for a product that works with
+   * the AI switched off entirely.
+   */
+  it('still proposes a resume when the model will not start', async () => {
+    t = makeTempStore({
+      config: {
+        ai: { ...DEFAULT_CONFIG.ai, enabled: true, command: '/nonexistent/model-cli', args: ['{prompt}'], timeoutMs: 5_000 },
+        git: { autoCommit: false },
+        output: { dir: 'out' },
+      },
+    });
+    app = express();
+    app.use(express.json());
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+    expect(res.body.isJobPosting).toBe(true);
+    expect(res.body.tailor).toBe('match');
+    expect(res.body.spec.choices.b_pipeline).toBe('v_kafka');
+    // And says why, so the card can name a misconfigured AI rather than
+    // leaving the person wondering why the star never lights up.
+    expect(res.body.aiFailed).toBeTruthy();
   });
 });

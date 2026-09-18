@@ -1724,6 +1724,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
       let aiVia: 'tools' | 'json' | undefined;
+      /**
+       * Why the AI did not tailor this one, when it was asked to and did not.
+       *
+       * Reported rather than thrown. A reply that will not parse already falls
+       * back to the match below — a model having a bad minute is not a reason
+       * to leave somebody looking at a posting with nothing — and a run that
+       * never started is the same thing from further away. It is also the more
+       * likely of the two: the command is a path to a CLI on the person's own
+       * machine, and `claude` not being on this process's PATH, a renamed
+       * binary or a half-finished install all arrive here.
+       *
+       * Before this, that threw, `handler` turned it into a 502, and the
+       * extension showed an error instead of a card — on every posting, until
+       * the configuration was fixed, for a product that works with the AI
+       * switched off entirely. The card is told `tailor: 'match'` either way,
+       * so it can say the AI did not run; this says why.
+       */
+      let aiFailed: string | undefined;
       if (mode === 'ai' && data.config.ai.enabled) {
         const resolved = resolveResume(baseId, data);
         const posting = {
@@ -1739,6 +1757,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * leaves them alone.
          */
         const withTools = canWire(data.config.ai.command) && serverEntry(mcpDir) !== null;
+        try {
         const agent = await runAgent(
           configForTask(data.config, 'tailor'),
           tailorPrompt(data, resolved, posting, { tools: withTools }),
@@ -1788,6 +1807,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             // A malformed AI reply must not sink the deterministic proposal.
             aiParsed = null;
           }
+        }
+        } catch (err) {
+          // See `aiFailed`: a run that never started is a reply that will not
+          // parse, from further away. Same answer.
+          aiFailed = err instanceof Error ? err.message : String(err);
+          aiParsed = null;
         }
       }
 
@@ -1904,6 +1929,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // the tools can be told apart from one that got lucky with JSON.
         aiVia,
         aiRaw: aiParsed ? undefined : aiRaw,
+        // Why it did not run, when it was asked to and did not start at all —
+        // almost always the configured command not being there. The proposal
+        // below is the keyword match, which is a good resume; this is so the
+        // card can say the AI is misconfigured rather than leave the person
+        // wondering why the star never lights up.
+        aiFailed,
         // What was actually done, not what was asked for: an AI run that came
         // back unusable falls through to the keyword match, and the card has
         // to be able to say so.
@@ -2582,20 +2613,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const match = matchVariants(data, base, { keywords: job.keywords });
 
       let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
+      // Why the AI did not tailor this one; see the same field on `/analyze`.
+      let aiFailed: string | undefined;
       if (useAi && data.config.ai.enabled) {
-        const agent = await runAgent(
-          configForTask(data.config, 'tailor'),
-          tailorPrompt(data, resolveResume(baseId!, data), {
-            jobTitle: draft.role,
-            company: draft.company,
-            jobDescription: job.description ?? html,
-            url: draft.url,
-          }),
-        );
         try {
-          plan = sanitizeAiPlan(extractJson(agent.output), data);
-        } catch {
-          plan = null; // a malformed reply must not sink the deterministic match
+          const agent = await runAgent(
+            configForTask(data.config, 'tailor'),
+            tailorPrompt(data, resolveResume(baseId!, data), {
+              jobTitle: draft.role,
+              company: draft.company,
+              jobDescription: job.description ?? html,
+              url: draft.url,
+            }),
+          );
+          try {
+            plan = sanitizeAiPlan(extractJson(agent.output), data);
+          } catch {
+            plan = null; // a malformed reply must not sink the deterministic match
+          }
+        } catch (err) {
+          // Nor must a run that never started. The button says "with AI", so
+          // the reason comes back with the resume rather than instead of it.
+          aiFailed = err instanceof Error ? err.message : String(err);
+          plan = null;
         }
       }
 
@@ -2632,6 +2672,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         spec,
         fetched,
         usedAi: Boolean(plan),
+        aiFailed,
         rejected: plan?.rejected ?? [],
         diff: diffResumes(resolveResume(baseId!, data), resolveResume(spec, after), { ignoreLabel: true }),
       });
