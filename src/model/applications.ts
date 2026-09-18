@@ -129,6 +129,45 @@ export function applicationId(company: string, role: string, at = new Date()): s
   return faithful ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
 }
 
+/**
+ * The application this company and role already has, whatever day it began.
+ *
+ * An id carries the date it was made, which is right for a folder name and
+ * wrong for identity: an application opened before midnight and sent after it
+ * asks for an id that does not exist, and a second row appears for the same
+ * job. That is not a hypothetical — it is what the suite found on the stroke
+ * of midnight, three systems in a row reporting a submission against a
+ * tracker row that was still "applying" because the send had quietly created
+ * its own.
+ *
+ * Identity is the company and the role. The most recent one still being
+ * worked on is the one meant; failing that, simply the most recent, because
+ * the same job applied for twice a year apart is two applications and the one
+ * you are touching now is the later.
+ */
+export function findApplication(apps: Application[], company: string, role: string): Application | undefined {
+  const key = `${slug(company)}\u0000${slug(role)}`;
+  const same = apps.filter((a) => `${slug(a.company)}\u0000${slug(a.role)}` === key);
+  if (same.length === 0) return undefined;
+
+  const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
+  const unsent = same.filter((a) => a.status === 'interested' || a.status === 'applying');
+  return (unsent.length > 0 ? unsent : same).sort(byNewest)[0];
+}
+
+/** The same question about a workspace, whose id is made the same way. */
+export function findDraft<T extends { id: string; company: string; role: string; status: string; updatedAt?: string }>(
+  drafts: T[],
+  company: string,
+  role: string,
+): T | undefined {
+  const key = `${slug(company)}\u0000${slug(role)}`;
+  const same = drafts.filter((d) => `${slug(d.company)}\u0000${slug(d.role)}` === key);
+  if (same.length === 0) return undefined;
+  const open = same.filter((d) => d.status !== 'submitted');
+  return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
+}
+
 export interface BundleRequest {
   company: string;
   role: string;
@@ -174,7 +213,13 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     data.config.output.fileNames ?? 'type',
   ) as [string, string, string];
 
-  const id = applicationId(req.company, req.role);
+  /*
+   * The row this job already has, if it has one — see `findApplication`. The
+   * folder is named after it, so a bundle built the day after the
+   * application was opened lands in that application's folder rather than in
+   * a second one beside it.
+   */
+  const id = findApplication(data.applications, req.company, req.role)?.id ?? applicationId(req.company, req.role);
   const dir = path.join(store.outDir(), 'applications', id);
   fs.mkdirSync(dir, { recursive: true });
 

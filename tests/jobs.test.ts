@@ -506,3 +506,53 @@ describe('telling a company name from a job title', () => {
     expect(looksLikeCompanyName('2026')).toBe(false);
   });
 });
+
+/*
+ * The title of a bare application form, which names one thing.
+ *
+ * Nobody writes a page title for an application step: the system writes it,
+ * and it comes out as the word for the step and who it is for — "Apply —
+ * Acme", "Apply for this job — Novena Health". Taking the first segment that
+ * is not page furniture then filed Acme as the *job* and the address the form
+ * was served from as the *employer*, which is inverted, and the employer was
+ * the only thing the page actually said.
+ *
+ * Found by looking at the tracker: a row reading "127.0.0.1 / Acme".
+ */
+describe('a form whose title is the employer and nothing else', () => {
+  const form = '<html><body><p>Submit application. Upload your resume and cover letter.</p></body></html>';
+  const read = (title: string, url = 'http://127.0.0.1:45227/gh/acme/jobs/9910') => extractJob(form, url, title);
+
+  it('reads the one remaining segment as who, not as what', () => {
+    expect(read('Apply — Acme')).toMatchObject({ company: 'Acme', title: undefined });
+  });
+
+  it('knows the applying phrase however many words it takes', () => {
+    expect(read('Apply for this job — Novena Health').company).toBe('Novena Health');
+    expect(read('Apply to this role — Halewood Group').company).toBe('Halewood Group');
+    expect(read('Start your application — Kestrel Aerospace').company).toBe('Kestrel Aerospace');
+  });
+
+  it('files an address as neither', () => {
+    // `looksLikeCompanyName` already refused a hostname as the employer; with
+    // nothing else to be, it was landing as the role instead.
+    const job = read('Apply — jobs.acme.com');
+    expect(job.company).toBeUndefined();
+    expect(job.title).toBeUndefined();
+  });
+
+  it('leaves a title that does name a job exactly as it was', () => {
+    expect(read('Data Platform Intern | Streamly')).toMatchObject({
+      company: 'Streamly',
+      title: 'Data Platform Intern',
+    });
+    expect(read('Platform Engineer at Helios')).toMatchObject({ company: 'Helios', title: 'Platform Engineer' });
+  });
+
+  it('does not invent an employer when the page declares one', () => {
+    // og:site_name is the site talking about itself, and it wins over a
+    // segment of the title either way.
+    const declared = '<html><head><meta property="og:site_name" content="Greenhouse"></head><body><p>Submit application.</p></body></html>';
+    expect(extractJob(declared, 'http://127.0.0.1:9/x', 'Apply — Acme').company).toBe('Greenhouse');
+  });
+});

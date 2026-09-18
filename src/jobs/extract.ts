@@ -288,7 +288,14 @@ export function looksLikeCompanyName(name?: string): boolean {
  * "Apply", which is not a job and cannot be searched for later.
  */
 const NOT_A_ROLE =
-  /^(apply|apply now|apply here|application|job application|submit application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
+  /*
+   * "Apply for this job" is the same segment with more words in it, and the
+   * rule matched the whole string or nothing — so a title reading "Apply for
+   * this job — Novena Health" got the phrase treated as a name. Anything
+   * that starts with applying, and says nothing after it but where or how,
+   * is the page talking about itself.
+   */
+  /^(apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
 
 /** A page title's parts, in the order they were written. */
 function titleParts(pageTitle?: string): string[] {
@@ -327,26 +334,57 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
    * segment that reads like a job, then a heading that does, and only then
    * the old answer — which is still right for every title shaped "Role | Site".
    */
-  const rawTitle =
-    ld?.title ??
-    metaContent(html, ['og:title', 'twitter:title']) ??
-    parts.find((part) => !NOT_A_ROLE.test(part) && ROLE_NOUN.test(part)) ??
-    headingRole(html) ??
-    parts.find((part) => !NOT_A_ROLE.test(part));
+  const declared = ld?.title ?? metaContent(html, ['og:title', 'twitter:title']);
+  const roleish = parts.find((part) => !NOT_A_ROLE.test(part) && ROLE_NOUN.test(part)) ?? headingRole(html);
+  const leftover = parts.find((part) => !NOT_A_ROLE.test(part));
 
-  const company =
+  /** Every way of knowing the employer that does not go through the title. */
+  const namedCompany =
     ld?.company ??
     companyFromUrl(url) ??
     metaContent(html, ['og:site_name']) ??
     // "Software Engineer Intern at Acme" is the common page-title shape.
-    /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim() ??
-    /*
-     * Or the other half of the title, which is where these systems put it:
-     * "Apply — Novena Health", "Platform Engineer | Halewood Group". Held to
-     * `looksLikeCompanyName`, so a second role, a sentence or a hostname in
-     * that position is refused rather than filed as the employer.
-     */
-    parts.find((part) => part !== rawTitle && !NOT_A_ROLE.test(part) && looksLikeCompanyName(part));
+    /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim();
+
+  /*
+   * "Apply — Acme" names the employer, not the job.
+   *
+   * A bare application form usually titles itself with the word about the
+   * page and the company: "Apply", "Application", "Careers", and then who
+   * for. Dropping the page word leaves one segment, and taking it as the role
+   * filed Acme as the job and the address the form was served from as the
+   * employer — inverted, and the employer was the only thing the page
+   * actually said. It is only this reading when nothing names a role
+   * anywhere and nothing else names the company; a title that carries a job
+   * word, or a site that declares its own name, is answered as before.
+   */
+  const onlyTheEmployer =
+    !declared && !roleish && !namedCompany && Boolean(leftover) && !ROLE_NOUN.test(leftover!) && looksLikeCompanyName(leftover);
+
+  /*
+   * And a hostname is not the job either.
+   *
+   * `looksLikeCompanyName` already refuses one as the employer — "Apply —
+   * jobs.acme.com" names nobody — but refusing it there only moved it: with
+   * no other candidate it was filed as the role instead. It is the address,
+   * wherever it is put.
+   */
+  const addressShaped = (part?: string) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test((part ?? '').trim());
+
+  const rawTitle = declared ?? roleish ?? (onlyTheEmployer || addressShaped(leftover) ? undefined : leftover);
+
+  const company =
+    namedCompany ??
+    (onlyTheEmployer
+      ? leftover
+      : /*
+         * Or the other half of the title, which is where these systems put it:
+         * "Apply — Novena Health", "Platform Engineer | Halewood Group". Held
+         * to `looksLikeCompanyName`, so a second role, a sentence or a
+         * hostname in that position is refused rather than filed as the
+         * employer.
+         */
+        parts.find((part) => part !== rawTitle && !NOT_A_ROLE.test(part) && looksLikeCompanyName(part)));
 
   // Page titles routinely carry the company along; the company has its own
   // field, and repeating it in the role reads badly everywhere it is shown.

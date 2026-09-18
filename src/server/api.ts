@@ -35,7 +35,7 @@ import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/an
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, applicationId, buildBundle, fingerprint, slug, stats } from '../model/applications.js';
+import { advance, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
@@ -1903,9 +1903,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const body = req.body as { company?: string; role?: string; url?: string; note?: string };
       if (!body.company || !body.role) throw new Error('company and role are required');
 
-      const id = applicationId(body.company, body.role);
       const data = store.load();
-      const tracked = data.applications.find((a) => a.id === id);
+      /*
+       * By company and role, not by the id today would make. An application
+       * opened yesterday and sent today asks for an id that does not exist,
+       * and what happened next was a second row: the send filed its own
+       * application as `applied` while the one being worked on sat at
+       * `applying` for ever. See `findApplication`.
+       */
+      const tracked = findApplication(data.applications, body.company, body.role);
+      const id = tracked?.id ?? applicationId(body.company, body.role);
       const note = body.note ?? 'The form was submitted on the page';
       const now = new Date().toISOString();
 
@@ -1936,8 +1943,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return made;
       });
 
-      // And the draft, if there is one, stops looking like something to finish.
-      const draft = store.getDraft(id);
+      // And the draft, if there is one, stops looking like something to finish
+      // — found the same way, for the same reason.
+      const draft = findDraft(store.loadDrafts(), body.company, body.role);
       if (draft && draft.status !== 'submitted') {
         store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
       }
@@ -1979,7 +1987,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * or a question that comes back a week later, both want the text rather
        * than the snapshot of it.
        */
-      const opened = store.getDraft(result.application.id);
+      const opened = findDraft(store.loadDrafts(), result.application.company, result.application.role);
       if (opened && result.application.status === 'applied' && opened.status !== 'submitted') {
         store.saveDraft({ ...opened, status: 'submitted', updatedAt: new Date().toISOString() });
       }
@@ -2107,7 +2115,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!body.company || !body.role) throw new Error('company and role are required');
 
       const data = store.load();
-      const id = applicationId(body.company, body.role);
+      /*
+       * Which space this job already has, whatever day it was opened — but
+       * only its id. The draft itself is read after the slow work below, and
+       * reading it here instead is precisely the bug the test named "does not
+       * reopen a workspace onto what it said before" exists to catch.
+       */
+      const id = findDraft(store.loadDrafts(), body.company, body.role)?.id ?? applicationId(body.company, body.role);
 
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
@@ -2239,6 +2253,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/workspace/:id',
     handler(async (req, res) => {
       const id = String(req.params.id);
+      // Addressed by id here, deliberately: this route is editing one known
+      // draft, not asking which draft a job has.
       const existing = store.getDraft(id);
       if (!existing) throw new Error(`No draft "${id}"`);
 

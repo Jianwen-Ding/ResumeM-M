@@ -294,6 +294,43 @@ describe('job analysis', () => {
       expect(later.body.application.status).toBe('interview');
     });
 
+    /*
+     * Midnight, which the suite found by running through it.
+     *
+     * An id carries the date it was made. An application opened before
+     * midnight asks, on being sent, for an id with today's date on it — which
+     * does not exist — so the send filed a second application of its own and
+     * left the one being worked on at "applying" for ever. Three systems in a
+     * row reported it before anyone noticed what the clock had done.
+     */
+    it('finds the application it opened yesterday', async () => {
+      await request(app)
+        .post('/api/workspace')
+        .send({ company: 'Halcyon', role: 'Platform Engineer', coverLetterRequired: true })
+        .expect(200);
+
+      // Age both, exactly as a night does.
+      const yesterday = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString();
+      const apps = t.store.load().applications.map((a) =>
+        a.company === 'Halcyon' ? { ...a, id: a.id.replace(/^\d{4}-\d{2}-\d{2}/, yesterday.slice(0, 10)), appliedAt: yesterday } : a,
+      );
+      t.store.saveApplications(apps);
+      const draft = t.store.loadDrafts().find((d) => d.company === 'Halcyon')!;
+      t.store.deleteDraft(draft.id);
+      t.store.saveDraft({ ...draft, id: draft.id.replace(/^\d{4}-\d{2}-\d{2}/, yesterday.slice(0, 10)) });
+
+      const res = await sent({ company: 'Halcyon', role: 'Platform Engineer' }).expect(200);
+      expect(res.body.changed).toBe(true);
+      expect(res.body.application.status).toBe('applied');
+
+      // One row, not two: the one that was already there.
+      const after = t.store.load().applications.filter((a) => a.company === 'Halcyon');
+      expect(after).toHaveLength(1);
+      expect(after[0]!.id).toContain(yesterday.slice(0, 10));
+      expect(t.store.loadDrafts().filter((d) => d.company === 'Halcyon')).toHaveLength(1);
+      expect(t.store.loadDrafts().find((d) => d.company === 'Halcyon')?.status).toBe('submitted');
+    });
+
     it('needs to know which application it is', async () => {
       await sent({ company: 'Nobody' }).expect(400);
     });
