@@ -246,6 +246,13 @@ export interface ResolvedResume {
   layout: LayoutOptions;
   /** Non-fatal problems: dangling ids, choices that matched nothing. */
   warnings: string[];
+  /**
+   * The same two of those, counted rather than described: an entry the resume
+   * lists and the store has lost, and a choice that matches nothing. Both
+   * mean the resume is not the one whoever built it was looking at, and both
+   * have to be sayable without printing an id at a person.
+   */
+  lost?: { kind: 'entry' | 'wording'; id: string }[];
 }
 
 /* ------------------------------------------------------------------ *

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { advance, applicationId, buildBundle, bundleFileName, slug, stats } from '../src/model/applications.js';
+import { advance, applicationId, buildBundle, bundleFileName, describeLost, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
@@ -537,5 +537,54 @@ describe.skipIf(!latex)('putting the job title in file names', { timeout: 180_00
     expect(resumes).toHaveLength(2);
     expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Acme.pdf');
     expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Globex.pdf');
+  });
+});
+
+
+/*
+ * A resume built from a proposal the store has moved on from.
+ *
+ * The browser extension makes its proposal minutes — or pages, or a trip to
+ * the editor and back — before the folder is written, and the store can
+ * change in between. That is not an error: the resume still compiles, it is
+ * simply no longer the one that was on screen. Nothing said so, and the card
+ * announced "these files are named and ready to attach" over a resume with
+ * somebody's main job missing from it.
+ */
+describe('saying what the store no longer has', () => {
+  it('counts rather than naming ids', () => {
+    expect(describeLost([])).toBeUndefined();
+    expect(describeLost([{ kind: 'entry' }])).toBe('1 entry this resume chose is no longer in your store.');
+    expect(describeLost([{ kind: 'wording' }, { kind: 'wording' }])).toBe(
+      '2 wordings this resume chose are no longer in your store.',
+    );
+    expect(describeLost([{ kind: 'entry' }, { kind: 'wording' }])).toBe(
+      '1 entry and 1 wording this resume chose are no longer in your store.',
+    );
+  });
+
+  it.skipIf(!latex)('reports it on the bundle, without stopping it', { timeout: 180_000 }, async () => {
+    t.store.saveResume({
+      id: 'stale',
+      label: 'Built before the change',
+      sections: [{ kind: 'experience', entries: ['exp_acme', 'exp_gone'] }],
+      choices: { b_renamed_since: 'v_1' },
+    });
+
+    const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'stale' });
+
+    // Written, because a resume missing one entry is still a resume, and
+    // refusing to write it would leave somebody with nothing to attach.
+    expect(result.files.some((f) => f.endsWith('.pdf'))).toBe(true);
+    expect(result.missing).toBe('1 entry and 1 wording this resume chose are no longer in your store.');
+
+    // And the sentence is about the store, not about this machine's LaTeX —
+    // which is what the warnings beside it are for.
+    expect(result.missing).not.toMatch(/ligature|font/i);
+  });
+
+  it.skipIf(!latex)('says nothing when the store has everything it asked for', { timeout: 180_000 }, async () => {
+    const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'intern' });
+    expect(result.missing).toBeUndefined();
   });
 });

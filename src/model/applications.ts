@@ -130,6 +130,23 @@ export function applicationId(company: string, role: string, at = new Date()): s
 }
 
 /**
+ * "One entry and two wordings", from the resolver's count of what it could
+ * not find. Undefined when it found everything, so the caller can ask
+ * whether there is anything to say by asking whether this is there.
+ */
+export function describeLost(lost: { kind: 'entry' | 'wording' }[]): string | undefined {
+  if (lost.length === 0) return undefined;
+  const entries = lost.filter((l) => l.kind === 'entry').length;
+  const wordings = lost.filter((l) => l.kind === 'wording').length;
+  const parts: string[] = [];
+  if (entries > 0) parts.push(`${entries} ${entries === 1 ? 'entry' : 'entries'}`);
+  if (wordings > 0) parts.push(`${wordings} ${wordings === 1 ? 'wording' : 'wordings'}`);
+  const what = parts.join(' and ');
+  const verb = entries + wordings === 1 ? 'is' : 'are';
+  return `${what} this resume chose ${verb} no longer in your store.`;
+}
+
+/**
  * The application this company and role already has, whatever day it began.
  *
  * An id carries the date it was made, which is right for a folder name and
@@ -188,6 +205,22 @@ export interface BundleResult {
   pages: number;
   fits: boolean;
   warnings: string[];
+  /**
+   * What the resume asked for and the store no longer has, in a sentence.
+   *
+   * Separate from `warnings`, which also carries typography notes about the
+   * TeX install — true, worth saying once, and not worth putting in front of
+   * somebody about to attach a file. This is the other kind: an entry the
+   * spec lists and the store has lost, a choice pointing at a wording that
+   * has been renamed. The resume still compiles; it is simply not the one
+   * that was on screen, and nothing said so.
+   *
+   * A sentence and not the warnings themselves, because those name ids —
+   * right for the editor, where you would go and fix them, and meaningless
+   * in a card that is about to attach a file: nobody has ever typed
+   * "b_ec_pipeline".
+   */
+  missing?: string;
 }
 
 /**
@@ -340,6 +373,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
     pages: compiled.pages,
     fits: compiled.fits,
     warnings: compiled.warnings,
+    missing: describeLost(resolved.lost ?? []),
   };
 }
 
