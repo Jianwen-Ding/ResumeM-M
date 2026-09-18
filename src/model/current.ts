@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Application, ApplicationStatus } from './types.js';
@@ -47,6 +48,21 @@ export interface CurrentFolder {
    * both numbers can say which.
    */
   inFlight: number;
+  /**
+   * Files that should be in the folder and are not, each with the reason.
+   *
+   * The folder is documented as the one to point a file dialog at, so the user
+   * having put something of their own in it is ordinary — including, one day,
+   * a folder with the same name as a file this sync wants to write. Copying
+   * over it is not an option, and throwing was worse than it sounds: the sync
+   * runs at the end of `buildBundle`, so an EISDIR here failed a request for
+   * an application that had in fact been built and tracked, and took the whole
+   * Applications tab with it.
+   *
+   * So the rest of the sync finishes and the file that could not be written
+   * says so here, by name. Empty on the ordinary run.
+   */
+  problems?: string[];
 }
 
 /** Trimmed and hyphenated the way `bundleFileName` trims a part, for the same reason. */
@@ -61,7 +77,17 @@ function readManifest(dir: string): string[] {
   try {
     const raw = fs.readFileSync(path.join(dir, MANIFEST), 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed?.files) ? parsed.files.filter((f: unknown) => typeof f === 'string') : [];
+    /*
+     * Plain names only, because every one of these is handed to a recursive
+     * delete a few lines down. The file is ours, and it also sits in a folder
+     * the user is invited to open, next to files they are told to keep there;
+     * `"files": ["../../Documents"]` is one hand edit or one bad merge away
+     * from `rm -r` on a folder nobody meant. A manifest entry that is not a
+     * name in this folder describes nothing this sync put here.
+     */
+    return Array.isArray(parsed?.files)
+      ? parsed.files.filter((f: unknown) => typeof f === 'string' && f !== '' && f === path.basename(f) && f !== '..')
+      : [];
   } catch {
     // No manifest, or an unreadable one. Owning nothing is the safe reading:
     // it means the next sync deletes nothing it cannot account for.
@@ -137,8 +163,15 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   const claims: { name: string; app: Application; from: string }[] = [];
   for (const app of apps) {
     if (!IN_FLIGHT.includes(app.status) || !app.snapshotDir) continue;
-    const from = path.join(store.outDir(), app.snapshotDir);
-    if (!fs.existsSync(from)) continue;
+    /*
+     * Through the store, which refuses a `snapshotDir` leading out of the
+     * output folder — see `Store.outPath`. This was a `path.join`, and the
+     * value joined onto it comes from applications.yaml, so a row saying
+     * `snapshotDir: ../../../.ssh` mirrored that folder into `out/current`,
+     * which is served over HTTP to any origin that asks.
+     */
+    const from = store.outPath(app.snapshotDir);
+    if (!from || !fs.existsSync(from)) continue;
 
     for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
       // `source/` holds the .tex and the frozen spec: archive material, not
@@ -169,15 +202,63 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
     }
   }
 
+  const problems: string[] = [];
+  const landed: string[] = [];
   for (const [name, from] of wanted) {
     const to = path.join(dir, name);
-    // Copy only when it differs, so the folder's timestamps mean something.
-    if (!fs.existsSync(to) || fs.statSync(to).mtimeMs < fs.statSync(from).mtimeMs) {
-      fs.copyFileSync(from, to);
+    try {
+      /*
+       * What is already there, if anything — and whether it is even a file.
+       *
+       * This was `existsSync` plus a timestamp, and a *directory* with the
+       * wanted name passed both: freshly made, so newer than the bundle, so
+       * nothing was copied, and the name went into the list of files the
+       * folder holds. The Applications tab then said the resume was ready to
+       * upload while the upload folder held a folder of the user's with that
+       * name and no resume at all.
+       */
+      const at = fs.statSync(to, { throwIfNoEntry: false });
+      if (at && !at.isFile()) {
+        throw new Error('something that is not a file already has that name here');
+      }
+      // Copy only when it differs, so the folder's timestamps mean something.
+      if (!at || at.mtimeMs < fs.statSync(from).mtimeMs) {
+        /*
+         * Through a temp file in the same folder, then renamed over the name.
+         *
+         * `copyFileSync` opens the destination with O_TRUNC, so for the length
+         * of the copy the file in this folder is short — and this is the
+         * folder whose entire purpose is that a portal's file dialog is open
+         * over it. A PDF attached during that window is a truncated PDF that
+         * the employer's viewer refuses, and nothing anywhere says so. A
+         * rename within one directory is atomic, so the dialog sees the old
+         * file or the new one.
+         */
+        const temp = path.join(dir, `.rmm-${randomUUID()}.tmp`);
+        try {
+          fs.copyFileSync(from, temp);
+          fs.renameSync(temp, to);
+        } catch (err) {
+          fs.rmSync(temp, { force: true });
+          throw err;
+        }
+      }
+      landed.push(name);
+    } catch (err) {
+      /*
+       * Named, rather than swallowed or thrown. Whatever is in the way — a
+       * folder of the user's with this name, a file they have open and locked,
+       * a full disk — the other applications' files are still worth putting
+       * out, and the one that did not land is worth saying out loud, because
+       * the alternative is a portal upload that quietly attaches yesterday's
+       * resume.
+       */
+      const said = err instanceof Error ? err.message : String(err);
+      problems.push(`"${name}" could not be put in ${dir}: ${said}`);
     }
   }
 
-  const files = [...wanted.keys()].sort();
+  const files = landed.sort();
   try {
     fs.writeFileSync(path.join(dir, MANIFEST), JSON.stringify({ files }, null, 2), 'utf8');
   } catch {
@@ -191,5 +272,6 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
     files,
     applications: apps.filter((a) => IN_FLIGHT.includes(a.status) && a.snapshotDir).length,
     inFlight: apps.filter((a) => IN_FLIGHT.includes(a.status)).length,
+    ...(problems.length ? { problems } : {}),
   };
 }

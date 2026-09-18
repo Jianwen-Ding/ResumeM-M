@@ -1523,6 +1523,48 @@ describe('adding files to the corpus', () => {
   });
 });
 
+/*
+ * The two refusals the path layer makes when a name is created. Both are
+ * reached through the route the editor auto-saves with, so what matters as
+ * much as the refusal is that the reason survives the trip: the editor puts
+ * `err.message` straight into its save chip — "Not saved — …" — so a message
+ * that arrives as "500" tells somebody their work is lost and nothing else.
+ */
+describe('a resume id the save cannot hold', () => {
+  it('refuses a reserved Windows name, and says which and why', async () => {
+    const res = await request(app)
+      .put('/api/resumes/CON')
+      .send({ label: 'Reserved', sections: [] })
+      .expect(400);
+
+    expect(res.body.error).toContain('CON');
+    expect(res.body.error).toMatch(/reserved device name on Windows/i);
+    // The reason somebody should care, in the same breath as the refusal.
+    expect(res.body.error).toMatch(/cloned|clone/i);
+  });
+
+  it('refuses an id that differs from one already there only in case', async () => {
+    const res = await request(app)
+      .put('/api/resumes/BASE')
+      .send({ label: 'Shouty', sections: [] })
+      .expect(400);
+
+    expect(res.body.error).toMatch(/only in capitalisation/i);
+    expect(res.body.error).toMatch(/macOS and Windows/);
+    // And the one that was already there is untouched by the attempt.
+    const still = await request(app).get('/api/resumes').expect(200);
+    expect(still.body.some((r: { id: string }) => r.id === 'base')).toBe(true);
+    expect(still.body.some((r: { id: string }) => r.id === 'BASE')).toBe(false);
+  });
+
+  it('still lets you save the resume that is already there', async () => {
+    // The refusal is on creating a new name, never on writing a file that
+    // exists — otherwise the app could list somebody's resume and then decline
+    // to save their edit to it.
+    await request(app).put('/api/resumes/base').send({ label: 'Base resume', sections: [] }).expect(200);
+  });
+});
+
 describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, () => {
   it('hands back the flat folder alongside the archive it just wrote', async () => {
     const res = await request(app)
@@ -1536,6 +1578,45 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
     expect(res.body.currentDir).toMatch(/current$/);
     expect(res.body.currentDir).not.toContain('applications/');
     expect(fs.existsSync(path.join(res.body.currentDir, 'Test-Person-Resume.pdf'))).toBe(true);
+    // Nothing in the way, so nothing to report.
+    expect(res.body.currentProblems).toBeUndefined();
+  });
+
+  /*
+   * And when a file cannot be put there, the answer travels.
+   *
+   * `syncCurrent` has always named the files it could not write — something of
+   * the user's already sitting under that name, a file open and locked, a full
+   * disk — and finished the rest rather than failing the request, which is
+   * right. This route threw that answer away, so the card said "named and
+   * ready to attach" over a folder with the resume missing from it. That is
+   * the upload the folder exists to prevent.
+   */
+  it('says which file did not reach the folder you upload from', async () => {
+    const first = await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+
+    // The user's own folder, with their name on it, where the resume goes.
+    const taken = path.join(first.body.currentDir, 'Test-Person-Resume.pdf');
+    fs.rmSync(taken, { force: true });
+    fs.mkdirSync(taken, { recursive: true });
+    fs.writeFileSync(path.join(taken, 'mine.txt'), 'mine', 'utf8');
+    // Released from the manifest, so the sync treats it as the user's.
+    fs.writeFileSync(path.join(first.body.currentDir, '.rmm-current.json'), JSON.stringify({ files: [] }), 'utf8');
+
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+
+    expect(res.body.currentProblems?.join(' ')).toContain('Test-Person-Resume.pdf');
+    // The archive still has everything, which is what the card offers instead.
+    expect(res.body.files).toContain('Test-Person-Resume.pdf');
+    expect(fs.existsSync(path.join(res.body.dir, 'Test-Person-Resume.pdf'))).toBe(true);
+    // And what was in the way is still there.
+    expect(fs.existsSync(path.join(taken, 'mine.txt'))).toBe(true);
   });
 
   /*

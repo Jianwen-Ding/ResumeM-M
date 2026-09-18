@@ -1854,7 +1854,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         data.coverLetters.find((l) => l.id === app.letterId) ??
         data.coverLetters.find((l) => l.applicationId === app.id);
 
-      const dir = app.snapshotDir ? path.join(store.outDir(), app.snapshotDir) : undefined;
+      // Through the store, which refuses a snapshot path that leads out of the
+      // output folder — this route lists what is in it, and the listing is
+      // shown to the browser. See `Store.outPath`.
+      const dir = app.snapshotDir ? store.outPath(app.snapshotDir) : undefined;
       const files =
         dir && fs.existsSync(dir)
           ? fs
@@ -2057,7 +2060,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // file picker should be pointed at — the archive is for later.
       const current = syncCurrent(store);
       if (autoCommit()) await repo.commitAll(`Apply: ${result.application.company} — ${result.application.role}`);
-      res.json({ ...result, currentDir: current.dir });
+      /*
+       * And anything that did not land there, by name.
+       *
+       * `syncCurrent` has always been able to say which files it could not put
+       * in the upload folder — a folder of the user's sitting where a file
+       * should go, a file they have open and locked, a full disk — and this
+       * route threw the answer away. The folder is the one a portal's file
+       * picker is pointed at, so a file missing from it silently is the exact
+       * failure the folder exists to prevent: an upload that attaches last
+       * week's resume, or nothing at all, with the card saying it is ready.
+       */
+      res.json({ ...result, currentDir: current.dir, currentProblems: current.problems });
     }),
   );
 

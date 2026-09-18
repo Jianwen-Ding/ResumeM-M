@@ -129,3 +129,110 @@ describe('linking straight to one tracked application', () => {
     });
   });
 });
+
+/*
+ * The tracker gains a row per application and never loses one, so the list a
+ * job hunt ends with is nothing like the list it starts with. The questions
+ * people actually have of it — what am I waiting to hear back on, what have I
+ * not finished, did I apply to these people already — were all answered by
+ * scrolling.
+ */
+describe('narrowing the tracker', () => {
+  const rows = () => [...document.querySelectorAll('#apps-wrap tbody tr')];
+  const companies = () => rows().map((r) => r.children[1]?.textContent);
+
+  const listing = [
+    { id: 'a', company: 'Helios', role: 'Platform Engineer', status: 'applied', appliedAt: '2026-03-12T09:00:00Z' },
+    { id: 'b', company: 'Lyra', role: 'Data Scientist', status: 'applying', appliedAt: '2026-05-01T09:00:00Z' },
+    { id: 'c', company: 'Helios Robotics', role: 'Controls Engineer', status: 'interview', appliedAt: '2026-06-01T09:00:00Z' },
+  ];
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#applications';
+
+    const fixture = makeTempStore();
+    const data = fixture.store.load();
+    fixture.cleanup();
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        let result = {};
+        if (url === '/api/store') result = data;
+        else if (url === '/api/ai/jobs') result = { jobs: [] };
+        else if (url === '/api/applications') {
+          result = {
+            applications: listing,
+            stats: { total: 3, last7: 0, last30: 1, responseRate: 33 },
+            current: { dir: '/tmp/current', files: [], applications: 0, inFlight: 0 },
+          };
+        }
+        return { ok: true, json: async () => structuredClone(result) };
+      }),
+    );
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(rows()).toHaveLength(3));
+  });
+
+  it('shows everything, and says nothing about a count, until asked', () => {
+    expect(document.querySelector('#app-count')?.textContent).toBe('');
+  });
+
+  it('finds by company, and by role', async () => {
+    const find = document.querySelector('#app-find');
+    find.value = 'helios';
+    find.dispatchEvent(new window.Event('input'));
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+    expect(companies()).toEqual(['Helios Robotics', 'Helios']);
+
+    find.value = 'data scientist';
+    find.dispatchEvent(new window.Event('input'));
+    await vi.waitFor(() => expect(companies()).toEqual(['Lyra']));
+  });
+
+  it('narrows to one stage', async () => {
+    const stage = document.querySelector('#app-status');
+    stage.value = 'interview';
+    stage.dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(companies()).toEqual(['Helios Robotics']));
+  });
+
+  it('says how much of the list is showing, once it is not all of it', async () => {
+    const stage = document.querySelector('#app-status');
+    stage.value = 'applied';
+    stage.dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(document.querySelector('#app-count')?.textContent).toMatch(/1 of 3 applications/));
+  });
+
+  it('tells an empty result from an empty tracker', async () => {
+    const find = document.querySelector('#app-find');
+    find.value = 'nobody has this name';
+    find.dispatchEvent(new window.Event('input'));
+    await vi.waitFor(() => {
+      const empty = document.querySelector('#apps-wrap .empty');
+      expect(empty?.textContent).toContain('Nothing matches');
+      // The distinction that matters: three applications exist, none match.
+      expect(empty?.textContent).toContain('3 applications filed');
+    });
+  });
+
+  it('keeps the filter when a row changes stage under it', async () => {
+    /*
+     * Changing a status reloads the list. A filter that cleared itself there
+     * would drop you back into the whole tracker every time you moved a row
+     * on, which is exactly when you are working through a filtered set.
+     */
+    const stage = document.querySelector('#app-status');
+    stage.value = 'applied';
+    stage.dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(rows()).toHaveLength(1));
+
+    const rowSelect = rows()[0].querySelector('select');
+    rowSelect.value = 'interview';
+    rowSelect.dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(document.querySelector('#app-status')?.value).toBe('applied'));
+  });
+});

@@ -6,6 +6,7 @@ import type {
   Entry,
   MaybeVariant,
   Profile,
+  SkillGroup,
   Variant,
   VariantField,
 } from './types.js';
@@ -99,6 +100,45 @@ export function normalizeEntry(entry: Entry): Entry {
 export function normalizeEntries(entries: unknown): Entry[] {
   if (!Array.isArray(entries)) return [];
   return entries.filter((e) => e && typeof e === 'object').map((e) => normalizeEntry(e as Entry));
+}
+
+/**
+ * Skill groups, which were the one file read straight out of YAML and handed
+ * on untouched.
+ *
+ * A dozen places walk this list without guarding — `for (const g of
+ * data.skillGroups)` in the tailoring prompt and the job matcher, `g.items.join(', ')`
+ * in the renderer, `group.items.find(...)` in the resolver. A group typed by
+ * hand without an `items:` key is the easiest omission in the whole store to
+ * make, and it took down the renderer, the matcher, the MCP session and the
+ * skills tab together with "Cannot read properties of undefined (reading
+ * 'length')" — a message naming neither the group nor the file.
+ *
+ * The coercions are the same ones `cleanVariants` does and for the same
+ * reason: YAML turns `text: 2026` into a number and `id: 1` into one too, and
+ * everything downstream calls string methods on both. The quotes a person
+ * never typed cannot be recovered — `text: 1.10` is genuinely the number 1.1
+ * by YAML's own rules, and it comes back as "1.1" — but a value that is still
+ * a string cannot crash the page that prints it. Nothing is dropped: unknown
+ * keys stay, because this file is hand-editable and a key somebody added is a
+ * key somebody meant.
+ */
+export function normalizeSkillGroups(groups: unknown): SkillGroup[] {
+  if (!Array.isArray(groups)) return [];
+  return groups
+    .filter((g) => g && typeof g === 'object')
+    .map((g, n) => {
+      const group = g as Partial<SkillGroup>;
+      const items = Array.isArray(group.items) ? group.items : [];
+      return {
+        ...group,
+        id: String(group.id ?? `g_${n + 1}`),
+        name: String(group.name ?? group.id ?? `Group ${n + 1}`),
+        items: items
+          .filter((i) => i && typeof i === 'object' && i.text !== undefined && i.text !== null)
+          .map((i, k) => ({ ...i, id: String(i.id ?? `s_${k + 1}`), text: String(i.text) })),
+      } as SkillGroup;
+    });
 }
 
 export function normalizeAnswers(answers: unknown): AnswerBankItem[] {

@@ -181,6 +181,19 @@
     <div id="stats" class="stats"></div>
     <div class="toolbar">
       <button id="btn-add-app" class="primary">Record an application</button>
+      <label for="app-find" class="sr-only">Find an application</label>
+      <input id="app-find" type="search" placeholder="Find a company or role" autocomplete="off">
+      <label for="app-status" class="sr-only">Show</label>
+      <select id="app-status">
+        <option value="">Every stage</option>
+        <option value="interested">Not applied</option>
+        <option value="applying">Applying</option>
+        <option value="applied">Applied</option>
+        <option value="interview">Interviewing</option>
+        <option value="offer">Got it!</option>
+        <option value="closed">Closed</option>
+      </select>
+      <span id="app-count" class="hint"></span>
       <span class="grow"></span>
       <span id="current-files" class="current-files"></span>
     </div>
@@ -199,6 +212,8 @@
         <div class="toolbar">
           <h2>Cover letters</h2>
           <span class="grow"></span>
+          <label for="letter-find" class="sr-only">Find a letter</label>
+          <input id="letter-find" type="search" class="narrow" placeholder="Find a letter" autocomplete="off">
           <button id="btn-add-letter">+ Letter</button>
         </div>
         <p class="hint">
@@ -211,6 +226,8 @@
         <div class="toolbar">
           <h2>Answer bank</h2>
           <span class="grow"></span>
+          <label for="answer-find" class="sr-only">Find a question</label>
+          <input id="answer-find" type="search" class="narrow" placeholder="Find a question" autocomplete="off">
           <button id="btn-add-answer">+ Question</button>
         </div>
         <p class="hint">

@@ -3292,6 +3292,21 @@ function sentOn(a) {
 
 let openApplicationId = null;
 
+/*
+ * What the tracker is showing, out of everything it holds.
+ *
+ * The table listed every application ever filed, newest first, with no way to
+ * narrow it — and the list only grows: one row per application, for as long as
+ * somebody is looking for work. The questions people actually have of it are
+ * "what am I waiting to hear back on", "what have I not finished", and "did I
+ * apply to these people already", and all three were answered by scrolling.
+ *
+ * Kept out here because `loadApplications` runs again after every status
+ * change, and a filter that clears itself when you move a row to Interviewing
+ * is worse than no filter.
+ */
+let appFilter = { text: '', status: '' };
+
 async function loadApplications() {
   const { applications, stats, current } = await api('/applications');
 
@@ -3315,6 +3330,18 @@ async function loadApplications() {
             ? `Empty — ${plural(current.inFlight, 'application')} in flight, none with a built folder yet.`
             : 'Empty — nothing is mid-application.',
       }),
+      /*
+       * And what is missing from it, which the count above cannot say.
+       *
+       * The sync reports by name any file it could not put here — a folder of
+       * yours sitting where a file should go, a file open and locked, a full
+       * disk — and finishes the rest rather than failing the request. That is
+       * the right behaviour and it was silent: the line above would read "3
+       * files still being sent" while the fourth, the one you are about to
+       * attach, was not there. This is the folder a portal's file picker is
+       * pointed at, so the gap has to be visible from the folder.
+       */
+      ...(current?.problems ?? []).map((said) => el('span', { className: 'hint warn', textContent: said })),
     );
   }
 
@@ -3342,7 +3369,28 @@ async function loadApplications() {
     return;
   }
 
-  const rows = [...applications]
+  /*
+   * The stats above stay about the whole hunt — "total" means total, and a
+   * response rate over a filtered slice would be a different number wearing
+   * the same label. Only the table narrows.
+   */
+  const wanted = (a) => {
+    if (appFilter.status && a.status !== appFilter.status) return false;
+    if (!appFilter.text) return true;
+    const said = appFilter.text.toLowerCase();
+    return `${a.company ?? ''} ${a.role ?? ''}`.toLowerCase().includes(said);
+  };
+  const showing = applications.filter(wanted);
+
+  const count = $('#app-count');
+  if (count) {
+    count.textContent =
+      showing.length === applications.length
+        ? ''
+        : `${showing.length} of ${plural(applications.length, 'application')}`;
+  }
+
+  const rows = [...showing]
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))
     .map((a) => {
       const sel = el('select');
@@ -3399,6 +3447,17 @@ async function loadApplications() {
       sel.onclick = (ev) => ev.stopPropagation();
       return row;
     });
+
+  if (rows.length === 0) {
+    // Not the same fact as an empty tracker, and not worth confusing with it.
+    wrap.replaceChildren(
+      el('div', { className: 'empty' }, [
+        el('b', {}, 'Nothing matches'),
+        `${plural(applications.length, 'application')} filed; none of them match what you are looking for.`,
+      ]),
+    );
+    return;
+  }
 
   wrap.replaceChildren(
     el('table', {}, [
@@ -4556,8 +4615,36 @@ async function completeDraft(draft, notes) {
  * Letters and answers                                                 *
  * ------------------------------------------------------------------ */
 
+/*
+ * What the two lists on this tab are showing.
+ *
+ * Both grow and neither shrinks: a letter per application, and a question per
+ * form that asked something new. "What did I write to Helios?" and "have I
+ * answered this before?" are the questions somebody brings to this tab, and
+ * without a way to narrow it they are answered by reading every card.
+ *
+ * Out here for the same reason the tracker's is: this tab reloads after every
+ * edit, and a filter that cleared itself when you saved a letter would be one
+ * you stopped using.
+ */
+let letterFilter = '';
+let answerFilter = '';
+
 async function loadLetters() {
   const [letters, store] = await Promise.all([api('/letters'), api('/store')]);
+
+  /*
+   * The whole card is searched, body included. Somebody looking for a letter
+   * usually remembers a phrase from it rather than its title — and the titles
+   * these are given are all much of a muchness.
+   */
+  const matching = (text, said) => !said || String(text ?? '').toLowerCase().includes(said.toLowerCase());
+  const shownLetters = letters.filter((l) =>
+    matching(`${l.title ?? ''} ${l.company ?? ''} ${l.role ?? ''} ${l.body ?? ''}`, letterFilter),
+  );
+  const shownAnswers = (store.answers ?? []).filter((a) =>
+    matching(`${a.question ?? ''} ${(a.variants ?? []).map((v) => v.text).join(' ')}`, answerFilter),
+  );
 
   // How often each stored question has actually gone out, so the bank shows
   // which answers are pulling their weight.
@@ -4567,15 +4654,17 @@ async function loadLetters() {
   }
 
   $('#letters').replaceChildren(
-    letters.length === 0
+    shownLetters.length === 0
       ? el('div', { className: 'empty' }, [
-          el('b', {}, 'No letters yet'),
-          'Drafts written by the extension are saved here, and become the voice reference for the next one.',
+          el('b', {}, letters.length === 0 ? 'No letters yet' : 'Nothing matches'),
+          letters.length === 0
+            ? 'Drafts written by the extension are saved here, and become the voice reference for the next one.'
+            : `${plural(letters.length, 'letter')} here; none of them mention that.`,
         ])
       : el(
           'div',
           { className: 'card-list' },
-          letters.map((l) =>
+          shownLetters.map((l) =>
             el('div', { className: 'mini-card' }, [
               el('div', { className: 'row1' }, [
                 el('b', { textContent: l.title }),
@@ -4604,12 +4693,17 @@ async function loadLetters() {
   );
 
   $('#answers').replaceChildren(
-    store.answers.length === 0
-      ? el('div', { className: 'empty' }, [el('b', {}, 'No saved answers'), 'Add the questions every form asks.'])
+    shownAnswers.length === 0
+      ? el('div', { className: 'empty' }, [
+          el('b', {}, store.answers.length === 0 ? 'No saved answers' : 'Nothing matches'),
+          store.answers.length === 0
+            ? 'Add the questions every form asks.'
+            : `${plural(store.answers.length, 'question')} saved; none of them mention that.`,
+        ])
       : el(
           'div',
           { className: 'card-list' },
-          store.answers.map((a) => {
+          shownAnswers.map((a) => {
             const v = a.variants.find((x) => x.id === a.default) ?? a.variants[0];
             return el('div', { className: 'mini-card' }, [
               el('div', { className: 'row1' }, [
@@ -6672,6 +6766,21 @@ async function boot() {
   refreshJobs().catch(() => {});
 
   $('#btn-add-app').onclick = addApplication;
+
+  /*
+   * Narrowing the tracker. Both redraw from the list already in hand rather
+   * than asking the server again — this is a view of what is loaded, not a
+   * query, so it answers as fast as somebody types.
+   */
+  const narrow = () => {
+    appFilter = {
+      text: ($('#app-find')?.value ?? '').trim(),
+      status: $('#app-status')?.value ?? '',
+    };
+    loadApplications().catch((e) => setStatus(e.message, true));
+  };
+  if ($('#app-find')) $('#app-find').oninput = narrow;
+  if ($('#app-status')) $('#app-status').onchange = narrow;
   $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
   // The extension writes drafts from another tab, so there is something to
   // refresh to — this list is not only changed from here.
@@ -6685,6 +6794,16 @@ async function boot() {
   };
   $('#btn-add-letter').onclick = addLetter;
   $('#btn-add-answer').onclick = addAnswer;
+
+  // Narrowing the two lists on the Letters & Answers tab. Both redraw from
+  // what is already loaded, so they answer as fast as somebody types.
+  const narrowWriting = () => {
+    letterFilter = ($('#letter-find')?.value ?? '').trim();
+    answerFilter = ($('#answer-find')?.value ?? '').trim();
+    loadLetters().catch((e) => setStatus(e.message, true));
+  };
+  if ($('#letter-find')) $('#letter-find').oninput = narrowWriting;
+  if ($('#answer-find')) $('#answer-find').oninput = narrowWriting;
   $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
   wireVoiceDrop();
   // Typing is what makes the box differ from the store, so it is what turns
