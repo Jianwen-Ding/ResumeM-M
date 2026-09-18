@@ -275,6 +275,7 @@ function authoring(docs: SourceDocument[] = [RESUME_DOC]) {
     entryIds: ['exp_acme'],
     bulletIds: ['b_pipeline', 'b_testing'],
     skillGroups: [{ id: 'sk_lang', name: 'Languages' }],
+    bulletsByEntry: { exp_acme: ['b_pipeline', 'b_testing'] },
   });
 }
 
@@ -469,6 +470,7 @@ describe('both sets of tools, as tools', () => {
       'propose_entry',
       'propose_bullet',
       'propose_alternate',
+      'propose_order',
       'propose_skill',
       'review_proposal',
       'finish',
@@ -786,5 +788,99 @@ describe('ids a model might propose', () => {
       expect(r.ok, id).toBe(false);
     }
     expect(propose('exp.vega').text).toContain('exp_vega');
+  });
+});
+
+/*
+ * Proposing an order for lines that are already in the store.
+ *
+ * The one proposal here that puts no words anywhere, and the one with the
+ * widest reach: the master decides what order the lines inside an entry come
+ * in, and every resume that has not arranged its own follows it. So it needs
+ * no quotation — nothing is being claimed about the person's history, only
+ * about which of their own lines a reader should meet first — and it is
+ * still a proposal, because accepting it moves every document at once.
+ */
+describe('proposing a different order for lines already in the store', () => {
+  it('takes an order for an entry that exists', () => {
+    const s = authoring();
+    const out = s.proposeOrder('exp_acme', ['b_testing'], 'The posting is about testing.');
+    expect(out.ok).toBe(true);
+    expect(s.state.orders).toEqual([
+      { entryId: 'exp_acme', bullets: ['b_testing', 'b_pipeline'], why: 'The posting is about testing.' },
+    ]);
+  });
+
+  /* Naming only what moves, the same as the tailoring tool of this shape. */
+  it('keeps the lines that were not named, behind the ones that were', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'why');
+    expect(s.state.orders[0]?.bullets).toEqual(['b_testing', 'b_pipeline']);
+  });
+
+  it('refuses an entry the store does not have', () => {
+    const out = authoring().proposeOrder('exp_nope', ['b_testing'], 'why');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/no entry/i);
+  });
+
+  it('refuses lines that belong to something else, and says whose they are not', () => {
+    const out = authoring().proposeOrder('exp_acme', ['b_elsewhere'], 'why');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/none of those/i);
+  });
+
+  /*
+   * The order it is already in is not a proposal. Accepting one writes the
+   * entry and moves every resume that follows it, so an empty one costs a
+   * write and a decision for nothing.
+   */
+  it('refuses the order it is already in', () => {
+    const out = authoring().proposeOrder('exp_acme', ['b_pipeline', 'b_testing'], 'why');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/already in/i);
+  });
+
+  /* The reason is the whole of what the person is judging. */
+  it('refuses an order with no reason given', () => {
+    const out = authoring().proposeOrder('exp_acme', ['b_testing'], '   ');
+    expect(out.ok).toBe(false);
+    expect(out.text).toMatch(/why/i);
+  });
+
+  it('replaces an earlier order for the same entry rather than stacking two', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'first thought');
+    s.proposeOrder('exp_acme', ['b_pipeline', 'b_testing'], 'second thought').text;
+    // The second is the order it already has, so it is refused and the first stands.
+    expect(s.state.orders).toHaveLength(1);
+    expect(s.state.orders[0]?.why).toBe('first thought');
+  });
+
+  it('says so in the proposal the person reads', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'why');
+    expect(s.describeProposal()).toMatch(/exp_acme/);
+    expect(s.describeProposal()).toMatch(/reordered/i);
+  });
+
+  /* An order on its own is a proposal worth finishing with. */
+  it('is enough on its own to be worth showing', () => {
+    const s = authoring();
+    s.proposeOrder('exp_acme', ['b_testing'], 'why');
+    const out = s.done('Nothing new to add, but the lines read better this way.');
+    expect(out.ok).toBe(true);
+    expect(s.state.finished).toBe(true);
+    expect(s.state.orders).toHaveLength(1);
+  });
+
+  it('has nothing to say about an entry with no lines', () => {
+    const s = new AuthoringSession([RESUME_DOC], {
+      entryIds: ['exp_bare'],
+      bulletIds: [],
+      skillGroups: [],
+      bulletsByEntry: { exp_bare: [] },
+    });
+    expect(s.proposeOrder('exp_bare', ['b_x'], 'why').ok).toBe(false);
   });
 });

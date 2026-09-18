@@ -49,7 +49,13 @@ export interface SessionFile {
   resumeText?: string;
   /** For `author`: the material handed over, and what is already in the store. */
   documents?: SourceDocument[];
-  existing?: { entryIds: string[]; bulletIds: string[]; skillGroups: { id: string; name: string }[] };
+  existing?: {
+    entryIds: string[];
+    bulletIds: string[];
+    skillGroups: { id: string; name: string }[];
+    /** Each entry's lines, in the order the master holds them. */
+    bulletsByEntry?: Record<string, string[]>;
+  };
   /** Where to write what was decided. */
   out: string;
 }
@@ -120,7 +126,7 @@ function build(file: SessionFile): { session: { state: unknown }; tools: ToolDef
   if (file.kind === 'author') {
     const session = new AuthoringSession(
       file.documents ?? [],
-      file.existing ?? { entryIds: [], bulletIds: [], skillGroups: [] },
+      file.existing ?? { entryIds: [], bulletIds: [], skillGroups: [], bulletsByEntry: {} },
     );
     return { session, tools: authoringTools(session) };
   }

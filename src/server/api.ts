@@ -1244,6 +1244,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         entryIds: data.entries.map((e) => e.id),
         bulletIds: data.entries.flatMap((e) => (e.bullets ?? []).map((b) => b.id)),
         skillGroups: data.skillGroups.map((g) => ({ id: g.id, name: g.name })),
+        // Per entry as well as flat, because proposing an order means naming
+        // lines of one entry and nothing else.
+        bulletsByEntry: Object.fromEntries(
+          data.entries.map((e) => [e.id, (e.bullets ?? []).filter((b) => !b.archived).map((b) => b.id)]),
+        ),
       };
 
       /*

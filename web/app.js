@@ -2633,8 +2633,9 @@ async function readMaterial(notes) {
   const proposal = result.proposal ?? {};
   const entries = proposal.entries ?? [];
   const alternates = proposal.alternates ?? [];
+  const orders = proposal.orders ?? [];
 
-  if (entries.length === 0 && alternates.length === 0) {
+  if (entries.length === 0 && alternates.length === 0 && orders.length === 0) {
     setChildren(notes, el('div', {}, [
       el('p', {
         textContent:
@@ -2650,7 +2651,8 @@ async function readMaterial(notes) {
     el('p', {
       textContent:
         `Read ${plural(result.read?.length ?? 0, 'file')}. ` +
-        `${plural(entries.length, 'entry', 'entries')} and ${plural(alternates.length, 'other wording')} to look at. ` +
+        `${plural(entries.length, 'entry', 'entries')}, ${plural(alternates.length, 'other wording')}` +
+        `${orders.length ? ` and ${plural(orders.length, 'entry', 'entries')} to reorder` : ''} to look at. ` +
         'Nothing is saved yet.',
     }),
     proposal.notes ? el('p', { className: 'hint', textContent: proposal.notes }) : null,
@@ -2743,6 +2745,52 @@ async function readMaterial(notes) {
       added++;
     } catch (err) {
       failures.push(`${alt.bulletId}: ${err.message}`);
+    }
+  }
+
+  /*
+   * And the orders, last, because accepting one moves every resume that has
+   * not arranged its own lines — so it is the proposal with the widest
+   * reach and the one worth meeting after the small additive ones.
+   *
+   * Shown as the two orders side by side rather than as a list of ids. The
+   * question being asked is "does this read better", and that cannot be
+   * answered from `b_ec_pipeline, b_ec_testing`.
+   */
+  for (const order of orders) {
+    const entry = state.store.entries.find((e) => e.id === order.entryId);
+    if (!entry) continue;
+    const textOf = (id) => {
+      const bullet = (entry.bullets ?? []).find((b) => b.id === id);
+      if (!bullet) return id;
+      return String((bullet.variants?.find((v) => v.id === bullet.default) ?? bullet.variants?.[0])?.text ?? id);
+    };
+    const now = (entry.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
+    const wanted = order.bullets.filter((id) => now.includes(id));
+
+    const accepted = await showModal(
+      `A different order — ${fieldText(entry.title, effectiveChoices(), `${entry.id}.title`) || entry.id}`,
+      el('div', {}, [
+        el('p', { className: 'hint', textContent: order.why }),
+        el('p', { className: 'hint', textContent: 'It reads now:' }),
+        el('ol', {}, now.map((id) => el('li', { textContent: textOf(id) }))),
+        el('p', { className: 'hint', textContent: 'It would read:' }),
+        el('ol', {}, wanted.map((id) => el('li', { textContent: textOf(id) }))),
+        el('p', {
+          className: 'hint',
+          textContent:
+            'This is the master’s order, so it moves every resume that has not arranged its own lines. The ones ' +
+            'you arranged yourself stay as they are.',
+        }),
+      ]),
+      { okLabel: 'Use this order', showCancel: true, cancelLabel: 'Leave it' },
+    );
+    if (!accepted) continue;
+    try {
+      await setMasterBulletOrder(entry, wanted);
+      added++;
+    } catch (err) {
+      failures.push(`${order.entryId}: ${err.message}`);
     }
   }
 

@@ -27,6 +27,14 @@ function str(args: Record<string, unknown>, name: string): string | ToolResult {
   };
 }
 
+/** A list of ids, or the complaint that says what arrived instead. */
+function list(args: Record<string, unknown>, name: string): string[] | ToolResult {
+  const value = args[name];
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value) && value.every((v) => typeof v === 'string')) return value as string[];
+  return { text: `This call needs "${name}" to be a list of ids. It was ${JSON.stringify(value)}.`, isError: true };
+}
+
 const isResult = (v: unknown): v is ToolResult => typeof v === 'object' && v !== null && 'text' in v;
 const NO_ARGS = { type: 'object', properties: {}, additionalProperties: false } as const;
 
@@ -328,6 +336,36 @@ export function authoringTools(session: AuthoringSession): ToolDefinition[] {
             String(args.document).trim(),
           ),
         );
+      },
+    },
+    {
+      name: 'propose_order',
+      description:
+        'A better order for the lines of an entry that is already in the store. The master document decides what ' +
+        'order the lines inside an entry come in, and every resume that has not arranged its own follows it — so ' +
+        'this is the one proposal that moves every document at once, and nothing is written until the person ' +
+        'accepts it. Name only what moves: anything you leave out keeps its place behind what you named, so a line ' +
+        'cannot be lost by being forgotten. Use it where the material makes plain that something matters more than ' +
+        'its position suggests — the achievement buried fourth that the performance review opens with. Do not use ' +
+        'it where the lines read as a sequence, such as a project that goes design, build, measure, and do not use ' +
+        'it to restate the order they are already in.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          entry: { type: 'string', description: 'The entry id whose lines are being reordered.' },
+          bullets: { type: 'array', items: { type: 'string' }, description: 'Line ids, the one to be read first at the front.' },
+          why: { type: 'string', description: 'Why this order reads better. This is what the person is judging.' },
+        },
+        required: ['entry', 'bullets', 'why'],
+      },
+      run: (args) => {
+        const entry = str(args, 'entry');
+        if (isResult(entry)) return entry;
+        const bullets = list(args, 'bullets');
+        if (isResult(bullets)) return bullets;
+        const why = str(args, 'why');
+        if (isResult(why)) return why;
+        return from(session.proposeOrder(entry, bullets, why));
       },
     },
     {

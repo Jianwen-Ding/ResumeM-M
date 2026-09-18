@@ -73,6 +73,17 @@ export interface AuthoringState {
   alternates: { bulletId: string; label: string; text: string; source: string; documentId: string }[];
   /** Skills found in the material, for groups that already exist. */
   skills: { groupId: string; text: string; source: string }[];
+  /**
+   * A better order for the lines of an entry that already exists.
+   *
+   * The master document decides what order the lines inside an entry come
+   * in, and every resume that has not arranged its own follows it — so this
+   * is one proposal that moves every document at once, which is exactly why
+   * it is a proposal and not a write. It also needs no quotation, because it
+   * invents no text: the lines are already the person's own, and all that is
+   * being suggested is which of them a reader meets first.
+   */
+  orders: { entryId: string; bullets: string[]; why: string }[];
   notes: string;
   finished: boolean;
 }
@@ -81,6 +92,7 @@ export const emptyAuthoring = (): AuthoringState => ({
   entries: [],
   alternates: [],
   skills: [],
+  orders: [],
   notes: '',
   finished: false,
 });
@@ -119,7 +131,13 @@ export class AuthoringSession {
   constructor(
     readonly documents: SourceDocument[],
     /** Ids already in the store, so a proposal cannot collide with one. */
-    readonly existing: { entryIds: string[]; bulletIds: string[]; skillGroups: { id: string; name: string }[] },
+    readonly existing: {
+      entryIds: string[];
+      bulletIds: string[];
+      skillGroups: { id: string; name: string }[];
+      /** Each entry's lines, in the order the master holds them. */
+      bulletsByEntry?: Record<string, string[]>;
+    },
   ) {
     for (const doc of documents) this.docs.set(doc.id, doc);
   }
@@ -270,9 +288,53 @@ export class AuthoringSession {
     return ok(`Proposed "${text.trim()}" under ${group.name}.`);
   }
 
+  /**
+   * A better order for the lines of an entry that is already in the store.
+   *
+   * No quotation is required, and that is not an oversight: everything else
+   * here puts words on a resume and has to point at the material they came
+   * from, while this puts no words anywhere. The lines are already the
+   * person's own and already accepted; the only claim being made is about
+   * which one a reader should meet first.
+   *
+   * Naming only what moves is deliberate, and matches the tailoring tool of
+   * the same shape: anything left out keeps its place behind what was named,
+   * so a line cannot be lost by being forgotten.
+   */
+  proposeOrder(entryId: string, bullets: string[], why: string): MoveResult {
+    if (!this.existing.entryIds.includes(entryId)) {
+      return no(`There is no entry "${entryId}" in the store. Entries: ${some(this.existing.entryIds)}.`);
+    }
+    const mine = this.existing.bulletsByEntry?.[entryId];
+    if (!mine || mine.length === 0) {
+      return no(`"${entryId}" has no lines to put in order.`);
+    }
+    const named = [...new Set((bullets ?? []).filter((id) => mine.includes(id)))];
+    const strangers = (bullets ?? []).filter((id) => !mine.includes(id));
+    if (named.length === 0) {
+      return no(`None of those are lines of ${entryId}. Its lines are: ${some(mine)}.`);
+    }
+    const rest = mine.filter((id) => !named.includes(id));
+    const wanted = [...named, ...rest];
+    if (wanted.every((id, i) => id === mine[i])) {
+      return no(`That is the order ${entryId} is already in, so there is nothing to propose.`);
+    }
+    if (!why?.trim()) return no('Say why this order reads better. It is the whole of what the person is judging.');
+
+    this.state.orders = this.state.orders.filter((o) => o.entryId !== entryId);
+    this.state.orders.push({ entryId, bullets: wanted, why: why.trim() });
+    return ok(
+      `Proposed for ${entryId}: ${wanted.join(', ')}.` +
+        (strangers.length ? ` Ignored, because they are not its lines: ${some(strangers)}.` : '') +
+        ' Nothing is written: this moves every resume that has not arranged its own lines, so the person decides.',
+    );
+  }
+
   describeProposal(): string {
-    const { entries, alternates, skills } = this.state;
-    if (entries.length === 0 && alternates.length === 0 && skills.length === 0) return 'Nothing proposed yet.';
+    const { entries, alternates, skills, orders } = this.state;
+    if (entries.length === 0 && alternates.length === 0 && skills.length === 0 && orders.length === 0) {
+      return 'Nothing proposed yet.';
+    }
     const lines: string[] = [];
     for (const e of entries) {
       lines.push(`### [${e.id}] ${e.title} — ${e.kind}${e.dates ? ` (${e.dates})` : ''}`);
@@ -281,6 +343,7 @@ export class AuthoringSession {
     }
     if (alternates.length) lines.push('', `Alternate wordings: ${alternates.map((a) => a.bulletId).join(', ')}`);
     if (skills.length) lines.push('', `Skills: ${skills.map((s) => s.text).join(', ')}`);
+    if (orders.length) lines.push('', `Lines reordered: ${orders.map((o) => o.entryId).join(', ')}`);
     lines.push('', 'None of this is in the store. It goes to the person to accept or decline, one at a time.');
     return lines.join('\n');
   }

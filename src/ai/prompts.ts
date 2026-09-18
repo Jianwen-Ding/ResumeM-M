@@ -1342,7 +1342,11 @@ export function readMaterialPrompt(data: StoreData, files: { name: string; kind?
     '2. `list_documents`, then `read_document` on each, all the way through.',
     '3. `propose_entry`, then `propose_bullet` for each line of it.',
     '4. `propose_alternate` where the material words something they already have better than they do.',
-    '5. `review_proposal`, then `finish` — saying anything you noticed and could not act on.',
+    '5. `propose_order` where the material makes plain that a line matters more than its position suggests —',
+    '   the achievement buried fourth that a performance review opens with. It writes no words: it only says',
+    '   which of their own lines a reader should meet first, and it moves every resume that has not arranged',
+    '   its own lines. Leave a set of lines alone where they read as a sequence.',
+    '6. `review_proposal`, then `finish` — saying anything you noticed and could not act on.',
   ].join('\n');
 }
 
