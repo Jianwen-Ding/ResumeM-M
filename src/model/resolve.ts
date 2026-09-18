@@ -572,11 +572,38 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   // ignoring them is how a resume quietly reverts to the wrong grad date.
   const knownKeys = new Set<string>();
   if (isVariantField(data.profile.name)) knownKeys.add(PROFILE_NAME_KEY);
+  /*
+   * A bullet id belongs to one line, everywhere.
+   *
+   * A chosen wording is recorded as `choices[bulletId]` with no entry beside
+   * it, so two entries carrying a line with the same id share one choice. If
+   * the second line has no wording by that name the resume falls back to its
+   * default and says so a few lines below — but if it happens to have one, and
+   * two entries minted from the same title usually do, the second line quietly
+   * changes wording because of a decision made about the first. Nothing warns,
+   * nothing looks wrong, and the difference is on the page that gets sent.
+   *
+   * The three places that mint bullet ids all keep them unique now, so this
+   * cannot arise from anything made since. It is checked here for the saves
+   * that predate that, because the alternative to a warning is silence.
+   */
+  const bulletOwner = new Map<string, string>();
   for (const e of data.entries) {
     for (const f of ['title', 'dates', 'subtitle', 'location'] as const) {
       if (isVariantField(e[f])) knownKeys.add(`${e.id}.${f}`);
     }
-    for (const b of e.bullets ?? []) knownKeys.add(b.id);
+    for (const b of e.bullets ?? []) {
+      knownKeys.add(b.id);
+      const owner = bulletOwner.get(b.id);
+      if (owner && owner !== e.id) {
+        warnings.push(
+          `Two entries carry a line with the id "${b.id}" — "${owner}" and "${e.id}". ` +
+            'They share one chosen wording, so picking a wording on either can change the other.',
+        );
+      } else if (!owner) {
+        bulletOwner.set(b.id, e.id);
+      }
+    }
   }
   for (const key of Object.keys(choices)) {
     if (!knownKeys.has(key)) {

@@ -370,6 +370,28 @@ function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
 }
 
+/**
+ * A bullet id nothing else in the store is using.
+ *
+ * Unique across the whole store, not just the entry it is going into. A chosen
+ * wording is recorded as `choices[bulletId]` with no entry beside it, so two
+ * lines sharing an id share one choice: picking a wording on one silently
+ * changes the other wherever it has a wording by the same name, and two lines
+ * minted from the same title usually do.
+ *
+ * Two roles at the same company was enough. `addEntry` named the first line
+ * after the title and nothing else — "Acme Co." twice gave `b_acme-co_1`
+ * twice — and the check it did run looked only inside the entry being added
+ * to, which is the one place a collision cannot come from. The drafted-entry
+ * path names its lines the same way.
+ */
+function freeBulletId(base) {
+  const taken = new Set((state.store?.entries ?? []).flatMap((e) => (e.bullets ?? []).map((b) => b.id)));
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
+  return id;
+}
+
 /* ------------------------------------------------------------------ *
  * Spec helpers                                                        *
  * ------------------------------------------------------------------ */
@@ -2716,7 +2738,7 @@ async function readMaterial(notes) {
           ...(entry.dates ? { dates: entry.dates } : {}),
           ...(entry.location ? { location: entry.location } : {}),
           bullets: (entry.bullets ?? []).map((b, i) => ({
-            id: `${id}_b${i + 1}`,
+            id: freeBulletId(`${id}_b${i + 1}`),
             default: 'v_read',
             variants: [{ id: 'v_read', label: b.label || 'From your material', text: b.text, suggested: true }],
           })),
@@ -2842,12 +2864,16 @@ async function reviewDraftedEntry(entry, repo, kind) {
   if (!accepted) return;
 
   // Ids are assigned by the server, but the store is the client's to keep
-  // unique — another entry may have been added since.
+  // unique — another entry may have been added since. The lines need the same
+  // treatment as the entry: the server names them after the title, and a
+  // second draft about the same company would otherwise carry the first's
+  // line ids, which is one shared chosen wording between two unrelated lines.
   let id = entry.id;
   for (let n = 2; state.store.entries.some((e) => e.id === id); n++) id = `${entry.id}_${n}`;
+  const bullets = (entry.bullets ?? []).map((b) => ({ ...b, id: freeBulletId(b.id) }));
 
   describeNext(`drafting "${entry.title}"`);
-  await saveEntry({ ...entry, id, kind: entry.kind ?? kind }, `Added "${entry.title}"`);
+  await saveEntry({ ...entry, id, kind: entry.kind ?? kind, bullets }, `Added "${entry.title}"`);
   setStatus(`Added "${entry.title}" — every wording is unreviewed`);
 }
 
@@ -2877,7 +2903,7 @@ async function addEntry(kind) {
     ...(answer.location?.trim() ? { location: answer.location.trim() } : {}),
     ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
     bullets: answer.bullet?.trim()
-      ? [{ id: `b_${slug(answer.title)}_1`, default: 'v_base', variants: [{ id: 'v_base', label: 'Base', text: answer.bullet.trim() }] }]
+      ? [{ id: freeBulletId(`b_${slug(answer.title)}_1`), default: 'v_base', variants: [{ id: 'v_base', label: 'Base', text: answer.bullet.trim() }] }]
       : [],
   };
 
@@ -2977,10 +3003,7 @@ async function addBullet(entry) {
   ], 'Markup: **bold**, *italic*, `code`.');
   if (!answer?.text?.trim()) return;
 
-  let id = `b_${slug(entry.id).replace(/^(exp|edu|proj)_/, '')}_${(entry.bullets?.length ?? 0) + 1}`;
-  const taken = new Set((entry.bullets ?? []).map((b) => b.id));
-  let n = 2;
-  while (taken.has(id)) id = `${id}_${n++}`;
+  const id = freeBulletId(`b_${slug(entry.id).replace(/^(exp|edu|proj)_/, '')}_${(entry.bullets?.length ?? 0) + 1}`);
 
   const next = {
     ...entry,
