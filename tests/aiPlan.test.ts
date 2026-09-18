@@ -228,3 +228,123 @@ describe('putting things in a different order', () => {
     expect(applyInclusion(SAMPLE_BASE, data(), plan)).toBeUndefined();
   });
 });
+
+/*
+ * An arrangement the AI makes has to survive the thing that decides order.
+ *
+ * Both of these were silent. `applyInclusion` wrote the new order down and
+ * something downstream put it straight back, so every one of these tools
+ * reported success, the plan showed the move, and the document did not — the
+ * worst shape a bug can take in a tool an agent is trusting.
+ *
+ * The editor already knew: dragging an entry there turns that section's date
+ * sort off in the same breath, and says so. The AI's path did neither.
+ */
+describe('an order the AI asks for is the order that prints', () => {
+  /** The ids that will actually print, which is the only thing worth asserting. */
+  const printedBullets = (d: StoreData, sections: NonNullable<ReturnType<typeof applyInclusion>>, entryId: string) => {
+    const spec = { ...SAMPLE_BASE, id: 'tailored', sections };
+    const out = resolveResume('tailored', { ...d, resumes: [...d.resumes, spec] });
+    return out.sections.flatMap((s) => s.entries).find((e) => e.id === entryId)?.bullets.map((b) => b.id) ?? [];
+  };
+  const printedEntries = (d: StoreData, sections: NonNullable<ReturnType<typeof applyInclusion>>, kind: string) => {
+    const spec = { ...SAMPLE_BASE, id: 'tailored', sections };
+    const out = resolveResume('tailored', { ...d, resumes: [...d.resumes, spec] });
+    return out.sections.find((s) => s.kind === kind)?.entries.map((e) => e.id) ?? [];
+  };
+
+  /*
+   * The master now decides the order of the lines inside an entry, and a
+   * resume only escapes that by saying it arranged them itself. A plan that
+   * set the list without saying so was restacked into the master's order on
+   * the way to the page.
+   */
+  it('a reordered bullet stays where the AI put it', () => {
+    const d = data();
+    const entry = d.entries.find((e) => (e.bullets ?? []).length >= 2)!;
+    const ids = (entry.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
+    const backwards = [...ids].reverse();
+
+    const sections = applyInclusion(SAMPLE_BASE, d, sanitizeAiPlan({ order: { [entry.id]: backwards } }, d))!;
+    expect(sections, 'the plan changed something').toBeDefined();
+    expect(printedBullets(d, sections, entry.id)).toEqual(backwards);
+  });
+
+  /*
+   * And the same for entries, against the date sort — which is on for very
+   * nearly every section, because `adoptDateOrder` turns it on wherever it
+   * provably changes nothing. A section still sorting by date reads the AI's
+   * list, ignores it, and sorts by date.
+   *
+   * Built here rather than taken from the sample store, which holds one
+   * experience entry: a reorder test needs two, and the first version of
+   * this skipped itself on a store that could not provide them and passed
+   * for it.
+   */
+  it('a reordered entry stays where the AI put it, date sort or not', () => {
+    const d = data();
+    const older = {
+      id: 'exp_older',
+      kind: 'experience' as const,
+      title: 'Older job',
+      period: { start: { year: 2019, month: 1 }, end: { year: 2019, month: 8 } },
+      bullets: [],
+    };
+    const newer = {
+      id: 'exp_newer',
+      kind: 'experience' as const,
+      title: 'Newer job',
+      period: { start: { year: 2024, month: 7 }, end: { year: 2024, month: 12 } },
+      bullets: [],
+    };
+    const withBoth: StoreData = { ...d, entries: [...d.entries, older, newer] };
+    const base = {
+      ...SAMPLE_BASE,
+      id: 'dated',
+      // Sorting newest first, which is what the store adopts for almost
+      // everything — and what quietly discarded the AI's arrangement.
+      sections: [{ kind: 'experience' as const, order: 'newest' as const, entries: ['exp_newer', 'exp_older'] }],
+    };
+    const store = { ...withBoth, resumes: [...withBoth.resumes, base] };
+
+    // Oldest first: the opposite of what the date sort would do.
+    const wanted = ['exp_older', 'exp_newer'];
+    const sections = applyInclusion(base, store, sanitizeAiPlan({ entryOrder: { experience: wanted } }, store))!;
+    expect(sections, 'the plan changed something').toBeDefined();
+
+    const spec = { ...base, id: 'tailored', sections };
+    const out = resolveResume('tailored', { ...store, resumes: [...store.resumes, spec] });
+    expect(out.sections.find((s) => s.kind === 'experience')?.entries.map((e) => e.id)).toEqual(wanted);
+  });
+
+  /*
+   * Saying so is the whole mechanism, so it is asserted directly too: a
+   * resume that arranged its own lines says `bulletOrder`, and a section the
+   * AI arranged by hand stops sorting by date.
+   */
+  it('writes down that it arranged them, rather than leaving it to be guessed', () => {
+    const d = data();
+    const entry = d.entries.find((e) => (e.bullets ?? []).length >= 2)!;
+    const ids = (entry.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
+
+    const anExperience = d.entries.find((e) => e.kind === 'experience')!.id;
+    const sections = applyInclusion(
+      SAMPLE_BASE,
+      d,
+      sanitizeAiPlan({ order: { [entry.id]: [...ids].reverse() }, entryOrder: { experience: [anExperience] } }, d),
+    )!;
+    const mine = sections.find((s) => (s.bullets ?? {})[entry.id]);
+    expect(mine?.bulletOrder?.[entry.id]).toBe('manual');
+    expect(sections.find((s) => s.kind === 'experience')?.order).toBe('manual');
+  });
+
+  /* And a plan that arranges nothing leaves both alone. */
+  it('says nothing about order when the AI only hid something', () => {
+    const d = data();
+    const sections = applyInclusion(SAMPLE_BASE, d, sanitizeAiPlan({ disable: ['b_testing'] }, d))!;
+    for (const s of sections) {
+      expect(s.bulletOrder).toBeUndefined();
+      expect(s.order).not.toBe('manual');
+    }
+  });
+});

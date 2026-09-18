@@ -262,12 +262,39 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
    */
   for (const s of sections) {
     const wanted = plan.entryOrder[s.kind];
-    if (wanted) s.entries = reorder(s.entries, wanted);
+    if (wanted) {
+      s.entries = reorder(s.entries, wanted);
+      /*
+       * And the sort steps aside, or the arrangement is thrown away between
+       * here and the page.
+       *
+       * `adoptDateOrder` turns the date sort on for very nearly every
+       * section, because it turns it on wherever it provably changes
+       * nothing — so a plan that rearranged entries wrote the new list into
+       * a section that then sorted by date and ignored it. The tool said it
+       * had moved them, the plan showed them moved, and the document did
+       * not, which is the worst shape this can take in something an agent is
+       * trusting.
+       *
+       * The editor has always done this: dragging an entry there turns the
+       * section's sort off in the same breath and says so on screen. This is
+       * the same decision, made in the same place, for the same reason.
+       */
+      s.order = 'manual';
+    }
 
     for (const entryId of s.entries) {
       const order = plan.order[entryId];
       if (!order) continue;
       s.bullets[entryId] = reorder(shown(s, entryId), order);
+      /*
+       * And this resume says it arranged these lines itself, rather than
+       * leaving it to be inferred. The master decides the order of the lines
+       * inside an entry, and a resume only escapes that by saying so — see
+       * `SectionSpec.bulletOrder`. Without this the AI's arrangement was
+       * restacked into the master's order on the way to the page.
+       */
+      s.bulletOrder = { ...(s.bulletOrder ?? {}), [entryId]: 'manual' };
     }
   }
 
