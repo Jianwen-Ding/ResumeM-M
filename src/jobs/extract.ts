@@ -297,6 +297,78 @@ const NOT_A_ROLE =
    */
   /^(apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
 
+/**
+ * The role, read out of the address, when the page itself never says it.
+ *
+ * This is for the link in the email that says "finish your application". It
+ * lands on the form rather than the description, with no posting read and no
+ * trail behind it — and a bare application form does not name the job. This
+ * one titles itself "Apply — Helios" and heads itself "Submit application",
+ * which is every such form there is.
+ *
+ * What that cost was not a label. Identity is the company and the role, so an
+ * application filed as "Unknown role" is a different job from the same job
+ * filed from its posting: opening the posting afterwards filed a second
+ * tracker row, and the card said nothing about having applied, on the one page
+ * where that was worth saying. One job, two rows, and the address had the
+ * answer in it the whole time — `/helios/apply/platform-engineer`.
+ *
+ * Held to the same two gates a page title goes through, deliberately rather
+ * than by a new rule: a segment has to read like a job (`ROLE_NOUN`) and must
+ * not be the page talking about itself (`NOT_A_ROLE`). That is what keeps it
+ * quiet where it should be — `/gh/acme/jobs/9910` and `/lever/vega/8f21` name
+ * no role and now say so, rather than inventing one out of a number, and
+ * `CandidateExperience`, `submit-candidate`, `JobBoard` and `role-4c2` are all
+ * refused by vocabulary that already existed and was already tested.
+ *
+ * The last matching segment wins, because these addresses read outwards: in
+ * `/icims/orion/jobs/4021/platform-engineer/form` the job is nearer the end
+ * than the system is.
+ */
+export function roleFromUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  let segments: string[];
+  try {
+    segments = new URL(url).pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return undefined;
+  }
+
+  for (const segment of segments.reverse()) {
+    /*
+     * A slug is words joined by punctuation, and the punctuation is the only
+     * thing separating them. Requisition numbers ride along in several of
+     * these systems — `2209118-platform-engineer`, `Staff-Engineer_R-12345` —
+     * and a word that is all digits, or a short run of hex, is an
+     * identifier rather than part of anyone's job title.
+     */
+    const tokens = segment.split(/[-_+.]+/).filter(Boolean);
+    const isId = (w?: string) => Boolean(w) && (/^\d+$/.test(w!) || /^[0-9a-f]{4,}$/i.test(w!));
+    const words = tokens.filter(
+      (w, i) =>
+        !isId(w) &&
+        /*
+         * And the letter these systems put in front of a requisition number —
+         * `Staff-Engineer_R-12345` — which is part of the number rather than
+         * part of the job, and came out as the role "Staff Engineer R". Only
+         * when a number follows it, so a job that really is about one letter
+         * keeps it.
+         */
+        !(w.length === 1 && isId(tokens[i + 1])),
+    );
+    if (words.length === 0) continue;
+
+    const said = words.join(' ').replace(/\s+/g, ' ').trim();
+    if (said.length < 3 || said.length > 80) continue;
+    if (NOT_A_ROLE.test(said) || !ROLE_NOUN.test(said)) continue;
+
+    // Title case, as `employerFallback` does for the same reason: a slug is
+    // lower case and the role is shown to a person in half a dozen places.
+    return said.replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+  return undefined;
+}
+
 /** A page title's parts, in the order they were written. */
 function titleParts(pageTitle?: string): string[] {
   return (pageTitle ?? '')
@@ -371,7 +443,13 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
    */
   const addressShaped = (part?: string) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test((part ?? '').trim());
 
-  const rawTitle = declared ?? roleish ?? (onlyTheEmployer || addressShaped(leftover) ? undefined : leftover);
+  /*
+   * And the address, last of all — after everything the page itself says.
+   * A form that names its job in the title is answered from the title; this
+   * is only for the one that names it nowhere, which is most of them.
+   */
+  const rawTitle =
+    declared ?? roleish ?? (onlyTheEmployer || addressShaped(leftover) ? roleFromUrl(url) : leftover ?? roleFromUrl(url));
 
   const company =
     namedCompany ??

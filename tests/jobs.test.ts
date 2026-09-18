@@ -9,6 +9,7 @@ import {
   JOB_SHAPED,
   jobPostingScore,
   mergeJobPages,
+  roleFromUrl,
 } from '../src/jobs/extract.js';
 import { matchVariants } from '../src/jobs/match.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
@@ -554,5 +555,73 @@ describe('a form whose title is the employer and nothing else', () => {
     // segment of the title either way.
     const declared = '<html><head><meta property="og:site_name" content="Greenhouse"></head><body><p>Submit application.</p></body></html>';
     expect(extractJob(declared, 'http://127.0.0.1:9/x', 'Apply — Acme').company).toBe('Greenhouse');
+  });
+});
+
+/*
+ * The link in the email that says "finish your application" lands on the form,
+ * and a bare application form does not name the job. Filing it as "Unknown
+ * role" made it a different job from the same job filed off its posting —
+ * identity being company and role — so the posting, opened later, filed a
+ * second tracker row and said nothing about having already applied.
+ */
+describe('reading the role out of the address', () => {
+  it('reads a job named in the path', () => {
+    expect(roleFromUrl('https://x.test/helios/apply/platform-engineer')).toBe('Platform Engineer');
+    expect(roleFromUrl('https://x.test/careers/JobDetail/Platform-Engineer/20918')).toBe('Platform Engineer');
+    expect(roleFromUrl('https://x.test/lumen/careers/staff-platform-engineer')).toBe('Staff Platform Engineer');
+    expect(roleFromUrl('https://x.test/icims/orion/jobs/4021/platform-engineer/form')).toBe('Platform Engineer');
+    expect(roleFromUrl('https://x.test/careers/backend-engineer')).toBe('Backend Engineer');
+  });
+
+  it('drops the requisition number riding along with it', () => {
+    expect(roleFromUrl('https://x.test/jobs/2209118-platform-engineer')).toBe('Platform Engineer');
+    expect(roleFromUrl('https://x.test/en/jobs/Staff-Engineer_R-12345')).toBe('Staff Engineer');
+  });
+
+  it('takes the segment nearest the job, not the first one that reads like one', () => {
+    // These addresses read outwards: the system is at the front, the job is
+    // at the back, and a step of the form can follow it.
+    expect(roleFromUrl('https://x.test/engineering/jobs/data-scientist/apply')).toBe('Data Scientist');
+  });
+
+  it('says nothing when the address names no job', () => {
+    // The shapes that carry an opaque id instead, which is most of the big
+    // systems. Inventing a role out of a number would be worse than none.
+    expect(roleFromUrl('https://x.test/gh/acme/jobs/9910')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/lever/vega/8f21/apply')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/job/1882043')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/jobs/view/3918277401')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/Recruiting/Jobs/Details/2891044')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/apply/position/118204/submit')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/careers/908812/apply')).toBeUndefined();
+  });
+
+  it('refuses the page talking about itself, on the vocabulary that already existed', () => {
+    expect(roleFromUrl('https://x.test/careers/JobBoard/apply')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/careers/job/40128/submit-candidate')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/ashby/lyra/role-4c2')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/hcmUI/CandidateExperience/en/sites/CX_1/job/18842/apply')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/CandidatePortal/en-US/meridian/Posting/View/30914')).toBeUndefined();
+  });
+
+  it('is not reached by anything that is not an address', () => {
+    expect(roleFromUrl(undefined)).toBeUndefined();
+    expect(roleFromUrl('not a url at all')).toBeUndefined();
+    expect(roleFromUrl('https://x.test/')).toBeUndefined();
+  });
+
+  it('answers the form the page could not', () => {
+    const form = '<html><body><h1>Helios</h1><p>Submit application. Upload your resume.</p></body></html>';
+    const job = extractJob(form, 'http://127.0.0.1:9/helios/apply/platform-engineer', 'Apply — Helios');
+    expect(job).toMatchObject({ company: 'Helios', title: 'Platform Engineer' });
+  });
+
+  it('and does not speak over a page that names the job itself', () => {
+    // The address says one thing, the title says another; the page wins,
+    // because it is the posting and the address is a guess about it.
+    const page = '<html><body><p>Submit application.</p></body></html>';
+    const job = extractJob(page, 'http://127.0.0.1:9/acme/apply/platform-engineer', 'Data Scientist | Acme');
+    expect(job.title).toBe('Data Scientist');
   });
 });
