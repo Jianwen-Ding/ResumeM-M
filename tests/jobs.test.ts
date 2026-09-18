@@ -359,6 +359,85 @@ describe('what kind of page this is', () => {
     expect(v.score).toBeLessThan(JOB_SHAPED);
   });
 
+  /*
+   * A page that *talks about* applications, which is the hardest thing here to
+   * tell from one that is an application.
+   *
+   * Both of these were reported from life: a pull request on the repository of
+   * this very tool, and a chat window discussing a cover letter. The
+   * vocabulary is genuinely present — that is the subject — and the furniture
+   * is genuinely form-shaped: one long textarea, a file picker, a submit
+   * button. Nothing in the word counting separates them from a form.
+   *
+   * What does is that neither has the slightest interest in who you are. Every
+   * application form asks for a name, nearly always beside an email; a comment
+   * box and a chat composer never do, because the site already knows.
+   */
+  const DISCUSSES_APPLICATIONS = `<html><head><title>Claude Code</title></head><body>
+<h1>Claude Code</h1>
+<p>Can you draft a cover letter for the Platform Engineer posting? I want to reuse
+the answer about why do you want to work here. I have read the job description and
+the requirements — years of experience, responsibilities, qualifications.</p>
+<p>Make the resume fit on one page and attach the resume when you submit application
+materials.</p>
+<form>
+  <label for="composer">Reply</label>
+  <textarea id="composer" name="prompt"></textarea>
+  <input name="attachment" type="file">
+  <button type="submit">Send</button>
+</form></body></html>`;
+
+  it('refuses a page that discusses applications but asks nothing of you', () => {
+    const v = classifyPage(DISCUSSES_APPLICATIONS, 'https://claude.ai/code/session_01');
+    expect(v.kind).toBe('none');
+    expect(v.why.join(' ')).not.toContain('asks for a resume file');
+  });
+
+  /*
+   * The same page, with the one thing that makes a form a form. This is the
+   * assertion that keeps the rule honest: it has to be the identity field
+   * doing the work, not something incidental about the chat page.
+   */
+  it('accepts the same page once it starts asking who you are', () => {
+    const asking = DISCUSSES_APPLICATIONS.replace(
+      '<label for="composer">Reply</label>',
+      '<label for="you">Full name</label><input id="you" name="fullName">\n  <input type="email" name="email">',
+    );
+    const v = classifyPage(asking, 'https://claude.ai/code/session_01');
+    expect(v.kind).toBe('application');
+  });
+
+  it('still knows a real form, which asks for a name as they all do', () => {
+    const v = classifyPage(APPLICATION_FORM, 'https://jobs.lever.co/streamly/abc/apply');
+    expect(v.kind).toBe('application');
+    expect(v.why.join(' ')).toContain('asks for a resume file');
+  });
+
+  /*
+   * An email field alone is enough — plenty of forms ask for one and let the
+   * name come off the resume.
+   */
+  it('takes an email field as asking who you are', () => {
+    const form = `<html><head><title>Apply — Acme</title></head><body>
+<h1>Submit application</h1>
+<form><input type="email" name="e"><input type="file" name="r">
+<label>Cover letter<textarea></textarea></label>
+<label>Why do you want to work here?<textarea></textarea></label>
+<p>Upload your resume. Work authorization?</p></form></body></html>`;
+    expect(classifyPage(form, 'https://acme.example/careers/apply').kind).toBe('application');
+  });
+
+  /*
+   * A page whose title names the post is a posting whatever its fields do, and
+   * must not be caught by a rule aimed at chat windows.
+   */
+  it('does not need an identity field from a page that names the role', () => {
+    const posting = `<html><head><title>Platform Engineer at Streamly</title></head><body>
+<h1>Platform Engineer</h1><p>Responsibilities, qualifications, years of experience,
+about the role, what you'll do, benefits, compensation.</p></body></html>`;
+    expect(classifyPage(posting, 'https://streamly.com/careers/platform-engineer').kind).toBe('posting');
+  });
+
   it('stays quiet on a blog post that merely mentions work', () => {
     const blog = '<html><body><h1>Bread</h1><p>Sourdough notes from my kitchen.</p></body></html>';
     expect(classifyPage(blog, 'https://blog.example.com/bread').kind).toBe('none');

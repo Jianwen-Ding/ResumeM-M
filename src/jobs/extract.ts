@@ -609,8 +609,17 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * that condition it fires on any page with an attachment button that happens
    * to mention a resume, which is exactly the chat window and the pull request.
    */
+  /*
+   * `\b(resum|cv)\b` matched neither "resume" nor "resumes" nor "résumé": the
+   * boundary after "resum" wants a non-word character and finds the "e". So
+   * this — the largest single award in the scorer, and on its own comment the
+   * clearest application-form signal there is — fired on "cv" alone, and every
+   * real form saying "Upload your resume" scored three points under. The
+   * extension's own copy of this had the same fault and was fixed first; this
+   * one was missed, and a unit test on the form fixture is what found it.
+   */
   const uploadsResume =
-    /<input[^>]+type=["']?file/i.test(html) && /\b(resum|cv)\b/i.test(text) && asksWhoYouAre;
+    /<input[^>]+type=["']?file/i.test(html) && /\bcv\b|résum|resum/i.test(text) && asksWhoYouAre;
   if (uploadsResume) add(3, 'asks for a resume file');
 
   const forumHiring = FORUM.test(link) && /\b(hiring|who is hiring|looking for|we are hiring)\b/i.test(text);
