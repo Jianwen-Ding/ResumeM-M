@@ -243,8 +243,19 @@ export function deriveSpec(
  * resume that was compiled and sent had every group in full. The proposal and
  * the document disagreed, and the document was the one nobody looked at.
  *
- * What comes back is still a section for the derived resume to state as its
- * own, laid over what it inherits by `mergeSections`.
+ * What comes back states the narrowing and nothing else. It used to be the
+ * whole inherited section spread into a new one, which pinned every part of
+ * it: `groups` most of all. A skills group added to the base afterwards then
+ * never reached a resume tailored before it, because that resume was now
+ * saying "these groups, exactly" when all it had ever meant was "fewer items
+ * in this one". `mergeSections` lays a child's `items` over the parent's and
+ * inherits everything the child leaves out, which is the whole mechanism —
+ * so leaving it out is how you use it. The same reasoning is written up over
+ * `mergeSections` for entries, where it was learned.
+ *
+ * `entries` is in the shape because the type requires it and for no other
+ * reason: nothing reads it on a skills section, which is resolved from
+ * `groups`.
  */
 function buildSkillSections(
   base: ResumeSpec,
@@ -252,12 +263,6 @@ function buildSkillSections(
   all: ResumeSpec[],
 ): ResumeSpec['sections'] {
   const flat = base.extends ? flattenSpec(base, all) : base;
-  const skillSection = flat.sections?.find((s) => s.kind === 'skills');
-  if (!skillSection) return undefined;
-  return [
-    {
-      ...skillSection,
-      items: { ...(skillSection.items ?? {}), ...skills },
-    },
-  ];
+  if (!flat.sections?.some((s) => s.kind === 'skills')) return undefined;
+  return [{ kind: 'skills', entries: [], items: { ...skills } }];
 }

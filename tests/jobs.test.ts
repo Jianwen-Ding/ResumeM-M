@@ -12,7 +12,8 @@ import {
   roleFromUrl,
 } from '../src/jobs/extract.js';
 import { detectLevel } from '../src/jobs/level.js';
-import { matchVariants } from '../src/jobs/match.js';
+import { deriveSpec, matchVariants } from '../src/jobs/match.js';
+import { resolveResume } from '../src/model/resolve.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
 
 const JSON_LD_PAGE = `<html><head><title>SWE Intern at Streamly</title>
@@ -257,6 +258,66 @@ const data: StoreData = {
 };
 
 const base: ResumeSpec = { id: 'base', label: 'Base' };
+
+/**
+ * A tailored resume is a selection over the base, not a copy of it — so what
+ * it states is what the posting decided and nothing else.
+ */
+describe('deriving a resume for a posting', () => {
+  const withSkills: StoreData = {
+    ...data,
+    resumes: [
+      { id: 'root', label: 'Root', sections: [{ kind: 'skills', entries: [], groups: ['sk'] }] },
+      { id: 'grad', label: 'New grad', extends: 'root' },
+    ],
+  };
+  const derive = (from: string, store: StoreData) =>
+    deriveSpec(
+      store.resumes.find((r) => r.id === from)!,
+      'job-x',
+      'Job X',
+      { choices: {}, skills: { sk: ['s_py'] }, rationale: [] },
+      {},
+      store.resumes,
+    );
+
+  /*
+   * Read off the base's own sections, a resume that inherits its skills
+   * section found nothing here and narrowed nothing — so the match decided
+   * which skills to keep, said so in the change list, and the document that
+   * was compiled had every group in full.
+   */
+  it('narrows skills on a base that inherits its skills section', () => {
+    const section = derive('grad', withSkills).sections?.find((s) => s.kind === 'skills');
+    expect(section?.items?.sk).toEqual(['s_py']);
+  });
+
+  /*
+   * And states only that. Spreading the inherited section into a new one
+   * pinned `groups`, so a skills group added to the base afterwards never
+   * reached a resume tailored before it — the same failure `mergeSections`
+   * documents for entries, in the other list.
+   */
+  it('does not pin the group list, so the base can still grow', () => {
+    const spec = derive('grad', withSkills);
+    expect(spec.sections?.find((s) => s.kind === 'skills')?.groups).toBeUndefined();
+
+    const grown: StoreData = {
+      ...withSkills,
+      skillGroups: [...withSkills.skillGroups, { id: 'sk2', name: 'Tools', items: [{ id: 't_git', text: 'Git' }] }],
+      resumes: withSkills.resumes.map((r) =>
+        r.id === 'root' ? { ...r, sections: [{ kind: 'skills' as const, entries: [], groups: ['sk', 'sk2'] }] } : r,
+      ),
+    };
+    const resolved = resolveResume(spec, { ...grown, resumes: [...grown.resumes, spec] });
+    expect(resolved.sections.flatMap((s) => s.skillGroups.map((g) => g.name))).toEqual(['Languages', 'Tools']);
+  });
+
+  it('says nothing about skills where the base has no skills section', () => {
+    const bare: StoreData = { ...data, resumes: [{ id: 'plain', label: 'Plain' }] };
+    expect(derive('plain', bare).sections).toBeUndefined();
+  });
+});
 
 describe('variant matching', () => {
   it('swaps to the variant the posting actually calls for', () => {
