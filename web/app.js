@@ -15,6 +15,7 @@ import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
+import { mergeSections } from './sections.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -396,12 +397,17 @@ function effectiveChoices() {
 
 /** Flattened section list through the chain, child replacing parent by kind. */
 function resolveSections(id = state.resumeId) {
+  /*
+   * Through the shared rule, rather than the `child ?? parent` this used to
+   * do. See web/sections.js: replacing the parent's section outright meant a
+   * child that mentioned only bullets was read as a section with no entries,
+   * so saving a bullet reorder emptied the section out of the editor on the
+   * next load while the PDF went on printing it.
+   */
   let sections = [];
   for (const spec of chain(id)) {
     if (!spec.sections?.length) continue;
-    const next = sections.map((base) => spec.sections.find((o) => o.kind === base.kind) ?? base);
-    for (const o of spec.sections) if (!next.some((x) => x.kind === o.kind)) next.push(o);
-    sections = next;
+    sections = mergeSections(sections, spec.sections);
   }
   return sections;
 }

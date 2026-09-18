@@ -1593,6 +1593,12 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
  * with six bullets is fifty-odd grips on screen, and a column of visible
  * handles down the left reads as decoration long before it reads as an
  * affordance. Focus shows it too, because the keyboard path goes through it.
+ *
+ * Quiet, though, not absent. This was `opacity: 0`, which is a feature you
+ * can only find if you already know it is there — you have to happen to put
+ * the pointer on the one row that reveals it. Reported as lines that could
+ * not be dragged at all. A third of full is enough to read as a handle when
+ * you look for one and still disappear into the page when you are not.
  */
 .grip {
   border: 0;
@@ -1601,7 +1607,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 0 4px;
   line-height: 1;
   color: var(--muted);
-  opacity: 0;
+  opacity: .32;
   transition: opacity .12s ease;
   font-size: 15px;
 }

@@ -505,6 +505,32 @@ async function main() {
         check('dragging a line moves it where you dropped it',
           now.indexOf(first) > now.indexOf(second),
           `${was.slice(0, 3).join(', ')} → ${now.slice(0, 3).join(', ')}`);
+
+        /*
+         * And it is still that way after a reload, which is the half this
+         * check did not have and the half that was broken.
+         *
+         * The entry version of this drag asserted against the saved spec;
+         * the bullet version asserted only against the screen, so it passed
+         * for weeks while saving a bullet reorder deleted every entry in the
+         * section from the editor on the next load. The editor merged an
+         * inherited section by replacing it with the child's rather than
+         * laying the child over it, and a saved bullet reorder is precisely
+         * a child that mentions bullets and no entries. The PDF, built by
+         * the server, went on printing them — so the screen and the document
+         * disagreed and the screen was the wrong one.
+         */
+        await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+
+        const kept = await shown(rows);
+        check('the entry it belongs to is still in the resume after a reload',
+          kept.length >= now.length, `${now.length} lines → ${kept.length}`);
+        check('and the line is still where it was dropped',
+          kept.indexOf(first) > kept.indexOf(second) && kept.includes(first),
+          kept.join(', ') || '(the entry is gone)');
       }
     }
 
@@ -751,6 +777,127 @@ async function main() {
       const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
       const made = resumes.find((r) => r.label === 'Kafka-heavy variation');
       check('an emptied filename still saves, named from what you typed', Boolean(made), made?.id ?? 'not saved');
+    }
+
+    /* -------------------------------------------------------------- *
+     * Going back to an earlier version                                 *
+     * -------------------------------------------------------------- *
+     * Restore is the most destructive button in the editor: it writes
+     * over the resume you have open. The server side of it is well
+     * covered, and the screen it is pressed from was not tested
+     * anywhere — not here, not in jsdom. A restore that silently picks
+     * the wrong version, or that loses the version you restored *from*,
+     * is the exact failure the save is meant to make impossible.
+     *
+     * The harness runs with autocommit off so the rest of the run
+     * leaves no commits behind, so the versions are made deliberately
+     * here, through the endpoint that commits regardless.
+     * -------------------------------------------------------------- */
+
+    console.log('\nGoing back to an earlier version');
+    {
+      const commit = (message) =>
+        fetch(`${server.url}/api/store/save`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message }),
+        });
+
+      const specOf = async (id) => (await (await fetch(`${server.url}/api/resumes`)).json()).find((r) => r.id === id);
+
+      // Two versions of one resume, differing in a way that is visible
+      // both on the page and in the stored spec.
+      const id = 'editor-history';
+      const put = (label) =>
+        fetch(`${server.url}/api/resumes/${id}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, label, extends: 'newgrad' }),
+        });
+
+      await put('The first name it had');
+      await commit('First version');
+      await put('The second name it had');
+      await commit('Second version');
+
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.locator('#tabs button[data-tab="history"]').click();
+      await page.locator('#history-resume').waitFor({ timeout: 20_000 });
+      await page.locator('#history-resume').selectOption(id);
+
+      const appeared = await page
+        .waitForFunction(() => document.querySelectorAll('#resume-timeline .version-card').length >= 2, null, {
+          timeout: 30_000,
+          polling: 200,
+        })
+        .then(() => true)
+        .catch(() => false);
+      const cards = await page.locator('#resume-timeline .version-card').count();
+      check('a resume edited twice has a history to look at', appeared, `${cards} versions`);
+
+      if (appeared) {
+        /*
+         * "Version-history UI like Google Docs, not raw git log" was the
+         * whole of the request, so the timeline must not be reading as
+         * hashes — the raw log is still there, behind its own button, for
+         * anyone who wants it.
+         */
+        const top = (await page.locator('#resume-timeline .version-card').first().innerText()).trim();
+        check('the newest is marked as the one in use', /current/i.test(top), top.split('\n')[0]);
+        check('and it reads as a change, not as a commit hash',
+          !/\b[0-9a-f]{7,40}\b/.test(top), top.replace(/\n/g, ' ').slice(0, 90));
+
+        /*
+         * The restore itself. Confirmed first, because it says it is
+         * about to replace what is on screen and that promise is part of
+         * the feature.
+         */
+        let asked = '';
+        page.once('dialog', (d) => {
+          asked = d.message();
+          d.accept();
+        });
+        await page.locator('#resume-timeline .version-card:not(.current) button', { hasText: 'Restore' }).first().click();
+        await page.waitForTimeout(3500);
+
+        check('it asks before replacing what you have', /restore this version/i.test(asked), asked.slice(0, 80));
+        check('and promises the current one is not lost', /history is kept|get back/i.test(asked), asked.slice(0, 120));
+
+        const after = await specOf(id);
+        check('the older version is the one now in the save', after?.label === 'The first name it had', after?.label);
+
+        /*
+         * And the promise the dialog made. Restoring must not be a way to
+         * lose the version you restored from — that is the whole standing
+         * rule about not destroying work, at the one button most able to
+         * break it.
+         *
+         * The property is that the old version is still listed and still
+         * offers a way back, not that the history grew: the restore commits
+         * only when autocommit is on, and this harness deliberately runs with
+         * it off so the rest of the run leaves no commits behind. Counting
+         * cards here asserted a commit the environment suppresses, which is a
+         * fact about the test rig rather than about the product.
+         */
+        await page.waitForTimeout(1000);
+        const names = await page.locator('#resume-timeline').innerText();
+        check('the version restored from is still in the history',
+          names.includes('The second name it had'), names.replace(/\n/g, ' ').slice(0, 120));
+        check('and still offers a way back to it',
+          (await page.locator('#resume-timeline .version-card:not(.current) button', { hasText: 'Restore' }).count()) > 0);
+      }
+
+      /*
+       * The raw git log is still reachable for anyone who wants it — the
+       * point of the timeline was to stop it being the only thing on
+       * offer, not to hide it.
+       */
+      await page.locator('#btn-raw-history').click();
+      await page.waitForTimeout(1500);
+      check('the raw log is still one click away',
+        (await page.locator('#raw-history').isVisible()) === true);
+
+      await fetch(`${server.url}/api/resumes/${id}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
     }
 
     /* -------------------------------------------------------------- *
