@@ -1682,3 +1682,20 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 .date-switches { display: inline-flex; align-items: center; gap: 10px; }
 .date-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--t-sm); cursor: pointer; }
 .date-switch:hover { color: var(--fg); }
+
+/* A range that runs backwards. Beside the two years that say so, and warn
+   rather than bad: nothing is broken and nothing has been refused — the
+   document is simply about to claim something that did not happen. */
+.date-wrong {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+}
+.date-wrong::before { content: '!'; font-weight: 700; }

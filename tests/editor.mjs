@@ -244,6 +244,335 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * Arranging it                                                     *
+     * -------------------------------------------------------------- *
+     * Dates, dragging and folding were all added without ever being run
+     * in a browser, and the user found two of them broken by hand: the
+     * date control was still a text box on one screen, and dragging a
+     * bullet moved the PDF without moving the list. Both were invisible
+     * to jsdom — the first because jsdom renders whatever it is given and
+     * has no opinion about whether it is a control, the second because
+     * the editor drew from the saved order and the test read the saved
+     * order too, so the two agreed with each other and not with the
+     * screen.
+     *
+     * So these read the screen. Every check below asks what the editor is
+     * showing after the gesture, and only then what got written down.
+     * -------------------------------------------------------------- */
+
+    console.log('\nArranging it');
+    await page.locator('#tabs button[data-tab="resumes"]').click();
+    await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+
+    /*
+     * A date is a control, not a string.
+     *
+     * Reported twice — "The dates still use text", then "Graduation dates
+     * still are not ui elements" — because the entry editor was converted
+     * and the two other places a date is shown were not. This asks the
+     * question the user was really asking: is there anywhere left in the
+     * editor that takes a date as free text?
+     */
+    {
+      const dated = page.locator('#editor .entry .dates').first();
+      const anyDates = await page.locator('#editor .entry .dates').count();
+      check('an entry offers its date as a control', anyDates > 0, `${anyDates} date controls`);
+
+      if (anyDates > 0) {
+        check('with a month to pick', (await dated.locator('select.date-month').count()) > 0);
+        check('and a year to type', (await dated.locator('input.date-year').count()) > 0);
+
+        /*
+         * The one that keeps regressing: a text input whose value looks like
+         * a date. `.date-year` is a number field and is not one of these.
+         */
+        const freeText = await page.evaluate(() =>
+          [...document.querySelectorAll('#editor input[type=text], #editor textarea')]
+            .filter((i) => /date|20\d\d\s*[-–—]|present/i.test(`${i.value} ${i.placeholder} ${i.title}`))
+            .map((i) => i.title || i.placeholder || i.value)
+            .slice(0, 3),
+        );
+        check('and no date left as a box you type a date into', freeText.length === 0, freeText.join(' | '));
+      }
+    }
+
+    /*
+     * Moving the date moves the words. The server decides the spelling —
+     * see `withDatesFrom` — so this is the round trip that proves the
+     * control, the save and the formatter are one path and not three.
+     */
+    {
+      const before = await (await fetch(`${server.url}/api/store`)).json();
+      const target = (before.entries ?? []).find((e) => e.period?.start?.year && typeof e.dates === 'string');
+
+      if (!target) {
+        check('there is a dated entry to move', false, 'none in the starter save');
+      } else {
+        const said = target.dates;
+        const wasYear = target.period.start.year;
+        const moved = String(wasYear === 2001 ? 2002 : 2001);
+
+        const year = page.locator(`#editor .entry[data-drag-id="${target.id}"] .dates input.date-year`).first();
+        await year.waitFor({ timeout: 10_000 });
+        await year.fill(moved);
+        await year.blur();
+        await page.waitForTimeout(3000);
+
+        const after = await (await fetch(`${server.url}/api/store`)).json();
+        const now = (after.entries ?? []).find((e) => e.id === target.id);
+        check('typing a year moves the date itself', String(now?.period?.start?.year) === moved,
+          `${wasYear} → ${now?.period?.start?.year}`);
+        check('and the words that print say the new year', String(now?.dates ?? '').includes(moved),
+          `${said} → ${now?.dates}`);
+
+        /*
+         * And a range that runs backwards. The control cannot refuse it —
+         * moving both ends means passing through a state where only one has
+         * moved — so the whole of the defence is that somebody is told, in
+         * the two places they are looking: beside the control while they are
+         * still on the dates, and in the resume's warnings afterwards.
+         */
+        if (now?.period?.end?.year) {
+          const backwards = String(now.period.end.year + 2);
+          await year.fill(backwards);
+          await year.blur();
+          await page.waitForTimeout(3000);
+
+          const note = page.locator(`#editor .entry[data-drag-id="${target.id}"] .dates .date-wrong`);
+          check('a range that ends before it starts says so beside the dates',
+            (await note.count()) === 1, await note.innerText().catch(() => '(absent)'));
+
+          /*
+           * Waited for rather than slept on: this one arrives with the next
+           * compile, and a fixed pause either flakes on a slow machine or
+           * wastes the time on a fast one.
+           */
+          const warned = await page
+            .waitForFunction(
+              () => (/ends before it starts/i.test(document.querySelector('#warnings')?.textContent ?? '') ? true : null),
+              null,
+              { timeout: 60_000, polling: 250 },
+            )
+            .then(() => true)
+            .catch(() => false);
+          check('and the resume says it too, where the page is checked', warned,
+            warned ? '' : (await page.locator('#warnings').innerText().catch(() => '')) || '(no warnings)');
+
+          // Nothing was refused and nothing rewritten — the date it was
+          // given is the date it kept.
+          const bad = await (await fetch(`${server.url}/api/store`)).json();
+          check('and the date it was given is the date it kept',
+            String(bad.entries.find((e) => e.id === target.id)?.period?.start?.year) === backwards);
+
+          // Put it back, so the rest of the run is not working on a resume
+          // with a known-bad date in it.
+          await year.fill(String(wasYear));
+          await year.blur();
+          await page.waitForTimeout(2500);
+          check('and fixing it clears the note',
+            (await page.locator(`#editor .entry[data-drag-id="${target.id}"] .dates .date-wrong`).count()) === 0);
+        }
+      }
+    }
+
+    /*
+     * Dragging, done as the browser does it.
+     *
+     * Playwright's `dragTo` sends mouse events, and this is HTML5 drag and
+     * drop — a different set of events entirely, which `dragTo` never
+     * fires. Driving it with mouse events would report a pass on a handle
+     * that does nothing, which is precisely the bug being tested for. So
+     * the real events are dispatched, with one DataTransfer shared across
+     * them as a browser shares it.
+     *
+     * This proves the handlers, not the operating system's drag. What it
+     * cannot tell you is whether Chromium will start a drag on that
+     * element at all; what it can tell you — and what was wrong — is
+     * whether landing a drop rearranges what you are looking at.
+     */
+    const dragOnto = (fromId, ontoId, kind, side) =>
+      page.evaluate(
+        ({ fromId, ontoId, kind, side }) => {
+          const grip = document.querySelector(`[data-drag-id="${fromId}"] .grip[data-drag-kind="${kind}"]`);
+          const onto = document.querySelector(`[data-drag-id="${ontoId}"]`);
+          if (!grip || !onto) return false;
+          const dt = new DataTransfer();
+          const ev = (type, on, y) =>
+            on.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }));
+          const box = onto.getBoundingClientRect();
+          const y = side === 'after' ? box.bottom - 2 : box.top + 2;
+          ev('dragstart', grip);
+          ev('dragover', onto, y);
+          ev('drop', onto, y);
+          ev('dragend', grip);
+          return true;
+        },
+        { fromId, ontoId, kind, side },
+      );
+
+    /** The ids the editor is showing, in the order it is showing them. */
+    const shown = (selector) => page.$$eval(selector, (rows) => rows.map((r) => r.dataset.dragId));
+
+    {
+      /*
+       * Two entries of one section. Flat in `#editor` with headings
+       * between them, so "same section" is "nothing but entries in
+       * between" rather than a parent element.
+       */
+      const pair = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#editor > *')];
+        for (let i = 0; i < rows.length - 1; i++) {
+          const a = rows[i];
+          const b = rows[i + 1];
+          if (!a.dataset?.dragId || !b.dataset?.dragId) continue;
+          if (!a.querySelector('.grip[data-drag-kind="entry"]')) continue;
+          if (!b.querySelector('.grip[data-drag-kind="entry"]')) continue;
+          return [a.dataset.dragId, b.dataset.dragId];
+        }
+        return null;
+      });
+
+      if (!pair) {
+        check('there are two entries to rearrange', false, 'no section has two');
+      } else {
+        const [first, second] = pair;
+        const was = await shown('#editor > [data-drag-id]');
+        const dropped = await dragOnto(first, second, 'entry', 'after');
+        check('an entry can be picked up', dropped);
+        await page.waitForTimeout(1200);
+
+        const now = await shown('#editor > [data-drag-id]');
+        check('and dropping it moves it on the screen, not only in the file',
+          now.indexOf(first) > now.indexOf(second),
+          `${was.slice(0, 3).join(', ')} → ${now.slice(0, 3).join(', ')}`);
+
+        /*
+         * Dragging is an instruction, and the sort would undo it — so the
+         * sort turns itself off and says so. A handle that visibly does
+         * nothing is worse than no handle.
+         */
+        /*
+         * That section's control, not the first one on the page. Sections
+         * are flat children of `#editor` with a heading in front of each,
+         * so the one that governs an entry is the nearest heading above
+         * it — reading `.first()` asked education about a drag in
+         * projects, and got a truthful answer to the wrong question.
+         */
+        const order = await page.evaluate((id) => {
+          let node = document.querySelector(`#editor > [data-drag-id="${id}"]`);
+          while (node && !node.classList?.contains('section-heading')) node = node.previousElementSibling;
+          return node?.querySelector('select.order-by')?.value ?? '(no control)';
+        }, first);
+        check('and the date sort steps aside for a hand arrangement', order === 'manual', order);
+
+        await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
+        const openId = await page.locator('#resume-select').inputValue();
+        const saved = await (await fetch(`${server.url}/api/resumes`)).json();
+        const spec = saved.find((r) => r.id === openId);
+        const list = (spec?.sections ?? []).map((s) => s.entries ?? []).find((e) => e.includes(first) && e.includes(second));
+        check('and the save agrees with the screen', !list || list.indexOf(first) > list.indexOf(second),
+          (list ?? []).slice(0, 4).join(', '));
+      }
+    }
+
+    {
+      /*
+       * The one the user called completely useless. Same gesture, one
+       * level down — and the level where it was broken, because bullets
+       * were drawn in the store's order while entries were drawn in the
+       * resume's.
+       */
+      const pair = await page.evaluate(() => {
+        for (const entry of document.querySelectorAll('#editor .entry')) {
+          const rows = [...entry.querySelectorAll('[data-drag-id]')].filter((r) =>
+            r.querySelector('.grip[data-drag-kind="bullet"]'),
+          );
+          if (rows.length >= 2) return [rows[0].dataset.dragId, rows[1].dataset.dragId, entry.dataset.dragId];
+        }
+        return null;
+      });
+
+      if (!pair) {
+        check('there are two lines to rearrange', false, 'no entry has two');
+      } else {
+        const [first, second, inEntry] = pair;
+        const rows = `#editor .entry[data-drag-id="${inEntry}"] [data-drag-id]`;
+        const was = await shown(rows);
+        await dragOnto(first, second, 'bullet', 'after');
+        await page.waitForTimeout(1200);
+
+        const now = await shown(rows);
+        check('dragging a line moves it where you dropped it',
+          now.indexOf(first) > now.indexOf(second),
+          `${was.slice(0, 3).join(', ')} → ${now.slice(0, 3).join(', ')}`);
+      }
+    }
+
+    {
+      /*
+       * The keyboard half of the same handle. It exists because a drag is
+       * not reachable without a mouse, and it is the path least likely to
+       * be exercised by hand — so it is the one most worth a check.
+       */
+      const grips = page.locator('#editor .grip[data-drag-kind="entry"]');
+      if ((await grips.count()) >= 2) {
+        const before = await shown('#editor > [data-drag-id]');
+        const last = before[before.length - 1];
+        await page.locator(`#editor [data-drag-id="${last}"] .grip`).first().focus();
+        await page.keyboard.press('Alt+ArrowUp');
+        await page.waitForTimeout(1200);
+        const after = await shown('#editor > [data-drag-id]');
+        check('Alt with an arrow moves an entry without a mouse',
+          after.indexOf(last) < before.indexOf(last),
+          `${before.indexOf(last)} → ${after.indexOf(last)}`);
+      }
+    }
+
+    {
+      /*
+       * Folding. The point of it is an entry that is switched *on* — the
+       * ones switched off already collapse — so the check is that the
+       * lines go away and the entry keeps printing.
+       */
+      const fold = page.locator('#editor .entry:not(.off) .fold').first();
+      if ((await fold.count()) > 0) {
+        const id = await page.evaluate(() => {
+          const f = document.querySelector('#editor .entry:not(.off) .fold');
+          return f?.closest('[data-drag-id]')?.dataset.dragId ?? null;
+        });
+        const linesBefore = await page.locator(`#editor .entry[data-drag-id="${id}"] .bullet-row, #editor .entry[data-drag-id="${id}"] .bullet`).count();
+        await fold.click();
+        await page.waitForTimeout(600);
+
+        check('folding an entry hides its lines',
+          (await page.locator(`#editor .entry[data-drag-id="${id}"].folded`).count()) === 1);
+        const linesAfter = await page.locator(`#editor .entry[data-drag-id="${id}"] .bullet-row, #editor .entry[data-drag-id="${id}"] .bullet`).count();
+        check('and there is less on the screen than there was', linesAfter < linesBefore, `${linesBefore} → ${linesAfter}`);
+        check('and says how many it folded away',
+          /line/i.test(await page.locator(`#editor .entry[data-drag-id="${id}"] .chip.count`).innerText().catch(() => '')));
+
+        /*
+         * Per resume and in the save, not in this browser: which entries
+         * you are done with is a fact about the document, and it should
+         * still be true on another machine.
+         */
+        await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
+        const openId = await page.locator('#resume-select').inputValue();
+        const saved = await (await fetch(`${server.url}/api/resumes`)).json();
+        check('and folding is remembered with the resume, not the browser',
+          (saved.find((r) => r.id === openId)?.collapsed ?? []).includes(id),
+          JSON.stringify(saved.find((r) => r.id === openId)?.collapsed ?? []));
+
+        await page.locator(`#editor .entry[data-drag-id="${id}"] .fold`).click();
+        await page.waitForTimeout(600);
+        check('and unfolding brings them back',
+          (await page.locator(`#editor .entry[data-drag-id="${id}"].folded`).count()) === 0);
+      } else {
+        check('an entry can be folded away', false, 'no fold control');
+      }
+    }
+
+    /* -------------------------------------------------------------- *
      * Keeping it as its own resume                                     *
      * -------------------------------------------------------------- */
 

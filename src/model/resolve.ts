@@ -1,4 +1,4 @@
-import { sortKey, startKey } from './period.js';
+import { endsBeforeItStarts, sortKey, startKey } from './period.js';
 import {
   DEFAULT_LAYOUT,
   isListBullet,
@@ -287,11 +287,28 @@ function resolveEntry(
         .filter((b): b is Bullet => Boolean(b))
     : available;
 
+  const title = pickField(entry.title, `${entry.id}.title`, choices, warnings) ?? entry.id;
+  const dates = pickField(entry.dates, `${entry.id}.dates`, choices, warnings);
+
+  /*
+   * A date that runs backwards, said once, where the person can still do
+   * something about it. See `endsBeforeItStarts`: the control accepts any
+   * year at either end because it has to, so this is the only place the
+   * mistake is ever noticed — and a resume reading "Jul. 2026 -- Dec. 2024"
+   * is exactly the document this program exists to stop somebody sending.
+   *
+   * Named by its title rather than its id, because this one is read by the
+   * person editing and `exp_example_co` is not what they call it.
+   */
+  if (endsBeforeItStarts(entry.period)) {
+    warnings.push(`"${title}" ends before it starts${dates ? ` — it reads "${dates}"` : ''}. Check the dates.`);
+  }
+
   return {
     id: entry.id,
     kind: entry.kind,
-    title: pickField(entry.title, `${entry.id}.title`, choices, warnings) ?? entry.id,
-    dates: pickField(entry.dates, `${entry.id}.dates`, choices, warnings),
+    title,
+    dates,
     subtitle: pickField(entry.subtitle, `${entry.id}.subtitle`, choices, warnings),
     location: pickField(entry.location, `${entry.id}.location`, choices, warnings),
     bullets: ordered

@@ -14,7 +14,7 @@ import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
-import { DEFAULT_STYLE, formatPeriod, inferStyle, parsePeriod } from './dates.js';
+import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -1579,9 +1579,10 @@ function entryBlock(entry, section, choices) {
      * is on because you want it: you just are not editing it right now. There
      * was no way to say that.
      *
-     * Kept in the browser rather than in the save, because it is about the
-     * screen in front of you and not about the document. Nothing here changes
-     * what compiles, and nothing here can be lost in a way that matters.
+     * Nothing here changes what compiles. It is still kept in the save
+     * rather than in this browser, per resume — see `collapsedIds`: which
+     * entries you are done with is a fact about the document you are
+     * building, and it should still be true on another machine.
      */
     el('button', {
       className: 'fold',
@@ -3086,6 +3087,25 @@ function datesControl(from, onChange) {
   wrap.append(end('start', 'From'));
   if (!period.ongoing) wrap.append(end('end', 'to'));
   wrap.append(switches);
+  /*
+   * A range that runs backwards, said beside the control that made it.
+   *
+   * Not refused: changing both ends means passing through a moment where
+   * only one of them has moved, and a control that rejected that state
+   * would be unusable. The resume's warnings say it too — see
+   * `endsBeforeItStarts` — but by then you have looked away from the dates,
+   * and this is the half-second where fixing it is free.
+   */
+  if (endsBeforeItStarts(period)) {
+    wrap.append(
+      el('span', {
+        className: 'date-wrong',
+        role: 'status',
+        textContent: 'ends before it starts',
+        title: 'The end of this range is earlier than its start. Nothing has been changed — check the two years.',
+      }),
+    );
+  }
   return wrap;
 }
 

@@ -361,3 +361,13 @@ export function startKey(period) {
   if (!period?.start) return undefined;
   return period.start.year * 100 + (period.start.month ?? 1);
 }
+
+/**
+ * A range that finishes before it begins. See `period.ts` for why this is
+ * said rather than refused; `tests/date-agreement.test.js` holds the two
+ * copies to the same answer.
+ */
+export function endsBeforeItStarts(period) {
+  if (!period?.start?.year || !period.end?.year || period.ongoing) return false;
+  return period.end.year < period.start.year;
+}

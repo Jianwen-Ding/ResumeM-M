@@ -388,3 +388,42 @@ export function startKey(period: Period | undefined): number | undefined {
   if (!period?.start) return undefined;
   return period.start.year * 100 + (period.start.month ?? 1);
 }
+
+/**
+ * A range that finishes before it begins.
+ *
+ * The date control takes any year between 1900 and 2100 at either end and
+ * asks nothing further, which is right while you are editing — changing both
+ * ends of a range means passing through a moment where only one of them has
+ * moved, and a control that fought you there would be unusable. But nothing
+ * downstream ever looked again, so a mistyped digit printed "Jul. 2026 --
+ * Dec. 2024" onto a document whose entire purpose is to be correct, and
+ * sorted the entry by an end date that never happened.
+ *
+ * It is one keystroke away — the end year typed into the start field, a 6 for
+ * a 4 — and it is equally what an imported file can already contain. So it is
+ * said out loud, in the warnings the editor and `rmm build` both show, and
+ * nowhere is anything refused or rewritten: the only thing the program is
+ * entitled to do about somebody's dates is point at them.
+ *
+ * Only the year is compared, and that is a deliberate retreat from a version
+ * of this that compared months too. "Winter 2024 -- Spring 2024" is an
+ * ordinary way to write an academic term, and the month for a season is one
+ * this file made up — winter is December here — so the finer check called
+ * that date wrong. It is not wrong. Nor is "Dec. 2024 -- Spring 2024", a
+ * co-op running into the next year, and the parse cannot even tell you a
+ * season was involved: only the start's season is kept, so by the time this
+ * sees the period the end is an ordinary March.
+ *
+ * So the rule is the one no reading rescues: the end year is before the start
+ * year. "Jul. 2026 -- Dec. 2024" is wrong however you read it. A month-level
+ * inversion inside one year is left alone — it is ambiguous, and it is picked
+ * from a menu rather than typed, which is not where the slip happens anyway.
+ * A warning that fires on somebody's real dates costs the credibility of
+ * every other warning, and that is the more expensive mistake by far.
+ */
+export function endsBeforeItStarts(period: Period | undefined): boolean {
+  // Still going has no end to be wrong about, whatever is left in `end`.
+  if (!period?.start?.year || !period.end?.year || period.ongoing) return false;
+  return period.end.year < period.start.year;
+}

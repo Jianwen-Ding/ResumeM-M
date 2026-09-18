@@ -64,6 +64,16 @@ const PERIODS = [
   { start: { year: 2021 }, end: { year: 2024 } },
   { start: { year: 2024, month: 5 } },
   { start: { year: 2024, month: 5 }, end: { year: 2024, month: 6 } },
+  // Backwards, in each of the shapes it comes in. The editor puts a note
+  // beside the control and the renderer puts a warning on the resume, and
+  // the two disagreeing would mean one of them says nothing.
+  { start: { year: 2026 }, end: { year: 2024 } },
+  // Ambiguous rather than backwards — an academic term running into the next
+  // year looks exactly like this, so neither side may complain about it.
+  { start: { year: 2024, month: 12 }, end: { year: 2024, month: 3 } },
+  { start: { year: 2024, month: 12 }, end: { year: 2024 } },
+  { start: { year: 2026 }, end: { year: 2024 }, ongoing: true },
+  { start: { year: 2028, month: 9 }, end: { year: 2027, month: 5 }, expected: true },
   undefined,
   {},
 ];
@@ -105,6 +115,22 @@ describe('the editor and the renderer agree about dates', () => {
     const mine = browser.parsePeriod(text);
     expect(browser.sortKey(mine)).toBe(server.sortKey(mine));
     expect(browser.startKey(mine)).toBe(server.startKey(mine));
+  });
+
+  /*
+   * And on which ones run backwards. One side says it beside the control
+   * while you are still looking at the dates, the other on the resume; a
+   * drift here is a warning that appears in one place and not the other,
+   * which is worse than neither.
+   */
+  it('agrees about a range that ends before it starts', () => {
+    for (const period of PERIODS) {
+      expect(browser.endsBeforeItStarts(period), JSON.stringify(period)).toBe(server.endsBeforeItStarts(period));
+    }
+    for (const text of TEXTS) {
+      const mine = browser.parsePeriod(text);
+      expect(browser.endsBeforeItStarts(mine), text).toBe(server.endsBeforeItStarts(mine));
+    }
   });
 
   /*
