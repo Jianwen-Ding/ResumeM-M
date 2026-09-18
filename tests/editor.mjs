@@ -956,6 +956,33 @@ async function main() {
           check('while the one arranged here is left exactly as it was',
             still.join(',') === arranged.lines.join(','),
             `${arranged.lines.join(', ')} → ${still.join(', ')}`);
+
+          /*
+           * And the way back, which is what stops an arrangement being a
+           * one-way door. Detaching from the master happens by dragging,
+           * which is easy to do without meaning to; if there were no way to
+           * undo it, an entry could silently stop following the house order
+           * forever on the strength of one slip.
+           */
+          const back = page.locator(`#editor .entry[data-drag-id="${arranged.id}"] .by-hand button`);
+          check('an arranged entry offers a way back to the master’s order', (await back.count()) === 1);
+          if (await back.count()) {
+            await back.click();
+            await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
+            await page.reload({ waitUntil: 'domcontentloaded' });
+            await page.locator('#tabs button[data-tab="resumes"]').click();
+            await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+
+            const now = await linesOf(arranged.id);
+            const store = await (await fetch(`${server.url}/api/store`)).json();
+            const master = (store.entries.find((e) => e.id === arranged.id)?.bullets ?? [])
+              .map((b) => b.id)
+              .filter((id) => now.includes(id));
+            check('and taking it puts the lines back in that order',
+              now.join(',') === master.join(','), `${now.join(', ')} | master: ${master.join(', ')}`);
+            check('and the note that it was arranged here goes away',
+              (await page.locator(`#editor .entry[data-drag-id="${arranged.id}"] .by-hand`).count()) === 0);
+          }
         }
         await sameAsDocument('after the master was rearranged');
       }
