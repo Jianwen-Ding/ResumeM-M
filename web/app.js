@@ -3315,6 +3315,18 @@ async function loadApplications() {
             ? `Empty — ${plural(current.inFlight, 'application')} in flight, none with a built folder yet.`
             : 'Empty — nothing is mid-application.',
       }),
+      /*
+       * And what is missing from it, which the count above cannot say.
+       *
+       * The sync reports by name any file it could not put here — a folder of
+       * yours sitting where a file should go, a file open and locked, a full
+       * disk — and finishes the rest rather than failing the request. That is
+       * the right behaviour and it was silent: the line above would read "3
+       * files still being sent" while the fourth, the one you are about to
+       * attach, was not there. This is the folder a portal's file picker is
+       * pointed at, so the gap has to be visible from the folder.
+       */
+      ...(current?.problems ?? []).map((said) => el('span', { className: 'hint warn', textContent: said })),
     );
   }
 

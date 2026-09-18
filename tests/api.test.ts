@@ -1536,6 +1536,45 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
     expect(res.body.currentDir).toMatch(/current$/);
     expect(res.body.currentDir).not.toContain('applications/');
     expect(fs.existsSync(path.join(res.body.currentDir, 'Test-Person-Resume.pdf'))).toBe(true);
+    // Nothing in the way, so nothing to report.
+    expect(res.body.currentProblems).toBeUndefined();
+  });
+
+  /*
+   * And when a file cannot be put there, the answer travels.
+   *
+   * `syncCurrent` has always named the files it could not write — something of
+   * the user's already sitting under that name, a file open and locked, a full
+   * disk — and finished the rest rather than failing the request, which is
+   * right. This route threw that answer away, so the card said "named and
+   * ready to attach" over a folder with the resume missing from it. That is
+   * the upload the folder exists to prevent.
+   */
+  it('says which file did not reach the folder you upload from', async () => {
+    const first = await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+
+    // The user's own folder, with their name on it, where the resume goes.
+    const taken = path.join(first.body.currentDir, 'Test-Person-Resume.pdf');
+    fs.rmSync(taken, { force: true });
+    fs.mkdirSync(taken, { recursive: true });
+    fs.writeFileSync(path.join(taken, 'mine.txt'), 'mine', 'utf8');
+    // Released from the manifest, so the sync treats it as the user's.
+    fs.writeFileSync(path.join(first.body.currentDir, '.rmm-current.json'), JSON.stringify({ files: [] }), 'utf8');
+
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+
+    expect(res.body.currentProblems?.join(' ')).toContain('Test-Person-Resume.pdf');
+    // The archive still has everything, which is what the card offers instead.
+    expect(res.body.files).toContain('Test-Person-Resume.pdf');
+    expect(fs.existsSync(path.join(res.body.dir, 'Test-Person-Resume.pdf'))).toBe(true);
+    // And what was in the way is still there.
+    expect(fs.existsSync(path.join(taken, 'mine.txt'))).toBe(true);
   });
 
   /*
