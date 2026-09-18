@@ -573,6 +573,153 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * Going over one page                                              *
+     * -------------------------------------------------------------- *
+     * "When it goes over the resume line limit it seemingly just
+     * freezes" — reported by the user, and the diagnosis was that
+     * auto-fit is a search. Compile, measure, shrink, compile again,
+     * until the least shrinking that fits is found; on a document that
+     * cannot be made to fit, that search runs to exhaustion before
+     * anything reaches the screen. Measured at the time: 471ms for a
+     * resume that fits, 6777ms for one that does not.
+     *
+     * The fix was to ask for the document as written first — one
+     * compile, the true page count, the real spill — and only then run
+     * the search. Both halves of that have been tested in jsdom and on
+     * the server, and neither had ever been watched happen in a browser
+     * with pdf.js drawing the pages. The freeze was a thing somebody
+     * sat through, so the thing worth asserting is how long it takes.
+     * -------------------------------------------------------------- */
+
+    console.log('\nGoing over one page');
+    {
+      /*
+       * Absurd margins rather than invented entries: it reaches the state
+       * without writing anything into the store that the rest of the run
+       * would then have to read around. `autoFit: false` for the first
+       * one, so it is a plain overflow with nothing rescuing it.
+       */
+      const tooLong = 'editor-overflow';
+      const make = (id, layout) =>
+        fetch(`${server.url}/api/resumes/${id}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: `Overflow ${id}`, extends: 'newgrad', layout }),
+        });
+
+      await make(tooLong, { marginIn: 2.6, autoFit: false, maxPages: 1 });
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+
+        /*
+         * The number that is the whole point. Not "does it eventually
+         * say the right thing" but "how long is somebody looking at a
+         * screen that has not admitted anything is wrong yet".
+         */
+        const began = Date.now();
+        await page.locator('#resume-select').selectOption(tooLong);
+        await page.waitForFunction(
+          () => {
+            const chip = document.querySelector('#fit');
+            return chip && !chip.classList.contains('idle') && /too long|fits/i.test(chip.textContent ?? '');
+          },
+          null,
+          { timeout: 120_000, polling: 100 },
+        );
+        const took = Date.now() - began;
+        timings.push({ what: 'a resume that is too long says so', took, budgetMs: 30_000 });
+        check(`the overflow is admitted in ${(took / 1000).toFixed(1)}s, rather than hanging`, took < 30_000,
+          took >= 30_000 ? 'over 30s' : '');
+
+        const said = (await page.locator('#fit').innerText()).trim().replace(/\n/g, ' ');
+        check('and says how much too long it is', /too long/i.test(said), said);
+        check('and what to do about it', /shorter phrasing or drop a bullet/i.test(said), said);
+        check('and marks it as the bad case, not a passing remark',
+          (await page.locator('#fit.bad').count()) === 1);
+
+        /*
+         * "It should render multiple pages but only allow save of one
+         * page" — so the spill has to be visible, not merely counted.
+         * Waited for: pdf.js draws the second canvas after the first.
+         */
+        const drew = await page
+          .waitForFunction(() => document.querySelectorAll('.pdf-pages canvas').length >= 2, null, {
+            timeout: 60_000,
+            polling: 200,
+          })
+          .then(() => true)
+          .catch(() => false);
+        const pages = await page.locator('.pdf-pages canvas').count();
+        check('and draws every page it spills onto, not just the first', drew, `${pages} drawn`);
+      } finally {
+        await fetch(`${server.url}/api/resumes/${tooLong}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+      }
+
+      /*
+       * And the other half of the same request: "Auto shrink margins is
+       * fine but make a warning that it is shrinking"; then, on being
+       * shown a warning, "Not a warning but a way of knowing it is being
+       * shrunk". So it is a statement of fact in its own line and its own
+       * colour, not an alarm — and the thing that must never happen is
+       * that it says "Fits on one page" and stops, which is what it used
+       * to do with the squeezing tucked into a grey clause after the word
+       * nobody reads past.
+       */
+      /*
+       * 2.1in because it was measured, not guessed. This was 1.35in on the
+       * reasoning that a wide margin would need squeezing, and 1.35in turned
+       * out to fit with five lines to spare — so the check reported that
+       * there was nothing to see and passed, which is the shape of a test
+       * that never runs. Asked directly, the render says 1.7in still fits
+       * untouched, 1.9in is the first that squeezes, and 2.5in and up cannot
+       * be rescued at all. 2.1in sits in the middle of the band that both
+       * needs squeezing and survives it.
+       */
+      const squeezed = 'editor-squeezed';
+      await make(squeezed, { marginIn: 2.1, autoFit: true, maxPages: 1 });
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+        await page.locator('#resume-select').selectOption(squeezed);
+
+        await page.waitForFunction(
+          () => {
+            const chip = document.querySelector('#fit');
+            if (!chip || chip.classList.contains('idle')) return false;
+            // Settled: the interim "Squeezing it onto one page…" is not an answer.
+            return /too long|fits/i.test(chip.textContent ?? '') && !chip.querySelector('.squeezed.working');
+          },
+          null,
+          { timeout: 120_000, polling: 150 },
+        );
+
+        const note = await page.locator('#fit .squeezed').innerText().catch(() => '');
+        const chip = (await page.locator('#fit').innerText()).trim().replace(/\n/g, ' ');
+        check('being squeezed to fit is said out loud', /squeezed to fit/i.test(note), note || chip);
+        check('and names what it did, rather than only that it did something',
+          /\d/.test(note.replace(/squeezed to fit/i, '')), note || chip);
+        /*
+         * The failure this replaced: it said "Fits on one page" and stopped,
+         * with the squeezing in a grey clause after the word nobody reads
+         * past. Fitting and having been shrunk to fit are different facts
+         * about what you are about to send, so both have to be on screen.
+         */
+        check('while still saying it fits, which is the other half of the fact',
+          /fits on one page/i.test(chip), chip);
+      } finally {
+        await fetch(`${server.url}/api/resumes/${squeezed}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+      }
+
+      // Back to a resume the rest of the run can work with.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.locator('#tabs button[data-tab="resumes"]').click();
+      await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+    }
+
+    /* -------------------------------------------------------------- *
      * Keeping it as its own resume                                     *
      * -------------------------------------------------------------- */
 
