@@ -112,6 +112,69 @@ export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
 }
 
 /**
+ * A file already in this folder whose name differs from `full` only in case.
+ *
+ * Deliberately only the same folder, and only on an exact case-insensitive
+ * match: this is asking the narrow question "would these two be one file on a
+ * Mac", not the broad one "are these names similar".
+ */
+function siblingDifferingOnlyInCase(full: string): string | undefined {
+  const name = path.basename(full);
+  let siblings: string[];
+  try {
+    siblings = fs.readdirSync(path.dirname(full));
+  } catch {
+    // No folder yet, so nothing to clash with. Anything else that stops the
+    // listing will stop the write a line later, where it is reported properly.
+    return undefined;
+  }
+  return siblings.find((other) => other !== name && other.toLowerCase() === name.toLowerCase());
+}
+
+/**
+ * Make the rename itself durable, not only the bytes it points at.
+ *
+ * The write above fsyncs the temp file, so a power cut can never leave the
+ * name pointing at half a resume. But the rename is a change to the
+ * *directory*, and that is a separate thing to get onto the disk: on ext4 with
+ * the usual mount options the entry can still be in flight for a few seconds
+ * after `renameSync` returns. Lose power in that window and the save comes
+ * back as it was before the edit — the data perfectly intact somewhere the
+ * directory no longer mentions.
+ *
+ * The narrow catch is the point, and it is worth being explicit about why it
+ * is not the usual silent one. Opening a directory for reading is a POSIX
+ * thing; Windows refuses it outright, and some filesystems refuse to fsync one
+ * even where it opens. Those are answers about the platform, not about this
+ * save, and there is nothing a person could do about them — whereas anything
+ * else here is a real failure and is left to the caller, who reports it
+ * against the file being written.
+ *
+ * It costs one fsync per save. Everything this writes is a document somebody
+ * has just typed, so the trade — a few milliseconds against losing the edit —
+ * only goes one way.
+ */
+function fsyncDirectory(dir: string): void {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(dir, 'r');
+    fs.fsyncSync(fd);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // The platform does not do this. Every other errno is the caller's news.
+    if (!['EPERM', 'EINVAL', 'EISDIR', 'EACCES', 'ENOTSUP', 'EBADF'].includes(code ?? '')) throw err;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Closing a descriptor that fsync already rejected; nothing is owed.
+      }
+    }
+  }
+}
+
+/**
  * Split a markdown file into its YAML header and the prose under it.
  *
  * The line endings are the whole reason this is a named function rather than a
@@ -358,6 +421,33 @@ export class Store {
             'like that stops the clone partway. Choose another id.',
         );
       }
+      /*
+       * And not a second name that only differs from an existing one in case.
+       *
+       * Linux keeps `Acme.yaml` and `acme.yaml` apart; macOS and Windows do
+       * not. So a store that holds both is a store that cannot be cloned
+       * faithfully — on those machines the second checkout overwrites the
+       * first, and the resume that loses is simply gone.
+       *
+       * Refused here, when the second name is created, rather than folded on
+       * read. Folding would mean a save under one spelling silently
+       * overwriting a genuinely different file on the platform that keeps them
+       * apart — turning a portability problem into data loss on the machine
+       * that does not have the problem. Refusing costs one rename by somebody
+       * who has two ids a letter apart, which is a thing worth being told
+       * about anyway.
+       *
+       * Existing pairs are left alone: both are writable, because this only
+       * runs when a name is new.
+       */
+      const clash = siblingDifferingOnlyInCase(f);
+      if (clash) {
+        throw new Error(
+          `This save already holds "${clash}", and "${path.basename(f)}" differs from it only in ` +
+            'capitalisation. macOS and Windows treat those as one file, so a save holding both ' +
+            'cannot be cloned onto them without losing one. Choose an id that differs by more than case.',
+        );
+      }
     }
 
     fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -382,6 +472,7 @@ export class Store {
         fs.closeSync(fd);
       }
       fs.renameSync(temp, f);
+      fsyncDirectory(path.dirname(f));
     } catch (err) {
       fs.rmSync(temp, { force: true });
       /*
