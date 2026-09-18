@@ -414,3 +414,74 @@ describe('choosing what decides a section’s order', () => {
     expect(document.querySelector('#editor .order-control .chip')).toBeNull();
   });
 });
+
+/*
+ * Dragging a line, which was reported as doing nothing at all.
+ *
+ * It was saving correctly the whole time. The editor drew bullets in the order
+ * the *store* holds them rather than the order this resume shows them, so the
+ * drop rewrote the selection, the PDF moved, and the screen did not — which
+ * reads as a broken handle and is worse than one, because the document quietly
+ * disagreed with what was in front of you.
+ */
+describe('putting the lines of an entry in order', () => {
+  const firstEntry = () => document.querySelector('#editor .entry:not(.off):not(.profile-entry)');
+  const lines = () =>
+    [...firstEntry().querySelectorAll(':scope > .bullet')].map((b) =>
+      b.querySelector('.bullet-head .text, .bullet-head [contenteditable]')?.textContent?.trim(),
+    );
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#resumes';
+    serve();
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(firstEntry()?.querySelectorAll(':scope > .bullet').length).toBe(3));
+  });
+
+  it('gives every line a grip where there is more than one', () => {
+    for (const row of firstEntry().querySelectorAll(':scope > .bullet')) {
+      expect(row.querySelector(':scope > .bullet-head > .grip')).not.toBeNull();
+    }
+  });
+
+  it('moves a line up when it is dropped on the one above', async () => {
+    const before = lines();
+    const rows = [...firstEntry().querySelectorAll(':scope > .bullet')];
+    dragOnto(rows[1], rows[0]);
+    await vi.waitFor(() => expect(lines()).toEqual([before[1], before[0], before[2]]));
+  });
+
+  it('moves a line to the bottom, through the lower half of the last one', async () => {
+    const before = lines();
+    const rows = [...firstEntry().querySelectorAll(':scope > .bullet')];
+    dragOnto(rows[0], rows[2], { after: true });
+    await vi.waitFor(() => expect(lines()).toEqual([before[1], before[2], before[0]]));
+  });
+
+  it('moves a line with the keyboard', async () => {
+    const before = lines();
+    const grip = [...firstEntry().querySelectorAll(':scope > .bullet')][2].querySelector(':scope > .bullet-head > .grip');
+    grip.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }));
+    await vi.waitFor(() => expect(lines()).toEqual([before[0], before[2], before[1]]));
+  });
+
+  /*
+   * The order on screen is the order that compiles. This is the assertion that
+   * would have caught the original bug: it was the disagreement, not the
+   * saving, that was broken.
+   */
+  it('sends the same order it shows', async () => {
+    const rows = [...firstEntry().querySelectorAll(':scope > .bullet')];
+    dragOnto(rows[2], rows[0]);
+    await vi.waitFor(() => expect(lines()[0]).toBe('Wrote the runbook'));
+
+    await vi.waitFor(() => {
+      const sent = globalThis.fetch.mock.calls
+        .filter(([url]) => url === '/api/render')
+        .map(([, init]) => JSON.parse(init?.body ?? '{}'));
+      expect(sent.at(-1)?.spec?.sections?.[0]?.bullets?.j1).toEqual(['b3', 'b1', 'b2']);
+    });
+  });
+});

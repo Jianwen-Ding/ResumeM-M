@@ -14,6 +14,7 @@ import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
+import { DEFAULT_STYLE, formatPeriod, inferStyle, parsePeriod } from './dates.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -1661,11 +1662,27 @@ function entryBlock(entry, section, choices) {
         ].filter(Boolean),
       });
       if (chosen?.note) control.append(el('div', { className: 'note', textContent: chosen.note }));
+      /*
+       * A graduation date is a date too.
+       *
+       * This is the case the variant system was built for — one education
+       * entry, two endings — and it was the one place the date control did not
+       * reach, because it only replaced plain-string fields. So the field most
+       * likely to hold a date was the last one still asking you to type
+       * "Sep. 2022 -- May 2026" by hand, and to type it the same way twice.
+       *
+       * Each alternate gets its own control, editing its own text: they are
+       * different dates, which is the entire point of there being two. The
+       * entry's sort order still comes from the default one.
+       */
+      const asDate = name === 'dates' && parsePeriod(String(chosen?.text ?? ''));
       const line = el('div', { className: 'field-line' }, [
-        editableLine(String(chosen?.text ?? ''), {
-          className: 'text field-text',
-          onCommit: (text) => saveFieldText(entry, name, current, text),
-        }),
+        asDate
+          ? variantDateEditor(entry, name, current, asDate)
+          : editableLine(String(chosen?.text ?? ''), {
+              className: 'text field-text',
+              onCommit: (text) => saveFieldText(entry, name, current, text),
+            }),
       ]);
       // Same as on a bullet: the stepper stays out of the disclosure, and
       // exists at all only where there is more than one wording to step
@@ -1740,7 +1757,25 @@ function entryBlock(entry, section, choices) {
     box.append(meta);
   }
 
-  for (const bullet of entry.bullets ?? []) {
+  /*
+   * In the order this resume shows them, not the order the store holds them.
+   *
+   * The same bug the entry list had, and the reason dragging a bullet did
+   * nothing you could see: the drop rewrote the selection, the selection is
+   * what compiles, and this loop then drew the bullets in `entry.bullets`
+   * order regardless. So the PDF moved and the editor did not — which reads as
+   * the handle being broken, and is worse than that, because the document
+   * quietly disagreed with the screen.
+   *
+   * Bullets that are switched off follow the ones that are on, so turning one
+   * off does not make it unreachable.
+   */
+  const shown = bulletSelection(section, entry);
+  const ordered = [
+    ...shown.map((id) => (entry.bullets ?? []).find((b) => b.id === id)).filter(Boolean),
+    ...(entry.bullets ?? []).filter((b) => !shown.includes(b.id)),
+  ];
+  for (const bullet of ordered) {
     if (bullet.archived) continue;
     box.append(bulletBlock(entry, section, bullet, choices));
   }
@@ -2968,7 +3003,19 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
  * itself moved.
  */
 function dateEditor(entry) {
-  const period = entry.period ? structuredClone(entry.period) : {};
+  return datesControl(entry.period, (period) => saveEntryPeriod(entry, period));
+}
+
+/**
+ * The control itself, given a date and somewhere to send the new one.
+ *
+ * Separate from what it is bound to, because it is bound to two different
+ * things: the entry's own date, where the server renders the words, and one
+ * alternate of a field, where this side does. The controls are the same either
+ * way, and so is what counts as a date.
+ */
+function datesControl(from, onChange) {
+  const period = from ? structuredClone(from) : {};
   const wrap = el('div', { className: 'dates' });
 
   const commit = () => {
@@ -2978,7 +3025,7 @@ function dateEditor(entry) {
     if (!next.start?.year) return;
     if (next.ongoing) delete next.end;
     if (!next.end?.year) delete next.end;
-    saveEntryPeriod(entry, next);
+    onChange(next);
   };
 
   /** One end of the range: a month that may be blank, and a year. */
@@ -3040,6 +3087,36 @@ function dateEditor(entry) {
   if (!period.ongoing) wrap.append(end('end', 'to'));
   wrap.append(switches);
   return wrap;
+}
+
+/**
+ * The date control, bound to one alternate of a field rather than to the entry.
+ *
+ * The words are written here rather than by the server, because the server
+ * only renders the entry's own `dates` and these are phrasings of a field —
+ * rewriting one of several from a period is a thing only the person editing
+ * that one alternate has any business asking for. The style still comes from
+ * the rest of the store, so the form written here is the form already in use,
+ * and `tests/date-agreement.test.js` holds this side and the server's to the
+ * same answers.
+ */
+function variantDateEditor(entry, name, variantId, period) {
+  return datesControl(period, (next) => {
+    const style = inferStyle(storeDateTexts());
+    const text = formatPeriod(next, style);
+    if (text) saveFieldText(entry, name, variantId, text);
+  });
+}
+
+/** Every date already written down, for working out how this store writes them. */
+function storeDateTexts() {
+  const out = [];
+  for (const entry of state.store?.entries ?? []) {
+    const field = entry.dates;
+    if (typeof field === 'string') out.push(field);
+    else if (field?.variants) for (const v of field.variants) out.push(String(v.text ?? ''));
+  }
+  return out.filter(Boolean);
 }
 
 /** A checkbox with its words, which is two elements every single time. */
