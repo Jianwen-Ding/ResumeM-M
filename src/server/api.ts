@@ -2441,10 +2441,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         store.saveDraft(draft),
       );
 
-      // An application being written is already an application. Track it as
-      // "applying" so the tracker shows what is in flight, not only what has
-      // been sent — completing the draft moves it to "applied".
-      const tracked = data.applications.find((a) => a.id === id);
+      /*
+       * An application being written is already an application. Track it as
+       * "applying" so the tracker shows what is in flight, not only what has
+       * been sent — completing the draft moves it to "applied".
+       *
+       * Read here, not from `data` at the top of the handler. `data` was
+       * loaded before the save above, and that save awaits a git commit — a
+       * process, tens to hundreds of milliseconds under load. Anything that
+       * writes this row in that window is invisible to a snapshot taken
+       * before it, and what followed was not a stale read but a destroyed
+       * one: the row was found missing, so a *new* one was written over the
+       * top, with `applying` for a status and a one-line history.
+       *
+       * Measured, on a store being driven by the extension: an application
+       * that had been staged and then submitted came back out of this handler
+       * reading `applying`, with the "Bundle created" and "applied" entries
+       * gone. The tracker said an application that had gone out had not, which
+       * is the failure that gets a job applied for twice.
+       *
+       * Nothing awaits between this read and the write below, so the two are
+       * one step as far as anything else on this server is concerned.
+       */
+      const tracked = store.load().applications.find((a) => a.id === id);
       if (!tracked) {
         store.upsertApplication({
           id,

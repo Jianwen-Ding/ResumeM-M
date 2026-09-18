@@ -12,11 +12,14 @@ const latex = await hasLatex();
 
 let t: TempStore;
 let app: express.Express;
+// Held out of `beforeEach` so a test that needs to stand in the middle of a
+// commit can reach the one this server is using. See the workspace race below.
+let repo: Repo;
 
 beforeEach(() => {
   t = makeTempStore();
   // Auto-commit is off in the fixture config, so no git repo is needed.
-  const repo = Repo.forStore(t.dir);
+  repo = Repo.forStore(t.dir);
   app = express();
   app.use('/api', createApi({ store: t.store, repo }));
   app.use('/pdf', createPdfRouter(t.store));
@@ -318,6 +321,75 @@ describe('job analysis', () => {
 
       const drafts = await request(app).get('/api/workspace').expect(200);
       expect(drafts.body.drafts.find((d: { company: string }) => d.company === 'Pulsar').status).toBe('submitted');
+    });
+
+    /*
+     * Opening the workspace and noticing the send, at the same moment.
+     *
+     * The workspace route decided whether this job already had a tracker row
+     * from a snapshot taken at the top of the handler — before an await that
+     * saves the draft and commits it. Anything writing that row in the window
+     * was invisible, and the consequence was not a stale read but a destroyed
+     * one: the row was judged missing, so a *new* one was written over the
+     * top, at `applying`, with a one-line history. Measured against a real
+     * store: an application that had been staged and submitted came back
+     * reading `applying`, with the "Bundle created" and "applied" entries
+     * gone. The tracker saying an application has not gone out when it has is
+     * how a job gets applied for twice.
+     *
+     * Every legal interleaving of these two ends the same way — one row, sent,
+     * with the send in its history — so that is what this asserts. Repeated,
+     * because which one wins the race is not this test's to decide, and one
+     * round that happened to serialise cleanly would prove nothing.
+     */
+    it('does not wipe the tracker row when a workspace opens beside a send', async () => {
+      /*
+       * The window held open rather than raced for. Auto-commit on means the
+       * workspace route really does await a commit after saving the draft, and
+       * the stub parks there until this test lets it go — which is the same
+       * window a real commit opens, made a length the test can reason about
+       * instead of a length the machine happens to pick.
+       */
+      const config = t.store.loadConfig();
+      t.store.saveConfig({ ...config, git: { ...config.git, autoCommit: true } });
+      let arrived: () => void;
+      const atTheCommit = new Promise<void>((r) => (arrived = r));
+      let release: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      const commits = vi.spyOn(repo, 'commitAll').mockImplementation(async (message: string) => {
+        // Only the workspace's own commit is held. The send that runs beside
+        // it commits too, and parking that as well would be this test
+        // deadlocking itself rather than the server doing anything wrong.
+        if (/Open workspace/.test(message)) {
+          arrived();
+          await held;
+        }
+        return { committed: false } as never;
+      });
+
+      const job = { company: 'Halcyon', role: 'Platform Engineer' };
+      // `.then` rather than `await`: supertest does not send until something
+      // subscribes, and this one has to be in flight while the send below runs.
+      const opening = request(app).post('/api/workspace').send({ ...job, coverLetterRequired: false }).then((r) => r);
+      await Promise.race([
+        atTheCommit,
+        new Promise((_, no) => setTimeout(() => no(new Error('the workspace route never reached a commit')), 10_000)),
+      ]);
+
+      // The form is submitted on the page while that commit is still running.
+      const send = await sent(job).expect(200);
+      expect(send.body.application.status).toBe('applied');
+
+      release!();
+      expect((await opening).status).toBe(200);
+      commits.mockRestore();
+
+      const listed = await request(app).get('/api/applications').expect(200);
+      const rows = (listed.body.applications as { company: string; status: string; history: { status: string }[] }[])
+        .filter((a) => a.company === job.company);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'applied' });
+      expect(rows[0]!.history.some((h) => h.status === 'applied')).toBe(true);
     });
 
     /*
