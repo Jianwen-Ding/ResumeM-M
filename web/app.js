@@ -3292,6 +3292,21 @@ function sentOn(a) {
 
 let openApplicationId = null;
 
+/*
+ * What the tracker is showing, out of everything it holds.
+ *
+ * The table listed every application ever filed, newest first, with no way to
+ * narrow it — and the list only grows: one row per application, for as long as
+ * somebody is looking for work. The questions people actually have of it are
+ * "what am I waiting to hear back on", "what have I not finished", and "did I
+ * apply to these people already", and all three were answered by scrolling.
+ *
+ * Kept out here because `loadApplications` runs again after every status
+ * change, and a filter that clears itself when you move a row to Interviewing
+ * is worse than no filter.
+ */
+let appFilter = { text: '', status: '' };
+
 async function loadApplications() {
   const { applications, stats, current } = await api('/applications');
 
@@ -3354,7 +3369,28 @@ async function loadApplications() {
     return;
   }
 
-  const rows = [...applications]
+  /*
+   * The stats above stay about the whole hunt — "total" means total, and a
+   * response rate over a filtered slice would be a different number wearing
+   * the same label. Only the table narrows.
+   */
+  const wanted = (a) => {
+    if (appFilter.status && a.status !== appFilter.status) return false;
+    if (!appFilter.text) return true;
+    const said = appFilter.text.toLowerCase();
+    return `${a.company ?? ''} ${a.role ?? ''}`.toLowerCase().includes(said);
+  };
+  const showing = applications.filter(wanted);
+
+  const count = $('#app-count');
+  if (count) {
+    count.textContent =
+      showing.length === applications.length
+        ? ''
+        : `${showing.length} of ${plural(applications.length, 'application')}`;
+  }
+
+  const rows = [...showing]
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))
     .map((a) => {
       const sel = el('select');
@@ -3411,6 +3447,17 @@ async function loadApplications() {
       sel.onclick = (ev) => ev.stopPropagation();
       return row;
     });
+
+  if (rows.length === 0) {
+    // Not the same fact as an empty tracker, and not worth confusing with it.
+    wrap.replaceChildren(
+      el('div', { className: 'empty' }, [
+        el('b', {}, 'Nothing matches'),
+        `${plural(applications.length, 'application')} filed; none of them match what you are looking for.`,
+      ]),
+    );
+    return;
+  }
 
   wrap.replaceChildren(
     el('table', {}, [
@@ -6684,6 +6731,21 @@ async function boot() {
   refreshJobs().catch(() => {});
 
   $('#btn-add-app').onclick = addApplication;
+
+  /*
+   * Narrowing the tracker. Both redraw from the list already in hand rather
+   * than asking the server again — this is a view of what is loaded, not a
+   * query, so it answers as fast as somebody types.
+   */
+  const narrow = () => {
+    appFilter = {
+      text: ($('#app-find')?.value ?? '').trim(),
+      status: $('#app-status')?.value ?? '',
+    };
+    loadApplications().catch((e) => setStatus(e.message, true));
+  };
+  if ($('#app-find')) $('#app-find').oninput = narrow;
+  if ($('#app-status')) $('#app-status').onchange = narrow;
   $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
   // The extension writes drafts from another tab, so there is something to
   // refresh to — this list is not only changed from here.

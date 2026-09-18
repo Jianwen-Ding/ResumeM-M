@@ -262,7 +262,7 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 
 /* Material text fields: a quiet outline that thickens to the accent on focus,
    rather than a glow around it. */
-select, input[type=text], textarea {
+select, input[type=text], input[type=search], textarea {
   font: inherit;
   padding: 7px 10px;
   border: 1px solid var(--line);
@@ -271,8 +271,8 @@ select, input[type=text], textarea {
   color: var(--ink);
   transition: border-color .15s, box-shadow .15s;
 }
-input[type=text]:hover, textarea:hover, select:hover { border-color: var(--faint); }
-input[type=text]:focus-visible, textarea:focus-visible, select:focus-visible {
+input[type=text]:hover, input[type=search]:hover, textarea:hover, select:hover { border-color: var(--faint); }
+input[type=text]:focus-visible, input[type=search]:focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 0;
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
@@ -1548,3 +1548,11 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 /* The end labels sit under the ends of the track rather than centred on them. */
 .effort-scale span:first-child { text-align: left; }
 .effort-scale span:last-child { text-align: right; }
+
+/* A label that is there for a screen reader and not for the eye: the search
+   box and the stage picker in the tracker's toolbar read as what they are,
+   without a second row of words above a toolbar that explains itself. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
