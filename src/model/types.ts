@@ -242,7 +242,23 @@ export const DEFAULT_LAYOUT: LayoutOptions = {
   spacing: 1,
   paper: 'letter',
   autoFit: true,
-  fitBounds: { minFontSizePt: 9.2, minSpacing: 0.78, minMarginIn: 0.35 },
+  /*
+   * How small auto-fit is allowed to go before it gives up and lets the
+   * document be two pages.
+   *
+   * This was 9.2pt at ×0.78 spacing inside 0.35in margins, which does fit more
+   * on a page and is not a resume anybody wants to receive: it is a wall of
+   * text set smaller than a footnote, with margins tight enough that some
+   * printers clip it. The point of a floor is that below it the honest answer
+   * is "this is too long", not "here it is, unreadable".
+   *
+   * 10pt is the smallest body size in common advice for a resume, ×0.92 keeps
+   * lines from touching, and 0.4in stays inside what printers and the parsers
+   * that read these documents handle. All three are `fitBounds` on the layout,
+   * so a resume that wants to push further still can — it is a setting, not a
+   * rule — but it has to say so rather than have it happen quietly.
+   */
+  fitBounds: { minFontSizePt: 10, minSpacing: 0.92, minMarginIn: 0.4 },
   maxPages: 1,
 };
 

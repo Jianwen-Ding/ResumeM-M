@@ -848,7 +848,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/render',
     handler(async (req, res) => {
-      const body = req.body as { resumeId?: string; spec?: ResumeSpec; master?: boolean; strict?: boolean };
+      const body = req.body as {
+        resumeId?: string;
+        spec?: ResumeSpec;
+        master?: boolean;
+        strict?: boolean;
+        fit?: 'auto' | 'as-written';
+      };
       const data = store.load();
 
       const resolved = body.master
@@ -857,10 +863,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           ? resolveResume({ ...body.spec, id: body.spec.id ?? '__preview__' }, { ...data, resumes: [...data.resumes, { ...body.spec, id: body.spec.id ?? '__preview__' }] })
           : resolveResume(String(body.resumeId), data);
 
-      const name = body.master ? 'master' : (body.resumeId ?? body.spec?.id ?? 'preview');
-      const pdfPath = path.join(store.outDir(), `${slug(name) || 'preview'}.pdf`);
+      /*
+       * "As written" is the document before auto-fit touches it, and it is
+       * what makes a live preview usable on a resume that is too long.
+       *
+       * Fitting is a search: compile, measure, shrink, compile again, until
+       * the least shrinking that works is found. On a document that fits, the
+       * first attempt is the answer and the whole thing costs one compile. On
+       * one that is slightly too long it costs seven, which measured at 6.8
+       * seconds against 0.47 — and all six extra compiles buy is 9.93pt of
+       * font instead of 9.2pt. Paying that on every keystroke is what made the
+       * editor look frozen exactly when somebody was trying to cut a line.
+       *
+       * So the preview asks for this first and gets the truth in half a
+       * second: the real page count, the real overflow, and a PDF showing
+       * every page it actually spills onto. The fitted version is a second
+       * request, and only when the first one did not fit. Nothing about the
+       * PDF that finally gets sent changes — that is still built by the full
+       * search, through buildBundle.
+       */
+      const asWritten = body.fit === 'as-written';
 
-      const result = await compileResume(resolved, {
+      const name = body.master ? 'master' : (body.resumeId ?? body.spec?.id ?? 'preview');
+      const suffix = asWritten ? '-as-written' : '';
+      const pdfPath = path.join(store.outDir(), `${slug(name) || 'preview'}${suffix}.pdf`);
+
+      const result = await compileResume(asWritten ? { ...resolved, layout: { ...resolved.layout, autoFit: false } } : resolved, {
         pdfPath,
         texPath: pdfPath.replace(/\.pdf$/, '.tex'),
         strict: body.strict ?? false,

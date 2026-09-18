@@ -354,6 +354,29 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .fit.idle { background: var(--line-soft); color: var(--muted); font-weight: 400; }
 .fit .adj { color: var(--warn); }
 
+/*
+ * "It is on one page" and "it is on one page because it was squeezed" are
+ * different facts about the document you are about to send, and the second one
+ * was a grey clause appended after the first — which is exactly where nobody
+ * looks once they have read the word "Fits". Its own line, its own colour, and
+ * a rule above it to separate the state of the page from what was done to get
+ * it there. Not an error: nothing is wrong, and the user asked for the
+ * squeezing. It just has to be impossible to miss.
+ */
+.fit .squeezed {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid currentColor;
+  border-top-color: color-mix(in srgb, currentColor 22%, transparent);
+  font-weight: 400;
+  font-size: var(--t-sm);
+  color: var(--warn);
+}
+.fit .squeezed strong { font-weight: 600; }
+/* The half-second where the honest page count is up and the fit is still
+   running. Reads as "not finished", not as "this is the answer". */
+.fit .squeezed.working { color: var(--muted); font-style: italic; }
+
 /* The preview recompiles on its own, so the toolbar says whether what you are
    looking at is current rather than offering a button to make it current. */
 /* The save state, stated the way Docs states it: quiet text you can glance at,

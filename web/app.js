@@ -2951,40 +2951,110 @@ function setLive(mode) {
   chip.textContent = mode === 'working' ? 'Updating…' : mode === 'bad' ? 'Compile failed' : 'Live';
 }
 
-async function renderPreview() {
-  const token = ++renderToken;
-  const fit = $('#fit');
-  setLive('working');
-  if (fit.classList.contains('idle')) fit.textContent = 'Compiling…';
-  try {
-    const master = state.masterView;
-    const result = await api('/render', { method: 'POST', body: JSON.stringify(master ? { master: true } : { spec: currentSpec() }) });
-    // A newer edit already asked for a newer compile; this answer is stale.
-    if (token !== renderToken) return;
-    setLive('ok');
-
-    showPdf($('#preview-pane'), result.pdfUrl);
-
-    fit.className = master || result.fits ? 'fit' : 'fit bad';
-    fit.replaceChildren(
-      master ? `Master Document · ${plural(result.pages, 'page')} · All source phrasings; may exceed two pages`
+/**
+ * What the fit line says, given a compiled result.
+ *
+ * Shrinking is not a warning — it is a thing that happened to your document,
+ * and the only unacceptable version of it is the silent one. It used to be a
+ * grey clause appended after the word "Fits", which is precisely where nobody
+ * looks once they have read "Fits". It now has its own line and its own
+ * colour, because "this is on one page because it was squeezed" and "this is
+ * on one page" are different facts about what you are about to send.
+ */
+function fitSummary(fit, result, { master, fitting = false } = {}) {
+  fit.className = master || result.fits ? 'fit' : 'fit bad';
+  fit.replaceChildren(
+    master
+      ? `Master Document · ${plural(result.pages, 'page')} · All source phrasings; may exceed two pages`
       : result.fits
         ? `Fits on one page${
             result.overflowLines < 0 ? ` — room for about ${plural(Math.abs(result.overflowLines), 'more line')}` : ''
           }`
         : `${plural(result.pages, 'page')} — about ${plural(result.overflowLines, 'line')} too long. Pick a shorter phrasing or drop a bullet.`,
+  );
+
+  if (master) return;
+
+  if (fitting) {
+    // Said while the second compile runs, so the half-second of truth on
+    // screen is not mistaken for the final answer.
+    fit.append(el('div', { className: 'squeezed working', textContent: 'Squeezing it onto one page…' }));
+    return;
+  }
+
+  if (result.adjustments?.length) {
+    fit.append(
+      el('div', { className: 'squeezed' }, [
+        el('strong', { textContent: 'Squeezed to fit' }),
+        el('span', { textContent: ` — ${result.adjustments.join(', ')}` }),
+      ]),
     );
-    if (!master && result.adjustments.length) {
-      fit.append(el('span', { className: 'adj', textContent: ` · auto-fit: ${result.adjustments.join('; ')}` }));
+  }
+}
+
+/**
+ * Compile what is on screen, in two passes when it needs them.
+ *
+ * Auto-fit is a search: compile, measure, shrink, compile again, until the
+ * least shrinking that fits is found. On a document that fits, the first
+ * attempt is the answer and it costs one compile — measured at 0.47s. On one
+ * that is slightly too long it costs seven, measured at 6.8s, and the editor
+ * spent all of it holding the previous page on screen with no page count, no
+ * overflow figure and nothing moving. That is the "it just freezes" that gets
+ * reported, and it lands exactly when somebody is trying to cut a line and
+ * needs to see what they cut.
+ *
+ * So the first pass asks for the document as written, with no shrinking. It
+ * comes back in half a second with the real page count and a PDF of every page
+ * it truly spills onto. If that fits, there was never a second pass to do. If
+ * it does not, the fitted compile runs after it and swaps in — and the line
+ * underneath says which it is you are looking at.
+ */
+async function renderPreview() {
+  const token = ++renderToken;
+  const fit = $('#fit');
+  setLive('working');
+  if (fit.classList.contains('idle')) fit.textContent = 'Compiling…';
+
+  const master = state.masterView;
+  const body = (extra) => JSON.stringify(master ? { master: true, ...extra } : { spec: currentSpec(), ...extra });
+
+  try {
+    const asWritten = await api('/render', { method: 'POST', body: body({ fit: 'as-written' }) });
+    // A newer edit already asked for a newer compile; this answer is stale.
+    if (token !== renderToken) return;
+
+    showPdf($('#preview-pane'), asWritten.pdfUrl);
+    $('#warnings').replaceChildren(...(asWritten.warnings ?? []).map((w) => el('div', { textContent: w })));
+
+    // It fits as authored, or nothing is allowed to shrink it. Either way this
+    // is the answer, and there is no second compile to pay for.
+    if (master || asWritten.fits || !autoFitOn()) {
+      setLive('ok');
+      fitSummary(fit, asWritten, { master });
+      return;
     }
 
-    $('#warnings').replaceChildren(...(result.warnings ?? []).map((w) => el('div', { textContent: w })));
+    fitSummary(fit, asWritten, { master, fitting: true });
+
+    const fitted = await api('/render', { method: 'POST', body: body({}) });
+    if (token !== renderToken) return;
+    setLive('ok');
+    showPdf($('#preview-pane'), fitted.pdfUrl);
+    fitSummary(fit, fitted, { master });
+    $('#warnings').replaceChildren(...(fitted.warnings ?? []).map((w) => el('div', { textContent: w })));
   } catch (err) {
     if (token !== renderToken) return;
     setLive('bad');
     fit.className = 'fit bad';
     fit.textContent = err.message;
   }
+}
+
+/** Whether this resume is allowed to shrink itself to fit. */
+function autoFitOn() {
+  const spec = resumeById(state.resumeId);
+  return spec?.layout?.autoFit ?? true;
 }
 
 async function saveAsVariation() {
