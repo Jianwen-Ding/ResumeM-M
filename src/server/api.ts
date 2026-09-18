@@ -39,6 +39,7 @@ import { advance, alreadySent, applicationId, buildBundle, findApplication, find
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
+import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
@@ -282,6 +283,60 @@ function plainText(field: MaybeVariant | undefined): string {
  * the application was still being written carries the day it was started.
  * The history knows better.
  */
+/**
+ * Keep an entry's date text and its date in step, without rewriting either
+ * unless the caller actually moved one.
+ *
+ * The editor now edits the date rather than the words, so something has to
+ * turn "start June 2023, no end, still going" back into the string that
+ * prints. Doing it here rather than in the browser keeps one implementation of
+ * the formatting, and it means a hand-edited YAML file converges on the same
+ * answer the next time it is saved.
+ *
+ * The condition is the careful part. Regenerating whenever a period is present
+ * would respell every date in the store the first time each entry was touched
+ * — "Jul. 2024" quietly becoming "July 2024" across documents that have been
+ * proofread and sent. So the text is rewritten only when the period disagrees
+ * with what the text already says: that happens exactly when the user moved
+ * the date, and never when they edited something else on the same entry.
+ *
+ * The style comes from the rest of the store, so the form the program writes
+ * is the form already in use here. Fields with alternates are left alone
+ * entirely — the period is taken from the default phrasing for sorting, and
+ * rewriting one of several phrasings from it would be picking a winner nobody
+ * asked for.
+ */
+export function withDatesFrom(entry: Entry, store: Store): Entry {
+  if (!entry.period?.start) return entry;
+  if (entry.dates !== undefined && typeof entry.dates !== 'string') return entry;
+
+  const current = typeof entry.dates === 'string' ? entry.dates : '';
+  const already = parsePeriod(current);
+  if (already && samePeriod(already, entry.period)) return entry;
+
+  const data = store.load();
+  const style = inferStyle(
+    data.entries
+      .filter((e) => e.id !== entry.id)
+      .map((e) => plainText(e.dates))
+      .filter(Boolean),
+  );
+  const text = formatPeriod(entry.period, style);
+  return text ? { ...entry, dates: text } : entry;
+}
+
+/** Two periods meaning the same thing, ignoring how they were spelt. */
+function samePeriod(a: Period, b: Period): boolean {
+  const point = (p?: { year: number; month?: number }) => (p ? `${p.year}-${p.month ?? ''}` : '');
+  return (
+    point(a.start) === point(b.start) &&
+    point(a.end) === point(b.end) &&
+    Boolean(a.ongoing) === Boolean(b.ongoing) &&
+    Boolean(a.expected) === Boolean(b.expected) &&
+    (a.season ?? '') === (b.season ?? '')
+  );
+}
+
 function sentBefore(
   applications: Application[],
   company: string | undefined,
@@ -484,7 +539,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.put(
     '/entries/:id',
     handler(async (req, res) => {
-      const entry = { ...(req.body as Entry), id: String(req.params.id) };
+      const entry = withDatesFrom({ ...(req.body as Entry), id: String(req.params.id) }, store);
       await withCommit(repo, autoCommit(), `Update entry "${entry.id}"`, () => store.saveEntry(entry));
       res.json(entry);
     }),
