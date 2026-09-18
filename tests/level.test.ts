@@ -38,6 +38,35 @@ describe('reading the level off a posting', () => {
     expect(detectLevel({ title: 'Engineer, Internationalization' })?.level).not.toBe('intern');
   });
 
+  /*
+   * Swept over forty real titles. These are the four it read wrongly, and each
+   * would have moved a graduation date on a document about to be sent.
+   */
+  it('does not take a word that is not a rank as a rank', () => {
+    // A title, not a rank — and at the labs that use it there are new grad MTS
+    // roles, so this is the worst case the module has.
+    expect(detectLevel({ title: 'Member of Technical Staff' })).toBeNull();
+    expect(detectLevel({ title: 'Interim Chief of Staff' })).toBeNull();
+    // Marketing. "Lead" there is a noun about sales, not about people.
+    expect(detectLevel({ title: 'Lead Generation Specialist' })).toBeNull();
+  });
+
+  it('still reads the same words where they really are ranks', () => {
+    expect(detectLevel({ title: 'Staff Software Engineer' })?.level).toBe('experienced');
+    expect(detectLevel({ title: 'Lead Data Scientist' })?.level).toBe('experienced');
+    expect(detectLevel({ title: 'Team Lead, Support' })?.level).toBe('experienced');
+  });
+
+  /*
+   * A job *about* interns is not an internship. These are full-time roles for
+   * people well out of school, and the word is in the title of every one.
+   */
+  it('does not read a job running an internship as an internship', () => {
+    expect(detectLevel({ title: 'Intern Program Coordinator' })).toBeNull();
+    expect(detectLevel({ title: 'Internship Program Manager' })).toBeNull();
+    expect(detectLevel({ title: 'University Recruiting — Intern Programs' })).toBeNull();
+  });
+
   it('says nothing about a title that names no level', () => {
     expect(detectLevel({ title: 'Software Engineer' })).toBeNull();
     expect(detectLevel({ title: 'Backend Engineer, Payments' })).toBeNull();

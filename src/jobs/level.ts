@@ -54,9 +54,32 @@ const TITLE_RULES: { level: JobLevel; re: RegExp }[] = [
   },
   {
     level: 'experienced',
-    re: /\b(senior|sr\.?|staff|principal|distinguished|lead|manager|director|head of|architect|vp)\b/i,
+    /*
+     * Two of these are words before they are ranks, and the lookbehinds are
+     * where that was measured rather than guessed.
+     *
+     * "Member of Technical Staff" is a title, not a rank, and at the labs that
+     * use it there are new grad MTS roles — reading it as seniority is the
+     * worst case this whole module has, because the applicant it is wrong
+     * about is exactly the one the feature exists for. "Chief of Staff" is the
+     * same word doing the same non-ranking job. And "Lead Generation
+     * Specialist" is a marketing role that can be entry level; "lead" there is
+     * a noun about sales, not about people.
+     */
+    re: /\b(senior|sr\.?|(?<!technical )(?<!of )staff|principal|distinguished|lead(?! generation)|manager|director|head of|architect|vp)\b/i,
   },
 ];
+
+/*
+ * A job *about* interns is not an internship.
+ *
+ * "Intern Program Coordinator", "Internship Manager", "Early Careers
+ * Recruiter" — every one of them says "intern" and none of them is one. They
+ * are usually full-time roles for people well out of school, so reading the
+ * word at face value puts an expected-graduation date on a resume going to
+ * somebody who would notice.
+ */
+const RUNS_THE_PROGRAM = /\b(coordinator|manager|recruiter|recruiting|supervisor|mentor|director|lead)\b/i;
 
 /*
  * Bodies, which only get a say when the title was silent.
@@ -101,6 +124,7 @@ export function detectLevel(job: { title?: string; description?: string }): Leve
   const title = (job.title ?? '').trim();
   if (title) {
     const hit = firstMatch(title, TITLE_RULES);
+    if (hit && hit.level === 'intern' && RUNS_THE_PROGRAM.test(title)) return null;
     if (hit) return { level: hit.level, why: [hit.word], from: 'title' };
   }
 
