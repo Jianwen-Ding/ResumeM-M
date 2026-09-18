@@ -605,6 +605,31 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
       }
     }
   }
+  /*
+   * And a skills group id belongs to one group.
+   *
+   * Worse than the bullet case, because a section lists groups by id and the
+   * lookup takes the first match: two groups named "Languages" print the
+   * first one twice and the second one never, and choosing which of its items
+   * to show edits the wrong group's list. The group you just made simply does
+   * not appear, with nothing anywhere saying why.
+   */
+  const groupsSeen = new Set<string>();
+  for (const g of data.skillGroups) {
+    if (groupsSeen.has(g.id)) {
+      warnings.push(
+        `Two skills groups have the id "${g.id}". Only the first is ever printed, and choosing items edits that one.`,
+      );
+    }
+    groupsSeen.add(g.id);
+    const itemsSeen = new Set<string>();
+    for (const i of g.items) {
+      if (itemsSeen.has(i.id)) {
+        warnings.push(`Skills group "${g.id}" lists two items with the id "${i.id}"; only the first can be chosen.`);
+      }
+      itemsSeen.add(i.id);
+    }
+  }
   for (const key of Object.keys(choices)) {
     if (!knownKeys.has(key)) {
       warnings.push(`Choice "${key}" does not match any field or bullet in the store.`);

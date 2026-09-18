@@ -31,6 +31,7 @@ afterEach(() => {
  */
 
 let saved;
+let inflight;
 
 async function openEditor() {
   vi.resetModules();
@@ -42,15 +43,39 @@ async function openEditor() {
   fixture.cleanup();
 
   saved = [];
+  inflight = 0;
   vi.stubGlobal('confirm', () => true);
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+    inflight++;
+    try {
+      return await answer(url, options);
+    } finally {
+      inflight--;
+    }
+  }));
+
+  async function answer(url, options) {
     let result = {};
     if (url === '/api/store') result = data;
     else if (url === '/api/ai/jobs') result = { jobs: [] };
     else if (url === '/api/letters') result = [];
     else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
     else if (url === '/api/config') result = { ai: { enabled: false }, latex: {}, git: {}, output: {}, overrides: {} };
-    else if (String(url).startsWith('/api/entries/') && options.method === 'PUT') {
+    else if (url === '/api/skills' && options.method === 'PUT') {
+      const body = JSON.parse(options.body);
+      saved.push(body);
+      data.skillGroups = body;
+      result = body;
+    } else if (String(url).startsWith('/api/resumes/') && options.method === 'PUT') {
+      // Adding a group also writes the resume's section list, and the page
+      // reloads the store straight after. Without keeping this, the reload
+      // undoes it and the new group never appears on the page.
+      const body = JSON.parse(options.body);
+      const at = data.resumes.findIndex((r) => r.id === body.id);
+      if (at >= 0) data.resumes[at] = body;
+      else data.resumes.push(body);
+      result = body;
+    } else if (String(url).startsWith('/api/entries/') && options.method === 'PUT') {
       const body = JSON.parse(options.body);
       saved.push(body);
       // The store the page reloads has to carry the new entry, or the second
@@ -62,7 +87,7 @@ async function openEditor() {
       result = body;
     }
     return { ok: true, json: async () => structuredClone(result) };
-  }));
+  }
 
   await import('../web/app.js');
   await vi.waitFor(() => expect(document.querySelector('.bullet-disclosure')).not.toBeNull());
@@ -80,6 +105,18 @@ async function addEntryNamed(sectionLabel, title, bullet) {
   document.querySelector('#f_title').value = title;
   document.querySelector('#f_bullet').value = bullet;
   document.querySelector('#modal-ok').click();
+}
+
+/*
+ * Wait for the page to stop working before the test ends.
+ *
+ * Saving a group does more than the one PUT the assertion looks at — it writes
+ * the resume's own section list and reloads the store afterwards. A test that
+ * returned as soon as its PUT landed took the stubbed fetch away mid-chain,
+ * and the tail of the save reached the real one.
+ */
+async function settle() {
+  await vi.waitFor(() => expect(inflight).toBe(0));
 }
 
 const allBulletIds = (entries) => entries.flatMap((e) => (e.bullets ?? []).map((b) => b.id));
@@ -120,5 +157,85 @@ describe('adding two entries with the same name', () => {
     await addEntryNamed('Experience', 'Globex', 'Something nobody else has said.');
     await vi.waitFor(() => expect(saved.length).toBe(1));
     expect(saved[0].bullets[0].id).toBe('b_globex_1');
+  });
+});
+
+const skillChips = () => [...document.querySelectorAll('.skill-chip')].map((c) => c.textContent.replace('×', '').trim());
+
+/**
+ * Click "+ Add skill group", fill the form, and wait for the page to be
+ * showing the group before returning.
+ *
+ * Waiting on the request is not enough. Saving a group writes the group list,
+ * then the resume's own section list, then reloads the store — and the reload
+ * lands in `state` a turn after its response does. Adding the next group in
+ * that gap builds its list from a store that has never seen this one, so the
+ * second write drops the first, and the test underneath would be watching a
+ * lost update rather than the thing it means to watch.
+ */
+async function addGroupNamed(name, items) {
+  [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '+ Add skill group').click();
+  await vi.waitFor(() => expect(document.querySelector('#f_name')).not.toBeNull());
+  document.querySelector('#f_name').value = name;
+  document.querySelector('#f_items').value = items;
+  document.querySelector('#modal-ok').click();
+
+  const first = items.split(',')[0].trim();
+  await vi.waitFor(() => expect(skillChips()).toContain(first));
+  await settle();
+}
+
+/*
+ * A skills group has it worse than a line. A section lists groups by id and
+ * the lookup takes the first match, so two groups with one id print the first
+ * one twice and the second one never — the group you just made is not on the
+ * page, and nothing says why.
+ */
+describe('adding two skill groups with the same name', () => {
+  it('gives them different ids', async () => {
+    await openEditor();
+    await addGroupNamed('Languages', 'Python, Go');
+    await vi.waitFor(() => expect(saved.length).toBe(1));
+    await addGroupNamed('Languages', 'Rust');
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(1));
+
+    const groups = saved.at(-1);
+    const ids = groups.map((g) => g.id);
+    expect(ids).toHaveLength(new Set(ids).size);
+    // Both are there — the second is a real group, not a silent no-op, and
+    // not the one the fixture already calls Languages either.
+    expect(groups.find((g) => g.items.some((i) => i.text === 'Go' && g.id !== 'sk_lang'))).toBeTruthy();
+    expect(groups.find((g) => g.items.some((i) => i.text === 'Rust'))).toBeTruthy();
+    // And the symptom that made this worth fixing: with one id between them,
+    // the second group is simply not on the page. The first prints twice
+    // instead, because a section names its groups by id and the lookup takes
+    // the first match.
+    expect(skillChips()).toContain('Rust');
+    await settle();
+  });
+
+  it('keeps the readable name when nothing is in the way', async () => {
+    await openEditor();
+    await addGroupNamed('Tooling', 'Git');
+    await vi.waitFor(() => expect(saved.length).toBe(1));
+    expect(saved.at(-1).some((g) => g.id === 'sk_tooling')).toBe(true);
+    await settle();
+  });
+
+  it('does not let a repeated skill in one group collapse into one id', async () => {
+    // "Python, Go, Python" is a typo rather than two skills, and letting both
+    // be `s_python` left the second unselectable and removed both at once.
+    await openEditor();
+    await addGroupNamed('Languages', 'Rust, Zig, Rust');
+    await vi.waitFor(() => expect(saved.length).toBe(1));
+
+    // By id, not by name: the fixture already has a group called Languages,
+    // and the one this test made is `sk_languages`.
+    const group = saved.at(-1).find((g) => g.id === 'sk_languages');
+    const ids = group.items.map((i) => i.id);
+    expect(ids).toHaveLength(3);
+    expect(ids).toHaveLength(new Set(ids).size);
+    expect(group.items.map((i) => i.text)).toEqual(['Rust', 'Zig', 'Rust']);
+    await settle();
   });
 });

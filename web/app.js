@@ -386,9 +386,37 @@ function slug(s) {
  * path names its lines the same way.
  */
 function freeBulletId(base) {
-  const taken = new Set((state.store?.entries ?? []).flatMap((e) => (e.bullets ?? []).map((b) => b.id)));
+  return unusedId(base, (state.store?.entries ?? []).flatMap((e) => (e.bullets ?? []).map((b) => b.id)));
+}
+
+/**
+ * A skills group id nothing else is using.
+ *
+ * Worse than a line if it collides. A section lists groups by id and the
+ * lookup takes the first match, so two groups named "Languages" print the
+ * first one twice and the second one never, and choosing which of its items
+ * to show edits the wrong group. Nothing said so — the group you just made
+ * simply did not appear.
+ */
+function freeSkillGroupId(base) {
+  return unusedId(base, (state.store?.skillGroups ?? []).map((g) => g.id));
+}
+
+/**
+ * A skills item id nothing in its own group is using.
+ *
+ * Scoped to the group, which is the scope that matters: a resume records the
+ * items it wants as `items[groupId]`. Two items with one id in a group left
+ * the second unselectable, and removing either removed both.
+ */
+function freeSkillItemId(group, base) {
+  return unusedId(base, (group?.items ?? []).map((i) => i.id));
+}
+
+function unusedId(base, taken) {
+  const used = new Set(taken);
   let id = base;
-  for (let n = 2; taken.has(id); n++) id = `${base}_${n}`;
+  for (let n = 2; used.has(id); n++) id = `${base}_${n}`;
   return id;
 }
 
@@ -3680,7 +3708,7 @@ async function addSkill(group) {
           items: [
             ...g.items,
             {
-              id: `s_${slug(answer.text)}`,
+              id: freeSkillItemId(group, `s_${slug(answer.text)}`),
               text: answer.text.trim(),
               ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
             },
@@ -3712,17 +3740,20 @@ async function addSkillGroup() {
   ]);
   if (!answer?.name?.trim()) return;
 
-  const id = `sk_${slug(answer.name)}`;
+  const id = freeSkillGroupId(`sk_${slug(answer.name)}`);
   const groups = [
     ...state.store.skillGroups,
     {
       id,
       name: answer.name.trim(),
+      // Built against what has already been taken from the same list: "Python,
+      // Go, Python" is a typo, not two skills, and letting both be `s_python`
+      // would leave the second unselectable and remove both at once.
       items: (answer.items ?? '')
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean)
-        .map((text) => ({ id: `s_${slug(text)}`, text })),
+        .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
     },
   ];
   describeNext(`adding the group "${answer.name.trim()}"`);

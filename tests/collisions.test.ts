@@ -156,3 +156,58 @@ describe('two entries that carry a line with the same id', () => {
     expect(out.warnings.join(' ')).toContain('picking a wording on either can change the other');
   });
 });
+
+/*
+ * Two skills groups that turn into one.
+ *
+ * The worst of the three, because a section lists groups by id and the lookup
+ * takes the first match. Two groups with one id print the first one twice and
+ * the second one never — and "Add group" named a group after its name alone,
+ * so a second "Languages" was all it took. Nothing said anything: the group
+ * you had just made simply was not on the page.
+ */
+describe('two skills groups with the same id', () => {
+  const skills = (groups: { id: string; name: string; items: { id: string; text: string }[] }[]) => {
+    const spec: ResumeSpec = {
+      id: 'r',
+      label: 'R',
+      sections: [{ kind: 'skills', heading: 'Skills', entries: [], groups: groups.map((g) => g.id) }],
+    };
+    return {
+      spec,
+      data: {
+        profile: { name: 'A', email: 'a@b.c' },
+        entries: [],
+        resumes: [spec],
+        skillGroups: groups,
+        answers: [],
+        config: {},
+      } as unknown as StoreData,
+    };
+  };
+
+  it('prints the first one twice and the second one never — which is why it is worth saying', () => {
+    const { spec, data } = skills([
+      { id: 'sk_languages', name: 'Languages', items: [{ id: 's_python', text: 'Python' }] },
+      { id: 'sk_languages', name: 'Languages', items: [{ id: 's_rust', text: 'Rust' }] },
+    ]);
+    const out = resolveResume(spec, data);
+    expect(out.sections[0]?.skillGroups?.flatMap((g) => g.items)).toEqual(['Python', 'Python']);
+    expect(out.warnings.join(' ')).toContain('sk_languages');
+  });
+
+  it('says so when one group lists the same item twice', () => {
+    const { spec, data } = skills([
+      { id: 'sk_l', name: 'Languages', items: [{ id: 's_python', text: 'Python' }, { id: 's_python', text: 'Python' }] },
+    ]);
+    expect(resolveResume(spec, data).warnings.join(' ')).toContain('two items with the id "s_python"');
+  });
+
+  it('stays quiet about an ordinary set of groups', () => {
+    const { spec, data } = skills([
+      { id: 'sk_languages', name: 'Languages', items: [{ id: 's_python', text: 'Python' }] },
+      { id: 'sk_tools', name: 'Tools', items: [{ id: 's_git', text: 'Git' }] },
+    ]);
+    expect(resolveResume(spec, data).warnings).toEqual([]);
+  });
+});
