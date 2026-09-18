@@ -234,7 +234,10 @@ function draftedEntry(raw: unknown): Entry {
       if (!body) continue;
       variants.push({
         id: `v_${slug(String(item.label ?? body).slice(0, 24)) || `alt${j + 1}`}`,
-        label: text(item.label) ?? body.slice(0, 24),
+        // Trimmed after the cut, not before it: a 24-character slice lands
+        // mid-word as often as not, and a label ending in a space prints as
+        // "Built the pipeline that : …" wherever it is shown beside its text.
+        label: text(item.label) ?? body.slice(0, 24).trim(),
         text: body,
         // Drafted, not reviewed — the editor already has a way of showing that.
         suggested: true,
@@ -1380,7 +1383,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const variants = (parsed.variants ?? [])
         .filter((v) => typeof v?.text === 'string' && v.text.trim())
         .slice(0, 5)
-        .map((v) => ({ label: String(v.label ?? '').trim() || v.text!.trim().slice(0, 24), text: v.text!.trim() }));
+        // Trimmed after the cut; see the note in `draftedEntry`.
+        .map((v) => ({ label: String(v.label ?? '').trim() || v.text!.trim().slice(0, 24).trim(), text: v.text!.trim() }));
       if (variants.length === 0) throw new Error('The AI came back with nothing usable.');
       res.json({ executed: true, variants, raw: agent.output });
     }),

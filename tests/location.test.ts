@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findProjectRoot, isEmptyStore, resolveStoreDir, seedStore } from '../src/model/location.js';
 import { cloneProject } from '../src/model/projects.js';
+import { tempDir } from './helpers.js';
 
 describe('resolveStoreDir', () => {
   const original = process.env.RMM_DATA;
@@ -11,7 +12,7 @@ describe('resolveStoreDir', () => {
   let projectRoot: string;
 
   beforeEach(() => {
-    projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-project-'));
+    projectRoot = tempDir('rmm-project-');
     /*
      * Point the remembered-projects file at somewhere that does not exist.
      *
@@ -38,8 +39,8 @@ describe('resolveStoreDir', () => {
    * of a store all served the one real save and wrote to it.
    */
   it('honours a folder named on the command line above RMM_DATA', () => {
-    const chosen = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-chosen-'));
-    process.env.RMM_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-env-'));
+    const chosen = tempDir('rmm-chosen-');
+    process.env.RMM_DATA = tempDir('rmm-env-');
     try {
       expect(resolveStoreDir(projectRoot, chosen)).toBe(path.resolve(chosen));
     } finally {
@@ -55,7 +56,7 @@ describe('resolveStoreDir', () => {
   });
 
   it('honours RMM_DATA above everything else', () => {
-    const explicit = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-explicit-'));
+    const explicit = tempDir('rmm-explicit-');
     process.env.RMM_DATA = explicit;
     try {
       expect(resolveStoreDir(projectRoot)).toBe(path.resolve(explicit));
@@ -94,7 +95,7 @@ describe('isEmptyStore', () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-store-'));
+    dir = tempDir('rmm-store-');
   });
 
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -119,8 +120,8 @@ describe('seedStore', () => {
   let to: string;
 
   beforeEach(() => {
-    from = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-from-'));
-    to = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-to-'));
+    from = tempDir('rmm-from-');
+    to = tempDir('rmm-to-');
     fs.rmSync(to, { recursive: true, force: true }); // seedStore must create it
 
     fs.writeFileSync(path.join(from, 'config.yaml'), 'ai: {}\n');
@@ -174,7 +175,7 @@ describe('finding the files that ship with the tool', () => {
   let root: string;
 
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-root-'));
+    root = tempDir('rmm-root-');
     fs.mkdirSync(path.join(root, 'web'), { recursive: true });
     fs.writeFileSync(path.join(root, 'web', 'index.html'), '<!doctype html>');
     fs.writeFileSync(path.join(root, 'package.json'), '{"name":"resumem-m"}');
@@ -215,7 +216,7 @@ describe('finding the files that ship with the tool', () => {
   });
 
   it('gives the old answer rather than a new failure when there is nothing to find', () => {
-    const lost = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-lost-'));
+    const lost = tempDir('rmm-lost-');
     const from = path.join(lost, 'a', 'b');
     fs.mkdirSync(from, { recursive: true });
     expect(findProjectRoot(from)).toBe(path.resolve(from, '..', '..'));
@@ -232,7 +233,7 @@ describe('cloning a save from a repository', () => {
   let into: string;
 
   beforeEach(() => {
-    into = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-clone-')), 'save');
+    into = path.join(tempDir('rmm-clone-'), 'save');
   });
 
   /** A stand-in for git: copies a prepared folder into the staging directory. */
@@ -241,7 +242,7 @@ describe('cloning a save from a repository', () => {
   };
 
   const aSave = () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-src-'));
+    const dir = tempDir('rmm-src-');
     fs.writeFileSync(path.join(dir, 'profile.yaml'), 'name: Someone\n');
     fs.writeFileSync(path.join(dir, 'config.yaml'), 'ai:\n  enabled: false\n');
     fs.mkdirSync(path.join(dir, 'resumes'));
@@ -274,7 +275,7 @@ describe('cloning a save from a repository', () => {
   });
 
   it('refuses a repository that is not a save, and leaves nothing behind', async () => {
-    const notASave = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-src-'));
+    const notASave = tempDir('rmm-src-');
     fs.writeFileSync(path.join(notASave, 'README.md'), '# not a save');
     await expect(cloneProject('git@example.com:me/x.git', into, copies(notASave))).rejects.toThrow(
       /not a resume save/,
@@ -318,7 +319,7 @@ describe('cloning a save from a repository', () => {
       'git@github.com:me/save.git',
       'ssh://git@example.com/me/save.git',
     ]) {
-      const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-clone-')), 'save');
+      const dir = path.join(tempDir('rmm-clone-'), 'save');
       await expect(cloneProject(good, dir, copies(aSave()))).resolves.toBeDefined();
     }
   });

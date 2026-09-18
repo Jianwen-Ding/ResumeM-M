@@ -15,6 +15,7 @@ import {
   repairAiArgs,
 } from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
+import { tempDir } from './helpers.js';
 
 /**
  * The supported CLIs, checked against stand-ins.
@@ -31,7 +32,7 @@ import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
  * loudly if handed something it could not use.
  */
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-stub-'));
+const dir = tempDir('rmm-stub-');
 
 /** Write a stand-in CLI and return the argv that runs it. */
 function stub(name: string, body: string): { command: string; prefix: string[] } {
