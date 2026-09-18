@@ -531,6 +531,30 @@ async function main() {
         check('and the line is still where it was dropped',
           kept.indexOf(first) > kept.indexOf(second) && kept.includes(first),
           kept.join(', ') || '(the entry is gone)');
+
+        /*
+         * The same shape, reached the commoner way.
+         *
+         * Hiding a line writes the same thing a reorder does — this
+         * resume's bullet list for that entry, and no entry list — so it
+         * met the same broken merge and emptied the section out of the
+         * editor in exactly the same way. Dragging is the rarer action of
+         * the two; this is the one somebody does every time they trim a
+         * resume to fit, which makes it the one worth holding down.
+         */
+        const box = page.locator(`#editor .entry[data-drag-id="${inEntry}"] .bullet:not(.off) input[type=checkbox]`).first();
+        if (await box.count()) {
+          await box.click();
+          await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
+
+          const there = await page.locator(`#editor .entry[data-drag-id="${inEntry}"]`).count();
+          check('hiding a line leaves the entry it belongs to in the resume', there === 1, `${there} found`);
+          const lines = await shown(`#editor .entry[data-drag-id="${inEntry}"] [data-drag-id]`);
+          check('and the lines that were not hidden are still on it', lines.length > 0, lines.join(', ') || '(none)');
+        }
       }
     }
 
