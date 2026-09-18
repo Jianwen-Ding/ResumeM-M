@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { coverLetterPrompt } from '../src/ai/prompts.js';
-import { makeTempStore } from './helpers.ts';
+import { makeTempStore } from './helpers.js';
 import { resolveResume } from '../src/model/resolve.js';
 import type { CoverLetter, StoreData } from '../src/model/types.js';
 
