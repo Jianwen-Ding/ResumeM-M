@@ -214,6 +214,50 @@ describe('job analysis', () => {
   });
 
   /*
+   * A heading that has alternates, described the same way a bullet is.
+   *
+   * The sample store only puts alternates on `dates`, and dates are the one
+   * field the matcher deliberately never touches — a graduation date is a
+   * fact about the applicant, not something a posting gets to influence. So
+   * nothing here had ever produced a change to a heading field, and the half
+   * of `describeChange` that turns one into words had never run. What it is
+   * for is the card: "Software Engineer Co-op" rather than
+   * "exp_acme.subtitle", which is the whole of why that function exists.
+   */
+  it('describes a change to a heading field in words too', async () => {
+    t.write('experience.yaml', [
+      {
+        id: 'exp_acme',
+        kind: 'experience',
+        title: 'Acme Co.',
+        dates: 'Jul. 2024 -- Dec. 2024',
+        subtitle: {
+          default: 'v_plain',
+          variants: [
+            { id: 'v_plain', label: 'Plain', text: 'Software Engineer Co-op' },
+            { id: 'v_data', label: 'Data', text: 'Data Platform Engineer, Kafka and Kubernetes', tags: ['kafka', 'kubernetes', 'streaming'] },
+          ],
+        },
+        bullets: [],
+      },
+    ]);
+
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'base' })
+      .expect(200);
+
+    const change = res.body.rationale.find((r: { key: string }) => r.key === 'exp_acme.subtitle');
+    expect(change, 'the heading change is in the rationale').toBeTruthy();
+    // Named for the entry it is in and the thing it is, not for either id.
+    expect(change.where).toBe('Acme Co.');
+    expect(change.what).not.toContain('exp_acme');
+    expect(change.fromLabel).toBe('Plain');
+    expect(change.toLabel).toBe('Data');
+    expect(change.toText).toContain('Kafka');
+  });
+
+  /*
    * Tailoring is the feature and was never supposed to be compulsory. Both
    * modes altered the resume, so every proposal arrived with a list of
    * changes on it and no way to say "none of these, send what I have".
