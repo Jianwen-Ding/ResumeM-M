@@ -1,3 +1,4 @@
+import { parsePeriod } from './period.js';
 import type {
   AnswerBankItem,
   Application,
@@ -84,6 +85,17 @@ export function normalizeBullet(bullet: Bullet): Bullet {
   };
 }
 
+/**
+ * The default phrasing of a field, for the two things that need one string
+ * rather than the set: reading a date out of it, and showing it in a list.
+ */
+function defaultText(field: MaybeVariant | undefined): string {
+  if (field === undefined) return '';
+  if (typeof field === 'string') return field;
+  const chosen = field.variants.find((v) => v.id === field.default) ?? field.variants[0];
+  return chosen?.text ?? '';
+}
+
 export function normalizeEntry(entry: Entry): Entry {
   const out: Entry = { ...entry, id: String(entry.id ?? '') };
   for (const name of ['title', 'dates', 'subtitle', 'location'] as const) {
@@ -94,6 +106,25 @@ export function normalizeEntry(entry: Entry): Entry {
   // A title is the one field that must print something.
   if (out.title === undefined) out.title = out.id;
   out.bullets = Array.isArray(entry.bullets) ? entry.bullets.map(normalizeBullet) : [];
+
+  /*
+   * A date the program can compare, read out of the words if the file does not
+   * carry one yet.
+   *
+   * Here rather than in a migration script, because a migration only runs on
+   * the stores it is pointed at: a save cloned from a machine still on the old
+   * version, a file edited by hand, a resume restored out of git history. Doing
+   * it on the way in means there is no such thing as a store that has not been
+   * converted — the old shape simply works, and the new field gets written down
+   * the next time the entry is saved.
+   *
+   * Nothing is thrown away and nothing is rewritten: `dates` is untouched, so
+   * what prints on a resume is the same text it was before.
+   */
+  if (out.period === undefined) {
+    const read = parsePeriod(defaultText(out.dates));
+    if (read) out.period = read;
+  }
   return out;
 }
 

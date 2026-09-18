@@ -1,3 +1,4 @@
+import { sortKey, startKey } from './period.js';
 import {
   DEFAULT_LAYOUT,
   isListBullet,
@@ -303,6 +304,42 @@ function resolveEntry(
 }
 
 /** Turn a resume spec plus the store into something the renderer can print. */
+/**
+ * The entry ids of one section, in the order they should print.
+ *
+ * Sorting happens here, at render time, rather than by rewriting the stored
+ * list. Two reasons. The list is what a manual arrangement *is*, so a sort that
+ * overwrote it would destroy the thing you go back to when you turn the sort
+ * off. And a sort that runs when the resume is built cannot go stale: change a
+ * date and the page is already right, with nothing to remember to re-run.
+ *
+ * Entries whose dates could not be read are not sorted anywhere. They keep
+ * their positions relative to each other and follow the dated ones, because an
+ * entry the program cannot place is one it has no business moving — "Various"
+ * is not older than 2019 and it is not newer, and pretending either way puts a
+ * line of somebody's resume somewhere they did not choose.
+ */
+export function orderedEntries(section: SectionSpec, entries: Entry[]): string[] {
+  const ids = section.entries ?? [];
+  if (section.order !== 'newest' && section.order !== 'oldest') return ids;
+
+  const keyOf = (id: string) => {
+    const entry = entries.find((e) => e.id === id);
+    return section.order === 'oldest' ? startKey(entry?.period) : sortKey(entry?.period);
+  };
+
+  const dated: { id: string; key: number }[] = [];
+  const undated: string[] = [];
+  for (const id of ids) {
+    const key = keyOf(id);
+    if (key === undefined) undated.push(id);
+    else dated.push({ id, key });
+  }
+
+  dated.sort((a, b) => (section.order === 'oldest' ? a.key - b.key : b.key - a.key));
+  return [...dated.map((d) => d.id), ...undated];
+}
+
 export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): ResolvedResume {
   const spec =
     typeof specOrId === 'string'
@@ -346,7 +383,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
         skillGroups.push({ id: group.id, name: group.name, items });
       }
     } else {
-      for (const eid of section.entries ?? []) {
+      for (const eid of orderedEntries(section, data.entries)) {
         const entry = data.entries.find((e) => e.id === eid);
         if (!entry) {
           warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);

@@ -5,6 +5,9 @@
  * store. Edit the canonical text once and every resume that points at it moves.
  */
 
+import type { Period } from './period.js';
+export type { DatePoint, DateStyle, Period, Season } from './period.js';
+
 /** A single interchangeable phrasing of some text. */
 export interface Variant {
   id: string;
@@ -73,8 +76,36 @@ export interface Entry {
   kind: EntryKind;
   /** Left heading: school, company, or project name. */
   title: MaybeVariant;
-  /** Right heading: dates. */
+  /**
+   * Right heading: dates, as the words that get printed.
+   *
+   * Still the text, and still what renders. `period` below is the same
+   * information as dates, and where the two disagree this one wins — see the
+   * note there for why that is the safe way round.
+   */
   dates?: MaybeVariant;
+  /**
+   * When this happened, as dates the program can compare.
+   *
+   * Derived from `dates` on load for every store written before this existed,
+   * so nothing has to be converted before it works, and written down the next
+   * time the entry is saved. Absent means the text said something that is not
+   * a date — "Various", "Two semesters" — and that entry stays wherever it was
+   * put by hand rather than being sorted somewhere arbitrary.
+   *
+   * `dates` remains what prints. A date can be read in more ways than it can
+   * be written, so a migration that re-rendered everything would respell dates
+   * in resumes that have already been sent and proofread: "Jul. 2024" quietly
+   * becoming "July 2024" across a store is a change nobody asked for in
+   * documents nobody is going to re-read. Writing the text only when the user
+   * edits the date themselves keeps that from happening.
+   *
+   * One period per entry, taken from the default phrasing where `dates` has
+   * alternates. Alternates of a date are nearly always two spellings of one
+   * period, or two projections of a graduation, and neither should move the
+   * entry to a different place on the page depending on which resume is open.
+   */
+  period?: Period;
   /** Second-line left: degree, role, or tech stack. */
   subtitle?: MaybeVariant;
   /** Second-line right: location. */
@@ -129,6 +160,20 @@ export interface SectionSpec {
    * selection, expressed in `bullets` below.
    */
   entries: string[];
+  /**
+   * Whether this list is the order, or only the membership.
+   *
+   * `'manual'` — and absent, which every store written before this means —
+   * says the list above is the order, exactly as it always was. A store does
+   * not start sorting itself because the program learned how.
+   *
+   * `'newest'` and `'oldest'` sort by `Entry.period` at render time and leave
+   * the stored list alone, so switching back to manual restores the order that
+   * was there rather than whatever the sort last produced. Entries whose dates
+   * could not be read keep their relative positions at the end: an entry the
+   * program cannot place is one it should not move.
+   */
+  order?: 'manual' | 'newest' | 'oldest';
   /**
    * Per-entry bullet inclusion and ordering. Absent entry => all non-archived
    * bullets in store order.
