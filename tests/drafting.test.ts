@@ -209,3 +209,121 @@ describe('when the draft cannot be used', () => {
     expect(res.body.prompt).toMatch(/queue I wrote/);
   });
 });
+
+/**
+ * Another way of saying a line that already exists.
+ *
+ * The rule this product runs on is that a model chooses between things the
+ * person has written and never writes the resume itself. This endpoint is the
+ * one exception, and it is a narrow one: what comes back is a *proposal* for
+ * one line that already exists, shown beside the line it rephrases, ticked in
+ * or out one at a time. So the things worth checking are the edges of that
+ * narrowness — that it knows which line it is rephrasing, that it is given the
+ * words to rephrase, and that it cannot come back with a pile of them.
+ */
+describe('another wording for a line', () => {
+  const FIVE_BACK = JSON.stringify({
+    variants: [
+      { label: 'Kafka', text: 'Built a Kafka pipeline.' },
+      { label: 'Scale', text: 'Built a pipeline holding two million events a day.' },
+      { label: 'Short', text: 'Built the pipeline.' },
+      { label: 'Latency', text: 'Built a pipeline, cutting latency to 180ms.' },
+      { label: 'Team', text: 'Built the pipeline with two others.' },
+      { label: 'Sixth', text: 'One more than it was asked for.' },
+    ],
+  });
+
+  const phrasing = (body: unknown) => request(app).post('/api/ai/draft-phrasing').send(body as object);
+
+  it('rephrases a bullet that exists', async () => {
+    serve(FIVE_BACK);
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline' }).expect(200);
+    expect(res.body.executed).toBe(true);
+    expect(res.body.variants[0].text).toBe('Built a Kafka pipeline.');
+  });
+
+  it('never comes back with more than five', async () => {
+    // Six were offered. A picker with a dozen wordings in it is a picker
+    // nobody uses, and this is the only route that can add several at once.
+    serve(FIVE_BACK);
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline' }).expect(200);
+    expect(res.body.variants).toHaveLength(5);
+  });
+
+  it('is given the wording it is meant to be rephrasing', async () => {
+    // With AI off the prompt comes back unexecuted, which is also how the
+    // editor offers to let you paste it into a chat of your own. It has to
+    // carry the line, or the model is inventing rather than rephrasing.
+    t = makeTempStore();
+    app = express();
+    app.use(express.json());
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline' }).expect(200);
+    expect(res.body.executed).toBe(false);
+    expect(res.body.prompt).toContain('Built a pipeline handling');
+    // And the other wordings of the same line, so it does not propose one of them back.
+    expect(res.body.prompt).toContain('Kafka');
+  });
+
+  it('refuses when neither a bullet nor a heading field is named', async () => {
+    serve(FIVE_BACK);
+    const res = await phrasing({ entryId: 'exp_acme' }).expect(400);
+    expect(res.body.error).toMatch(/bullet or a heading field/i);
+  });
+
+  it('refuses when both are named, rather than quietly picking one', async () => {
+    serve(FIVE_BACK);
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline', fieldName: 'title' }).expect(400);
+    expect(res.body.error).toMatch(/not both/i);
+  });
+
+  it('refuses without an entry to work in', async () => {
+    serve(FIVE_BACK);
+    const res = await phrasing({ bulletId: 'b_pipeline' }).expect(400);
+    expect(res.body.error).toMatch(/which line/i);
+  });
+
+  it('says so when the entry is not in the store', async () => {
+    serve(FIVE_BACK);
+    const res = await phrasing({ entryId: 'exp_ghost', bulletId: 'b_pipeline' }).expect(400);
+    expect(res.body.error).toMatch(/exp_ghost/);
+  });
+
+  it('says so when the line has gone since the page was drawn', async () => {
+    serve(FIVE_BACK);
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_gone' }).expect(400);
+    expect(res.body.error).toMatch(/not in the store any more/i);
+  });
+
+  it('rephrases a heading field, which may be a plain string', async () => {
+    // `dates` on the sample experience entry is a bare string rather than a
+    // field with alternates — the shape most entries start in.
+    serve(JSON.stringify({ variants: [{ label: 'Spelled out', text: 'July 2024 -- December 2024' }] }));
+    const res = await phrasing({ entryId: 'exp_acme', fieldName: 'dates' }).expect(200);
+    expect(res.body.variants).toHaveLength(1);
+  });
+
+  it('drops a wording with nothing in it, and names one that came unlabelled', async () => {
+    serve(
+      JSON.stringify({
+        variants: [{ label: 'Blank', text: '  ' }, { text: 'Built the pipeline that moves the events.' }],
+      }),
+    );
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline' }).expect(200);
+    expect(res.body.variants).toHaveLength(1);
+    expect(res.body.variants[0].label).toBe('Built the pipeline that');
+  });
+
+  it('says so when the reply cannot be read', async () => {
+    serve('Here are some thoughts about your bullet point.');
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline' }).expect(400);
+    expect(res.body.error).toMatch(/did not return wordings/i);
+  });
+
+  it('says so when the reply is readable but empty', async () => {
+    serve(JSON.stringify({ variants: [] }));
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline' }).expect(400);
+    expect(res.body.error).toMatch(/nothing usable/i);
+  });
+});
