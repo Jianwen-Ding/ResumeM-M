@@ -1689,12 +1689,31 @@ function entryBlock(entry, section, choices) {
   if (plainFields.length > 0) {
     const meta = el('div', { className: 'meta-row' });
     for (const f of plainFields) {
+      /*
+       * Dates are edited as dates, and everything else as text.
+       *
+       * The exception is a date nothing could read — "Various", "Two
+       * semesters". Replacing that with two blank month-and-year boxes would
+       * throw away what the person wrote in order to offer them a control they
+       * did not ask for, so it keeps the text box and says why it is not being
+       * sorted, which is the only consequence.
+       */
+      const asDate = f.name === 'dates' && Boolean(entry.period);
       const row = el('span', { className: 'meta-item' }, [
         el('span', { className: 'meta-label', textContent: FIELD_LABELS[f.name] }),
-        editableLine(f.text, {
-          className: 'meta-value',
-          onCommit: (text) => savePlainField(entry, f.name, text),
-        }),
+        asDate
+          ? dateEditor(entry)
+          : editableLine(f.text, {
+              className: 'meta-value',
+              onCommit: (text) => savePlainField(entry, f.name, text),
+            }),
+        f.name === 'dates' && !entry.period
+          ? el('span', {
+              className: 'chip',
+              textContent: 'not a date',
+              title: 'Nothing here could be read as a date, so this entry keeps its place by hand instead of being sorted.',
+            })
+          : null,
         phraseFeedbackButton(entry, { fieldName: f.name }),
         el('button', {
           className: 'link meta-add',
@@ -1702,7 +1721,7 @@ function entryBlock(entry, section, choices) {
           title: `Give ${FIELD_LABELS[f.name] ?? f.name} a second option — a different graduation date, say`,
           onclick: () => addFieldAlternate(entry, f.name),
         }),
-      ]);
+      ].filter(Boolean));
       meta.append(attachSourceTools(row, `${entry.id}.${f.name}`,
         [...row.querySelectorAll('button')], row, 'field'));
     }
@@ -2925,6 +2944,144 @@ async function saveFieldText(entry, name, variantId, text) {
 }
 
 /** And for a field that is a plain string rather than a set of alternates. */
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+/**
+ * The date on an entry, edited as a date.
+ *
+ * It was a text box holding "Jul. 2024 -- Dec. 2024", which is the thing a
+ * person has to get exactly right for the program to be able to sort by it —
+ * and which the program then could not check, because any string is a valid
+ * string. Two ends, a month and a year each, and the two switches that cover
+ * everything else a resume date says.
+ *
+ * The month may be left blank: "2024" is a perfectly good date for a project,
+ * and a control that forced a month onto it would be inventing precision the
+ * person does not have. A blank month means the year as a whole, which is what
+ * the model has always meant by a period with no month.
+ *
+ * The words that print are the server's business, not this control's: it sends
+ * the period and the server renders the text in the style the rest of the
+ * store already uses. That is why there is one implementation of the
+ * formatting rather than two, and why nothing is respelt unless the date
+ * itself moved.
+ */
+function dateEditor(entry) {
+  const period = entry.period ? structuredClone(entry.period) : {};
+  const wrap = el('div', { className: 'dates' });
+
+  const commit = () => {
+    const next = { ...period };
+    // A start is what makes a date a date. Without one there is nothing to
+    // record, and the text is left exactly as it was.
+    if (!next.start?.year) return;
+    if (next.ongoing) delete next.end;
+    if (!next.end?.year) delete next.end;
+    saveEntryPeriod(entry, next);
+  };
+
+  /** One end of the range: a month that may be blank, and a year. */
+  const end = (which, label) => {
+    const value = () => period[which] ?? {};
+    const month = el('select', { className: 'date-month', title: `${label} month, or blank for the whole year` });
+    month.append(el('option', { value: '', textContent: '—' }));
+    for (const [i, name] of MONTHS.entries()) {
+      month.append(el('option', { value: String(i + 1), textContent: name.slice(0, 3), selected: value().month === i + 1 }));
+    }
+    month.onchange = () => {
+      const n = Number(month.value);
+      const now = { ...value() };
+      if (n) now.month = n;
+      else delete now.month;
+      period[which] = now;
+      commit();
+    };
+
+    const year = el('input', {
+      className: 'date-year',
+      type: 'number',
+      min: '1900',
+      max: '2100',
+      step: '1',
+      placeholder: 'Year',
+      value: value().year ? String(value().year) : '',
+      title: `${label} year`,
+    });
+    year.onchange = () => {
+      const n = Number(year.value);
+      if (n >= 1900 && n <= 2100) period[which] = { ...value(), year: n };
+      else delete period[which];
+      commit();
+    };
+
+    return el('span', { className: 'date-end' }, [
+      el('span', { className: 'date-label', textContent: label }),
+      month,
+      year,
+    ]);
+  };
+
+  const switches = el('span', { className: 'date-switches' }, [
+    labelled('Still going', Boolean(period.ongoing), (on) => {
+      period.ongoing = on;
+      if (on) delete period.end;
+      // `commit` saves, and the save redraws; calling renderEditor here as
+      // well drew the row twice and the second one won, from stale state.
+      commit();
+    }, 'No end date yet — prints as "Present". Works the same on a project as on a job.'),
+    labelled('Not yet', Boolean(period.expected), (on) => {
+      period.expected = on;
+      commit();
+    }, 'A date still to come, such as a graduation — prints as "Expected"'),
+  ]);
+
+  wrap.append(end('start', 'From'));
+  if (!period.ongoing) wrap.append(end('end', 'to'));
+  wrap.append(switches);
+  return wrap;
+}
+
+/** A checkbox with its words, which is two elements every single time. */
+function labelled(text, on, onChange, title) {
+  const box = el('input', { type: 'checkbox', checked: on });
+  box.onchange = () => onChange(box.checked);
+  return el('label', { className: 'date-switch', title: title ?? '' }, [box, el('span', { textContent: text })]);
+}
+
+/**
+ * Save the date, and let the server decide what it should say.
+ *
+ * The entry goes up carrying its period; `withDatesFrom` on the other side
+ * renders the text from it, in the style the rest of this store writes dates
+ * in, and only when the period actually disagrees with what the text already
+ * says. So editing a date rewrites that one date, and editing anything else
+ * leaves every date in the store spelt exactly as its author spelt it.
+ */
+async function saveEntryPeriod(entry, period) {
+  /*
+   * On screen first, then on disk.
+   *
+   * `saveEntry` redraws when it returns, from the store the client is holding
+   * — and that copy has not heard about this change yet, so the redraw put the
+   * old date straight back. Ticking "Still going" left the far end sitting
+   * there, filled in, on an entry that no longer had one.
+   */
+  const held = state.store?.entries?.find((e) => e.id === entry.id);
+  if (held) held.period = period;
+  await saveEntry({ ...entry, period }, 'Dates updated');
+  /*
+   * And then from the store, because the server has the last word on this
+   * one: it renders the printed text from the period, in the style the rest
+   * of the save uses, so the words on screen after an edit are the words that
+   * will be on the page. The optimistic update above is what keeps the
+   * control from flickering back to the old date in the meantime.
+   */
+  await loadStore();
+  render();
+  scheduleRender();
+}
+
 async function savePlainField(entry, name, text) {
   await saveEntry({ ...entry, [name]: undisplay(text) }, `${FIELD_LABELS[name] ?? name} updated`);
   scheduleRender();

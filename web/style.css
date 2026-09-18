@@ -1646,3 +1646,39 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   color: var(--muted);
 }
 .order-by:hover, .order-by:focus-visible { color: var(--fg); border-color: var(--line-strong, var(--line)); }
+
+/* ------------------------------------------------------------------ *
+ * Dates, edited as dates                                              *
+ * ------------------------------------------------------------------ */
+
+/*
+ * Two ends and two switches, on one line beside the other heading fields. The
+ * month may be left blank, which is what "2024" means for a project — a
+ * control that forced a month onto it would be inventing precision nobody has.
+ */
+.dates { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.date-end { display: inline-flex; align-items: center; gap: 4px; }
+.date-label { color: var(--muted); font-size: var(--t-sm); }
+.date-month {
+  font-size: var(--t-sm);
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.date-year {
+  width: 5.5ch;
+  font-size: var(--t-sm);
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+/* The spinner is noise on a year, and it makes the box wider than the number. */
+.date-year::-webkit-outer-spin-button,
+.date-year::-webkit-inner-spin-button { appearance: none; margin: 0; }
+.date-year { appearance: textfield; -moz-appearance: textfield; }
+
+.date-switches { display: inline-flex; align-items: center; gap: 10px; }
+.date-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--t-sm); cursor: pointer; }
+.date-switch:hover { color: var(--fg); }
