@@ -147,11 +147,15 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
   }
 
   const pdfFile = path.join(dir, 'resume.pdf');
-  if (!fs.existsSync(pdfFile)) {
+  // Zero bytes counts as no PDF. A document with nothing in it makes the
+  // engine report "No pages of output" and exit cleanly, leaving an empty
+  // file; waving that through hands the caller a buffer it will write out and
+  // attach to an application. See the same guard in fastCompile.ts.
+  if (!fs.existsSync(pdfFile) || fs.statSync(pdfFile).size === 0) {
     const logFile = path.join(dir, 'resume.log');
     const fileLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : log;
     fs.rmSync(dir, { recursive: true, force: true });
-    throw new LatexError(`${engine} produced no PDF: ${firstTexError(fileLog) ?? 'see log'}`, tail(fileLog));
+    throw new LatexError(`${engine} produced no PDF: ${firstTexError(fileLog) ?? 'no pages of output'}`, tail(fileLog));
   }
 
   const auxFile = path.join(dir, 'resume.aux');
