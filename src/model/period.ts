@@ -102,11 +102,20 @@ const PRESENT = /^(present|current|currently|now|ongoing|to date|date)$/i;
 const EXPECTED = /\b(expected|anticipated|projected)\b:?/i;
 
 /*
- * Every separator seen in the wild, longest first so ` -- ` is not read as a
- * hyphen with a stray dash beside it. A bare `-` is last because it also turns
- * up inside `2024-07`, which the month parser needs first.
+ * Every separator seen in the wild, strictly longest first so ` -- ` is not
+ * read as a hyphen with a stray dash beside it. A bare `-` is last because it
+ * also turns up inside `2024-07`, which the month parser needs first.
+ *
+ * "Strictly" is the part that was only a claim. ' – ' sat after '–', so a
+ * store writing "July 2024 – December 2024" matched the bare dash, recorded a
+ * separator with no spaces around it, and got "July 2024–March 2025" back the
+ * next time one of its dates moved — the em dash the same. Spaced dashes are
+ * an ordinary way to write a range, and this quietly closed them up.
  */
-const RANGE_SEPARATORS = [' -- ', ' --- ', '--', '—', ' — ', '–', ' – ', ' to ', ' until ', ' through ', ' - ', '-'];
+const RANGE_SEPARATORS = [
+  ' --- ', ' -- ', ' — ', ' – ', ' to ', ' until ', ' through ', ' - ',
+  '---', '--', '—', '–', '-',
+];
 
 /** The `(expected)` that people write after the date instead of before it. */
 const TRAILING_EXPECTED = /\s*\((expected|anticipated|projected)\)\s*$/i;
