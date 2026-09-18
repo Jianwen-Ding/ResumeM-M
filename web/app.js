@@ -6194,9 +6194,36 @@ async function loadSettings() {
   const modelChips = el('div', { className: 'chip-set model-chips' });
   const modelOther = el('div', { className: 'model-other', hidden: true }, [model]);
   const typedModel = () => model.value.trim();
+
+  /*
+   * What the chosen command says it takes, asked of the command itself.
+   *
+   * The written suggestions go stale, and had: the Claude CLI documents
+   * `fable`, `opus` and `sonnet` while the list in the source said `opus`,
+   * `sonnet`, `haiku`. So the buttons are built from the server's answer,
+   * which puts the question to the command that is actually configured — a
+   * path to a particular build gets that build's answer — and which falls back
+   * to the written list whenever the command cannot be asked. Nothing here can
+   * leave the picker empty.
+   *
+   * Held per command for as long as the panel is open, because the chips are
+   * redrawn on every keystroke in the command box and the answer does not
+   * change between two of them.
+   */
+  const fromCli = new Map();
+  const askAboutModels = async (cmd) => {
+    if (!cmd || fromCli.has(cmd)) return;
+    fromCli.set(cmd, null); // in flight, so a keystroke does not ask twice
+    const answer = await api(`/ai/models?command=${encodeURIComponent(cmd)}`).catch(() => null);
+    fromCli.set(cmd, answer);
+    if (command.value.trim() === cmd) showModelChips();
+  };
+
   const showModelChips = () => {
     const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
-    const names = chosen?.model?.suggestions ?? [];
+    const said = fromCli.get(command.value.trim());
+    if (said === undefined) void askAboutModels(command.value.trim());
+    const names = said?.models?.length ? said.models : (chosen?.model?.suggestions ?? []);
     const listed = names.includes(typedModel());
     // Nothing to choose between: the box is the only control that makes sense.
     modelChips.hidden = names.length === 0;

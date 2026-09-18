@@ -22,6 +22,7 @@ import {
   tailorPrompt,
   type TailorContext,
 } from '../ai/prompts.js';
+import { listModels } from '../ai/models.js';
 import { AI_PRESETS, AI_TASKS, configForTask } from '../ai/presets.js';
 import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
 import { readState } from '../mcp/main.js';
@@ -684,6 +685,27 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * and not the other is how a config ends up broken.
    */
   api.get('/ai/presets', handler(async (_req, res) => res.json({ presets: AI_PRESETS, tasks: AI_TASKS })));
+
+  /**
+   * What this command says it takes, rather than what this file remembers.
+   *
+   * A hand-written list of models is stale the week after it is written, and
+   * the one in `presets.ts` already was: the Claude CLI documents `fable`,
+   * `opus` and `sonnet`, and the list said `opus`, `sonnet`, `haiku`.
+   *
+   * Asked of the command the settings are actually pointed at, not of the
+   * preset's default name, because somebody who has typed a path to a
+   * particular build wants that build's answer. Falls back to the written
+   * suggestions whenever the command cannot be asked, which is what was shown
+   * before this existed — so nothing here can leave the picker empty.
+   */
+  api.get(
+    '/ai/models',
+    handler(async (req, res) => {
+      const command = String(req.query.command ?? '') || store.loadConfig().ai.command;
+      res.json(await listModels(command));
+    }),
+  );
 
   api.put(
     '/config',
