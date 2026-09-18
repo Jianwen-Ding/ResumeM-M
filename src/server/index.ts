@@ -210,9 +210,35 @@ export async function startServer(opts: ServerOptions = {}) {
       res.json({ defaultFolder: readProjects(preferencesFile).defaultFolder });
     } catch (error) { res.status(400).json({ error: (error as Error).message }); }
   });
+  /*
+   * A write meant for a save that is no longer open.
+   *
+   * This has always guarded the editor, whose two windows can disagree about
+   * which save is open. The browser extension never sent the header, and it
+   * is the caller that most needs it: an application takes pages and minutes
+   * to write, and the editor can be pointed at another save meanwhile. Filing
+   * it then wrote the application into whichever save happened to be open,
+   * saved its tailored resume there, and typeset the PDFs from that save's
+   * profile and wordings — a 200, files that were not the ones on screen, and
+   * a row in somebody else's tracker. `/extension/analyze` hands the save
+   * back now, and the extension says which one it means.
+   *
+   * So the refusal names both, because by this point the two readers of it
+   * are a window that should reload and an application that should be filed
+   * somewhere else.
+   */
   app.use('/api', (req, res, next) => {
-    if (req.headers['x-rmm-project'] && req.headers['x-rmm-project'] !== active?.store.root) {
-      res.status(409).json({ error: 'The active save changed in another window. Reload before saving.' }); return;
+    const meant = req.headers['x-rmm-project'];
+    if (typeof meant === 'string' && meant && meant !== active?.store.root) {
+      res.status(409).json({
+        kind: 'other-save',
+        save: active?.store.root ?? null,
+        error: active
+          ? `ResumeM-M has "${path.basename(active.store.root)}" open now, and this was written against ` +
+            `"${path.basename(meant)}". Reload the editor, or open that save again, before saving.`
+          : `No save is open in ResumeM-M. This was written against "${path.basename(meant)}" — open it again before saving.`,
+      });
+      return;
     }
     if (switching) { res.status(409).json({ error: 'The save is changing. Try again in a moment.' }); return; }
     next();

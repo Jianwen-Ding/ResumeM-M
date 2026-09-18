@@ -74,6 +74,65 @@ describe('project folders', () => {
       expect(await fetch(`${base}/api/store`).then(r => r.json())).toMatchObject({ profile: { name: 'Test Person' } });
     } finally { await server.close(); }
   });
+  /*
+   * The same guard, for the caller that most needs it.
+   *
+   * The browser extension holds an application for as long as it takes to
+   * write one, and the editor can be pointed at another save meanwhile.
+   * Nothing was sent, so nothing was checked: filing the application wrote it
+   * into whichever save happened to be open, saved its tailored resume there,
+   * and typeset the PDFs from that save's profile and wordings — answering
+   * 200, with files that were not the ones on screen.
+   */
+  it('tells the extension which save a proposal came from, and refuses one meant for another', async () => {
+    const { t, dir, dest } = setup();
+    const server = await startServer({ port: 0, dataDir: t.dir, preferencesFile: path.join(dir, 'prefs.json') });
+    const base = `http://127.0.0.1:${server.port}`;
+    const post = (path: string, body: unknown, save?: string) =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(save ? { 'X-RMM-Project': save } : {}) },
+        body: JSON.stringify(body),
+      });
+
+    try {
+      const analysis = await post('/api/extension/analyze', {
+        url: 'http://example.test/jobs/1',
+        title: 'Platform Engineer at Helios',
+        html:
+          '<html><body><h1>Platform Engineer</h1><p>Kafka and Kubernetes. Responsibilities include streaming ' +
+          'infrastructure. Minimum qualifications: distributed systems. Equal opportunity employer.</p></body></html>',
+        tailor: 'match',
+      }).then((r) => r.json());
+      // Which save this proposal was built from — the base resume, the
+      // wordings and the profile all came from it.
+      expect(analysis.save).toBe(t.dir);
+
+      await fetch(`${base}/api/projects/switch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir: dest, mode: 'create' }),
+      });
+
+      const refused = await post(
+        '/api/workspace',
+        { company: 'Helios', role: 'Platform Engineer', spec: analysis.spec, resumeId: analysis.spec.id },
+        analysis.save,
+      );
+      expect(refused.status).toBe(409);
+      const said = await refused.json();
+      expect(said.kind).toBe('other-save');
+      // Both of them, because the reader has to know which is which.
+      expect(said.error).toContain(path.basename(dest));
+      expect(said.error).toContain(path.basename(t.dir));
+
+      // And nothing of this application landed in the save that is open.
+      expect(await fetch(`${base}/api/workspace`).then((r) => r.json())).toMatchObject({ drafts: [] });
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
+
   it('serves retained originals and blocks project changes until an import finishes', async () => {
     const { t, dir, dest } = setup();
     t.store.saveConfig({ ai: { ...t.store.loadConfig().ai, enabled: true } });

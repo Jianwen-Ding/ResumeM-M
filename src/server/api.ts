@@ -1705,6 +1705,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * `isJobPosting: true`, and the card appeared on all three.
          */
         isJobPosting: anyPageIsAJob,
+        /*
+         * Which save this proposal was built from.
+         *
+         * Everything below — the base resume, the wordings, the profile the
+         * PDF is typeset with — belongs to one save, and a person can open
+         * another one in the editor while an application is open in the
+         * browser. The extension sends this back when it files the
+         * application, and the server refuses it if the answer has changed.
+         * See the `x-rmm-project` check where saves are switched.
+         */
+        save: store.root,
         score,
         kind: verdict.kind,
         why: verdict.why,
