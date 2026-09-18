@@ -6501,6 +6501,26 @@ async function applyHash() {
     return true;
   }
 
+  /*
+   * `#applications/<id>` opens the tracker on one application.
+   *
+   * The card in the browser can now say "you applied to this on the twelfth of
+   * March" while you are standing on the posting, and the honest next question
+   * is "what did I send them?". Without a way through, the answer is: open the
+   * editor, find the tracker, and scroll back through everything since March.
+   */
+  const tracked = /^#applications\/(.+)$/.exec(location.hash);
+  if (tracked) {
+    // Set before the tab is shown, because showing it loads the list and the
+    // row marks itself as the selected one while it renders. Done afterwards,
+    // the link opened the right record beside a table with nothing
+    // highlighted in it, and nothing on screen connected the two.
+    openApplicationId = decodeURIComponent(tracked[1]);
+    showTab('applications');
+    await openApplication(openApplicationId).catch(() => undefined);
+    return true;
+  }
+
   // A bare `#voice` or `#applications` opens that tab. The extension links
   // here when it needs to send someone to a setting, and a link that lands on
   // the wrong tab is worse than no link.
