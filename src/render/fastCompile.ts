@@ -33,7 +33,19 @@ const run = promisify(execFile);
  * application.
  */
 
-const CACHE_DIR = path.join(os.tmpdir(), 'rmm-fmt-cache');
+/**
+ * Where the dumped formats live. One is about 7MB, and there is one per
+ * distinct layout, so this is worth being able to move: `RMM_FMT_CACHE` puts
+ * it somewhere with room, or somewhere that survives a reboot, or — for a test
+ * that wants to watch a cold build without racing every other process on the
+ * machine for the same files — somewhere of its own.
+ *
+ * Read on each call rather than captured at import, so setting the variable
+ * after this module is loaded still works.
+ */
+function cacheDir(): string {
+  return process.env.RMM_FMT_CACHE || path.join(os.tmpdir(), 'rmm-fmt-cache');
+}
 
 let available: boolean | undefined;
 
@@ -108,10 +120,11 @@ async function buildFormat(
   preambleText: string,
   key: string,
 ): Promise<CachedFormat> {
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  const into = cacheDir();
+  fs.mkdirSync(into, { recursive: true });
 
   const jobname = `rmm-${paper}-${key}`;
-  const fmtPath = path.join(CACHE_DIR, `${jobname}.fmt`);
+  const fmtPath = path.join(into, `${jobname}.fmt`);
 
   if (fs.existsSync(fmtPath)) return { path: fmtPath };
 
@@ -171,27 +184,33 @@ export async function compileFastBody(
   const texFile = path.join(dir, 'resume.tex');
 
   /*
-   * `\endofdump` first, or the layout is silently discarded.
+   * `\endofdump` first, so a body's own preamble is executed rather than eaten.
    *
    * A document run against a `mylatexformat` format does not simply begin: the
    * format scans the file line by line and throws away everything before
    * `\begin{document}` or `\endofdump`, because that is how it skips the
-   * preamble it has already compiled. The fast bodies put `runtimeSetup` — font
-   * size, `\rmmunit`, margins, text width, text height — above
-   * `\begin{document}`, so every one of those settings was dropped and the
-   * preview was typeset at the article class defaults.
+   * preamble it has already compiled. `\endofdump` tells it to stop skipping
+   * and start executing here.
    *
-   * It was not a cosmetic difference. The preview measured a different page
-   * from the one it displayed, in both directions: a resume that really ran to
-   * two pages came back `fits: true, "room for about 1 more line"`, and one
-   * that fitted with 240pt to spare came back "about 7 lines too long" with a
-   * list of shrinking steps that had never been applied. The one-page
-   * guarantee is the whole point of the tool, and the badge above the preview
-   * was reporting on a document nobody was looking at.
+   * Today both fast bodies open on `\begin{document}` and the layout travels
+   * in the format, so there is nothing above that line for the format to throw
+   * away. This is the guard for the day that stops being true. When it was not
+   * true — when the bodies still carried `runtimeSetup` — the cost was not
+   * cosmetic: every setting was dropped, the preview was typeset at the
+   * article class defaults, and the fit badge reported on a page nobody was
+   * looking at. A resume that really ran to two pages came back `fits: true,
+   * "room for about 1 more line"`, and one that fitted with 240pt to spare
+   * came back "about 7 lines too long" with a list of shrinking steps that had
+   * never been applied to anything. Fitting on one page is the whole promise
+   * of the tool, so a setting that vanishes without a word is the worst shape
+   * a bug here can take.
    *
-   * `\endofdump` tells the format to stop skipping and start executing here.
+   * The backslash is doubled because it is not one in a template literal:
+   * JavaScript drops the backslash from an escape it does not recognise, and
+   * `\e` is not one, so the single-backslash version of this line wrote the
+   * bare word `endofdump` and the guard was never armed.
    */
-  fs.writeFileSync(texFile, `\endofdump
+  fs.writeFileSync(texFile, `\\endofdump
 ${body}`, 'utf8');
 
   try {
@@ -214,10 +233,18 @@ ${body}`, 'utf8');
   const pdfFile = path.join(dir, 'resume.pdf');
   const auxFile = path.join(dir, 'resume.aux');
   const logFile = path.join(dir, 'resume.log');
-  if (!fs.existsSync(pdfFile)) {
+  // Existing is not the same as usable. A document with nothing in it —
+  // `\begin{document}` straight to `\end{document}` — makes pdftex report "No
+  // pages of output" and *succeed*, leaving a zero-byte resume.pdf behind. An
+  // existsSync on its own waves that through, and a caller that trusts it
+  // hands the preview an empty buffer: a blank viewer with no error to
+  // explain it. Neither renderer can currently produce a body that empty, so
+  // this is a guard rather than a fix, and it belongs here because the
+  // failure it prevents is silent.
+  if (!fs.existsSync(pdfFile) || fs.statSync(pdfFile).size === 0) {
     const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
     fs.rmSync(dir, { recursive: true, force: true });
-    throw new Error(`fast preview compile produced no PDF: ${firstTexError(log) ?? 'see log'}`);
+    throw new Error(`fast preview compile produced no PDF: ${firstTexError(log) ?? 'no pages of output'}`);
   }
 
   const result: RawCompile = {

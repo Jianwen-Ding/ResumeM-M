@@ -370,6 +370,56 @@ function slug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
 }
 
+/**
+ * A bullet id nothing else in the store is using.
+ *
+ * Unique across the whole store, not just the entry it is going into. A chosen
+ * wording is recorded as `choices[bulletId]` with no entry beside it, so two
+ * lines sharing an id share one choice: picking a wording on one silently
+ * changes the other wherever it has a wording by the same name, and two lines
+ * minted from the same title usually do.
+ *
+ * Two roles at the same company was enough. `addEntry` named the first line
+ * after the title and nothing else — "Acme Co." twice gave `b_acme-co_1`
+ * twice — and the check it did run looked only inside the entry being added
+ * to, which is the one place a collision cannot come from. The drafted-entry
+ * path names its lines the same way.
+ */
+function freeBulletId(base) {
+  return unusedId(base, (state.store?.entries ?? []).flatMap((e) => (e.bullets ?? []).map((b) => b.id)));
+}
+
+/**
+ * A skills group id nothing else is using.
+ *
+ * Worse than a line if it collides. A section lists groups by id and the
+ * lookup takes the first match, so two groups named "Languages" print the
+ * first one twice and the second one never, and choosing which of its items
+ * to show edits the wrong group. Nothing said so — the group you just made
+ * simply did not appear.
+ */
+function freeSkillGroupId(groups, base) {
+  return unusedId(base, (groups ?? []).map((g) => g.id));
+}
+
+/**
+ * A skills item id nothing in its own group is using.
+ *
+ * Scoped to the group, which is the scope that matters: a resume records the
+ * items it wants as `items[groupId]`. Two items with one id in a group left
+ * the second unselectable, and removing either removed both.
+ */
+function freeSkillItemId(group, base) {
+  return unusedId(base, (group?.items ?? []).map((i) => i.id));
+}
+
+function unusedId(base, taken) {
+  const used = new Set(taken);
+  let id = base;
+  for (let n = 2; used.has(id); n++) id = `${base}_${n}`;
+  return id;
+}
+
 /* ------------------------------------------------------------------ *
  * Spec helpers                                                        *
  * ------------------------------------------------------------------ */
@@ -869,7 +919,9 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
   // Order matters: status chips, then the two things you do most (edit the
   // wording, add another), then the incidental actions.
   const actions = el('div', { className: 'actions' });
-  for (const a of extraActions) actions.append(a);
+  // Filtered here rather than at each call site: `append(null)` puts the
+  // string "null" on the screen, which is a strange thing to discover.
+  for (const a of extraActions) if (a) actions.append(a);
   if (field.variants.length > 1) actions.append(pinControl(key, field, current));
   if (choose) actions.append(choose);
   if (onEdit) {
@@ -892,7 +944,7 @@ function variantPicker({ key, field, current, onAdd, onEdit, addLabel = '+ alter
       }),
     );
   }
-  for (const a of trailingActions) actions.append(a);
+  for (const a of trailingActions) if (a) actions.append(a);
 
   return el('div', { className: 'variant-row' }, [el('span', { className: 'grow' }), actions]);
 }
@@ -1312,13 +1364,27 @@ function bulletBlock(entry, section, bullet, choices) {
       ].filter(Boolean),
       trailingActions: [
         aiButton({ label: 'Compare Phrasings', title: 'Ask which of these wordings is strongest, and why', onclick: () => askBulletFeedback(entry, bullet) }),
+        /*
+         * Deleting the wording you are looking at, beside deleting the line
+         * it belongs to. Only where there is more than one: with a single
+         * wording the two actions would mean the same thing and sit next to
+         * each other saying different words.
+         */
+        bullet.variants.length > 1 && chosen
+          ? el('button', {
+              className: 'tiny danger',
+              textContent: 'Delete phrasing',
+              title: 'Delete this one wording, and keep the line',
+              onclick: () => removeBulletVariant(entry, bullet, chosen),
+            })
+          : null,
         el('button', {
           className: 'tiny danger',
           textContent: 'Remove',
           title: 'Delete this bullet from the save',
           onclick: () => removeBullet(entry, bullet),
         }),
-      ],
+      ].filter(Boolean),
     }),
   );
 
@@ -2700,7 +2766,7 @@ async function readMaterial(notes) {
           ...(entry.dates ? { dates: entry.dates } : {}),
           ...(entry.location ? { location: entry.location } : {}),
           bullets: (entry.bullets ?? []).map((b, i) => ({
-            id: `${id}_b${i + 1}`,
+            id: freeBulletId(`${id}_b${i + 1}`),
             default: 'v_read',
             variants: [{ id: 'v_read', label: b.label || 'From your material', text: b.text, suggested: true }],
           })),
@@ -2826,12 +2892,16 @@ async function reviewDraftedEntry(entry, repo, kind) {
   if (!accepted) return;
 
   // Ids are assigned by the server, but the store is the client's to keep
-  // unique — another entry may have been added since.
+  // unique — another entry may have been added since. The lines need the same
+  // treatment as the entry: the server names them after the title, and a
+  // second draft about the same company would otherwise carry the first's
+  // line ids, which is one shared chosen wording between two unrelated lines.
   let id = entry.id;
   for (let n = 2; state.store.entries.some((e) => e.id === id); n++) id = `${entry.id}_${n}`;
+  const bullets = (entry.bullets ?? []).map((b) => ({ ...b, id: freeBulletId(b.id) }));
 
   describeNext(`drafting "${entry.title}"`);
-  await saveEntry({ ...entry, id, kind: entry.kind ?? kind }, `Added "${entry.title}"`);
+  await saveEntry({ ...entry, id, kind: entry.kind ?? kind, bullets }, `Added "${entry.title}"`);
   setStatus(`Added "${entry.title}" — every wording is unreviewed`);
 }
 
@@ -2861,7 +2931,7 @@ async function addEntry(kind) {
     ...(answer.location?.trim() ? { location: answer.location.trim() } : {}),
     ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
     bullets: answer.bullet?.trim()
-      ? [{ id: `b_${slug(answer.title)}_1`, default: 'v_base', variants: [{ id: 'v_base', label: 'Base', text: answer.bullet.trim() }] }]
+      ? [{ id: freeBulletId(`b_${slug(answer.title)}_1`), default: 'v_base', variants: [{ id: 'v_base', label: 'Base', text: answer.bullet.trim() }] }]
       : [],
   };
 
@@ -2961,10 +3031,7 @@ async function addBullet(entry) {
   ], 'Markup: **bold**, *italic*, `code`.');
   if (!answer?.text?.trim()) return;
 
-  let id = `b_${slug(entry.id).replace(/^(exp|edu|proj)_/, '')}_${(entry.bullets?.length ?? 0) + 1}`;
-  const taken = new Set((entry.bullets ?? []).map((b) => b.id));
-  let n = 2;
-  while (taken.has(id)) id = `${id}_${n++}`;
+  const id = freeBulletId(`b_${slug(entry.id).replace(/^(exp|edu|proj)_/, '')}_${(entry.bullets?.length ?? 0) + 1}`);
 
   const next = {
     ...entry,
@@ -3417,6 +3484,71 @@ async function editVariant(entry, bullet, variant) {
 }
 
 /**
+ * Take one wording of a line out of the save.
+ *
+ * The one thing here that only ever grew. Every other way of saying a line is
+ * added — by hand, by "+ phrasing", and most of all by the AI, which is asked
+ * for alternates a few at a time and never asked to take one back — and
+ * nothing removed one. A line with nine wordings, six of them from a model
+ * and two of them nearly the same sentence, is a picker nobody can use.
+ *
+ * Deleted rather than archived, and committed, which is the answer to "what
+ * if I wanted it": the version history has it, the same as it has a deleted
+ * entry. Archiving would keep the file growing and put the retired wordings
+ * somewhere the editor then has to show.
+ *
+ * The last one cannot go. A bullet is its wordings — an empty variant set is
+ * a line with no text, which every reader of it would have to special-case,
+ * and "delete the line" is what that action already is.
+ */
+async function removeBulletVariant(entry, bullet, variant) {
+  if (bullet.variants.length < 2) {
+    setStatus('A line needs at least one wording — delete the line itself instead', true);
+    return;
+  }
+  const left = bullet.variants.length - 1;
+  const ok = await confirmModal(
+    `Delete “${String(variant.text).slice(0, 60)}${String(variant.text).length > 60 ? '…' : ''}”?`,
+    `This wording is removed from the save. The line keeps its other ${plural(left, 'phrasing')}.`,
+  );
+  if (!ok) return;
+
+  const remaining = bullet.variants.filter((v) => v.id !== variant.id);
+  const next = {
+    ...entry,
+    bullets: entry.bullets.map((b) =>
+      b.id !== bullet.id
+        ? b
+        : {
+            ...b,
+            variants: remaining,
+            /*
+             * Something has to be the default. Removing the pinned wording
+             * without moving the pin leaves `default` naming a variant that
+             * is gone, which resolves to "using default" and a warning on
+             * every build for a reason nobody would connect to this.
+             */
+            default: b.default === variant.id ? remaining[0].id : b.default,
+          },
+    ),
+  };
+  await saveEntry(next, 'Phrasing deleted');
+  /*
+   * A resume that had chosen this wording now names one that is not there.
+   * `resolveResume` says so and falls back to the default, which is the right
+   * behaviour and is already tested — but the choice is this resume's and
+   * clearing it here is what stops the warning appearing on a build the user
+   * did not cause.
+   */
+  if (state.choices[bullet.id] === variant.id) {
+    const { [bullet.id]: _gone, ...rest } = state.choices;
+    state.choices = rest;
+    markDirty();
+  }
+  scheduleRender();
+}
+
+/**
  * Give a heading field an alternate. When the field is currently a plain
  * string, this converts it into a variant set, keeping the existing text as
  * the default — the "two graduation dates" move, without touching YAML.
@@ -3561,6 +3693,44 @@ async function removeListItem(entry, bullet, item) {
 
 /* ---- Skills ---- */
 
+/**
+ * One in-flight write for the skills list, and each change built when its turn
+ * comes rather than when the button was pressed.
+ *
+ * Every skills write is a read-modify-write of the whole list: read
+ * `state.store.skillGroups`, change one thing in it, PUT all of it. The store
+ * is reloaded afterwards, and until that lands `state.store` still shows what
+ * was there before — so a second write started inside that window builds its
+ * list from the old one and puts back whatever the first had just removed.
+ *
+ * A form makes that window hard to hit. The × on a skill chip does not:
+ * deleting three skills is three clicks with nothing in between, and the way
+ * it failed was for one of them to reappear. Entries have had a lane for this
+ * reason since they were given one; this is the same lane for the one other
+ * list that is written whole.
+ *
+ * `change` is handed the groups as they stand when it runs, and returns the
+ * list to write — or nothing, to write nothing at all.
+ */
+let skillsQueue = Promise.resolve();
+
+function inSkillsLane(change) {
+  const mine = skillsQueue.then(async () => {
+    const groups = await change(state.store?.skillGroups ?? []);
+    if (!groups) return undefined;
+    const written = await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
+    // Inside the lane, so the next change in the queue builds on this one
+    // rather than on what was on screen before it.
+    await loadStore();
+    return written;
+  });
+  skillsQueue = mine.then(
+    () => {},
+    () => {},
+  );
+  return mine;
+}
+
 async function addSkill(group) {
   const answer = await form(`Add a skill to ${group.name}`, [
     { name: 'text', label: 'Skill', value: '' },
@@ -3568,35 +3738,36 @@ async function addSkill(group) {
   ], 'Tags are what the extension matches against a job posting.');
   if (!answer?.text?.trim()) return;
 
-  const groups = state.store.skillGroups.map((g) =>
-    g.id !== group.id
-      ? g
-      : {
-          ...g,
-          items: [
-            ...g.items,
-            {
-              id: `s_${slug(answer.text)}`,
-              text: answer.text.trim(),
-              ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
-            },
-          ],
-        },
+  await inSkillsLane((groups) =>
+    groups.map((g) =>
+      g.id !== group.id
+        ? g
+        : {
+            ...g,
+            items: [
+              ...g.items,
+              {
+                // Against `g`, the group as it now stands, not the copy this
+                // button was drawn from: a skill added a moment ago is in one
+                // and not the other.
+                id: freeSkillItemId(g, `s_${slug(answer.text)}`),
+                text: answer.text.trim(),
+                ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
+              },
+            ],
+          },
+    ),
   );
-  await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
   setStatus('Skill added');
-  await loadStore();
   render();
   scheduleRender();
 }
 
 async function removeSkill(group, item) {
-  const groups = state.store.skillGroups.map((g) =>
-    g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) },
+  await inSkillsLane((groups) =>
+    groups.map((g) => (g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) })),
   );
-  await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
   setStatus(`Removed ${item.text}`);
-  await loadStore();
   render();
   scheduleRender();
 }
@@ -3608,21 +3779,27 @@ async function addSkillGroup() {
   ]);
   if (!answer?.name?.trim()) return;
 
-  const id = `sk_${slug(answer.name)}`;
-  const groups = [
-    ...state.store.skillGroups,
-    {
-      id,
-      name: answer.name.trim(),
-      items: (answer.items ?? '')
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean)
-        .map((text) => ({ id: `s_${slug(text)}`, text })),
-    },
-  ];
   describeNext(`adding the group "${answer.name.trim()}"`);
-  await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
+  let id;
+  await inSkillsLane((groups) => {
+    id = freeSkillGroupId(groups, `sk_${slug(answer.name)}`);
+    return [
+      ...groups,
+      {
+        id,
+        name: answer.name.trim(),
+        // Built against what has already been taken from the same list:
+        // "Python, Go, Python" is a typo, not two skills, and letting both be
+        // `s_python` would leave the second unselectable and remove both at
+        // once.
+        items: (answer.items ?? '')
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+          .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
+      },
+    ];
+  });
 
   // The root's own sections, for the reason given in addEntry: built from the
   // flattened chain this carried the selected variation's overrides down onto
@@ -3642,10 +3819,7 @@ async function addSkillGroup() {
 
 async function removeSkillGroup(group) {
   if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the save.'))) return;
-  await api('/skills', {
-    method: 'PUT',
-    body: JSON.stringify(state.store.skillGroups.filter((g) => g.id !== group.id)),
-  });
+  await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
   const root = chain(state.resumeId)[0];
   const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
@@ -5604,6 +5778,12 @@ async function loadLetters() {
                   : null,
                 el('span', { className: 'chip count', textContent: plural(a.variants.length, 'version') }),
                 el('button', { className: 'tiny', textContent: 'Edit', onclick: () => editAnswer(a) }),
+                el('button', {
+                  className: 'tiny danger',
+                  textContent: 'Delete',
+                  title: 'Remove this question and every version of its answer from the save',
+                  onclick: () => removeAnswer(a, usedBy[a.question] ?? 0),
+                }),
               ]),
               el('div', { className: 'body', textContent: v?.text ?? '' }),
             ]);
@@ -5659,6 +5839,39 @@ async function addAnswer() {
   if (!answer?.question?.trim() || !answer?.answer?.trim()) return;
   await api('/answers/save', { method: 'POST', body: JSON.stringify(answer) });
   setStatus('Answer saved');
+  loadLetters();
+}
+
+/**
+ * Take a question, and every version of its answer, out of the bank.
+ *
+ * The other thing here that only ever grew. Every form answered adds to this,
+ * "Save for next time" adds to it, and the extension adds to it on your
+ * behalf — and nothing took anything away, so a year of applying leaves a
+ * bank whose oldest entries are questions from a job you did not take, worded
+ * for a company you have forgotten.
+ *
+ * Told how many applications used it, because that is the fact that decides
+ * this and it is not visible from the question itself. Deleting one that
+ * nothing used is housekeeping; deleting one that eleven applications used
+ * throws away the wording you have been reusing all year, and the history of
+ * those applications keeps the answer it actually sent either way.
+ */
+async function removeAnswer(item, usedIn = 0) {
+  const ok = await confirmModal(
+    `Delete “${item.question}”?`,
+    `${plural(item.variants.length, 'version')} of this answer ${item.variants.length === 1 ? 'is' : 'are'} removed from the save.` +
+      (usedIn > 0
+        ? ` ${plural(usedIn, 'application')} used it — those keep the answer they sent, but it will not be offered again.`
+        : ' Nothing has used it yet.'),
+  );
+  if (!ok) return;
+
+  // Through the whole list, which is the only way the bank is written: the
+  // endpoint refuses anything that is not a list, so a filter is the edit.
+  const answers = (await api('/store')).answers.filter((a) => a.id !== item.id);
+  await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+  setStatus(`Deleted “${item.question}”`);
   loadLetters();
 }
 

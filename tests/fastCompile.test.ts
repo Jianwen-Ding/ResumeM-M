@@ -1,6 +1,9 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { compileResume } from '../src/render/compile.js';
-import { compileFast, hasFastPath, resetFastPathCache } from '../src/render/fastCompile.js';
+import { compileFast, compileFastBody, hasFastPath, resetFastPathCache } from '../src/render/fastCompile.js';
 import { DEFAULT_LAYOUT, type ResolvedBullet, type ResolvedResume } from '../src/model/types.js';
 
 const available = await hasFastPath();
@@ -128,10 +131,181 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
   });
 });
 
+/**
+ * Watch the format cache with a cache of its own.
+ *
+ * The real one is a fixed path under the system temp directory, shared by
+ * every process on the machine — including the other vitest workers, which
+ * compile previews of their own. A test that wants to see a *cold* build has
+ * to either use a layout nothing else uses or delete what it finds, and both
+ * turn into a race: the cache key is a hash of the preamble, the preamble
+ * rounds its lengths to three decimals, so "an unusual margin" collapses onto
+ * the ordinary one and the cleanup takes out a 7MB file another worker is
+ * halfway through using. Hence `RMM_FMT_CACHE`: an empty directory per test,
+ * every build cold by construction, and nothing shared to race over.
+ */
+async function withACacheOfItsOwn<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const was = process.env.RMM_FMT_CACHE;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-fmt-test-'));
+  process.env.RMM_FMT_CACHE = dir;
+  resetFastPathCache(); // nothing built in the old cache counts towards this one
+  await hasFastPath();
+  try {
+    return await run(dir);
+  } finally {
+    if (was === undefined) delete process.env.RMM_FMT_CACHE;
+    else process.env.RMM_FMT_CACHE = was;
+    resetFastPathCache();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const formatsIn = (dir: string): string[] => (fs.existsSync(dir) ? fs.readdirSync(dir) : []);
+
+const HELLO = '\\begin{document}\nHello.\n\\end{document}\n';
+
+describe.skipIf(!available)('what the fast path does with a body it cannot use', { timeout: 120_000 }, () => {
+  it('runs a body’s own preamble instead of eating it', async () => {
+    /*
+     * A format built by mylatexformat skips everything before
+     * `\begin{document}`, because that is how it avoids recompiling the
+     * preamble it already holds. `\endofdump` is what tells it to stop
+     * skipping — and the line writing it lost its backslash to a JavaScript
+     * escape, so the marker never reached TeX and anything a body put above
+     * `\begin{document}` vanished without a word.
+     *
+     * Nothing puts settings there today; the layout travels in the format.
+     * This is here so that the day something does, it takes effect rather
+     * than disappearing. Two inches of text height is loud enough to see
+     * from the page count: skipped, this is one page.
+     */
+    const body = `\\setlength{\\textheight}{2in}
+\\begin{document}
+${Array.from({ length: 40 }, (_, i) => `Line ${i} of a body long enough to run over several pages once the text height is cut.\\par`).join('\n')}
+\\end{document}
+`;
+    const raw = await compileFastBody(body, 'letter', DEFAULT_LAYOUT);
+    const pages = Number(/Output written on .*?\((\d+) page/.exec(raw.log)?.[1]);
+    expect(pages).toBeGreaterThan(1);
+  });
+
+  it('says what the TeX error was, not just that something failed', async () => {
+    await expect(
+      compileFastBody('\\begin{document}\n\\thisIsNotACommand\n\\end{document}\n', 'letter', DEFAULT_LAYOUT),
+    ).rejects.toThrow(/Undefined control sequence/);
+  });
+
+  it('names the construct that was left open', async () => {
+    await expect(
+      compileFastBody('\\begin{document}\n\\begin{itemize}\nx\n\\end{document}\n', 'letter', DEFAULT_LAYOUT),
+    ).rejects.toThrow(/\\begin\{itemize\}/);
+  });
+
+  it('refuses a compile that produced no pages, rather than handing back an empty file', async () => {
+    // pdftex reports "No pages of output" and *exits cleanly* here, leaving a
+    // zero-byte resume.pdf. Waving that through gives the preview an empty
+    // buffer and no error to explain the blank frame.
+    await expect(compileFastBody('\\begin{document}\n\\end{document}\n', 'letter', DEFAULT_LAYOUT)).rejects.toThrow(
+      /produced no PDF/,
+    );
+  });
+
+  it('reports a format that will not build, and leaves nothing behind', async () => {
+    await withACacheOfItsOwn(async (dir) => {
+      // A layout whose runtime setup is not valid TeX: \changefontsizes[NaNpt].
+      const broken = { ...DEFAULT_LAYOUT, fontSizePt: Number.NaN };
+      await expect(compileFastBody(HELLO, 'letter', broken)).rejects.toThrow();
+      expect(formatsIn(dir)).toEqual([]);
+    });
+  });
+
+  it('tries again after a build that failed, rather than remembering the failure', async () => {
+    /*
+     * A failed build is not cached, so a compile that failed for a reason that
+     * has since gone away works on the next try — without it, one unwritable
+     * moment poisons that layout for the life of the process and the preview
+     * stays broken until the editor is restarted.
+     *
+     * The failure has to be one that can be undone without changing the
+     * layout, because the layout is the cache key. A cache directory that is
+     * a file rather than a directory is exactly that: the build cannot even
+     * mkdir, and removing the file fixes it.
+     */
+    const was = process.env.RMM_FMT_CACHE;
+    const spot = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-fmt-test-')), 'cache');
+    fs.writeFileSync(spot, 'not a directory', 'utf8');
+    process.env.RMM_FMT_CACHE = spot;
+    resetFastPathCache();
+    await hasFastPath();
+    try {
+      await expect(compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT)).rejects.toThrow();
+
+      fs.rmSync(spot, { force: true }); // the obstruction goes; nothing else changes
+      const raw = await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
+      expect(raw.pdf.subarray(0, 4).toString()).toBe('%PDF');
+    } finally {
+      if (was === undefined) delete process.env.RMM_FMT_CACHE;
+      else process.env.RMM_FMT_CACHE = was;
+      resetFastPathCache();
+      fs.rmSync(path.dirname(spot), { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(!available)('the format cache', { timeout: 120_000 }, () => {
+  it('builds a format for a layout it has never seen', async () => {
+    await withACacheOfItsOwn(async (dir) => {
+      expect(formatsIn(dir)).toEqual([]);
+      const raw = await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
+      expect(raw.pdf.subarray(0, 4).toString()).toBe('%PDF');
+      expect(formatsIn(dir)).toHaveLength(1);
+    });
+  });
+
+  it('builds one format per layout, not one per compile', async () => {
+    await withACacheOfItsOwn(async (dir) => {
+      await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
+      await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
+      expect(formatsIn(dir)).toHaveLength(1);
+      await compileFastBody(HELLO, 'letter', { ...DEFAULT_LAYOUT, marginIn: 0.9 });
+      expect(formatsIn(dir)).toHaveLength(2);
+    });
+  });
+
+  it('reuses the one on disk after the in-memory cache is dropped', async () => {
+    await withACacheOfItsOwn(async (dir) => {
+      await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
+      const built = formatsIn(dir)[0] as string;
+      const stamp = fs.statSync(path.join(dir, built)).mtimeMs;
+
+      resetFastPathCache(); // a fresh process knows nothing; the disk still does
+      await hasFastPath();
+
+      const raw = await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
+      expect(raw.pdf.subarray(0, 4).toString()).toBe('%PDF');
+      // The count would be unchanged either way — a rebuild copies over the
+      // same path. The mtime is what tells them apart.
+      expect(fs.statSync(path.join(dir, built)).mtimeMs).toBe(stamp);
+    });
+  });
+});
+
 describe('availability check', () => {
   it('is cheap to call repeatedly', async () => {
     const a = await hasFastPath();
     const b = await hasFastPath();
     expect(a).toBe(b);
+  });
+
+  it('says no, rather than throwing, when pdftex is not on the path', async () => {
+    const realPath = process.env.PATH;
+    resetFastPathCache();
+    try {
+      process.env.PATH = path.join(os.tmpdir(), 'rmm-definitely-not-a-bin-dir');
+      await expect(hasFastPath()).resolves.toBe(false);
+    } finally {
+      process.env.PATH = realPath;
+      resetFastPathCache();
+    }
   });
 });
