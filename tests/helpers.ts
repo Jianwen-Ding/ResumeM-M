@@ -6,6 +6,36 @@ import { Store } from '../src/model/store.js';
 import type { AnswerBankItem, Entry, ResumeSpec, SkillGroup } from '../src/model/types.js';
 
 /**
+ * Every throwaway directory this file has handed out, so the run can sweep
+ * them even where a test forgot to.
+ *
+ * `makeTempStore` has always returned a `cleanup`, and calling it is easy to
+ * leave out of a test that ends early, throws, or simply has several stores
+ * and one `afterEach`. Nothing failed when it was left out, which is why one
+ * session left 1,144 `rmm-clone-*`, 728 `rmm-src-*` and 559 `rmm-test-store-*`
+ * directories behind in the system temp folder. On a machine with a fixed
+ * temp allowance that is the whole suite's next run, failing to write.
+ *
+ * Swept per test *file*, not per process, because `setup.ts` is loaded once
+ * per worker and the list is module state there — and because deleting on any
+ * broader schedule would mean one worker removing a directory another is in
+ * the middle of using.
+ */
+const handedOut: string[] = [];
+
+/** A throwaway directory that does not have to be remembered. */
+export function tempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  handedOut.push(dir);
+  return dir;
+}
+
+/** Remove everything `tempDir` handed out. Safe to call more than once. */
+export function sweepTempDirs(): void {
+  for (const dir of handedOut.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/**
  * A throwaway store on disk. Several modules read and write YAML directly, so
  * testing them against a real directory is both simpler and more honest than
  * mocking the filesystem.
@@ -143,7 +173,7 @@ export const SAMPLE_INTERN: ResumeSpec = {
 
 /** Build a temp store seeded with the sample content above. */
 export function makeTempStore(overrides: { config?: unknown; empty?: boolean } = {}): TempStore {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-test-store-'));
+  const dir = tempDir('rmm-test-store-');
   const dataDir = path.join(dir, 'data');
   fs.mkdirSync(path.join(dataDir, 'resumes'), { recursive: true });
   fs.mkdirSync(path.join(dataDir, 'letters'), { recursive: true });

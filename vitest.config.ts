@@ -6,6 +6,8 @@ export default defineConfig({
     // only way to verify the one-page guarantee.
     testTimeout: 120_000,
     hookTimeout: 120_000,
+    // Sweeps the throwaway directories the helpers handed out. See setup.ts.
+    setupFiles: ['tests/setup.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary', 'html'],
