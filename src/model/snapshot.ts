@@ -1,5 +1,5 @@
 import YAML from 'yaml';
-import { normalizeEntries, normalizeProfile } from './normalize.js';
+import { normalizeEntries, normalizeProfile, normalizeSkillGroups } from './normalize.js';
 import type { Entry, Profile, ResumeSpec, SkillGroup, StoreData } from './types.js';
 
 /**
@@ -62,7 +62,14 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
      */
     profile: normalizeProfile(parse<Profile>(files.get('profile.yaml'), { name: 'Your Name' })),
     entries: normalizeEntries(entries),
-    skillGroups: parse<SkillGroup[]>(files.get('skills.yaml'), []),
+    /*
+     * And the skill groups, for the same reason the profile is. A group with
+     * no `items:` key crashes the renderer on `g.items.length`, and an old
+     * commit is where a half-written file is most likely to be found — which
+     * would turn one bad revision into a timeline that cannot be opened at all
+     * rather than one entry in it that cannot be resolved.
+     */
+    skillGroups: normalizeSkillGroups(parse<SkillGroup[]>(files.get('skills.yaml'), [])),
     resumes,
   };
 }

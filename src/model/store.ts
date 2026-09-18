@@ -21,8 +21,116 @@ import {
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
 import { applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
-import { normalizeAnswers, normalizeApplications, normalizeEntries, normalizeEntry, normalizeProfile } from './normalize.js';
+import {
+  normalizeAnswers,
+  normalizeApplications,
+  normalizeEntry,
+  normalizeProfile,
+  normalizeSkillGroups,
+} from './normalize.js';
 export { repairAiArgs };
+
+/** What a value turned out to be, in words, for a message about a file. */
+function describeValue(v: unknown): string {
+  if (Array.isArray(v)) return 'a list';
+  if (v === null) return 'empty';
+  switch (typeof v) {
+    case 'string':
+      return 'a single piece of text';
+    case 'number':
+      return 'a number';
+    case 'boolean':
+      return 'true or false';
+    default:
+      return 'a set of keys and values';
+  }
+}
+
+/**
+ * Read one file of the store, and say which file it was when it will not read.
+ *
+ * Two failures, both of which happen on the day somebody first imports files
+ * they wrote or generated elsewhere, and both of which used to end somewhere
+ * unhelpful.
+ *
+ * The first is YAML that does not parse. `YAML.parse` throws "Flow sequence in
+ * block collection must be sufficiently indented and end with a ] at line 2,
+ * column 1" — accurate, and useless, because a store is ten YAML files at its
+ * root plus a folder of resumes, a folder of drafts, a folder of letters and a
+ * corpus, and that message names none of them. The parser's own complaint is
+ * kept, because the line and column are the useful half; the file's name is put
+ * in front of it, because "which file?" is the only question anybody has here.
+ *
+ * The second is a file that parses into the wrong shape, and it was the worse
+ * of the two because it was silent. `applications.yaml` written as a mapping of
+ * id to application — an entirely reasonable thing for a person or a script to
+ * produce — parsed fine, failed `Array.isArray` inside `normalizeApplications`,
+ * and came back as `[]`. The tracker was empty, nothing was raised, and the
+ * next save wrote that empty list over the file: a year of applications gone,
+ * silently, in two steps. `profile.yaml` holding a bare line of text failed the
+ * other way — `{...'A Name'}` spreads a string into `{0:'A', 1:' ', 2:'N'…}`,
+ * so the profile became a numbered map of single characters.
+ *
+ * So a file that is there, has content, and is not the shape this store keeps
+ * in it is refused by name. Refusing costs a minute of somebody's afternoon;
+ * the alternative cost them the afternoon's data and did not say so.
+ *
+ * Which shape is allowed comes from the empty value the caller would accept
+ * instead: every file here is either a list of things (`experience.yaml`,
+ * `applications.yaml`) or one object (`profile.yaml`, `config.yaml`), and the
+ * fallback already says which — so there is no second argument to keep in step
+ * with the first.
+ *
+ * An empty file, and a file holding only `---`, are not malformed. They are a
+ * file somebody made and has not filled in yet, and they stay the empty thing
+ * they are.
+ */
+export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
+  if (!raw.trim()) return fallback;
+
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(raw);
+  } catch (err) {
+    // The first line only: the rest is a code frame repeating the file back at
+    // you, which is noise in a dialog box. The colon it ends with introduced
+    // that frame and now introduces nothing.
+    const said = (err instanceof Error ? err.message : String(err)).split('\n')[0]!.trim().replace(/:$/, '');
+    throw new Error(`${label} is not valid YAML — ${said}`);
+  }
+
+  if (parsed === null || parsed === undefined) return fallback;
+
+  const wantList = Array.isArray(fallback);
+  if (typeof parsed !== 'object' || Array.isArray(parsed) !== wantList) {
+    throw new Error(
+      `${label} should be ${wantList ? 'a list' : 'a set of keys and values'}, and it is ${describeValue(parsed)}. ` +
+        'Nothing has been changed — fix the file, or move it aside, and try again.',
+    );
+  }
+  return parsed as T;
+}
+
+/**
+ * Split a markdown file into its YAML header and the prose under it.
+ *
+ * The line endings are the whole reason this is a named function rather than a
+ * regex sitting in two places. It required `---\n` exactly, so a letter with
+ * CRLF endings — which is what anything saved out of Word, out of a Windows
+ * editor, or downloaded through a browser gives you — matched nothing at all.
+ * The entire file including both `---` fences became the body, the title fell
+ * back to the filename, and the date and the company were simply gone. Saving
+ * that letter then wrote a *second* header above the first, so the body opened
+ * with a horizontal rule and a stanza of stale metadata, and every later read
+ * saw the new header and the old one as prose.
+ *
+ * Trailing spaces after a fence are allowed for the same reason: they are
+ * invisible, and a file that has one is not a file without a header.
+ */
+function splitFrontMatter(raw: string): { header: string; body: string } | undefined {
+  const m = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(raw);
+  return m ? { header: m[1] ?? '', body: m[2] ?? '' } : undefined;
+}
 
 /**
  * The store is a directory of YAML files under git. It is deliberately dumb:
@@ -71,12 +179,10 @@ export class Store {
   }
 
   private readYaml<T>(rel: string | string[], fallback: T): T {
-    const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
+    const parts = Array.isArray(rel) ? rel : [rel];
+    const f = this.file(...parts);
     if (!fs.existsSync(f)) return fallback;
-    const raw = fs.readFileSync(f, 'utf8');
-    if (!raw.trim()) return fallback;
-    const parsed = YAML.parse(raw);
-    return (parsed ?? fallback) as T;
+    return parseStoreYaml(parts.join('/'), fs.readFileSync(f, 'utf8'), fallback);
   }
 
   /*
@@ -130,13 +236,8 @@ export class Store {
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.
-      entries: normalizeEntries([
-        ...this.readYaml<Entry[]>('education.yaml', []),
-        ...this.readYaml<Entry[]>('experience.yaml', []),
-        ...this.readYaml<Entry[]>('projects.yaml', []),
-        ...this.readYaml<Entry[]>('custom.yaml', []),
-      ]),
-      skillGroups: this.readYaml<SkillGroup[]>('skills.yaml', []),
+      entries: this.loadEntries(),
+      skillGroups: normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', [])),
       resumes: this.loadResumes(),
       applications: normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])),
       coverLetters: this.loadCoverLetters(),
@@ -208,11 +309,24 @@ export class Store {
   loadResumes(): ResumeSpec[] {
     const dir = this.file('resumes');
     if (!fs.existsSync(dir)) return [];
-    return fs
-      .readdirSync(dir)
-      .filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'))
+    return (
+      fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'))
+        /*
+         * `.yaml` before `.yml`, so a folder holding both spellings of one id
+         * is not decided by whatever order the filesystem returned. `saveResume`
+         * writes `.yaml`, so `.yaml` is the copy that has been edited; the
+         * dedupe below keeps the first of the two it sees.
+         */
+        .sort((a, b) => a.localeCompare(b))
+    )
       .map((f) => {
-        const spec = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as ResumeSpec;
+        const spec = parseStoreYaml<Partial<ResumeSpec>>(
+          `resumes/${f}`,
+          fs.readFileSync(path.join(dir, f), 'utf8'),
+          {},
+        );
         /*
          * Filename is the source of truth for the id, which the comment here
          * always said and the code did not: it preferred the id written inside
@@ -226,9 +340,16 @@ export class Store {
          *
          * Taken from the name, a copied file is simply its own resume.
          */
-        return { ...spec, id: path.basename(f).replace(/\.ya?ml$/, '') };
+        const id = path.basename(f).replace(/\.ya?ml$/, '');
+        /*
+         * And a name for it, from the same place, when the file does not give
+         * one. A resume file that exists and is still empty — created by hand,
+         * or copied and not yet filled in — arrived with `label: undefined`,
+         * which is the label every picker in the app then showed for it.
+         */
+        return { ...spec, id, label: String(spec.label ?? id) } satisfies ResumeSpec;
       })
-      .filter((r): r is ResumeSpec => Boolean(r && r.id));
+      .filter((r, i, all) => Boolean(r.id) && all.findIndex((o) => o.id === r.id) === i);
   }
 
   getResume(id: string): ResumeSpec | undefined {
@@ -294,6 +415,59 @@ export class Store {
   }
 
   /**
+   * The four entry files, read into one list holding each id once.
+   *
+   * This was a plain concatenation of the four, which meant `load()` could hand
+   * back two entries with one id — and then the app disagreed with itself about
+   * which of them was the entry. `resolveResume` does `entries.find(...)` and
+   * got the first; the editor, the inventory and the tailoring prompt iterate
+   * the list and got both, so a copied entry was listed twice, counted twice,
+   * and rendered from whichever copy happened to sort first.
+   *
+   * One id, one entry. Where two copies exist, the first in file order wins —
+   * the same one `find` was already picking, so nothing that worked before
+   * resolves differently — except for the one case where the files themselves
+   * say which copy is misfiled. An entry copied into projects.yaml while still
+   * saying `kind: experience` belongs to experience.yaml by its own account,
+   * and the copy sitting in the file its kind names is the one to believe.
+   *
+   * What this cannot do is tell a stale copy from a fresh one when both sit in
+   * the file their kind names — which is exactly the wreckage `saveEntry` can
+   * leave if the second of its two writes fails. Nothing in the content
+   * distinguishes them, so that case still falls to file order and the error
+   * `saveEntry` threw at the time remains the only notice of it. See the
+   * comment there.
+   *
+   * Entries with no id at all are left alone: they are not duplicates of each
+   * other, and folding two of them into one would be exactly the silent loss
+   * this is here to prevent.
+   */
+  private loadEntries(): Entry[] {
+    const out: Entry[] = [];
+    const at = new Map<string, { index: number; misfiled: boolean }>();
+
+    for (const rel of Store.ENTRY_FILES) {
+      for (const raw of this.readYaml<Entry[]>(rel, [])) {
+        if (!raw || typeof raw !== 'object') continue;
+        const entry = normalizeEntry(raw);
+        const misfiled = this.fileForKind(entry.kind) !== rel;
+
+        const seen = entry.id ? at.get(entry.id) : undefined;
+        if (!seen) {
+          at.set(entry.id, { index: out.push(entry) - 1, misfiled });
+        } else if (seen.misfiled && !misfiled) {
+          // Replaced where the first copy stood, so the order the four files
+          // are read in still decides the order of the list.
+          out[seen.index] = entry;
+          seen.misfiled = false;
+        }
+      }
+    }
+
+    return out;
+  }
+
+  /**
    * An id lives in exactly one of the four files.
    *
    * Splitting entries by kind means changing an entry's kind moves it between
@@ -323,8 +497,17 @@ export class Store {
      * file, and `load()` simply concatenates the four: the title, the dates and
      * every phrasing of every bullet, gone, with the error naming the disk
      * rather than the entry. In this order the same failure leaves the entry in
-     * both files instead, which `load()` resolves in favour of the newer one
-     * and the next successful save tidies up.
+     * both files instead, and the next successful save tidies up.
+     *
+     * Be clear about what that costs, because the comment here used to claim
+     * more than the code did: `loadEntries` hands out one entry per id, but
+     * both copies sit in the file their own `kind` names — the fresh one
+     * because it was just written there, the stale one because its `kind` was
+     * never changed — so nothing in the content says which is which, and file
+     * order decides. For a project becoming education the fresh copy wins; for
+     * education becoming a project the stale one does. The error thrown from
+     * here is the only notice of that, which is why it must not be swallowed
+     * by a caller.
      */
     const list = this.readYaml<Entry[]>(rel, []);
     const idx = list.findIndex((e) => e.id === clean.id);
@@ -388,27 +571,37 @@ export class Store {
       .filter((f) => f.endsWith('.md'))
       .map((f) => {
         const raw = fs.readFileSync(path.join(dir, f), 'utf8');
-        const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
         const id = path.basename(f, '.md');
-        if (!m) {
+        const split = splitFrontMatter(raw);
+        if (!split) {
           return { id, title: id, createdAt: '', body: raw } satisfies CoverLetter;
         }
-        const meta = (YAML.parse(m[1] ?? '') ?? {}) as Partial<CoverLetter>;
+        const meta = parseStoreYaml<Partial<CoverLetter>>(`letters/${f}`, split.header, {});
+        /*
+         * The header as it was written, with the fields we know about settled
+         * over the top of it.
+         *
+         * This was rebuilt field by field, and a field missed there was a field
+         * deleted: the editor loads a letter and PUTs back exactly what it was
+         * given, so anything dropped on the way in is dropped from the file on
+         * the way out. It happened to `applicationId` — completing an
+         * application tags its letter with the application it belongs to, and
+         * opening that letter once untagged it, after which the per-application
+         * lookup could never match and the application showed no letter.
+         *
+         * Listing the fields again would only move the next omission somewhere
+         * else, and it would still throw away a key this version has never
+         * heard of. A store is hand-editable YAML under git; somebody who adds
+         * `sentOn:` or `portal:` to their own letter means it, and a later
+         * version of this app may well mean it too. So the header is kept whole
+         * and only the four fields that must have a value are settled.
+         */
         return {
+          ...meta,
           id,
-          title: meta.title ?? id,
-          company: meta.company,
-          role: meta.role,
-          createdAt: meta.createdAt ?? '',
-          tags: meta.tags,
-          // Rebuilt field by field, so a field missed here is a field deleted:
-          // the editor loads a letter and PUTs back exactly what it was given,
-          // and this one was dropped on the way in. Completing an application
-          // tags its letter with the application it belongs to, and opening
-          // that letter once untagged it — after which the per-application
-          // lookup could never match and the application showed no letter.
-          applicationId: meta.applicationId,
-          body: m[2] ?? '',
+          title: String(meta.title ?? id),
+          createdAt: String(meta.createdAt ?? ''),
+          body: split.body,
         } satisfies CoverLetter;
       });
   }
@@ -434,19 +627,20 @@ export class Store {
       .filter((f) => f.endsWith('.md'))
       .map((f) => {
         const raw = fs.readFileSync(path.join(dir, f), 'utf8');
-        const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
         const id = path.basename(f, '.md');
-        if (!m) return { id, title: id, kind: 'other' as const, text: raw, createdAt: '' };
-        const meta = (YAML.parse(m[1] ?? '') ?? {}) as Partial<WritingSample>;
+        const split = splitFrontMatter(raw);
+        if (!split) return { id, title: id, kind: 'other' as const, text: raw, createdAt: '' };
+        const meta = parseStoreYaml<Partial<WritingSample>>(`corpus/${f}`, split.header, {});
+        // Kept whole, for the reason given over the letters above: a sample is
+        // a file somebody wrote, and a key this version does not recognise is
+        // not a key to delete on their behalf.
         return {
+          ...meta,
           id,
-          title: meta.title ?? id,
+          title: String(meta.title ?? id),
           kind: meta.kind ?? 'other',
-          createdAt: meta.createdAt ?? '',
-          writtenAt: meta.writtenAt,
-          tags: meta.tags,
-          archived: meta.archived,
-          text: m[2] ?? '',
+          createdAt: String(meta.createdAt ?? ''),
+          text: split.body,
         } satisfies WritingSample;
       });
   }
@@ -477,7 +671,11 @@ export class Store {
       .readdirSync(dir)
       .filter((f) => f.endsWith('.yaml'))
       .map((f) => {
-        const draft = YAML.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as Draft;
+        const draft = parseStoreYaml<Partial<Draft>>(
+          `drafts/${f}`,
+          fs.readFileSync(path.join(dir, f), 'utf8'),
+          {},
+        );
         // The filename is the id, the same way it is for resumes, and for the
         // same reason: an id written inside the file meant that copying a draft
         // to `d1-backup.yaml` produced two drafts claiming to be `d1`, and that
