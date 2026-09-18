@@ -190,6 +190,81 @@ describe('job analysis', () => {
     expect(change.because).toContain('kafka');
   });
 
+  /*
+   * Narrowing a skills group, named so the extension can offer it back.
+   *
+   * `rationale` is `{key, from, to}` where the key names a choice and the
+   * values name wordings. A skills group is not that shape — it is a set of
+   * items under `sections[skills].items` — so skills swaps never appeared in
+   * it, and the extension, which hangs its undo button off having one, showed
+   * no way back on any skills row. You could undo a bullet and not the four
+   * groups narrowed beside it.
+   */
+  describe('narrowed skills groups, named for putting back', () => {
+    it('reports the group by id and by the name the diff labels it with', async () => {
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'intern' })
+        .expect(200);
+
+      const narrowed = (res.body.skillChanges as { groupId: string; groupName: string; to: string[] }[])
+        .find((c) => c.groupId === 'sk_lang');
+      expect(narrowed).toBeTruthy();
+      expect(narrowed!.to).toEqual(['s_py', 's_go']);
+
+      // The row the extension matches this to is the one the *diff* wrote, and
+      // that is labelled with the group's name rather than its id.
+      const row = (res.body.diff as { where?: string }[]).find((d) => d.where === narrowed!.groupName);
+      expect(row, `no diff row labelled "${narrowed!.groupName}"`).toBeTruthy();
+    });
+
+    /*
+     * `null` is an answer, not a gap. A group with no entry under `items`
+     * prints all of its items, so undoing back to that means leaving the key
+     * out — and an empty list would print nothing at all.
+     */
+    it('says the base asked for nothing, where it asked for nothing', async () => {
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'intern' })
+        .expect(200);
+      expect(res.body.skillChanges.find((c: { groupId: string }) => c.groupId === 'sk_lang').from).toBeNull();
+    });
+
+    /*
+     * And what the base *inherits* counts as what the base asks for. Read off
+     * the base's own sections, a resume holding none of this itself reported
+     * "nothing" while its parent held a list — so undoing would have thrown
+     * that list away rather than put it back.
+     */
+    it('reads a list the base inherits rather than states', async () => {
+      t.store.saveResume({
+        id: 'narrowed',
+        label: 'Narrowed',
+        extends: 'base',
+        sections: [{ kind: 'skills', entries: [], items: { sk_lang: ['s_py', 's_ts', 's_php'] } }],
+      });
+      t.store.saveResume({ id: 'inherits', label: 'Inherits', extends: 'narrowed' });
+
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'inherits' })
+        .expect(200);
+
+      const change = (res.body.skillChanges as { groupId: string; from: string[] | null }[])
+        .find((c) => c.groupId === 'sk_lang');
+      expect(change?.from).toEqual(['s_py', 's_ts', 's_php']);
+    });
+
+    it('says nothing about skills when nothing was narrowed', async () => {
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'none' })
+        .expect(200);
+      expect(res.body.skillChanges).toEqual([]);
+    });
+  });
+
   it('maps bullets back to their entries for the suggestion flow', async () => {
     const res = await request(app).post('/api/extension/analyze').send({ html: JOB_HTML }).expect(200);
     expect(res.body.entryByBullet.b_pipeline).toBe('exp_acme');

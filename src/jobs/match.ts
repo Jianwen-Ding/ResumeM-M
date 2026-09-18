@@ -1,5 +1,6 @@
 import type { ResumeSpec, StoreData, Variant } from '../model/types.js';
 import { isVariantField } from '../model/types.js';
+import { flattenSpec } from '../model/resolve.js';
 import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
 
 /**
@@ -206,6 +207,9 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
 /**
  * Build a posting-specific resume spec from a base one. It inherits rather
  * than copies, so later edits to the base still reach it.
+ *
+ * `all` is every resume in the store, which is needed to see what the base
+ * inherits — see `buildSkillSections`.
  */
 export function deriveSpec(
   base: ResumeSpec,
@@ -213,8 +217,10 @@ export function deriveSpec(
   label: string,
   match: MatchResult,
   meta: { url?: string; company?: string; role?: string },
+  all: ResumeSpec[] = [],
 ): ResumeSpec {
-  const sections = Object.keys(match.skills).length > 0 ? buildSkillSections(base, match.skills) : undefined;
+  const sections =
+    Object.keys(match.skills).length > 0 ? buildSkillSections(base, match.skills, all) : undefined;
   return {
     id,
     label,
@@ -225,8 +231,28 @@ export function deriveSpec(
   };
 }
 
-function buildSkillSections(base: ResumeSpec, skills: Record<string, string[]>): ResumeSpec['sections'] {
-  const skillSection = base.sections?.find((s) => s.kind === 'skills');
+/**
+ * The skills section, narrowed to what the posting asked for.
+ *
+ * Looked up on the *flattened* base, not on its own sections. Almost nobody's
+ * base states a skills section itself: the usual arrangement is one resume
+ * holding the sections and "new grad" and "intern" extending it by a handful
+ * of choices, which is the whole point of `extends`. Read off `base.sections`
+ * alone, every one of those found nothing here and returned `undefined` — so
+ * the match decided which skills to keep, said so in the change list, and the
+ * resume that was compiled and sent had every group in full. The proposal and
+ * the document disagreed, and the document was the one nobody looked at.
+ *
+ * What comes back is still a section for the derived resume to state as its
+ * own, laid over what it inherits by `mergeSections`.
+ */
+function buildSkillSections(
+  base: ResumeSpec,
+  skills: Record<string, string[]>,
+  all: ResumeSpec[],
+): ResumeSpec['sections'] {
+  const flat = base.extends ? flattenSpec(base, all) : base;
+  const skillSection = flat.sections?.find((s) => s.kind === 'skills');
   if (!skillSection) return undefined;
   return [
     {
