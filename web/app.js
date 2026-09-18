@@ -4615,8 +4615,36 @@ async function completeDraft(draft, notes) {
  * Letters and answers                                                 *
  * ------------------------------------------------------------------ */
 
+/*
+ * What the two lists on this tab are showing.
+ *
+ * Both grow and neither shrinks: a letter per application, and a question per
+ * form that asked something new. "What did I write to Helios?" and "have I
+ * answered this before?" are the questions somebody brings to this tab, and
+ * without a way to narrow it they are answered by reading every card.
+ *
+ * Out here for the same reason the tracker's is: this tab reloads after every
+ * edit, and a filter that cleared itself when you saved a letter would be one
+ * you stopped using.
+ */
+let letterFilter = '';
+let answerFilter = '';
+
 async function loadLetters() {
   const [letters, store] = await Promise.all([api('/letters'), api('/store')]);
+
+  /*
+   * The whole card is searched, body included. Somebody looking for a letter
+   * usually remembers a phrase from it rather than its title — and the titles
+   * these are given are all much of a muchness.
+   */
+  const matching = (text, said) => !said || String(text ?? '').toLowerCase().includes(said.toLowerCase());
+  const shownLetters = letters.filter((l) =>
+    matching(`${l.title ?? ''} ${l.company ?? ''} ${l.role ?? ''} ${l.body ?? ''}`, letterFilter),
+  );
+  const shownAnswers = (store.answers ?? []).filter((a) =>
+    matching(`${a.question ?? ''} ${(a.variants ?? []).map((v) => v.text).join(' ')}`, answerFilter),
+  );
 
   // How often each stored question has actually gone out, so the bank shows
   // which answers are pulling their weight.
@@ -4626,15 +4654,17 @@ async function loadLetters() {
   }
 
   $('#letters').replaceChildren(
-    letters.length === 0
+    shownLetters.length === 0
       ? el('div', { className: 'empty' }, [
-          el('b', {}, 'No letters yet'),
-          'Drafts written by the extension are saved here, and become the voice reference for the next one.',
+          el('b', {}, letters.length === 0 ? 'No letters yet' : 'Nothing matches'),
+          letters.length === 0
+            ? 'Drafts written by the extension are saved here, and become the voice reference for the next one.'
+            : `${plural(letters.length, 'letter')} here; none of them mention that.`,
         ])
       : el(
           'div',
           { className: 'card-list' },
-          letters.map((l) =>
+          shownLetters.map((l) =>
             el('div', { className: 'mini-card' }, [
               el('div', { className: 'row1' }, [
                 el('b', { textContent: l.title }),
@@ -4663,12 +4693,17 @@ async function loadLetters() {
   );
 
   $('#answers').replaceChildren(
-    store.answers.length === 0
-      ? el('div', { className: 'empty' }, [el('b', {}, 'No saved answers'), 'Add the questions every form asks.'])
+    shownAnswers.length === 0
+      ? el('div', { className: 'empty' }, [
+          el('b', {}, store.answers.length === 0 ? 'No saved answers' : 'Nothing matches'),
+          store.answers.length === 0
+            ? 'Add the questions every form asks.'
+            : `${plural(store.answers.length, 'question')} saved; none of them mention that.`,
+        ])
       : el(
           'div',
           { className: 'card-list' },
-          store.answers.map((a) => {
+          shownAnswers.map((a) => {
             const v = a.variants.find((x) => x.id === a.default) ?? a.variants[0];
             return el('div', { className: 'mini-card' }, [
               el('div', { className: 'row1' }, [
@@ -6759,6 +6794,16 @@ async function boot() {
   };
   $('#btn-add-letter').onclick = addLetter;
   $('#btn-add-answer').onclick = addAnswer;
+
+  // Narrowing the two lists on the Letters & Answers tab. Both redraw from
+  // what is already loaded, so they answer as fast as somebody types.
+  const narrowWriting = () => {
+    letterFilter = ($('#letter-find')?.value ?? '').trim();
+    answerFilter = ($('#answer-find')?.value ?? '').trim();
+    loadLetters().catch((e) => setStatus(e.message, true));
+  };
+  if ($('#letter-find')) $('#letter-find').oninput = narrowWriting;
+  if ($('#answer-find')) $('#answer-find').oninput = narrowWriting;
   $('#btn-add-sample').onclick = () => addSample().catch((e) => setStatus(e.message, true));
   wireVoiceDrop();
   // Typing is what makes the box differ from the store, so it is what turns
