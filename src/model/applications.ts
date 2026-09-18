@@ -248,12 +248,56 @@ export interface BundleResult {
 }
 
 /**
+ * One build at a time per application.
+ *
+ * Two builds of the same application write the same folder and the same
+ * tracker row, and neither is safe against the other. The folder hand-over
+ * sweeps out anything the build that is landing did not produce, so a build
+ * without a cover letter finishing after one with a letter takes the letter
+ * out from under it; the tracker row is read, changed and written back, so
+ * the later write drops whatever the earlier one recorded.
+ *
+ * It used to take two deliberate presses of the filing button seconds apart
+ * to arrange that. Building stages the files now, so every build runs one of
+ * these, and pressing Recompile while the last one is still compiling is an
+ * ordinary thing to do.
+ *
+ * Serialised rather than refused: the second build is not a mistake, it is
+ * the newer resume, and it should land — after the one in front of it, not
+ * across it. Keyed by the folder the build writes, which is what two builds
+ * have to share before they can collide.
+ */
+const building = new Map<string, Promise<unknown>>();
+
+async function inBuildLane<T>(id: string, run: () => Promise<T>): Promise<T> {
+  const queue = building.get(id) ?? Promise.resolve();
+  // `run` on either settlement, so one failed build does not wedge the ones
+  // queued behind it — each is still worth attempting on its own.
+  const mine = queue.then(run, run);
+  const settled = mine.then(() => {}, () => {});
+  building.set(id, settled);
+  try {
+    return await mine;
+  } finally {
+    // Only when nothing else has queued behind this one, or the map keeps a
+    // resolved promise per application for the life of the process.
+    if (building.get(id) === settled) building.delete(id);
+  }
+}
+
+/**
  * Produce one folder holding everything an application needs, named the way
  * portals expect, plus a snapshot of the exact resume that was sent. The
  * snapshot is the point: six weeks later, when they ask about "the pipeline
  * project", the file that went out is still there, byte for byte.
  */
 export async function buildBundle(store: Store, req: BundleRequest): Promise<BundleResult> {
+  const data0 = store.load();
+  const existing = findApplication(data0.applications, req.company, req.role);
+  return inBuildLane(existing?.id ?? applicationId(req.company, req.role), () => buildBundleNow(store, req));
+}
+
+async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data = store.load();
   const resolved: ResolvedResume = resolveResume(req.resumeId, data);
 
