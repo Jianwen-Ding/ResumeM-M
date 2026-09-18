@@ -35,7 +35,7 @@ import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/an
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
@@ -47,6 +47,7 @@ import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
 import type {
   AnswerBankItem,
   Application,
+  ApplicationStatus,
   Bullet,
   CoverLetter,
   Draft,
@@ -266,6 +267,32 @@ function plainText(field: MaybeVariant | undefined): string {
   if (field === undefined) return '';
   if (typeof field === 'string') return field;
   return String((field.variants.find((v) => v.id === field.default) ?? field.variants[0])?.text ?? '');
+}
+
+/**
+ * What to tell the card about an application to this job that already went.
+ *
+ * Both names have to be real. `company` is undefined on every bare
+ * application form, and matching on the role alone would tell somebody
+ * looking at a Platform Engineer posting that they had applied to it because
+ * they once applied to a Platform Engineer somewhere else entirely.
+ *
+ * The date is the one it actually went out on, which is not always the row's
+ * `appliedAt` — that is stamped when the row is made, and a row made while
+ * the application was still being written carries the day it was started.
+ * The history knows better.
+ */
+function sentBefore(
+  applications: Application[],
+  company: string | undefined,
+  role: string | undefined,
+): { id: string; at: string; status: ApplicationStatus } | undefined {
+  if (!company?.trim() || !role?.trim()) return undefined;
+  const past = alreadySent(applications, company, role);
+  if (!past) return undefined;
+  const went = (past.history ?? []).find((h) => h.status === 'applied');
+  const at = went?.at ?? past.appliedAt;
+  return at ? { id: past.id, at, status: past.status } : undefined;
 }
 
 /**
@@ -1723,6 +1750,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * See the `x-rmm-project` check where saves are switched.
          */
         save: store.root,
+        /*
+         * "You have applied to this one before."
+         *
+         * Not a warning and not a refusal — the same job comes round again,
+         * and reapplying a year later is a perfectly good idea. But finding
+         * out afterwards, from the tracker, that you have just spent twenty
+         * minutes writing a second letter for a role you were turned down for
+         * in March is a waste this tool is in a position to prevent, and it
+         * knows before the first word is written.
+         *
+         * Only when the posting names both the company and the role. The
+         * employer fallback reads a company off the host, which is a good
+         * enough label for a resume and nowhere near good enough to tell
+         * somebody they have done this already.
+         */
+        applied: sentBefore(data.applications, job.company, job.title),
         score,
         kind: verdict.kind,
         why: verdict.why,

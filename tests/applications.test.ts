@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { advance, applicationId, buildBundle, bundleFileName, describeLost, slug, stats } from '../src/model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, bundleFileName, describeLost, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
@@ -138,6 +138,46 @@ describe('status history', () => {
 
   it('names the application that does not exist', () => {
     expect(() => advance(t.store, 'nope', 'applied')).toThrow(/nope/);
+  });
+});
+
+describe('have I sent this one before', () => {
+  const apps: Application[] = [
+    { id: 'old', company: 'Helios', role: 'Platform Engineer', status: 'closed', appliedAt: '2026-03-12T09:00:00Z' },
+    { id: 'new', company: 'Helios', role: 'Platform Engineer', status: 'applying', appliedAt: '2026-09-18T09:00:00Z' },
+    { id: 'else', company: 'Lyra', role: 'Platform Engineer', status: 'applied', appliedAt: '2026-05-01T09:00:00Z' },
+    { id: 'want', company: 'Vega', role: 'Data Scientist', status: 'interested', appliedAt: '2026-06-01T09:00:00Z' },
+  ];
+
+  it('answers with the one that went, not the one being written now', () => {
+    // `findApplication` prefers the open row; this asks the opposite question
+    // and must not be satisfied by the draft the person is in the middle of.
+    expect(alreadySent(apps, 'Helios', 'Platform Engineer')?.id).toBe('old');
+  });
+
+  it('does not count an application that has only been thought about', () => {
+    expect(alreadySent(apps, 'Vega', 'Data Scientist')).toBeUndefined();
+  });
+
+  it('is about this job, not this role anywhere', () => {
+    expect(alreadySent(apps, 'Helios', 'Data Scientist')).toBeUndefined();
+    expect(alreadySent(apps, 'Rigel', 'Platform Engineer')).toBeUndefined();
+  });
+
+  it('reads the company and the role the way ids are made, not letter by letter', () => {
+    expect(alreadySent(apps, 'helios', 'platform  engineer')?.id).toBe('old');
+  });
+
+  it('takes the most recent when a job has been applied for more than once', () => {
+    const twice: Application[] = [
+      ...apps,
+      { id: 'later', company: 'Helios', role: 'Platform Engineer', status: 'applied', appliedAt: '2026-08-01T09:00:00Z' },
+    ];
+    expect(alreadySent(twice, 'Helios', 'Platform Engineer')?.id).toBe('later');
+  });
+
+  it('has nothing to say about a store with nothing in it', () => {
+    expect(alreadySent([], 'Helios', 'Platform Engineer')).toBeUndefined();
   });
 });
 

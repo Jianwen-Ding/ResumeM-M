@@ -172,6 +172,30 @@ export function findApplication(apps: Application[], company: string, role: stri
   return (unsent.length > 0 ? unsent : same).sort(byNewest)[0];
 }
 
+/**
+ * Have I sent this one before?
+ *
+ * The other half of `findApplication`, and a different question. That one
+ * answers "which row does this belong to", and prefers one still being worked
+ * on, because the point is not to file a second row for a job already open.
+ * This one asks whether there is a row that has already gone out — which is
+ * something a person standing in front of the posting wants to know before
+ * they spend twenty minutes on it again.
+ *
+ * `applying` and `interested` do not count: those are this application, or an
+ * intention to make it, and saying "you already applied" about a draft you
+ * are in the middle of would be a lie told confidently. Everything past
+ * sending counts, `closed` included — a job you were turned down for is the
+ * one you would most like to be reminded about before writing another letter.
+ */
+export function alreadySent(apps: Application[], company: string, role: string): Application | undefined {
+  const key = `${slug(company)} ${slug(role)}`;
+  return apps
+    .filter((a) => `${slug(a.company)} ${slug(a.role)}` === key)
+    .filter((a) => a.status !== 'interested' && a.status !== 'applying')
+    .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
+}
+
 /** The same question about a workspace, whose id is made the same way. */
 export function findDraft<T extends { id: string; company: string; role: string; status: string; updatedAt?: string }>(
   drafts: T[],
