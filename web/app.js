@@ -398,8 +398,8 @@ function freeBulletId(base) {
  * to show edits the wrong group. Nothing said so — the group you just made
  * simply did not appear.
  */
-function freeSkillGroupId(base) {
-  return unusedId(base, (state.store?.skillGroups ?? []).map((g) => g.id));
+function freeSkillGroupId(groups, base) {
+  return unusedId(base, (groups ?? []).map((g) => g.id));
 }
 
 /**
@@ -3693,6 +3693,44 @@ async function removeListItem(entry, bullet, item) {
 
 /* ---- Skills ---- */
 
+/**
+ * One in-flight write for the skills list, and each change built when its turn
+ * comes rather than when the button was pressed.
+ *
+ * Every skills write is a read-modify-write of the whole list: read
+ * `state.store.skillGroups`, change one thing in it, PUT all of it. The store
+ * is reloaded afterwards, and until that lands `state.store` still shows what
+ * was there before — so a second write started inside that window builds its
+ * list from the old one and puts back whatever the first had just removed.
+ *
+ * A form makes that window hard to hit. The × on a skill chip does not:
+ * deleting three skills is three clicks with nothing in between, and the way
+ * it failed was for one of them to reappear. Entries have had a lane for this
+ * reason since they were given one; this is the same lane for the one other
+ * list that is written whole.
+ *
+ * `change` is handed the groups as they stand when it runs, and returns the
+ * list to write — or nothing, to write nothing at all.
+ */
+let skillsQueue = Promise.resolve();
+
+function inSkillsLane(change) {
+  const mine = skillsQueue.then(async () => {
+    const groups = await change(state.store?.skillGroups ?? []);
+    if (!groups) return undefined;
+    const written = await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
+    // Inside the lane, so the next change in the queue builds on this one
+    // rather than on what was on screen before it.
+    await loadStore();
+    return written;
+  });
+  skillsQueue = mine.then(
+    () => {},
+    () => {},
+  );
+  return mine;
+}
+
 async function addSkill(group) {
   const answer = await form(`Add a skill to ${group.name}`, [
     { name: 'text', label: 'Skill', value: '' },
@@ -3700,35 +3738,36 @@ async function addSkill(group) {
   ], 'Tags are what the extension matches against a job posting.');
   if (!answer?.text?.trim()) return;
 
-  const groups = state.store.skillGroups.map((g) =>
-    g.id !== group.id
-      ? g
-      : {
-          ...g,
-          items: [
-            ...g.items,
-            {
-              id: freeSkillItemId(group, `s_${slug(answer.text)}`),
-              text: answer.text.trim(),
-              ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
-            },
-          ],
-        },
+  await inSkillsLane((groups) =>
+    groups.map((g) =>
+      g.id !== group.id
+        ? g
+        : {
+            ...g,
+            items: [
+              ...g.items,
+              {
+                // Against `g`, the group as it now stands, not the copy this
+                // button was drawn from: a skill added a moment ago is in one
+                // and not the other.
+                id: freeSkillItemId(g, `s_${slug(answer.text)}`),
+                text: answer.text.trim(),
+                ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
+              },
+            ],
+          },
+    ),
   );
-  await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
   setStatus('Skill added');
-  await loadStore();
   render();
   scheduleRender();
 }
 
 async function removeSkill(group, item) {
-  const groups = state.store.skillGroups.map((g) =>
-    g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) },
+  await inSkillsLane((groups) =>
+    groups.map((g) => (g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) })),
   );
-  await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
   setStatus(`Removed ${item.text}`);
-  await loadStore();
   render();
   scheduleRender();
 }
@@ -3740,24 +3779,27 @@ async function addSkillGroup() {
   ]);
   if (!answer?.name?.trim()) return;
 
-  const id = freeSkillGroupId(`sk_${slug(answer.name)}`);
-  const groups = [
-    ...state.store.skillGroups,
-    {
-      id,
-      name: answer.name.trim(),
-      // Built against what has already been taken from the same list: "Python,
-      // Go, Python" is a typo, not two skills, and letting both be `s_python`
-      // would leave the second unselectable and remove both at once.
-      items: (answer.items ?? '')
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean)
-        .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
-    },
-  ];
   describeNext(`adding the group "${answer.name.trim()}"`);
-  await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
+  let id;
+  await inSkillsLane((groups) => {
+    id = freeSkillGroupId(groups, `sk_${slug(answer.name)}`);
+    return [
+      ...groups,
+      {
+        id,
+        name: answer.name.trim(),
+        // Built against what has already been taken from the same list:
+        // "Python, Go, Python" is a typo, not two skills, and letting both be
+        // `s_python` would leave the second unselectable and remove both at
+        // once.
+        items: (answer.items ?? '')
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+          .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
+      },
+    ];
+  });
 
   // The root's own sections, for the reason given in addEntry: built from the
   // flattened chain this carried the selected variation's overrides down onto
@@ -3777,10 +3819,7 @@ async function addSkillGroup() {
 
 async function removeSkillGroup(group) {
   if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the save.'))) return;
-  await api('/skills', {
-    method: 'PUT',
-    body: JSON.stringify(state.store.skillGroups.filter((g) => g.id !== group.id)),
-  });
+  await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
   const root = chain(state.resumeId)[0];
   const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,

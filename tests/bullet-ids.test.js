@@ -166,12 +166,11 @@ const skillChips = () => [...document.querySelectorAll('.skill-chip')].map((c) =
  * Click "+ Add skill group", fill the form, and wait for the page to be
  * showing the group before returning.
  *
- * Waiting on the request is not enough. Saving a group writes the group list,
- * then the resume's own section list, then reloads the store — and the reload
- * lands in `state` a turn after its response does. Adding the next group in
- * that gap builds its list from a store that has never seen this one, so the
- * second write drops the first, and the test underneath would be watching a
- * lost update rather than the thing it means to watch.
+ * Waiting on the request is not enough: the reload lands in `state` a turn
+ * after its response does, and the next button has to be the one the page is
+ * showing now rather than one left over from before. The lost update that used
+ * to be underneath this — a second write built from a store that had never
+ * seen the first — is the skills lane's job now, and has its own test below.
  */
 async function addGroupNamed(name, items) {
   [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '+ Add skill group').click();
@@ -237,5 +236,40 @@ describe('adding two skill groups with the same name', () => {
     expect(ids).toHaveLength(new Set(ids).size);
     expect(group.items.map((i) => i.text)).toEqual(['Rust', 'Zig', 'Rust']);
     await settle();
+  });
+});
+
+/*
+ * Two × clicks in a row.
+ *
+ * Every skills write is a read-modify-write of the whole group list: read
+ * `state.store.skillGroups`, change one thing, PUT all of it. The store is
+ * reloaded afterwards, and until that lands `state.store` still shows what was
+ * there before — so a second write started inside that window builds its list
+ * from the old one and puts back what the first had just removed.
+ *
+ * Forms make that window hard to hit; the × on a skill chip does not. Deleting
+ * three skills is three clicks with nothing in between, and the way it failed
+ * was for one of them to come back.
+ */
+describe('deleting two skills quickly', () => {
+  const chipFor = (text) =>
+    [...document.querySelectorAll('.skill-chip')].find((c) => c.textContent.replace('×', '').trim() === text);
+
+  it('removes both, rather than the second putting the first back', async () => {
+    const data = await openEditor();
+    expect(chipFor('Python')).toBeTruthy();
+    expect(chipFor('Go')).toBeTruthy();
+
+    // No await between them: this is the point.
+    chipFor('Python').querySelector('button.x').click();
+    chipFor('Go').querySelector('button.x').click();
+
+    await settle();
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(1));
+
+    const group = data.skillGroups.find((g) => g.id === 'sk_lang');
+    expect(group.items.map((i) => i.text)).not.toContain('Python');
+    expect(group.items.map((i) => i.text)).not.toContain('Go');
   });
 });
