@@ -1,3 +1,4 @@
+import { sortKey, startKey } from './period.js';
 import {
   DEFAULT_LAYOUT,
   isListBullet,
@@ -303,6 +304,89 @@ function resolveEntry(
 }
 
 /** Turn a resume spec plus the store into something the renderer can print. */
+/**
+ * The entry ids of one section, in the order they should print.
+ *
+ * Sorting happens here, at render time, rather than by rewriting the stored
+ * list. Two reasons. The list is what a manual arrangement *is*, so a sort that
+ * overwrote it would destroy the thing you go back to when you turn the sort
+ * off. And a sort that runs when the resume is built cannot go stale: change a
+ * date and the page is already right, with nothing to remember to re-run.
+ *
+ * Entries whose dates could not be read are not sorted anywhere. They keep
+ * their positions relative to each other and follow the dated ones, because an
+ * entry the program cannot place is one it has no business moving — "Various"
+ * is not older than 2019 and it is not newer, and pretending either way puts a
+ * line of somebody's resume somewhere they did not choose.
+ */
+/**
+ * Turn a hand-ordered section into a date-ordered one, where that is provably
+ * a no-op.
+ *
+ * Most of the time a resume should keep itself in date order, and most of the
+ * time it already is: people list jobs newest-first because that is what the
+ * document is for. But a section written before ordering existed says nothing
+ * about what it wants, and reading "says nothing" as "sort me" would rearrange
+ * documents that have been proofread and sent — for the sake of a setting the
+ * author never saw.
+ *
+ * So the question asked is narrower and answerable: would sorting this section
+ * change it? If not, it is already a date-ordered section that has been
+ * maintained by hand, and saying so out loud costs the user nothing and means
+ * the next entry they add lands in the right place by itself. If it would
+ * change, the order is a decision — a project pulled to the top for one
+ * application, a job held back — and the only right move is to leave it and
+ * let the editor offer the sort as a button.
+ *
+ * Returns the sections it would change, rather than changing them, so the
+ * caller decides whether this is a migration or a question.
+ */
+export function adoptDateOrder(
+  sections: SectionSpec[],
+  entries: Entry[],
+): { adopted: SectionSpec[]; handOrdered: SectionSpec[] } {
+  const adopted: SectionSpec[] = [];
+  const handOrdered: SectionSpec[] = [];
+
+  for (const section of sections) {
+    if (section.order !== undefined || section.kind === 'skills') {
+      adopted.push(section);
+      continue;
+    }
+    const ids = section.entries ?? [];
+    const sorted = orderedEntries({ ...section, order: 'newest' }, entries);
+    // One entry cannot be out of order, and neither can none.
+    if (ids.length < 2 || sorted.every((id, i) => id === ids[i])) {
+      adopted.push({ ...section, order: 'newest' });
+    } else {
+      adopted.push(section);
+      handOrdered.push(section);
+    }
+  }
+  return { adopted, handOrdered };
+}
+
+export function orderedEntries(section: SectionSpec, entries: Entry[]): string[] {
+  const ids = section.entries ?? [];
+  if (section.order !== 'newest' && section.order !== 'oldest') return ids;
+
+  const keyOf = (id: string) => {
+    const entry = entries.find((e) => e.id === id);
+    return section.order === 'oldest' ? startKey(entry?.period) : sortKey(entry?.period);
+  };
+
+  const dated: { id: string; key: number }[] = [];
+  const undated: string[] = [];
+  for (const id of ids) {
+    const key = keyOf(id);
+    if (key === undefined) undated.push(id);
+    else dated.push({ id, key });
+  }
+
+  dated.sort((a, b) => (section.order === 'oldest' ? a.key - b.key : b.key - a.key));
+  return [...dated.map((d) => d.id), ...undated];
+}
+
 export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): ResolvedResume {
   const spec =
     typeof specOrId === 'string'
@@ -346,7 +430,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
         skillGroups.push({ id: group.id, name: group.name, items });
       }
     } else {
-      for (const eid of section.entries ?? []) {
+      for (const eid of orderedEntries(section, data.entries)) {
         const entry = data.entries.find((e) => e.id === eid);
         if (!entry) {
           warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);

@@ -118,6 +118,56 @@ function unknownFlag(command: string, rest: string[]): string | null {
   return null;
 }
 
+/**
+ * What is left of a command's arguments once its flags are taken out.
+ *
+ * A flag, the folder it names, and the resume id all arrive in the same list,
+ * and every command that takes an id was reading the first thing in that list.
+ * So `rmm check --data ~/other-save my-resume` looked up a resume called
+ * "--data" and reported that it does not exist, while the same words in the
+ * other order worked — and the message named the resume rather than the
+ * ordering, so there was nothing in it to act on. `--data` is documented as
+ * belonging to every command, and putting a flag before the thing it applies
+ * to is the ordering most tools teach.
+ *
+ * `voice add` had the same bug wearing different clothes: it took every token
+ * that did not begin with a dash as a file to read, which includes the folder
+ * `--data` names, and failed with "EISDIR: illegal operation on a directory"
+ * naming a path the person had typed as a save.
+ *
+ * Driven by the same table `unknownFlag` reads, so a flag cannot be known to
+ * one and unknown to the other.
+ */
+function positionals(command: string, rest: string[]): string[] {
+  const spec = TAKES[command] ?? {};
+  const value = new Set(['data', ...(spec.value ?? [])]);
+  const out: string[] = [];
+
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i] ?? '';
+    // Everything after `--` is a value, by convention — which is how you name
+    // a file that begins with a dash.
+    if (token === '--') {
+      out.push(...rest.slice(i + 1));
+      break;
+    }
+    if (token === '-m' && value.has('m')) {
+      i++;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      const name = token.slice(2).split('=')[0] ?? '';
+      if (value.has(name) && !token.includes('=')) i++; // its value is not a positional
+      continue;
+    }
+    // A lone `-x`: not a positional either. `unknownFlag` only judges `--`
+    // flags, so this is where a single-dash typo stops being a filename.
+    if (token.startsWith('-') && token.length > 1) continue;
+    out.push(token);
+  }
+  return out;
+}
+
 /** `-m "message"`, because every other tool that commits accepts it. */
 function shortFlag(argv: string[], flag: string): string | undefined {
   const i = argv.indexOf(flag);
@@ -168,7 +218,7 @@ async function main(argv: string[]): Promise<number> {
     case 'build': {
       const data = store.load();
       const all = rest.includes('--all');
-      const ids = all ? data.resumes.map((r) => r.id) : [rest[0]];
+      const ids = all ? data.resumes.map((r) => r.id) : [positionals('build', rest)[0]];
       if (!ids[0]) {
         // "Which resume?" is the wrong question when the answer was "all of
         // them" and there are none.
@@ -204,7 +254,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'check': {
-      const id = rest[0];
+      const id = positionals('check', rest)[0];
       if (!id) {
         console.error('Which resume?');
         return 1;
@@ -232,7 +282,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'feedback': {
-      const id = rest[0];
+      const id = positionals('feedback', rest)[0];
       if (!id) {
         console.error('Which resume?');
         return 1;
@@ -249,7 +299,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'apply': {
-      const id = rest[0];
+      const id = positionals('apply', rest)[0];
       const company = arg(rest, 'company');
       const role = arg(rest, 'role');
       if (!id || !company || !role) {
@@ -324,13 +374,13 @@ async function main(argv: string[]): Promise<number> {
      * samples, not one lump nobody will ever read back.
      */
     case 'voice': {
-      const [sub, ...files] = rest;
+      const [sub, ...files] = positionals('voice', rest);
       if (sub !== 'add') {
         console.error('Usage: rmm voice add <file…> [--dry-run] [--no-ai]');
         return 1;
       }
 
-      const paths = files.filter((f) => !f.startsWith('-'));
+      const paths = files;
       if (paths.length === 0) {
         console.error('Name at least one file to add.');
         return 1;
@@ -395,8 +445,7 @@ async function main(argv: string[]): Promise<number> {
      * laptop, before there is anything to open.
      */
     case 'clone': {
-      const url = rest[0];
-      const into = rest[1];
+      const [url, into] = positionals('clone', rest);
       if (!url || !into) {
         console.error('Usage: rmm clone <repository> <folder>');
         return 1;

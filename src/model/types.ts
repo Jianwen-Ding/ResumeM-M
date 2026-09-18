@@ -5,6 +5,9 @@
  * store. Edit the canonical text once and every resume that points at it moves.
  */
 
+import type { Period } from './period.js';
+export type { DatePoint, DateStyle, Period, Season } from './period.js';
+
 /** A single interchangeable phrasing of some text. */
 export interface Variant {
   id: string;
@@ -73,8 +76,36 @@ export interface Entry {
   kind: EntryKind;
   /** Left heading: school, company, or project name. */
   title: MaybeVariant;
-  /** Right heading: dates. */
+  /**
+   * Right heading: dates, as the words that get printed.
+   *
+   * Still the text, and still what renders. `period` below is the same
+   * information as dates, and where the two disagree this one wins — see the
+   * note there for why that is the safe way round.
+   */
   dates?: MaybeVariant;
+  /**
+   * When this happened, as dates the program can compare.
+   *
+   * Derived from `dates` on load for every store written before this existed,
+   * so nothing has to be converted before it works, and written down the next
+   * time the entry is saved. Absent means the text said something that is not
+   * a date — "Various", "Two semesters" — and that entry stays wherever it was
+   * put by hand rather than being sorted somewhere arbitrary.
+   *
+   * `dates` remains what prints. A date can be read in more ways than it can
+   * be written, so a migration that re-rendered everything would respell dates
+   * in resumes that have already been sent and proofread: "Jul. 2024" quietly
+   * becoming "July 2024" across a store is a change nobody asked for in
+   * documents nobody is going to re-read. Writing the text only when the user
+   * edits the date themselves keeps that from happening.
+   *
+   * One period per entry, taken from the default phrasing where `dates` has
+   * alternates. Alternates of a date are nearly always two spellings of one
+   * period, or two projections of a graduation, and neither should move the
+   * entry to a different place on the page depending on which resume is open.
+   */
+  period?: Period;
   /** Second-line left: degree, role, or tech stack. */
   subtitle?: MaybeVariant;
   /** Second-line right: location. */
@@ -130,6 +161,30 @@ export interface SectionSpec {
    */
   entries: string[];
   /**
+   * Whether this list is the order, or only the membership.
+   *
+   * `'newest'` is what a resume wants nearly always — most recent first is not
+   * a preference so much as the convention every reader of the document
+   * already has — so it is what a new section gets, and it is maintained from
+   * `Entry.period` rather than by hand.
+   *
+   * `'manual'` says the list above is the order. It is what you get by
+   * dragging something, because dragging is an instruction and a sort that
+   * immediately undid it would make the handle a lie.
+   *
+   * Absent is the shape of every section written before any of this existed,
+   * and it means manual — see `adoptDateOrder`, which upgrades the ones where
+   * doing so provably changes nothing and leaves the rest alone. A store does
+   * not silently rearrange a document that has already been sent.
+   *
+   * Sorting happens at render time and leaves the stored list alone, so
+   * turning it off gives back the order that was there rather than whatever
+   * the sort last produced. Entries whose dates could not be read keep their
+   * relative positions at the end: an entry the program cannot place is one it
+   * should not move.
+   */
+  order?: 'manual' | 'newest' | 'oldest';
+  /**
    * Per-entry bullet inclusion and ordering. Absent entry => all non-archived
    * bullets in store order.
    */
@@ -168,6 +223,17 @@ export interface ResumeSpec {
   lists?: Record<string, string[]>;
   /** Rendering knobs; merged over defaults and the parent's. */
   layout?: Partial<LayoutOptions>;
+  /**
+   * Entry ids folded away in the editor for this resume.
+   *
+   * A view preference, and it prints nothing — but it belongs to the resume
+   * rather than to the browser, because which entries you are done with is a
+   * fact about the document you are building and it should still be true on
+   * another machine, or after the save is cloned. Kept per resume and not
+   * inherited through `extends`: folding is about the list in front of you,
+   * and a variation is a different list.
+   */
+  collapsed?: string[];
   notes?: string;
   /** Set when the extension generated this for a specific posting. */
   generatedFor?: { url?: string; company?: string; role?: string; at?: string };
@@ -197,7 +263,23 @@ export const DEFAULT_LAYOUT: LayoutOptions = {
   spacing: 1,
   paper: 'letter',
   autoFit: true,
-  fitBounds: { minFontSizePt: 9.2, minSpacing: 0.78, minMarginIn: 0.35 },
+  /*
+   * How small auto-fit is allowed to go before it gives up and lets the
+   * document be two pages.
+   *
+   * This was 9.2pt at ×0.78 spacing inside 0.35in margins, which does fit more
+   * on a page and is not a resume anybody wants to receive: it is a wall of
+   * text set smaller than a footnote, with margins tight enough that some
+   * printers clip it. The point of a floor is that below it the honest answer
+   * is "this is too long", not "here it is, unreadable".
+   *
+   * 10pt is the smallest body size in common advice for a resume, ×0.92 keeps
+   * lines from touching, and 0.4in stays inside what printers and the parsers
+   * that read these documents handle. All three are `fitBounds` on the layout,
+   * so a resume that wants to push further still can — it is a setting, not a
+   * rule — but it has to say so rather than have it happen quietly.
+   */
+  fitBounds: { minFontSizePt: 10, minSpacing: 0.92, minMarginIn: 0.4 },
   maxPages: 1,
 };
 

@@ -199,6 +199,73 @@ function theRestOfTheStore(data: StoreData, resume: ResolvedResume): string {
  */
 const PRIOR_BUDGET = 9000;
 
+/**
+ * What they have written before, listed rather than pasted.
+ *
+ * `priorWork` below spends up to nine kilobytes of every prompt on the full
+ * text of a handful of letters and answers, chosen by a ranking made here
+ * rather than by the model. That is the right thing to do when the run is a
+ * single shot and there is no way to ask for more. It is the wrong thing when
+ * the writing tools are attached: `find_my_letters` and `find_my_answers`
+ * fetch any of it on demand, so pasting a ranked subset as well spends the
+ * context on something the model could ask for a piece at a time, hides
+ * everything the ranking cut, and hands it two copies of the same material to
+ * disagree with each other about.
+ *
+ * `tailorPrompt` already drops its store inventory for exactly this reason.
+ * This is the same trade for the corpus.
+ *
+ * What stays is the index: enough to know what is there and to decide whether
+ * any of it is worth reading, which is the one thing a search tool cannot tell
+ * you about a corpus you have never seen. Titles and questions only — no
+ * bodies, so it stays a list rather than becoming the paste again as the store
+ * fills up.
+ */
+function priorWorkIndex(data: StoreData, { question, job }: PriorWork): string {
+  const letters = [...(data.coverLetters ?? [])]
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
+  const answers = [...(data.answers ?? [])];
+  if (letters.length === 0 && answers.length === 0) return '';
+
+  const lines = ['## What they have written before', ''];
+
+  if (letters.length > 0) {
+    const here = (job?.company ?? '').toLowerCase();
+    // The same employer first, for the same reason the picker does it: the
+    // most useful letter to start from is the one they sent these people.
+    const ranked = here
+      ? [...letters].sort(
+          (a, b) =>
+            Number((b.company ?? '').toLowerCase() === here) - Number((a.company ?? '').toLowerCase() === here),
+        )
+      : letters;
+    lines.push(`${plural(letters.length, 'cover letter')}, most recent first:`);
+    for (const l of ranked.slice(0, 30)) {
+      const where = [l.company, l.role].filter(Boolean).join(' — ');
+      lines.push(`- ${l.title}${where && !l.title.includes(where) ? ` (${where})` : ''}`);
+    }
+    if (ranked.length > 30) lines.push(`- …and ${ranked.length - 30} more.`);
+  }
+
+  if (answers.length > 0) {
+    const ranked = question
+      ? [...answers].sort((a, b) => questionSimilarity(question, b.question) - questionSimilarity(question, a.question))
+      : answers;
+    lines.push('', `${plural(answers.length, 'question')} they have answered${question ? ', closest first' : ''}:`);
+    for (const a of ranked.slice(0, 30)) lines.push(`- ${a.question}`);
+    if (ranked.length > 30) lines.push(`- …and ${ranked.length - 30} more.`);
+  }
+
+  lines.push(
+    '',
+    'Read any of these with `find_my_letters` and `find_my_answers` before you write.',
+    'Adapting what already reads well beats starting from nothing: staying recognisably',
+    'the same person across a season of applications matters more than novelty.',
+  );
+  return lines.join('\n');
+}
+
+
 export interface PriorWork {
   /** The question being answered, when there is one. Ranks the answer bank. */
   question?: string;
@@ -641,10 +708,19 @@ export function coverLetterPrompt(
     employerNaming(job.company),
     '',
     mayLookThingsUp(data, { company: job.company, jobTitle: job.jobTitle }),
-    // Their own letters and answers, in full. A letter that has to be written
-    // from nothing every time drifts; one that starts from what was already
-    // said well stays recognisably the same person.
-    priorWork(data, {
+    /*
+     * Their own letters and answers. A letter written from nothing every time
+     * drifts; one that starts from what was already said well stays
+     * recognisably the same person.
+     *
+     * Listed when the writing tools are attached and pasted when they are not.
+     * With tools the model can fetch any of it on demand, so pasting a ranked
+     * subset as well would spend the context on something it could ask for a
+     * piece at a time, hide everything the ranking cut, and give it two copies
+     * to disagree about. Without tools this is the only chance to show any of
+     * it, so the full text goes in.
+     */
+    (options.tools ? priorWorkIndex : priorWork)(data, {
       job: { company: job.company, role: job.jobTitle },
       letters: priorLetters.length > 0
         ? priorLetters.map((l, n) =>
