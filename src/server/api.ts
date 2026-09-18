@@ -1854,7 +1854,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         data.coverLetters.find((l) => l.id === app.letterId) ??
         data.coverLetters.find((l) => l.applicationId === app.id);
 
-      const dir = app.snapshotDir ? path.join(store.outDir(), app.snapshotDir) : undefined;
+      // Through the store, which refuses a snapshot path that leads out of the
+      // output folder — this route lists what is in it, and the listing is
+      // shown to the browser. See `Store.outPath`.
+      const dir = app.snapshotDir ? store.outPath(app.snapshotDir) : undefined;
       const files =
         dir && fs.existsSync(dir)
           ? fs

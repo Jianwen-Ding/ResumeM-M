@@ -277,128 +277,209 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
    * a second one beside it.
    */
   const id = findApplication(data.applications, req.company, req.role)?.id ?? applicationId(req.company, req.role);
-  const dir = path.join(store.outDir(), 'applications', id);
-  fs.mkdirSync(dir, { recursive: true });
+  /*
+   * Through the store, so an id that is a path cannot choose the folder. The
+   * id here is often not one this code made — `findApplication` takes it from
+   * applications.yaml — and the loop below used to delete every file in
+   * whatever folder it named. See `Store.outFile`.
+   */
+  let dir: string;
+  try {
+    dir = store.outFile('applications', id);
+  } catch (err) {
+    /*
+     * Refused by the store, and said here in terms of the thing the person can
+     * actually go and change. `Store.outFile` knows a name is not a name; it
+     * does not know that this one came off a tracker row, and "That name is
+     * not allowed" in front of somebody trying to send an application names
+     * nothing they can see or edit.
+     */
+    const said = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `The tracked application for ${req.company} — ${req.role} has an id that cannot be a folder name ` +
+        `("${id.slice(0, 60)}"): ${said} Fix or remove that row in the tracker and build again.`,
+      { cause: err },
+    );
+  }
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
 
   /*
-   * A rebuild replaces the bundle; it does not add to it.
+   * Built beside the folder, and moved into it once it is all there.
    *
-   * The id is company, role and date, so building the same application twice
-   * in a day writes into the same folder — and every file whose name changed
-   * in between was left sitting beside its replacement. Change how your name
-   * is written, or rebuild without the cover letter you had before, and the
-   * folder holds two resumes or an orphaned letter. Both then get copied into
-   * the flat upload folder, where the whole point is that the file in front of
-   * you is the one to send.
+   * A rebuild replaces the bundle rather than adding to it — the id is
+   * company, role and date, so building the same application twice in a day
+   * writes into the same folder, and every file whose name changed in between
+   * would otherwise sit beside its replacement. Change how your name is
+   * written, or rebuild without the cover letter you had before, and the
+   * folder holds two resumes or an orphaned letter, both of which then get
+   * copied into the flat upload folder where the whole point is that the file
+   * in front of you is the one to send.
    *
-   * `source/` stays: it is the archive material, and it is rewritten below.
+   * That clearing used to happen first, before anything was compiled, and the
+   * bundle folder is the archive: "six weeks later, when they ask about the
+   * pipeline project, the file that went out is still there". It was not.
+   * Anything between the clearing and the last write — an emoji in a title
+   * that no engine can set, an entry the spec names and the store has since
+   * lost, a full disk, closing the laptop — left the folder holding `source/`
+   * and nothing else. The resume that was actually sent, the cover letter, the
+   * plain-text copy of it and the answers: deleted, by a rebuild that then
+   * reported an error about typography.
+   *
+   * Staging costs one rename per file and makes the two states the only two
+   * there are. Either the folder is the bundle that was sent, or it is the new
+   * one; a crash in the middle leaves the old one intact and a `.rmm-building-`
+   * folder to sweep up, and nothing half-written is ever inside the folder the
+   * tracker points at or the upload folder copies from.
    */
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isFile()) fs.rmSync(path.join(dir, entry.name), { force: true });
-  }
+  const stage = fs.mkdtempSync(path.join(path.dirname(dir), '.rmm-building-'));
 
-  const pdfPath = path.join(dir, resumeName);
-  const compiled = await compileResume(resolved, {
-    pdfPath,
-    texPath: path.join(dir, 'source', 'resume.tex'),
-  });
+  try {
+    const pdfPath = path.join(stage, resumeName);
+    const compiled = await compileResume(resolved, {
+      pdfPath,
+      texPath: path.join(stage, 'source', 'resume.tex'),
+    });
 
-  const files = [resumeName];
+    const files = [resumeName];
 
-  if (req.coverLetter?.trim()) {
+    if (req.coverLetter?.trim()) {
 
-    // Typeset to match the resume, with the trusted engine — this is a file
-    // that gets uploaded, so it never takes the preview shortcut. The plain
-    // text goes alongside it, because as many portals want a letter pasted
-    // into a box as want one attached.
-    await compileLetter(
-      {
-        profile: resolved.profile,
-        company: req.company,
-        role: req.role,
-        body: req.coverLetter,
-      },
-      resolved.layout,
-      { pdfPath: path.join(dir, letterName), texPath: path.join(dir, 'source', 'cover-letter.tex') },
-    );
-    files.push(letterName);
+      // Typeset to match the resume, with the trusted engine — this is a file
+      // that gets uploaded, so it never takes the preview shortcut. The plain
+      // text goes alongside it, because as many portals want a letter pasted
+      // into a box as want one attached.
+      await compileLetter(
+        {
+          profile: resolved.profile,
+          company: req.company,
+          role: req.role,
+          body: req.coverLetter,
+        },
+        resolved.layout,
+        { pdfPath: path.join(stage, letterName), texPath: path.join(stage, 'source', 'cover-letter.tex') },
+      );
+      files.push(letterName);
 
-    const textPath = path.join(dir, letterName.replace(/\.pdf$/, '.txt'));
-    fs.writeFileSync(textPath, req.coverLetter, 'utf8');
-    files.push(path.basename(textPath));
-  }
+      const textPath = path.join(stage, letterName.replace(/\.pdf$/, '.txt'));
+      fs.writeFileSync(textPath, req.coverLetter, 'utf8');
+      files.push(path.basename(textPath));
+    }
 
-  if (req.answers?.length) {
-    /*
-     * Named like the other two rather than `application-answers.md`. A
-     * constant was fine inside a per-application folder and collided for any
-     * two applications at once in the flat one — and the flat folder is the
-     * one you upload from.
-     */
-    const qaPath = path.join(
-      dir,
-      answersName,
-    );
-    /*
-     * Titled, because this one is read rather than uploaded.
-     *
-     * The resume and the letter are attachments: a portal takes them and
-     * nobody opens them again. This file is the one you sit with, copying
-     * answers into boxes — often with a second application's open beside it,
-     * since the flat folder holds everything in flight at once. It began
-     * straight in at "## Why this team?", with nothing on the page saying
-     * whose question that was.
-     */
-    const title = [req.company, req.role].filter(Boolean).join(' — ');
+    if (req.answers?.length) {
+      /*
+       * Named like the other two rather than `application-answers.md`. A
+       * constant was fine inside a per-application folder and collided for any
+       * two applications at once in the flat one — and the flat folder is the
+       * one you upload from.
+       */
+      const qaPath = path.join(
+        stage,
+        answersName,
+      );
+      /*
+       * Titled, because this one is read rather than uploaded.
+       *
+       * The resume and the letter are attachments: a portal takes them and
+       * nobody opens them again. This file is the one you sit with, copying
+       * answers into boxes — often with a second application's open beside it,
+       * since the flat folder holds everything in flight at once. It began
+       * straight in at "## Why this team?", with nothing on the page saying
+       * whose question that was.
+       */
+      const title = [req.company, req.role].filter(Boolean).join(' — ');
+      fs.writeFileSync(
+        qaPath,
+        `# ${title}\n\n${req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n')}`,
+        'utf8',
+      );
+      files.push(path.basename(qaPath));
+    }
+
+    // The resolved resume is stored as data too, so a past application can be
+    // reopened as a starting point without re-deriving it from the store as it
+    // stands today.
+    fs.mkdirSync(path.join(stage, 'source'), { recursive: true });
     fs.writeFileSync(
-      qaPath,
-      `# ${title}\n\n${req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n')}`,
+      path.join(stage, 'source', 'resolved.yaml'),
+      YAML.stringify({ spec: store.getResume(req.resumeId), resolved }, { lineWidth: 0 }),
       'utf8',
     );
-    files.push(path.basename(qaPath));
+
+    // Everything is written. Now it becomes the bundle.
+    fs.mkdirSync(dir, { recursive: true });
+    handOver(stage, dir);
+
+    const now = new Date().toISOString();
+    const status: ApplicationStatus = req.status ?? 'applied';
+    const application: Application = {
+      id,
+      company: req.company,
+      role: req.role,
+      url: req.url,
+      appliedAt: now,
+      status,
+      resumeId: req.resumeId,
+      snapshotDir: path.relative(store.outDir(), dir),
+      source: req.source,
+      notes: req.notes,
+      answers: req.answers,
+      coverLetter: req.coverLetter?.trim() || undefined,
+      history: [{ at: now, status, note: 'Bundle created' }],
+    };
+    store.upsertApplication(application);
+    // The files also land in the flat folder, ready for the upload dialog that
+    // is probably already open.
+    syncCurrent(store);
+
+    return {
+      application,
+      dir,
+      files,
+      pages: compiled.pages,
+      fits: compiled.fits,
+      warnings: compiled.warnings,
+      missing: describeLost(resolved.lost ?? []),
+    };
+  } finally {
+    // Whatever happened: no half-built folder is left for the next listing of
+    // out/applications to show, and none survives to be confused with a
+    // bundle. On the way out of a successful build it is already empty.
+    fs.rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Move a finished bundle into the folder the tracker points at.
+ *
+ * File by file, by rename, which within one filesystem is atomic — so every
+ * name in the folder is either the old file or the new one, never a
+ * half-written prefix of the new one. The new files go in before the stale
+ * ones come out, deliberately: interrupted that way round the folder holds one
+ * document too many, which the next successful build tidies up, rather than
+ * one too few, which is gone.
+ *
+ * Only files are removed, and only files this build did not write. A folder
+ * the user made in there is theirs and is left alone; `source/` is recursed
+ * into because the build rewrites it, so an old `cover-letter.tex` does not
+ * outlive the letter it came from.
+ */
+function handOver(from: string, to: string): void {
+  const staged = fs.readdirSync(from, { withFileTypes: true });
+
+  for (const entry of staged) {
+    const there = path.join(to, entry.name);
+    if (entry.isDirectory()) {
+      fs.mkdirSync(there, { recursive: true });
+      handOver(path.join(from, entry.name), there);
+    } else {
+      fs.renameSync(path.join(from, entry.name), there);
+    }
   }
 
-  // The resolved resume is stored as data too, so a past application can be
-  // reopened as a starting point without re-deriving it from the store as it
-  // stands today.
-  fs.mkdirSync(path.join(dir, 'source'), { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, 'source', 'resolved.yaml'),
-    YAML.stringify({ spec: store.getResume(req.resumeId), resolved }, { lineWidth: 0 }),
-    'utf8',
-  );
-
-  const now = new Date().toISOString();
-  const status: ApplicationStatus = req.status ?? 'applied';
-  const application: Application = {
-    id,
-    company: req.company,
-    role: req.role,
-    url: req.url,
-    appliedAt: now,
-    status,
-    resumeId: req.resumeId,
-    snapshotDir: path.relative(store.outDir(), dir),
-    source: req.source,
-    notes: req.notes,
-    answers: req.answers,
-    coverLetter: req.coverLetter?.trim() || undefined,
-    history: [{ at: now, status, note: 'Bundle created' }],
-  };
-  store.upsertApplication(application);
-  // The files also land in the flat folder, ready for the upload dialog that
-  // is probably already open.
-  syncCurrent(store);
-
-  return {
-    application,
-    dir,
-    files,
-    pages: compiled.pages,
-    fits: compiled.fits,
-    warnings: compiled.warnings,
-    missing: describeLost(resolved.lost ?? []),
-  };
+  const written = new Set(staged.map((e) => e.name));
+  for (const entry of fs.readdirSync(to, { withFileTypes: true })) {
+    if (entry.isFile() && !written.has(entry.name)) fs.rmSync(path.join(to, entry.name), { force: true });
+  }
 }
 
 /** Record a status change, keeping the history rather than overwriting it. */

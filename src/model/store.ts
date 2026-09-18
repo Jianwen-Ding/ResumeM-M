@@ -133,6 +133,145 @@ function splitFrontMatter(raw: string): { header: string; body: string } | undef
 }
 
 /**
+ * One segment of a path, checked as the filename it is about to become.
+ *
+ * Every id in this app is also a filename, and ids arrive from a URL, from a
+ * request body the browser extension supplies, and from YAML somebody edited
+ * by hand. All three checks live here rather than at the callers, because
+ * there are a dozen callers and one of them is always the one that was
+ * forgotten.
+ *
+ * A name that contains a path is not a name. `../config` from the resumes
+ * folder overwrites the store's own configuration, whose `ai.command` this
+ * application executes — see `Store.file` below, which is where that one was
+ * first caught, and `Store.outFile`, which is where it was still open.
+ *
+ * A name with a null byte in it is refused here so the message is about the
+ * name. Node throws on its own further down — "The argument 'path' must be a
+ * string, Uint8Array, or URL without null bytes. Received '/…/resumes/a\x00b
+ * .yaml.19280d27-….tmp'" — which is accurate, names a temp file the person
+ * never typed, and leaves them to work out that their id was the problem.
+ *
+ * And 255 bytes is the filename limit on ext4, APFS, NTFS and every other
+ * filesystem this is likely to meet, so a longer one cannot be written
+ * anywhere and should say so in those words rather than as ENAMETOOLONG
+ * pointing at a path with a UUID in it.
+ */
+function assertName(segment: string): void {
+  if (segment.includes('/') || segment.includes('\\') || segment.split('.').includes('..')) {
+    throw new Error('That name is not allowed — a name cannot contain a path.');
+  }
+  if (segment.includes('\u0000')) {
+    throw new Error('That name is not allowed — a name cannot contain a null character.');
+  }
+  if (Buffer.byteLength(segment, 'utf8') > 255) {
+    throw new Error(
+      `That name is too long — "${segment.slice(0, 40)}…" comes to ${Buffer.byteLength(segment, 'utf8')} bytes ` +
+        'as a filename, and 255 is the most a filesystem will take. Shorten the id.',
+    );
+  }
+}
+
+/** `CON.yaml` and `com1.md` included: the extension does not save them. */
+const WINDOWS_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+/**
+ * Why a filename would survive here and nowhere else, or undefined when it
+ * travels.
+ *
+ * The store is a git repository, and the reason it is one is that it gets
+ * cloned: onto the laptop, which is a Mac, and onto the desktop, which is
+ * Windows. Linux will hold a file called `Acme: Engineer.yaml`, `why?.yaml`,
+ * `CON.yaml` or `ends with a dot..yaml` quite happily. Windows will not create
+ * any of them, so `git clone` of that store fails partway through the
+ * checkout, with an error naming git and a file, and leaves a save missing
+ * exactly the resumes whose names were interesting.
+ *
+ * A leading dot is in here for a different reason: a store entry written as a
+ * hidden file is invisible in Finder, in Explorer and in a plain `ls`, and
+ * this folder's own bookkeeping — the temp files below, `.rmm-current.json` —
+ * already lives behind that prefix. An empty name is the same failure at its
+ * limit: an id of `''` wrote `resumes/.yaml`, which `loadResumes` read, took
+ * an empty id from, and dropped — a file that could not be opened, edited or
+ * deleted from the app and sat in every commit.
+ */
+function unportableReason(name: string): string | undefined {
+  const stem = name.replace(/\.[^.]*$/, '');
+  if (!stem) return 'it has no name in front of the file extension';
+  if (stem === '.' || stem === '..') return 'a name of dots is not a name';
+  if (name.startsWith('.')) return 'a name beginning with a dot is hidden in every file browser';
+  // Control characters included: they are legal on ext4, unprintable in every
+  // listing, and rejected outright by Windows.
+  const bad = name.match(/[\u0000-\u001f<>:"|?*]/g);
+  if (bad) return `Windows will not take ${[...new Set(bad)].map((c) => `"${c}"`).join(', ')} in a filename`;
+  if (/[. ]$/.test(stem)) return 'Windows drops a dot or a space from the end of a name';
+  if (WINDOWS_DEVICE_NAMES.test(name)) return `"${stem}" is a reserved device name on Windows`;
+  return undefined;
+}
+
+/**
+ * Read one file of a store folder, saying which one when it will not read.
+ *
+ * `parseStoreYaml` already names the file when the *content* is wrong, and the
+ * step before it did not: `readFileSync` on `resumes/acme.yaml` that turns out
+ * to be a directory, or that the process cannot open, throws "EISDIR: illegal
+ * operation on a directory, read" — which names neither the file nor the
+ * resume, arrives from inside `store.load()`, and so presents as the whole
+ * application being broken rather than one file in it.
+ */
+function readStoreFile(full: string, label: string): string {
+  try {
+    return fs.readFileSync(full, 'utf8');
+  } catch (err) {
+    const said = err instanceof Error ? err.message : String(err);
+    throw new Error(`${label} could not be read (${full}) — ${said}`);
+  }
+}
+
+/**
+ * The name this file has on disk, when that is not quite the name it was asked
+ * for.
+ *
+ * macOS keeps filenames decomposed. A store written on Linux with `géraldine
+ * .yaml` — one code point for the é — comes back from `readdir` on a Mac as
+ * `e` followed by a combining acute, and no two of those strings compare
+ * equal. `loadResumes` takes the id from the filename, so the store then held
+ * a resume with an id nothing could look up: the editor answered "No resume",
+ * every variation extending it lost its base, and saving from the editor wrote
+ * a *second* file whose name lists identically beside the first. On the Mac,
+ * where those two names are one file, that second write silently replaced a
+ * resume the app had just said did not exist.
+ *
+ * So a name that is not there is looked for again under Unicode
+ * normalisation, and the spelling that is actually on disk wins. Reads find
+ * it, writes go back into it rather than beside it, and deletes remove the
+ * file that exists rather than reporting success over one that does not.
+ *
+ * Deliberately not case-folding. `Acme` and `acme` are one file on macOS and
+ * Windows and two on Linux, and folding them here would make a save under one
+ * name overwrite the other resume on the filesystem where they are genuinely
+ * separate — turning a portability problem into data loss on the platform that
+ * does not have it.
+ */
+function onDiskSpelling(full: string): string {
+  if (fs.existsSync(full)) return full;
+  const dir = path.dirname(full);
+  const wanted = path.basename(full).normalize('NFC');
+  let siblings: string[];
+  try {
+    siblings = fs.readdirSync(dir);
+  } catch {
+    // No folder yet, or not a folder at all. Either way there is nothing on
+    // disk to match, and the name asked for is the name to create; whatever is
+    // wrong with the folder is reported by the read or write that follows,
+    // which knows what it was trying to do.
+    return full;
+  }
+  const found = siblings.find((name) => name.normalize('NFC') === wanted);
+  return found === undefined ? full : path.join(dir, found);
+}
+
+/**
  * The store is a directory of YAML files under git. It is deliberately dumb:
  * read everything, hand out plain objects, write back whole files. A resume
  * store is a few hundred kilobytes; there is no reason for an index or a
@@ -165,17 +304,13 @@ export class Store {
      * folder stays inside it and overwrites the store's own configuration,
      * whose `ai.command` this application executes.
      */
-    for (const segment of p) {
-      if (segment.includes('/') || segment.includes('\\') || segment.split('.').includes('..')) {
-        throw new Error('That name is not allowed — a name cannot contain a path.');
-      }
-    }
+    for (const segment of p) assertName(segment);
     const full = path.resolve(this.root, ...p);
     // And the belt to that pair of braces, in case a segment ever gets through.
     if (full !== this.root && !full.startsWith(this.root + path.sep)) {
       throw new Error('That name is not allowed — it points outside the save folder.');
     }
-    return full;
+    return onDiskSpelling(full);
   }
 
   private readYaml<T>(rel: string | string[], fallback: T): T {
@@ -203,8 +338,40 @@ export class Store {
    * data deserves it at least as much.
    */
   private writeAtomic(f: string, text: string): void {
+    /*
+     * A name is judged when it is created, and never afterwards.
+     *
+     * `unportableReason` above says why a store must not *acquire* a file
+     * called `CON.yaml` or `Acme: Engineer.yaml`. It says nothing about one
+     * that is already there — from a store written before this check, from a
+     * hand edit, from an import — and refusing to write those would mean the
+     * app can see a file of the user's, list it, and then decline to save
+     * their edit to it. That is the loss this whole layer is trying to avoid,
+     * so an existing file is always writable and only a new one is refused.
+     */
+    if (!fs.existsSync(f)) {
+      const reason = unportableReason(path.basename(f));
+      if (reason) {
+        throw new Error(
+          `"${path.basename(f)}" is not a name this save can hold: ${reason}. ` +
+            'The save is a git repository meant to be cloned onto other machines, and a name ' +
+            'like that stops the clone partway. Choose another id.',
+        );
+      }
+    }
+
     fs.mkdirSync(path.dirname(f), { recursive: true });
-    const temp = `${f}.${randomUUID()}.tmp`;
+    /*
+     * A fixed-length temp name, in the same directory so the rename is atomic.
+     *
+     * It used to be the target's own name with `.<uuid>.tmp` after it, which
+     * spends 41 of the 255 bytes a filename gets — so a resume whose filename
+     * was long and entirely legal, and which loaded and rendered perfectly,
+     * could not be saved: ENAMETOOLONG, naming a temp path with a UUID in it,
+     * and the edit lost. The temp file exists for the length of one write and
+     * nothing reads it by name.
+     */
+    const temp = path.join(path.dirname(f), `.rmm-${randomUUID()}.tmp`);
     try {
       const fd = fs.openSync(temp, 'w');
       try {
@@ -217,7 +384,20 @@ export class Store {
       fs.renameSync(temp, f);
     } catch (err) {
       fs.rmSync(temp, { force: true });
-      throw err;
+      /*
+       * Named for the file that was being saved, not for the scratch file it
+       * was being saved through.
+       *
+       * Everything that goes wrong here goes wrong on the temp file — a folder
+       * that cannot be written to, a full disk, a read-only mount — so the
+       * errno arrived as "EACCES: permission denied, open
+       * '/…/resumes/.rmm-9f3c….tmp'", a path with a UUID in it that exists for
+       * a millisecond and that nobody can act on. The person needs to know
+       * which of their files did not save and where it lives; the original
+       * complaint is kept after it, because the errno is the diagnosis.
+       */
+      const said = err instanceof Error ? err.message : String(err);
+      throw new Error(`${path.basename(f)} could not be saved to ${path.dirname(f)} — ${said}`, { cause: err });
     }
   }
 
@@ -305,14 +485,59 @@ export class Store {
     this.writeAtomic(this.file('voice.md'), text);
   }
 
+  /**
+   * What is in one of the store's folders, and a sentence about the folder
+   * when there is no answer.
+   *
+   * A folder that is not there yet is not a problem: a store with no letters
+   * in it has no `letters/`, and the empty list is the truth. Two other things
+   * happen to real people on import day and used to arrive as a raw errno from
+   * the middle of `store.load()`, which every page of the app calls:
+   *
+   * `corpus` as a *file* — an export that wrote one, a note somebody saved
+   * next to their store — threw "ENOTDIR: not a directory, scandir '/…/corpus'"
+   * and took down the whole application, including the parts that had nothing
+   * to do with the corpus. The path was in the message; what it was for, and
+   * what to do about it, were not.
+   *
+   * A folder that cannot be read — wrong owner after a restore from a backup,
+   * a mode of 0500 on a copied tree — threw EACCES the same way. Both are
+   * still refusals, because the alternative is reporting an empty corpus to
+   * somebody who has one and letting the next save write that emptiness back.
+   * They just say which folder, and what was expected of it.
+   */
+  private listing(rel: string, keep: (name: string) => boolean): string[] {
+    const dir = this.file(rel);
+    let stat: fs.Stats | undefined;
+    try {
+      // Missing comes back as undefined; a parent that cannot be searched, or
+      // a mount that has gone away, still throws — and must, for the reason
+      // above.
+      stat = fs.statSync(dir, { throwIfNoEntry: false });
+    } catch (err) {
+      const said = err instanceof Error ? err.message : String(err);
+      throw new Error(`The save's "${rel}" folder could not be looked at (${dir}) — ${said}`);
+    }
+    if (!stat) return [];
+    if (!stat.isDirectory()) {
+      throw new Error(
+        `The save has a file called "${rel}" where it expects a folder (${dir}). ` +
+          'Move that file aside and try again — nothing has been changed.',
+      );
+    }
+    try {
+      return fs.readdirSync(dir).filter(keep);
+    } catch (err) {
+      const said = err instanceof Error ? err.message : String(err);
+      throw new Error(`The save's "${rel}" folder could not be read (${dir}) — ${said}`);
+    }
+  }
+
   /** Resumes live one-per-file so a new variation is a new small file. */
   loadResumes(): ResumeSpec[] {
     const dir = this.file('resumes');
-    if (!fs.existsSync(dir)) return [];
     return (
-      fs
-        .readdirSync(dir)
-        .filter((f) => f.endsWith('.yaml') || f.endsWith('.yml'))
+      this.listing('resumes', (f) => f.endsWith('.yaml') || f.endsWith('.yml'))
         /*
          * `.yaml` before `.yml`, so a folder holding both spellings of one id
          * is not decided by whatever order the filesystem returned. `saveResume`
@@ -324,7 +549,7 @@ export class Store {
       .map((f) => {
         const spec = parseStoreYaml<Partial<ResumeSpec>>(
           `resumes/${f}`,
-          fs.readFileSync(path.join(dir, f), 'utf8'),
+          readStoreFile(path.join(dir, f), `resumes/${f}`),
           {},
         );
         /*
@@ -338,9 +563,13 @@ export class Store {
          * through the copy, and the next save wrote the copy's content over the
          * real file.
          *
-         * Taken from the name, a copied file is simply its own resume.
+         * Taken from the name, a copied file is simply its own resume — and
+         * normalised, so the id is the same string whichever filesystem last
+         * wrote the name. See `onDiskSpelling`: a Mac hands back the é of an
+         * accented filename as two code points, and an id nothing can match is
+         * a resume nothing can open.
          */
-        const id = path.basename(f).replace(/\.ya?ml$/, '');
+        const id = path.basename(f).replace(/\.ya?ml$/, '').normalize('NFC');
         /*
          * And a name for it, from the same place, when the file does not give
          * one. A resume file that exists and is still empty — created by hand,
@@ -565,13 +794,10 @@ export class Store {
   /** Cover letters are markdown files with a YAML front-matter header. */
   loadCoverLetters(): CoverLetter[] {
     const dir = this.file('letters');
-    if (!fs.existsSync(dir)) return [];
-    return fs
-      .readdirSync(dir)
-      .filter((f) => f.endsWith('.md'))
+    return this.listing('letters', (f) => f.endsWith('.md'))
       .map((f) => {
-        const raw = fs.readFileSync(path.join(dir, f), 'utf8');
-        const id = path.basename(f, '.md');
+        const raw = readStoreFile(path.join(dir, f), `letters/${f}`);
+        const id = path.basename(f, '.md').normalize('NFC');
         const split = splitFrontMatter(raw);
         if (!split) {
           return { id, title: id, createdAt: '', body: raw } satisfies CoverLetter;
@@ -621,13 +847,10 @@ export class Store {
    */
   loadSamples(): WritingSample[] {
     const dir = this.file('corpus');
-    if (!fs.existsSync(dir)) return [];
-    return fs
-      .readdirSync(dir)
-      .filter((f) => f.endsWith('.md'))
+    return this.listing('corpus', (f) => f.endsWith('.md'))
       .map((f) => {
-        const raw = fs.readFileSync(path.join(dir, f), 'utf8');
-        const id = path.basename(f, '.md');
+        const raw = readStoreFile(path.join(dir, f), `corpus/${f}`);
+        const id = path.basename(f, '.md').normalize('NFC');
         const split = splitFrontMatter(raw);
         if (!split) return { id, title: id, kind: 'other' as const, text: raw, createdAt: '' };
         const meta = parseStoreYaml<Partial<WritingSample>>(`corpus/${f}`, split.header, {});
@@ -666,14 +889,11 @@ export class Store {
    */
   loadDrafts(): Draft[] {
     const dir = this.file('drafts');
-    if (!fs.existsSync(dir)) return [];
-    return fs
-      .readdirSync(dir)
-      .filter((f) => f.endsWith('.yaml'))
+    return this.listing('drafts', (f) => f.endsWith('.yaml'))
       .map((f) => {
         const draft = parseStoreYaml<Partial<Draft>>(
           `drafts/${f}`,
-          fs.readFileSync(path.join(dir, f), 'utf8'),
+          readStoreFile(path.join(dir, f), `drafts/${f}`),
           {},
         );
         // The filename is the id, the same way it is for resumes, and for the
@@ -682,7 +902,7 @@ export class Store {
         // renaming one left `deleteDraft` unlinking a path that is not there —
         // so discarding it failed and completing it silently left it on the
         // list forever.
-        return { ...draft, id: path.basename(f, '.yaml') };
+        return { ...draft, id: path.basename(f, '.yaml').normalize('NFC') };
       })
       .filter((d): d is Draft => Boolean(d && d.id))
       .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
@@ -705,11 +925,85 @@ export class Store {
     return true;
   }
 
-  /** Absolute path to the configured output directory, created on demand. */
+  /**
+   * Absolute path to the configured output directory, created on demand.
+   *
+   * `output.dir` is a setting in a hand-editable file, and blank is what a
+   * half-finished edit leaves behind. Blank resolved to the *parent of the
+   * save* — so `current/` and `applications/` were scattered beside the save
+   * folder, and `/pdf/:name`, which serves whatever is in the output
+   * directory, was pointed at a directory full of the user's unrelated files.
+   * `dir: '.'` with `withinProject` did the same to the save folder itself,
+   * which would have put generated PDFs under version control.
+   *
+   * Neither is a thing anybody means, and neither is worth refusing to start
+   * over: the output folder holds only files this app can rebuild, so falling
+   * back to `out` inside the save costs a rebuild and loses nothing.
+   */
   outDir(): string {
     const output = this.loadConfig().output;
-    const dir = path.resolve(this.root, output.withinProject ? '.' : '..', output.dir);
-    fs.mkdirSync(dir, { recursive: true });
+    const asked = String(output.dir ?? '').trim();
+    let dir = path.resolve(this.root, output.withinProject ? '.' : '..', asked || 'out');
+    if (dir === this.root || this.root.startsWith(dir + path.sep)) dir = path.join(this.root, 'out');
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (err) {
+      const said = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `The output folder could not be created (${dir}) — ${said}. ` +
+          'Change where built files go under Settings → output folder.',
+      );
+    }
     return dir;
+  }
+
+  /**
+   * A path inside the output folder, and never outside it.
+   *
+   * The twin of `file` above, for the same reason and against a worse case.
+   * A bundle folder is named after an application id, and that id is not
+   * always one this code made: `buildBundle` prefers the id of the tracker row
+   * the job already has, which comes out of applications.yaml — hand-editable
+   * by design, and written by `POST /api/applications` from a body the browser
+   * extension supplies, `id` and all.
+   *
+   * An id of `../../..` plus a real path therefore chose the bundle folder,
+   * and `buildBundle` deletes every file in that folder before it writes. One
+   * request from any page in the browser, and a folder of the owner's is
+   * emptied. Checked here, where the path is built, because the alternative is
+   * remembering to check at each of the callers.
+   */
+  outFile(...p: string[]): string {
+    const out = this.outDir();
+    for (const segment of p) assertName(segment);
+    const full = path.resolve(out, ...p);
+    if (full !== out && !full.startsWith(out + path.sep)) {
+      throw new Error('That name is not allowed — it points outside the output folder.');
+    }
+    return full;
+  }
+
+  /**
+   * A path the tracker recorded, resolved — or nothing, when it leads out of
+   * the output folder.
+   *
+   * `snapshotDir` is stored relative to the output folder, and everything that
+   * reads it walks the folder and copies what it finds: `syncCurrent` copies
+   * it into `out/current`, which this app serves over HTTP to any origin that
+   * asks. A `snapshotDir` of `../../.ssh` is then a tidy little file server for
+   * somebody's keys, and the only thing standing between that and a visited
+   * web page was that nothing had written such a value yet — which the id
+   * above could do.
+   *
+   * Undefined rather than a throw: a row pointing somewhere else is one row,
+   * and failing the whole sync over it would take down the tab that lists
+   * every other application. Nothing of the user's is lost by declining to
+   * copy a folder that was never a bundle.
+   */
+  outPath(rel: string): string | undefined {
+    const out = this.outDir();
+    if (!rel || rel.includes('\u0000')) return undefined;
+    const full = path.resolve(out, rel);
+    return full.startsWith(out + path.sep) ? full : undefined;
   }
 }
