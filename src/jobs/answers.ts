@@ -115,9 +115,50 @@ export interface AnswerMatch {
   score: number;
   /** True when the match is close enough to use as-is without editing. */
   confident: boolean;
+  /**
+   * The employer this answer talks about, when that is not the one being
+   * applied to. "Why do you want to work here?" is answered by naming the
+   * company, so the answer you wrote for Acme says Acme — and a bank that
+   * hands it over for the next application hands over a sentence addressed to
+   * the wrong people.
+   */
+  namesAnother?: string;
 }
 
-export function matchAnswer(question: string, bank: AnswerBankItem[], threshold = 0.45): AnswerMatch {
+/**
+ * Whether this answer talks about a particular employer, as a whole word.
+ *
+ * Only names the bank has actually seen: each variant is labelled with the
+ * company it was written for, so the set of names to look for is the set of
+ * companies answers have been written for. Nothing is guessed at, and a name
+ * that has never been an employer here is never mistaken for one.
+ */
+function mentions(text: string, name: string): boolean {
+  if (name.trim().length < 3) return false;
+  const escaped = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu').test(text);
+}
+
+/** Every employer the bank has written an answer for. */
+function employersInBank(bank: AnswerBankItem[]): string[] {
+  const names = new Set<string>();
+  for (const item of bank) {
+    for (const v of item.variants) {
+      const label = (v.label ?? '').trim();
+      if (label.length >= 3) names.add(label);
+    }
+  }
+  return [...names];
+}
+
+export function matchAnswer(
+  question: string,
+  bank: AnswerBankItem[],
+  options: number | { threshold?: number; company?: string } = {},
+): AnswerMatch {
+  // The threshold used to be the third argument, and callers pass it that way.
+  const { threshold = 0.45, company } = typeof options === 'number' ? { threshold: options } : options;
+
   let best: { item: AnswerBankItem; score: number } | undefined;
   for (const item of bank) {
     const score = questionSimilarity(question, item.question);
@@ -128,27 +169,52 @@ export function matchAnswer(question: string, bank: AnswerBankItem[], threshold 
     return { question, score: best?.score ?? 0, confident: false };
   }
 
-  const variant =
-    best.item.variants.find((v) => v.id === best!.item.default) ?? best.item.variants[0];
+  /*
+   * The one written for these people, when there is one.
+   *
+   * Every variant carries the company it was written for, because that is
+   * what the Workspace labels it with on the way in. Applying to somewhere
+   * you have applied before should hand back what you said to *them*, not
+   * the default, which is whatever was written last.
+   */
+  const forThisCompany = company
+    ? best.item.variants.find((v) => (v.label ?? '').trim().toLowerCase() === company.trim().toLowerCase())
+    : undefined;
+  const variant = forThisCompany ?? best.item.variants.find((v) => v.id === best!.item.default) ?? best.item.variants[0];
+
+  const text = variant?.text ?? '';
+  const ours = (company ?? '').trim().toLowerCase();
+  const namesAnother = forThisCompany
+    ? undefined
+    : employersInBank(bank).find((name) => name.trim().toLowerCase() !== ours && mentions(text, name));
 
   return {
     question,
     item: best.item,
     variant,
-    answer: variant?.text,
+    answer: text || undefined,
     score: Number(best.score.toFixed(3)),
     /*
      * A near-identical question is safe to reuse verbatim; a loose one is a
      * starting point the user should read first. Near-identical means the
      * stored question asked nothing extra — a high score alone is not enough,
      * because adding a qualifier to a question only adds shared words.
+     *
+     * And an answer that names somebody else is never safe to reuse verbatim,
+     * however exactly the question matches: that is the one failure this
+     * whole tool exists to prevent.
      */
-    confident: best.score >= 0.7 && fullyAsked(question, best.item.question),
+    confident: !namesAnother && best.score >= 0.7 && fullyAsked(question, best.item.question),
+    ...(namesAnother ? { namesAnother } : {}),
   };
 }
 
-export function matchAnswers(questions: string[], bank: AnswerBankItem[], threshold?: number): AnswerMatch[] {
-  return questions.map((q) => matchAnswer(q, bank, threshold));
+export function matchAnswers(
+  questions: string[],
+  bank: AnswerBankItem[],
+  options?: number | { threshold?: number; company?: string },
+): AnswerMatch[] {
+  return questions.map((q) => matchAnswer(q, bank, options ?? {}));
 }
 
 /**

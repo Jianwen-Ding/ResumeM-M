@@ -256,3 +256,91 @@ describe('the same question, asked by another system', () => {
     expect(loose.confident).toBe(false);
   });
 });
+
+/*
+ * An answer that names the last employer, handed to the next one.
+ *
+ * "Why do you want to work here?" is answered by naming the company, and the
+ * bank's whole premise is that the fifteenth time it is asked you start from
+ * the fourteenth answer. So the answer written for Acme says Acme — and it
+ * was put straight into the box for the next application, badged "answered
+ * before", which is exactly the reassurance that stops somebody reading it.
+ *
+ * The cover letter learned this once already, and was fixed by offering
+ * rather than adopting. The bank knows more than the letters did: every
+ * variant carries the company it was written for, so the names to look for
+ * are the names answers have actually been written for. Nothing is guessed.
+ */
+describe('an answer written for somebody else', () => {
+  const bank: AnswerBankItem[] = [
+    {
+      id: 'ans_why',
+      question: 'Why do you want to work here?',
+      default: 'v_acme',
+      variants: [
+        { id: 'v_acme', label: 'Acme', text: 'Acme has been building the same pipelines I care about for a decade.' },
+        { id: 'v_streamly', label: 'Streamly', text: 'Streamly runs the streaming infrastructure I want to learn on.' },
+      ],
+    },
+    {
+      id: 'ans_strength',
+      question: 'What is your greatest strength?',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Acme', text: 'Reading somebody else code before rewriting it.' }],
+    },
+  ];
+
+  it('says whose name is in it, and refuses to call it safe to reuse', () => {
+    const m = matchAnswer('Why do you want to work here?', bank, { company: 'Halcyon' });
+    expect(m.namesAnother).toBe('Acme');
+    // However exactly the question matches: this is the one failure the whole
+    // tool exists to prevent.
+    expect(m.confident).toBe(false);
+    // Still handed over — it is a good starting point, and the caller offers
+    // it rather than filling it in.
+    expect(m.answer).toContain('Acme');
+  });
+
+  it('prefers what you told these people, when you have told them anything', () => {
+    const m = matchAnswer('Why do you want to work here?', bank, { company: 'Streamly' });
+    expect(m.answer).toContain('Streamly');
+    expect(m.namesAnother).toBeUndefined();
+    expect(m.confident).toBe(true);
+  });
+
+  it('is quiet about an answer that names nobody', () => {
+    const m = matchAnswer('What is your greatest strength?', bank, { company: 'Halcyon' });
+    expect(m.namesAnother).toBeUndefined();
+    expect(m.confident).toBe(true);
+  });
+
+  it('only looks for names the bank has actually written answers for', () => {
+    // "Reading" is a word in an answer and has never been an employer, so it
+    // is never mistaken for one. Nothing here guesses at what a company is.
+    const m = matchAnswer('What is your greatest strength?', bank, { company: 'Reading' });
+    expect(m.namesAnother).toBeUndefined();
+  });
+
+  it('matches a name as a word, not as a fragment', () => {
+    const acme: AnswerBankItem[] = [
+      {
+        id: 'ans_why',
+        question: 'Why do you want to work here?',
+        default: 'v_1',
+        variants: [{ id: 'v_1', label: 'Ace', text: 'Placement here would suit me.' }],
+      },
+    ];
+    // "Ace" is inside "Placement"; a substring is not a mention.
+    expect(matchAnswer('Why do you want to work here?', acme, { company: 'Halcyon' }).namesAnother).toBeUndefined();
+  });
+
+  it('still takes a bare threshold, the way it always did', () => {
+    // A loose question, which clears the default and not a strict one — so
+    // the number is doing the work, and the old two-argument calls that pass
+    // it positionally still mean what they meant.
+    const loose = 'Why are you interested in this particular role at this company?';
+    expect(matchAnswer(loose, SAMPLE_ANSWERS).item?.id).toBe('ans_why');
+    expect(matchAnswer(loose, SAMPLE_ANSWERS, 0.99).item).toBeUndefined();
+    expect(matchAnswers([loose], SAMPLE_ANSWERS, 0.99)[0]?.item).toBeUndefined();
+  });
+});

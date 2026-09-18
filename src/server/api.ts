@@ -1384,11 +1384,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/answers/match',
     handler(async (req, res) => {
-      const { questions, threshold } = req.body as { questions: string[]; threshold?: number };
+      const { questions, threshold, company } = req.body as {
+        questions: string[];
+        threshold?: number;
+        // Who is being applied to, so an answer written for somebody else can
+        // be recognised as one — and so an answer written for *these* people
+        // is preferred over whatever was written last.
+        company?: string;
+      };
       if (!Array.isArray(questions)) throw new Error('questions must be an array');
       const data = store.load();
       res.json({
-        matches: matchAnswers(questions, data.answers, threshold),
+        matches: matchAnswers(questions, data.answers, { threshold, company }),
         bankSize: data.answers.length,
       });
     }),
