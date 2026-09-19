@@ -58,16 +58,53 @@ export interface Wiring {
   env: Record<string, string>;
 }
 
+/** The one server, in the shape every config file here is written from. */
+interface Server {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+/**
+ * Codex has no key naming a config file, so the server is spelled out.
+ *
+ * `-c mcp_servers_file=…` was invented: there is no such key. Codex's
+ * configuration reference has `mcp_servers` — a table of servers — and four
+ * neighbours (`mcp_oauth_callback_port`, `mcp_oauth_callback_url`,
+ * `mcp_oauth_credentials_store`, `mcp_optional_startup_grace_ms`), and nothing
+ * that takes a path. An override on a key Codex does not have is accepted and
+ * ignored, so the run went ahead with no tools at all while its prompt told it
+ * to call them — the one combination the wiring exists to avoid.
+ *
+ * `-c` sets a dotted key to a TOML value, so the server goes in a field at a
+ * time. JSON is the encoder because TOML basic strings and arrays of them are
+ * written exactly as JSON writes them, escapes included — which matters for a
+ * Windows path, where the alternative is hand-escaping backslashes.
+ */
+function codexOverrides(server: Server): string[] {
+  const toml = (v: unknown) => JSON.stringify(v);
+  const env = Object.entries(server.env)
+    .map(([k, v]) => `${k}=${toml(v)}`)
+    .join(', ');
+  return [
+    '-c',
+    `mcp_servers.resume.command=${toml(server.command)}`,
+    '-c',
+    `mcp_servers.resume.args=${toml(server.args)}`,
+    '-c',
+    `mcp_servers.resume.env={${env}}`,
+  ];
+}
+
 /**
  * How each CLI is told. Absent means "this one has no MCP support we can rely
  * on", and the caller falls back to asking for JSON — which still works, and
  * is what every run did before this existed.
  */
-const WIRING: Record<string, (configPath: string) => string[]> = {
+const WIRING: Record<string, (configPath: string, server: Server) => string[]> = {
   // A flag naming the file, which is the least surprising of the three.
   claude: (config) => ['--mcp-config', config, '--strict-mcp-config'],
-  // Codex takes arbitrary config overrides; this is the documented key.
-  codex: (config) => ['-c', `mcp_servers_file=${config}`],
+  codex: (_config, server) => codexOverrides(server),
   // Gemini reads .gemini/settings.json from the working directory, so the
   // file is written where it looks and no flag is needed.
   gemini: () => [],
@@ -122,14 +159,8 @@ export function wireUp(
    * model sees the name beside every tool, and "resume" is the word that
    * tells it what these tools are about.
    */
-  const config = {
-    mcpServers: {
-      resume: {
-        ...howToRun(entry),
-        env: { RMM_TAILOR_SESSION: sessionPath },
-      },
-    },
-  };
+  const server: Server = { ...howToRun(entry), env: { RMM_TAILOR_SESSION: sessionPath } };
+  const config = { mcpServers: { resume: server } };
 
   const configPath = path.join(sandbox, 'mcp.json');
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
@@ -142,7 +173,7 @@ export function wireUp(
   fs.writeFileSync(path.join(geminiDir, 'settings.json'), JSON.stringify(config, null, 2), 'utf8');
 
   return {
-    args: build(configPath),
+    args: build(configPath, server),
     out,
     // Also on the environment, so a CLI that launches the server some other
     // way — or a person debugging one by hand — does not need the config.

@@ -554,6 +554,29 @@ describe('wiring a CLI up to it', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  /*
+   * Codex has no key naming a config file. `-c mcp_servers_file=…` was
+   * invented; the reference has `mcp_servers` and four OAuth/timeout
+   * neighbours, and nothing that takes a path. An override on a key Codex
+   * does not have is accepted and ignored — so the run went ahead with no
+   * tools while its prompt told it to call them.
+   */
+  it('spells the server out for Codex, which has no key naming a file', () => {
+    const dir = sandbox();
+    const wiring = wireUp(dir, 'codex', payload(), '/somewhere/bin.js');
+    expect(wiring).not.toBeNull();
+
+    const said = wiring!.args.join(' ');
+    expect(said).not.toContain('mcp_servers_file');
+    expect(said).toContain('mcp_servers.resume.command=');
+    // TOML: a string carries its own quotes, and an array is bracketed.
+    expect(wiring!.args).toContain('mcp_servers.resume.args=["/somewhere/bin.js"]');
+    expect(said).toContain(`mcp_servers.resume.env={RMM_TAILOR_SESSION="${path.join(dir, 'tailor-session.json')}"}`);
+    // Each override is its own `-c`, and the effort slider's `-c` is another.
+    expect(wiring!.args.filter((a) => a === '-c')).toHaveLength(3);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('finds the CLI behind a path', () => {
     const dir = sandbox();
     expect(wireUp(dir, '/usr/local/bin/claude', payload(), '/x/bin.js')).not.toBeNull();
