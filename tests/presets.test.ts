@@ -289,6 +289,30 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
     expect((JSON.parse(result.output) as { cli: string }).cli).toBe('codex');
   });
 
+  /*
+   * And only on Codex's own command line.
+   *
+   * `-o` is Codex's short spelling of it, and `-o` on somebody else's tool
+   * means something else — an output format, a report file. Read for every
+   * CLI, a custom command carrying `-o report.txt` would have had that file
+   * returned as the model's answer.
+   */
+  it('does not read another tool’s -o as the answer', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-not-codex-'));
+    const decoy = path.join(dir, 'report.txt');
+    fs.writeFileSync(decoy, 'A report this tool wrote for its own reasons.\n');
+    try {
+      const { command, prefix } = stub('other', `
+process.stdout.write('The actual answer.');
+`);
+      const result = await runAgent(config(command, [...prefix, '-o', decoy]), PROMPT);
+      expect(result.output).toBe('The actual answer.');
+      expect(result.output).not.toContain('for its own reasons');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('fails the way the real Codex failed, when the flag is missing', async () => {
     const { command, prefix } = stub('codex', CODEX);
     const withoutFlag = ['exec', '--sandbox', 'read-only', '--cd', '{sandbox}', '{promptText}'];

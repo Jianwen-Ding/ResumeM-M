@@ -167,7 +167,7 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
     // The answer, not the session transcript it may be wrapped in. See
     // `unwrapAgentFraming` — this is before every reader of `output`, because
     // all of them were reading the wrapper.
-    const output = lastMessage(args) ?? unwrapAgentFraming(stdout.trim());
+    const output = lastMessage(config.ai.command, args) ?? unwrapAgentFraming(stdout.trim());
     /*
      * Silence is only a failure when there was no other way to answer.
      *
@@ -448,8 +448,16 @@ const CODEX_SESSION = new RegExp(`^${STAMP}[ \\t]*User instructions:`, 'm');
  * transcript, so a version that does not write the file behaves exactly as
  * before rather than reporting that the model said nothing.
  */
-function lastMessage(args: string[]): string | null {
-  const at = args.findIndex((a) => a === '--output-last-message' || a === '-o');
+function lastMessage(command: string, args: string[]): string | null {
+  /*
+   * `--output-last-message` is Codex's alone, and means only ever this, so it
+   * is honoured whatever the command is. `-o` is its short spelling, and `-o`
+   * on somebody else's tool means something else entirely — an output format,
+   * a report file. Read everywhere, a custom command carrying `-o report.txt`
+   * would have had that file returned as the model's answer.
+   */
+  const isCodex = /(^|[\\/])codex(\.exe)?$/i.test(command.trim());
+  const at = args.findIndex((a) => a === '--output-last-message' || (isCodex && a === '-o'));
   const joined = args.find((a) => a.startsWith('--output-last-message='));
   const file = joined ? joined.slice('--output-last-message='.length) : at >= 0 ? args[at + 1] : undefined;
   if (!file) return null;
