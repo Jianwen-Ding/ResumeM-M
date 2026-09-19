@@ -276,7 +276,7 @@ export interface ResumeSpec {
    */
   lists?: Record<string, string[]>;
   /** Rendering knobs, over the save's own defaults. */
-  layout?: Partial<LayoutOptions>;
+  layout?: LayoutDefaults;
   /**
    * Entry ids folded away in the editor for this resume.
    *
@@ -652,6 +652,22 @@ export interface StoreConfig {
      */
     fileNames?: 'type' | 'title' | 'title-type';
   };
+  /**
+   * The page, for every resume in the save that has not said otherwise.
+   *
+   * Layout used to arrive by inheritance: a base stated the font size and the
+   * margins, and every variation of it took them. That was the one thing
+   * inheritance carried which nothing else covers, and resumes stand alone
+   * now — so without this, "make my margins a little wider" is an edit to
+   * every resume you own, one at a time, and a resume made next week would
+   * still arrive with the old ones.
+   *
+   * It belongs here rather than on a resume anyway. Font size and margins are
+   * a fact about how you like a page to look, not about which job you are
+   * applying for, and the per-resume `layout` stays for the one that has to
+   * be squeezed a little harder to fit.
+   */
+  layout?: LayoutDefaults;
 }
 
 export const DEFAULT_CONFIG: StoreConfig = {
@@ -679,7 +695,49 @@ export const DEFAULT_CONFIG: StoreConfig = {
   },
   git: { autoCommit: true },
   output: { dir: 'out', fileNames: 'type' },
+  // Empty, not a copy of DEFAULT_LAYOUT: absent here means "whatever this
+  // version thinks a resume should look like", so a save that never had an
+  // opinion follows the app rather than being frozen at the moment it was
+  // created.
+  layout: {},
 };
+
+/**
+ * Layout as somebody states it: any subset, including a subset of the floors.
+ *
+ * `Partial<LayoutOptions>` is not that — it makes `fitBounds` optional and
+ * leaves all three floors inside it required, so raising one meant restating
+ * the other two. Which is the same silent-pinning shape that made resume
+ * inheritance worth removing: a value written down because the type demanded
+ * it, and frozen at whatever it happened to be that day.
+ */
+export type LayoutDefaults = Partial<Omit<LayoutOptions, 'fitBounds'>> & {
+  fitBounds?: Partial<LayoutOptions['fitBounds']>;
+};
+
+/**
+ * The page a resume is set on: this version's defaults, then the save's, then
+ * the resume's own.
+ *
+ * Three levels, in the order of how specific each is. `fitBounds` is merged
+ * at its own level for the same reason — a save that widens the margin floor
+ * should not have to restate the font floor beside it.
+ */
+export function layoutFor(
+  own: LayoutDefaults | undefined,
+  saveWide: LayoutDefaults | undefined,
+): LayoutOptions {
+  return {
+    ...DEFAULT_LAYOUT,
+    ...(saveWide ?? {}),
+    ...(own ?? {}),
+    fitBounds: {
+      ...DEFAULT_LAYOUT.fitBounds,
+      ...(saveWide?.fitBounds ?? {}),
+      ...(own?.fitBounds ?? {}),
+    },
+  };
+}
 
 export function isVariantField(v: MaybeVariant | undefined): v is VariantField {
   return typeof v === 'object' && v !== null && Array.isArray((v as VariantField).variants);

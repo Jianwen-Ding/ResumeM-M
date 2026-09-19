@@ -48,7 +48,7 @@ import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snap
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
 import type { Store } from '../model/store.js';
-import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
+import { isVariantField, layoutFor } from '../model/types.js';
 import type {
   AnswerBankItem,
   Application,
@@ -1054,7 +1054,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       } catch {
         sentWith = undefined;
       }
-      const layout = sentWith?.layout ?? DEFAULT_LAYOUT;
+      /*
+       * The letter is set on the same page as the resume it goes with, and
+       * failing that on the save's own default — not on this version's, which
+       * is how a letter came out at 10.5pt beside a resume the user had set
+       * to 11.
+       */
+      const layout = sentWith?.layout ?? layoutFor(undefined, data.config?.layout);
 
       const result = await compileLetter(
         {

@@ -6582,6 +6582,85 @@ async function loadAiPresets() {
   return AI_PRESETS;
 }
 
+/**
+ * The page every resume in the save is set on, unless it says otherwise.
+ *
+ * This used to arrive by inheritance: a base stated the font size and the
+ * margins, and every variation of it took them. Resumes stand alone now, so
+ * without somewhere to say it once, "make my margins a little wider" is an
+ * edit to every resume you own — and a resume made next week would still come
+ * out with the old ones.
+ *
+ * It belongs to the save rather than to a resume anyway. How you like a page
+ * to look is not a fact about the job you are applying for. The per-resume
+ * setting stays for the one document that has to be squeezed a little harder
+ * to fit on the page.
+ */
+function pageDefaults(config) {
+  const now = config.layout ?? {};
+  // The value in force, so the boxes show what the resumes are actually set
+  // on rather than blanks that mean "whatever the app thinks".
+  const inForce = { fontSizePt: 10.5, marginIn: 0.45, spacing: 1, paper: 'letter', ...now };
+
+  const save = async (patch, revert) => {
+    try {
+      const saved = await api('/config', { method: 'PUT', body: JSON.stringify({ layout: patch }) });
+      if (state.store?.config) state.store.config.layout = saved.layout;
+      setStatus('Page settings saved');
+      // Every resume is set on this, including the one on screen.
+      scheduleRender();
+    } catch (err) {
+      revert();
+      setStatus(err.message, true);
+    }
+  };
+
+  const number = (key, label, attrs, hint) => {
+    const was = String(inForce[key]);
+    const box = el('input', { type: 'number', value: was, ...attrs });
+    box.onchange = () => {
+      const n = Number(box.value);
+      if (!Number.isFinite(n)) { box.value = was; return; }
+      save({ [key]: n }, () => { box.value = was; });
+    };
+    return el('label', { className: 'f' }, [
+      el('div', { className: 'lbl', textContent: label }),
+      box,
+      hint ? el('div', { className: 'hint', textContent: hint }) : null,
+    ]);
+  };
+
+  const paper = el('select', {}, [
+    el('option', { value: 'letter', textContent: 'US Letter' }),
+    el('option', { value: 'a4', textContent: 'A4' }),
+  ]);
+  paper.value = inForce.paper;
+  paper.onchange = () => {
+    const was = inForce.paper;
+    save({ paper: paper.value }, () => { paper.value = was; });
+  };
+
+  return el('div', { className: 'page-defaults' }, [
+    el('div', { className: 'lbl', textContent: 'The Page' }),
+    el('div', {
+      className: 'hint',
+      style: 'margin-bottom:8px',
+      textContent: 'How every resume in this save is set, unless one of them says otherwise.',
+    }),
+    el('div', { className: 'row' }, [
+      number('fontSizePt', 'Font size (pt)', { step: '0.5', min: '8', max: '14' }),
+      number('marginIn', 'Margin (in)', { step: '0.05', min: '0.3', max: '1.5' }),
+      number('spacing', 'Line spacing', { step: '0.05', min: '0.8', max: '1.5' }),
+      el('label', { className: 'f' }, [el('div', { className: 'lbl', textContent: 'Paper' }), paper]),
+    ]),
+    el('div', {
+      className: 'hint',
+      style: 'margin-bottom:12px',
+      textContent: 'Auto-fit may still shrink a resume within its limits to keep it on one page.',
+    }),
+  ]);
+}
+
 /** Where the store lives, and whether it is backed up anywhere. */
 async function loadProjectSettings() {
   const [info, config] = await Promise.all([api('/config/store'), api('/config')]);
@@ -6635,6 +6714,8 @@ async function loadProjectSettings() {
         ? `Its own git repository, ${plural(info.commits, 'commit')} so far.`
         : 'Not a git repository yet — it becomes one the first time you save.',
     }),
+
+    pageDefaults(config),
 
     // Edits made here are committed as they happen; this is for everything
     // else — YAML edited by hand, or auto-commit switched off.

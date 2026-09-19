@@ -2,6 +2,7 @@ import { flattenOne } from './flatten.js';
 import { endsBeforeItStarts, sortKey, startKey } from './period.js';
 import {
   DEFAULT_LAYOUT,
+  layoutFor,
   isListBullet,
   isVariantField,
   type Bullet,
@@ -511,11 +512,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
     }
   }
 
-  const layout: LayoutOptions = {
-    ...DEFAULT_LAYOUT,
-    ...(flat.layout ?? {}),
-    fitBounds: { ...DEFAULT_LAYOUT.fitBounds, ...(flat.layout?.fitBounds ?? {}) },
-  };
+  const layout = layoutFor(flat.layout, data.config?.layout);
 
   return {
     id: flat.id,

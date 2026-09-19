@@ -622,6 +622,7 @@ export class Store {
       ai: { ...DEFAULT_CONFIG.ai, ...(raw.ai ?? {}) },
       git: { ...DEFAULT_CONFIG.git, ...(raw.git ?? {}) },
       output: { ...DEFAULT_CONFIG.output, ...(raw.output ?? {}) },
+      layout: { ...DEFAULT_CONFIG.layout, ...(raw.layout ?? {}) },
     };
 
     config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
@@ -657,6 +658,23 @@ export class Store {
       ...(patch.ai ? { ai: { ...current.ai, ...patch.ai } } : {}),
       ...(patch.git ? { git: { ...current.git, ...patch.git } } : {}),
       ...(patch.output ? { output: { ...current.output, ...patch.output } } : {}),
+      /*
+       * `fitBounds` merged at its own level, like every block above. Sending
+       * one floor would otherwise drop the other two back to this version's
+       * defaults, which is a change nobody asked for and would not notice
+       * until a resume came out set smaller than they had allowed.
+       */
+      ...(patch.layout
+        ? {
+            layout: {
+              ...current.layout,
+              ...patch.layout,
+              ...(patch.layout.fitBounds || current.layout?.fitBounds
+                ? { fitBounds: { ...current.layout?.fitBounds, ...patch.layout.fitBounds } }
+                : {}),
+            },
+          }
+        : {}),
     };
     this.writeYaml('config.yaml', merged);
     return this.loadConfig();
