@@ -1,16 +1,24 @@
-# The shared skeleton. `newgrad` and `intern` extend this and differ only by
-# the choices they override — which is the point: one edit here reaches both.
+# What everything else here was copied from, and what the extension offers
+# first. Resumes stand alone: this one's selections were copied into the
+# others rather than being inherited by them, so editing it changes only it.
 id: base
 label: Base resume
 sections:
   - kind: education
-    entries: [edu_neu]
+    entries:
+      - edu_neu
   - kind: experience
-    entries: [exp_example_co]
+    entries:
+      - exp_example_co
   - kind: project
-    entries: [proj_resumemm, proj_jobhelper]
+    entries:
+      - proj_resumemm
+      - proj_jobhelper
   - kind: skills
-    groups: [sk_languages, sk_frameworks, sk_tools]
+    groups:
+      - sk_languages
+      - sk_frameworks
+      - sk_tools
 choices: {}
 layout:
   fontSizePt: 11
@@ -19,4 +27,11 @@ layout:
   maxPages: 1
   autoFit: true
 lists:
-  b_edu_coursework: [c_algorithms, c_ood, c_systems, c_databases, c_networks, c_theory]
+  b_edu_coursework:
+    - c_algorithms
+    - c_ood
+    - c_systems
+    - c_databases
+    - c_networks
+    - c_theory
+tier: base
