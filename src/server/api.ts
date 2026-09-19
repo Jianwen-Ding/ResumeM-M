@@ -2133,6 +2133,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          */
         save: store.root,
         /*
+         * What the AI would be writing from, so the card can say it.
+         *
+         * A model writing a cover letter is the part of this people are
+         * rightly wariest of, and the answer to that wariness — that it works
+         * from their own letters, their own samples and their own notes on
+         * how they write — is exactly why the banks exist. The card asks for
+         * a letter and never said where one would come from.
+         *
+         * Counted rather than claimed, because a count is something somebody
+         * can go and check, and because zero is the honest answer on the
+         * first application and the one most worth showing: a letter written
+         * with nothing of yours to learn from is a different offer.
+         */
+        voice: {
+          letters: data.coverLetters.length,
+          answers: data.answers.length,
+          samples: data.samples.length,
+          notes: String(data.voice ?? '').trim().length > 0,
+        },
+        /*
          * "You have applied to this one before."
          *
          * Not a warning and not a refusal — the same job comes round again,

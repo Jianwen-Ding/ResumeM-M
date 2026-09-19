@@ -694,6 +694,32 @@ describe('job analysis', () => {
     expect(res.body.aiReasoning).toBe('asked the old way');
   }, 60_000);
 
+  /*
+   * What the card needs to say where a drafted letter would come from.
+   *
+   * The counts, not the letters: the card is saying "in your voice, from the
+   * nine you have written", and nine is all it needs. Sending the letters
+   * themselves would put the user's whole correspondence through a content
+   * script on every posting they look at, to print one number.
+   */
+  it('says how much of the person’s own writing a draft would have to go on', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'none' })
+      .expect(200);
+
+    const data = t.store.load();
+    expect(res.body.voice).toEqual({
+      letters: data.coverLetters.length,
+      answers: data.answers.length,
+      samples: data.samples.length,
+      notes: data.voice.trim().length > 0,
+    });
+    // The fixture has some of each, or this would pass on all zeros.
+    expect(res.body.voice.letters).toBeGreaterThan(0);
+    expect(res.body.voice.answers).toBeGreaterThan(0);
+  });
+
   it('refuses a way of tailoring it does not have', async () => {
     const res = await request(app)
       .post('/api/extension/analyze')
