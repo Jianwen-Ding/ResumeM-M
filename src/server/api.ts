@@ -35,6 +35,7 @@ import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
+import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
 import { byBaseFirst, defaultBaseId } from '../model/bases.js';
@@ -42,7 +43,7 @@ import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
-import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
+import { buildMaster, flattenSpec, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
 import type { Store } from '../model/store.js';
 import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
@@ -1719,7 +1720,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const match =
         mode === 'none'
           ? { choices: {}, skills: {}, rationale: [] }
-          : matchVariants(data, base, { keywords: job.keywords });
+          : matchVariants(data, base, { keywords: job.keywords, level: detectLevel(job) });
 
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
@@ -1833,13 +1834,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * application form, and there is more than one of those. Named for
        * where it came from instead — see `employerFallback`.
        */
+      /*
+       * What the base asks for on skills, with what it inherits folded in.
+       *
+       * Read from the flattened base rather than `base.sections` because a
+       * base that extends another one may hold none of this itself, and "the
+       * base has no opinion" and "the base's parent has one" are different
+       * answers — the second is the one that has to come back when a skills
+       * swap is undone.
+       */
+      const baseSkillItems = flattenSpec(base, data.resumes).sections?.find((s) => s.kind === 'skills')?.items;
+
       const employer = job.company ?? employerFallback(url);
       const specId = `job-${slug(employer)}-${slug(job.title ?? 'role')}`.slice(0, 60);
       const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${employer}`, finalMatch, {
         url,
         company: job.company,
         role: job.title,
-      });
+      }, data.resumes);
 
       // Showing and hiding entries or bullets, the other half of what the AI
       // is allowed to do. Merged over whatever deriveSpec built for skills.
@@ -1919,6 +1931,36 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // Ids are how the store refers to things; they are not how a person
         // reads a diff. Resolve each change to the words it actually swaps.
         rationale: finalMatch.rationale.map((r) => describeChange(r, data)),
+        /*
+         * The same thing for skills, which the rationale cannot carry.
+         *
+         * `rationale` is a list of `{key, from, to}` where the key names a
+         * choice and the values name wordings — the shape of "this bullet said
+         * that and now says this". Narrowing a skills group is not that shape:
+         * it is a set of items, recorded under `sections[skills].items`, and
+         * nothing about it fits a key and two strings. So skills swaps never
+         * appeared in the rationale at all, the extension matched its undo
+         * button to rows that had one, and every skills row came up without a
+         * way back — you could undo a bullet and not the four groups swapped
+         * beside it.
+         *
+         * Named by group as well as by id, because the row the extension is
+         * matching this to is the one the *diff* wrote, and that is keyed on
+         * the group's name — the diff describes the document, where a group is
+         * "Languages" and not `sk_lang`.
+         *
+         * `from` is what the base asked for, and `null` where it asked for
+         * nothing, which is a real answer and not a missing one: a group with
+         * no entry under `items` prints all of its items. Undoing has to be
+         * able to say that, and saying it by leaving the key out is how the
+         * resolver already reads it.
+         */
+        skillChanges: Object.entries(finalMatch.skills).map(([groupId, to]) => ({
+          groupId,
+          groupName: data.skillGroups.find((g) => g.id === groupId)?.name ?? groupId,
+          from: baseSkillItems?.[groupId] ?? null,
+          to,
+        })),
         entryByBullet: Object.fromEntries(
           data.entries.flatMap((e) => (e.bullets ?? []).map((b) => [b.id, e.id])),
         ),
@@ -2440,10 +2482,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         store.saveDraft(draft),
       );
 
-      // An application being written is already an application. Track it as
-      // "applying" so the tracker shows what is in flight, not only what has
-      // been sent — completing the draft moves it to "applied".
-      const tracked = data.applications.find((a) => a.id === id);
+      /*
+       * An application being written is already an application. Track it as
+       * "applying" so the tracker shows what is in flight, not only what has
+       * been sent — completing the draft moves it to "applied".
+       *
+       * Read here, not from `data` at the top of the handler. `data` was
+       * loaded before the save above, and that save awaits a git commit — a
+       * process, tens to hundreds of milliseconds under load. Anything that
+       * writes this row in that window is invisible to a snapshot taken
+       * before it, and what followed was not a stale read but a destroyed
+       * one: the row was found missing, so a *new* one was written over the
+       * top, with `applying` for a status and a one-line history.
+       *
+       * Measured, on a store being driven by the extension: an application
+       * that had been staged and then submitted came back out of this handler
+       * reading `applying`, with the "Bundle created" and "applied" entries
+       * gone. The tracker said an application that had gone out had not, which
+       * is the failure that gets a job applied for twice.
+       *
+       * Nothing awaits between this read and the write below, so the two are
+       * one step as far as anything else on this server is concerned.
+       */
+      const tracked = store.load().applications.find((a) => a.id === id);
       if (!tracked) {
         store.upsertApplication({
           id,
@@ -2610,7 +2671,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');
 
-      const match = matchVariants(data, base, { keywords: job.keywords });
+      const match = matchVariants(data, base, { keywords: job.keywords, level: detectLevel(job) });
 
       let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
       // Why the AI did not tailor this one; see the same field on `/analyze`.
@@ -2647,7 +2708,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         url: draft.url,
         company: draft.company,
         role: draft.role,
-      });
+      }, data.resumes);
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
       if (inclusion) {
         const bySkills = new Map((spec.sections ?? []).map((sec) => [sec.kind, sec]));

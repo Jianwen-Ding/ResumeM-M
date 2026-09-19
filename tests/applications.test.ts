@@ -279,6 +279,28 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
     });
   });
 
+  /*
+   * What the hand-over sweep is for, and what it costs.
+   *
+   * The bundle folder mirrors what you are sending *now*: the build that
+   * lands removes anything it did not produce, so a letter you deleted stops
+   * being in the folder you attach from. That is right, and it is also why
+   * two builds of one application must not overlap — a build without a letter
+   * landing after one with a letter would take the letter with it. They are
+   * serialised for that reason; see `inBuildLane`.
+   */
+  it('mirrors what is being sent now, rather than accumulating', async () => {
+    const req = { company: 'Streamly', role: 'Intern', resumeId: 'intern', status: 'applying' as const };
+    const withLetter = await buildBundle(t.store, { ...req, coverLetter: 'Dear Streamly, this is the letter.' });
+    expect(fs.readdirSync(withLetter.dir)).toContain('Test-Person-Cover-Letter.pdf');
+
+    const without = await buildBundle(t.store, req);
+    expect(fs.readdirSync(without.dir)).not.toContain('Test-Person-Cover-Letter.pdf');
+    // And the answer describes the folder that exists, which is what the card
+    // prints under "named and ready to attach".
+    expect([...without.files].sort()).toEqual(fs.readdirSync(without.dir).filter((f) => f !== 'source').sort());
+  });
+
   it('freezes the choices that were actually used', async () => {
     const result = await buildBundle(t.store, { company: 'Acme', role: 'Intern', resumeId: 'intern' });
     const snapshot = YAML.parse(fs.readFileSync(path.join(result.dir, 'source', 'resolved.yaml'), 'utf8'));
