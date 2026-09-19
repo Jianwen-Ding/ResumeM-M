@@ -419,11 +419,28 @@ const STAMP = String.raw`\[\d{4}-\d{2}-\d{2}[T ][^\]]*\]`;
 const CODEX_ANSWER = new RegExp(`^${STAMP}[ \\t]*codex[ \\t]*$`, 'gm');
 const CODEX_TOKENS = new RegExp(`\\n${STAMP}[ \\t]*tokens used:[^\\n]*$`);
 
+/*
+ * And the same session with no answer in it at all.
+ *
+ * A run that prints its banner, echoes the prompt and then stops — the model
+ * returned nothing, the key was refused, a future version moved the marker —
+ * has not answered. Left alone, the banner and the echoed prompt *are* the
+ * output, so they became the cover letter: a run that failed, saved and
+ * bundled as though it had worked. Silence is the honest reading, and the
+ * caller already knows how to report that.
+ *
+ * Only when the transcript is unmistakably one. "User instructions:" under a
+ * timestamp is not a line anybody's letter contains.
+ */
+const CODEX_SESSION = new RegExp(`^${STAMP}[ \\t]*User instructions:`, 'm');
+
 export function unwrapAgentFraming(text: string): string {
   const marks = [...text.matchAll(CODEX_ANSWER)];
   const last = marks[marks.length - 1];
-  if (!last || last.index === undefined) return text;
-  return text.slice(last.index + last[0].length).replace(CODEX_TOKENS, '').trim();
+  if (last && last.index !== undefined) {
+    return text.slice(last.index + last[0].length).replace(CODEX_TOKENS, '').trim();
+  }
+  return CODEX_SESSION.test(text) ? '' : text;
 }
 
 /**

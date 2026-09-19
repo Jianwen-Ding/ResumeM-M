@@ -404,6 +404,29 @@ describe('a CLI that prints a session rather than an answer', () => {
    * somebody typed — a path, a wrapper script, `npx codex`. Which also means
    * it has to leave every other CLI's output exactly alone.
    */
+  /*
+   * A session that never reached an answer.
+   *
+   * The model returned nothing, the key was refused, a future version moved
+   * the marker — whichever it was, the run did not answer. Left as it came,
+   * the banner and the echoed prompt *are* the output, so they became the
+   * cover letter: a failure saved and bundled as though it had worked.
+   */
+  it('treats a transcript with no answer in it as silence', () => {
+    const stopped = [
+      '[2026-09-19T17:20:01] OpenAI Codex v0.9.0 (research preview)',
+      '--------',
+      'workdir: /tmp/rmm-ai-abc123',
+      '--------',
+      '[2026-09-19T17:20:01] User instructions:',
+      'Write a letter to Helios.',
+      '[2026-09-19T17:20:03] thinking',
+      '',
+      'I will not be able to do that.',
+    ].join('\n');
+    expect(unwrapAgentFraming(stopped)).toBe('');
+  });
+
   it('leaves an answer that is only an answer untouched', () => {
     const plain = 'Dear Helios,\n\nI build ingest pipelines.\n\nJianwen';
     expect(unwrapAgentFraming(plain)).toBe(plain);
