@@ -803,10 +803,19 @@ export class Store {
 
     for (const spec of lightened) {
       const before = all.find((r) => r.id === spec.id);
-      const wasFolded = Boolean(before?.extends);
-      if (wasFolded) flattened.push(spec.id);
-      // One write per resume however many migrations touched it.
-      if (wasFolded || tiered.includes(spec.id) || lifted.length > 0) this.saveResume(spec);
+      if (before?.extends) flattened.push(spec.id);
+      /*
+       * One write per resume however many migrations touched it, and none at
+       * all for a resume none of them changed.
+       *
+       * Compared rather than inferred from which pass ran: the layout lift
+       * takes a key off some resumes and not others, so "something was
+       * lifted" is not the same question as "was this one of them". Writing
+       * on the coarser answer put every file in the save into one commit,
+       * most of them identical to themselves, which buries the ones that did
+       * change in the history somebody would be reading to find them.
+       */
+      if (JSON.stringify(before) !== JSON.stringify(spec)) this.saveResume(spec);
     }
     return { flattened, tiered, lifted, problems };
   }

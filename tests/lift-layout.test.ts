@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { liftLayout } from '../src/model/lift-layout.js';
 import { resolveResume } from '../src/model/resolve.js';
@@ -173,5 +175,64 @@ describe('migrating a save whose resumes all carry the same page', () => {
     const data = temp.store.load();
     expect(resolveResume('base', data).layout.fontSizePt).toBe(12.5);
     expect(resolveResume('squeezed', data).layout.fontSizePt).toBe(10);
+  });
+});
+
+describe('what the migration actually writes', () => {
+  let temp: ReturnType<typeof makeTempStore>;
+  beforeEach(() => { temp = makeTempStore(); });
+  afterEach(() => temp.cleanup());
+
+  /*
+   * A resume none of the passes changed is not rewritten.
+   *
+   * Which pass ran is the wrong question: the lift takes a key off some
+   * resumes and not others, so "something was lifted" and "was this one of
+   * them" are different. Writing on the coarser answer put every file in the
+   * save into one commit, most identical to themselves, burying the ones that
+   * did change in the history somebody would read to find them.
+   */
+  it('leaves a resume the passes did not touch exactly as it was on disk', () => {
+    // Two that share a layout, so the lift has something to do —
+    temp.write('resumes/base.yaml', {
+      id: 'base', label: 'Base', tier: 'base',
+      sections: [{ kind: 'education', entries: ['edu_neu'] }],
+      layout: { fontSizePt: 11 },
+    });
+    temp.write('resumes/other.yaml', {
+      id: 'other', label: 'Other', tier: 'extended',
+      sections: [{ kind: 'education', entries: ['edu_neu'] }],
+      layout: { fontSizePt: 11 },
+    });
+    /*
+     * — and one that keeps its own size, so the lift leaves it alone.
+     *
+     * It has to state the key: a resume with no layout at all blocks the
+     * lift entirely, because it was taking the app's default and putting a
+     * number on the save would move it. That rule is tested above; this is
+     * about what gets *written*, so the fixture has to be one where the lift
+     * happens and this resume is still untouched by it.
+     */
+    /*
+     * Written as raw YAML with a comment in it, because that is the only
+     * thing that can tell "not written" from "written back identically" —
+     * and it is the honest signal, too. The folder is advertised as editable
+     * YAML, so a note somebody left in a file is theirs, and a rewrite it did
+     * not need would take it away.
+     */
+    temp.write(
+      'resumes/untouched.yaml',
+      '# Kept small on purpose — this one has to fit beside a long cover letter.\n' +
+        'id: untouched\nlabel: Untouched\ntier: extended\n' +
+        'sections:\n  - kind: education\n    entries: [edu_neu]\n' +
+        'layout:\n  fontSizePt: 10\n',
+    );
+    const before = fs.readFileSync(path.join(temp.dir, 'resumes/untouched.yaml'), 'utf8');
+
+    const { lifted } = temp.store.migrateResumes();
+
+    expect(lifted).toContain('fontSizePt');
+    expect(temp.store.getResume('base')?.layout).toBeUndefined();
+    expect(fs.readFileSync(path.join(temp.dir, 'resumes/untouched.yaml'), 'utf8')).toBe(before);
   });
 });
