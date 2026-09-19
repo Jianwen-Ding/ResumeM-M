@@ -335,6 +335,17 @@ async function main(argv: string[]): Promise<number> {
             engine: data.config.latex.engine,
           });
           console.log(`${id.padEnd(20)} ${fmtFit(result)}  → ${path.relative(process.cwd(), out)}`);
+          /*
+           * And what the compile itself had to say, which nothing printed.
+           *
+           * Only the resolver's warnings were shown, so everything
+           * `compileResume` works out from the LaTeX log — the font fallback
+           * that makes a PDF an ATS cannot read, and a line that ran off the
+           * edge of the page taking its text with it — was gathered, returned,
+           * and dropped on the floor by the one command whose whole job is to
+           * report on a build.
+           */
+          for (const w of result.warnings) console.warn(`  ! ${w}`);
         } catch (err) {
           failed = true;
           console.error(`${id.padEnd(20)} ${err instanceof Error ? err.message : String(err)}`);
