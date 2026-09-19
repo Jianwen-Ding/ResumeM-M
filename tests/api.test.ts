@@ -560,6 +560,37 @@ describe('job analysis', () => {
     });
 
     /*
+     * Applying again, months later, to a job that is over.
+     *
+     * The rejection is the row that matched, and a rejection is not something
+     * a send can move forwards from — so the submission was answered
+     * `changed: false` and left no trace at all. The tracker went on showing
+     * the March row, closed, while today's application went out with nothing
+     * in the save to say it had.
+     */
+    it('records a fresh attempt at a job that was already closed', async () => {
+      await sent({ company: 'Rigel', role: 'Backend Engineer' }).expect(200);
+      const first = t.store.load().applications.find((a) => a.company === 'Rigel')!;
+      t.store.upsertApplication({
+        ...first,
+        status: 'closed',
+        appliedAt: '2026-03-12T09:00:00Z',
+        history: [...(first.history ?? []), { at: '2026-04-01T09:00:00Z', status: 'closed', note: 'Rejected' }],
+      });
+
+      const again = await sent({ company: 'Rigel', role: 'Backend Engineer' }).expect(200);
+
+      expect(again.body.changed).toBe(true);
+      expect(again.body.application.id).not.toBe(first.id);
+      expect(again.body.application.status).toBe('applied');
+      const rows = t.store.load().applications.filter((a) => a.company === 'Rigel');
+      expect(rows).toHaveLength(2);
+      // And the one that was turned down still says so.
+      expect(rows.find((a) => a.id === first.id)?.status).toBe('closed');
+      expect(rows.find((a) => a.id === first.id)?.history).toHaveLength(2);
+    });
+
+    /*
      * Midnight, which the suite found by running through it.
      *
      * An id carries the date it was made. An application opened before
@@ -869,6 +900,100 @@ describe('tracking', () => {
   it('requires a company and a role', async () => {
     const res = await request(app).post('/api/applications').send({ company: 'Only' }).expect(400);
     expect(res.body.error).toMatch(/required/);
+  });
+
+  /*
+   * "Record an application" over a job the tracker already knows about.
+   *
+   * The manual form is how somebody notes a job they applied for outside the
+   * tool, and it is four boxes: company, role, URL, notes. It used to build a
+   * whole record out of them and hand it to `upsertApplication`, which
+   * replaces — so typing a company and role already tracked wiped the row.
+   * Measured: an application at `interview` with a folder of sent files, a
+   * cover letter, its answers and three lines of history came back at
+   * `applied` with one line reading "Recorded", no letter, no answers, and no
+   * `snapshotDir` — the files still on disk and nothing left pointing at them.
+   *
+   * What somebody typed goes on top of the record now. Nothing is taken away
+   * by not being mentioned: this form asks four questions and an application
+   * holds a dozen.
+   */
+  describe('recording one the tracker already has', () => {
+    const job = { company: 'Streamly', role: 'Intern' };
+
+    async function tracked() {
+      const made = await request(app).post('/api/applications').send({ ...job, url: 'https://x' }).expect(200);
+      const row = t.store.load().applications.find((a) => a.id === made.body.id)!;
+      t.store.upsertApplication({
+        ...row,
+        status: 'interview',
+        snapshotDir: '/somewhere/it/was/filed',
+        coverLetter: 'Dear Streamly, this is the letter I sent.',
+        answers: [{ question: 'Why us?', answer: 'Because of the ingest work.' }],
+        history: [...(row.history ?? []), { at: new Date().toISOString(), status: 'interview', note: 'call booked' }],
+      });
+      return row.id;
+    }
+
+    it('keeps everything the form does not ask about', async () => {
+      const id = await tracked();
+
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+
+      const after = t.store.load().applications.find((a) => a.id === id)!;
+      expect(after.coverLetter).toMatch(/this is the letter I sent/);
+      expect(after.answers).toHaveLength(1);
+      expect(after.snapshotDir).toBe('/somewhere/it/was/filed');
+      expect(after.notes).toBe('Chased them up.');
+    });
+
+    it('does not walk the status back to "applied"', async () => {
+      const id = await tracked();
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+      expect(t.store.load().applications.find((a) => a.id === id)?.status).toBe('interview');
+    });
+
+    it('adds to the history rather than starting it again', async () => {
+      const id = await tracked();
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+      const after = t.store.load().applications.find((a) => a.id === id)!;
+      expect(after.history!.length).toBe(3);
+      expect(after.history![0]!.note).toBe('Recorded');
+      expect(after.history!.at(-1)!.note).toMatch(/by hand/);
+    });
+
+    it('leaves one row, not two', async () => {
+      await tracked();
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+      expect(t.store.load().applications.filter((a) => a.company === 'Streamly')).toHaveLength(1);
+    });
+
+    /*
+     * An empty box means "nothing to add here", not "delete that": the form
+     * sends all four every time, so a URL typed when the job was first
+     * recorded would be erased by a later note that did not repeat it.
+     */
+    it('does not erase what was there with a box left blank', async () => {
+      const id = await tracked();
+      await request(app).post('/api/applications').send({ ...job, url: '', notes: 'Chased them up.' }).expect(200);
+      expect(t.store.load().applications.find((a) => a.id === id)?.url).toBe('https://x');
+    });
+
+    /*
+     * And a job that is over is a different application, as everywhere else:
+     * this is the second attempt at it, not a correction to the first.
+     */
+    it('but files a fresh attempt at a closed job as its own row', async () => {
+      const id = await tracked();
+      const row = t.store.load().applications.find((a) => a.id === id)!;
+      t.store.upsertApplication({ ...row, status: 'closed' });
+
+      const again = await request(app).post('/api/applications').send({ ...job, notes: 'Going again.' }).expect(200);
+
+      expect(again.body.id).not.toBe(id);
+      expect(t.store.load().applications.filter((a) => a.company === 'Streamly')).toHaveLength(2);
+      expect(t.store.load().applications.find((a) => a.id === id)?.status).toBe('closed');
+    });
   });
 
   it('reports removing an application that is not there', async () => {

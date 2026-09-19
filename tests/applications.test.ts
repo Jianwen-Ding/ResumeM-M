@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { advance, alreadySent, applicationId, buildBundle, bundleFileName, describeLost, slug, stats } from '../src/model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, bundleFileName, describeLost, findApplication, freshApplicationId, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
@@ -141,6 +141,67 @@ describe('status history', () => {
   });
 });
 
+/*
+ * Which row a company and a role belong to.
+ *
+ * Tested on its own as well as through the build, because the two halves of
+ * the fix — not taking a finished row, and not taking a finished row's id —
+ * produce the same symptom through a build and are different rules.
+ */
+describe('which application this job is', () => {
+  const rows: Application[] = [
+    { id: 'march', company: 'Acme', role: 'Backend Engineer', status: 'closed', appliedAt: '2026-03-12T09:00:00Z' },
+    { id: 'may', company: 'Lyra', role: 'Data Scientist', status: 'applied', appliedAt: '2026-05-01T09:00:00Z' },
+    { id: 'open', company: 'Vega', role: 'Platform Engineer', status: 'applying' },
+    { id: 'sent', company: 'Vega', role: 'Platform Engineer', status: 'applied', appliedAt: '2026-06-01T09:00:00Z' },
+  ];
+
+  it('is the one still being worked on, when there is one', () => {
+    expect(findApplication(rows, 'Vega', 'Platform Engineer')?.id).toBe('open');
+  });
+
+  it('is the one already sent, when that is all there is', () => {
+    // A build over a job already sent is "I spotted a typo, do that again",
+    // and belongs in the folder the files are already in.
+    expect(findApplication(rows, 'Lyra', 'Data Scientist')?.id).toBe('may');
+  });
+
+  it('is none of them when the only one is over', () => {
+    // The whole of the change: a fresh attempt at a job that was turned down
+    // is a new application, not an edit to the rejection.
+    expect(findApplication(rows, 'Acme', 'Backend Engineer')).toBeUndefined();
+  });
+
+  it('is nothing at all for a job that has never been seen', () => {
+    expect(findApplication(rows, 'Rigel', 'Backend Engineer')).toBeUndefined();
+  });
+});
+
+describe('an id for an application that has none', () => {
+  const today = applicationId('Acme', 'Backend Engineer');
+
+  it('is the readable one when nothing has taken it', () => {
+    expect(freshApplicationId([], 'Acme', 'Backend Engineer')).toBe(today);
+  });
+
+  /*
+   * Turned down in the morning, reposted in the afternoon. The id is today's
+   * date and the name, so the second attempt asks for the first one's — which
+   * is the first one's tracker row and the first one's folder of sent files.
+   */
+  it('steps aside when the job was already applied for today', () => {
+    const taken = [{ id: today, company: 'Acme', role: 'Backend Engineer', status: 'closed' } as Application];
+    expect(freshApplicationId(taken, 'Acme', 'Backend Engineer')).toBe(`${today}-2`);
+  });
+
+  it('keeps counting rather than stopping at two', () => {
+    const taken = [today, `${today}-2`, `${today}-3`].map(
+      (id) => ({ id, company: 'Acme', role: 'Backend Engineer', status: 'closed' } as Application),
+    );
+    expect(freshApplicationId(taken, 'Acme', 'Backend Engineer')).toBe(`${today}-4`);
+  });
+});
+
 describe('have I sent this one before', () => {
   const apps: Application[] = [
     { id: 'old', company: 'Helios', role: 'Platform Engineer', status: 'closed', appliedAt: '2026-03-12T09:00:00Z' },
@@ -276,6 +337,100 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       await new Promise((r) => setTimeout(r, 10));
       const again = await buildBundle(t.store, staged);
       expect(again.application.appliedAt).toBe(when);
+    });
+  });
+
+  /*
+   * Applying again to a job that is over.
+   *
+   * The rule was written into `findApplication` from the start — "the same
+   * job applied for twice a year apart is two applications" — and not done:
+   * every row for that company and role matched, so the row a fresh attempt
+   * was filed as was the one that had already been rejected.
+   *
+   * What that cost, measured: the new build landed in March's folder and the
+   * hand-over sweep deleted the take-home brief kept in it; the tracker
+   * showed one row, reading `closed` and dated March, with the new attempt's
+   * files listed under it; and the row, being closed, dropped out of the flat
+   * upload folder, so the documents just built were nowhere a file picker
+   * would find them. Three separate ways of losing the same afternoon's work.
+   */
+  describe('applying again to a job that was already closed', () => {
+    const job = { company: 'Acme', role: 'Backend Engineer' };
+
+    /** March: applied, and turned down. */
+    async function turnedDown() {
+      const first = await buildBundle(t.store, { ...job, resumeId: 'newgrad' });
+      // Something of theirs in the bundle folder — the brief they were sent,
+      // kept beside what was sent back.
+      fs.writeFileSync(path.join(first.dir, 'what-they-asked.md'), 'their take-home brief');
+      const row = t.store.load().applications.find((a) => a.id === first.application.id)!;
+      t.store.upsertApplication({
+        ...row,
+        status: 'closed',
+        appliedAt: '2026-03-12T09:00:00Z',
+        history: [...(row.history ?? []), { at: '2026-04-01T09:00:00Z', status: 'closed', note: 'Rejected' }],
+      });
+      return first;
+    }
+
+    it('files it as its own application, not as the one that failed', async () => {
+      const first = await turnedDown();
+
+      const second = await buildBundle(t.store, { ...job, resumeId: 'intern' });
+
+      expect(second.application.id).not.toBe(first.application.id);
+      expect(second.application.status).toBe('applied');
+      // Not March's date on an application being sent today.
+      expect(second.application.appliedAt).not.toBe('2026-03-12T09:00:00Z');
+      expect(t.store.load().applications).toHaveLength(2);
+    });
+
+    it('leaves the first one, and its folder, exactly as it was', async () => {
+      const first = await turnedDown();
+      const before = fs.readdirSync(first.dir).sort();
+
+      const second = await buildBundle(t.store, { ...job, resumeId: 'intern' });
+
+      expect(second.dir).not.toBe(first.dir);
+      expect(fs.readdirSync(first.dir).sort()).toEqual(before);
+      // The one that is not ours to touch, and the one the sweep took.
+      expect(fs.existsSync(path.join(first.dir, 'what-they-asked.md'))).toBe(true);
+      const closed = t.store.load().applications.find((a) => a.id === first.application.id);
+      expect(closed?.status).toBe('closed');
+      expect(closed?.history).toHaveLength(2);
+    });
+
+    /*
+     * And the id, which is today's date and the name. Turned down in the
+     * morning, reposted in the afternoon: the second attempt asks for an id
+     * the first one is already using, which is its tracker row and its folder.
+     */
+    it('takes an id of its own when the first one was today', async () => {
+      const first = await buildBundle(t.store, { ...job, resumeId: 'newgrad' });
+      const row = t.store.load().applications.find((a) => a.id === first.application.id)!;
+      t.store.upsertApplication({ ...row, status: 'closed' });
+
+      const second = await buildBundle(t.store, { ...job, resumeId: 'intern' });
+
+      expect(second.application.id).toBe(`${first.application.id}-2`);
+      expect(t.store.load().applications.map((a) => a.id).sort()).toEqual(
+        [first.application.id, `${first.application.id}-2`].sort(),
+      );
+    });
+
+    /*
+     * The other half, which is why this is not simply "never reuse a row": a
+     * build for a job already sent is the ordinary "I have spotted a typo, do
+     * that again", and it belongs in the folder the files are already in.
+     */
+    it('but a rebuild of one that is still live is still the same application', async () => {
+      const sent = await buildBundle(t.store, { ...job, resumeId: 'newgrad', status: 'applied' });
+
+      const again = await buildBundle(t.store, { ...job, resumeId: 'intern' });
+
+      expect(again.application.id).toBe(sent.application.id);
+      expect(t.store.load().applications).toHaveLength(1);
     });
   });
 

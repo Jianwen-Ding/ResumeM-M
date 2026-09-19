@@ -38,7 +38,7 @@ import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats } from '../model/applications.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
@@ -2303,19 +2303,49 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const body = req.body as Partial<Application>;
       if (!body.company || !body.role) throw new Error('company and role are required');
+
+      /*
+       * "Record an application" is the manual way in, and the one place where
+       * what somebody types can land on a job the tracker already knows
+       * about. It used to build a whole record from the body and hand it to
+       * `upsertApplication`, which replaces: type a company and role already
+       * tracked from earlier the same day and the existing row was gone —
+       * status back from `interview` to `applied`, the folder of sent files
+       * unreachable because `snapshotDir` went with it, and the cover letter,
+       * the answers and the history all replaced by one line reading
+       * "Recorded".
+       *
+       * So the record it is about is found first — by id when one was given,
+       * and otherwise the same way everything else finds it — and what was
+       * typed is laid over it. Nothing is taken away by not being mentioned:
+       * this form asks for four things and an application holds a dozen.
+       */
+      const apps = store.load().applications;
+      const existing = body.id
+        ? apps.find((a) => a.id === body.id)
+        : findApplication(apps, body.company, body.role);
+
+      const now = new Date().toISOString();
+      const status = body.status ?? existing?.status ?? 'applied';
+      // Typed, not merely present: the form sends every box it has, so an
+      // empty one means "I had nothing to add here" and not "delete that".
+      const typed = (was: string | undefined, before: string | undefined) =>
+        was?.trim() ? was : before;
       const app: Application = {
-        id: body.id ?? applicationId(body.company, body.role),
+        ...existing,
+        id: existing?.id ?? body.id ?? freshApplicationId(apps, body.company, body.role),
         company: body.company,
         role: body.role,
-        url: body.url,
-        appliedAt: body.appliedAt ?? new Date().toISOString(),
-        status: body.status ?? 'applied',
-        resumeId: body.resumeId,
-        source: body.source,
-        notes: body.notes,
-        answers: body.answers,
+        url: typed(body.url, existing?.url),
+        appliedAt: body.appliedAt ?? existing?.appliedAt ?? now,
+        status,
+        resumeId: body.resumeId ?? existing?.resumeId,
+        source: body.source ?? existing?.source,
+        notes: typed(body.notes, existing?.notes),
+        answers: body.answers ?? existing?.answers,
         history: body.history ?? [
-          { at: new Date().toISOString(), status: body.status ?? 'applied', note: 'Recorded' },
+          ...(existing?.history ?? []),
+          { at: now, status, note: existing ? 'Recorded again by hand' : 'Recorded' },
         ],
       };
       await withCommit(repo, autoCommit(), `Track application to ${app.company}`, () =>
@@ -2384,7 +2414,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * `applying` for ever. See `findApplication`.
        */
       const tracked = findApplication(data.applications, body.company, body.role);
-      const id = tracked?.id ?? applicationId(body.company, body.role);
+      // Not `applicationId`: a job applied for and closed earlier the same day
+      // already holds the id today would make. See `freshApplicationId`.
+      const id = tracked?.id ?? freshApplicationId(data.applications, body.company, body.role);
       const note = body.note ?? 'The form was submitted on the page';
       const now = new Date().toISOString();
 
