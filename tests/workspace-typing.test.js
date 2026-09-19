@@ -113,6 +113,37 @@ describe('typing in the Workspace', () => {
     await vi.waitFor(() => expect(document.querySelector('#draft-editor .letter')).not.toBeNull());
   });
 
+  /*
+   * What the drafting buttons write from, said where they are.
+   *
+   * An AI writing a cover letter is the part of this people are rightly
+   * wariest of, and the answer to that — that it is working from their own
+   * letters, their own samples and their own notes on how they write — was in
+   * a tooltip, which is to say nowhere. The bank and the notes exist for this
+   * and the screen never said so.
+   */
+  describe('what the AI is writing from', () => {
+    const voiceLines = () =>
+      [...document.querySelectorAll('#draft-editor .voice-from')].map((n) => n.textContent);
+
+    it('says it beside the letter and beside the questions', () => {
+      expect(voiceLines()).toHaveLength(2);
+      for (const line of voiceLines()) expect(line).toMatch(/in your voice/i);
+    });
+
+    it('names what it has of yours to work from, and counts it', () => {
+      const [letter, answers] = voiceLines();
+      // The fixture's own bank — see `makeTempStore`.
+      expect(letter).toMatch(/letters? you have already written/i);
+      expect(answers).toMatch(/answers? you have already written/i);
+      expect(letter).toMatch(/\d/);
+    });
+
+    it('says "not from nothing", because that is the point of saying it', () => {
+      expect(voiceLines()[0]).toMatch(/not from nothing/i);
+    });
+  });
+
   const letterBox = () => document.querySelector('#draft-editor .letter');
   const type = (node, text) => {
     node.value = text;

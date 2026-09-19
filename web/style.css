@@ -979,6 +979,21 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .draft-editor .block.subtle .block-head h4,
 .draft-editor .block.subtle .hint { color: var(--ink-soft, #5f6368); }
 .draft-editor .block.subtle { opacity: 0.86; }
+/*
+ * What the drafting button writes from, under the button.
+ *
+ * Emphasised rather than left as a tooltip: an AI writing a cover letter is
+ * the part of this people are wariest of, and the answer to that wariness —
+ * that it is working from their own letters and their own notes on how they
+ * write — was the one thing not on screen.
+ */
+.draft-editor .voice-from {
+  margin: -2px 0 9px;
+  padding-left: 9px;
+  border-left: 2px solid var(--line-soft);
+  line-height: 1.5;
+}
+
 .draft-editor .block-head { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
 .draft-editor .block-head h4 { margin: 0; font-size: 13.5px; }
 .draft-editor textarea { min-height: 110px; width: 100%; font-family: inherit; font-size: 13.5px; line-height: 1.6; }
