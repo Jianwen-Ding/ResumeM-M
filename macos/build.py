@@ -18,6 +18,35 @@ def run(*args, **kwargs):
     subprocess.run(args, cwd=ROOT, check=True, **kwargs)
 
 
+def module_cache(root):
+    """The Swift module cache to build against, emptied if it is not ours.
+
+    A precompiled module records the absolute path of the cache it was built
+    in, so moving this checkout makes every .pcm in `dist/macos/module-cache`
+    unusable — and swiftc refuses the build rather than recompiling them:
+
+      error: precompiled file '…/module-cache/…/SwiftShims-….pcm' was compiled
+      with module cache path '…/Career/ResumeM-M/dist/macos/module-cache', but
+      the path is currently '…/CurrentProjects/ResumeM-M/dist/macos/
+      module-cache'
+      error: missing required module 'SwiftShims'
+
+    Which reads as a broken toolchain and is cured by deleting a directory
+    nobody knew was there. So the path is kept beside the cache and the cache
+    is dropped when it is not the one it was built for. Being wrong costs a
+    few seconds recompiling two Swift files; being right is the difference
+    between a build that works after a move and one that cannot run at all.
+    """
+    cache = root / "dist" / "macos" / "module-cache"
+    built_for = cache.parent / "module-cache.path"
+    was = built_for.read_text().strip() if built_for.exists() else ""
+    if cache.exists() and was != str(cache):
+        shutil.rmtree(cache, ignore_errors=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    built_for.write_text(f"{cache}\n")
+    return cache
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install", action="store_true")
@@ -80,8 +109,7 @@ def main():
                     "NSPrincipalClass": "NSApplication",
                     "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
                 }, stream)
-            cache = ROOT / "dist" / "macos" / "module-cache"
-            cache.mkdir(parents=True, exist_ok=True)
+            cache = module_cache(ROOT)
             flags = ["-O", "-swift-version", "5", "-module-cache-path", str(cache),
                      "-target", f"{os.uname().machine}-apple-macosx12.0"]
             run("xcrun", "swiftc", *flags, str(ROOT / "macos" / "App.swift"), "-o", str(executable))

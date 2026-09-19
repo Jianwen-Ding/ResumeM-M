@@ -39,6 +39,7 @@ import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats } from '../model/applications.js';
+import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
@@ -2285,6 +2286,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           github: p.github,
           website: p.website,
           location: p.location,
+          /*
+           * And the parts of those two that forms actually ask for.
+           *
+           * No ATS asks for a full name or a location: they ask for First
+           * name and Last name, and for City, State and Country, and they
+           * mark them required. The extension has always recognised those
+           * labels — `FIELD_PATTERNS` in its autofill.js has had all five
+           * keys from the start — and the store had nothing to offer them,
+           * so the commonest boxes on an application form came out empty on
+           * a profile that plainly knew the answers. Every test store had
+           * them typed in as extras, which is what hid it.
+           *
+           * Before the hand-entered extras, never after: a value somebody
+           * typed is a decision and this is only a reading. See
+           * `derivedAutofill`, which yields nothing at all where the reading
+           * is not plain.
+           */
+          ...derivedAutofill({ name: p.name, location: p.location }),
           ...(p.autofill ?? {}),
         },
         answers: data.answers.map((a) => ({

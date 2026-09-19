@@ -796,6 +796,56 @@ describe('job analysis', () => {
 });
 
 describe('autofill', () => {
+  /*
+   * The boxes every ATS form really has, on a profile that never listed them.
+   *
+   * A profile holds a full name and a location. Greenhouse, Lever, Workday,
+   * iCIMS and the rest ask for First name, Last name, City and State, and mark
+   * them required — and this endpoint offered none of those unless somebody
+   * had gone and typed the parts out again as `autofill` extras. Which every
+   * store used for testing had done, including the one above, so nothing
+   * noticed.
+   *
+   * Cleared here rather than tested on the fixture for exactly that reason.
+   */
+  it('works the parts of a name and a location out for a profile with no extras', async () => {
+    const profile = t.store.load().profile;
+    t.store.saveProfile({ ...profile, name: 'Jianwen Ding', location: 'Boston, MA', autofill: undefined });
+
+    const { fields } = (await request(app).get('/api/autofill').expect(200)).body;
+    expect(fields.first_name).toBe('Jianwen');
+    expect(fields.last_name).toBe('Ding');
+    expect(fields.address_city).toBe('Boston');
+    expect(fields.address_state).toBe('MA');
+    // And still the whole ones, for the forms that ask that way.
+    expect(fields.full_name).toBe('Jianwen Ding');
+    expect(fields.location).toBe('Boston, MA');
+  });
+
+  it('lets a hand-entered extra beat what it worked out', async () => {
+    const profile = t.store.load().profile;
+    t.store.saveProfile({
+      ...profile,
+      name: 'Jianwen Ding',
+      autofill: { first_name: 'Jason' },
+    });
+
+    const { fields } = (await request(app).get('/api/autofill').expect(200)).body;
+    expect(fields.first_name).toBe('Jason');
+    // The half that was not overridden is still worked out.
+    expect(fields.last_name).toBe('Ding');
+  });
+
+  it('offers nothing for a name and a place it cannot read', async () => {
+    const profile = t.store.load().profile;
+    t.store.saveProfile({ ...profile, name: 'Cher', location: 'Remote', autofill: undefined });
+
+    const { fields } = (await request(app).get('/api/autofill').expect(200)).body;
+    expect(fields.first_name).toBeUndefined();
+    expect(fields.last_name).toBeUndefined();
+    expect(fields.address_city).toBeUndefined();
+  });
+
   it('returns profile fields and the answer bank', async () => {
     const res = await request(app).get('/api/autofill').expect(200);
     expect(res.body.fields.full_name).toBe('Test Person');
