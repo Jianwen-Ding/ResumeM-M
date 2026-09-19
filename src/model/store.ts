@@ -5,7 +5,7 @@ import YAML from 'yaml';
 import { flattenResumes, needsFlattening } from './flatten.js';
 import { liftLayout } from './lift-layout.js';
 import { needsTiering, tierResumes } from './tiers.js';
-import { adoptBulletOrder, adoptDateOrder } from './resolve.js';
+import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
 import {
   DEFAULT_CONFIG,
   type AnswerBankItem,
@@ -617,7 +617,7 @@ export class Store {
     const config = this.loadConfig();
     const entries = this.loadEntries();
     return {
-      profile: normalizeProfile(this.readYaml<Profile>('profile.yaml', { name: 'Your Name' })),
+      profile: normalizeProfile(this.readYaml<Profile>('profile.yaml', { name: PLACEHOLDER_NAME })),
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.

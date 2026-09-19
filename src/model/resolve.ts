@@ -38,6 +38,51 @@ const DEFAULT_HEADINGS: Record<EntryKind, string> = {
  */
 export const PROFILE_NAME_KEY = 'profile.name';
 
+/**
+ * What a brand-new store puts in `profile.yaml`, and what an empty or missing
+ * one reads as.
+ *
+ * In one place because it has to be recognisable later: it is the difference
+ * between a resume and a template, and the only way to tell them apart.
+ */
+export const PLACEHOLDER_NAME = 'Your Name';
+
+/**
+ * Why this document cannot be sent to anybody, or undefined when it can.
+ *
+ * `profile.yaml` reads as `{ name: 'Your Name' }` when it is empty or not
+ * there — which is what a crashed editor, a sync client, or a checkout of a
+ * branch without it leaves behind, and also what a store looks like on the
+ * day it is made. Every other unreadable file in the save is refused with a
+ * sentence and nothing is changed; this one is accepted, and the placeholder
+ * goes all the way through.
+ *
+ * Measured, on a real server, by emptying the file and pressing the button the
+ * extension presses: a PDF headed "Your Name" with no email, no telephone and
+ * no links, named `Your-Name-Resume.pdf`, filed as an application marked
+ * `applied`, and copied into the flat folder a portal's file picker is
+ * pointed at. Every step reported success. It is the one output of this
+ * program that is worse than no output at all — not a blank where a name
+ * should be, but a template somebody plainly did not finish.
+ */
+export function unsendableReason(profile: ResolvedProfile): string | undefined {
+  const name = String(profile.name ?? '').trim();
+  if (!name) {
+    return (
+      'This save has no name in it, so the document would go out with nothing at the top of it. ' +
+      'Put your name in under Master — profile.yaml may be empty or missing.'
+    );
+  }
+  if (name === PLACEHOLDER_NAME) {
+    return (
+      `This save still says "${PLACEHOLDER_NAME}", which is what a new one says until you change it — ` +
+      'and an empty or missing profile.yaml reads the same way. Put your name in under Master ' +
+      'before sending anything.'
+    );
+  }
+  return undefined;
+}
+
 /** The profile with its name decided. */
 export function resolveProfile(
   profile: Profile,

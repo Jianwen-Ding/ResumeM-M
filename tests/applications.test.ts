@@ -341,6 +341,78 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
   });
 
   /*
+   * A save with nobody's name in it.
+   *
+   * `profile.yaml` reads as `{ name: 'Your Name' }` when it is empty or not
+   * there — which is what a crashed editor, a sync client, or a checkout of a
+   * branch without it leaves behind, and also what a store looks like on the
+   * day it is made. Every other unreadable file in the save is refused by
+   * name with "nothing has been changed"; this one was accepted, and the
+   * placeholder went the whole way.
+   *
+   * Measured on a real server before this was written: a PDF headed "Your
+   * Name" with no email, no telephone and no links, named
+   * `Your-Name-Resume.pdf`, filed as an application marked `applied`, and
+   * copied into the flat folder a portal's file picker is pointed at. Every
+   * step reported success. It is the one output of this program that is worse
+   * than no output — not a blank where a name should be, but a template
+   * somebody plainly did not finish.
+   */
+  describe('a save that still has the placeholder name in it', () => {
+    const job = { company: 'Acme', role: 'Backend Engineer', resumeId: 'newgrad' };
+
+    it('will not build anything at all', async () => {
+      t.store.saveProfile({ name: 'Your Name' });
+      await expect(buildBundle(t.store, job)).rejects.toThrow(/Your Name/);
+    });
+
+    it('says what to do about it, rather than naming a file', async () => {
+      t.store.saveProfile({ name: 'Your Name' });
+      const said = await buildBundle(t.store, job).catch((err: Error) => err.message);
+      expect(said).toMatch(/put your name in/i);
+      expect(said).not.toMatch(/profile\.yaml is not|undefined|\bnull\b/);
+    });
+
+    it('and the same when the file is empty or gone', async () => {
+      // Which is how it reads: `load()` falls back to the placeholder rather
+      // than refusing, so this is the shape of the real failure.
+      fs.writeFileSync(path.join(t.dir, 'profile.yaml'), '');
+      await expect(buildBundle(t.store, job)).rejects.toThrow(/Your Name/);
+    });
+
+    it('leaves nothing behind — no folder, no row, no upload', async () => {
+      t.store.saveProfile({ name: 'Your Name' });
+      await buildBundle(t.store, job).catch(() => undefined);
+
+      expect(t.store.load().applications).toHaveLength(0);
+      const out = t.store.outDir();
+      expect(fs.existsSync(path.join(out, 'applications'))).toBe(false);
+      expect(fs.existsSync(path.join(out, 'current'))).toBe(false);
+    });
+
+    /*
+     * And a name that is somebody's still builds, which is the whole of the
+     * rest of the program. Without this the safe reading of the above is to
+     * stop building.
+     */
+    it('but a save with a name in it builds as it always did', async () => {
+      const built = await buildBundle(t.store, job);
+      expect(built.files.some((f) => f.endsWith('.pdf'))).toBe(true);
+      expect(t.store.load().applications).toHaveLength(1);
+    });
+
+    /*
+     * A blank name is the other half. It does not read as a template, it
+     * reads as a fault in the PDF: a document with nothing on the top line.
+     */
+    it('will not build one with an empty name either', async () => {
+      t.store.saveProfile({ name: '   ' });
+      const said = await buildBundle(t.store, job).catch((err: Error) => err.message);
+      expect(said).toMatch(/no name in it/i);
+    });
+  });
+
+  /*
    * Applying again to a job that is over.
    *
    * The rule was written into `findApplication` from the start — "the same
