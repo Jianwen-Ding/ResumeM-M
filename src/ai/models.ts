@@ -12,6 +12,26 @@ export interface ModelList {
 
 /** Long enough that reopening Settings does not start four terminal sessions. */
 const REMEMBER_MS = 10 * 60 * 1000;
+
+/**
+ * And much shorter when the answer was that they could not be read.
+ *
+ * A failure was remembered for the same ten minutes as a list, and the failure
+ * says: "Codex did not show any model choices. Sign in to the CLI, then reopen
+ * Settings." Doing exactly that is answered from the memory of the failure, so
+ * the panel repeats the same sentence to somebody who has just done what it
+ * asked — for ten minutes, with nothing to press and no way to tell that the
+ * signing in worked. `forgetModels` exists for this and nothing calls it
+ * outside the tests.
+ *
+ * Not removed altogether, because the reason the memory is there is real: a
+ * probe opens a terminal session and waits several seconds for it, and a panel
+ * that asks four times as it renders would open four. Twenty seconds covers
+ * one panel opening; it does not cover walking to a terminal, signing in, and
+ * coming back.
+ */
+const RETRY_FAILED_MS = 20 * 1000;
+
 const asked = new Map<string, { at: number; list: ModelList }>();
 
 /**
@@ -300,7 +320,8 @@ export async function listModels(
 
   const key = `${name}\u0000${JSON.stringify(preset.model.picker)}`;
   const remembered = asked.get(key);
-  if (remembered && Date.now() - remembered.at < REMEMBER_MS) return remembered.list;
+  const keepFor = remembered?.list.from === 'cli' ? REMEMBER_MS : RETRY_FAILED_MS;
+  if (remembered && Date.now() - remembered.at < keepFor) return remembered.list;
 
   let list: ModelList;
   try {

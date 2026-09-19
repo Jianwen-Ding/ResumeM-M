@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   captureModelPicker,
   forgetModels,
@@ -165,6 +165,44 @@ gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
     forgetModels();
     await listModels('claude', '/a/save', probe);
     expect(calls.count).toBe(2);
+  });
+
+  /*
+   * The failure says "Sign in to the CLI, then reopen Settings", and reopening
+   * Settings was answered from the memory of the failure for the same ten
+   * minutes a real list is kept for. So the panel repeated that sentence to
+   * somebody who had just signed in, for ten minutes, with nothing to press.
+   */
+  describe('after the choices could not be read', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it('asks again soon, rather than repeating the failure for ten minutes', async () => {
+      vi.useFakeTimers();
+      const calls = { count: 0 };
+      const notSignedIn = answer('Please run /login', calls);
+      const first = await listModels('claude', '/a/save', notSignedIn);
+      expect(first.from).toBe('unavailable');
+
+      // Twice within the same panel opening is still one terminal session.
+      await listModels('claude', '/a/save', notSignedIn);
+      expect(calls.count).toBe(1);
+
+      // Long enough to have gone and signed in.
+      vi.advanceTimersByTime(25_000);
+      const signedIn = await listModels('claude', '/a/save', answer(CLAUDE_PICKER, calls));
+      expect(calls.count).toBe(2);
+      expect(signedIn).toEqual({ models: ['opus', 'sonnet', 'haiku'], from: 'cli' });
+    });
+
+    it('and still keeps a list it did read', async () => {
+      vi.useFakeTimers();
+      const calls = { count: 0 };
+      const probe = answer(CLAUDE_PICKER, calls);
+      await listModels('claude', '/a/save', probe);
+      vi.advanceTimersByTime(25_000);
+      await listModels('claude', '/a/save', probe);
+      expect(calls.count).toBe(1);
+    });
   });
 });
 
