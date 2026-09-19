@@ -132,10 +132,43 @@ describe('inheritance', () => {
     expect(r.sections.find((s) => s.kind === 'education')?.entries).toHaveLength(1);
   });
 
-  it('rejects an inheritance cycle instead of hanging', () => {
+  /*
+   * Throwing is the one thing that cannot be right here. A resume whose
+   * `extends` points back at itself is already saved, and the error came out
+   * of every read of it — so the editor would not open it, which is where
+   * the only controls for changing its base or deleting it are. The fault
+   * made itself unfixable.
+   */
+  it('stops at an inheritance cycle rather than hanging, and still resolves', () => {
     const a: ResumeSpec = { id: 'a', label: 'A', extends: 'b' };
     const b: ResumeSpec = { id: 'b', label: 'B', extends: 'a' };
-    expect(() => flattenSpec(a, [a, b])).toThrow(/cycle/i);
+    const warnings: string[] = [];
+    const flat = flattenSpec(a, [a, b], new Set(), warnings);
+    expect(flat.id).toBe('a');
+    expect(warnings.join(' ')).toMatch(/inherits from itself/i);
+  });
+
+  it('says so for a resume that names itself directly', () => {
+    const self: ResumeSpec = { id: 'job-adobe', label: 'Adobe', extends: 'job-adobe' };
+    const warnings: string[] = [];
+    expect(flattenSpec(self, [self], new Set(), warnings).id).toBe('job-adobe');
+    expect(warnings.join(' ')).toMatch(/job-adobe/);
+  });
+
+  /*
+   * And the resume opens — which is the whole point, because opening it is
+   * how it gets fixed.
+   */
+  it('resolves a self-inheriting resume instead of refusing to read it', () => {
+    const self: ResumeSpec = {
+      id: 'job-adobe',
+      label: 'Adobe',
+      extends: 'job-adobe',
+      sections: [{ kind: 'education', entries: ['edu'] }],
+    };
+    const resolved = resolveResume('job-adobe', store([self]));
+    expect(resolved.label).toBe('Adobe');
+    expect(resolved.warnings.join(' ')).toMatch(/inherits from itself/i);
   });
 
   it('names the missing parent when `extends` points nowhere', () => {
