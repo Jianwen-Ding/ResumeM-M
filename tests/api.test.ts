@@ -1889,6 +1889,49 @@ describe('a resume id the save cannot hold', () => {
   });
 });
 
+/*
+ * A saved loop is the one fault that hides the controls for fixing itself:
+ * every read of the resume went through the resolver, so the editor would not
+ * open the resume whose base you needed to change. The resolver no longer
+ * throws on it, but the write is where the loop should never have got through.
+ */
+describe('a base that would make a resume inherit from itself', () => {
+  it('refuses a resume based on itself, and names both ends', async () => {
+    const res = await request(app)
+      .put('/api/resumes/intern')
+      .send({ label: 'Summer intern', extends: 'intern' })
+      .expect(400);
+
+    expect(res.body.error).toContain('intern');
+    expect(res.body.error).toMatch(/inherit from itself/i);
+    // And the resume that was already there is untouched by the attempt.
+    expect(t.store.getResume('intern')?.extends).toBe('base');
+  });
+
+  it('refuses a loop closed through a chain, not only a direct one', async () => {
+    t.store.saveResume({ id: 'mid', label: 'Middle', extends: 'intern' });
+    t.store.saveResume({ id: 'leaf', label: 'Leaf', extends: 'mid' });
+
+    // `intern` is above both, so pointing it at `leaf` closes intern→leaf→mid→intern.
+    const res = await request(app)
+      .put('/api/resumes/intern')
+      .send({ label: 'Summer intern', extends: 'leaf' })
+      .expect(400);
+
+    expect(res.body.error).toMatch(/inherit from itself/i);
+    expect(t.store.getResume('intern')?.extends).toBe('base');
+  });
+
+  it('still allows a base that is merely deep', async () => {
+    t.store.saveResume({ id: 'mid', label: 'Middle', extends: 'intern' });
+    await request(app)
+      .put('/api/resumes/leaf')
+      .send({ label: 'Leaf', extends: 'mid' })
+      .expect(200);
+    expect(t.store.getResume('leaf')?.extends).toBe('mid');
+  });
+});
+
 describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, () => {
   it('hands back the flat folder alongside the archive it just wrote', async () => {
     const res = await request(app)

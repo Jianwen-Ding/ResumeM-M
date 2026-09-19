@@ -506,6 +506,30 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
 
+      /*
+       * A resume cannot be based on itself, or on anything based on it.
+       *
+       * Nothing checked before, on any write — the endpoint took whatever
+       * `extends` it was handed. The two callers that could get it wrong have
+       * both been fixed at their own end, but the rule belongs here: the CLI
+       * and the MCP tools write through this too, and a loop is not something
+       * to find out about later from a resume that will not open.
+       */
+      if (spec.extends) {
+        const all = store.load().resumes;
+        const seen = new Set<string>([spec.id]);
+        let at: string | undefined = spec.extends;
+        while (at) {
+          if (seen.has(at)) {
+            throw new Error(
+              `"${spec.id}" cannot be based on "${spec.extends}" — that would make it inherit from itself.`,
+            );
+          }
+          seen.add(at);
+          at = all.find((r) => r.id === at)?.extends;
+        }
+      }
+
       // `?commit=0` writes without committing. The editor auto-saves as you
       // work, and a commit per keystroke would bury the history it feeds; it
       // commits once the editing stops, through /store/save.
