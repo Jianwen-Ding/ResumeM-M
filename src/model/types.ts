@@ -680,6 +680,17 @@ export interface StoreConfig {
    * be squeezed a little harder to fit.
    */
   layout?: LayoutDefaults;
+  resumes?: {
+    /**
+     * How many days a temporary resume lives after its posting is done with.
+     *
+     * Zero or less switches the sweep off rather than making it instant. That
+     * is the only reading of "0" that cannot lose work by being typed into a
+     * settings box by mistake, and this is the one setting in the program
+     * whose wrong value deletes something.
+     */
+    temporaryDays?: number;
+  };
 }
 
 export const DEFAULT_CONFIG: StoreConfig = {

@@ -7,6 +7,7 @@ import { Repo, cloneRepo } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
 import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
+import { sweepTemporary } from './sweep.js';
 import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
@@ -36,7 +37,51 @@ function projectSession(store: Store) {
   const repo = Repo.forStore(store.root);
   const assets = new Assets(store, repo);
   const jobs = new Jobs();
+
+  /*
+   * Bring the save up to date, and take away what is done with, on the way
+   * in. Both once per opened save rather than on a timer: a server left
+   * running for a week should not delete something under the person using it
+   * at the moment the clock happens to tick over.
+   *
+   * Not awaited, and not allowed to stop the save opening. A migration or a
+   * sweep that cannot write — a read-only folder, a git lock left behind by
+   * something else — is a thing to say out loud and carry on from, because
+   * the alternative is a save that will not open for a reason that has
+   * nothing to do with what is in it.
+   */
+  void openSave(store, repo).catch((err) => {
+    console.warn(`ResumeM-M: ${err instanceof Error ? err.message : String(err)}`);
+  });
   return { store, assets, jobs, api: createApi({ store, repo, jobs }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store), current: createCurrentRouter(store) };
+}
+
+/**
+ * The two housekeeping passes a save gets when it is opened.
+ *
+ * In this order, and the order matters: the sweep reads tiers, and a save
+ * written before tiers existed has none until the migration has given it
+ * them — so sweeping first would find nothing and sweeping second finds
+ * nothing either, because the migration starts every clock from now. Which
+ * is the point. A save upgraded today loses nothing tonight.
+ */
+async function openSave(store: Store, repo: Repo): Promise<void> {
+  const { flattened, tiered, problems } = store.migrateResumes();
+  for (const problem of problems) console.warn(`ResumeM-M: ${problem}`);
+  if (flattened.length > 0) {
+    console.log(`ResumeM-M: folded ${flattened.length} resume(s) that recorded a base into themselves.`);
+  }
+  if (tiered.length > 0) {
+    console.log(`ResumeM-M: sorted ${tiered.length} resume(s) into base, kept and temporary.`);
+  }
+
+  const { swept } = await sweepTemporary(store, repo);
+  if (swept.length > 0) {
+    console.log(
+      `ResumeM-M: swept ${swept.length} temporary resume(s) — ${swept.map((d) => d.label).join(', ')}. ` +
+        'They are in the version history.',
+    );
+  }
 }
 
 export async function startServer(opts: ServerOptions = {}) {

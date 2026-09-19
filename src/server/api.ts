@@ -41,6 +41,7 @@ import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
+import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
@@ -539,6 +540,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         store.saveResume(spec),
       );
       res.json(spec);
+    }),
+  );
+
+  /**
+   * What the sweep would take, and taking it.
+   *
+   * Two endpoints rather than one on purpose. This is the only thing in the
+   * program that deletes something nobody asked it to, and a deletion that
+   * cannot be looked at first is one nobody can trust — so the list is
+   * available on its own, and both come from the same function, which is how
+   * a preview usually stops matching what happens.
+   */
+  api.get(
+    '/resumes/expiring',
+    handler(async (_req, res) => {
+      res.json({ due: wouldSweep(store), days: temporaryDays(store) });
+    }),
+  );
+
+  api.post(
+    '/resumes/sweep',
+    handler(async (_req, res) => {
+      res.json(await sweepTemporary(store, repo));
     }),
   );
 

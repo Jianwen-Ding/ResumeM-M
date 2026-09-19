@@ -624,6 +624,7 @@ export class Store {
       git: { ...DEFAULT_CONFIG.git, ...(raw.git ?? {}) },
       output: { ...DEFAULT_CONFIG.output, ...(raw.output ?? {}) },
       layout: { ...DEFAULT_CONFIG.layout, ...(raw.layout ?? {}) },
+      resumes: { ...DEFAULT_CONFIG.resumes, ...(raw.resumes ?? {}) },
     };
 
     config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
@@ -665,6 +666,7 @@ export class Store {
        * defaults, which is a change nobody asked for and would not notice
        * until a resume came out set smaller than they had allowed.
        */
+      ...(patch.resumes ? { resumes: { ...current.resumes, ...patch.resumes } } : {}),
       ...(patch.layout
         ? {
             layout: {
