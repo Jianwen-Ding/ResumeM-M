@@ -329,6 +329,31 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   const base = resume.layout;
   const maxAttempts = opts.maxAttempts ?? 8;
 
+  /*
+   * A document with no name at the top is not a document this can typeset.
+   *
+   * The heading ends with a `\\`, and with nothing in front of it TeX says
+   * "There's no line here to end." — which reached the user exactly like
+   * that, from `rmm build`, `rmm check`, `rmm master` and the editor's live
+   * preview, naming neither the field nor anything to do about it. A
+   * `profile.yaml` that is simply missing its `name:` key is enough; the
+   * placeholder default only covers a missing or empty *file*.
+   *
+   * The sentence already existed — `unsendableReason` — and was wired only
+   * into the bundle builder, which is the last of the five places somebody
+   * meets this and the only one that had it.
+   *
+   * Only the empty case. `unsendableReason` also refuses the placeholder name
+   * a new save carries, and that is a rule about sending rather than about
+   * typesetting: a new save must still be able to draw its own preview.
+   */
+  if (!String(resume.profile?.name ?? '').trim()) {
+    const reason =
+      'This save has no name in it, so the document would have nothing at the top of it. ' +
+      'Put your name in under Master — profile.yaml may be missing its `name:`.';
+    throw new LatexError(reason, reason);
+  }
+
   // Before the fit loop, not inside it: a character the engine cannot set fails
   // identically on all eight attempts, and the answer is never to shrink.
   assertRenderable(renderLatex(resume));

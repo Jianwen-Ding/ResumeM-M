@@ -158,6 +158,33 @@ describe.runIf(latex && hasPdfToText)('what the reader actually sees', () => {
   }, 120_000);
 
   /*
+   * A save whose profile.yaml has lost its `name:` key.
+   *
+   * The heading ends with a `\\`, and with nothing in front of it TeX says
+   * "There's no line here to end." — which is what reached the user, from
+   * `rmm build`, `rmm check`, `rmm master` and the editor's live preview
+   * alike, naming neither the field nor anything to do about it. The sentence
+   * that says it properly already existed and was wired only into the bundle
+   * builder, which is the last of the five places anybody meets this.
+   */
+  it('says what is missing when the save has no name, instead of TeX saying it', async () => {
+    const nameless = { ...resume(['Cut p99 latency by a third']), profile: { email: 'jane@x.example' } };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-noname-'));
+    try {
+      const err = await compileResume(nameless as never, { pdfPath: path.join(dir, 'out.pdf') }).catch(
+        (e: Error) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      const said = (err as Error).message;
+      expect(said).toContain('no name in it');
+      expect(said).toContain('under Master');
+      expect(said).not.toContain('no line here to end');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  /*
    * And nothing said about a resume whose lines all fit, which is every
    * ordinary one. A warning that fires on the common case is a warning
    * people learn to scroll past.
