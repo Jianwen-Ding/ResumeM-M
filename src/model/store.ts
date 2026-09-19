@@ -50,6 +50,46 @@ function describeValue(v: unknown): string {
 }
 
 /**
+ * Take a file out of the save, and say something useful when it will not go.
+ *
+ * `fs.unlinkSync` throws `EACCES: permission denied, unlink '/home/…/resumes/
+ * summer-intern.yaml'`, which reaches the user through the API's error
+ * handler exactly as written. It names a path they did not ask about and a
+ * code they have no reason to know, and it does not say which of their
+ * documents it was talking about — on a delete, that is the only question.
+ *
+ * The common causes get a sentence. Anything else keeps the system's own
+ * words, because a rare errno said plainly is more use than a guess.
+ */
+export function removeFile(full: string, what: string): void {
+  if (!fs.existsSync(full)) return;
+  try {
+    fs.unlinkSync(full);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    const said = err instanceof Error ? err.message : String(err);
+    const because =
+      code === 'EACCES' || code === 'EPERM'
+        ? 'the save folder is not writable'
+        : code === 'EBUSY'
+          ? 'something else on this machine has the file open'
+          : code === 'EROFS'
+            ? 'the save is on a read-only disk'
+            : code === 'EISDIR'
+              ? 'there is a folder where that file should be'
+              /*
+               * Anything else keeps the system's own words, which are more
+               * use than a guess — but not the path it puts after them. It
+               * names the store's full location, which the person already
+               * knows and did not ask about, and it is the half of the
+               * message that made the raw version unreadable.
+               */
+              : said.replace(/,\s*unlink\s+'[^']*'\s*$/, '');
+    throw new Error(`${what} could not be removed from the save — ${because}. Nothing else was changed.`);
+  }
+}
+
+/**
  * Read one file of the store, and say which file it was when it will not read.
  *
  * Two failures, both of which happen on the day somebody first imports files
@@ -912,9 +952,13 @@ export class Store {
   deleteResume(id: string): void {
     this.migrateResumes();
 
+    /*
+     * Both spellings. A hand-made `.yml` beside the `.yaml` the app writes
+     * would otherwise bring the resume back on the next read.
+     */
+    const named = this.loadResumes().find((r) => r.id === id);
     for (const ext of ['yaml', 'yml']) {
-      const f = this.file('resumes', `${id}.${ext}`);
-      if (fs.existsSync(f)) fs.unlinkSync(f);
+      removeFile(this.file('resumes', `${id}.${ext}`), `"${named?.label ?? id}"`);
     }
   }
 
@@ -1177,7 +1221,7 @@ export class Store {
   deleteSample(id: string): boolean {
     const f = this.file('corpus', `${id}.md`);
     if (!fs.existsSync(f)) return false;
-    fs.unlinkSync(f);
+    removeFile(f, 'That writing sample');
     return true;
   }
 
@@ -1219,7 +1263,7 @@ export class Store {
   deleteDraft(id: string): boolean {
     const f = this.file('drafts', `${id}.yaml`);
     if (!fs.existsSync(f)) return false;
-    fs.unlinkSync(f);
+    removeFile(f, 'That draft');
     return true;
   }
 

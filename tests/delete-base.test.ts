@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolveResume } from '../src/model/resolve.js';
+import { removeFile } from '../src/model/store.js';
 import { makeTempStore } from './helpers.js';
 
 /*
@@ -92,5 +95,49 @@ describe('deleting a resume other resumes were copied from', () => {
     // The editor deletes and reloads; a double click should not raise.
     expect(() => temp.store.deleteResume('never-existed')).not.toThrow();
     expect(temp.store.loadResumes()).toHaveLength(3);
+  });
+});
+
+/*
+ * When a file will not go.
+ *
+ * `fs.unlinkSync` throws `EACCES: permission denied, unlink
+ * '/home/…/resumes/summer-intern.yaml'`, and the API's error handler puts
+ * that on screen exactly as written: a path the user did not ask about, a
+ * code they have no reason to know, and no mention of which of their
+ * documents it was talking about — which on a delete is the only question
+ * they have. Reads already say it properly; deletes did not.
+ *
+ * Tested on the function rather than through `deleteResume`, because there
+ * is no portable way to make one unlink fail from outside. Taking write
+ * permission off the folder does nothing when the tests run as root, which
+ * they often do; putting a directory where the file should be fails the
+ * *read* first, before the delete is ever reached. The function has one job
+ * and this is the granularity at which it can actually be asked to do it.
+ */
+describe('a delete the filesystem refuses', () => {
+  it('names the document and says what is untouched', () => {
+    // A directory, which unlink refuses for root as readily as for anyone.
+    const inTheWay = path.join(temp.dir, 'corpus');
+    fs.mkdirSync(inTheWay, { recursive: true });
+
+    let said = '';
+    try {
+      removeFile(inTheWay, '"Summer intern"');
+    } catch (err) {
+      said = err instanceof Error ? err.message : String(err);
+    }
+
+    expect(said).toMatch(/Summer intern/);
+    expect(said).toMatch(/could not be removed from the save/);
+    // The other half of what somebody wants to know when a delete fails.
+    expect(said).toMatch(/Nothing else was changed/);
+    // And not the raw one, which named a path and no document at all.
+    expect(said).not.toMatch(/unlink '/);
+  });
+
+  it('says nothing at all about a file that is already gone', () => {
+    // The editor deletes and reloads; a double click must not raise.
+    expect(() => removeFile(path.join(temp.dir, 'nowhere.yaml'), 'That')).not.toThrow();
   });
 });
