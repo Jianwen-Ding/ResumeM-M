@@ -2159,7 +2159,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         voice: {
           letters: data.coverLetters.length,
           answers: data.answers.length,
-          samples: data.samples.length,
+          /*
+           * Live samples only. An archived one is skipped everywhere the
+           * writing happens — the voice context that leads every prompt drops
+           * it, and so does the corpus listing — so counting it made the card
+           * overstate its case in the one place the count exists to be
+           * checkable.
+           */
+          samples: data.samples.filter((s) => !s.archived).length,
           notes: String(data.voice ?? '').trim().length > 0,
         },
         /*

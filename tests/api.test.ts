@@ -735,12 +735,46 @@ describe('job analysis', () => {
     expect(res.body.voice).toEqual({
       letters: data.coverLetters.length,
       answers: data.answers.length,
-      samples: data.samples.length,
+      samples: data.samples.filter((s) => !s.archived).length,
       notes: data.voice.trim().length > 0,
     });
     // The fixture has some of each, or this would pass on all zeros.
     expect(res.body.voice.letters).toBeGreaterThan(0);
     expect(res.body.voice.answers).toBeGreaterThan(0);
+  });
+
+  /*
+   * And counts only what a draft could actually go on.
+   *
+   * An archived sample is skipped everywhere the writing happens — the voice
+   * context that leads every prompt drops it, and so does the corpus listing
+   * — so counting it makes the card overstate its case in exactly the place
+   * the count exists to be checkable. "From 3 writing samples" is a claim,
+   * and a claim about material nothing will read is the worst kind.
+   */
+  it('does not count writing it has archived and would never read', async () => {
+    const counted = async () => {
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'none' })
+        .expect(200);
+      return res.body.voice.samples as number;
+    };
+    const start = await counted();
+
+    const sample = {
+      id: 'a-talk-i-gave',
+      title: 'A talk I gave',
+      kind: 'other' as const,
+      text: 'I spent a year on a queue that nobody wanted to own, and this is what it taught me about ownership.',
+      createdAt: new Date().toISOString(),
+    };
+    t.store.saveSample(sample);
+    expect(await counted()).toBe(start + 1);
+
+    // Archived: still in the folder, read by nothing, and so counted by nothing.
+    t.store.saveSample({ ...sample, archived: true });
+    expect(await counted()).toBe(start);
   });
 
   it('refuses a way of tailoring it does not have', async () => {
