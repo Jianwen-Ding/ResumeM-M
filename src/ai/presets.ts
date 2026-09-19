@@ -278,8 +278,27 @@ const CONFINED_TOOLS = 'Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,Read,G
  * whether the model may read the company's own careers page, not whether it
  * may read yours.
  */
+/**
+ * Does this switch actually decide anything for that CLI?
+ *
+ * Only where the deny list is ours to write. Claude Code is told which tools
+ * it may not use, so taking the web ones off that list is what "let it look
+ * things up" means; nothing is added that was not there. Every other CLI here
+ * is run as it comes, and whether it can reach the web is its own setting, in
+ * its own configuration — this tool neither grants it nor takes it away.
+ *
+ * Which matters because the checkbox is drawn for all of them and its note
+ * made a promise in both directions: "it may read about the company" and
+ * "off: it works only from the posting and what you have written". The second
+ * is the one that would be believed and the one this cannot keep. So the box
+ * says whose setting it is.
+ */
+export function researchIsOurs(command: string): boolean {
+  return /(^|[\\/])claude(\.exe)?$/i.test(command.trim());
+}
+
 export function applyResearch(command: string, args: string[], research: boolean): string[] {
-  if (!/(^|[\\/])claude(\.exe)?$/i.test(command.trim())) return args;
+  if (!researchIsOurs(command)) return args;
 
   const at = args.indexOf('--disallowedTools');
   if (at < 0) {

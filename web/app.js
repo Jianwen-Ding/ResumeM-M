@@ -7089,7 +7089,25 @@ async function loadSettings() {
    */
   const research = el('input', { type: 'checkbox', checked: Boolean(config.ai.research) });
   const researchNote = el('div', { className: 'hint', style: 'margin-bottom:12px' });
+  /*
+   * And whose setting it actually is.
+   *
+   * This box is drawn whichever CLI is configured, and it only decides
+   * anything for the one whose deny list this tool writes. For the others it
+   * was making a promise in both directions over a command line it had not
+   * changed — and the direction that would be believed is the one it could
+   * not keep: "off: it works only from the posting and what you have
+   * written". Somebody choosing not to let a model read about their employer
+   * should not be told they have when they have not.
+   */
   const showResearchNote = (on) => {
+    if (config.overrides.research) {
+      researchNote.textContent =
+        `This does not reach ${config.ai.command || 'the command you have configured'} — the switch only ` +
+        'writes the tool list for Claude Code. Whether another CLI may read the web is its own setting, ' +
+        'in its own configuration, and this tool neither grants it nor takes it away.';
+      return;
+    }
     researchNote.textContent = on
       ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
       : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.';

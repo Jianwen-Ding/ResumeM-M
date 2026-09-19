@@ -23,7 +23,7 @@ import {
   type TailorContext,
 } from '../ai/prompts.js';
 import { listModels } from '../ai/models.js';
-import { AI_PRESETS, AI_TASKS, configForTask } from '../ai/presets.js';
+import { AI_PRESETS, AI_TASKS, configForTask, researchIsOurs } from '../ai/presets.js';
 import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
 import { readState } from '../mcp/main.js';
 import type { SessionState } from '../mcp/session.js';
@@ -765,6 +765,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           autoCommit: process.env.RMM_AUTOCOMMIT === '0',
           ai: process.env.RMM_AI === '0',
           engine: Boolean(process.env.RMM_LATEX_ENGINE),
+          /*
+           * And the one setting whose effect depends on which CLI is
+           * configured. "Let it look up the company online" is drawn for all
+           * of them and only decides anything for the one whose deny list is
+           * ours to write — see `researchIsOurs`. The box promised in both
+           * directions, and the direction that would be believed is the one
+           * it could not keep: "off: it works only from the posting and what
+           * you have written".
+           */
+          research: !researchIsOurs(c.ai.command),
         },
       });
     }),

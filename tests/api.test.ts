@@ -695,6 +695,29 @@ describe('job analysis', () => {
   }, 60_000);
 
   /*
+   * Which settings are not the file's to decide, said by the one thing that
+   * knows. "Let it look up the company online" writes a tool list, and only
+   * one of the CLIs takes one — so for the rest the switch reaches nothing,
+   * and the panel has to be able to say so rather than promise in both
+   * directions over a command line it never touched.
+   */
+  it('says when the research switch does not reach the configured command', async () => {
+    const base = t.store.loadConfig();
+
+    t.store.saveConfig({ ...base, ai: { ...base.ai, command: 'claude' } });
+    const ours = await request(app).get('/api/config').expect(200);
+    expect(ours.body.overrides.research).toBe(false);
+
+    t.store.saveConfig({ ...base, ai: { ...base.ai, command: 'codex' } });
+    const theirs = await request(app).get('/api/config').expect(200);
+    expect(theirs.body.overrides.research).toBe(true);
+
+    // By what the command is, not by where it lives.
+    t.store.saveConfig({ ...base, ai: { ...base.ai, command: '/opt/bin/claude' } });
+    expect((await request(app).get('/api/config').expect(200)).body.overrides.research).toBe(false);
+  });
+
+  /*
    * What the card needs to say where a drafted letter would come from.
    *
    * The counts, not the letters: the card is saying "in your voice, from the
