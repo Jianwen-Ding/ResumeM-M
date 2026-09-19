@@ -310,6 +310,36 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
     expect(education.entries[0].dates).toContain('Dec. 2026');
   });
 
+  /*
+   * And the spec beside it, from the same moment.
+   *
+   * The two are a pair: the spec is what was selected and `resolved` is what
+   * that came out as. This read the spec back off disk after compiling, so a
+   * resume removed while the document was being built — which the sweep does
+   * on its own, to a resume made for one posting — left the snapshot holding
+   * `spec: undefined` beside a perfectly good resolved document. A record of
+   * something that never existed, in the one file that exists so a past
+   * application can be reopened.
+   */
+  it('freezes the selection beside the document, even if the resume goes', async () => {
+    /*
+     * Deleted *while* the bundle is being built, not after it — which is the
+     * only arrangement that tells the two readings apart. Compiling is the
+     * slow part and runs in a subprocess, so the delete lands in the middle
+     * of it, exactly as the sweep would.
+     */
+    const building = buildBundle(t.store, { company: 'Acme', role: 'Intern', resumeId: 'intern' });
+    await new Promise((r) => setTimeout(r, 50));
+    t.store.deleteResume('intern');
+    const result = await building;
+
+    const snapshot = YAML.parse(fs.readFileSync(path.join(result.dir, 'source', 'resolved.yaml'), 'utf8'));
+    expect(snapshot.spec).toBeTruthy();
+    expect(snapshot.spec.id).toBe('intern');
+    // And it is the selection the resolved document was actually built from.
+    expect(snapshot.spec.choices?.['edu_neu.dates']).toBe('v_dec2026');
+  });
+
   it('writes a cover letter and answers when supplied', async () => {
     const result = await buildBundle(t.store, {
       company: 'Streamly',

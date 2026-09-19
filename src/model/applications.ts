@@ -300,6 +300,19 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
 async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data = store.load();
   const resolved: ResolvedResume = resolveResume(req.resumeId, data);
+  /*
+   * Taken here, beside the resolve, and not read again when the snapshot is
+   * written further down.
+   *
+   * The two are a pair: the spec is what was selected and `resolved` is what
+   * that came out as, and a snapshot holding one from before a compile and
+   * the other from after is a record of something that never existed. The
+   * window is not small — compiling is the slow part of this function, and
+   * the sweep that removes a resume made for one posting runs on its own.
+   * Read late, the spec could be `undefined` for a resume that was there
+   * when the document was built.
+   */
+  const spec = data.resumes.find((r) => r.id === req.resumeId);
 
   /*
    * All three names decided together, because the shape that leaves the
@@ -445,7 +458,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
     fs.mkdirSync(path.join(stage, 'source'), { recursive: true });
     fs.writeFileSync(
       path.join(stage, 'source', 'resolved.yaml'),
-      YAML.stringify({ spec: store.getResume(req.resumeId), resolved }, { lineWidth: 0 }),
+      YAML.stringify({ spec, resolved }, { lineWidth: 0 }),
       'utf8',
     );
 
