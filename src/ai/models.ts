@@ -67,7 +67,28 @@ if {[info exists env(RMM_MODEL_REVEAL)] && $env(RMM_MODEL_REVEAL) ne ""} {
   observe 2
   send -- $env(RMM_MODEL_REVEAL)
 }
-observe 5
+if {[info exists env(RMM_MODEL_OPENED)] && $env(RMM_MODEL_OPENED) ne ""} {
+  # A cold GUI-launched CLI sometimes accepts the text before its input loop
+  # is ready but loses the Return key. Wait for proof that the picker opened;
+  # if it did not, press Return once more on the text still in the input box.
+  set ::timeout 5
+  expect {
+    -exact $env(RMM_MODEL_OPENED) { observe 3 }
+    eof { exit 0 }
+    timeout {
+      # The first text can be lost as well as Return. Clear any partial input,
+      # then repeat the complete command once the TUI is unquestionably ready.
+      send -- "\025"
+      after 100
+      send -- "$env(RMM_MODEL_QUERY)"
+      after 150
+      send -- "\r"
+      observe 5
+    }
+  }
+} else {
+  observe 5
+}
 send -- "\033"
 after 100
 send -- "\003\003"
@@ -123,6 +144,7 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
         RMM_MODEL_ARG_COUNT: String(pickerArgs.length),
         RMM_MODEL_QUERY: interactive ? picker.query : '',
         RMM_MODEL_REVEAL: interactive ? picker.reveal ?? '' : '',
+        RMM_MODEL_OPENED: interactive ? picker.opened ?? '' : '',
         ...pickerEnv,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -167,7 +189,7 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
       }, 700));
     }
     // Long enough for a remotely supplied list, short enough for Settings.
-    const timeout = !interactive ? 35_000 : onMac ? 9_000 : picker.reveal ? 6_000 : 4_500;
+    const timeout = !interactive ? 35_000 : onMac ? 15_000 : picker.reveal ? 6_000 : 4_500;
     timers.push(setTimeout(() => stop(), timeout));
   });
 
@@ -238,10 +260,16 @@ export function modelsInPicker(output: string, parser: AiModelPicker['parser']):
    * banner so the answer is exactly the menu, in the order the menu showed.
    */
   const codexPickerAt = parser === 'codex' ? text.lastIndexOf('Select Model and Effort') : -1;
+  // A startup banner also contains the current model. It is not an answer to
+  // /model, so never turn that partial capture into a one-choice model list.
+  if (parser === 'codex' && codexPickerAt < 0) return [];
   const pickerText = codexPickerAt >= 0 ? text.slice(codexPickerAt) : text;
+  if (parser === 'codex') {
+    const numbered = /\b\d+[.)]\s+((?:gpt|codex|o[1-9])[-.][a-z0-9][a-z0-9._-]*)\b/gi;
+    return unique([...pickerText.matchAll(numbered)].map((match) => match[1]!));
+  }
   const ids = [...pickerText.matchAll(MODEL_ID)].map((match) => match[0]!);
   if (parser === 'gemini') return unique(ids.filter((id) => /^gemini-/i.test(id)));
-  if (parser === 'codex') return unique(ids.filter((id) => /^(?:gpt|codex|o[1-9])[-.]/i.test(id)));
   return unique(ids);
 }
 

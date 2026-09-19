@@ -55,8 +55,17 @@ The docs also mention claude-fable-5.
   });
 
   it('deduplicates redraws from a terminal UI', () => {
-    expect(modelsInPicker('gpt-5.6-sol\r\n\x1b[2Jgpt-5.6-sol\r\ngpt-6-astra', 'codex'))
+    expect(modelsInPicker('Select Model and Effort\r\n1. gpt-5.6-sol\r\n\x1b[2J1. gpt-5.6-sol\r\n2. gpt-6-astra', 'codex'))
       .toEqual(['gpt-5.6-sol', 'gpt-6-astra']);
+  });
+
+  it('does not mistake Codex startup status for a completed model picker', () => {
+    expect(modelsInPicker('model: gpt-5.6-sol high /model to change', 'codex')).toEqual([]);
+  });
+
+  it('does not mistake a Codex-like working-directory name for a picker choice', () => {
+    const screen = 'Select Model and Effort  1. gpt-6-astra  2. gpt-5.6-sol  directory: /tmp/rmm-codex-cwd-AbC123';
+    expect(modelsInPicker(screen, 'codex')).toEqual(['gpt-6-astra', 'gpt-5.6-sol']);
   });
 
   it('strips terminal title and cursor sequences without losing their text', () => {
@@ -165,6 +174,7 @@ describe.skipIf(process.platform === 'win32')('the pseudo-terminal bridge', () =
       "process.stdin.setEncoding('utf8')",
       "process.stdin.on('data', value => {",
       "  if (!value.includes('/model')) return",
+      "  console.log('Select Model and Effort')",
       "  console.log('1. gpt-live-from-picker')",
       "  process.exit(0)",
       "})",

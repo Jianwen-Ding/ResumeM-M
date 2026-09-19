@@ -45,6 +45,8 @@ export type AiModelPicker = {
   parser: 'claude' | 'codex' | 'gemini' | 'agy';
   /** Optional follow-up keystrokes used to reveal a nested model list. */
   reveal?: string;
+  /** Stable text proving the requested picker actually opened. */
+  opened?: string;
 } | {
   /** Some CLIs expose the same account-aware list as a native subcommand. */
   mode: 'command';
@@ -151,7 +153,12 @@ export const AI_PRESETS: AiPreset[] = [
     note: 'Runs in Codex’s own read-only sandbox, in a scratch directory.',
     model: {
       flag: '--model',
-      picker: { query: '/model', args: ['--no-alt-screen', '-c', 'tui.animations=false'], parser: 'codex' },
+      picker: {
+        query: '/model',
+        args: ['--no-alt-screen', '-c', 'tui.animations=false'],
+        parser: 'codex',
+        opened: 'Select Model and Effort',
+      },
     },
     /*
      * Codex takes arbitrary config overrides with `-c key=value`, and
