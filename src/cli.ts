@@ -29,7 +29,20 @@ const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url))
  * accepted and discarded is worse than one that is rejected.
  */
 const dataDir = resolveStoreDir(projectRoot, arg(process.argv.slice(2), 'data'));
-seedStore(path.join(projectRoot, 'data'), dataDir);
+/*
+ * Say so when a save is made rather than opened.
+ *
+ * Seeding an empty folder from the bundled example is how a first run gets a
+ * store to work in, and it said nothing — so `rmm list --data ~/saves/wrok`,
+ * one letter wrong, created a folder, filled it with the example's four
+ * resumes, and listed them as though they were the person's own. A typo
+ * produced a working-looking save instead of a message naming the path that
+ * does not exist. One line is the difference, and refusing instead would
+ * break the first run this exists for.
+ */
+if (seedStore(path.join(projectRoot, 'data'), dataDir)) {
+  console.error(`Started a new save at ${dataDir}, from the bundled example — there was nothing there.`);
+}
 
 const USAGE = `rmm — resume mix-and-match
 
@@ -97,17 +110,49 @@ function unknownFlag(command: string, rest: string[]): string | null {
   const value = new Set(['data', ...(spec.value ?? [])]);
   const bare = new Set(spec.bare ?? []);
 
+  /**
+   * A flag that swallowed the next flag instead of a value.
+   *
+   * `rmm save -m --push` is the ordering the usage banner itself prints, and
+   * it read `--push` as the commit message: the store got a real commit
+   * titled `--push`, the push then failed for want of a remote, and the only
+   * thing said out loud was that failure — so a bad commit landed in somebody's
+   * history with nothing on screen to suggest it. `rmm apply x --company Acme
+   * --role --url https://…` did the same to an application record, writing
+   * `role: --url` into `applications.yaml` and reporting a clean success.
+   *
+   * Judged against this command's own flags rather than against a leading
+   * dash, because a commit message is free text and free text may begin with
+   * one. `--push` after `-m` is a mistake; `--not-a-flag` is a message.
+   */
+  const stolenFlag = (next: string | undefined): boolean => {
+    if (!next?.startsWith('--') || next === '--') return false;
+    const n = next.slice(2).split('=')[0] ?? '';
+    return value.has(n) || bare.has(n);
+  };
+  const noValue = (flag: string, next: string): string => {
+    const spelled = flag === '-m' ? '--message' : flag;
+    return (
+      `${flag} was given ${next} as its value, but ${next} is another flag \`rmm ${command}\` takes — ` +
+      `so ${flag} has no value. Put the value after ${flag}, or write ${spelled}=${next} if that really is the value.`
+    );
+  };
+
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i] ?? '';
     if (token === '--') break; // everything after it is a value, by convention
     if (token === '-m' && value.has('m')) {
+      if (stolenFlag(rest[i + 1])) return noValue('-m', rest[i + 1]!);
       i++;
       continue;
     }
     if (!token.startsWith('--')) continue;
     const name = token.slice(2).split('=')[0] ?? '';
     if (value.has(name)) {
-      if (!token.includes('=')) i++; // its value is not a flag
+      if (!token.includes('=')) {
+        if (stolenFlag(rest[i + 1])) return noValue(token, rest[i + 1]!);
+        i++; // its value is not a flag
+      }
       continue;
     }
     if (bare.has(name)) continue;
@@ -176,6 +221,51 @@ function shortFlag(argv: string[], flag: string): string | undefined {
 
 function plural(n: number, word: string): string {
   return `${n} ${n === 1 ? word : `${word}s`}`;
+}
+
+/**
+ * A file to read into the corpus, or a sentence saying why it is not one.
+ *
+ * `rmm voice add ~/letters` — naming the folder the letters are in, which is
+ * the first thing anyone tries — failed with "EISDIR: illegal operation on a
+ * directory, read", and a mistyped filename failed with an ENOENT that printed
+ * the same path a second time inside quotes. Neither says what to do about it.
+ *
+ * The store already translates these codes where it deletes and writes files
+ * (`removeFile` in model/store.ts); this is the one place that read a file the
+ * person named and passed the system's words straight through.
+ */
+function readForVoice(file: string): Buffer {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') throw new Error('there is nothing at that path');
+    if (code === 'EACCES' || code === 'EPERM') throw new Error('it is not readable by this account');
+    throw new Error(clean(err));
+  }
+  if (stat.isDirectory()) {
+    throw new Error('that is a folder, not a file — name the files inside it, or `<folder>/*.txt` to add them all');
+  }
+  try {
+    return fs.readFileSync(file);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'EACCES' || code === 'EPERM') throw new Error('it is not readable by this account');
+    throw new Error(clean(err));
+  }
+}
+
+/**
+ * A rare errno kept in the system's own words, minus the path it repeats.
+ *
+ * The path is already at the front of the line the caller prints, and it is
+ * the half of the raw message that made it unreadable.
+ */
+function clean(err: unknown): string {
+  const said = err instanceof Error ? err.message : String(err);
+  return said.replace(/,\s*\w+\s+'[^']*'\s*$/, '');
 }
 
 function fmtFit(r: { pages: number; fits: boolean; overflowPt: number; overflowLines: number; adjustments: string[] }): string {
@@ -396,7 +486,7 @@ async function main(argv: string[]): Promise<number> {
       for (const file of paths) {
         let found;
         try {
-          found = await ingestFile(config, path.basename(file), fs.readFileSync(file), { useAi });
+          found = await ingestFile(config, path.basename(file), readForVoice(file), { useAi });
         } catch (err) {
           console.error(`${file}: ${err instanceof Error ? err.message : String(err)}`);
           failed++;
@@ -459,6 +549,20 @@ async function main(argv: string[]): Promise<number> {
     case 'serve': {
       await repo.ensure();
       const port = arg(rest, 'port');
+      /*
+       * `rmm serve --port abc` reached Node's own listen() validation and
+       * printed "options.port should be >= 0 and < 65536. Received type number
+       * (NaN)" — a sentence about a type, naming neither the flag the person
+       * typed nor the value they typed into it.
+       */
+      if (port !== undefined && !/^\d+$/.test(port.trim())) {
+        console.error(`--port takes a number, and "${port}" is not one. Try \`rmm serve --port 4600\`.`);
+        return 1;
+      }
+      if (port !== undefined && Number(port) > 65535) {
+        console.error(`--port ${port} is above the highest port there is (65535).`);
+        return 1;
+      }
       await startServer({ port: port ? Number(port) : undefined, dataDir });
       return new Promise<number>(() => {
         /* run until interrupted */

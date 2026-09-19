@@ -95,6 +95,52 @@ describe('rmm --data', () => {
   });
 
   /*
+   * The other half of that: a value that is not free text at all, but the
+   * next flag, taken as the value because nothing checked.
+   *
+   * `rmm save -m --push` is the ordering `rmm help` itself prints. It read
+   * `--push` as the commit message and committed it — a real commit titled
+   * `--push` in somebody's store — then failed to push for want of a remote,
+   * and printed only that failure. The commit was never mentioned.
+   *
+   * Refused against this command's own flags rather than against a leading
+   * dash, so the free-text case above keeps working.
+   */
+  it('refuses a flag that swallowed the next flag instead of a value', async () => {
+    const said = await rmm(['save', '-m', '--push', '--data', save]).catch((e: { stderr: string }) => e);
+    const stderr = (said as { stderr: string }).stderr ?? '';
+    expect(stderr).toContain('-m was given --push as its value');
+    expect(stderr).toContain('--message=--push');
+
+    // And nothing was written: no commit, titled `--push` or otherwise.
+    const log = await run('git', ['-C', save, 'log', '--oneline'], { timeout: 20_000 }).catch(() => ({ stdout: '' }));
+    expect(log.stdout).not.toContain('--push');
+  });
+
+  /*
+   * The same mistake where it corrupts data rather than history: forgetting
+   * to type the role wrote `role: --url` into `applications.yaml`, built a
+   * bundle folder named after it, and reported success.
+   */
+  it('refuses it for a value flag spelled in full, naming the escape hatch', async () => {
+    const said = await rmm([
+      'apply',
+      'the-folder-on-the-command-line',
+      '--company',
+      'Acme',
+      '--role',
+      '--url',
+      'https://example.com/job',
+      '--data',
+      save,
+    ]).catch((e: { stderr: string }) => e);
+    const stderr = (said as { stderr: string }).stderr ?? '';
+    expect(stderr).toContain('--role was given --url as its value');
+    expect(stderr).toContain('--role=--url');
+    expect(fs.existsSync(path.join(save, 'applications.yaml'))).toBe(false);
+  });
+
+  /*
    * A flag, its value, and the resume id all arrive in one list, and every
    * command that takes an id was reading the first thing in that list.
    *
@@ -122,6 +168,63 @@ describe('rmm --data', () => {
     const { stdout, stderr } = await rmm(['voice', 'add', '--data', save, '--no-ai', '--dry-run', letter]);
     expect(stderr).not.toContain('EISDIR');
     expect(stdout).toContain('1 piece of writing');
+  });
+
+  /*
+   * The errno the person sees when they name the folder their letters are in
+   * rather than the letters. Every other place the store touches a file
+   * translates these; this one printed them.
+   */
+  it('says what is wrong with a file it cannot read, in words', async () => {
+    const folder = await rmm(['voice', 'add', save, '--data', save, '--no-ai', '--dry-run']).catch(
+      (e: { stderr: string; stdout: string }) => e,
+    );
+    const said = `${(folder as { stdout?: string }).stdout ?? ''}${(folder as { stderr: string }).stderr}`;
+    expect(said).not.toContain('EISDIR');
+    expect(said).toContain('that is a folder, not a file');
+
+    const missing = await rmm([
+      'voice',
+      'add',
+      path.join(save, 'no-such-letter.txt'),
+      '--data',
+      save,
+      '--no-ai',
+      '--dry-run',
+    ]).catch((e: { stderr: string; stdout: string }) => e);
+    const about = `${(missing as { stdout?: string }).stdout ?? ''}${(missing as { stderr: string }).stderr}`;
+    expect(about).not.toContain('ENOENT');
+    expect(about).toContain('there is nothing at that path');
+  });
+
+  /*
+   * `--port abc` reached Node's own listen() validation, which reports a type
+   * ("number (NaN)") rather than the flag the person typed.
+   */
+  it('says a port that is not a number is not a number', async () => {
+    const said = await rmm(['serve', '--port', 'abc', '--data', save]).catch((e: { stderr: string }) => e);
+    const stderr = (said as { stderr: string }).stderr ?? '';
+    expect(stderr).not.toContain('NaN');
+    expect(stderr).toContain('--port takes a number, and "abc" is not one');
+  });
+
+  /*
+   * Seeding an empty folder from the bundled example is how a first run gets
+   * something to work in, and it happened in silence — so one wrong letter in
+   * `--data` created a folder, filled it with the example's resumes, and
+   * listed them as if they were the person's own.
+   */
+  it('says when it started a new save rather than opening one', async () => {
+    const typo = path.join(path.dirname(save), `${path.basename(save)}-typo`);
+    try {
+      const { stdout, stderr } = await rmm(['list', '--data', typo]);
+      expect(stderr).toContain(`Started a new save at ${typo}`);
+      expect(stderr).toContain('there was nothing there');
+      // And it is still a working save: the example is listed, not an error.
+      expect(stdout.length).toBeGreaterThan(0);
+    } finally {
+      fs.rmSync(typo, { recursive: true, force: true });
+    }
   });
 
   it('beats RMM_DATA', async () => {
