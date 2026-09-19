@@ -90,6 +90,44 @@ export function questionSimilarity(a: string, b: string): number {
 }
 
 /**
+ * The meaningful words `terms` is too coarse to see.
+ *
+ * `terms` drops anything of two characters or fewer, which is right for the
+ * scoring — "an", "it", "so" are noise — and catastrophic for the handful of
+ * short words that are the entire question: US, UK, EU, Go, R, C#. Dropping
+ * them made "authorized to work in the US" and "…in the UK" identical to the
+ * matcher, scoring 1.000 and coming back confident.
+ *
+ * Only tokens with a letter in them. A bare number is how forms pad
+ * themselves — "(2 pages max)" — and demoting a match over one would cost a
+ * read for nothing.
+ */
+function shortTerms(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .split(/[^a-z0-9+#]+/)
+      .filter((w) => w.length > 0 && w.length <= 2 && /[a-z]/.test(w) && !STOP.has(w)),
+  );
+}
+
+/**
+ * Two questions that disagree about a short word are about different things.
+ *
+ * A veto, like `namesAnother` and for the same reason: it can only ever take
+ * confidence away, never grant it, so the worst it can do is ask somebody to
+ * read an answer they would have sent anyway. The other direction sends a
+ * false declaration about their right to work.
+ */
+function sameShortTerms(a: string, b: string): boolean {
+  const ta = shortTerms(a);
+  const tb = shortTerms(b);
+  if (ta.size !== tb.size) return false;
+  for (const t of tb) if (!ta.has(t)) return false;
+  return true;
+}
+
+/**
  * Whether the stored question says nothing the asked question did not.
  *
  * Every meaningful word of the stored question has to appear in the one on the
@@ -204,7 +242,11 @@ export function matchAnswer(
      * however exactly the question matches: that is the one failure this
      * whole tool exists to prevent.
      */
-    confident: !namesAnother && best.score >= 0.7 && fullyAsked(question, best.item.question),
+    confident:
+      !namesAnother &&
+      best.score >= 0.7 &&
+      fullyAsked(question, best.item.question) &&
+      sameShortTerms(question, best.item.question),
     ...(namesAnother ? { namesAnother } : {}),
   };
 }
