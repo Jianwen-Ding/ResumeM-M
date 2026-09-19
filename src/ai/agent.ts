@@ -164,7 +164,10 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
      */
     const decided = wiring ? tools?.read(wiring.out) : undefined;
 
-    const output = stdout.trim();
+    // The answer, not the session transcript it may be wrapped in. See
+    // `unwrapAgentFraming` — this is before every reader of `output`, because
+    // all of them were reading the wrapper.
+    const output = unwrapAgentFraming(stdout.trim());
     /*
      * Silence is only a failure when there was no other way to answer.
      *
@@ -376,6 +379,51 @@ export function extractJson<T>(text: string): T {
     }
   }
   throw new AgentError(`Could not find JSON in the agent's reply. Raw output:\n${text.slice(0, 2000)}`);
+}
+
+/**
+ * The answer, out of the transcript the CLI wrapped it in.
+ *
+ * `codex exec` does not print an answer; it prints a session. A version
+ * banner, the working directory, the model, the sandbox mode — then, under
+ * "User instructions", **the whole prompt echoed back**, then its reasoning
+ * under "thinking", then the answer under "codex", then a token count.
+ *
+ * Taken whole, as it was, that is what became the cover letter: a letter that
+ * opens with a version number and a working directory, contains the prompt,
+ * contains the letters the prompt quoted as examples of the user's voice —
+ * which are letters to *other companies* — and reaches the actual letter
+ * several hundred lines down. `trimToLetter` cannot save it, and makes it
+ * worse: the first salutation it finds is the one in the echoed example, so
+ * the letter it keeps is the one written to somebody else.
+ *
+ * The tailoring plan went the same way for the same reason. `extractJson`
+ * takes the first JSON object it can parse, and the echoed prompt is full of
+ * them — so the plan applied was a fragment of the store that had been quoted
+ * back, and an AI run that changed nothing reported success.
+ *
+ * Matched on the shape rather than on the configured command, because the
+ * command is whatever the user typed: a path, a wrapper script, `npx codex`.
+ * A timestamped line that is exactly the word `codex` is not something a
+ * cover letter contains, and the last one is the answer — the earlier ones
+ * are earlier turns.
+ */
+/*
+ * A date in the brackets, not merely brackets. "[not a timestamp] codex" is a
+ * line somebody could write, and taking it for a marker would throw away
+ * everything above it — the rule has to be narrow enough that only a machine
+ * writes it. Both spellings, because the separator has moved between
+ * versions.
+ */
+const STAMP = String.raw`\[\d{4}-\d{2}-\d{2}[T ][^\]]*\]`;
+const CODEX_ANSWER = new RegExp(`^${STAMP}[ \\t]*codex[ \\t]*$`, 'gm');
+const CODEX_TOKENS = new RegExp(`\\n${STAMP}[ \\t]*tokens used:[^\\n]*$`);
+
+export function unwrapAgentFraming(text: string): string {
+  const marks = [...text.matchAll(CODEX_ANSWER)];
+  const last = marks[marks.length - 1];
+  if (!last || last.index === undefined) return text;
+  return text.slice(last.index + last[0].length).replace(CODEX_TOKENS, '').trim();
 }
 
 /**
