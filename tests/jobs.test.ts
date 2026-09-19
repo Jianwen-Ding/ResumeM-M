@@ -190,6 +190,34 @@ describe('keywords', () => {
   it('finds multi-word terms', () => {
     expect(extractKeywords('experience with distributed systems')).toContain('distributed systems');
   });
+
+  it('reaches outside web and backend, which is where it used to stop', () => {
+    const found = extractKeywords(
+      'You will write C++ against OpenGL and Vulkan, profiling with Tracy and debugging in GDB. SDL, animation and physics on Linux.',
+    );
+    expect(found).toEqual(
+      expect.arrayContaining(['c++', 'opengl', 'vulkan', 'sdl', 'tracy', 'gdb', 'physics', 'animation', 'linux']),
+    );
+  });
+
+  /*
+   * A false keyword is not cosmetic: it reaches `matchVariants`, which swaps
+   * a bullet toward the wording it thinks the posting asked for — so the
+   * resume that goes out is wrong for a reason that was never in the
+   * posting. These five sentences are why `unity`, `metal`, `make`, `excel`
+   * and `blender` are not in the vocabulary, however useful they would be on
+   * the postings that mean them.
+   */
+  it('does not read a technology out of ordinary posting prose', () => {
+    const prose = [
+      'You will excel in a fast-paced environment and thrive under pressure.',
+      'We make time for each other and make space to grow.',
+      'Operate a forklift; sheet metal handling experience a plus.',
+      'A small team with real unity, shipping real things.',
+      'We are an equal opportunity employer. All qualified applicants will receive consideration.',
+    ];
+    for (const sentence of prose) expect(extractKeywords(sentence)).toEqual([]);
+  });
 });
 
 describe('posting confidence', () => {

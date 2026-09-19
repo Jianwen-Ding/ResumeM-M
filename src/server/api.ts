@@ -35,6 +35,7 @@ import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
+import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
@@ -1817,6 +1818,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           ? { choices: {}, skills: {}, rationale: [] }
           : matchVariants(data, base, { keywords: job.keywords, level: detectLevel(job) });
 
+      /*
+       * And how well each of the others would have suited it.
+       *
+       * Computed on every analysis rather than behind its own endpoint,
+       * because the card needs it at the moment the picker is drawn and that
+       * is the same moment this reply arrives. It resolves each resume once,
+       * which is the same work the editor's own list does.
+       */
+      const fit = fitResumes(data, job.keywords);
+
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
       let aiVia: 'tools' | 'json' | undefined;
@@ -2021,6 +2032,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         pages: job.pages,
         baseResumeId: baseId,
         baseLabel: base.label,
+        /*
+         * Which resume to start from, answered rather than left to the label.
+         *
+         * The store fills up — a new grad one, a summer intern one, one built
+         * for a posting last March — and the picker listed them in the order
+         * they happened to be written. So the first decision of every
+         * application was made from labels alone, and the label is the one
+         * thing that does not say what is in the document.
+         *
+         * Measured on the untouched resumes, not on what the match could do
+         * with them: every one of them would gain from being matched against
+         * this posting, so scoring the tailored versions would mostly measure
+         * the store's stock of alternates rather than where to begin.
+         *
+         * `recommended` is deliberately allowed to be empty. A field where
+         * nothing stands out is a real answer, and a picker that always
+         * points somewhere is one nobody can trust when it does.
+         */
+        resumeFit: fit,
+        recommended: [...recommend(fit)],
         spec,
         diff,
         // Ids are how the store refers to things; they are not how a person

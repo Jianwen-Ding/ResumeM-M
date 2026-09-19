@@ -26,6 +26,53 @@ const KEYWORD_VOCAB = [
   'frontend', 'front-end', 'backend', 'back-end', 'full stack', 'fullstack', 'distributed systems',
   'microservices', 'api', 'rest', 'graphql', 'grpc', 'security', 'embedded', 'systems', 'compiler',
   'testing', 'automation', 'mobile', 'ios', 'android', 'performance', 'scalability',
+
+  /*
+   * Graphics, games and the systems work next to them.
+   *
+   * The list above is web, backend and data, and a posting outside those
+   * came back with one keyword or none — which takes the keyword match and
+   * the resume ranking with it, because both can only see words that are in
+   * here. A game engine posting naming C++, OpenGL, Vulkan, Unity, SDL and
+   * Tracy yielded exactly one: `c++`.
+   *
+   * Every term is matched on word boundaries, so the risk is a product name
+   * that is also an ordinary word — and a false hit here is not cosmetic. It
+   * reaches `matchVariants`, which will swap a bullet toward the wording it
+   * thinks the posting asked for, so the resume that gets sent is wrong for
+   * a reason that was never in the posting.
+   *
+   * Swept against real posting prose, and four were dropped for firing on
+   * it: `unity` ("a small team with real unity"), `metal` ("sheet metal
+   * handling experience a plus" — a posting this tool is on, which is what
+   * an earlier note here denied), `make` ("we make time for each other"),
+   * and `excel` ("you will excel in a fast-paced environment", which is
+   * close to the commonest sentence in the corpus). `blender` is left out
+   * for the same reason without needing the sweep.
+   *
+   * Unity and Metal being missed is a real loss to a game or Apple posting.
+   * It is the smaller loss: a picker that ranks nothing is worse than one
+   * that ranks by accident only for as long as nobody acts on it, and people
+   * act on a resume.
+   */
+  'opengl', 'vulkan', 'directx', 'webgpu', 'webgl', 'shader', 'shaders', 'rendering', 'renderer',
+  'unity3d', 'unreal', 'godot', 'sdl', 'glsl', 'hlsl', 'raytracing', 'ray tracing', 'rasterization',
+  'physics', 'animation', 'gameplay', 'game engine', 'graphics',
+  'simd', 'gpu', 'cuda', 'opencl', 'profiling', 'valgrind', 'gdb', 'tracy',
+  'memory management', 'multithreading', 'concurrency', 'lock-free', 'real-time', 'low-latency',
+  'linux', 'windows', 'macos', 'cmake', 'llvm', 'clang',
+
+  /*
+   * And the trades that are not software at all. The extension offers on any
+   * posting; a resume ranked against a nursing or accounting one by a
+   * vocabulary that knows only Kubernetes is ranked by nothing.
+   */
+  'accounting', 'audit', 'payroll', 'bookkeeping', 'gaap',
+  'nursing', 'clinical', 'patient care', 'phlebotomy', 'ehr', 'hipaa',
+  'teaching', 'curriculum', 'classroom',
+  'marketing', 'seo', 'copywriting', 'social media', 'salesforce', 'crm',
+  'logistics', 'supply chain', 'inventory', 'procurement',
+  'cad', 'solidworks', 'autocad', 'matlab', 'simulink', 'labview',
 ];
 
 function stripTags(html: string): string {

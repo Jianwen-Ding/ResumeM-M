@@ -1,177 +1,173 @@
 import { describe, expect, it } from 'vitest';
-import { compileResume, detectEngine, LatexError, OverflowError } from '../src/render/compile.js';
-import { DEFAULT_LAYOUT, type ResolvedBullet, type ResolvedResume } from '../src/model/types.js';
+import { fitResumes, recommend } from '../src/jobs/fit.js';
+import type { Entry, StoreData } from '../src/model/types.js';
 
 /**
- * These actually run LaTeX, so they are slower than the rest of the suite and
- * skip when no engine is installed. They cover the one promise the tool makes
- * that nothing else can verify: the PDF is one page, or you are told exactly
- * how much too long it is.
+ * Which resume to start from, before anything is tailored.
+ *
+ * The scoring is a reading aid for a list, and every rule below exists to keep
+ * it from claiming more than that: a mark on the best of a bad field, or on
+ * one of two equals, reads as a judgement and is not one.
  */
-const hasEngine = await detectEngine()
-  .then(() => true)
-  .catch(() => false);
 
-const bullet = (i: number): ResolvedBullet => ({
-  id: `b${i}`,
-  variantId: 'v',
-  text: `Built and shipped subsystem number ${i}, cutting processing latency from 900ms to 180ms and raising throughput`,
-});
+const bullet = (id: string, text: string) => ({ id, variants: [{ id: `${id}_v`, text }], default: `${id}_v` });
 
-function resume(entryCount: number, bulletsEach = 3): ResolvedResume {
+const entry = (id: string, title: string, bullets: [string, string][]): Entry =>
+  ({
+    id,
+    kind: 'experience',
+    title,
+    bullets: bullets.map(([bid, text]) => bullet(bid, text)),
+  }) as unknown as Entry;
+
+/** A store of three resumes over three entries, each about something else. */
+function store(): StoreData {
   return {
-    id: 'test',
-    label: 'Test',
-    profile: { name: 'Test Person', email: 'a@b.com' },
-    sections: [
-      {
-        kind: 'experience',
-        heading: 'Experience',
-        skillGroups: [],
-        entries: Array.from({ length: entryCount }, (_, i) => ({
-          id: `e${i}`,
-          kind: 'experience' as const,
-          title: `Company ${i}`,
-          dates: 'Jul. 2024 -- Dec. 2024',
-          subtitle: 'Software Engineer',
-          location: 'Boston, MA',
-          bullets: Array.from({ length: bulletsEach }, (_, j) => bullet(i * 10 + j)),
-        })),
-      },
+    profile: { name: 'Someone', email: 'a@b.c' },
+    entries: [
+      entry('e_kafka', 'Streaming Co.', [['b_kafka', 'Ran Kafka and Kubernetes in Go across three regions.']]),
+      entry('e_web', 'Web Co.', [['b_web', 'Built React and TypeScript interfaces for a design system.']]),
+      entry('e_lab', 'Research Lab', [['b_lab', 'Wrote MATLAB for spectroscopy data.']]),
     ],
-    layout: { ...DEFAULT_LAYOUT },
-    warnings: [],
-  };
+    skillGroups: [],
+    resumes: [
+      { id: 'platform', label: 'Platform', sections: [{ kind: 'experience', entries: ['e_kafka'] }] },
+      { id: 'frontend', label: 'Frontend', sections: [{ kind: 'experience', entries: ['e_web'] }] },
+      { id: 'lab', label: 'Lab', sections: [{ kind: 'experience', entries: ['e_lab'] }] },
+    ],
+    applications: [],
+    answers: [],
+    letters: [],
+    config: {},
+  } as unknown as StoreData;
 }
 
-describe.skipIf(!hasEngine)('one-page enforcement', { timeout: 300_000 }, () => {
-  it('compiles a short resume as-authored, with no shrinking', async () => {
-    const result = await compileResume(resume(2));
-    expect(result.pages).toBe(1);
-    expect(result.fits).toBe(true);
-    expect(result.adjustments).toEqual([]);
+const KAFKA_POSTING = ['Kafka', 'Kubernetes', 'Go', 'distributed systems'];
+
+describe('how well each resume already suits a posting', () => {
+  it('counts the posting’s own words, in the resume as it would print', () => {
+    const fits = fitResumes(store(), KAFKA_POSTING);
+    const by = Object.fromEntries(fits.map((f) => [f.id, f.hits]));
+    expect(by.platform).toBe(3);
+    expect(by.frontend).toBe(0);
+    expect(by.lab).toBe(0);
   });
 
-  it('reports the room left over, so you know you can add more', async () => {
-    const result = await compileResume(resume(1));
-    expect(result.overflowPt).toBeLessThan(0);
-    expect(result.overflowLines).toBeLessThan(0);
+  it('says which words, so the card can explain the mark', () => {
+    const platform = fitResumes(store(), KAFKA_POSTING).find((f) => f.id === 'platform');
+    expect(platform?.because).toEqual(expect.arrayContaining(['Kafka', 'Kubernetes', 'Go']));
   });
 
-  it('shrinks within bounds to pull a slightly-too-long resume onto one page', async () => {
-    const result = await compileResume(resume(12));
-    expect(result.pages).toBe(1);
-    expect(result.fits).toBe(true);
-    expect(result.adjustments.length).toBeGreaterThan(0);
-    // Whatever it did, it stayed inside the configured floors.
-    expect(result.layout.fontSizePt).toBeGreaterThanOrEqual(DEFAULT_LAYOUT.fitBounds.minFontSizePt);
-    expect(result.layout.marginIn).toBeGreaterThanOrEqual(DEFAULT_LAYOUT.fitBounds.minMarginIn);
-  });
-
-  it('refuses to shrink past the floor, and says how much has to go', async () => {
-    const hopeless = resume(24);
-    await expect(compileResume(hopeless, { strict: true })).rejects.toThrow(OverflowError);
-
-    const report = await compileResume(hopeless);
-    expect(report.fits).toBe(false);
-    expect(report.overflowLines).toBeGreaterThan(0);
-    expect(report.layout.fontSizePt).toBeGreaterThanOrEqual(DEFAULT_LAYOUT.fitBounds.minFontSizePt);
-  });
-
-  it('honours autoFit: false by not touching the layout at all', async () => {
-    // 12 entries does not fit as authored, so a passing run here means auto-fit
-    // really was skipped rather than simply not needed.
-    const r = resume(12);
-    r.layout = { ...r.layout, autoFit: false };
-    const result = await compileResume(r);
-    expect(result.adjustments).toEqual([]);
-    expect(result.layout.fontSizePt).toBe(DEFAULT_LAYOUT.fontSizePt);
-  });
-
-  it('writes a PDF and the .tex it came from', async () => {
-    const fs = await import('node:fs');
-    const os = await import('node:os');
-    const path = await import('node:path');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-test-'));
-
-    const result = await compileResume(resume(2), {
-      pdfPath: path.join(dir, 'r.pdf'),
-      texPath: path.join(dir, 'r.tex'),
+  /*
+   * `includes` over an unbroken string matched "Rust" inside "trust" and
+   * "Java" across "ninja validation". A ranking built on that would order the
+   * list by accident, and the mark would point at a resume for a reason that
+   * is not there.
+   */
+  it('does not find a word inside another word', () => {
+    const data = store();
+    (data.resumes as { id: string; label: string; sections: unknown[] }[]).push({
+      id: 'decoy',
+      label: 'Decoy',
+      sections: [{ kind: 'experience', entries: ['e_decoy'] }],
     });
-
-    expect(fs.existsSync(result.pdfPath!)).toBe(true);
-    expect(fs.readFileSync(result.pdfPath!).subarray(0, 4).toString()).toBe('%PDF');
-    expect(fs.readFileSync(result.texPath!, 'utf8')).toContain('\\begin{document}');
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-});
-
-describe('engine selection', () => {
-  it('rejects an engine that is not installed, naming the alternatives', async () => {
-    await expect(detectEngine('not-an-engine' as never)).rejects.toThrow(/not-an-engine/);
+    data.entries.push(entry('e_decoy', 'Decoy Co.', [['b_decoy', 'Built trust with ninja validation of Javanese ratios.']]));
+    const decoy = fitResumes(data, ['Rust', 'Java', 'iOS']).find((f) => f.id === 'decoy');
+    expect(decoy?.hits).toBe(0);
   });
 
   /*
-   * The message is the whole of the user's experience here: nothing typesets,
-   * and this line is the only thing between that and "the button does
-   * nothing". It used to send them to config.yaml — a text file — to change a
-   * setting that has a dropdown in the editor, and which they had most likely
-   * set from that dropdown in the first place.
+   * A posting that says "Kubernetes" four times is not asking for it four
+   * times. Without this a resume matching one repeated word outranks one
+   * matching three distinct ones.
    */
-  it('points at the control that changes it, not at a file to edit', async () => {
-    const failed = await detectEngine('not-an-engine' as never).catch((e: Error) => e.message);
-    expect(failed).toContain('Voice & AI');
-    expect(failed).toContain('Auto-detect');
-    expect(failed).not.toContain('config.yaml');
+  it('counts a repeated word once', () => {
+    const fits = fitResumes(store(), ['Kafka', 'Kafka', 'Kafka', 'Kafka']);
+    expect(fits.find((f) => f.id === 'platform')?.hits).toBe(1);
+  });
+
+  it('scores a resume it cannot resolve as nothing rather than throwing', () => {
+    const data = store();
+    (data.resumes as { id: string; label: string; extends?: string }[]).push({
+      id: 'broken',
+      label: 'Broken',
+      extends: 'a-resume-that-is-gone',
+    });
+    const fits = fitResumes(data, KAFKA_POSTING);
+    expect(fits.find((f) => f.id === 'broken')?.hits).toBe(0);
+    // And the rest are still scored: one bad row must not take the list down.
+    expect(fits.find((f) => f.id === 'platform')?.hits).toBe(3);
   });
 });
 
-describe.skipIf(!hasEngine)('other layouts', { timeout: 180_000 }, () => {
-  it('respects a lower attempt cap without hanging', async () => {
-    const result = await compileResume(resume(16), { maxAttempts: 2 });
-    expect(result.pages).toBeGreaterThanOrEqual(1);
-  });
-
-  it('compiles on A4 when asked', async () => {
-    const r = resume(1);
-    r.layout = { ...r.layout, paper: 'a4' };
-    const result = await compileResume(r);
-    expect(result.fits).toBe(true);
-  });
-
-  it('cannot be broken by LaTeX-looking text in the store', async () => {
-    // Everything from the store is escaped, so a name that reads like a macro
-    // is printed rather than executed. This is why a corrupted store cannot
-    // produce a compile failure.
-    const r = resume(1);
-    r.profile = { ...r.profile, name: String.raw`\undefinedmacro & 100% {braces}` };
-    const result = await compileResume(r);
-    expect(result.fits).toBe(true);
-    expect(LatexError).toBeTypeOf('function');
+describe('which of them is worth marking', () => {
+  it('marks the one that is clearly ahead', () => {
+    expect([...recommend(fitResumes(store(), KAFKA_POSTING))]).toEqual(['platform']);
   });
 
   /*
-   * A link target is read by TeX before hyperref sees it, so `tex()` does not
-   * cover it. A single `{`, `}` or `\` in the email, LinkedIn, GitHub or
-   * website field — a paste that picked up one stray character — used to take
-   * out every resume and every cover letter at once, reporting
-   * "File ended while scanning use of \hyper@n@rmalise": nothing the person who
-   * pasted it could act on, and nothing left that still builds to fix it from.
+   * The best of a bad field is not a recommendation. Marking it reads as
+   * "this one suits the posting" when what happened is that it suited it
+   * least badly, and the applicant acts on the mark rather than on the two
+   * seconds of reading it replaced.
    */
-  it('cannot be broken by a stray character in a link', async () => {
-    const contacts = [
-      { email: String.raw`a{b@c.example` },
-      { email: String.raw`a\b@c.example` },
-      { email: 'a@b.com', github: 'github.com/a}b' },
-      { email: 'a@b.com', website: String.raw`example.com/\newpage` },
-      { email: 'a@b.com', linkedin: 'linkedin.com/in/a{b' },
+  it('marks nothing when nothing actually suits the posting', () => {
+    expect([...recommend(fitResumes(store(), ['COBOL', 'mainframe', 'JCL', 'CICS']))]).toEqual([]);
+  });
+
+  /*
+   * The case the floor is actually for, and the one the test above does not
+   * reach: a long posting where the best resume is clearly ahead of the rest
+   * and still barely touches it. Three of twenty is a gap of three over a
+   * median of nothing — enough for the flatness guard — and it is still not
+   * a resume that suits this job.
+   */
+  it('marks nothing when the leader is ahead but barely touches the posting', () => {
+    const thin = [
+      { id: 'a', hits: 3, because: [], share: 3 / 20 },
+      { id: 'b', hits: 0, because: [], share: 0 },
+      { id: 'c', hits: 0, because: [], share: 0 },
     ];
+    expect([...recommend(thin)]).toEqual([]);
+  });
 
-    for (const contact of contacts) {
-      const r = resume(1);
-      r.profile = { ...r.profile, ...contact };
-      const result = await compileResume(r);
-      expect(result.pages, JSON.stringify(contact)).toBe(1);
-    }
-  }, 180_000);
+  it('marks nothing when the best is barely ahead of the rest', () => {
+    const flat = [
+      { id: 'a', hits: 5, because: [], share: 0.5 },
+      { id: 'b', hits: 4, because: [], share: 0.4 },
+      { id: 'c', hits: 4, because: [], share: 0.4 },
+    ];
+    expect([...recommend(flat)]).toEqual([]);
+  });
+
+  /*
+   * A tie is not a ranking either. Two resumes level at the top are genuinely
+   * interchangeable for this posting, and picking one of them would be
+   * inventing a difference the numbers do not have.
+   */
+  it('marks both of two equals rather than choosing between them', () => {
+    const tied = [
+      { id: 'a', hits: 6, because: [], share: 0.6 },
+      { id: 'b', hits: 6, because: [], share: 0.6 },
+      { id: 'c', hits: 1, because: [], share: 0.1 },
+      { id: 'd', hits: 0, because: [], share: 0 },
+      { id: 'e', hits: 0, because: [], share: 0 },
+      { id: 'f', hits: 0, because: [], share: 0 },
+    ];
+    expect([...recommend(tied)].sort()).toEqual(['a', 'b']);
+  });
+
+  it('never marks more than three, however many are level', () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      id: `r${i}`,
+      hits: i < 10 ? 8 : 0,
+      because: [],
+      share: i < 10 ? 0.8 : 0,
+    }));
+    expect(recommend(many).size).toBe(3);
+  });
+
+  it('marks nothing at all for an empty store', () => {
+    expect([...recommend([])]).toEqual([]);
+  });
 });
