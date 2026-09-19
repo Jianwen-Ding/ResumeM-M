@@ -116,7 +116,7 @@ describe('folding an inherited save flat', () => {
     const untouched = temp.read('resumes/newgrad.yaml');
 
     // The second pass is the one every start after the first makes.
-    expect(temp.store.migrateResumes()).toEqual({ flattened: [], tiered: [], problems: [] });
+    expect(temp.store.migrateResumes()).toEqual({ flattened: [], tiered: [], lifted: [], problems: [] });
     expect(temp.read('resumes/newgrad.yaml')).toEqual(untouched);
   });
 
