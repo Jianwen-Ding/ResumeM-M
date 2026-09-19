@@ -33,11 +33,12 @@ afterEach(() => {
  */
 
 let saved;
+let deleted;
 let putAnswers;
 /** How many resumes other than the open one chose the wording under test. */
 let chooserCount = 0;
 
-async function open({ answers, chooser } = {}) {
+async function open({ answers, chooser, resumes } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
   document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
@@ -68,8 +69,15 @@ async function open({ answers, chooser } = {}) {
     ];
     chooserCount = data.resumes.length - 1;
   }
+  /*
+   * Before the page boots, not after. The editor keeps its own copy of the
+   * store — the fetch mock hands back a `structuredClone` — so a resume
+   * pushed onto the fixture afterwards is one the editor has never heard of.
+   */
+  if (resumes) data.resumes = resumes(data.resumes);
 
   saved = [];
+  deleted = [];
   putAnswers = null;
 
   vi.stubGlobal('confirm', () => true);
@@ -87,6 +95,10 @@ async function open({ answers, chooser } = {}) {
       // puts back what was just removed.
       data.entries = data.entries.map((e) => (e.id === body.id ? body : e));
       result = body;
+    } else if (String(url).startsWith('/api/resumes/') && options.method === 'DELETE') {
+      deleted.push(decodeURIComponent(String(url).split('/').pop()));
+      data.resumes = data.resumes.filter((r) => r.id !== deleted.at(-1));
+      result = { ok: true };
     } else if (url === '/api/answers' && options.method === 'PUT') {
       putAnswers = JSON.parse(options.body);
       data.answers = putAnswers;
@@ -347,5 +359,69 @@ describe('saying what a delete costs before it happens', () => {
     await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
     expect(modalNote()).not.toMatch(/other resume/i);
     document.querySelector('#modal-cancel').click();
+  });
+});
+
+/*
+ * Variations pile up. One press of "Save as variation…" makes one, and so
+ * does the extension every time it tailors a posting — a store a year into
+ * applying is mostly resumes for jobs that closed months ago. The store and
+ * the server could always delete one; the editor had no control for it, so
+ * the list could only ever grow, and the picker is where that cost is paid.
+ */
+describe('deleting a variation', () => {
+  const modalNote = () => document.querySelector('#modal p')?.textContent ?? '';
+
+  it('offers it on a variation', async () => {
+    await open();
+    const button = document.querySelector('#btn-delete-resume');
+    expect(button).toBeTruthy();
+    expect(button.hidden).toBe(false);
+  });
+
+  it('takes it out of the save', async () => {
+    const data = await open();
+    const was = data.resumes.length;
+    const openOne = document.querySelector('#resume-select').value;
+    document.querySelector('#btn-delete-resume').click();
+    await confirmIt();
+    await vi.waitFor(() => expect(deleted.length).toBe(1));
+    expect(deleted[0]).toBe(openOne);
+    expect(data.resumes.length).toBe(was - 1);
+  });
+
+  /*
+   * "And everything based on it" is the fear, and the answer is no: the store
+   * folds what this resume gave its children into each of them before it
+   * goes. Saying so is the difference between a delete somebody makes and one
+   * they back away from.
+   */
+  it('says what happens to the resumes built on it', async () => {
+    /*
+     * Opened once to find out which resume the editor lands on — that is the
+     * store's default base, not whichever happens to be first in the file —
+     * and again with a child of exactly that one. Guessing it would make the
+     * child extend a resume nobody is looking at, and the sentence under test
+     * would correctly say nothing.
+     */
+    await open();
+    const opensOn = document.querySelector('#resume-select').value;
+    await open({ resumes: (all) => [...all, { id: 'built-on-it', label: 'Built on it', extends: opensOn }] });
+    expect(document.querySelector('#resume-select').value).toBe(opensOn);
+
+    document.querySelector('#btn-delete-resume').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    expect(modalNote()).toMatch(/1 resume based on it/i);
+    expect(modalNote()).toMatch(/keeps what it gave them/i);
+    document.querySelector('#modal-cancel').click();
+  });
+
+  /*
+   * A store with no resume in it has nothing to open, and "delete" should not
+   * be a way to reach a state the rest of the app cannot handle.
+   */
+  it('is not offered on the last resume standing', async () => {
+    await open({ resumes: (all) => all.slice(0, 1) });
+    expect(document.querySelector('#btn-delete-resume').hidden).toBe(true);
   });
 });

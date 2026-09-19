@@ -32,9 +32,33 @@ const DEFAULT_HEADINGS: Record<EntryKind, string> = {
  * child sections replace the parent's section of the same kind entirely, since
  * a half-merged section ordering is never what anyone means.
  */
-export function flattenSpec(spec: ResumeSpec, all: ResumeSpec[], seen = new Set<string>()): ResumeSpec {
+export function flattenSpec(
+  spec: ResumeSpec,
+  all: ResumeSpec[],
+  seen = new Set<string>(),
+  warnings?: string[],
+): ResumeSpec {
+  /*
+   * A loop stops the walk; it does not stop the resume.
+   *
+   * This threw, and throwing is the one thing that cannot be right here: a
+   * resume whose `extends` points back at itself is *already saved*, and the
+   * error came out of every read of it — so the editor would not open it,
+   * which is where the only controls for changing its base or deleting it
+   * are. The fault made itself unfixable.
+   *
+   * There is a correct answer and it is not an error: stop following the
+   * chain at the repeat. What comes back is the resume laid over as much of
+   * its ancestry as could be walked, which is exactly what it would resolve
+   * to if the bad link were removed — and the warning says the link is
+   * there, so nobody is left thinking the store is fine.
+   */
   if (seen.has(spec.id)) {
-    throw new Error(`Resume inheritance cycle at "${spec.id}"`);
+    warnings?.push(
+      `Resume "${spec.id}" inherits from itself, directly or through a chain. ` +
+        `The loop is ignored. Change what it is based on, or delete it.`,
+    );
+    return spec;
   }
   seen.add(spec.id);
   if (!spec.extends) return spec;
@@ -43,7 +67,7 @@ export function flattenSpec(spec: ResumeSpec, all: ResumeSpec[], seen = new Set<
   if (!parent) {
     throw new Error(`Resume "${spec.id}" extends "${spec.extends}", which does not exist`);
   }
-  return mergeOnto(flattenSpec(parent, all, seen), spec);
+  return mergeOnto(flattenSpec(parent, all, seen, warnings), spec);
 }
 
 /** One inheritance step: `spec` laid over `base`. */
@@ -513,7 +537,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
    * looking at" are counted as they are found.
    */
   const lost: { kind: 'entry' | 'wording'; id: string }[] = [];
-  const flat = flattenSpec(spec, data.resumes);
+  const flat = flattenSpec(spec, data.resumes, new Set(), warnings);
   const choices = flat.choices ?? {};
   const lists = flat.lists ?? {};
 

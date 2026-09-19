@@ -4262,6 +4262,60 @@ function autoFitOn() {
   return spec?.layout?.autoFit ?? true;
 }
 
+/**
+ * Delete the variation you are looking at.
+ *
+ * The store and the server could always do this; the editor had no control
+ * for it, so a resume made by one press of "Save as variation…", or by the
+ * extension tailoring a posting, could only ever be accumulated. A store a
+ * year into applying is mostly resumes for postings that closed months ago,
+ * and the picker is the place that cost is paid.
+ *
+ * It refuses on the master, which is not a variation but the source every
+ * variation is a selection over, and on the last resume standing — a store
+ * with no resume in it has nothing to open, and "delete" should not be a way
+ * to reach a state the rest of the app cannot handle.
+ *
+ * Children are not orphaned: `deleteResume` walks the ones that extend this
+ * and folds what it contributed into each before it goes, so they resolve to
+ * the same document afterwards. That is worth saying out loud in the
+ * confirmation, because "and everything based on it" is the fear.
+ */
+async function deleteVariation() {
+  if (state.masterView) {
+    setStatus('The master is not a variation — it is what they are all made from', true);
+    return;
+  }
+  const mine = resumeById(state.resumeId);
+  if (!mine) return;
+  if ((state.store.resumes ?? []).length < 2) {
+    setStatus('This is the only resume in the save', true);
+    return;
+  }
+
+  const children = (state.store.resumes ?? []).filter((r) => r.extends === mine.id);
+  const ok = await confirmModal(`Delete “${mine.label ?? mine.id}”?`, [
+    'It is removed from the save. The entries and wordings it selected are the store’s and stay.',
+    children.length > 0
+      ? `${plural(children.length, 'resume')} based on it ${children.length === 1 ? 'keeps' : 'keep'} what it gave them and ` +
+        `${children.length === 1 ? 'moves' : 'move'} up to its own base.`
+      : null,
+    'The version history keeps it, the way it keeps a deleted entry.',
+  ].filter(Boolean).join(' '));
+  if (!ok) return;
+
+  await api(`/resumes/${encodeURIComponent(mine.id)}`, { method: 'DELETE' });
+  /*
+   * Off this resume before reloading, or the reload lands on an id the store
+   * no longer has and the editor opens on nothing.
+   */
+  clearEdits();
+  state.resumeId = null;
+  location.hash = '';
+  await loadStore();
+  setStatus('Variation deleted');
+}
+
 async function saveAsVariation() {
   /*
    * The name first, because that is the thing anyone is actually deciding.
@@ -7792,7 +7846,24 @@ function render() {
   drawWayBack();
   $('#btn-base').hidden = state.masterView;
   $('#btn-save-as').hidden = state.masterView;
-  $('#btn-feedback').textContent = state.masterView ? 'Master Feedback' : 'Resume Feedback';
+  // Not on the master, which is not a variation.
+  $('#btn-delete-resume').hidden = state.masterView || (state.store.resumes ?? []).length < 2;
+  /*
+   * The label only, not the whole button.
+   *
+   * `textContent` on the button replaces every child, and one of them is the
+   * ✦ that marks this as something that runs the AI. It is in the markup and
+   * was on screen exactly until the first render, which is why it looked as
+   * though it had never been there. Every other AI control in the editor
+   * carries the mark; this is the one that costs the most to press.
+   *
+   * And the word "AI" in the label as well as the mark, because "Resume
+   * Feedback" beside "Rebuild" and "Undo" reads as another local action
+   * rather than minutes of a model.
+   */
+  $('#btn-feedback').querySelector('span:not(.ai-mark)').textContent = state.masterView
+    ? 'AI Master Feedback'
+    : 'AI Resume Feedback';
   $('#resume-view-note').textContent = state.masterView
     ? 'All source entries and phrasings. Edits here update every tailored resume that uses them.'
     : 'Select source content for this resume. Shared wording edits also update the master and other resumes that use it.';
@@ -8075,6 +8146,7 @@ async function boot() {
   // anyway" — after changing the LaTeX engine, say.
   $('#live-state').onclick = renderPreview;
   $('#btn-save-as').onclick = saveAsVariation;
+  $('#btn-delete-resume').onclick = deleteVariation;
   $('#btn-feedback').onclick = () => askFeedback(state.masterView);
   $('#btn-rebuild').onclick = renderPreview;
   $('#btn-add-entry').onclick = async () => {
