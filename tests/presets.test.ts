@@ -364,6 +364,40 @@ describe('choosing a model and an effort level', () => {
     expect(applyModelAndEffort('claude', set, {})).toEqual(claude.args);
   });
 
+  /*
+   * Codex's `-c` is not the effort setting. It is its general config
+   * override, and the effort switch is only one of the things people put
+   * behind it — a proxy, a provider, a sandbox rule.
+   *
+   * Replacing "the flag" meant replacing all of them: picking an effort
+   * silently deleted `-c model_provider=myproxy` from somebody's command
+   * line, and clearing the effort afterwards did not bring it back. Nothing
+   * said so at either end; the run simply went somewhere else.
+   */
+  it('leaves alone a config override that is not the effort', () => {
+    const mine = [
+      'exec', '--sandbox', 'read-only', '--skip-git-repo-check',
+      '-c', 'model_provider=myproxy',
+      '--cd', '{sandbox}', '{promptText}',
+    ];
+
+    const high = applyModelAndEffort('codex', mine, { effort: 'high' });
+    expect(high).toContain('model_provider=myproxy');
+    expect(high).toContain('model_reasoning_effort=high');
+
+    // And taking the effort off again leaves theirs exactly where it was.
+    const cleared = applyModelAndEffort('codex', high, {});
+    expect(cleared).toEqual(mine);
+  });
+
+  it('still replaces its own value rather than stacking them up', () => {
+    const once = applyModelAndEffort('codex', codex.args, { effort: 'low' });
+    const twice = applyModelAndEffort('codex', once, { effort: 'high' });
+    expect(twice.filter((a) => a.startsWith('model_reasoning_effort='))).toEqual([
+      'model_reasoning_effort=high',
+    ]);
+  });
+
   it('passes effort only where the CLI has a switch for it', () => {
     const withEffort = applyModelAndEffort('codex', codex.args, { effort: 'high' });
     expect(withEffort).toContain('model_reasoning_effort=high');

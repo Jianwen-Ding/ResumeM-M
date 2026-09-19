@@ -364,18 +364,55 @@ function matchesCommand(name: string, command: string): boolean {
  * model chosen and then cleared has to take its flag with it, or the box says
  * "whatever the CLI defaults to" while the command line still pins one.
  */
-function setSwitch(args: string[], spec: AiSwitch | undefined, value: string | undefined): string[] {
+function setSwitch(
+  args: string[],
+  spec: (AiSwitch & { values?: Record<string, string> }) | undefined,
+  value: string | undefined,
+): string[] {
   if (!spec) return args;
   const out: string[] = [];
+
+  /*
+   * Which occurrences of this flag are this switch's to remove.
+   *
+   * A flag like `--model` is the setting: every `--model` on the line is one
+   * of these and replacing it is right. `-c` is not — it is Codex's general
+   * config override, and the effort switch is only one of the things people
+   * put behind it. Removing every `-c` pair meant that picking an effort
+   * silently deleted `-c model_provider=myproxy` off somebody's command line,
+   * and clearing the effort afterwards did not bring it back. Measured: the
+   * override was gone from the args and nothing said so.
+   *
+   * So a switch with named values owns only the values it names — matched on
+   * the key in front of the `=`, since that is what is being set.
+   */
+  const owned = spec.values
+    ? new Set(Object.values(spec.values).map((v) => v.split('=')[0]))
+    : null;
+  const mine = (v: string | undefined) => !owned || (v !== undefined && owned.has(v.split('=')[0]!));
 
   // Drop whatever is there now, in either spelling.
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === spec.flag) {
-      i++; // and its value
+      const next = args[i + 1];
+      if (mine(next)) {
+        i++; // and its value
+        continue;
+      }
+      // Somebody else's use of the same flag. Both parts stay where they are.
+      out.push(a);
+      if (next !== undefined) {
+        out.push(next);
+        i++;
+      }
       continue;
     }
-    if (a.startsWith(`${spec.flag}=`)) continue;
+    if (a.startsWith(`${spec.flag}=`)) {
+      if (mine(a.slice(spec.flag.length + 1))) continue;
+      out.push(a);
+      continue;
+    }
     out.push(a);
   }
 
