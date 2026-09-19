@@ -1582,8 +1582,8 @@ function orderControl(section) {
  * it should still be true on another machine or after the save is cloned — a
  * preference kept in localStorage is a preference that exists on one computer.
  *
- * Not inherited through `extends`: folding is about the list in front of you,
- * and a variation is a different list.
+ * One resume's own, not shared with the ones copied from it: folding is about
+ * the list in front of you, and another resume is a different list.
  */
 function collapsedIds() {
   return state.collapsedEdits ?? resumeById(state.resumeId)?.collapsed ?? [];
@@ -4246,10 +4246,11 @@ function autoFitOn() {
  * with no resume in it has nothing to open, and "delete" should not be a way
  * to reach a state the rest of the app cannot handle.
  *
- * Children are not orphaned: `deleteResume` walks the ones that extend this
- * and folds what it contributed into each before it goes, so they resolve to
- * the same document afterwards. That is worth saying out loud in the
- * confirmation, because "and everything based on it" is the fear.
+ * Nothing else moves. Resumes stand alone, so a resume copied from this one
+ * holds its own sections and is untouched by this going — which is the whole
+ * of what deleting has to do now, and used to be a rewrite of every child on
+ * the way past. Said out loud in the confirmation, because "and everything
+ * based on it" is the fear.
  */
 async function deleteVariation() {
   if (state.masterView) {
@@ -4814,9 +4815,34 @@ async function openApplication(id) {
          */
         el('div', {
           className: 'file',
-          textContent: resume ? resume.label : (a.resumeId ?? '—'),
+          textContent: resume ? resume.label : `${a.role} — ${a.company}`,
           title: resume ? `Stored as ${resume.id}.yaml` : '',
         }),
+        /*
+         * And a sentence when the resume is no longer in the save, rather
+         * than its filename.
+         *
+         * This printed `a.resumeId` — `job-helios-platform-engineer`, a
+         * filename with nothing to say — and that used to be the rare case of
+         * somebody having deleted one by hand. The sweep makes it the
+         * ordinary state of every application older than a week, so it is
+         * worth a sentence: what went, what did not, and where to find it.
+         *
+         * The two things that matter are both still true. The files that were
+         * actually sent are in this application's own folder and are listed
+         * further down this same pane; and the resume is in the version
+         * history, which is where every other deleted thing in this program
+         * is.
+         */
+        !resume && a.resumeId
+          ? el('div', {
+              className: 'hint',
+              textContent:
+                'This resume was made for this posting and has since been removed from the save. ' +
+                'The files that were sent are below, and the version history still has it.',
+              title: `Was ${a.resumeId}.yaml`,
+            })
+          : null,
         // And the base by its name too: "Built on base." was an id with a
         // full stop after it, not a sentence.
         copiedFromLabel ? el('div', { className: 'hint', textContent: `Copied from ${copiedFromLabel}.` }) : null,
@@ -8235,15 +8261,55 @@ async function applyHash() {
   const tab = ['assets', 'project'].includes(requestedTab) ? 'save'
     : ['build', 'master'].includes(requestedTab) ? 'resumes' : requestedTab;
   if (requestedTab === 'master' || requestedTab === 'build') {
-    state.masterView = requestedTab === 'master' || !state.resumeId;
-    render();
-    scheduleRender();
+    // Through the same door as the dropdown. This set the view and rendered,
+    // which left the previous resume's unsaved edits sitting over a document
+    // they do not belong to. See `leaveResume`.
+    await leaveResume(() => {
+      state.masterView = requestedTab === 'master' || !state.resumeId;
+    });
   }
   if (tab && document.querySelector(`#tabs button[data-tab="${tab}"]`)) {
     showTab(tab);
     return true;
   }
   return false;
+}
+
+/**
+ * Put down the resume on screen and pick up another one.
+ *
+ * Its own function because there are two ways to leave a resume and only one
+ * of them was doing this. The dropdown flushed, saved and cleared; arriving
+ * at `#master` or `#build` — which is a link the extension hands out — set
+ * the view and rendered, leaving the previous resume's unsaved overlay in
+ * `state.choices`, `state.entryEdits` and the rest, sitting over a document
+ * they do not belong to.
+ *
+ * A save that did not land is not a reason to say nothing. Refusing to move
+ * is right — the alternative is throwing away an edit — but the first version
+ * of that just put the dropdown back and left it there, so picking another
+ * resume looked like a control that does not work. The usual cause is one
+ * failed request, so it is tried once more; if it still will not save, say so
+ * and leave the edit where it can still be rescued.
+ *
+ * Returns whether it moved.
+ */
+async function leaveResume(go) {
+  await flushEdits();
+  if (state.dirty) await autoSave().catch(() => {});
+  if (state.dirty) {
+    setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
+    return false;
+  }
+
+  clearTimeout(renderTimer);
+  renderToken++;
+  go();
+  clearEdits();
+  setSaveState('saved');
+  render();
+  scheduleRender();
+  return true;
 }
 
 function setupTabs() {
@@ -8292,32 +8358,13 @@ async function boot() {
 
   $('#resume-select').onchange = async (e) => {
     const next = e.target.value;
-    // Save what is on screen before leaving it: clearEdits() is about to throw
-    // the unsaved overlay away.
-    await flushEdits();
-    /*
-     * A save that did not land is not a reason to say nothing.
-     *
-     * Refusing to switch is right — the alternative is throwing away an edit
-     * — but this put the dropdown back and left it there, so picking another
-     * resume looked like a control that does not work. The usual cause is one
-     * failed request, so try it once more; if it still will not save, say so
-     * and leave the edit where it can still be rescued.
-     */
-    if (state.dirty) await autoSave().catch(() => {});
-    if (state.dirty) {
-      e.target.value = state.masterView ? '__master__' : state.resumeId;
-      setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
-      return;
-    }
-    clearTimeout(renderTimer);
-    renderToken++;
-    state.masterView = next === '__master__';
-    if (!state.masterView) state.resumeId = next;
-    clearEdits();
-    setSaveState('saved');
-    render();
-    scheduleRender();
+    const moved = await leaveResume(() => {
+      state.masterView = next === '__master__';
+      if (!state.masterView) state.resumeId = next;
+    });
+    // Put the dropdown back where the screen still is, or it shows a resume
+    // that is not the one in front of you.
+    if (!moved) e.target.value = state.masterView ? '__master__' : state.resumeId;
   };
 
   // Leaving the page: write and commit on the way out. `visibilitychange` is
