@@ -1544,6 +1544,101 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   );
 
   /**
+   * The whole written half of one application, in one run.
+   *
+   * The extension asked for the letter and then for each answer separately —
+   * so a form with three questions was four runs of a model, each one reading
+   * the same posting, the same resume and the same corpus from scratch. That
+   * is four times the tokens for the same context, four times the wait, and
+   * four drafts that cannot see each other: an application that says two
+   * different things about why you want the job, because the letter and the
+   * answer were written by two runs that never met.
+   *
+   * The Workspace has done it in one run since the writing tools existed; this
+   * is the same thing, reachable from the card. Where the tools cannot be
+   * wired — no MCP entry point, or a CLI that does not take them — the reply
+   * says so and the caller falls back to the one-at-a-time routes, which still
+   * exist for redrafting a single answer on its own.
+   */
+  api.post(
+    '/extension/write',
+    handler(async (req, res) => {
+      const { resumeId, job, letter, questions } = req.body as {
+        resumeId: string;
+        job: TailorContext;
+        letter?: { required?: boolean; body?: string };
+        questions?: { id: string; question: string; answer?: string }[];
+      };
+      if (!resumeId) throw new Error('resumeId is required');
+      if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to write against');
+
+      const data = store.load();
+      const resolved = resolveResume(resumeId, data);
+      const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
+      const wantsLetter = Boolean(letter?.required);
+      const pending: Draft['questions'] = (questions ?? []).map((q) => ({
+        id: q.id,
+        question: q.question,
+        answer: q.answer ?? '',
+      }));
+
+      if (!wantsLetter && pending.length === 0) {
+        res.json({ letter: null, answers: {}, priorLetters: prior, aiUsed: false });
+        return;
+      }
+
+      const wired = canWire(data.config.ai.command) && serverEntry(mcpDir) !== null;
+      if (!wired || !data.config.ai.enabled) {
+        /*
+         * Reported rather than attempted. One run is only one run when the
+         * tools are there to collect the pieces; without them a single prompt
+         * would have to be parsed back apart, which is the guessing this
+         * replaced. The caller has the per-item routes and knows to use them.
+         */
+        res.json({
+          letter: null,
+          answers: {},
+          priorLetters: prior,
+          aiUsed: false,
+          oneRun: false,
+          why: !data.config.ai.enabled ? 'AI is switched off in ResumeM-M.' : 'This AI command cannot take the writing tools.',
+        });
+        return;
+      }
+
+      let aiFailed: string | undefined;
+      let state: { letter?: string; answers?: Record<string, string> } | undefined;
+      try {
+        const agent = await runAgent(
+          configForTask(data.config, 'write'),
+          applicationWritingPrompt(data, resolved, job),
+          writingTools(data, resolved, job, {
+            coverLetter: { required: wantsLetter, body: letter?.body ?? '' },
+            questions: pending,
+          }),
+        );
+        state = agent.tools as typeof state;
+      } catch (err) {
+        // The same reasoning as `/extension/analyze`: a run that never started
+        // is a misconfigured command, and saying so beats a 502 in front of
+        // somebody halfway through an application.
+        aiFailed = err instanceof Error ? err.message : String(err);
+      }
+
+      const written = state?.letter?.trim();
+      const answers = state?.answers ?? {};
+      res.json({
+        letter: wantsLetter && written ? written : null,
+        answers,
+        priorLetters: prior,
+        aiUsed: Boolean(written) || Object.keys(answers).length > 0,
+        oneRun: true,
+        aiFailed,
+      });
+    }),
+  );
+
+  /**
    * Answer a question. Reuses a stored answer outright when one plainly covers
    * it, and only reaches for the AI when nothing does — or when asked to adapt
    * the stored answer to this specific posting.

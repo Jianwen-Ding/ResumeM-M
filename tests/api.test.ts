@@ -265,6 +265,70 @@ describe('job analysis', () => {
     });
   });
 
+  /*
+   * The letter and every answer from one run.
+   *
+   * The extension asked for the letter and then for each answer separately, so
+   * a form with three questions was four runs of a model, each reading the
+   * same posting, resume and corpus from scratch — four times the tokens for
+   * the same context, and four drafts that could not see each other.
+   */
+  describe('writing the whole application at once', () => {
+    const write = (body: Record<string, unknown>) =>
+      request(app).post('/api/extension/write').send(body);
+    const job = { jobTitle: 'Data Platform Intern', company: 'Streamly', jobDescription: 'Kafka in Go and Python.' };
+
+    it('refuses without a resume or a description, rather than running on nothing', async () => {
+      expect((await write({ job }).expect(400)).body.error).toMatch(/resumeId/i);
+      expect((await write({ resumeId: 'intern', job: { jobDescription: '  ' } }).expect(400)).body.error)
+        .toMatch(/job description/i);
+    });
+
+    /*
+     * Asked for nothing, it runs nothing — and says so by leaving `oneRun`
+     * off rather than setting it false. The difference matters to the caller:
+     * `false` means "could not be done in one run, go and do it the slow way",
+     * and firing that after a request that asked for nothing would be four
+     * runs where none were wanted.
+     */
+    it('does nothing when there is nothing to write', async () => {
+      const res = await write({ resumeId: 'intern', job, letter: { required: false }, questions: [] }).expect(200);
+      expect(res.body).toMatchObject({ letter: null, answers: {}, aiUsed: false });
+      expect(res.body.oneRun).toBeUndefined();
+      expect(Array.isArray(res.body.priorLetters)).toBe(true);
+    });
+
+    /*
+     * One run is only one run where the tools exist to collect the pieces.
+     * Without them a single reply would have to be parsed back apart, which is
+     * the guessing this replaced — so it declines, names why, and leaves the
+     * caller to its per-item routes.
+     */
+    it('declines rather than guessing when one run is not possible', async () => {
+      const res = await write({
+        resumeId: 'intern',
+        job,
+        letter: { required: true, body: '' },
+        questions: [{ id: 'q1', question: 'Why us?' }],
+      }).expect(200);
+      expect(res.body.oneRun).toBe(false);
+      expect(res.body.why).toMatch(/switched off|writing tools/i);
+      expect(res.body).toMatchObject({ letter: null, answers: {}, aiUsed: false });
+    });
+
+    // Previous letters come back either way, so there is always something to
+    // start from even when nothing was written.
+    it('hands back the letters worth starting from, whatever happened', async () => {
+      const res = await write({
+        resumeId: 'intern',
+        job,
+        letter: { required: true, body: '' },
+        questions: [],
+      }).expect(200);
+      expect(Array.isArray(res.body.priorLetters)).toBe(true);
+    });
+  });
+
   it('maps bullets back to their entries for the suggestion flow', async () => {
     const res = await request(app).post('/api/extension/analyze').send({ html: JOB_HTML }).expect(200);
     expect(res.body.entryByBullet.b_pipeline).toBe('exp_acme');
