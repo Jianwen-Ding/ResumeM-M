@@ -621,6 +621,82 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
 /** What a person sees in the folder: the uploads, not the bookkeeping. */
 const visible = (dir: string) => fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
 
+/*
+ * One application handing its filename to another, which is the ordinary
+ * shape of applying to two jobs.
+ *
+ * Every application produces the same `First-Last-Resume.pdf` under the
+ * default naming, so when one is in flight at a time they take turns holding
+ * that name. Freshness was decided by timestamp alone, and a timestamp cannot
+ * tell two applications apart: prepare Beta, prepare Acme, send Acme, then
+ * send Beta, and Beta's bundle is *older* than the copy of Acme's already
+ * sitting in the folder. Nothing was copied and nothing was reported — the
+ * Applications tab said one application was in flight with its resume ready,
+ * and the folder a portal's file dialog is pointed at held the other job's
+ * tailored resume.
+ *
+ * Bundles are written by hand here rather than compiled. Going through
+ * `buildBundle` syncs the folder as a side effect, which changes the state
+ * this is about — the first version of this test did that and passed with the
+ * fix removed.
+ */
+describe('one application taking over another’s filename', () => {
+  const NAME = 'Test-Person-Resume.pdf';
+
+  /** A bundle folder on disk, with a mtime we choose. */
+  const bundle = (dir: string, body: string, at: Date) => {
+    const full = path.join(t.store.outDir(), 'applications', dir);
+    fs.mkdirSync(full, { recursive: true });
+    const file = path.join(full, NAME);
+    fs.writeFileSync(file, body);
+    fs.utimesSync(file, at, at);
+    return `applications/${dir}`;
+  };
+
+  const app = (id: string, company: string, status: string, snapshotDir: string) =>
+    ({ id, company, role: 'Intern', status, snapshotDir }) as unknown as Application;
+
+  const held = () => fs.readFileSync(path.join(t.store.outDir(), 'current', NAME), 'utf8');
+
+  it('replaces it even when the arriving bundle is the older one', () => {
+    const beta = bundle('beta', 'BETA', new Date('2026-01-01T00:00:00Z'));
+    const acme = bundle('acme', 'ACME', new Date('2026-06-01T00:00:00Z'));
+
+    syncCurrent(t.store, [app('acme', 'Acme', 'applying', acme), app('beta', 'Beta', 'interested', beta)]);
+    expect(held()).toBe('ACME');
+
+    const after = syncCurrent(t.store, [
+      app('acme', 'Acme', 'interview', acme),
+      app('beta', 'Beta', 'applying', beta),
+    ]);
+    expect(held()).toBe('BETA');
+    expect(after.problems ?? []).toEqual([]);
+  });
+
+  /*
+   * And a folder synced before the manifest recorded where files came from.
+   * The old manifest has `files` and no `from`, so every name reads as
+   * "copied from somewhere else" and is written once more on the next sync:
+   * one redundant copy, then right from then on.
+   */
+  it('recovers a folder whose manifest predates knowing where files came from', () => {
+    const beta = bundle('beta', 'BETA', new Date('2026-01-01T00:00:00Z'));
+    const acme = bundle('acme', 'ACME', new Date('2026-06-01T00:00:00Z'));
+
+    const first = syncCurrent(t.store, [
+      app('acme', 'Acme', 'applying', acme),
+      app('beta', 'Beta', 'interested', beta),
+    ]);
+    const manifest = path.join(first.dir, '.rmm-current.json');
+    fs.writeFileSync(manifest, JSON.stringify({ files: first.files }, null, 2), 'utf8');
+
+    syncCurrent(t.store, [app('acme', 'Acme', 'interview', acme), app('beta', 'Beta', 'applying', beta)]);
+    expect(held()).toBe('BETA');
+    // And the manifest is the new shape now, so the next sync is exact.
+    expect(JSON.parse(fs.readFileSync(manifest, 'utf8')).from[NAME]).toContain('beta');
+  });
+});
+
 describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_000 }, () => {
   const bundleFor = (company: string, status?: string) =>
     buildBundle(t.store, {

@@ -96,6 +96,43 @@ function readManifest(dir: string): string[] {
 }
 
 /**
+ * Which bundle each file in the folder was copied out of, last time.
+ *
+ * Freshness used to be a timestamp and nothing else, and a timestamp cannot
+ * tell two applications apart. Every application produces the same
+ * `First-Last-Resume.pdf` under the default naming, so when one hands that
+ * name over to another the question is not "is the source newer?" but "is it
+ * a different source?" — and the answer to the first was routinely no:
+ * prepare Beta, prepare Acme, send Acme, then send Beta, and Beta's bundle is
+ * older than the copy of Acme's already sitting in the folder. Nothing was
+ * copied, nothing was reported, and the upload folder held Acme's tailored
+ * resume under the name that now belonged to Beta.
+ *
+ * Only ever compared, never opened and never deleted — unlike `files`, which
+ * is handed to a recursive delete and so has to be names in this folder. A
+ * path here that means nothing simply forces a copy, which is the safe way to
+ * be wrong.
+ *
+ * A manifest written before this existed has no `from` at all, so every name
+ * reads as "came from somewhere else" and is copied once on the next sync.
+ * That is the migration: one redundant copy, then right from then on.
+ */
+function readSources(dir: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(dir, MANIFEST), 'utf8'));
+    const from = parsed?.from;
+    if (!from || typeof from !== 'object' || Array.isArray(from)) return {};
+    const out: Record<string, string> = {};
+    for (const [name, source] of Object.entries(from)) {
+      if (typeof source === 'string' && source) out[name] = source;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Give each in-flight application a name of its own in the flat folder.
  *
  * Names are `FirstName-LastName-<Document Type>`, with the job title in the
@@ -190,6 +227,7 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   // Anything this folder put here and no longer wants leaves. Only those: a
   // name the manifest does not claim belongs to the user, whatever it is.
   const ours = readManifest(dir);
+  const cameFrom = readSources(dir);
   for (const existing of ours) {
     if (wanted.has(existing) || existing === MANIFEST) continue;
     try {
@@ -221,8 +259,12 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
       if (at && !at.isFile()) {
         throw new Error('something that is not a file already has that name here');
       }
-      // Copy only when it differs, so the folder's timestamps mean something.
-      if (!at || at.mtimeMs < fs.statSync(from).mtimeMs) {
+      /*
+       * Copy when it is a different bundle, or when the same bundle has been
+       * rebuilt since. The second test alone let one application keep another
+       * application's file — see `readSources`.
+       */
+      if (!at || cameFrom[name] !== from || at.mtimeMs < fs.statSync(from).mtimeMs) {
         /*
          * Through a temp file in the same folder, then renamed over the name.
          *
@@ -259,8 +301,11 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   }
 
   const files = landed.sort();
+  // And which bundle each one came out of, so the next sync can tell a
+  // different application's file from a stale copy of the same one.
+  const from = Object.fromEntries(files.map((name) => [name, wanted.get(name)!]));
   try {
-    fs.writeFileSync(path.join(dir, MANIFEST), JSON.stringify({ files }, null, 2), 'utf8');
+    fs.writeFileSync(path.join(dir, MANIFEST), JSON.stringify({ files, from }, null, 2), 'utf8');
   } catch {
     // A folder that cannot hold the manifest still holds the files. The cost
     // is that the next sync will not clean up after this one, which is the
