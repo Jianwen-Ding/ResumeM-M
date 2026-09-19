@@ -387,6 +387,15 @@ custom one that then drifts out of date with the preset it came from. They are
 applied to the arguments when the config is loaded, the way the research switch
 is.
 
+The model choices are read from the installed CLI, not kept as presets here.
+When Settings opens, ResumeM-M starts that CLI in a terminal, types its model
+picker command (such as `/model`, or a native model-listing subcommand), reads
+the choices available to the signed-in account, and exits without selecting
+one. The same live choices fill the main
+model buttons and every row under **A different model for a particular kind of
+work**. If the CLI is missing, signed out, or its picker cannot be read, the
+free-form model field remains available instead of substituting a guessed list.
+
 Only Codex has a reasoning-effort flag. Rather than invent one for the others —
 a flag a CLI does not recognise usually stops it running at all — effort is also
 said in the prompt, in words, which reaches every model. The panel tells you

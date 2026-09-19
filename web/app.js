@@ -7192,16 +7192,10 @@ async function loadSettings() {
   /*
    * Which model, and how hard it should think.
    *
-   * Two settings rather than two more arguments to hand-edit: a preset is
-   * copied when it is chosen, so editing the argument line to change a model
-   * turns the configuration into a custom one that then drifts out of date
-   * with the preset it came from. These are applied to the arguments on the
-   * server, the way the research switch is, so the saved arguments stay the
-   * preset's own.
-   *
-   * A text box with suggestions rather than a dropdown, because every one of
-   * these CLIs gains models faster than this file can be edited and a closed
-   * list would start refusing names that work.
+   * The choices do not come from a list in this application. The server opens
+   * the selected CLI, types its own model-picker command, and returns what the
+   * installed version and signed-in account showed. A free-form box remains
+   * behind "Another…" for a provider-specific name the picker omits.
    */
   const modelList = el('datalist', { id: 'ai-model-options' });
   const model = keptField('ai-model', config.ai.model ?? '', {
@@ -7224,35 +7218,26 @@ async function loadSettings() {
   const modelOther = el('div', { className: 'model-other', hidden: true }, [model]);
   const typedModel = () => model.value.trim();
 
-  /*
-   * What the chosen command says it takes, asked of the command itself.
-   *
-   * The written suggestions go stale, and had: the Claude CLI documents
-   * `fable`, `opus` and `sonnet` while the list in the source said `opus`,
-   * `sonnet`, `haiku`. So the buttons are built from the server's answer,
-   * which puts the question to the command that is actually configured — a
-   * path to a particular build gets that build's answer — and which falls back
-   * to the written list whenever the command cannot be asked. Nothing here can
-   * leave the picker empty.
-   *
-   * Held per command for as long as the panel is open, because the chips are
-   * redrawn on every keystroke in the command box and the answer does not
-   * change between two of them.
-   */
+  /* What the CLI's interactive model picker returned, held per command. */
   const fromCli = new Map();
+  const liveModelsNote = el('div', { className: 'hint' });
+  let refreshModelChoices = () => {};
   const askAboutModels = async (cmd) => {
     if (!cmd || fromCli.has(cmd)) return;
     fromCli.set(cmd, null); // in flight, so a keystroke does not ask twice
-    const answer = await api(`/ai/models?command=${encodeURIComponent(cmd)}`).catch(() => null);
+    const answer = await api(`/ai/models?command=${encodeURIComponent(cmd)}`).catch(() => ({
+      models: [],
+      from: 'unavailable',
+      message: `Could not ask ${cmd} for its model choices; you can still type a model name.`,
+    }));
     fromCli.set(cmd, answer);
-    if (command.value.trim() === cmd) showModelChips();
+    if (command.value.trim() === cmd) refreshModelChoices();
   };
 
   const showModelChips = () => {
     const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
     const said = fromCli.get(command.value.trim());
-    if (said === undefined) void askAboutModels(command.value.trim());
-    const names = said?.models?.length ? said.models : (chosen?.model?.suggestions ?? []);
+    const names = said?.models ?? [];
     const listed = names.includes(typedModel());
     // Nothing to choose between: the box is the only control that makes sense.
     modelChips.hidden = names.length === 0;
@@ -7408,6 +7393,26 @@ async function loadSettings() {
   };
 
   /*
+   * One answer drives every model control: the main buttons, the datalist and
+   * every task row. Keeping this in one repaint is important — previously the
+   * asynchronous answer updated only the main buttons, leaving each task on a
+   * stale preset guess for the lifetime of the panel.
+   */
+  refreshModelChoices = () => {
+    const cmd = command.value.trim();
+    const said = fromCli.get(cmd);
+    const names = said?.models ?? [];
+    modelList.replaceChildren(...names.map((m) => el('option', { value: m })));
+    showModelChips();
+    paintTaskGrid(names);
+    liveModelsNote.textContent = said === undefined || said === null
+      ? `Reading ${cmd || 'the CLI'}’s model picker…`
+      : said.from === 'cli'
+        ? `Choices read from ${cmd}’s live model picker.`
+        : said.message ?? 'The live model picker could not be read; you can still type a model name.';
+  };
+
+  /*
    * Effort as a slider, because it is one axis and four stops on it.
    *
    * A dropdown asks you to open it before you can see what the choices even
@@ -7498,6 +7503,7 @@ async function loadSettings() {
     modelChips,
     modelOther,
     modelList,
+    liveModelsNote,
     modelNote,
     el('div', { className: 'lbl', textContent: 'Effort' }),
     effortSlider,
@@ -7507,9 +7513,8 @@ async function loadSettings() {
   ]);
   const showModelNote = () => {
     const chosen = AI_PRESETS.find((p) => p.label !== 'Custom…' && p.command === command.value.trim());
-    modelList.replaceChildren(...(chosen?.model?.suggestions ?? []).map((m) => el('option', { value: m })));
-    showModelChips();
-    paintTaskGrid(chosen?.model?.suggestions ?? []);
+    if (chosen && fromCli.get(command.value.trim()) === undefined) void askAboutModels(command.value.trim());
+    refreshModelChoices();
     showEffortLabel();
 
     modelAndEffort.hidden = !chosen;

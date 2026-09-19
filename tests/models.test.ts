@@ -1,161 +1,179 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { forgetModels, listModels, modelsInHelp } from '../src/ai/models.js';
+import {
+  captureModelPicker,
+  forgetModels,
+  listModels,
+  modelsInPicker,
+  plainTerminal,
+  type ModelProbe,
+} from '../src/ai/models.js';
+import { AI_PRESETS } from '../src/ai/presets.js';
 
-/*
- * Asking a CLI what models it takes, instead of remembering.
- *
- * The list in `presets.ts` is written by hand, and a hand-written list of
- * models is stale the week after it is written. It already was: the Claude CLI
- * on this machine documents `fable`, `opus` and `sonnet`, and the list said
- * `opus`, `sonnet`, `haiku`. Somebody picking from the buttons was picking
- * from last quarter.
- *
- * There is no listing command to call, and that is worth stating rather than
- * papering over: `claude` has no `models` subcommand, and `/models` is
- * something its interactive client understands rather than the executable —
- * put through `-p` it is a prompt, and the model answers it in conversation.
- * ("The `/models` command isn't available in this session", verbatim.) So the
- * question goes to the one interface all of these do have and do keep
- * current, which is `--help`.
- */
-
-/** The real thing, abbreviated, from `claude --help` on this machine. */
-const CLAUDE_HELP = `
-Usage: claude [options] [command] [prompt]
-
-Options:
-  --mcp-config <configs...>             Load MCP servers from JSON files
-  --model <model>                       Model for the current session. Provide
-                                        an alias for the latest model (e.g.
-                                        'fable', 'opus', or 'sonnet') or a
-                                        model's full name (e.g.
-                                        'claude-fable-5').
-  -n, --name <name>                     Set a display name for this session
-                                        (shown in the prompt box, /resume
-                                        picker, and terminal title)
-  --no-chrome                           Disable Claude in Chrome integration
+const CLAUDE_PICKER = `
+you: /model
+Select model
+1. Default (recommended) — Use the default model (currently Opus 5)
+2. (selected) Opus (1M context) — Best for everyday, complex tasks
+3. Sonnet — Efficient for routine tasks
+4. Haiku — Fastest for quick answers
+5. (disabled) Fable (disabled) — currently unavailable
+Select with numbers [1-5].
 `;
 
-describe('reading model names out of a CLI’s help', () => {
-  it('finds the aliases and the full name the help offers', () => {
-    expect(modelsInHelp(CLAUDE_HELP).sort()).toEqual(['claude-fable-5', 'fable', 'opus', 'sonnet']);
+describe('reading model choices from interactive CLI pickers', () => {
+  it('reads Claude aliases and ignores the default and unavailable choices', () => {
+    expect(modelsInPicker(CLAUDE_PICKER, 'claude')).toEqual(['opus', 'sonnet', 'haiku']);
   });
 
-  /*
-   * The paragraph wraps over five lines and the names are spread across three
-   * of them, so anything reading line by line finds one of the four.
-   */
-  it('reads the whole wrapped paragraph, not one line of it', () => {
-    expect(modelsInHelp(CLAUDE_HELP)).toContain('claude-fable-5');
+  it('reads exact Codex identifiers without inventing a release list', () => {
+    const screen = `
+model: gpt-old-startup-value
+Select Model and Effort
+› 1. gpt-6-astra       Most capable
+  2. gpt-5.6-sol       Reliable coding agent
+  3. gpt-5.6-terra     Balanced
+Press enter to confirm or esc to go back
+`;
+    expect(modelsInPicker(screen, 'codex')).toEqual(['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']);
   });
 
-  it('stops at the next flag, so a neighbour cannot contribute a name', () => {
-    // "/resume" and the words under --name are in the next entry down.
-    expect(modelsInHelp(CLAUDE_HELP)).not.toContain('resume');
-    expect(modelsInHelp(CLAUDE_HELP).some((m) => m.includes('picker'))).toBe(false);
+  it('reads the manual Gemini list and not prose about other providers', () => {
+    const screen = `
+Select a model
+Auto may route between gemini-3-pro-preview and gemini-3-flash-preview.
+Manual
+  gemini-2.5-pro
+  gemini-2.5-flash
+The docs also mention claude-fable-5.
+`;
+    expect(modelsInPicker(screen, 'gemini')).toEqual([
+      'gemini-3-pro-preview',
+      'gemini-3-flash-preview',
+      'gemini-2.5-pro',
+      'gemini-2.5-flash',
+    ]);
   });
 
-  it('takes the short-and-long spelling of the flag', () => {
-    const help = "  -m, --model <name>   Pick a model, e.g. 'fast' or 'careful'.\n  -v, --verbose\n";
-    expect(modelsInHelp(help).sort()).toEqual(['careful', 'fast']);
+  it('deduplicates redraws from a terminal UI', () => {
+    expect(modelsInPicker('gpt-5.6-sol\r\n\x1b[2Jgpt-5.6-sol\r\ngpt-6-astra', 'codex'))
+      .toEqual(['gpt-5.6-sol', 'gpt-6-astra']);
   });
 
-  /*
-   * Quoted words beside the model flag that are plainly not models. Wrong in
-   * this direction costs a button nobody presses; the field takes anything
-   * typed either way.
-   */
-  it('refuses the placeholder and the stock advice', () => {
-    const help = `  --model <model>   Pass a 'model' name, or 'default' for the 'latest' one.\n  --other\n`;
-    expect(modelsInHelp(help)).toEqual([]);
-  });
-
-  it('refuses a quoted phrase, which is prose rather than a name', () => {
-    const help = `  --model <model>   For example 'the fastest one available'.\n  --other\n`;
-    expect(modelsInHelp(help)).toEqual([]);
-  });
-
-  it('says nothing when the help has no model flag at all', () => {
-    expect(modelsInHelp('Usage: thing [options]\n  --verbose  Say more\n')).toEqual([]);
-    expect(modelsInHelp('')).toEqual([]);
+  it('strips terminal title and cursor sequences without losing their text', () => {
+    expect(plainTerminal('\x1b]0;Title\x07\x1b[2Jchoice')).toContain('choice');
+    expect(plainTerminal('\x1b]0;Title\x07\x1b[2Jchoice')).not.toContain('Title');
   });
 });
 
 describe('asking the configured command', () => {
   beforeEach(() => forgetModels());
 
-  it('prefers what the command said over what this project remembers', async () => {
-    const found = await listModels('claude', async () => CLAUDE_HELP);
-    expect(found.from).toBe('cli');
-    expect(found.models).toContain('fable');
-  });
-
-  /*
-   * The important one. A CLI that is not installed, hangs, or writes its help
-   * somewhere unexpected must leave the picker exactly as it was before any of
-   * this existed.
-   */
-  it('falls back to the written suggestions when the command cannot be asked', async () => {
-    const found = await listModels('claude', async () => {
-      throw new Error('spawn claude ENOENT');
-    });
-    expect(found.from).toBe('suggestions');
-    expect(found.models.length).toBeGreaterThan(0);
-  });
-
-  it('falls back when the command answers with nothing useful', async () => {
-    const found = await listModels('claude', async () => 'Usage: claude [options]\n');
-    expect(found.from).toBe('suggestions');
-    expect(found.models).toEqual(['opus', 'sonnet', 'haiku']);
-  });
-
-  it('gives an empty answer for a command it has never heard of, rather than throwing', async () => {
-    const found = await listModels('not-a-real-cli', async () => {
-      throw new Error('nope');
-    });
-    expect(found).toEqual({ models: [], from: 'suggestions' });
-  });
-
-  it('answers for a path to a particular build, not only a bare name', async () => {
-    const found = await listModels('/opt/homebrew/bin/claude', async () => CLAUDE_HELP);
-    expect(found.from).toBe('cli');
-  });
-
-  /*
-   * Opening Settings redraws the buttons on every keystroke in the command
-   * box. Running the CLI that often would be absurd.
-   */
-  it('asks once and remembers the answer', async () => {
-    let asked = 0;
-    const exec = async () => {
-      asked++;
-      return CLAUDE_HELP;
+  const answer = (output: string, calls?: { count: number }): ModelProbe =>
+    async (_command, picker, cwd) => {
+      if (calls) calls.count++;
+      expect(cwd).toBe('/a/save');
+      expect(picker.mode).not.toBe('command');
+      if (picker.mode !== 'command') expect(picker.query).toBe('/model');
+      return output;
     };
-    await listModels('claude', exec);
-    await listModels('claude', exec);
-    await listModels('claude', exec);
-    expect(asked).toBe(1);
+
+  it('uses the preset-specific interactive command and returns what it showed', async () => {
+    const found = await listModels('claude', '/a/save', answer(CLAUDE_PICKER));
+    expect(found).toEqual({ models: ['opus', 'sonnet', 'haiku'], from: 'cli' });
+  });
+
+  it('declares the right live model request for every supported CLI', () => {
+    expect(AI_PRESETS.map((preset) => [
+      preset.command,
+      preset.model?.picker.mode === 'command'
+        ? preset.model.picker.args.join(' ')
+        : preset.model?.picker.query,
+    ])).toEqual([
+      ['claude', '/model'],
+      ['codex', '/model'],
+      ['gemini', '/model'],
+      ['agy', 'models'],
+    ]);
+  });
+
+  it('reads exact Antigravity model IDs from its account-aware listing', () => {
+    const screen = `
+gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)
+claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
+`;
+    expect(modelsInPicker(screen, 'agy')).toEqual([
+      'gemini-3.8-flash-medium',
+      'claude-opus-4-6-thinking',
+      'gpt-oss-120b-medium',
+    ]);
+  });
+
+  it('does not replace a failed picker with guessed presets', async () => {
+    const found = await listModels('claude', '/a/save', async () => {
+      throw Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' });
+    });
+    expect(found.models).toEqual([]);
+    expect(found.from).toBe('unavailable');
+    expect(found.message).toMatch(/not installed|PATH/i);
+  });
+
+  it('says when the CLI opened but did not show choices', async () => {
+    const found = await listModels('claude', '/a/save', answer('Please run /login'));
+    expect(found.models).toEqual([]);
+    expect(found.from).toBe('unavailable');
+    expect(found.message).toMatch(/sign in/i);
+  });
+
+  it('does not execute a command that is not one of the known CLI presets', async () => {
+    let called = false;
+    const found = await listModels('not-a-real-cli', '/a/save', async () => {
+      called = true;
+      return 'gpt-should-not-run';
+    });
+    expect(called).toBe(false);
+    expect(found.from).toBe('unavailable');
+  });
+
+  it('answers for a path to a particular installed build', async () => {
+    const found = await listModels('/opt/homebrew/bin/claude', '/a/save', answer(CLAUDE_PICKER));
+    expect(found.from).toBe('cli');
+  });
+
+  it('asks once and remembers the answer', async () => {
+    const calls = { count: 0 };
+    const probe = answer(CLAUDE_PICKER, calls);
+    await listModels('claude', '/a/save', probe);
+    await listModels('claude', '/a/save', probe);
+    await listModels('claude', '/a/save', probe);
+    expect(calls.count).toBe(1);
   });
 
   it('asks again after being told to forget', async () => {
-    let asked = 0;
-    const exec = async () => {
-      asked++;
-      return CLAUDE_HELP;
-    };
-    await listModels('claude', exec);
+    const calls = { count: 0 };
+    const probe = answer(CLAUDE_PICKER, calls);
+    await listModels('claude', '/a/save', probe);
     forgetModels();
-    await listModels('claude', exec);
-    expect(asked).toBe(2);
+    await listModels('claude', '/a/save', probe);
+    expect(calls.count).toBe(2);
   });
+});
 
-  it('asks nothing at all for an empty command', async () => {
-    let asked = 0;
-    const found = await listModels('', async () => {
-      asked++;
-      return CLAUDE_HELP;
-    });
-    expect(asked).toBe(0);
-    expect(found.from).toBe('suggestions');
-  });
+describe.skipIf(process.platform === 'win32')('the pseudo-terminal bridge', () => {
+  it('actually types the picker command into an interactive process', async () => {
+    const fakeCli = [
+      "process.stdin.setEncoding('utf8')",
+      "process.stdin.on('data', value => {",
+      "  if (!value.includes('/model')) return",
+      "  console.log('1. gpt-live-from-picker')",
+      "  process.exit(0)",
+      "})",
+    ].join(';');
+    const output = await captureModelPicker(
+      process.execPath,
+      { mode: 'terminal', query: '/model', args: ['-e', fakeCli], parser: 'codex' },
+      process.cwd(),
+    );
+    expect(modelsInPicker(output, 'codex')).toEqual(['gpt-live-from-picker']);
+  }, 8_000);
 });

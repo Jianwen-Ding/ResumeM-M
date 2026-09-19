@@ -26,6 +26,32 @@ export interface AiSwitch {
   join?: '=' | ' ';
 }
 
+/**
+ * How to ask an installed CLI which models this particular account can use.
+ *
+ * These are deliberately commands for the interactive client, not model
+ * names copied from a release note. Availability depends on the installed
+ * version, the provider, the account and sometimes an organization policy.
+ * The query is typed into a pseudo-terminal by `ai/models.ts`, exactly as a
+ * person would type it.
+ */
+export type AiModelPicker = {
+  /** Text typed into the interactive client after it opens in a PTY. */
+  query: string;
+  mode?: 'terminal';
+  /** Startup switches that make the picker readable without changing it. */
+  args?: string[];
+  /** The picker has CLI-specific labels even though its transport is shared. */
+  parser: 'claude' | 'codex' | 'gemini' | 'agy';
+  /** Optional follow-up keystrokes used to reveal a nested model list. */
+  reveal?: string;
+} | {
+  /** Some CLIs expose the same account-aware list as a native subcommand. */
+  mode: 'command';
+  args: string[];
+  parser: 'claude' | 'codex' | 'gemini' | 'agy';
+};
+
 export interface AiPreset {
   /** Shown in the picker. */
   label: string;
@@ -35,15 +61,8 @@ export interface AiPreset {
   note: string;
   /** What changes when the AI is allowed to look things up. */
   researchNote?: string;
-  /**
-   * How to name a model, and which names are worth offering.
-   *
-   * The suggestions are a starting list, not a closed one — every one of these
-   * CLIs gains models faster than this file can be edited, so the editor's box
-   * is a text field with these as a datalist rather than a dropdown that would
-   * go stale and start refusing things that work.
-   */
-  model?: AiSwitch & { suggestions: string[] };
+  /** How to name a model, and how to open this CLI's live model picker. */
+  model?: AiSwitch & { picker: AiModelPicker };
   /**
    * How to ask for more or less thinking, where the CLI has a way to say it.
    *
@@ -94,7 +113,10 @@ export const AI_PRESETS: AiPreset[] = [
     args: ['-p', '--add-dir', '{sandbox}', '--disallowedTools', 'Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,Read,Glob,Grep,Task,TodoWrite,SlashCommand,WebFetch,WebSearch'],
     note: 'Runs with every tool denied: it is asked for text and can reach for nothing.',
     researchNote: 'Web search and fetch are allowed; nothing else changes.',
-    model: { flag: '--model', suggestions: ['opus', 'sonnet', 'haiku'] },
+    model: {
+      flag: '--model',
+      picker: { query: '/model', args: ['--ax-screen-reader'], parser: 'claude' },
+    },
     // Claude Code has no reasoning-effort switch; the ask goes in the prompt.
     
   },
@@ -127,7 +149,10 @@ export const AI_PRESETS: AiPreset[] = [
       '{promptText}',
     ],
     note: 'Runs in Codex’s own read-only sandbox, in a scratch directory.',
-    model: { flag: '--model', suggestions: ['gpt-5-codex', 'gpt-5', 'o4-mini'] },
+    model: {
+      flag: '--model',
+      picker: { query: '/model', args: ['--no-alt-screen', '-c', 'tui.animations=false'], parser: 'codex' },
+    },
     /*
      * Codex takes arbitrary config overrides with `-c key=value`, and
      * reasoning effort is one of them. This is the only preset here with a
@@ -144,7 +169,12 @@ export const AI_PRESETS: AiPreset[] = [
     // Gemini takes the prompt inline after -p and writes the answer to stdout.
     args: ['-p', '{promptText}'],
     note: 'Prompt passed inline; nothing is written anywhere.',
-    model: { flag: '--model', suggestions: ['gemini-2.5-pro', 'gemini-2.5-flash'] },
+    model: {
+      flag: '--model',
+      // The first Gemini dialog contains Auto choices and a final Manual
+      // choice. End + Enter opens Manual's account-specific model list.
+      picker: { query: '/model', parser: 'gemini', reveal: '\u001b[F\r' },
+    },
   },
   {
     label: 'Antigravity (agy)',
@@ -166,7 +196,9 @@ export const AI_PRESETS: AiPreset[] = [
      */
     args: ['--mode', 'plan', '--sandbox', '--output-format', 'text', '--print={promptText}'],
     note: 'Runs in plan mode, which cannot run commands, in a scratch directory.',
-    model: { flag: '--model', suggestions: [] },
+    // Unlike its visual picker, this prints the exact values accepted by
+    // --model (including its model-specific effort suffixes).
+    model: { flag: '--model', picker: { mode: 'command', args: ['models'], parser: 'agy' } },
   },
 ];
 

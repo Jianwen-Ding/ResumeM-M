@@ -23,6 +23,7 @@ afterEach(() => {
  */
 describe('the settings panel', () => {
   let config;
+  let liveModels;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -40,6 +41,10 @@ describe('the settings panel', () => {
       output: { dir: 'out', fileNames: 'type' },
       overrides: {},
     };
+    liveModels = {
+      claude: ['opus', 'sonnet', 'haiku'],
+      gemini: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+    };
 
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : null;
@@ -49,6 +54,10 @@ describe('the settings panel', () => {
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/voice') result = { voice: '' };
       else if (url === '/api/ai/presets') result = { presets: AI_PRESETS, tasks: AI_TASKS };
+      else if (url.startsWith('/api/ai/models?')) {
+        const command = new URL(url, 'http://local').searchParams.get('command');
+        result = { models: liveModels[command] ?? [], from: 'cli' };
+      }
       else if (url === '/api/config/test-ai') result = { ok: true, command: config.ai.command, ms: 1200, output: 'ok' };
       else if (url === '/api/config' && options.method === 'PUT') {
         config = { ...config, ...body, ai: { ...config.ai, ...(body.ai ?? {}) } };
@@ -511,6 +520,22 @@ describe('the settings panel', () => {
       expect([...tr.querySelectorAll('input:checked')]).toHaveLength(1);
     }
     for (const row of rows) expect(gridCell(row, '').checked).toBe(true);
+  });
+
+  it('repaints every task from the live CLI answer, not a preset guess', async () => {
+    liveModels.claude = ['brand-new-fast', 'brand-new-deep'];
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+
+    await vi.waitFor(() => expect(chip('brand-new-deep')).toBeTruthy());
+    expect([...taskBlock().querySelectorAll('thead th')].map((n) => n.textContent)).toEqual([
+      'For',
+      'Same as above',
+      'brand-new-fast',
+      'brand-new-deep',
+      'Another…',
+    ]);
+    expect(gridCell('Tailoring a resume', 'brand-new-fast')).toBeTruthy();
   });
 
   it('saves the one it is given, and leaves the rest alone', async () => {
