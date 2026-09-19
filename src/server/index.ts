@@ -81,11 +81,21 @@ async function openSave(store: Store, repo: Repo): Promise<void> {
     );
   }
 
-  const { swept } = await sweepTemporary(store, repo);
+  const { swept, held } = await sweepTemporary(store, repo);
   if (swept.length > 0) {
     console.log(
       `ResumeM-M: swept ${swept.length} temporary resume(s) — ${swept.map((d) => d.label).join(', ')}. ` +
         'They are in the version history.',
+    );
+  }
+  if (held.length > 0) {
+    // Said as a warning because it is one: the save history is not working,
+    // and the sweep is the least of what that costs.
+    console.warn(
+      `ResumeM-M: kept ${held.length} temporary resume(s) that were due — ${held
+        .map((d) => d.label)
+        .join(', ')}. The version history does not have them, so removing them ` +
+        'could not have been undone. Save the store and they will go next time.',
     );
   }
 }

@@ -6752,7 +6752,25 @@ function temporaryLife(config, expiring) {
               if (!ok) return;
               try {
                 const res = await api('/resumes/sweep', { method: 'POST' });
-                setStatus(`Swept ${plural(res.swept.length, 'resume')}`);
+                /*
+                 * Held back because the version history does not have them,
+                 * which is the one case where removing a resume could not be
+                 * undone. Said as an error rather than a note: something is
+                 * wrong with the save history, and the sweep is the smallest
+                 * part of what that costs.
+                 */
+                if (res.held?.length) {
+                  setStatus(
+                    `Kept ${plural(res.held.length, 'resume')} that ${res.held.length === 1 ? 'is' : 'are'} ` +
+                      'due — the version history does not have ' +
+                      `${res.held.length === 1 ? 'it' : 'them'} yet, so removing ` +
+                      `${res.held.length === 1 ? 'it' : 'them'} could not be undone. ` +
+                      'Save the store under Save History and they will go next time.',
+                    true,
+                  );
+                } else {
+                  setStatus(`Swept ${plural(res.swept.length, 'resume')}`);
+                }
                 await loadStore();
                 render();
                 loadProjectSettings().catch(() => {});

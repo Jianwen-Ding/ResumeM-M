@@ -952,14 +952,32 @@ export class Store {
   deleteResume(id: string): void {
     this.migrateResumes();
 
-    /*
-     * Both spellings. A hand-made `.yml` beside the `.yaml` the app writes
-     * would otherwise bring the resume back on the next read.
-     */
     const named = this.loadResumes().find((r) => r.id === id);
-    for (const ext of ['yaml', 'yml']) {
+    for (const ext of Store.RESUME_SPELLINGS) {
       removeFile(this.file('resumes', `${id}.${ext}`), `"${named?.label ?? id}"`);
     }
+  }
+
+  /**
+   * Both spellings of a resume's filename. A hand-made `.yml` beside the
+   * `.yaml` the app writes would bring a deleted resume back on the next read.
+   */
+  static readonly RESUME_SPELLINGS = ['yaml', 'yml'] as const;
+
+  /**
+   * Where a resume is kept, relative to the store, whether or not it is there.
+   *
+   * For asking git — the sweep checks that the history has a resume before it
+   * deletes one, and git speaks in paths from the root of the repository.
+   * Never for opening a file: paths are composed by `file`, one name at a
+   * time, and splitting one of these back into segments would hand it
+   * `['resumes', '..', 'profile.yaml']`, three names each of which passes the
+   * check that `../profile.yaml` fails. The id is checked here anyway, so a
+   * path cannot be smuggled into a pathspec either.
+   */
+  static resumeFiles(id: string): string[] {
+    assertName(`${id}.yaml`);
+    return Store.RESUME_SPELLINGS.map((ext) => `resumes/${id}.${ext}`);
   }
 
   /** The four files entries are split across, in the order `load` reads them. */
