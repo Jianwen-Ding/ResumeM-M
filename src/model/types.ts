@@ -257,6 +257,18 @@ export interface ResumeSpec {
    */
   tier?: ResumeTier;
   /**
+   * When this resume became temporary, for the sweep to count from.
+   *
+   * Only ever a fallback: the week is normally measured from the application
+   * being sent, because a posting you are still writing for is not one to
+   * take the resume away from. This covers the copy that was made and then
+   * abandoned — no application, nothing to measure — and, more importantly,
+   * the resumes an upgrade makes temporary. A save upgraded today must not
+   * lose three months of work tonight because a field appeared under it, so
+   * their clock starts when the migration ran.
+   */
+  temporaryFrom?: string;
+  /**
    * Pinned as a starting point.
    *
    * @deprecated Superseded by `tier: 'base'`. Read by the migration only.

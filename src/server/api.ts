@@ -48,7 +48,7 @@ import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snap
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
 import type { Store } from '../model/store.js';
-import { isVariantField, layoutFor } from '../model/types.js';
+import { isVariantField, layoutFor, RESUME_TIERS, type ResumeTier } from '../model/types.js';
 import type {
   AnswerBankItem,
   Application,
@@ -470,24 +470,72 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   );
 
   /**
-   * Pin a resume as a base, or unpin it. Its own toggle rather than part of
-   * the whole-spec save: this is a decision about how the store is organised,
-   * and it should not ride along with an unrelated edit.
+   * Move a resume between tiers.
+   *
+   * Its own endpoint rather than part of the whole-spec save, for the reason
+   * the pin toggle it replaces had: this is a decision about how the save is
+   * organised, and it should not ride along with an unrelated edit to the
+   * document.
+   *
+   *   `base` — what you build from, and what the extension offers first.
+   *   `extended` — permanent, and never swept.
+   *   `temporary` — made for one posting, and gone a week after that posting
+   *   is done with. Promoting out of it is the whole reason this takes a
+   *   tier rather than a boolean.
+   */
+  api.put(
+    '/resumes/:id/tier',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const wanted = (req.body as { tier?: string }).tier;
+      if (!RESUME_TIERS.includes(wanted as ResumeTier)) {
+        throw new Error(`"${String(wanted)}" is not a tier — it is one of ${RESUME_TIERS.join(', ')}.`);
+      }
+      const tier = wanted as ResumeTier;
+
+      const spec = store.loadResumes().find((r) => r.id === id);
+      if (!spec) throw new Error(`No resume "${id}"`);
+
+      spec.tier = tier;
+      // The flag the tier replaced. Leaving it would let the two disagree.
+      delete spec.base;
+      /*
+       * The clock starts now, and only for a resume that was not already on
+       * it. Re-marking something temporary must not give it another week, or
+       * a stray click would keep it forever; and promoting it out has to
+       * forget the date, or demoting it later would sweep it immediately.
+       */
+      if (tier === 'temporary') spec.temporaryFrom ??= new Date().toISOString();
+      else delete spec.temporaryFrom;
+
+      const said = { base: 'a base', extended: 'kept', temporary: 'temporary' }[tier];
+      await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => store.saveResume(spec));
+      res.json(spec);
+    }),
+  );
+
+  /**
+   * The pin toggle this replaced, kept working.
+   *
+   * The CLI, the MCP tools and any older client still send it, and a client
+   * is not wrong for saying something that used to be true. `base: false` is
+   * `extended` rather than `temporary`, because unpinning a resume has never
+   * meant "and delete it next week".
    */
   api.put(
     '/resumes/:id/base',
     handler(async (req, res) => {
       const id = String(req.params.id);
-      const base = (req.body as { base?: boolean }).base !== false;
+      const tier: ResumeTier = (req.body as { base?: boolean }).base !== false ? 'base' : 'extended';
+
       const spec = store.loadResumes().find((r) => r.id === id);
       if (!spec) throw new Error(`No resume "${id}"`);
 
-      // Absent rather than false: an unpinned resume should look untouched in
-      // YAML, not carry a field explaining that it is ordinary.
-      if (base) spec.base = true;
-      else delete spec.base;
+      spec.tier = tier;
+      delete spec.base;
+      delete spec.temporaryFrom;
 
-      await withCommit(repo, autoCommit(), `${base ? 'Pin' : 'Unpin'} "${spec.label}" as a base`, () =>
+      await withCommit(repo, autoCommit(), `${tier === 'base' ? 'Mark' : 'Unmark'} "${spec.label}" as a base`, () =>
         store.saveResume(spec),
       );
       res.json(spec);

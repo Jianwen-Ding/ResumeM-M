@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { flattenResumes, needsFlattening } from './flatten.js';
+import { needsTiering, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder } from './resolve.js';
 import {
   DEFAULT_CONFIG,
@@ -753,7 +754,15 @@ export class Store {
      * app no longer means, never a resume that resolves to the wrong
      * document.
      */
-    return flattenResumes(this.loadResumesAsWritten());
+    /*
+     * And a tier, for a save written before there were any. The date stamped
+     * on a resume this makes temporary is *this read's* date, which never
+     * reaches disk — so a save that has not been written back yet has a clock
+     * that restarts on every read and therefore never runs out. That is the
+     * right way round: the sweep deletes things, and it should not begin
+     * until the save has actually been migrated and the date recorded.
+     */
+    return tierResumes(flattenResumes(this.loadResumesAsWritten())).tiered;
   }
 
   /**
@@ -764,18 +773,23 @@ export class Store {
    * time after the first. See `flatten.ts` for why the fold cannot change any
    * document.
    */
-  migrateResumes(): { flattened: string[]; problems: string[] } {
+  migrateResumes(): { flattened: string[]; tiered: string[]; problems: string[] } {
     const all = this.loadResumesAsWritten();
-    if (!needsFlattening(all)) return { flattened: [], problems: [] };
+    if (!needsFlattening(all) && !needsTiering(all)) return { flattened: [], tiered: [], problems: [] };
 
     const problems: string[] = [];
     const flattened: string[] = [];
-    for (const spec of flattenResumes(all, problems)) {
-      if (!all.find((r) => r.id === spec.id)?.extends) continue;
-      this.saveResume(spec);
-      flattened.push(spec.id);
+    const flat = flattenResumes(all, problems);
+    const { tiered: withTiers, changed: tiered } = tierResumes(flat);
+
+    for (const spec of withTiers) {
+      const before = all.find((r) => r.id === spec.id);
+      const wasFolded = Boolean(before?.extends);
+      if (wasFolded) flattened.push(spec.id);
+      // One write per resume however many migrations touched it.
+      if (wasFolded || tiered.includes(spec.id)) this.saveResume(spec);
     }
-    return { flattened, problems };
+    return { flattened, tiered, problems };
   }
 
   /**

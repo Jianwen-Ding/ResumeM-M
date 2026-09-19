@@ -103,6 +103,8 @@ describe('folding an inherited save flat', () => {
     const { flattened, problems } = temp.store.migrateResumes();
 
     expect(flattened.sort()).toEqual(['intern', 'newgrad']);
+    // `base` was not folded — it never inherited — but it is rewritten all
+    // the same, because the same pass gives every resume a tier.
     expect(problems).toEqual([]);
     // On disk, not only in memory: the point of the writing pass.
     expect(temp.read('resumes/newgrad.yaml')).not.toHaveProperty('extends');
@@ -114,7 +116,7 @@ describe('folding an inherited save flat', () => {
     const untouched = temp.read('resumes/newgrad.yaml');
 
     // The second pass is the one every start after the first makes.
-    expect(temp.store.migrateResumes()).toEqual({ flattened: [], problems: [] });
+    expect(temp.store.migrateResumes()).toEqual({ flattened: [], tiered: [], problems: [] });
     expect(temp.read('resumes/newgrad.yaml')).toEqual(untouched);
   });
 

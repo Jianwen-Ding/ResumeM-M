@@ -6,7 +6,7 @@ const spec = (id: string, extra: Partial<ResumeSpec> = {}): ResumeSpec => ({ id,
 
 describe('which resume you start from', () => {
   it('takes the pinned one, whatever it is called', () => {
-    const resumes = [spec('newgrad'), spec('systems', { base: true })];
+    const resumes = [spec('newgrad'), spec('systems', { tier: 'base' })];
     expect(defaultBaseId(resumes)).toBe('systems');
   });
 
@@ -37,16 +37,38 @@ describe('which resume you start from', () => {
     expect(defaultBaseId([])).toBeUndefined();
   });
 
-  it('lists the pinned ones, and says so plainly when there are none', () => {
-    expect(baseResumes([spec('a', { base: true }), spec('b')]).map((r) => r.id)).toEqual(['a']);
+  it('lists the ones marked as bases, and says so plainly when there are none', () => {
+    expect(baseResumes([spec('a', { tier: 'base' }), spec('b')]).map((r) => r.id)).toEqual(['a']);
     expect(baseResumes([spec('a'), spec('b')])).toEqual([]);
+  });
+
+  /*
+   * A resume with no tier written on it is permanent, not a base and not
+   * swept. It is the reading that cannot lose anybody's work: a file written
+   * by a version that had no tiers, or by hand in a folder advertised as
+   * editable YAML, must not become a base or become deletable because of a
+   * field its author had no way to know about.
+   */
+  it('treats a resume with no tier as permanent, not as a base', () => {
+    expect(baseResumes([spec('untiered')])).toEqual([]);
   });
 });
 
 describe('ordering a picker', () => {
   it('puts the bases first and keeps everything else', () => {
-    const resumes = [spec('tailored-1'), spec('systems', { base: true }), spec('tailored-2')];
+    const resumes = [spec('tailored-1'), spec('systems', { tier: 'base' }), spec('tailored-2')];
     expect(byBaseFirst(resumes).map((r) => r.id)).toEqual(['systems', 'tailored-1', 'tailored-2']);
+  });
+
+  /* And what is on its way out sorts last, rather than wherever its filename
+   * happened to put it. */
+  it('puts what is about to be swept after what is kept', () => {
+    const resumes = [
+      spec('job-adobe', { tier: 'temporary' }),
+      spec('kept', { tier: 'extended' }),
+      spec('systems', { tier: 'base' }),
+    ];
+    expect(byBaseFirst(resumes).map((r) => r.id)).toEqual(['systems', 'kept', 'job-adobe']);
   });
 
   it('leaves the order alone when nothing is pinned', () => {
@@ -55,7 +77,7 @@ describe('ordering a picker', () => {
   });
 
   it('does not drop anything', () => {
-    const resumes = [spec('a', { base: true }), spec('b'), spec('c', { base: true })];
+    const resumes = [spec('a', { tier: 'base' }), spec('b'), spec('c', { tier: 'base' })];
     expect(byBaseFirst(resumes)).toHaveLength(3);
   });
 });

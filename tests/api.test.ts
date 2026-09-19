@@ -2255,16 +2255,56 @@ describe('pinning', () => {
       .toMatch(/Name the alternate/);
   });
 
-  it('pins a resume as a base, and unpins it without leaving a field behind', async () => {
-    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
-    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.base).toBe(true);
+  const tierOf = (id: string) => t.store.loadResumes().find((r) => r.id === id)?.tier;
 
-    await request(app).put('/api/resumes/intern/base').send({ base: false }).expect(200);
+  it('marks a resume as a base, and moves it back', async () => {
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'base' }).expect(200);
+    expect(tierOf('intern')).toBe('base');
+
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'extended' }).expect(200);
+    expect(tierOf('intern')).toBe('extended');
+  });
+
+  /*
+   * The pin toggle the tier replaced. The CLI, the MCP tools and any older
+   * client still send it, and a client is not wrong for saying something
+   * that used to be true.
+   */
+  it('still takes the pin toggle it replaced, and leaves no flag behind', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    expect(tierOf('intern')).toBe('base');
     expect(t.store.loadResumes().find((r) => r.id === 'intern')).not.toHaveProperty('base');
+
+    // Unpinning has never meant "and delete it next week".
+    await request(app).put('/api/resumes/intern/base').send({ base: false }).expect(200);
+    expect(tierOf('intern')).toBe('extended');
+  });
+
+  it('refuses a tier that is not one, and says which are', async () => {
+    const res = await request(app).put('/api/resumes/intern/tier').send({ tier: 'archived' }).expect(400);
+    expect(res.body.error).toMatch(/archived/);
+    expect(res.body.error).toMatch(/base, extended, temporary/);
+  });
+
+  /*
+   * Marking something temporary twice must not give it another week — a stray
+   * click would keep it forever — and promoting it out has to forget the date,
+   * or demoting it later would sweep it the same day.
+   */
+  it('starts the clock once, and forgets it on the way out', async () => {
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'temporary' }).expect(200);
+    const started = t.store.loadResumes().find((r) => r.id === 'intern')?.temporaryFrom;
+    expect(started).toBeTruthy();
+
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'temporary' }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.temporaryFrom).toBe(started);
+
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'extended' }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')).not.toHaveProperty('temporaryFrom');
   });
 
   it('lists the bases first, so a picker opens on what you build from', async () => {
-    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'base' }).expect(200);
     const ids = (await request(app).get('/api/resumes').expect(200)).body.map((r: { id: string }) => r.id);
     expect(ids[0]).toBe('intern');
     expect(ids).toHaveLength(t.store.loadResumes().length);
@@ -2276,7 +2316,7 @@ describe('pinning', () => {
   });
 
   it('starts a tailored draft from the pinned base rather than a guessed name', async () => {
-    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'base' }).expect(200);
     const res = await request(app)
       .post('/api/extension/analyze')
       .send({ html: JOB_HTML, url: 'https://example.com/job' })
