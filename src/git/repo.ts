@@ -525,6 +525,23 @@ export async function cloneRepo(url: string, into: string): Promise<void> {
 }
 
 /**
+ * Every path the newest commit holds, and nothing at all when git will not
+ * say — no repository, no commits, a lock left by a crashed git.
+ *
+ * Empty is the safe answer rather than a thrown one, because every caller is
+ * asking the same question: is this file recoverable if I replace or remove
+ * it? "Git is not answering" means no.
+ */
+export async function filedPaths(repo: Repo): Promise<Set<string>> {
+  try {
+    const [head] = await repo.log(1);
+    return head ? new Set((await repo.treeAt(head.hash)).keys()) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+/**
  * Take things away, and only ones the version history already has.
  *
  * The two places this program deletes something nobody asked it to — the
@@ -559,14 +576,7 @@ export async function removeWhatIsFiled<T>(
   const onDisk = going.flatMap((g) => g.paths.filter((p) => fs.existsSync(path.join(root, p))));
   await repo.commitAll(messages.filing, onDisk).catch(() => undefined);
 
-  let filed: Set<string>;
-  try {
-    const [head] = await repo.log(1);
-    filed = head ? new Set((await repo.treeAt(head.hash)).keys()) : new Set();
-  } catch {
-    // Git is not answering. Nothing is known to be recoverable, so nothing is.
-    filed = new Set();
-  }
+  const filed = await filedPaths(repo);
 
   const taking = going.filter((g) => g.paths.some((p) => filed.has(p)));
   const held = going.filter((g) => !taking.includes(g)).map((g) => g.what);

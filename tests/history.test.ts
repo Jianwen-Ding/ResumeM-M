@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import { createApi } from '../src/server/api.js';
@@ -311,6 +313,60 @@ describe('restoring a version', () => {
     const after = await history();
     expect(after[0]?.message).toBe('Restore "newgrad" to an earlier version');
     expect(after.length).toBe(3);
+  });
+
+  /*
+   * "Its own history is kept, so you can still get back to it" is the whole
+   * of the argument for a button that replaces the resume in front of you,
+   * and it is only true of a version the history has.
+   *
+   * Auto-commit is a setting people turn off, and even left on a commit that
+   * fails is a console warning with no retry — so the resume on screen can be
+   * sitting in no commit at all, and rolling it back to last week is then the
+   * one act in this program that cannot be undone. It is filed first, and
+   * refused if it could not be.
+   */
+  it('files the version it is about to replace', async () => {
+    const first = await history();
+    const originalHash = first[0]!.hash;
+
+    // Written straight to disk, so nothing has committed it: the shape a save
+    // is in with the history switched off, or with git refusing commits.
+    t.write('resumes/newgrad.yaml', {
+      id: 'newgrad',
+      label: 'New grad',
+      choices: { 'edu_neu.dates': 'v_dec2026' },
+    });
+
+    await request(app).post(`/api/resumes/newgrad/history/${originalHash}/restore`).expect(200);
+
+    // Somewhere in the history, the version that was replaced.
+    const holds = await Promise.all(
+      (await repo.log(20)).map(async (entry) => (await repo.treeAt(entry.hash)).get('resumes/newgrad.yaml')),
+    );
+    const blobs = await Promise.all(holds.filter(Boolean).map((objectId) => repo.blob(objectId!)));
+    expect(blobs.some((text) => text.includes('v_dec2026'))).toBe(true);
+  });
+
+  it('refuses when the version it would replace cannot be filed', async () => {
+    const first = await history();
+    const originalHash = first[0]!.hash;
+    t.write('resumes/newgrad.yaml', {
+      id: 'newgrad',
+      label: 'New grad',
+      choices: { 'edu_neu.dates': 'v_dec2026' },
+    });
+    // A lock left by a git that was killed: reading the old version still
+    // works, keeping the current one does not.
+    fs.writeFileSync(path.join(t.dir, '.git/index.lock'), '');
+
+    const res = await request(app).post(`/api/resumes/newgrad/history/${originalHash}/restore`);
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.body.error).toMatch(/not in the version history/i);
+    expect(res.body.error).toMatch(/Save History/);
+    // And it is still there, which is the point.
+    expect(t.store.getResume('newgrad')?.choices?.['edu_neu.dates']).toBe('v_dec2026');
   });
 
   it('rejects a hash the resume never had', async () => {

@@ -48,7 +48,7 @@ import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/per
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
-import type { Store } from '../model/store.js';
+import { Store } from '../model/store.js';
 import { isVariantField, layoutFor, RESUME_TIERS, type ResumeTier } from '../model/types.js';
 import type {
   AnswerBankItem,
@@ -3606,6 +3606,52 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * So the result is checked against the version that was asked for, and
        * whatever still differs is named rather than forced.
        */
+      /*
+       * File what is about to be replaced, before replacing it.
+       *
+       * The confirmation says "the current version will be replaced (its own
+       * history is kept, so you can still get back to it)", and that is only
+       * true of a version the history actually has. Auto-commit is a setting
+       * people turn off, and even left on a commit that fails is a console
+       * warning with no retry — so the resume on screen can be sitting in no
+       * commit at all, and rolling it back to last week would be the one act
+       * in this program that cannot be undone. Refused rather than done
+       * quietly: it is a button somebody pressed, and there is something they
+       * can do about it.
+       *
+       * Only when there is something to lose. Restoring a resume that has
+       * been deleted is the case this exists to serve, and there is no
+       * current version of it to keep.
+       */
+      const here = Store.resumeFiles(id).filter((rel) => fs.existsSync(path.join(store.root, rel)));
+      if (here.length > 0) {
+        await repo
+          .commitAll(`File "${id}" before restoring an earlier version`, here)
+          .catch(() => undefined);
+        /*
+         * The file as it stands, not merely a file by that name. The history
+         * having *a* version of this resume is not the question — it is about
+         * to be rolled back to one of those — the question is whether the one
+         * being replaced is among them.
+         */
+        const [head] = await repo.log(1).catch(() => []);
+        const tree = head ? await repo.treeAt(head.hash).catch(() => new Map()) : new Map();
+        const kept = await Promise.all(
+          here.map(async (rel) => {
+            const objectId = tree.get(rel);
+            if (!objectId) return false;
+            const filed = await repo.blob(objectId).catch(() => undefined);
+            return filed === fs.readFileSync(path.join(store.root, rel), 'utf8');
+          }),
+        );
+        if (!kept.some(Boolean)) {
+          throw new Error(
+            `"${id}" as it stands is not in the version history, so replacing it could not be undone. ` +
+              'Save the store — Save History, under the save panel — and then restore.',
+          );
+        }
+      }
+
       const tree = await repo.treeAt(hash);
       const readAt = async (file: string): Promise<string | undefined> => {
         const objectId = tree.get(file);

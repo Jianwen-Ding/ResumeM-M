@@ -293,6 +293,19 @@ async function stepHistory(direction) {
   }
 }
 
+/**
+ * Throw the stack away, and say so on the buttons.
+ *
+ * `history.clear()` on its own leaves Undo enabled, and titled with the label
+ * of a step that no longer exists — a button that says "Undo remove a line"
+ * and does nothing when pressed, which reads as the editor being broken
+ * rather than as there being nothing to undo.
+ */
+function forgetHistory() {
+  history.clear();
+  paintUndo();
+}
+
 /** Keep the two buttons honest about what they would do. */
 function paintUndo() {
   const undoBtn = $('#btn-undo');
@@ -7774,7 +7787,20 @@ function renderResumeTimeline(versions) {
 }
 
 async function restoreResumeVersion(hash) {
-  if (!historyResumeId) return;
+  /*
+   * Taken once, before anything waits.
+   *
+   * `historyResumeId` belongs to the dropdown above the timeline, and a
+   * dropdown is a thing somebody can use while this is running — the flush
+   * below is a round trip, and an unsaved edit makes it a slow one. Read
+   * again afterwards, the restore went to whichever resume was selected by
+   * then, carrying a version from a different resume's timeline: the server
+   * reads that commit's file for the id it is given and saves it, so a resume
+   * nobody was looking at was overwritten out of a commit that was never
+   * shown for it, under a confirmation naming something else.
+   */
+  const wanted = historyResumeId;
+  if (!wanted) return;
   if (!confirm('Restore this version? The current version will be replaced (its own history is kept, so you can still get back to it).')) {
     return;
   }
@@ -7784,13 +7810,23 @@ async function restoreResumeVersion(hash) {
      * when there are selections on screen, and discarding them silently is
      * the opposite of what the version history is for.
      */
-    if (historyResumeId === state.resumeId) await flushEdits();
-    await api(`/resumes/${encodeURIComponent(historyResumeId)}/history/${encodeURIComponent(hash)}/restore`, {
+    if (wanted === state.resumeId) await flushEdits();
+    await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });
+    /*
+     * And the undo stack goes, for the reason a stack from another save goes
+     * — see `projectChanged`. Its entries are "this document before and after
+     * an edit", and the document they describe is the one that has just been
+     * replaced. Undo is always enabled and says nothing about what it is
+     * about to undo, so one press after a restore put the pre-restore
+     * document back over the restored one, reported "Undid change", and left
+     * no sign that the version somebody had just gone to fetch was gone.
+     */
+    forgetHistory();
     setStatus('Restored.');
     await loadStore();
-    if (historyResumeId === state.resumeId) {
+    if (wanted === state.resumeId) {
       clearEdits();
       setSaveState('saved');
       render();
@@ -8413,7 +8449,7 @@ async function boot() {
       activeProject = dir;
       // A stack of edits to another save is meaningless here and dangerous if
       // applied: the ids in it belong to somebody else's documents.
-      history.clear();
+      forgetHistory();
       paintUndo();
     }, loadProjectSettings });
   setupTabs();
