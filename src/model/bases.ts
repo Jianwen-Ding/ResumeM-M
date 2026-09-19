@@ -1,4 +1,5 @@
-import type { ResumeSpec } from './types.js';
+import { byTier } from './tiers.js';
+import { tierOf, type ResumeSpec } from './types.js';
 
 /**
  * Which resumes are starting points, and which are leaves.
@@ -17,62 +18,66 @@ import type { ResumeSpec } from './types.js';
 /** The historical default, kept as the guess for a store that pins nothing. */
 const CONVENTIONAL = 'newgrad';
 
-/** Pinned bases first, then everything else, each in store order. */
+/** The resumes marked as the ones to build from. */
 export function baseResumes(resumes: ResumeSpec[]): ResumeSpec[] {
-  const pinned = resumes.filter((r) => r.base);
-  return pinned.length > 0 ? pinned : [];
+  return resumes.filter((r) => tierOf(r) === 'base');
 }
 
 /**
- * The resume to start from when the caller did not say. A pinned base wins; a
- * resume nothing extends is a better guess than one three levels deep; and the
- * conventional id is the last word before "whatever is first".
+ * The resume to start from when the caller did not say. A pinned base wins;
+ * then the conventional id; then a resume that was written rather than copied
+ * off a posting, which is a better guess than the leftovers of an application
+ * somebody sent in March.
  */
 export function defaultBaseId(resumes: ResumeSpec[]): string | undefined {
-  const pinned = resumes.find((r) => r.base);
+  const pinned = resumes.find((r) => tierOf(r) === 'base');
   if (pinned) return pinned.id;
 
   const conventional = resumes.find((r) => r.id === CONVENTIONAL);
   if (conventional) return conventional.id;
 
-  const root = resumes.find((r) => !r.extends);
-  return root?.id ?? resumes[0]?.id;
+  /*
+   * Then anything that is not on its way out, and only then the leftovers.
+   * A resume made for a posting last March is a poor guess at "where do I
+   * usually start" even when it is the only thing in the save — but it is
+   * still better than nothing, which is why the last clause is there.
+   */
+  const kept = resumes.find((r) => tierOf(r) !== 'temporary' && !r.copiedFrom && !r.generatedFor);
+  return kept?.id ?? resumes.find((r) => tierOf(r) !== 'temporary')?.id ?? resumes[0]?.id;
 }
 
 /**
- * Bases first, for a picker. Not a filter: a resume that is not pinned is
- * still a perfectly good thing to build from, it is just not the answer to
- * "where do I usually start".
+ * Bases first, for a picker — and now by tier, so what is on its way out
+ * sorts last rather than wherever its filename put it.
+ *
+ * Not a filter: a resume that is not a base is still a perfectly good thing
+ * to build from, it is just not the answer to "where do I usually start".
  */
 export function byBaseFirst(resumes: ResumeSpec[]): ResumeSpec[] {
-  const pinned = baseResumes(resumes);
-  if (pinned.length === 0) return [...resumes];
-  const rest = resumes.filter((r) => !r.base);
-  return [...pinned, ...rest];
+  return byTier(resumes);
 }
 
 /**
  * The resume to build *this* posting's copy from, which is never that copy.
  *
  * The copy an application gets is named after the posting — `job-adobe-2027-
- * intern-software-engineer` — and it is a thin selection over a base. Apply
- * to the same posting twice and the second pass computes the same name, so if
- * the base it was handed happens to be that first copy, the resume is asked
- * to extend itself and the resolver refuses with "Resume inheritance cycle".
+ * intern-software-engineer` — so applying to the same posting twice computes
+ * the same name, and the second pass overwrites the first. The copy shows up
+ * in the picker like any other resume, the extension remembers whichever was
+ * chosen last, and the obvious thing to pick when returning to a posting is
+ * the one already named after it. So "build this copy from itself" is easy to
+ * ask for by accident.
  *
- * Which is easy to arrive at: the copy shows up in the picker like any other
- * resume, the extension remembers whichever was chosen last, and the obvious
- * thing to pick when returning to a posting is the one already named after
- * it.
+ * It no longer corrupts anything — resumes stand alone, and copying one onto
+ * itself is just a write — but it is still the wrong answer, and quietly. The
+ * copy's skills are already narrowed to this posting and its wordings already
+ * chosen for it, so matching it again narrows what was narrowed: each pass
+ * keeps fewer skills than the last, and what comes back is not what the
+ * person asked for.
  *
- * The answer is the copy's own parent, which is what the person meant: build
- * it again from where it came from. Only when that is gone does this fall
- * back to the store's default, and it walks the chain rather than checking
- * one link, because a parent can be a copy of a copy.
- *
- * It refuses rather than repairing anything on disk. A resume that really
- * does extend itself is a store to be fixed in the editor, not quietly
- * rewritten underneath somebody.
+ * What they meant is "build it again from where it came from", which
+ * `copiedFrom` records. The walk follows that record rather than one link,
+ * because a copy can have been made from a copy.
  */
 export function baseForCopy(resumes: ResumeSpec[], wanted: string | undefined, copyId: string): string | undefined {
   const asked = wanted ?? defaultBaseId(resumes);
@@ -89,18 +94,18 @@ export function baseForCopy(resumes: ResumeSpec[], wanted: string | undefined, c
   let at: string | undefined = asked;
   while (at && at === copyId && !seen.has(at)) {
     seen.add(at);
-    at = resumes.find((r) => r.id === at)?.extends;
+    at = resumes.find((r) => r.id === at)?.copiedFrom;
   }
   /*
-   * `seen` is what stops a store that already contains a self-extending
-   * resume from spinning here — walking it lands back on the same id, and
-   * the loop has to give up rather than follow it round again.
+   * `seen` stops a save whose provenance records point in a circle from
+   * spinning here — a store copied about by hand can hold anything, and the
+   * walk has to give up rather than follow it round again.
    *
-   * And the answer has to name a resume that is actually there. A parent
-   * that has been deleted would otherwise be handed on as the base and fail
-   * two lines later as `No resume "…"`, which says nothing about what went
-   * wrong or what to do; the store's default is both a real answer and the
-   * one somebody would have picked.
+   * And the answer has to name a resume that is actually there. A source
+   * that has since been deleted would otherwise be handed on as the base and
+   * fail two lines later as `No resume "…"`, which says nothing about what
+   * went wrong or what to do; the store's default is both a real answer and
+   * the one somebody would have picked.
    */
   const usable = at && at !== copyId && resumes.some((r) => r.id === at);
   return usable ? at : defaultBaseId(resumes.filter((r) => r.id !== copyId));

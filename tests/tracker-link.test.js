@@ -76,7 +76,7 @@ describe('linking straight to one tracked application', () => {
             current: { dir: '/tmp/current', files: [], applications: 0, inFlight: 0 },
           };
         } else if (url === `/api/applications/${encodeURIComponent(sent.id)}`) {
-          result = { application: sent, resume: null, extendsLabel: null, letter: null, files: [] };
+          result = { application: sent, resume: null, copiedFromLabel: null, letter: null, files: [] };
         } else if (String(url).startsWith('/api/applications/')) {
           // As the server answers for an id it does not have.
           return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'No application "2020-01-01-gone"' }) };
@@ -99,6 +99,27 @@ describe('linking straight to one tracked application', () => {
       expect(panel?.textContent).toContain('Platform Engineer');
       expect(panel?.textContent).toContain('Helios');
     });
+  });
+
+  /*
+   * The resume this was sent with is gone, which the sweep makes ordinary:
+   * a resume built for one posting is removed a week after that posting is
+   * done with. The pane printed its filename — `job-helios-platform-engineer`
+   * — which says nothing and reads like a fault.
+   *
+   * What it has to say is what is still true: the files that went are in
+   * this application's own folder and listed further down the same pane, and
+   * the resume is in the version history like everything else deleted here.
+   */
+  it('says what happened to a resume that is no longer in the save', async () => {
+    await vi.waitFor(() => {
+      const panel = document.querySelector('#app-detail');
+      expect(panel?.textContent).toMatch(/removed from the save/i);
+    });
+    const panel = document.querySelector('#app-detail');
+    expect(panel?.textContent).toMatch(/version history/i);
+    // And not its filename, which is what it used to print instead.
+    expect(panel?.textContent).not.toContain('job-helios-platform-engineer');
   });
 
   it('marks its row in the list, so the link and the table agree', async () => {

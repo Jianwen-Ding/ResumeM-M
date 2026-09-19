@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createApi } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
+import { Store } from '../src/model/store.js';
 import { makeTempStore, type TempStore } from './helpers.js';
 
 let t: TempStore;
@@ -46,6 +47,25 @@ describe('an id is a name, never a path', () => {
   it('cannot delete a file through a resume id', async () => {
     await request(app).delete(`/api/resumes/${encodeURIComponent('../profile')}`).expect(400);
     expect(t.store.load().profile.name).toBe('Test Person');
+  });
+
+  /*
+   * The paths the sweep hands to git, which is the one place a resume's
+   * filename is built as a path rather than a name at a time.
+   *
+   * Routing the delete above through one of these stopped it refusing, which
+   * is how the trap was found: split back into segments,
+   * `resumes/../profile.yaml` is three names, each of which passes the check
+   * that the whole of it fails. The delete composes its own path again, and
+   * these refuse an id that is a path, so neither can be the way in.
+   */
+  it('will not build a git path out of an id that is a path', () => {
+    expect(() => Store.resumeFiles('../profile')).toThrow(/not allowed/);
+    expect(() => Store.resumeFiles('../../etc/passwd')).toThrow(/not allowed/);
+    expect(Store.resumeFiles('job-helios')).toEqual([
+      'resumes/job-helios.yaml',
+      'resumes/job-helios.yml',
+    ]);
   });
 
   it('cannot write outside the save folder at all', async () => {

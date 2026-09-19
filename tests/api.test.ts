@@ -172,7 +172,7 @@ describe('job analysis', () => {
     expect(res.body.isJobPosting).toBe(true);
     expect(res.body.job.company).toBe('Streamly');
     expect(res.body.job.keywords).toContain('kafka');
-    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.copiedFrom).toBe('intern');
     expect(res.body.spec.choices.b_pipeline).toBe('v_kafka');
   });
 
@@ -412,10 +412,20 @@ describe('job analysis', () => {
 
     expect(res.body.tailor).toBe('none');
     // Still a spec of its own, so the folder and the history name the posting.
-    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.copiedFrom).toBe('intern');
     expect(res.body.spec.generatedFor.company).toBe('Streamly');
-    // And it selects nothing, so it resolves to exactly the base.
-    expect(res.body.spec.choices).toEqual({});
+    /*
+     * And it decides nothing of its own, so it resolves to exactly the base.
+     * A copy rather than a link, so what it holds *is* the base's selections
+     * — the claim is that none of them were changed, which the empty diff is
+     * the direct statement of.
+     */
+    // Through `load`, not `getResume`: the deriving reads the normalised
+    // store, where a section that has never said how it wants to be ordered
+    // has taken over its own date order. See `adoptDateOrder`.
+    const base = t.store.load().resumes.find((r) => r.id === 'intern');
+    expect(res.body.spec.choices).toEqual(base?.choices ?? {});
+    expect(res.body.spec.sections).toEqual(base?.sections);
     expect(res.body.diff).toEqual([]);
     expect(res.body.rationale).toEqual([]);
   });
@@ -547,6 +557,37 @@ describe('job analysis', () => {
       const later = await sent({ company: 'Vela', role: 'Backend Engineer' }).expect(200);
       expect(later.body.changed).toBe(false);
       expect(later.body.application.status).toBe('interview');
+    });
+
+    /*
+     * Applying again, months later, to a job that is over.
+     *
+     * The rejection is the row that matched, and a rejection is not something
+     * a send can move forwards from — so the submission was answered
+     * `changed: false` and left no trace at all. The tracker went on showing
+     * the March row, closed, while today's application went out with nothing
+     * in the save to say it had.
+     */
+    it('records a fresh attempt at a job that was already closed', async () => {
+      await sent({ company: 'Rigel', role: 'Backend Engineer' }).expect(200);
+      const first = t.store.load().applications.find((a) => a.company === 'Rigel')!;
+      t.store.upsertApplication({
+        ...first,
+        status: 'closed',
+        appliedAt: '2026-03-12T09:00:00Z',
+        history: [...(first.history ?? []), { at: '2026-04-01T09:00:00Z', status: 'closed', note: 'Rejected' }],
+      });
+
+      const again = await sent({ company: 'Rigel', role: 'Backend Engineer' }).expect(200);
+
+      expect(again.body.changed).toBe(true);
+      expect(again.body.application.id).not.toBe(first.id);
+      expect(again.body.application.status).toBe('applied');
+      const rows = t.store.load().applications.filter((a) => a.company === 'Rigel');
+      expect(rows).toHaveLength(2);
+      // And the one that was turned down still says so.
+      expect(rows.find((a) => a.id === first.id)?.status).toBe('closed');
+      expect(rows.find((a) => a.id === first.id)?.history).toHaveLength(2);
     });
 
     /*
@@ -859,6 +900,100 @@ describe('tracking', () => {
   it('requires a company and a role', async () => {
     const res = await request(app).post('/api/applications').send({ company: 'Only' }).expect(400);
     expect(res.body.error).toMatch(/required/);
+  });
+
+  /*
+   * "Record an application" over a job the tracker already knows about.
+   *
+   * The manual form is how somebody notes a job they applied for outside the
+   * tool, and it is four boxes: company, role, URL, notes. It used to build a
+   * whole record out of them and hand it to `upsertApplication`, which
+   * replaces — so typing a company and role already tracked wiped the row.
+   * Measured: an application at `interview` with a folder of sent files, a
+   * cover letter, its answers and three lines of history came back at
+   * `applied` with one line reading "Recorded", no letter, no answers, and no
+   * `snapshotDir` — the files still on disk and nothing left pointing at them.
+   *
+   * What somebody typed goes on top of the record now. Nothing is taken away
+   * by not being mentioned: this form asks four questions and an application
+   * holds a dozen.
+   */
+  describe('recording one the tracker already has', () => {
+    const job = { company: 'Streamly', role: 'Intern' };
+
+    async function tracked() {
+      const made = await request(app).post('/api/applications').send({ ...job, url: 'https://x' }).expect(200);
+      const row = t.store.load().applications.find((a) => a.id === made.body.id)!;
+      t.store.upsertApplication({
+        ...row,
+        status: 'interview',
+        snapshotDir: '/somewhere/it/was/filed',
+        coverLetter: 'Dear Streamly, this is the letter I sent.',
+        answers: [{ question: 'Why us?', answer: 'Because of the ingest work.' }],
+        history: [...(row.history ?? []), { at: new Date().toISOString(), status: 'interview', note: 'call booked' }],
+      });
+      return row.id;
+    }
+
+    it('keeps everything the form does not ask about', async () => {
+      const id = await tracked();
+
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+
+      const after = t.store.load().applications.find((a) => a.id === id)!;
+      expect(after.coverLetter).toMatch(/this is the letter I sent/);
+      expect(after.answers).toHaveLength(1);
+      expect(after.snapshotDir).toBe('/somewhere/it/was/filed');
+      expect(after.notes).toBe('Chased them up.');
+    });
+
+    it('does not walk the status back to "applied"', async () => {
+      const id = await tracked();
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+      expect(t.store.load().applications.find((a) => a.id === id)?.status).toBe('interview');
+    });
+
+    it('adds to the history rather than starting it again', async () => {
+      const id = await tracked();
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+      const after = t.store.load().applications.find((a) => a.id === id)!;
+      expect(after.history!.length).toBe(3);
+      expect(after.history![0]!.note).toBe('Recorded');
+      expect(after.history!.at(-1)!.note).toMatch(/by hand/);
+    });
+
+    it('leaves one row, not two', async () => {
+      await tracked();
+      await request(app).post('/api/applications').send({ ...job, notes: 'Chased them up.' }).expect(200);
+      expect(t.store.load().applications.filter((a) => a.company === 'Streamly')).toHaveLength(1);
+    });
+
+    /*
+     * An empty box means "nothing to add here", not "delete that": the form
+     * sends all four every time, so a URL typed when the job was first
+     * recorded would be erased by a later note that did not repeat it.
+     */
+    it('does not erase what was there with a box left blank', async () => {
+      const id = await tracked();
+      await request(app).post('/api/applications').send({ ...job, url: '', notes: 'Chased them up.' }).expect(200);
+      expect(t.store.load().applications.find((a) => a.id === id)?.url).toBe('https://x');
+    });
+
+    /*
+     * And a job that is over is a different application, as everywhere else:
+     * this is the second attempt at it, not a correction to the first.
+     */
+    it('but files a fresh attempt at a closed job as its own row', async () => {
+      const id = await tracked();
+      const row = t.store.load().applications.find((a) => a.id === id)!;
+      t.store.upsertApplication({ ...row, status: 'closed' });
+
+      const again = await request(app).post('/api/applications').send({ ...job, notes: 'Going again.' }).expect(200);
+
+      expect(again.body.id).not.toBe(id);
+      expect(t.store.load().applications.filter((a) => a.company === 'Streamly')).toHaveLength(2);
+      expect(t.store.load().applications.find((a) => a.id === id)?.status).toBe('closed');
+    });
   });
 
   it('reports removing an application that is not there', async () => {
@@ -1306,6 +1441,9 @@ describe('workspace', () => {
    * live work instead of becoming a second, worse tracker.
    */
   it('keeps a sent workspace, and lets it go once it is a fortnight stale', async () => {
+    // A repository, because a space is only ever closed once the history has
+    // it — see the test below, and `removeWhatIsFiled`.
+    await repo.ensure();
     const { body } = await open().expect(200);
     const id = body.draft.id;
     const age = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -1335,6 +1473,65 @@ describe('workspace', () => {
     leave('submitted', 15);
     list = await request(app).get('/api/workspace').expect(200);
     expect(list.body.drafts).toHaveLength(0);
+  });
+
+  /*
+   * And it is in the history when it goes, which is the only thing that makes
+   * closing it on somebody's behalf acceptable.
+   *
+   * "What is lost is the editing surface, not the content" is true of the
+   * letter that was sent — the application record has that — and not of the
+   * one rewritten a week later because they asked for it again. That lives in
+   * the space and nowhere else, and it is exactly what the fortnight is for.
+   * Auto-commit is off in this fixture, as it is in any save where somebody
+   * has switched it off, so nothing had committed the space at all: it was
+   * unlinked, and the rewrite went with it.
+   */
+  it('files a sent workspace before closing it', async () => {
+    await repo.ensure();
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const sent = t.store.getDraft(id)!;
+    // Rewritten after sending — the thing the application record does not have.
+    t.store.saveDraft({
+      ...sent,
+      status: 'submitted',
+      coverLetter: { ...sent.coverLetter, body: 'The one they asked me to send again.' },
+    });
+    const file = path.join(t.dir, 'drafts', `${id}.yaml`);
+    const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
+
+    await request(app).get('/api/workspace').expect(200);
+
+    expect(fs.existsSync(file)).toBe(false);
+    const holds = await Promise.all(
+      (await repo.log(10)).map(async (entry) => (await repo.treeAt(entry.hash)).get(`drafts/${id}.yaml`)),
+    );
+    const objectId = holds.find(Boolean);
+    expect(objectId, 'no commit in the history holds the closed workspace').toBeTruthy();
+    expect(await repo.blob(objectId!)).toContain('asked me to send again');
+  });
+
+  /*
+   * And when it cannot be filed it is not taken. A save that is not a
+   * repository at all — which is every save until somebody presses Save, and
+   * any save whose git has stopped answering — is one where closing a space
+   * would be the one act here that cannot be undone.
+   */
+  it('keeps one it could not file, rather than closing it anyway', async () => {
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const sent = t.store.getDraft(id)!;
+    t.store.saveDraft({ ...sent, status: 'submitted' });
+    const file = path.join(t.dir, 'drafts', `${id}.yaml`);
+    const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
+
+    const list = await request(app).get('/api/workspace').expect(200);
+
+    expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
+    expect(fs.existsSync(file)).toBe(true);
   });
 
   it('falls back to the closest previous letter when the AI is off', async () => {
@@ -1889,6 +2086,54 @@ describe('a resume id the save cannot hold', () => {
   });
 });
 
+/*
+ * A write that still names a base is folded, not refused.
+ *
+ * This endpoint is what the CLI, the MCP tools and any older client save
+ * through, and one of those may still be sending the shape a previous version
+ * used. Refusing it would break a client for saying something that used to be
+ * true. Storing it would put a field on disk that nothing reads, so the resume
+ * would silently lose whatever the base was contributing — which is how a
+ * store ends up disagreeing with the document it prints.
+ */
+describe('a resume saved with a base it used to inherit from', () => {
+  it('folds what the base contributed into the file it writes', async () => {
+    const res = await request(app)
+      .put('/api/resumes/oldshape')
+      .send({ label: 'Old shape', extends: 'base', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    expect(res.body.extends).toBeUndefined();
+    expect(res.body.copiedFrom).toBe('base');
+    // What the base was giving it is in the file now, not behind a link.
+    expect(res.body.sections?.length).toBeGreaterThan(0);
+    expect(res.body.choices.b_pipeline).toBe('v_kafka');
+    expect(t.store.getResume('oldshape')?.extends).toBeUndefined();
+  });
+
+  it('takes a self-naming base without hanging or throwing', async () => {
+    // The shape a real store arrived in, and the one that used to make the
+    // resume unopenable: it was saved, and every read of it raised.
+    const res = await request(app)
+      .put('/api/resumes/selfy')
+      .send({ label: 'Selfy', extends: 'selfy', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    expect(res.body.extends).toBeUndefined();
+    expect(res.body.choices.b_pipeline).toBe('v_kafka');
+  });
+
+  it('takes a base the save does not have, rather than losing the write', async () => {
+    const res = await request(app)
+      .put('/api/resumes/orphan')
+      .send({ label: 'Orphan', extends: 'a-resume-that-is-gone', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    expect(res.body.extends).toBeUndefined();
+    expect(res.body.choices.b_pipeline).toBe('v_kafka');
+  });
+});
+
 describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, () => {
   it('hands back the flat folder alongside the archive it just wrote', async () => {
     const res = await request(app)
@@ -2112,10 +2357,17 @@ describe('pinning', () => {
 
     const res = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
 
-    // A thin selection over the base, not a copy of it: nothing decided yet,
-    // because deciding is what you are about to go and do.
-    expect(res.body.spec.extends).toBeTruthy();
-    expect(res.body.spec.choices).toBeUndefined();
+    /*
+     * A copy of the base, with nothing changed yet — because changing it is
+     * what you are about to go and do. It has to arrive holding what the base
+     * holds: an empty variation used to mean "everything the base shows"
+     * because it resolved through the base, and it still has to mean that now
+     * that nothing does.
+     */
+    const base = t.store.load().resumes.find((r) => r.id === res.body.spec.copiedFrom);
+    expect(res.body.spec.copiedFrom).toBeTruthy();
+    expect(res.body.spec.choices).toEqual(base?.choices);
+    expect(res.body.spec.sections).toEqual(base?.sections);
     expect(res.body.spec.label).toBe('Platform Engineer — Altair Labs');
     expect(res.body.draft.resumeId).toBe(res.body.spec.id);
     // The way there and the way back, in one link, so the two ends cannot
@@ -2129,7 +2381,7 @@ describe('pinning', () => {
     expect(again.body.spec.id).not.toBe(res.body.spec.id);
     // And the second inherits from the base, never from the first — a
     // variation of a variation of a variation is how a store becomes a maze.
-    expect(again.body.spec.extends).toBe(res.body.spec.extends);
+    expect(again.body.spec.copiedFrom).toBe(res.body.spec.copiedFrom);
   });
 
   it('refuses to start a variation for a draft that is not there', async () => {
@@ -2190,16 +2442,56 @@ describe('pinning', () => {
       .toMatch(/Name the alternate/);
   });
 
-  it('pins a resume as a base, and unpins it without leaving a field behind', async () => {
-    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
-    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.base).toBe(true);
+  const tierOf = (id: string) => t.store.loadResumes().find((r) => r.id === id)?.tier;
 
-    await request(app).put('/api/resumes/intern/base').send({ base: false }).expect(200);
+  it('marks a resume as a base, and moves it back', async () => {
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'base' }).expect(200);
+    expect(tierOf('intern')).toBe('base');
+
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'extended' }).expect(200);
+    expect(tierOf('intern')).toBe('extended');
+  });
+
+  /*
+   * The pin toggle the tier replaced. The CLI, the MCP tools and any older
+   * client still send it, and a client is not wrong for saying something
+   * that used to be true.
+   */
+  it('still takes the pin toggle it replaced, and leaves no flag behind', async () => {
+    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    expect(tierOf('intern')).toBe('base');
     expect(t.store.loadResumes().find((r) => r.id === 'intern')).not.toHaveProperty('base');
+
+    // Unpinning has never meant "and delete it next week".
+    await request(app).put('/api/resumes/intern/base').send({ base: false }).expect(200);
+    expect(tierOf('intern')).toBe('extended');
+  });
+
+  it('refuses a tier that is not one, and says which are', async () => {
+    const res = await request(app).put('/api/resumes/intern/tier').send({ tier: 'archived' }).expect(400);
+    expect(res.body.error).toMatch(/archived/);
+    expect(res.body.error).toMatch(/base, extended, temporary/);
+  });
+
+  /*
+   * Marking something temporary twice must not give it another week — a stray
+   * click would keep it forever — and promoting it out has to forget the date,
+   * or demoting it later would sweep it the same day.
+   */
+  it('starts the clock once, and forgets it on the way out', async () => {
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'temporary' }).expect(200);
+    const started = t.store.loadResumes().find((r) => r.id === 'intern')?.temporaryFrom;
+    expect(started).toBeTruthy();
+
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'temporary' }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.temporaryFrom).toBe(started);
+
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'extended' }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')).not.toHaveProperty('temporaryFrom');
   });
 
   it('lists the bases first, so a picker opens on what you build from', async () => {
-    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'base' }).expect(200);
     const ids = (await request(app).get('/api/resumes').expect(200)).body.map((r: { id: string }) => r.id);
     expect(ids[0]).toBe('intern');
     expect(ids).toHaveLength(t.store.loadResumes().length);
@@ -2211,11 +2503,11 @@ describe('pinning', () => {
   });
 
   it('starts a tailored draft from the pinned base rather than a guessed name', async () => {
-    await request(app).put('/api/resumes/intern/base').send({ base: true }).expect(200);
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'base' }).expect(200);
     const res = await request(app)
       .post('/api/extension/analyze')
       .send({ html: JOB_HTML, url: 'https://example.com/job' })
       .expect(200);
-    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.copiedFrom).toBe('intern');
   });
 });

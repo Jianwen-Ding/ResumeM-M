@@ -87,7 +87,7 @@ export function prepareProject(current: Store | undefined, input: string, mode: 
       }
     } else {
       staged.saveProfile({ name: 'Your Name' });
-      staged.saveResume({ id: 'base', label: 'My resume', base: true, sections: [
+      staged.saveResume({ id: 'base', label: 'My resume', tier: 'base', sections: [
         { kind: 'education', entries: [] }, { kind: 'experience', entries: [] },
         { kind: 'project', entries: [] }, { kind: 'skills', entries: [], groups: [] },
       ] });

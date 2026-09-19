@@ -46,6 +46,24 @@ export class Repo {
    */
   readonly scope: string[];
 
+  /**
+   * Why the last automatic commit did not happen, if one did not.
+   *
+   * An auto-commit that fails cannot stop the edit — the file is already
+   * written and losing it would be worse than losing its history — so the
+   * failure was a line in the server's console and nothing else. Nobody reads
+   * that, and the cost of not reading it is silent: the editor goes on saying
+   * "All changes saved", because it is telling the truth about the file, while
+   * the version history has quietly stopped recording. Everything built on the
+   * history is then built on nothing — "restore this version", the diff
+   * between two resumes, and the sweep, which now refuses to delete a resume
+   * the history does not have and needs to be able to say why.
+   *
+   * Cleared by the next commit that works, so this is the current state of the
+   * save rather than a log of everything that has ever gone wrong.
+   */
+  lastCommitError?: { message: string; at: string };
+
   constructor(root: string, scope: string[] = ['.']) {
     this.root = path.resolve(root);
     this.scope = scope.length > 0 ? scope : ['.'];
@@ -441,9 +459,30 @@ export async function withCommit<T>(
   const result = await fn();
   if (enabled) {
     try {
-      await repo.commitAll(message);
+      const hash = await repo.commitAll(message);
+      /*
+       * No hash is usually "nothing had changed", and sometimes "there is no
+       * repository to commit to" — `commitAll` returns the same nothing for
+       * both. The second is the quietest way for a save to end up with no
+       * history at all, and the check only runs in the rare case, because
+       * auto-commit is invoked by a write that has just changed something.
+       */
+      repo.lastCommitError =
+        !hash && !(await repo.isRepo())
+          ? {
+              message:
+                'the save is not a git repository yet, so there is nothing keeping a history of it',
+              at: new Date().toISOString(),
+            }
+          : undefined;
     } catch (err) {
       // A failed commit must not lose the write that already landed on disk.
+      // Remembered as well as logged: see `lastCommitError`, because a console
+      // line in a server nobody is looking at is the same as saying nothing.
+      repo.lastCommitError = {
+        message: (err as Error).message,
+        at: new Date().toISOString(),
+      };
       console.warn(`[rmm] auto-commit failed: ${(err as Error).message}`);
     }
   }
@@ -483,4 +522,70 @@ export async function cloneRepo(url: string, into: string): Promise<void> {
     }
     throw new Error(`git clone failed: ${said.split('\n').slice(-2).join(' ') || 'unknown error'}`);
   }
+}
+
+/**
+ * Every path the newest commit holds, and nothing at all when git will not
+ * say — no repository, no commits, a lock left by a crashed git.
+ *
+ * Empty is the safe answer rather than a thrown one, because every caller is
+ * asking the same question: is this file recoverable if I replace or remove
+ * it? "Git is not answering" means no.
+ */
+export async function filedPaths(repo: Repo): Promise<Set<string>> {
+  try {
+    const [head] = await repo.log(1);
+    return head ? new Set((await repo.treeAt(head.hash)).keys()) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Take things away, and only ones the version history already has.
+ *
+ * The two places this program deletes something nobody asked it to — the
+ * sweep that removes a resume built for one posting, and the retirement that
+ * closes a workspace a fortnight after it was sent — are both acceptable for
+ * the same reason: it is all still in the history. That argument has a hole
+ * in it, and both of them fell through it. Committing the *deletion* of a
+ * file git has never seen recovers nothing, and a file can easily have never
+ * been seen: auto-commit is a setting people switch off, and even left on, a
+ * commit that fails is a console warning with no retry.
+ *
+ * So whatever is about to go is filed first — scoped to those files, because
+ * the rest of the save is somebody's work in progress and this is no reason
+ * to commit it for them — and then what actually goes is held to what git can
+ * be seen to have. Filing is the fix; the check is the part that cannot be
+ * wrong, because it asks rather than assuming the filing worked. What is held
+ * back is handed to the caller to report: somebody pressed a button, or
+ * opened a list, and is owed a reason.
+ *
+ * One commit for the lot on each side. A deletion spread over eleven commits
+ * buries the history it is meant to be recoverable from.
+ */
+export async function removeWhatIsFiled<T>(
+  repo: Repo,
+  root: string,
+  going: { paths: string[]; what: T }[],
+  messages: { filing: string; removing: (removed: T[]) => string },
+  remove: (what: T) => void,
+): Promise<{ removed: T[]; held: T[] }> {
+  if (going.length === 0) return { removed: [], held: [] };
+
+  const onDisk = going.flatMap((g) => g.paths.filter((p) => fs.existsSync(path.join(root, p))));
+  await repo.commitAll(messages.filing, onDisk).catch(() => undefined);
+
+  const filed = await filedPaths(repo);
+
+  const taking = going.filter((g) => g.paths.some((p) => filed.has(p)));
+  const held = going.filter((g) => !taking.includes(g)).map((g) => g.what);
+  if (taking.length === 0) return { removed: [], held };
+
+  // `true` whatever auto-commit is set to: that setting is about whether your
+  // *edits* are recorded as you make them, and this is not an edit you made.
+  await withCommit(repo, true, messages.removing(taking.map((g) => g.what)), () => {
+    for (const g of taking) remove(g.what);
+  });
+  return { removed: taking.map((g) => g.what), held };
 }

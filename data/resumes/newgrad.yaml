@@ -1,7 +1,39 @@
-# Issue #1, solved: switching between new-grad and intern applications is a
-# one-line difference, not a second copy of the resume.
+# A copy of `base` with the graduation date and a couple of wordings changed.
+# `copiedFrom` is a record of where it came from, not a link — nothing
+# resolves through `base` when this is rendered.
 id: newgrad
 label: New grad
-extends: base
+sections:
+  - kind: education
+    entries:
+      - edu_neu
+  - kind: experience
+    entries:
+      - exp_example_co
+  - kind: project
+    entries:
+      - proj_resumemm
+      - proj_jobhelper
+  - kind: skills
+    groups:
+      - sk_languages
+      - sk_frameworks
+      - sk_tools
 choices:
   edu_neu.dates: v_may2026
+layout:
+  fontSizePt: 11
+  marginIn: 0.5
+  spacing: 1
+  maxPages: 1
+  autoFit: true
+lists:
+  b_edu_coursework:
+    - c_algorithms
+    - c_ood
+    - c_systems
+    - c_databases
+    - c_networks
+    - c_theory
+copiedFrom: base
+tier: extended

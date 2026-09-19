@@ -15,7 +15,7 @@ import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
-import { bulletsAreHandOrdered, mergeSections, orderedBullets } from './sections.js';
+import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -293,6 +293,19 @@ async function stepHistory(direction) {
   }
 }
 
+/**
+ * Throw the stack away, and say so on the buttons.
+ *
+ * `history.clear()` on its own leaves Undo enabled, and titled with the label
+ * of a step that no longer exists — a button that says "Undo remove a line"
+ * and does nothing when pressed, which reads as the editor being broken
+ * rather than as there being nothing to undo.
+ */
+function forgetHistory() {
+  history.clear();
+  paintUndo();
+}
+
 /** Keep the two buttons honest about what they would do. */
 function paintUndo() {
   const undoBtn = $('#btn-undo');
@@ -428,44 +441,26 @@ function resumeById(id) {
   return state.store.resumes.find((r) => r.id === id);
 }
 
-/** The `extends` chain, root first. */
-function chain(id) {
-  const out = [];
-  let spec = resumeById(id);
-  const seen = new Set();
-  while (spec && !seen.has(spec.id)) {
-    seen.add(spec.id);
-    out.unshift(spec);
-    spec = spec.extends ? resumeById(spec.extends) : null;
-  }
-  return out;
-}
-
-/** Choices as they resolve today, including unsaved edits. */
+/**
+ * Choices as they resolve today, including unsaved edits.
+ *
+ * One resume's own choices and nothing else. This used to fold in every
+ * ancestor's, because a resume inherited; resumes stand alone now, and a key
+ * absent here still means "whatever the store has pinned as the default",
+ * which is the cascade that actually earns its keep.
+ */
 function effectiveChoices() {
-  return Object.assign({}, ...chain(state.resumeId).map((s) => s.choices ?? {}), state.choices);
+  return { ...(resumeById(state.resumeId)?.choices ?? {}), ...state.choices };
 }
 
-/** Flattened section list through the chain, each child laid over its parent. */
+/** The sections this resume shows. */
 function resolveSections(id = state.resumeId) {
-  /*
-   * Through the shared rule, rather than the `child ?? parent` this used to
-   * do. See web/sections.js: replacing the parent's section outright meant a
-   * child that mentioned only bullets was read as a section with no entries,
-   * so saving a bullet reorder emptied the section out of the editor on the
-   * next load while the PDF went on printing it.
-   */
-  let sections = [];
-  for (const spec of chain(id)) {
-    if (!spec.sections?.length) continue;
-    sections = mergeSections(sections, spec.sections);
-  }
-  return sections;
+  return resumeById(id)?.sections ?? [];
 }
 
 /** Which items a list bullet shows right now, including unsaved edits. */
 function listSelection(bullet) {
-  const saved = Object.assign({}, ...chain(state.resumeId).map((s) => s.lists ?? {}));
+  const saved = resumeById(state.resumeId)?.lists ?? {};
   return state.listEdits?.[bullet.id] ?? saved[bullet.id] ?? bullet.items.map((i) => i.id);
 }
 
@@ -501,59 +496,50 @@ function currentSpec() {
   };
 
   /*
-   * Only what this resume actually changes.
+   * The resume's own sections, with this session's edits written into them.
    *
-   * This wrote the *flattened* chain — the parent's sections with the child's
-   * overrides folded in — back onto the resume being edited. Ticking one bullet
-   * on a variation therefore copied every inherited section down into it, and
-   * from then on the variation was pinned to the entries the base had at that
-   * moment: anything added to the base afterwards arrived switched off.
-   *
-   * A section the user has not touched is left inherited. A section they have
-   * carries only the part they changed, which mergeSections now lays over the
-   * parent's rather than replacing it outright.
+   * There is nothing underneath any more, so "leave it out and it stays
+   * inherited" — which every line below used to be arranged around — no
+   * longer says anything. What the resume holds is what it prints.
    */
   const touchesSections =
     state.skillEdits || state.entryEdits || state.bulletEdits || state.orderEdits || state.bulletOrderEdits;
   if (touchesSections) {
-    const own = new Map((base.sections ?? []).map((s) => [s.kind, s]));
     const sections = [];
 
-    for (const section of resolveSections()) {
-      const mine = own.get(section.kind);
-      const entries = entrySelection(section);
+    /*
+     * The resume's own sections, in place, rather than a map keyed by kind.
+     * A store can hold two `custom` sections — "Awards" and "Leadership" —
+     * and a map keyed by kind silently keeps one of them.
+     */
+    for (const mine of resolveSections()) {
+      const entries = entrySelection(mine);
 
       const editedHere =
-        section.kind === 'skills'
-          ? Boolean(state.skillEdits && (section.groups ?? []).some((g) => g in state.skillEdits))
-          : Boolean(state.entryEdits && section.kind in state.entryEdits) ||
-            Boolean(state.orderEdits && section.kind in state.orderEdits) ||
+        mine.kind === 'skills'
+          ? Boolean(state.skillEdits && (mine.groups ?? []).some((g) => g in state.skillEdits))
+          : Boolean(state.entryEdits && mine.kind in state.entryEdits) ||
+            Boolean(state.orderEdits && mine.kind in state.orderEdits) ||
             Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits)) ||
             Boolean(state.bulletOrderEdits && entries.some((eid) => eid in state.bulletOrderEdits));
 
-      // Untouched and not already this resume's own: leave it inherited.
-      if (!mine && !editedHere) continue;
       if (!editedHere) {
         sections.push(mine);
         continue;
       }
 
-      if (section.kind === 'skills') {
-        sections.push({ ...(mine ?? { kind: section.kind }), items: { ...(mine?.items ?? {}), ...state.skillEdits } });
+      if (mine.kind === 'skills') {
+        sections.push({ ...mine, items: { ...(mine.items ?? {}), ...state.skillEdits } });
         continue;
       }
 
-      const next = { ...(mine ?? { kind: section.kind }) };
-      // The entry list is only written down when the user changed which
-      // entries show. A bullet the user hid does not pin the entry list.
-      if (state.entryEdits && section.kind in state.entryEdits) next.entries = entries;
-      /*
-       * What decides the order, written down whenever it was chosen here — and
-       * only then, so a section left alone stays inherited rather than being
-       * pinned to whatever it happened to be when something else was edited.
-       */
-      if (state.orderEdits && section.kind in state.orderEdits) next.order = state.orderEdits[section.kind];
-      const bullets = { ...(mine?.bullets ?? {}) };
+      const next = { ...mine };
+      // The entry list is written down when the user changed which entries
+      // show. A bullet they hid is not a decision about the entry list.
+      if (state.entryEdits && mine.kind in state.entryEdits) next.entries = entries;
+      /* What decides the order, written down whenever it was chosen here. */
+      if (state.orderEdits && mine.kind in state.orderEdits) next.order = state.orderEdits[mine.kind];
+      const bullets = { ...(mine.bullets ?? {}) };
       for (const eid of entries) {
         if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
       }
@@ -1609,8 +1595,8 @@ function orderControl(section) {
  * it should still be true on another machine or after the save is cloned — a
  * preference kept in localStorage is a preference that exists on one computer.
  *
- * Not inherited through `extends`: folding is about the list in front of you,
- * and a variation is a different list.
+ * One resume's own, not shared with the ones copied from it: folding is about
+ * the list in front of you, and another resume is a different list.
  */
 function collapsedIds() {
   return state.collapsedEdits ?? resumeById(state.resumeId)?.collapsed ?? [];
@@ -2987,16 +2973,17 @@ async function addEntry(kind) {
   }
 
   /*
-   * A new entry nobody references is invisible, so add it to the section of the
-   * resume being edited — at the root of the chain, so every resume gets it.
+   * A new entry nobody references is invisible, so it is switched on in the
+   * resume being edited — that one and no other.
    *
-   * From the root's *own* sections, not the flattened chain. Built from the
-   * flattened chain, this carried the child's overrides down onto the base with
-   * it: adding an entry while "New grad" was selected wrote New grad's hidden
-   * coursework line into the base, and every other variation lost it too.
+   * It used to go to the root of the inheritance chain, so every variation
+   * got it. Resumes stand alone now, and quietly writing into a resume other
+   * than the open one is exactly the surprise that was worth removing. The
+   * entry itself is in the save either way; switching it on elsewhere is a
+   * tick per resume, and a decision rather than a side effect.
    */
-  const root = chain(state.resumeId)[0];
-  const rootEntries = (id2) => resolveSections(root.id).find((s) => s.kind === id2)?.entries ?? [];
+  const root = resumeById(state.resumeId);
+  const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
   const sections = (root.sections ?? []).map((s) =>
     s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
   );
@@ -3047,9 +3034,8 @@ async function removeEntry(entry) {
       lane.server = null;
     });
 
-    // Drop the reference too, so the next compile does not warn about it. From
-    // the root's own sections, for the reason given in addEntry.
-    const root = chain(state.resumeId)[0];
+    // Drop the reference too, so the next compile does not warn about it.
+    const root = resumeById(state.resumeId);
     const sections = (root.sections ?? []).map((s) => ({
       ...s,
       entries: (s.entries ?? []).filter((id) => id !== entry.id),
@@ -4015,16 +4001,13 @@ async function addSkillGroup() {
     ];
   });
 
-  // The root's own sections, for the reason given in addEntry: built from the
-  // flattened chain this carried the selected variation's overrides down onto
-  // the base along with the new group.
-  const root = chain(state.resumeId)[0];
+  // The open resume's own sections, for the reason given in addEntry.
+  const root = resumeById(state.resumeId);
   const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
   );
   if (!sections.some((s) => s.kind === 'skills')) {
-    const inherited = resolveSections(root.id).find((s) => s.kind === 'skills');
-    sections.push({ kind: 'skills', entries: [], groups: [...(inherited?.groups ?? []), id] });
+    sections.push({ kind: 'skills', entries: [], groups: [id] });
   }
   await saveResumeSpec({ ...root, sections }, 'Skill group added');
   render();
@@ -4034,7 +4017,7 @@ async function addSkillGroup() {
 async function removeSkillGroup(group) {
   if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the save.'))) return;
   await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
-  const root = chain(state.resumeId)[0];
+  const root = resumeById(state.resumeId);
   const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
   );
@@ -4276,10 +4259,11 @@ function autoFitOn() {
  * with no resume in it has nothing to open, and "delete" should not be a way
  * to reach a state the rest of the app cannot handle.
  *
- * Children are not orphaned: `deleteResume` walks the ones that extend this
- * and folds what it contributed into each before it goes, so they resolve to
- * the same document afterwards. That is worth saying out loud in the
- * confirmation, because "and everything based on it" is the fear.
+ * Nothing else moves. Resumes stand alone, so a resume copied from this one
+ * holds its own sections and is untouched by this going — which is the whole
+ * of what deleting has to do now, and used to be a rewrite of every child on
+ * the way past. Said out loud in the confirmation, because "and everything
+ * based on it" is the fear.
  */
 async function deleteVariation() {
   if (state.masterView) {
@@ -4293,12 +4277,14 @@ async function deleteVariation() {
     return;
   }
 
-  const children = (state.store.resumes ?? []).filter((r) => r.extends === mine.id);
+  const copies = (state.store.resumes ?? []).filter((r) => r.copiedFrom === mine.id);
   const ok = await confirmModal(`Delete “${mine.label ?? mine.id}”?`, [
     'It is removed from the save. The entries and wordings it selected are the store’s and stay.',
-    children.length > 0
-      ? `${plural(children.length, 'resume')} based on it ${children.length === 1 ? 'keeps' : 'keep'} what it gave them and ` +
-        `${children.length === 1 ? 'moves' : 'move'} up to its own base.`
+    // Said because the list shows where each copy came from, so the name is
+    // about to stop resolving there. Nothing about the copies themselves
+    // changes — they hold their own sections and always did.
+    copies.length > 0
+      ? `${plural(copies.length, 'resume')} copied from it ${copies.length === 1 ? 'is' : 'are'} untouched.`
       : null,
     'The version history keeps it, the way it keeps a deleted entry.',
   ].filter(Boolean).join(' '));
@@ -4331,7 +4317,7 @@ async function saveAsVariation() {
   const answer = await form('Save as variation', [
     { name: 'label', label: 'Name', value: `${parentLabel} variation` },
     { name: 'id', label: 'Filename', value: `${state.resumeId}-variant` },
-  ], `Inherits from ${parentLabel}, so later edits there still reach it.`);
+  ], `A copy of ${parentLabel} as it is right now. The two are separate from here on — editing either leaves the other alone.`);
   if (!answer) return;
 
   /*
@@ -4343,18 +4329,29 @@ async function saveAsVariation() {
   const chosenId = slug(answer.id?.trim() || chosenLabel || '');
   if (!chosenId) return;
 
-  // A variation is the whole bundle: which entries and bullets are switched
-  // on, which phrasings are used, and which list items are shown. Saving only
-  // the phrasings would silently drop half of what you just did.
+  /*
+   * A variation is the whole bundle: which entries and bullets are switched
+   * on, which phrasings are used, and which list items are shown. Saving only
+   * the phrasings would silently drop half of what you just did — and now
+   * that nothing resolves through the resume it came from, saving only what
+   * changed in this session would drop everything the original decided.
+   *
+   * `currentSpec()` is that whole bundle already: the open resume plus this
+   * session's unsaved edits. So the copy is it, renamed.
+   */
   const built = currentSpec();
   const spec = {
+    ...built,
     id: chosenId,
     label: chosenLabel || chosenId,
-    extends: state.resumeId,
-    choices: { ...state.choices },
-    ...(state.listEdits ? { lists: { ...state.listEdits } } : {}),
-    ...(built.sections ? { sections: built.sections } : {}),
+    copiedFrom: state.resumeId,
+    /* A variation somebody named and saved is theirs to keep, not a draft. */
+    tier: 'extended',
   };
+  // What the original *was* stays with the original. See flatten.ts.
+  delete spec.base;
+  delete spec.generatedFor;
+  delete spec.extends;
 
   await saveResumeSpec(spec, `Saved ${spec.id}`);
   clearEdits();
@@ -4815,7 +4812,7 @@ async function openApplication(id) {
   setChildren(panel, skeleton('detail', 3));
 
   try {
-    const { application: a, resume, extendsLabel, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
+    const { application: a, resume, copiedFromLabel, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
 
     const sections = [];
 
@@ -4831,12 +4828,37 @@ async function openApplication(id) {
          */
         el('div', {
           className: 'file',
-          textContent: resume ? resume.label : (a.resumeId ?? '—'),
+          textContent: resume ? resume.label : `${a.role} — ${a.company}`,
           title: resume ? `Stored as ${resume.id}.yaml` : '',
         }),
+        /*
+         * And a sentence when the resume is no longer in the save, rather
+         * than its filename.
+         *
+         * This printed `a.resumeId` — `job-helios-platform-engineer`, a
+         * filename with nothing to say — and that used to be the rare case of
+         * somebody having deleted one by hand. The sweep makes it the
+         * ordinary state of every application older than a week, so it is
+         * worth a sentence: what went, what did not, and where to find it.
+         *
+         * The two things that matter are both still true. The files that were
+         * actually sent are in this application's own folder and are listed
+         * further down this same pane; and the resume is in the version
+         * history, which is where every other deleted thing in this program
+         * is.
+         */
+        !resume && a.resumeId
+          ? el('div', {
+              className: 'hint',
+              textContent:
+                'This resume was made for this posting and has since been removed from the save. ' +
+                'The files that were sent are below, and the version history still has it.',
+              title: `Was ${a.resumeId}.yaml`,
+            })
+          : null,
         // And the base by its name too: "Built on base." was an id with a
         // full stop after it, not a sentence.
-        extendsLabel ? el('div', { className: 'hint', textContent: `Built on ${extendsLabel}.` }) : null,
+        copiedFromLabel ? el('div', { className: 'hint', textContent: `Copied from ${copiedFromLabel}.` }) : null,
       ]),
     );
 
@@ -6599,9 +6621,193 @@ async function loadAiPresets() {
   return AI_PRESETS;
 }
 
+/**
+ * The page every resume in the save is set on, unless it says otherwise.
+ *
+ * This used to arrive by inheritance: a base stated the font size and the
+ * margins, and every variation of it took them. Resumes stand alone now, so
+ * without somewhere to say it once, "make my margins a little wider" is an
+ * edit to every resume you own — and a resume made next week would still come
+ * out with the old ones.
+ *
+ * It belongs to the save rather than to a resume anyway. How you like a page
+ * to look is not a fact about the job you are applying for. The per-resume
+ * setting stays for the one document that has to be squeezed a little harder
+ * to fit on the page.
+ */
+function pageDefaults(config) {
+  const now = config.layout ?? {};
+  // The value in force, so the boxes show what the resumes are actually set
+  // on rather than blanks that mean "whatever the app thinks".
+  const inForce = { fontSizePt: 10.5, marginIn: 0.45, spacing: 1, paper: 'letter', ...now };
+
+  const save = async (patch, revert) => {
+    try {
+      const saved = await api('/config', { method: 'PUT', body: JSON.stringify({ layout: patch }) });
+      if (state.store?.config) state.store.config.layout = saved.layout;
+      setStatus('Page settings saved');
+      // Every resume is set on this, including the one on screen.
+      scheduleRender();
+    } catch (err) {
+      revert();
+      setStatus(err.message, true);
+    }
+  };
+
+  const number = (key, label, attrs, hint) => {
+    const was = String(inForce[key]);
+    const box = el('input', { type: 'number', value: was, ...attrs });
+    box.onchange = () => {
+      const n = Number(box.value);
+      if (!Number.isFinite(n)) { box.value = was; return; }
+      save({ [key]: n }, () => { box.value = was; });
+    };
+    return el('label', { className: 'f' }, [
+      el('div', { className: 'lbl', textContent: label }),
+      box,
+      hint ? el('div', { className: 'hint', textContent: hint }) : null,
+    ]);
+  };
+
+  const paper = el('select', {}, [
+    el('option', { value: 'letter', textContent: 'US Letter' }),
+    el('option', { value: 'a4', textContent: 'A4' }),
+  ]);
+  paper.value = inForce.paper;
+  paper.onchange = () => {
+    const was = inForce.paper;
+    save({ paper: paper.value }, () => { paper.value = was; });
+  };
+
+  return el('div', { className: 'page-defaults' }, [
+    el('div', { className: 'lbl', textContent: 'The Page' }),
+    el('div', {
+      className: 'hint',
+      style: 'margin-bottom:8px',
+      textContent: 'How every resume in this save is set, unless one of them says otherwise.',
+    }),
+    el('div', { className: 'row' }, [
+      number('fontSizePt', 'Font size (pt)', { step: '0.5', min: '8', max: '14' }),
+      number('marginIn', 'Margin (in)', { step: '0.05', min: '0.3', max: '1.5' }),
+      number('spacing', 'Line spacing', { step: '0.05', min: '0.8', max: '1.5' }),
+      el('label', { className: 'f' }, [el('div', { className: 'lbl', textContent: 'Paper' }), paper]),
+    ]),
+    el('div', {
+      className: 'hint',
+      style: 'margin-bottom:12px',
+      textContent: 'Auto-fit may still shrink a resume within its limits to keep it on one page.',
+    }),
+  ]);
+}
+
+/**
+ * How long a resume made for one posting sticks around, and what is due.
+ *
+ * Shown beside the number rather than only behind a menu, because this is the
+ * one setting in the program whose value deletes something. A person changing
+ * it should be able to see what that means for the save in front of them
+ * without having to work it out from a date.
+ */
+function temporaryLife(config, expiring) {
+  const was = String(config.resumes?.temporaryDays ?? 7);
+  const box = el('input', { type: 'number', value: was, step: '1', min: '0', max: '3650' });
+
+  const due = expiring?.due ?? [];
+  const note = el('div', {
+    className: due.length > 0 ? 'result idle' : 'result ok',
+    textContent:
+      Number(was) <= 0
+        ? 'Switched off. Nothing is swept, and temporary resumes stay until you delete them.'
+        : due.length > 0
+          ? `${plural(due.length, 'resume')} due to go next time this save is opened: ` +
+            `${due.slice(0, 4).map((d) => d.label).join(', ')}${due.length > 4 ? '…' : ''}`
+          : 'Nothing is due. A resume is only swept once its application is done with.',
+  });
+
+  box.onchange = async () => {
+    const n = Number(box.value);
+    if (!Number.isFinite(n)) { box.value = was; return; }
+    try {
+      await api('/config', { method: 'PUT', body: JSON.stringify({ resumes: { temporaryDays: n } }) });
+      setStatus(n > 0 ? `Temporary resumes go after ${plural(n, 'day')}` : 'Temporary resumes are no longer swept');
+      loadProjectSettings().catch(() => {});
+    } catch (err) {
+      box.value = was;
+      setStatus(err.message, true);
+    }
+  };
+
+  return el('div', { className: 'temporary-life' }, [
+    el('div', { className: 'lbl', textContent: 'Resumes Made For One Posting' }),
+    el('div', {
+      className: 'hint',
+      style: 'margin-bottom:8px',
+      textContent:
+        'The extension makes one of these per posting. They are removed once the application is done with — ' +
+        'not while it is still being written, and never while an interview or an offer is live. ' +
+        'The version history keeps them, the way it keeps a deleted entry.',
+    }),
+    el('label', { className: 'f' }, [
+      el('div', { className: 'lbl', textContent: 'Days to keep them (0 switches this off)' }),
+      box,
+    ]),
+    note,
+    due.length > 0
+      ? el('div', { className: 'row' }, [
+          el('button', {
+            textContent: `Sweep ${plural(due.length, 'resume')} now`,
+            onclick: async () => {
+              const ok = await confirmModal(
+                `Remove ${plural(due.length, 'resume')}?`,
+                `${due.map((d) => `“${d.label}”`).join(', ')}. ` +
+                  'The entries and wordings they selected are the store’s and stay, and the version history keeps them.',
+              );
+              if (!ok) return;
+              try {
+                const res = await api('/resumes/sweep', { method: 'POST' });
+                /*
+                 * Held back because the version history does not have them,
+                 * which is the one case where removing a resume could not be
+                 * undone. Said as an error rather than a note: something is
+                 * wrong with the save history, and the sweep is the smallest
+                 * part of what that costs.
+                 */
+                if (res.held?.length) {
+                  setStatus(
+                    `Kept ${plural(res.held.length, 'resume')} that ${res.held.length === 1 ? 'is' : 'are'} ` +
+                      'due — the version history does not have ' +
+                      `${res.held.length === 1 ? 'it' : 'them'} yet, so removing ` +
+                      `${res.held.length === 1 ? 'it' : 'them'} could not be undone. ` +
+                      'Save the store under Save History and they will go next time.',
+                    true,
+                  );
+                } else {
+                  setStatus(`Swept ${plural(res.swept.length, 'resume')}`);
+                }
+                await loadStore();
+                render();
+                loadProjectSettings().catch(() => {});
+              } catch (err) {
+                setStatus(err.message, true);
+              }
+            },
+          }),
+          el('span', { className: 'hint', textContent: 'Or leave it — this happens when the save is next opened.' }),
+        ])
+      : null,
+    el('div', { className: 'hint', style: 'margin-bottom:12px' }),
+  ]);
+}
+
 /** Where the store lives, and whether it is backed up anywhere. */
 async function loadProjectSettings() {
-  const [info, config] = await Promise.all([api('/config/store'), api('/config')]);
+  const [info, config, expiring] = await Promise.all([
+    api('/config/store'),
+    api('/config'),
+    // Not fatal: the panel is worth showing without it, and an older server
+    // does not have this endpoint at all.
+    api('/resumes/expiring').catch(() => null),
+  ]);
   const box = $('#project-settings');
   const autoCommit = el('input', { type: 'checkbox', checked: config.git.autoCommit, disabled: config.overrides.autoCommit });
   autoCommit.onchange = async () => {
@@ -6630,10 +6836,25 @@ async function loadProjectSettings() {
   };
 
   const pending = info.pending ?? [];
+  /*
+   * The version history has stopped recording, and nothing else would say so.
+   *
+   * A failed auto-commit cannot be allowed to fail the edit — the file is
+   * written, and losing it would be worse than losing its history — so it was
+   * a line in a console nobody reads. The editor goes on saying "All changes
+   * saved", truthfully, about the file. Meanwhile "restore this version" has
+   * nothing to restore to, and the sweep will not take a resume the history
+   * does not have. This is the only place that can say it.
+   */
+  const brokenHistory = config.git.autoCommit ? info.lastCommitError : null;
   const unsaved = el('div', {
-    className: pending.length > 0 ? 'result idle' : 'result ok',
-    textContent:
-      pending.length > 0
+    className: brokenHistory ? 'result bad' : pending.length > 0 ? 'result idle' : 'result ok',
+    textContent: brokenHistory
+      ? 'Nothing has been recorded in the version history since ' +
+        `${new Date(brokenHistory.at).toLocaleString()}: ` +
+        `${brokenHistory.message}. Your files are all written — it is the history that has stopped. ` +
+        'Save History below will say the same thing, and the reason is usually in it.'
+      : pending.length > 0
         ? `${plural(pending.length, 'file')} changed since the last save: ${pending
             .slice(0, 4)
             .map((f) => f.path)
@@ -6652,6 +6873,9 @@ async function loadProjectSettings() {
         ? `Its own git repository, ${plural(info.commits, 'commit')} so far.`
         : 'Not a git repository yet — it becomes one the first time you save.',
     }),
+
+    pageDefaults(config),
+    temporaryLife(config, expiring),
 
     // Edits made here are committed as they happen; this is for everything
     // else — YAML edited by hand, or auto-commit switched off.
@@ -7563,7 +7787,20 @@ function renderResumeTimeline(versions) {
 }
 
 async function restoreResumeVersion(hash) {
-  if (!historyResumeId) return;
+  /*
+   * Taken once, before anything waits.
+   *
+   * `historyResumeId` belongs to the dropdown above the timeline, and a
+   * dropdown is a thing somebody can use while this is running — the flush
+   * below is a round trip, and an unsaved edit makes it a slow one. Read
+   * again afterwards, the restore went to whichever resume was selected by
+   * then, carrying a version from a different resume's timeline: the server
+   * reads that commit's file for the id it is given and saves it, so a resume
+   * nobody was looking at was overwritten out of a commit that was never
+   * shown for it, under a confirmation naming something else.
+   */
+  const wanted = historyResumeId;
+  if (!wanted) return;
   if (!confirm('Restore this version? The current version will be replaced (its own history is kept, so you can still get back to it).')) {
     return;
   }
@@ -7573,13 +7810,23 @@ async function restoreResumeVersion(hash) {
      * when there are selections on screen, and discarding them silently is
      * the opposite of what the version history is for.
      */
-    if (historyResumeId === state.resumeId) await flushEdits();
-    await api(`/resumes/${encodeURIComponent(historyResumeId)}/history/${encodeURIComponent(hash)}/restore`, {
+    if (wanted === state.resumeId) await flushEdits();
+    await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });
+    /*
+     * And the undo stack goes, for the reason a stack from another save goes
+     * — see `projectChanged`. Its entries are "this document before and after
+     * an edit", and the document they describe is the one that has just been
+     * replaced. Undo is always enabled and says nothing about what it is
+     * about to undo, so one press after a restore put the pre-restore
+     * document back over the restored one, reported "Undid change", and left
+     * no sign that the version somebody had just gone to fetch was gone.
+     */
+    forgetHistory();
     setStatus('Restored.');
     await loadStore();
-    if (historyResumeId === state.resumeId) {
+    if (wanted === state.resumeId) {
       clearEdits();
       setSaveState('saved');
       render();
@@ -7812,34 +8059,36 @@ function render() {
   const option = (r) => el('option', { value: r.id, textContent: r.label, selected: r.id === state.resumeId });
 
   /*
-   * Bases in their own group. A store fills up with resumes tailored for one
-   * posting each; the two or three you actually build from should not have to
-   * be found among them.
+   * One group per tier. A save fills up with resumes made for one posting
+   * each; the two or three you actually build from should not have to be
+   * found among them, and the ones on their way out should sort last rather
+   * than alphabetically through the middle.
    *
-   * That grouping only appeared once something had been pinned, and nothing is
-   * pinned in a store nobody has pinned anything in — which is every store to
-   * begin with. So the list stayed flat for exactly the people who had not yet
-   * found the pin, growing by one per application until the documents worth
-   * starting from were scattered alphabetically through everything ever sent.
+   * This used to key off a pin, and the grouping therefore only appeared once
+   * something had been pinned — which is never, in a save nobody has pinned
+   * anything in, meaning every save to begin with. So the list stayed flat
+   * for exactly the people who had not yet found the pin. Every resume has a
+   * tier now, including the ones a migration gave one to, so there is always
+   * something to group by.
    *
-   * A resume the extension built for a posting is named `job-<company>-<role>`
-   * by the server, and nothing else is named that way. The extension's own
-   * picker already falls back to it for this reason; this is the same answer
-   * on this side of the round trip. A pin still wins where there is one —
-   * pinning a tailored resume is a perfectly reasonable thing to do with a
-   * good one, and a guess made from a name must not quietly overrule it.
+   * An empty group is left out rather than shown empty: "Temporary" over
+   * nothing reads as a section that failed to load.
    */
-  const forAPosting = (r) => /^job-/.test(r.id ?? '');
-  const pinned = state.store.resumes.filter((r) => r.base);
-  const mine = pinned.length > 0 ? pinned : state.store.resumes.filter((r) => !forAPosting(r));
-  const rest = state.store.resumes.filter((r) => !mine.includes(r));
+  const GROUPS = [
+    ['base', 'Bases — what you build from'],
+    ['extended', 'Kept'],
+    ['temporary', 'Made for a posting — swept when it is done'],
+  ];
+  const tierOf = (r) => r.tier ?? 'extended';
+  const groups = GROUPS.map(([tier, label]) => [label, state.store.resumes.filter((r) => tierOf(r) === tier)])
+    .filter(([, list]) => list.length > 0);
+
   select.replaceChildren(
     el('option', { value: '__master__', textContent: 'Master Document — All Source Content' }),
-    ...(mine.length > 0 && rest.length > 0
-      ? [
-          el('optgroup', { label: pinned.length > 0 ? 'Bases' : 'Your resumes' }, mine.map(option)),
-          el('optgroup', { label: pinned.length > 0 ? 'Variations' : 'Built for a posting' }, rest.map(option)),
-        ]
+    // One group is no grouping: a save with three resumes all of one kind
+    // reads better as a plain list than as a list under a heading.
+    ...(groups.length > 1
+      ? groups.map(([label, list]) => el('optgroup', { label }, list.map(option)))
       : state.store.resumes.map(option)),
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
@@ -7871,27 +8120,57 @@ function render() {
   renderEditor();
 }
 
-/** The pin itself: what this resume is, and the one click that changes it. */
+/**
+ * What this resume is, and the one click that changes it.
+ *
+ * A cycle rather than three buttons. There are three tiers and two of the
+ * moves are rare — you mark a base once and leave it, and you promote a
+ * temporary resume you turned out to want — so three controls in a toolbar
+ * would be two pieces of permanent furniture for one occasional act. The
+ * button says what the resume *is*; its title says what pressing it does.
+ */
+const TIER_LOOK = {
+  base: {
+    label: '★ Base',
+    className: 'tiny pinned',
+    next: 'extended',
+    title: 'New resumes and tailored drafts start from this one. Click to keep it without starting from it.',
+    said: 'Now a base',
+  },
+  extended: {
+    label: '☆ Kept',
+    className: 'tiny',
+    next: 'base',
+    title: 'Kept in this save and never swept. Click to make it one of the ones you build from.',
+    said: 'Kept',
+  },
+  temporary: {
+    label: '⌛ Temporary',
+    className: 'tiny temporary',
+    next: 'extended',
+    title: 'Made for one posting, and swept a week after that posting is done. Click to keep it.',
+    said: 'Now temporary',
+  },
+};
+
 function renderBaseButton() {
   const btn = $('#btn-base');
   if (!btn) return;
   const spec = state.store.resumes.find((r) => r.id === state.resumeId);
-  const pinned = Boolean(spec?.base);
+  const look = TIER_LOOK[spec?.tier ?? 'extended'];
 
-  btn.textContent = pinned ? '★ Base' : '☆ Pin as base';
-  btn.className = pinned ? 'tiny pinned' : 'tiny';
-  btn.title = pinned
-    ? 'New resumes and tailored drafts start from this one. Click to unpin.'
-    : 'Pin this as a starting point for new resumes and tailored drafts';
+  btn.textContent = look.label;
+  btn.className = look.className;
+  btn.title = look.title;
   btn.disabled = !spec;
   btn.onclick = async () => {
     try {
-      await api(`/resumes/${encodeURIComponent(state.resumeId)}/base`, {
+      await api(`/resumes/${encodeURIComponent(state.resumeId)}/tier`, {
         method: 'PUT',
-        body: JSON.stringify({ base: !pinned }),
+        body: JSON.stringify({ tier: look.next }),
       });
       await loadStore();
-      setStatus(pinned ? 'No longer a base' : 'Pinned as a base');
+      setStatus(TIER_LOOK[look.next].said);
       render();
     } catch (err) {
       setStatus(err.message, true);
@@ -7906,9 +8185,9 @@ async function loadStore() {
     // conventional id is only the guess for a store that has never said.
     const resumes = state.store.resumes;
     state.resumeId =
-      resumes.find((r) => r.base)?.id ??
+      resumes.find((r) => r.tier === 'base')?.id ??
       resumes.find((r) => r.id === 'newgrad')?.id ??
-      resumes.find((r) => !r.extends)?.id ??
+      resumes.find((r) => !r.copiedFrom && !r.generatedFor)?.id ??
       resumes[0]?.id ??
       null;
   }
@@ -7998,25 +8277,59 @@ async function applyHash() {
   const build = /^#resumes\/([^/]+)(?:\/from\/(.+))?$/.exec(location.hash);
   if (build) {
     const wanted = decodeURIComponent(build[1]);
-    state.fromDraftId = build[2] ? decodeURIComponent(build[2]) : null;
-    state.fromDraft = null;
+    const trail = build[2] ? decodeURIComponent(build[2]) : null;
     showTab('resumes');
     if (state.store.resumes.some((r) => r.id === wanted)) {
       /*
-       * Write what is pending before moving. The resume dropdown has always
-       * been careful about this; the hash route was not, so following the way
-       * back — or pressing the browser's own Back button — inside the
-       * auto-save debounce dropped the edit and left the save chip reading
-       * "Unsaved changes" forever, with nothing unsaved and nothing that would
-       * ever save it.
+       * Through the same door as the dropdown — see `leaveResume`. Writing
+       * what is pending before moving is the part this route used to miss
+       * entirely, so following the way back, or pressing the browser's own
+       * Back button, inside the auto-save debounce dropped the edit and left
+       * the save chip reading "Unsaved changes" forever with nothing unsaved
+       * and nothing that would ever save it.
+       *
+       * Everything the move changes is set inside, so a move that is refused
+       * leaves the screen exactly as it was rather than half-way between two
+       * resumes.
        */
-      await flushEdits();
-      state.masterView = false;
-      state.resumeId = wanted;
-      clearEdits();
-      setSaveState('saved');
+      const moved = await leaveResume(() => {
+        state.masterView = false;
+        state.resumeId = wanted;
+        state.fromDraftId = trail;
+        state.fromDraft = null;
+      });
+      /*
+       * Refused, because the edit on screen has not saved yet. The dropdown
+       * puts itself back when that happens and the address has to do the
+       * same: left pointing at the other resume, the Back button — which is
+       * how most people arrive here — takes the edit with it, and a reload
+       * opens a resume nobody asked for.
+       */
+      if (!moved) {
+        const here = state.fromDraftId
+          ? `#resumes/${encodeURIComponent(state.resumeId)}/from/${encodeURIComponent(state.fromDraftId)}`
+          : `#resumes/${encodeURIComponent(state.resumeId)}`;
+        if (location.hash !== here) location.hash = here;
+        return true;
+      }
     } else {
-      setStatus(`No resume "${wanted}" — it may have been deleted.`, true);
+      state.fromDraftId = trail;
+      state.fromDraft = null;
+      /*
+       * Said in words rather than as a filename.
+       *
+       * This printed the id — `job-helios-platform-engineer` — which names
+       * nothing the person has ever typed, and it used to be the rare case of
+       * somebody having deleted a resume by hand. A resume made for one
+       * posting is now removed a week after that posting is done with, so
+       * every way back from an older application arrives here.
+       */
+      setStatus(
+        'That resume is no longer in the save. One made for a single posting is removed once ' +
+          'the application is done with — the files that were sent are still on the application, ' +
+          'and the version history still has the resume.',
+        true,
+      );
     }
     if (state.fromDraftId) loadFromDraft().catch(() => undefined);
     render();
@@ -8051,15 +8364,55 @@ async function applyHash() {
   const tab = ['assets', 'project'].includes(requestedTab) ? 'save'
     : ['build', 'master'].includes(requestedTab) ? 'resumes' : requestedTab;
   if (requestedTab === 'master' || requestedTab === 'build') {
-    state.masterView = requestedTab === 'master' || !state.resumeId;
-    render();
-    scheduleRender();
+    // Through the same door as the dropdown. This set the view and rendered,
+    // which left the previous resume's unsaved edits sitting over a document
+    // they do not belong to. See `leaveResume`.
+    await leaveResume(() => {
+      state.masterView = requestedTab === 'master' || !state.resumeId;
+    });
   }
   if (tab && document.querySelector(`#tabs button[data-tab="${tab}"]`)) {
     showTab(tab);
     return true;
   }
   return false;
+}
+
+/**
+ * Put down the resume on screen and pick up another one.
+ *
+ * Its own function because there are two ways to leave a resume and only one
+ * of them was doing this. The dropdown flushed, saved and cleared; arriving
+ * at `#master` or `#build` — which is a link the extension hands out — set
+ * the view and rendered, leaving the previous resume's unsaved overlay in
+ * `state.choices`, `state.entryEdits` and the rest, sitting over a document
+ * they do not belong to.
+ *
+ * A save that did not land is not a reason to say nothing. Refusing to move
+ * is right — the alternative is throwing away an edit — but the first version
+ * of that just put the dropdown back and left it there, so picking another
+ * resume looked like a control that does not work. The usual cause is one
+ * failed request, so it is tried once more; if it still will not save, say so
+ * and leave the edit where it can still be rescued.
+ *
+ * Returns whether it moved.
+ */
+async function leaveResume(go) {
+  await flushEdits();
+  if (state.dirty) await autoSave().catch(() => {});
+  if (state.dirty) {
+    setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
+    return false;
+  }
+
+  clearTimeout(renderTimer);
+  renderToken++;
+  go();
+  clearEdits();
+  setSaveState('saved');
+  render();
+  scheduleRender();
+  return true;
 }
 
 function setupTabs() {
@@ -8096,7 +8449,7 @@ async function boot() {
       activeProject = dir;
       // A stack of edits to another save is meaningless here and dangerous if
       // applied: the ids in it belong to somebody else's documents.
-      history.clear();
+      forgetHistory();
       paintUndo();
     }, loadProjectSettings });
   setupTabs();
@@ -8108,32 +8461,13 @@ async function boot() {
 
   $('#resume-select').onchange = async (e) => {
     const next = e.target.value;
-    // Save what is on screen before leaving it: clearEdits() is about to throw
-    // the unsaved overlay away.
-    await flushEdits();
-    /*
-     * A save that did not land is not a reason to say nothing.
-     *
-     * Refusing to switch is right — the alternative is throwing away an edit
-     * — but this put the dropdown back and left it there, so picking another
-     * resume looked like a control that does not work. The usual cause is one
-     * failed request, so try it once more; if it still will not save, say so
-     * and leave the edit where it can still be rescued.
-     */
-    if (state.dirty) await autoSave().catch(() => {});
-    if (state.dirty) {
-      e.target.value = state.masterView ? '__master__' : state.resumeId;
-      setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
-      return;
-    }
-    clearTimeout(renderTimer);
-    renderToken++;
-    state.masterView = next === '__master__';
-    if (!state.masterView) state.resumeId = next;
-    clearEdits();
-    setSaveState('saved');
-    render();
-    scheduleRender();
+    const moved = await leaveResume(() => {
+      state.masterView = next === '__master__';
+      if (!state.masterView) state.resumeId = next;
+    });
+    // Put the dropdown back where the screen still is, or it shows a resume
+    // that is not the one in front of you.
+    if (!moved) e.target.value = state.masterView ? '__master__' : state.resumeId;
   };
 
   // Leaving the page: write and commit on the way out. `visibilitychange` is

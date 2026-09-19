@@ -1,5 +1,38 @@
+# The same idea for internships: a copy of `base`, differing by a handful of
+# choices. Issue #2, solved without a second whole document.
 id: intern
 label: Summer intern
-extends: base
+sections:
+  - kind: education
+    entries:
+      - edu_neu
+  - kind: experience
+    entries:
+      - exp_example_co
+  - kind: project
+    entries:
+      - proj_resumemm
+      - proj_jobhelper
+  - kind: skills
+    groups:
+      - sk_languages
+      - sk_frameworks
+      - sk_tools
 choices:
   edu_neu.dates: v_dec2026
+layout:
+  fontSizePt: 11
+  marginIn: 0.5
+  spacing: 1
+  maxPages: 1
+  autoFit: true
+lists:
+  b_edu_coursework:
+    - c_algorithms
+    - c_ood
+    - c_systems
+    - c_databases
+    - c_networks
+    - c_theory
+copiedFrom: base
+tier: extended

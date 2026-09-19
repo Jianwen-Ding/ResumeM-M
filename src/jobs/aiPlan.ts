@@ -1,4 +1,4 @@
-import { flattenSpec } from '../model/resolve.js';
+
 import { isVariantField, type Bullet, type ResumeSpec, type SectionSpec, type StoreData } from '../model/types.js';
 
 /**
@@ -199,8 +199,7 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
   const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
   if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;
 
-  const flat = flattenSpec(base, data.resumes);
-  const sections = (flat.sections ?? []).map((s) => ({
+  const sections = (base.sections ?? []).map((s) => ({
     ...s,
     entries: [...(s.entries ?? [])],
     bullets: { ...(s.bullets ?? {}) },

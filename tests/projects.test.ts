@@ -22,7 +22,7 @@ describe('project folders', () => {
     const { t, dir, dest } = setup();
     const next = prepareProject(t.store, dest, 'create');
     expect(next.load().entries).toEqual([]);
-    expect(next.load().resumes[0]?.base).toBe(true);
+    expect(next.load().resumes[0]?.tier).toBe('base');
     expect(next.outDir()).toBe(path.join(dest, 'out'));
     expect(fs.existsSync(path.join(dest, 'assets', 'inbox'))).toBe(true);
     const prefs = path.join(dir, 'prefs.json');

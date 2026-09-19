@@ -30,7 +30,7 @@ import type { SessionState } from '../mcp/session.js';
 import type { AuthoringState } from '../mcp/authoring.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
-import { Repo, withCommit } from '../git/repo.js';
+import { Repo, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
@@ -38,16 +38,18 @@ import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats } from '../model/applications.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
+import { flattenOne } from '../model/flatten.js';
+import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
-import { buildMaster, flattenSpec, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
+import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
-import type { Store } from '../model/store.js';
-import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
+import { Store } from '../model/store.js';
+import { isVariantField, layoutFor, RESUME_TIERS, type ResumeTier } from '../model/types.js';
 import type {
   AnswerBankItem,
   Application,
@@ -469,27 +471,98 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   );
 
   /**
-   * Pin a resume as a base, or unpin it. Its own toggle rather than part of
-   * the whole-spec save: this is a decision about how the store is organised,
-   * and it should not ride along with an unrelated edit.
+   * Move a resume between tiers.
+   *
+   * Its own endpoint rather than part of the whole-spec save, for the reason
+   * the pin toggle it replaces had: this is a decision about how the save is
+   * organised, and it should not ride along with an unrelated edit to the
+   * document.
+   *
+   *   `base` — what you build from, and what the extension offers first.
+   *   `extended` — permanent, and never swept.
+   *   `temporary` — made for one posting, and gone a week after that posting
+   *   is done with. Promoting out of it is the whole reason this takes a
+   *   tier rather than a boolean.
+   */
+  api.put(
+    '/resumes/:id/tier',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const wanted = (req.body as { tier?: string }).tier;
+      if (!RESUME_TIERS.includes(wanted as ResumeTier)) {
+        throw new Error(`"${String(wanted)}" is not a tier — it is one of ${RESUME_TIERS.join(', ')}.`);
+      }
+      const tier = wanted as ResumeTier;
+
+      const spec = store.loadResumes().find((r) => r.id === id);
+      if (!spec) throw new Error(`No resume "${id}"`);
+
+      spec.tier = tier;
+      // The flag the tier replaced. Leaving it would let the two disagree.
+      delete spec.base;
+      /*
+       * The clock starts now, and only for a resume that was not already on
+       * it. Re-marking something temporary must not give it another week, or
+       * a stray click would keep it forever; and promoting it out has to
+       * forget the date, or demoting it later would sweep it immediately.
+       */
+      if (tier === 'temporary') spec.temporaryFrom ??= new Date().toISOString();
+      else delete spec.temporaryFrom;
+
+      const said = { base: 'a base', extended: 'kept', temporary: 'temporary' }[tier];
+      await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => store.saveResume(spec));
+      res.json(spec);
+    }),
+  );
+
+  /**
+   * The pin toggle this replaced, kept working.
+   *
+   * The CLI, the MCP tools and any older client still send it, and a client
+   * is not wrong for saying something that used to be true. `base: false` is
+   * `extended` rather than `temporary`, because unpinning a resume has never
+   * meant "and delete it next week".
    */
   api.put(
     '/resumes/:id/base',
     handler(async (req, res) => {
       const id = String(req.params.id);
-      const base = (req.body as { base?: boolean }).base !== false;
+      const tier: ResumeTier = (req.body as { base?: boolean }).base !== false ? 'base' : 'extended';
+
       const spec = store.loadResumes().find((r) => r.id === id);
       if (!spec) throw new Error(`No resume "${id}"`);
 
-      // Absent rather than false: an unpinned resume should look untouched in
-      // YAML, not carry a field explaining that it is ordinary.
-      if (base) spec.base = true;
-      else delete spec.base;
+      spec.tier = tier;
+      delete spec.base;
+      delete spec.temporaryFrom;
 
-      await withCommit(repo, autoCommit(), `${base ? 'Pin' : 'Unpin'} "${spec.label}" as a base`, () =>
+      await withCommit(repo, autoCommit(), `${tier === 'base' ? 'Mark' : 'Unmark'} "${spec.label}" as a base`, () =>
         store.saveResume(spec),
       );
       res.json(spec);
+    }),
+  );
+
+  /**
+   * What the sweep would take, and taking it.
+   *
+   * Two endpoints rather than one on purpose. This is the only thing in the
+   * program that deletes something nobody asked it to, and a deletion that
+   * cannot be looked at first is one nobody can trust — so the list is
+   * available on its own, and both come from the same function, which is how
+   * a preview usually stops matching what happens.
+   */
+  api.get(
+    '/resumes/expiring',
+    handler(async (_req, res) => {
+      res.json({ due: wouldSweep(store), days: temporaryDays(store) });
+    }),
+  );
+
+  api.post(
+    '/resumes/sweep',
+    handler(async (_req, res) => {
+      res.json(await sweepTemporary(store, repo));
     }),
   );
 
@@ -506,14 +579,27 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
 
+      /*
+       * A write that still says `extends` is folded before it lands.
+       *
+       * Resumes stand alone, but this endpoint is what the CLI, the MCP tools
+       * and any older client write through, and one of those may still be
+       * sending the shape a previous version used. Refusing it would break a
+       * client for saying something that used to be true; storing it would
+       * put a field back on disk that nothing downstream reads, so the resume
+       * would silently lose whatever the base was contributing. Folding it in
+       * writes down exactly what that client meant.
+       */
+      const flat = spec.extends ? flattenOne(spec, store.loadResumes()) : spec;
+
       // `?commit=0` writes without committing. The editor auto-saves as you
       // work, and a commit per keystroke would bury the history it feeds; it
       // commits once the editing stops, through /store/save.
       const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
-      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${spec.id}"`, () =>
-        store.saveResume(spec),
+      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${flat.id}"`, () =>
+        store.saveResume(flat),
       );
-      res.json(spec);
+      res.json(flat);
     }),
   );
 
@@ -739,6 +825,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         commits: (await repo.log(1)).length,
         remote,
         pending: await repo.pending(),
+        // Why the history stopped recording, when it has. See
+        // `Repo.lastCommitError`.
+        lastCommitError: repo.lastCommitError,
       });
     }),
   );
@@ -1040,7 +1129,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       } catch {
         sentWith = undefined;
       }
-      const layout = sentWith?.layout ?? DEFAULT_LAYOUT;
+      /*
+       * The letter is set on the same page as the resume it goes with, and
+       * failing that on the save's own default — not on this version's, which
+       * is how a letter came out at 10.5pt beside a resume the user had set
+       * to 11.
+       */
+      const layout = sentWith?.layout ?? layoutFor(undefined, data.config?.layout);
 
       const result = await compileLetter(
         {
@@ -1950,16 +2045,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * application form, and there is more than one of those. Named for
        * where it came from instead — see `employerFallback`.
        */
-      /*
-       * What the base asks for on skills, with what it inherits folded in.
-       *
-       * Read from the flattened base rather than `base.sections` because a
-       * base that extends another one may hold none of this itself, and "the
-       * base has no opinion" and "the base's parent has one" are different
-       * answers — the second is the one that has to come back when a skills
-       * swap is undone.
-       */
-      const baseSkillItems = flattenSpec(base, data.resumes).sections?.find((s) => s.kind === 'skills')?.items;
+      /* What the base asks for on skills, which is what undoing a swap restores. */
+      const baseSkillItems = base.sections?.find((s) => s.kind === 'skills')?.items;
 
       const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${employer}`, finalMatch, {
         url,
@@ -2188,22 +2275,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           : [];
 
       /*
-       * The base by the name its owner gave it.
+       * Where it was copied from, by the name its owner gave it.
        *
-       * `extends` is an id, and the detail pane printed it raw — "Built on
+       * `copiedFrom` is an id, and the detail pane printed it raw — "Built on
        * base." is not a sentence, it is a filename with a full stop after it.
        * Resolved here because the pane has only this one response to work
        * from and no reason to hold the whole store.
        */
       const sent = app.resumeId ? (store.getResume(app.resumeId) ?? null) : null;
-      const extendsLabel = sent?.extends
-        ? (store.getResume(sent.extends)?.label ?? sent.extends)
+      const copiedFromLabel = sent?.copiedFrom
+        ? (store.getResume(sent.copiedFrom)?.label ?? sent.copiedFrom)
         : undefined;
 
       res.json({
         application: app,
         resume: sent,
-        extendsLabel,
+        copiedFromLabel,
         letter: letter ?? (app.coverLetter ? { id: null, body: app.coverLetter, title: 'As sent' } : null),
         files,
         dir: dir ?? null,
@@ -2216,19 +2303,49 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const body = req.body as Partial<Application>;
       if (!body.company || !body.role) throw new Error('company and role are required');
+
+      /*
+       * "Record an application" is the manual way in, and the one place where
+       * what somebody types can land on a job the tracker already knows
+       * about. It used to build a whole record from the body and hand it to
+       * `upsertApplication`, which replaces: type a company and role already
+       * tracked from earlier the same day and the existing row was gone —
+       * status back from `interview` to `applied`, the folder of sent files
+       * unreachable because `snapshotDir` went with it, and the cover letter,
+       * the answers and the history all replaced by one line reading
+       * "Recorded".
+       *
+       * So the record it is about is found first — by id when one was given,
+       * and otherwise the same way everything else finds it — and what was
+       * typed is laid over it. Nothing is taken away by not being mentioned:
+       * this form asks for four things and an application holds a dozen.
+       */
+      const apps = store.load().applications;
+      const existing = body.id
+        ? apps.find((a) => a.id === body.id)
+        : findApplication(apps, body.company, body.role);
+
+      const now = new Date().toISOString();
+      const status = body.status ?? existing?.status ?? 'applied';
+      // Typed, not merely present: the form sends every box it has, so an
+      // empty one means "I had nothing to add here" and not "delete that".
+      const typed = (was: string | undefined, before: string | undefined) =>
+        was?.trim() ? was : before;
       const app: Application = {
-        id: body.id ?? applicationId(body.company, body.role),
+        ...existing,
+        id: existing?.id ?? body.id ?? freshApplicationId(apps, body.company, body.role),
         company: body.company,
         role: body.role,
-        url: body.url,
-        appliedAt: body.appliedAt ?? new Date().toISOString(),
-        status: body.status ?? 'applied',
-        resumeId: body.resumeId,
-        source: body.source,
-        notes: body.notes,
-        answers: body.answers,
+        url: typed(body.url, existing?.url),
+        appliedAt: body.appliedAt ?? existing?.appliedAt ?? now,
+        status,
+        resumeId: body.resumeId ?? existing?.resumeId,
+        source: body.source ?? existing?.source,
+        notes: typed(body.notes, existing?.notes),
+        answers: body.answers ?? existing?.answers,
         history: body.history ?? [
-          { at: new Date().toISOString(), status: body.status ?? 'applied', note: 'Recorded' },
+          ...(existing?.history ?? []),
+          { at: now, status, note: existing ? 'Recorded again by hand' : 'Recorded' },
         ],
       };
       await withCommit(repo, autoCommit(), `Track application to ${app.company}`, () =>
@@ -2297,7 +2414,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * `applying` for ever. See `findApplication`.
        */
       const tracked = findApplication(data.applications, body.company, body.role);
-      const id = tracked?.id ?? applicationId(body.company, body.role);
+      // Not `applicationId`: a job applied for and closed earlier the same day
+      // already holds the id today would make. See `freshApplicationId`.
+      const id = tracked?.id ?? freshApplicationId(data.applications, body.company, body.role);
       const note = body.note ?? 'The form was submitted on the page';
       const now = new Date().toISOString();
 
@@ -2450,27 +2569,53 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * It cannot stay forever, or the list becomes an archive of everything ever
    * applied for, which the tracker already is and does better. Two weeks
    * without a keystroke is the line: long enough to cover the week-later
-   * follow-up, short enough that the list is still a list of live work. What
-   * is lost is the editing surface, not the content — the application record
-   * keeps the letter, the answers and the files exactly as they went out.
+   * follow-up, short enough that the list is still a list of live work.
+   *
+   * Mostly what is lost is the editing surface and not the content: the
+   * application record keeps the letter, the answers and the files exactly as
+   * they went out. Mostly, because the fortnight is there for the week-later
+   * follow-up — a letter rewritten because they asked for it again is in the
+   * space and not in the record, and it is precisely the thing somebody would
+   * come back for. So this goes through `removeWhatIsFiled`, like the resume
+   * sweep: filed first, and never taken unless the version history can be
+   * seen to have it.
    */
   const KEEP_SENT_FOR_DAYS = 14;
 
   /** Let go of the spaces that have been sent and untouched since. */
-  const retireStaleDrafts = (): void => {
+  const retireStaleDrafts = async (): Promise<void> => {
     const cutoff = Date.now() - KEEP_SENT_FOR_DAYS * 24 * 60 * 60 * 1000;
-    for (const draft of store.loadDrafts()) {
-      if (draft.status !== 'submitted') continue;
+    const going = store.loadDrafts().filter((draft) => {
+      if (draft.status !== 'submitted') return false;
       const touched = Date.parse(draft.updatedAt ?? '');
       // An unparseable date is not a reason to delete somebody's work.
-      if (Number.isFinite(touched) && touched < cutoff) store.deleteDraft(draft.id);
-    }
+      return Number.isFinite(touched) && touched < cutoff;
+    });
+    if (going.length === 0) return;
+
+    const name = (d: Draft) => `${d.company} — ${d.role}`;
+    await removeWhatIsFiled(
+      repo,
+      store.root,
+      going.map((draft) => ({ paths: [`drafts/${draft.id}.yaml`], what: draft })),
+      {
+        filing: `File ${going.map(name).join(', ')} before closing the space`,
+        removing: (closed) =>
+          `Close the workspace for ${closed.map(name).join(', ')} — sent, and quiet since`,
+      },
+      (draft) => store.deleteDraft(draft.id),
+    );
   };
 
   api.get(
     '/workspace',
     handler(async (_req, res) => {
-      retireStaleDrafts();
+      /*
+       * Not fatal to the list. Retiring is housekeeping, and a save whose git
+       * is not answering should still show somebody the applications they are
+       * in the middle of writing.
+       */
+      await retireStaleDrafts().catch(() => undefined);
       res.json({ drafts: store.loadDrafts() });
     }),
   );
@@ -2720,13 +2865,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const { baseResumeId, label } = req.body as { baseResumeId?: string; label?: string };
       const data = store.load();
 
-      // What it inherits from. Never the draft's own tailored copy, or the
-      // variation would inherit from a thing it is meant to sit beside.
+      // What it is copied from. Never the draft's own tailored copy: that one
+      // has already been narrowed for this posting, so starting from it would
+      // narrow what was narrowed rather than give the variation a fair start.
       let baseId = baseResumeId ?? draft.resumeId ?? defaultBaseId(data.resumes);
       const seen = new Set<string>();
       while (baseId && data.resumes.find((r) => r.id === baseId)?.generatedFor && !seen.has(baseId)) {
         seen.add(baseId);
-        baseId = data.resumes.find((r) => r.id === baseId)?.extends ?? defaultBaseId(data.resumes);
+        baseId = data.resumes.find((r) => r.id === baseId)?.copiedFrom ?? defaultBaseId(data.resumes);
       }
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');
@@ -2737,12 +2883,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let id = wanted;
       for (let n = 2; data.resumes.some((r) => r.id === id); n++) id = `${wanted}-${n}`.slice(0, 60);
 
+      /*
+       * A copy of the base, not a link to it. What the base selects comes
+       * across whole — an empty variation used to mean "everything the base
+       * shows", and it has to go on meaning that now that nothing resolves
+       * through the base at render time.
+       */
       const spec: ResumeSpec = {
+        ...base,
         id,
         label: label?.trim() || `${draft.role} — ${draft.company}`,
-        extends: base.id,
+        copiedFrom: base.id,
+        tier: 'temporary',
         generatedFor: { url: draft.url, company: draft.company, role: draft.role, at: new Date().toISOString() },
       };
+      // The base's identity, as opposed to its contents, stays with the base.
+      delete spec.base;
+      delete spec.notes;
+      delete spec.collapsed;
+      delete spec.extends;
 
       await withCommit(repo, autoCommit(), `Start a resume variation for ${draft.company}`, () =>
         store.saveResume(spec),
@@ -3433,20 +3592,66 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * the document unchanged, and not even a commit in the timeline to show
        * for it.
        *
-       * What is restored is this resume's own file, and nothing else. Anything
-       * it inherits belongs to every other resume too, and silently rewriting
-       * those is worse than not restoring: this used to walk the whole
-       * `extends` chain and write every ancestor back at the old commit's
-       * content, so rolling one tailored variation back to last week's version
-       * also rolled `base` back — and with it every other variation that
-       * inherits from `base`. A week of work on the shared resume, gone, under
-       * a confirmation that said only "the current version will be replaced"
-       * and a reply carrying no warnings, because the check below re-resolves
-       * the restored resume, which of course now matches.
+       * What is restored is this resume's own file, and nothing else. The
+       * text it points at belongs to every other resume too, and silently
+       * rewriting that is worse than not restoring: back when resumes
+       * inherited, this walked the whole chain and wrote every ancestor back
+       * at the old commit's content, so rolling one tailored variation back to
+       * last week's version also rolled `base` back — and with it every other
+       * variation built on `base`. A week of work on the shared resume, gone,
+       * under a confirmation that said only "the current version will be
+       * replaced" and a reply carrying no warnings, because the check below
+       * re-resolves the restored resume, which of course now matches.
        *
        * So the result is checked against the version that was asked for, and
        * whatever still differs is named rather than forced.
        */
+      /*
+       * File what is about to be replaced, before replacing it.
+       *
+       * The confirmation says "the current version will be replaced (its own
+       * history is kept, so you can still get back to it)", and that is only
+       * true of a version the history actually has. Auto-commit is a setting
+       * people turn off, and even left on a commit that fails is a console
+       * warning with no retry — so the resume on screen can be sitting in no
+       * commit at all, and rolling it back to last week would be the one act
+       * in this program that cannot be undone. Refused rather than done
+       * quietly: it is a button somebody pressed, and there is something they
+       * can do about it.
+       *
+       * Only when there is something to lose. Restoring a resume that has
+       * been deleted is the case this exists to serve, and there is no
+       * current version of it to keep.
+       */
+      const here = Store.resumeFiles(id).filter((rel) => fs.existsSync(path.join(store.root, rel)));
+      if (here.length > 0) {
+        await repo
+          .commitAll(`File "${id}" before restoring an earlier version`, here)
+          .catch(() => undefined);
+        /*
+         * The file as it stands, not merely a file by that name. The history
+         * having *a* version of this resume is not the question — it is about
+         * to be rolled back to one of those — the question is whether the one
+         * being replaced is among them.
+         */
+        const [head] = await repo.log(1).catch(() => []);
+        const tree = head ? await repo.treeAt(head.hash).catch(() => new Map()) : new Map();
+        const kept = await Promise.all(
+          here.map(async (rel) => {
+            const objectId = tree.get(rel);
+            if (!objectId) return false;
+            const filed = await repo.blob(objectId).catch(() => undefined);
+            return filed === fs.readFileSync(path.join(store.root, rel), 'utf8');
+          }),
+        );
+        if (!kept.some(Boolean)) {
+          throw new Error(
+            `"${id}" as it stands is not in the version history, so replacing it could not be undone. ` +
+              'Save the store — Save History, under the save panel — and then restore.',
+          );
+        }
+      }
+
       const tree = await repo.treeAt(hash);
       const readAt = async (file: string): Promise<string | undefined> => {
         const objectId = tree.get(file);

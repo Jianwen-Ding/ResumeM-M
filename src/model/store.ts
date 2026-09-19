@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { absorbBase, adoptBulletOrder, adoptDateOrder } from './resolve.js';
+import { flattenResumes, needsFlattening } from './flatten.js';
+import { liftLayout } from './lift-layout.js';
+import { needsTiering, tierResumes } from './tiers.js';
+import { adoptBulletOrder, adoptDateOrder } from './resolve.js';
 import {
   DEFAULT_CONFIG,
   type AnswerBankItem,
@@ -43,6 +46,46 @@ function describeValue(v: unknown): string {
       return 'true or false';
     default:
       return 'a set of keys and values';
+  }
+}
+
+/**
+ * Take a file out of the save, and say something useful when it will not go.
+ *
+ * `fs.unlinkSync` throws `EACCES: permission denied, unlink '/home/…/resumes/
+ * summer-intern.yaml'`, which reaches the user through the API's error
+ * handler exactly as written. It names a path they did not ask about and a
+ * code they have no reason to know, and it does not say which of their
+ * documents it was talking about — on a delete, that is the only question.
+ *
+ * The common causes get a sentence. Anything else keeps the system's own
+ * words, because a rare errno said plainly is more use than a guess.
+ */
+export function removeFile(full: string, what: string): void {
+  if (!fs.existsSync(full)) return;
+  try {
+    fs.unlinkSync(full);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    const said = err instanceof Error ? err.message : String(err);
+    const because =
+      code === 'EACCES' || code === 'EPERM'
+        ? 'the save folder is not writable'
+        : code === 'EBUSY'
+          ? 'something else on this machine has the file open'
+          : code === 'EROFS'
+            ? 'the save is on a read-only disk'
+            : code === 'EISDIR'
+              ? 'there is a folder where that file should be'
+              /*
+               * Anything else keeps the system's own words, which are more
+               * use than a guess — but not the path it puts after them. It
+               * names the store's full location, which the person already
+               * knows and did not ask about, and it is the half of the
+               * message that made the raw version unreadable.
+               */
+              : said.replace(/,\s*unlink\s+'[^']*'\s*$/, '');
+    throw new Error(`${what} could not be removed from the save — ${because}. Nothing else was changed.`);
   }
 }
 
@@ -621,6 +664,8 @@ export class Store {
       ai: { ...DEFAULT_CONFIG.ai, ...(raw.ai ?? {}) },
       git: { ...DEFAULT_CONFIG.git, ...(raw.git ?? {}) },
       output: { ...DEFAULT_CONFIG.output, ...(raw.output ?? {}) },
+      layout: { ...DEFAULT_CONFIG.layout, ...(raw.layout ?? {}) },
+      resumes: { ...DEFAULT_CONFIG.resumes, ...(raw.resumes ?? {}) },
     };
 
     config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
@@ -656,6 +701,24 @@ export class Store {
       ...(patch.ai ? { ai: { ...current.ai, ...patch.ai } } : {}),
       ...(patch.git ? { git: { ...current.git, ...patch.git } } : {}),
       ...(patch.output ? { output: { ...current.output, ...patch.output } } : {}),
+      /*
+       * `fitBounds` merged at its own level, like every block above. Sending
+       * one floor would otherwise drop the other two back to this version's
+       * defaults, which is a change nobody asked for and would not notice
+       * until a resume came out set smaller than they had allowed.
+       */
+      ...(patch.resumes ? { resumes: { ...current.resumes, ...patch.resumes } } : {}),
+      ...(patch.layout
+        ? {
+            layout: {
+              ...current.layout,
+              ...patch.layout,
+              ...(patch.layout.fitBounds || current.layout?.fitBounds
+                ? { fitBounds: { ...current.layout?.fitBounds, ...patch.layout.fitBounds } }
+                : {}),
+            },
+          }
+        : {}),
     };
     this.writeYaml('config.yaml', merged);
     return this.loadConfig();
@@ -720,6 +783,93 @@ export class Store {
 
   /** Resumes live one-per-file so a new variation is a new small file. */
   loadResumes(): ResumeSpec[] {
+    /*
+     * A save written by a version that had inheritance is folded flat here,
+     * on the way in, so nothing past this line has to know that `extends`
+     * ever existed.
+     *
+     * In memory rather than on disk, and on every read rather than once:
+     * `migrateResumes` writes the flattened files back and commits them, but
+     * it is not the thing that makes this safe. A store can be cloned from a
+     * git link, restored from history, or hand-edited between two reads, and
+     * any of those can put an `extends` back under a running server. Folding
+     * on read means the worst case is a file that still says something the
+     * app no longer means, never a resume that resolves to the wrong
+     * document.
+     */
+    /*
+     * And a tier, for a save written before there were any. The date stamped
+     * on a resume this makes temporary is *this read's* date, which never
+     * reaches disk — so a save that has not been written back yet has a clock
+     * that restarts on every read and therefore never runs out. That is the
+     * right way round: the sweep deletes things, and it should not begin
+     * until the save has actually been migrated and the date recorded.
+     */
+    return tierResumes(flattenResumes(this.loadResumesAsWritten())).tiered;
+  }
+
+  /**
+   * Fold an older save's inheritance into the files themselves, once.
+   *
+   * Returns what it changed and what it found wrong, for the caller to log —
+   * and nothing at all when the save is already flat, which is the case every
+   * time after the first. See `flatten.ts` for why the fold cannot change any
+   * document.
+   */
+  migrateResumes(): { flattened: string[]; tiered: string[]; lifted: string[]; problems: string[] } {
+    const all = this.loadResumesAsWritten();
+    if (!needsFlattening(all) && !needsTiering(all)) {
+      return { flattened: [], tiered: [], lifted: [], problems: [] };
+    }
+
+    const problems: string[] = [];
+    const flattened: string[] = [];
+    const flat = flattenResumes(all, problems);
+    const { tiered: withTiers, changed: tiered } = tierResumes(flat);
+
+    /*
+     * And a page setting every one of them agrees on goes up to the save.
+     *
+     * Only on a save actually being migrated, which is why it is inside the
+     * guard above rather than run on every start. Folding copied each base's
+     * layout down into every resume that had been inheriting it — correct,
+     * and it leaves the save-wide setting saying nothing, because every
+     * resume overrules it. See `liftLayout`: no document changes, and from
+     * then on the number in Settings moves all of them.
+     */
+    const config = this.loadConfig();
+    const { layout, resumes: lightened, keys: lifted } = liftLayout(withTiers, config.layout);
+    if (lifted.length > 0) this.saveConfig({ layout });
+
+    for (const spec of lightened) {
+      const before = all.find((r) => r.id === spec.id);
+      if (before?.extends) flattened.push(spec.id);
+      /*
+       * One write per resume however many migrations touched it, and none at
+       * all for a resume none of them changed.
+       *
+       * Compared rather than inferred from which pass ran: the layout lift
+       * takes a key off some resumes and not others, so "something was
+       * lifted" is not the same question as "was this one of them". Writing
+       * on the coarser answer put every file in the save into one commit,
+       * most of them identical to themselves, which buries the ones that did
+       * change in the history somebody would be reading to find them.
+       */
+      if (JSON.stringify(before) !== JSON.stringify(spec)) this.saveResume(spec);
+    }
+    return { flattened, tiered, lifted, problems };
+  }
+
+  /**
+   * The resume files as written, before any migration.
+   *
+   * Public because the migration needs it and because a test that claims the
+   * fold changes no document has to be able to read what was there before.
+   * Nothing else should: `loadResumes` is the one that answers "what does
+   * this save hold", and this one can hand back a shape the app no longer
+   * understands.
+   */
+  loadResumesAsWritten(): ResumeSpec[] {
     const dir = this.file('resumes');
     return (
       this.listing('resumes', (f) => f.endsWith('.yaml') || f.endsWith('.yml'))
@@ -775,32 +925,59 @@ export class Store {
   }
 
   /**
-   * Deleting a resume must not break the ones built on it.
+   * Deleting a resume takes nothing else with it.
    *
-   * Variations are thin — "new grad" is the base plus a handful of choices,
-   * recorded as `extends: base`. Unlinking the base and nothing else left every
-   * variation throwing "extends 'base', which does not exist" from that moment
-   * on, in the editor, the preview and the tracker alike, with nothing in the
-   * UI able to edit `extends` and so no way back but hand-editing YAML.
+   * This used to be the most dangerous write in the store. Variations were
+   * thin — "new grad" was the base plus a handful of choices, recorded as
+   * `extends: base` — so unlinking the base left every variation throwing
+   * "extends 'base', which does not exist" from that moment on, in the
+   * editor, the preview and the tracker alike, with nothing in the UI able to
+   * edit `extends` and so no way back but hand-editing YAML. The fix was a
+   * rewrite of every child on the way past, which then had to be careful
+   * about which of the parent's fields were content and which were identity,
+   * and got that wrong too.
    *
-   * So each child absorbs what the deleted resume contributed and re-points at
-   * its parent. The children are written first: if anything fails partway, the
-   * base is still there and they still resolve.
+   * Resumes stand alone now, so none of that has anything to rewrite — as
+   * long as they actually do, which is what the fold below makes sure of.
+   *
+   * A save can still be sitting on disk in the old shape: folding happens on
+   * read, and the write-back is a separate pass that a given process may not
+   * have run. Delete the base of an unfolded save and the children lose
+   * everything it was contributing, silently — the next read finds nothing to
+   * fold and they resolve to their own handful of overrides. So the files are
+   * brought up to date first, and only then is one of them removed. It costs
+   * one pass over a folder of small files, once, on the first delete after an
+   * upgrade.
    */
   deleteResume(id: string): void {
-    const all = this.loadResumes();
-    const removed = all.find((r) => r.id === id);
+    this.migrateResumes();
 
-    if (removed) {
-      for (const child of all) {
-        if (child.extends === id) this.saveResume(absorbBase(child, removed));
-      }
+    const named = this.loadResumes().find((r) => r.id === id);
+    for (const ext of Store.RESUME_SPELLINGS) {
+      removeFile(this.file('resumes', `${id}.${ext}`), `"${named?.label ?? id}"`);
     }
+  }
 
-    for (const ext of ['yaml', 'yml']) {
-      const f = this.file('resumes', `${id}.${ext}`);
-      if (fs.existsSync(f)) fs.unlinkSync(f);
-    }
+  /**
+   * Both spellings of a resume's filename. A hand-made `.yml` beside the
+   * `.yaml` the app writes would bring a deleted resume back on the next read.
+   */
+  static readonly RESUME_SPELLINGS = ['yaml', 'yml'] as const;
+
+  /**
+   * Where a resume is kept, relative to the store, whether or not it is there.
+   *
+   * For asking git — the sweep checks that the history has a resume before it
+   * deletes one, and git speaks in paths from the root of the repository.
+   * Never for opening a file: paths are composed by `file`, one name at a
+   * time, and splitting one of these back into segments would hand it
+   * `['resumes', '..', 'profile.yaml']`, three names each of which passes the
+   * check that `../profile.yaml` fails. The id is checked here anyway, so a
+   * path cannot be smuggled into a pathspec either.
+   */
+  static resumeFiles(id: string): string[] {
+    assertName(`${id}.yaml`);
+    return Store.RESUME_SPELLINGS.map((ext) => `resumes/${id}.${ext}`);
   }
 
   /** The four files entries are split across, in the order `load` reads them. */
@@ -1062,7 +1239,7 @@ export class Store {
   deleteSample(id: string): boolean {
     const f = this.file('corpus', `${id}.md`);
     if (!fs.existsSync(f)) return false;
-    fs.unlinkSync(f);
+    removeFile(f, 'That writing sample');
     return true;
   }
 
@@ -1104,7 +1281,7 @@ export class Store {
   deleteDraft(id: string): boolean {
     const f = this.file('drafts', `${id}.yaml`);
     if (!fs.existsSync(f)) return false;
-    fs.unlinkSync(f);
+    removeFile(f, 'That draft');
     return true;
   }
 

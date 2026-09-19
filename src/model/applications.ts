@@ -158,9 +158,22 @@ export function describeLost(lost: { kind: 'entry' | 'wording' }[]): string | un
  * its own.
  *
  * Identity is the company and the role. The most recent one still being
- * worked on is the one meant; failing that, simply the most recent, because
- * the same job applied for twice a year apart is two applications and the one
- * you are touching now is the later.
+ * worked on is the one meant; failing that, the most recent that is still
+ * live, because a bundle built for a job already sent is the ordinary "I
+ * spotted a typo, do that again" and belongs in the same folder.
+ *
+ * Never one that is over, and that is the whole of the difference between
+ * this and what it used to do. "The same job applied for twice a year apart
+ * is two applications" was written here from the start and then not done:
+ * every row matched, so a job that had been applied for and rejected in March
+ * was the row a fresh attempt in September was filed as. Measured, on a
+ * rejection and a repost of the same role: the September build landed in
+ * March's folder and deleted the take-home brief kept in it, the tracker
+ * showed one row reading `closed` and dated March with a "Files rebuilt"
+ * note, and the new application — the one actually being sent that day — had
+ * no record of its own anywhere. It also dropped out of the flat upload
+ * folder, which carries only what is in flight, so the files it had just
+ * built were nowhere a file picker would find them.
  */
 export function findApplication(apps: Application[], company: string, role: string): Application | undefined {
   const key = `${slug(company)}\u0000${slug(role)}`;
@@ -169,7 +182,32 @@ export function findApplication(apps: Application[], company: string, role: stri
 
   const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
   const unsent = same.filter((a) => a.status === 'interested' || a.status === 'applying');
-  return (unsent.length > 0 ? unsent : same).sort(byNewest)[0];
+  if (unsent.length > 0) return unsent.sort(byNewest)[0];
+  // Undefined when every one of them is finished: this is a new attempt, and
+  // it needs a row and a folder of its own. See `freshApplicationId`.
+  return same.filter((a) => a.status !== 'closed').sort(byNewest)[0];
+}
+
+/**
+ * An id for an application that does not have one yet, and does not take
+ * another's.
+ *
+ * `applicationId` is today's date and the name, which is what anybody would
+ * want to see in a folder listing and is not unique: apply in the morning,
+ * be turned down in the afternoon, and apply again to the repost the same
+ * day, and the second attempt asks for the first one's id — which is the
+ * first one's tracker row and the first one's folder of sent files.
+ *
+ * Counted rather than stamped with a time, because the id is a folder name
+ * somebody reads.
+ */
+export function freshApplicationId(apps: Application[], company: string, role: string): string {
+  const wanted = applicationId(company, role);
+  const taken = new Set(apps.map((a) => a.id));
+  if (!taken.has(wanted)) return wanted;
+  for (let n = 2; ; n++) {
+    if (!taken.has(`${wanted}-${n}`)) return `${wanted}-${n}`;
+  }
 }
 
 /**
@@ -294,12 +332,28 @@ async function inBuildLane<T>(id: string, run: () => Promise<T>): Promise<T> {
 export async function buildBundle(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data0 = store.load();
   const existing = findApplication(data0.applications, req.company, req.role);
-  return inBuildLane(existing?.id ?? applicationId(req.company, req.role), () => buildBundleNow(store, req));
+  return inBuildLane(
+    existing?.id ?? freshApplicationId(data0.applications, req.company, req.role),
+    () => buildBundleNow(store, req),
+  );
 }
 
 async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data = store.load();
   const resolved: ResolvedResume = resolveResume(req.resumeId, data);
+  /*
+   * Taken here, beside the resolve, and not read again when the snapshot is
+   * written further down.
+   *
+   * The two are a pair: the spec is what was selected and `resolved` is what
+   * that came out as, and a snapshot holding one from before a compile and
+   * the other from after is a record of something that never existed. The
+   * window is not small — compiling is the slow part of this function, and
+   * the sweep that removes a resume made for one posting runs on its own.
+   * Read late, the spec could be `undefined` for a resume that was there
+   * when the document was built.
+   */
+  const spec = data.resumes.find((r) => r.id === req.resumeId);
 
   /*
    * All three names decided together, because the shape that leaves the
@@ -320,7 +374,9 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * application was opened lands in that application's folder rather than in
    * a second one beside it.
    */
-  const id = findApplication(data.applications, req.company, req.role)?.id ?? applicationId(req.company, req.role);
+  const id =
+    findApplication(data.applications, req.company, req.role)?.id ??
+    freshApplicationId(data.applications, req.company, req.role);
   /*
    * Through the store, so an id that is a path cannot choose the folder. The
    * id here is often not one this code made — `findApplication` takes it from
@@ -445,7 +501,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
     fs.mkdirSync(path.join(stage, 'source'), { recursive: true });
     fs.writeFileSync(
       path.join(stage, 'source', 'resolved.yaml'),
-      YAML.stringify({ spec: store.getResume(req.resumeId), resolved }, { lineWidth: 0 }),
+      YAML.stringify({ spec, resolved }, { lineWidth: 0 }),
       'utf8',
     );
 

@@ -181,6 +181,93 @@ describe('withCommit', () => {
     expect(fs.existsSync(path.join(root, 'kept.txt'))).toBe(true);
   });
 
+  /*
+   * And remembers that it failed, which is the half that was missing.
+   *
+   * The write has to land whatever git does, so the failure cannot be thrown
+   * — it was a line in the server's console instead, and a console nobody
+   * reads is the same as saying nothing. Meanwhile the editor goes on saying
+   * "All changes saved", truthfully, about the file: the history has stopped
+   * recording and nothing on screen can tell anyone so. "Restore this
+   * version" then has nothing to restore to, and the sweep will not take a
+   * resume the history does not have.
+   */
+  it('remembers why the commit did not happen', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    // A lock left behind by a git that was killed, which is the failure the
+    // serialising in `commitAll` was written for and does not cover: this one
+    // is somebody else's git, or one that crashed, and it stays until it is
+    // removed by hand.
+    fs.writeFileSync(path.join(root, '.git/index.lock'), '');
+
+    await withCommit(repo, true, 'msg', () => {
+      fs.writeFileSync(path.join(root, 'kept.txt'), 'kept');
+    });
+
+    // The write still landed, which is the rule this must not break —
+    expect(fs.readFileSync(path.join(root, 'kept.txt'), 'utf8')).toBe('kept');
+    // — and now there is something that can say the history did not.
+    expect(repo.lastCommitError?.message).toMatch(/index\.lock/);
+    expect(repo.lastCommitError?.at).toMatch(/^\d{4}-/);
+  });
+
+  it('forgets it again once a commit works', async () => {
+    // The state of the save now, not a log of everything that ever went
+    // wrong: a repository that was locked for a moment and then was not is a
+    // repository that is fine, and saying otherwise sends somebody looking
+    // for a fault that has already gone.
+    const repo = new Repo(root);
+    repo.lastCommitError = { message: 'index.lock exists', at: new Date().toISOString() };
+    await repo.ensure();
+
+    await withCommit(repo, true, 'saved something', () => {
+      fs.writeFileSync(path.join(root, 'f.txt'), 'data');
+    });
+
+    expect(repo.lastCommitError).toBeUndefined();
+  });
+
+  /*
+   * The quietest way of all to end up with no history.
+   *
+   * `commitAll` returns the same nothing for "there was nothing to commit"
+   * and "there is no repository to commit to", so a save that has never been
+   * saved took every write, wrote it, reported success and recorded none of
+   * it — with auto-commit switched on and doing nothing at all.
+   */
+  it('says so when there is no repository to commit to', async () => {
+    const repo = new Repo(root);
+
+    await withCommit(repo, true, 'msg', () => {
+      fs.writeFileSync(path.join(root, 'f.txt'), 'data');
+    });
+
+    expect(repo.lastCommitError?.message).toMatch(/not a git repository yet/);
+  });
+
+  it('says nothing when there was simply nothing to commit', async () => {
+    // The ordinary case that shares its answer with the one above: a write
+    // that put back exactly what was already there.
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.writeFileSync(path.join(root, 'f.txt'), 'data');
+    await repo.commitAll('the first time');
+
+    await withCommit(repo, true, 'again', () => {
+      fs.writeFileSync(path.join(root, 'f.txt'), 'data');
+    });
+
+    expect(repo.lastCommitError).toBeUndefined();
+  });
+
+  it('says nothing about a commit it was told not to make', async () => {
+    // Auto-commit off is a choice, not a fault.
+    const repo = new Repo(path.join(root, 'nonexistent'));
+    await withCommit(repo, false, 'msg', () => undefined);
+    expect(repo.lastCommitError).toBeUndefined();
+  });
+
   it('awaits an async write before committing', async () => {
     const repo = new Repo(root);
     await repo.ensure();

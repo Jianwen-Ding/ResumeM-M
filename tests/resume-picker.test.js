@@ -22,16 +22,18 @@ afterEach(() => {
 /*
  * The list of resumes, after a month of using this.
  *
- * It grows by one every time the extension builds an application and never
- * shrinks, so the two or three documents somebody actually starts from end up
- * scattered alphabetically through everything they have ever sent. The editor
- * already split the list in two — but only once a resume had been pinned as a
- * base, and nothing is pinned in a store nobody has pinned anything in, which
- * is every store to begin with. So the grouping appeared for people who had
- * already found the pin, and stayed away from everyone who had not.
+ * It grows by one every time the extension builds an application, so the two
+ * or three documents somebody actually starts from end up scattered
+ * alphabetically through everything they have ever sent. The editor split the
+ * list in two — but only once a resume had been pinned as a base, and nothing
+ * is pinned in a store nobody has pinned anything in, which is every store to
+ * begin with. So the grouping appeared for people who had already found the
+ * pin and stayed away from everyone who had not.
  *
- * The extension's own picker answers this with the id: the server names what
- * it generates `job-<company>-<role>`, and nothing else is named that way.
+ * Every resume has a tier now, including the ones a migration gave one to, so
+ * there is always something to group by: what you build from, what you keep,
+ * and what was made for one posting and will be swept when that posting is
+ * done with.
  */
 describe('picking a resume out of a store that has been used', () => {
   const groups = () => [...document.querySelectorAll('#resume-select optgroup')].map((g) => g.label);
@@ -64,33 +66,49 @@ describe('picking a resume out of a store that has been used', () => {
     await vi.waitFor(() => expect(document.querySelectorAll('#resume-select option').length).toBeGreaterThan(1));
   }
 
+  const KEPT = 'Kept';
+  const BASES = 'Bases — what you build from';
+  const GOING = 'Made for a posting — swept when it is done';
+
   const written = [
-    { id: 'new-grad', label: 'New Grad', choices: {} },
-    { id: 'backend', label: 'Backend', choices: {} },
+    { id: 'new-grad', label: 'New Grad', tier: 'extended', choices: {} },
+    { id: 'backend', label: 'Backend', tier: 'extended', choices: {} },
   ];
   const built = [
-    { id: 'job-helios-platform-engineer', label: 'Helios — Platform Engineer', choices: {} },
-    { id: 'job-lyra-data-scientist', label: 'Lyra — Data Scientist', choices: {} },
+    { id: 'job-helios-platform-engineer', label: 'Helios — Platform Engineer', tier: 'temporary', choices: {} },
+    { id: 'job-lyra-data-scientist', label: 'Lyra — Data Scientist', tier: 'temporary', choices: {} },
   ];
 
-  it('separates what you wrote from what was built for a posting, with nothing pinned', async () => {
+  it('separates what you keep from what was built for a posting', async () => {
     await open([...written, ...built]);
-    expect(groups()).toEqual(['Your resumes', 'Built for a posting']);
-    expect(inGroup('Your resumes')).toEqual(['New Grad', 'Backend']);
-    expect(inGroup('Built for a posting')).toEqual(['Helios — Platform Engineer', 'Lyra — Data Scientist']);
+    expect(groups()).toEqual([KEPT, GOING]);
+    expect(inGroup(KEPT)).toEqual(['New Grad', 'Backend']);
+    expect(inGroup(GOING)).toEqual(['Helios — Platform Engineer', 'Lyra — Data Scientist']);
   });
 
   /*
-   * A pin is a deliberate statement about which resume is a starting point,
-   * and it has to beat a guess made from a name — otherwise pinning one of the
-   * tailored resumes, which is a perfectly reasonable thing to do with a good
-   * one, would do nothing visible.
+   * Marking a base is a deliberate statement about which resume is a starting
+   * point, and marking one of the tailored ones is a perfectly reasonable
+   * thing to do with a good one.
    */
-  it('lets a pin overrule the naming, and says so in the labels', async () => {
-    await open([...written, ...built.map((r, i) => (i === 0 ? { ...r, base: true } : r))]);
-    expect(groups()).toEqual(['Bases', 'Variations']);
-    expect(inGroup('Bases')).toEqual(['Helios — Platform Engineer']);
-    expect(inGroup('Variations')).toEqual(['New Grad', 'Backend', 'Lyra — Data Scientist']);
+  it('puts a base of its own in front of both', async () => {
+    await open([...written, ...built.map((r, i) => (i === 0 ? { ...r, tier: 'base' } : r))]);
+    expect(groups()).toEqual([BASES, KEPT, GOING]);
+    expect(inGroup(BASES)).toEqual(['Helios — Platform Engineer']);
+    expect(inGroup(KEPT)).toEqual(['New Grad', 'Backend']);
+    expect(inGroup(GOING)).toEqual(['Lyra — Data Scientist']);
+  });
+
+  /*
+   * A resume with no tier written on it is one this save has not been
+   * migrated for, or one somebody wrote by hand. It is kept, and it appears
+   * among the kept — not in its own group, and never among the ones about to
+   * be swept.
+   */
+  it('shows a resume with no tier among the ones it keeps', async () => {
+    await open([{ id: 'handmade', label: 'Written By Hand', choices: {} }, ...built]);
+    expect(groups()).toEqual([KEPT, GOING]);
+    expect(inGroup(KEPT)).toEqual(['Written By Hand']);
   });
 
   /*
@@ -99,6 +117,8 @@ describe('picking a resume out of a store that has been used', () => {
    */
   it('does not divide a list that has nothing to divide', async () => {
     await open(written);
+    // One group is no grouping: a heading over the whole list divides one
+    // thing into one thing.
     expect(groups()).toEqual([]);
     expect([...document.querySelectorAll('#resume-select option')].map((o) => o.textContent)).toEqual([
       'Master Document — All Source Content',

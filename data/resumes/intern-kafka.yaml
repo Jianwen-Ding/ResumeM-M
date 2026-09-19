@@ -1,21 +1,57 @@
-# Issue #2, solved: a posting-specific mix is a handful of overrides, not a new
-# document. This one leans the same bullets toward streaming work and swaps the
-# skills list to match, while inheriting everything else from `intern`.
+# And a posting-specific mix: a copy of `intern` leaning toward streaming
+# work, with the skills list swapped to match.
 id: intern-kafka
 label: Summer intern — streaming/distributed
-extends: intern
+sections:
+  - kind: education
+    entries:
+      - edu_neu
+  - kind: experience
+    entries:
+      - exp_example_co
+  - kind: project
+    entries:
+      - proj_resumemm
+      - proj_jobhelper
+  - kind: skills
+    groups:
+      - sk_languages
+      - sk_frameworks
+      - sk_tools
+    items:
+      sk_languages:
+        - s_python
+        - s_go
+        - s_java
+        - s_sql
+      sk_frameworks:
+        - s_kafka
+        - s_postgres
+        - s_node
+      sk_tools:
+        - s_git
+        - s_docker
+        - s_k8s
+        - s_aws
 choices:
+  edu_neu.dates: v_dec2026
   b_ec_pipeline: v_kafka
   b_ec_testing: v_ci
-sections:
-  - kind: skills
-    groups: [sk_languages, sk_frameworks, sk_tools]
-    items:
-      sk_languages: [s_python, s_go, s_java, s_sql]
-      sk_frameworks: [s_kafka, s_postgres, s_node]
-      sk_tools: [s_git, s_docker, s_k8s, s_aws]
-notes: >
-  Drafted for streaming-heavy backend postings. Drops TypeScript/React from the
-  skills list so the relevant items are not buried.
+layout:
+  fontSizePt: 11
+  marginIn: 0.5
+  spacing: 1
+  maxPages: 1
+  autoFit: true
 lists:
-  b_edu_coursework: [c_systems, c_os, c_networks, c_distributed, c_algorithms, c_databases]
+  b_edu_coursework:
+    - c_systems
+    - c_os
+    - c_networks
+    - c_distributed
+    - c_algorithms
+    - c_databases
+notes: |
+  Drafted for streaming-heavy backend postings. Drops TypeScript/React from the skills list so the relevant items are not buried.
+copiedFrom: intern
+tier: extended
