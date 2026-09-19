@@ -659,6 +659,124 @@ about the role, what you'll do, benefits, compensation.</p></body></html>`;
   });
 });
 
+/*
+ * Reddit, reported from life: the card came up on it.
+ *
+ * A comment thread is the hardest false positive there is, because it is
+ * written by the people postings are written about, in their vocabulary, on a
+ * page whose shell carries a login form and whose composer carries a file
+ * input. Two of the gates meant to separate a posting from a page about
+ * postings read a thread wrongly, and each on its own is enough:
+ *
+ *   `namesARole` — a title that is the name of a post rather than a sentence
+ *   about one. On a careers site the employer wrote that title and it names
+ *   the thing being advertised; on a forum it is a person talking, so a
+ *   thread called "Software Engineer" is somebody asking about an offer.
+ *
+ *   `uploadsResume` — a file input, the word résumé, and a page that asks who
+ *   you are. Every condition holds on r/resumes, and the verdict was not
+ *   merely `posting` but `application`: the tool decided a thread was a form
+ *   to fill in.
+ *
+ * The fixtures below carry the shell and the composer on purpose, because
+ * without them the test passes for the wrong reason.
+ */
+describe('a comment thread, which is written like a posting and is not one', () => {
+  const SHELL = `<header><a href="/">reddit</a>
+    <form action="/login"><label for="lg">Email or username</label>
+    <input id="lg" name="username" type="text"><input name="password" type="password"></form>
+    <input type="search" name="q" placeholder="Search Reddit"></header>`;
+  const COMPOSER = `<label for="c">Add a comment</label><textarea id="c" name="comment"></textarea>
+    <input type="file" id="img" name="image">`;
+  const thread = (title: string, body: string) =>
+    `<!doctype html><html><head><title>${title}</title></head><body>${SHELL}` +
+    `<div class="post"><h1>${title}</h1><p>${body}</p></div>${COMPOSER}` +
+    `<div class="comments"><p>Posted by u/someone</p><p>312 comments</p></div></body></html>`;
+
+  const at = (path: string) => `https://www.reddit.com${path}`;
+
+  it('stays quiet on a thread about how many applications people sent', () => {
+    const v = classifyPage(
+      thread(
+        'How many applications did it take you?',
+        `I have sent about 200. Most were full-time new grad roles. A few asked for a cover
+         letter, most wanted years of experience I do not have. The requirements are always
+         "3+ years" even for an internship. Benefits and compensation are never mentioned.`,
+      ),
+      at('/r/cscareerquestions/comments/1a2b3c/how_many_applications/'),
+    );
+    expect(v.kind).toBe('none');
+  });
+
+  it('stays quiet on a thread whose title happens to be a job title', () => {
+    const v = classifyPage(
+      thread(
+        'Software Engineer',
+        `Got an offer. Salary range seems low for the responsibilities. The job description said
+         minimum qualifications of 5 years. Should I negotiate? They are an equal opportunity
+         employer if that matters.`,
+      ),
+      at('/r/cscareerquestions/comments/1a2b3d/software_engineer_offer/'),
+    );
+    expect(v.kind).toBe('none');
+  });
+
+  /* The one that was classified as a form to fill in. */
+  it('does not read a resume-review thread as an application form', () => {
+    const v = classifyPage(
+      thread(
+        'Resume review — new grad, 0 callbacks',
+        `Here is my resume. I am applying to full-time new grad roles. Should I add a cover
+         letter? Most postings want years of experience. Any feedback on the requirements?`,
+      ),
+      at('/r/resumes/comments/1a2b3e/resume_review_new_grad/'),
+    );
+    expect(v.kind).not.toBe('application');
+    expect(v.kind).toBe('none');
+  });
+
+  /*
+   * And the half that makes the rest mean something. A forum genuinely does
+   * carry postings, and suppressing every thread would be the easy wrong
+   * answer — quiet everywhere, including where the tool was wanted.
+   */
+  it('still offers on a thread that is actually hiring', () => {
+    const v = classifyPage(
+      thread(
+        '[Hiring] Backend Engineer — Remote',
+        `We are looking for a Backend Engineer. Responsibilities include building services in Go.
+         Minimum qualifications: 3 years of experience. Full-time, salary range $150k-$180k.
+         Apply now by emailing us. We are an equal opportunity employer.`,
+      ),
+      at('/r/forhire/comments/1a2b3g/hiring_backend_engineer/'),
+    );
+    expect(v.kind).toBe('discussion');
+  });
+
+  it('reads the Discourse and Stack Exchange shapes as threads too', () => {
+    const chatter = thread(
+      'Platform Engineer',
+      `Responsibilities, qualifications, years of experience, about the role,
+       what you'll do, benefits, compensation — what do these even mean?`,
+    );
+    expect(classifyPage(chatter, 'https://forum.example.com/t/platform-engineer/2').kind).toBe('none');
+    expect(classifyPage(chatter, 'https://stackexchange.com/questions/12/what-is-this').kind).toBe('none');
+  });
+
+  it('leaves an ordinary site’s /t/ and /questions/ paths alone', () => {
+    // The Discourse and Stack Exchange shapes are only read as threads on a
+    // host that is one. `/questions/1` is an ordinary path anywhere else, and
+    // a careers site is free to use it.
+    const posting = `<html><head><title>Platform Engineer</title></head><body>
+      <h1>Platform Engineer</h1><p>Responsibilities, qualifications, years of experience,
+      about the role, what you'll do, benefits, compensation.</p></body></html>`;
+    // Exactly the Discourse shape, `/t/<slug>/<id>`, on a host that is not a
+    // forum. Only the host check keeps this a posting.
+    expect(classifyPage(posting, 'https://streamly.com/t/platform-engineer/2').kind).toBe('posting');
+    expect(classifyPage(posting, 'https://streamly.com/questions/12').kind).toBe('posting');
+  });
+});
+
 describe('one application across several pages', () => {
   const DESCRIPTION = JSON_LD_PAGE;
 

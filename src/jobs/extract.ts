@@ -557,6 +557,49 @@ const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y
 const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
 const FORUM = /\b(news\.ycombinator|reddit|lobste\.rs|discourse|forum|stackexchange|quora|levels\.fyi|blind)\b/i;
 
+/**
+ * A comment thread, by the shape of its address.
+ *
+ * Reported from life: the card came up on Reddit. Two of the gates that are
+ * meant to separate a posting from a page about postings are read wrongly by
+ * a thread, and both because a thread is written by the people it is about.
+ *
+ * `namesARole` lets a page through when its title is the name of a post —
+ * "Platform Engineer at Cygnus" rather than "The hiring slowdown, explained".
+ * That is a good rule on a careers site, where the title is written by the
+ * employer and names the thing being advertised. On a forum the title is a
+ * person talking: a thread called "Software Engineer" is somebody asking what
+ * to do about an offer, and there is nothing there to apply to.
+ *
+ * `uploadsResume` is worse, because it decides the page *is the form*. A
+ * comment composer has a file input for images; a thread on r/resumes says
+ * "resume" in every paragraph; and the site shell carries a login form, so
+ * the page does ask for an email address. All three conditions hold, and a
+ * resume-review thread was classified as an application to fill in.
+ *
+ * So this is a structural fact about the address rather than a list of hosts
+ * to block — `/r/<sub>/comments/`, an HN item, a Discourse topic, a Stack
+ * Exchange question all say "what follows is a conversation". A hiring thread
+ * on one of them is still offered on, through `forumHiring` below, which is
+ * the one thing a forum genuinely does have.
+ */
+function isDiscussionPage(link: string): boolean {
+  return (
+    /\breddit\.com\/(?:r|user|u)\/[^/]+\/comments\//i.test(link) ||
+    /\bnews\.ycombinator\.com\/item\?/i.test(link) ||
+    /\blobste\.rs\/s\//i.test(link) ||
+    /\bquora\.com\/[^/]+-\d*$/i.test(link) ||
+    /*
+     * Discourse topics (`/t/<slug>/<id>`) and Stack Exchange questions
+     * (`/questions/<id>/<slug>`), but only on a host that is one of those:
+     * both shapes are ordinary paths anywhere else, and a careers site is
+     * free to put a role at `/t/platform-engineer/2`.
+     */
+    (FORUM.test(link) &&
+      (/\/(?:t|topic|thread|discussion)\/[^/]+\/\d+/i.test(link) || /\/questions\/\d+/i.test(link)))
+  );
+}
+
 /** Words that show up in the body of a posting, whatever the board. */
 const DESCRIPTION_WORDS = [
   'apply now', 'job description', 'responsibilities', 'qualifications',
@@ -665,8 +708,12 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * extension's own copy of this had the same fault and was fixed first; this
    * one was missed, and a unit test on the form fixture is what found it.
    */
+  const thread = isDiscussionPage(link);
   const uploadsResume =
-    /<input[^>]+type=["']?file/i.test(html) && /\bcv\b|résum|resum/i.test(text) && asksWhoYouAre;
+    !thread &&
+    /<input[^>]+type=["']?file/i.test(html) &&
+    /\bcv\b|résum|resum/i.test(text) &&
+    asksWhoYouAre;
   if (uploadsResume) add(3, 'asks for a resume file');
 
   const forumHiring = FORUM.test(link) && /\b(hiring|who is hiring|looking for|we are hiring)\b/i.test(text);
@@ -719,6 +766,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * through.
    */
   const namesARole =
+    !thread &&
     named.split(/\s+/).length <= 8 &&
     (ENDS_WITH_ROLE.test(named) || LEADS_WITH_ROLE.test(named)) &&
     !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my)\b/i.test(named);
@@ -749,6 +797,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     (formish >= 3 && hasFields && asksWhoYouAre);
   if (namesARole) why.push('names a role');
   else if (actionable) why.push('somewhere to apply');
+  else if (thread) why.push('a comment thread, whatever it is about');
 
   // Which kind, in the order that decides what the tool should offer. A form
   // wins over a description, because the form is what you are about to fill
@@ -769,6 +818,19 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * that matters, by way of the links they carry.
    */
   if (!actionable && kind === 'posting' && listish >= 2) kind = 'listing';
+
+  /*
+   * And the same for a hiring thread, for the same reason.
+   *
+   * A thread that says it is hiring is written in the vocabulary of a posting
+   * — because it is one — so it reaches here as a `posting` with nowhere to
+   * apply, and the gate below would throw it away. The two gates that would
+   * otherwise have made it actionable are exactly the two a comment thread
+   * reads wrongly: its title is a person talking, and its file input is for
+   * images. What it has instead is the thing `forumHiring` found, which is
+   * somebody saying they are hiring and leaving an address to write to.
+   */
+  if (!actionable && kind === 'posting' && forumHiring) kind = 'discussion';
 
   // Everything else has to have somewhere to go.
   if (!actionable && kind !== 'listing' && kind !== 'discussion') kind = 'none';
