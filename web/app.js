@@ -8208,25 +8208,59 @@ async function applyHash() {
   const build = /^#resumes\/([^/]+)(?:\/from\/(.+))?$/.exec(location.hash);
   if (build) {
     const wanted = decodeURIComponent(build[1]);
-    state.fromDraftId = build[2] ? decodeURIComponent(build[2]) : null;
-    state.fromDraft = null;
+    const trail = build[2] ? decodeURIComponent(build[2]) : null;
     showTab('resumes');
     if (state.store.resumes.some((r) => r.id === wanted)) {
       /*
-       * Write what is pending before moving. The resume dropdown has always
-       * been careful about this; the hash route was not, so following the way
-       * back — or pressing the browser's own Back button — inside the
-       * auto-save debounce dropped the edit and left the save chip reading
-       * "Unsaved changes" forever, with nothing unsaved and nothing that would
-       * ever save it.
+       * Through the same door as the dropdown — see `leaveResume`. Writing
+       * what is pending before moving is the part this route used to miss
+       * entirely, so following the way back, or pressing the browser's own
+       * Back button, inside the auto-save debounce dropped the edit and left
+       * the save chip reading "Unsaved changes" forever with nothing unsaved
+       * and nothing that would ever save it.
+       *
+       * Everything the move changes is set inside, so a move that is refused
+       * leaves the screen exactly as it was rather than half-way between two
+       * resumes.
        */
-      await flushEdits();
-      state.masterView = false;
-      state.resumeId = wanted;
-      clearEdits();
-      setSaveState('saved');
+      const moved = await leaveResume(() => {
+        state.masterView = false;
+        state.resumeId = wanted;
+        state.fromDraftId = trail;
+        state.fromDraft = null;
+      });
+      /*
+       * Refused, because the edit on screen has not saved yet. The dropdown
+       * puts itself back when that happens and the address has to do the
+       * same: left pointing at the other resume, the Back button — which is
+       * how most people arrive here — takes the edit with it, and a reload
+       * opens a resume nobody asked for.
+       */
+      if (!moved) {
+        const here = state.fromDraftId
+          ? `#resumes/${encodeURIComponent(state.resumeId)}/from/${encodeURIComponent(state.fromDraftId)}`
+          : `#resumes/${encodeURIComponent(state.resumeId)}`;
+        if (location.hash !== here) location.hash = here;
+        return true;
+      }
     } else {
-      setStatus(`No resume "${wanted}" — it may have been deleted.`, true);
+      state.fromDraftId = trail;
+      state.fromDraft = null;
+      /*
+       * Said in words rather than as a filename.
+       *
+       * This printed the id — `job-helios-platform-engineer` — which names
+       * nothing the person has ever typed, and it used to be the rare case of
+       * somebody having deleted a resume by hand. A resume made for one
+       * posting is now removed a week after that posting is done with, so
+       * every way back from an older application arrives here.
+       */
+      setStatus(
+        'That resume is no longer in the save. One made for a single posting is removed once ' +
+          'the application is done with — the files that were sent are still on the application, ' +
+          'and the version history still has the resume.',
+        true,
+      );
     }
     if (state.fromDraftId) loadFromDraft().catch(() => undefined);
     render();
