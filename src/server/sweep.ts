@@ -1,6 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { withCommit } from '../git/repo.js';
+import { removeWhatIsFiled } from '../git/repo.js';
 import type { Repo } from '../git/repo.js';
 import { Store } from '../model/store.js';
 import { DEFAULT_TEMPORARY_DAYS, dueToGo, type DueToGo } from '../model/tiers.js';
@@ -62,32 +60,13 @@ function naming(due: DueToGo[]): string {
   return `${first}${due.length > 3 ? ` and ${due.length - 3} more` : ''}`;
 }
 
-/** Every path the newest commit holds, or nothing at all if it holds none. */
-async function committed(repo: Repo): Promise<Set<string>> {
-  try {
-    const [head] = await repo.log(1);
-    if (!head) return new Set();
-    return new Set((await repo.treeAt(head.hash)).keys());
-  } catch {
-    // Git is not answering. Nothing is known to be recoverable, so nothing is.
-    return new Set();
-  }
-}
-
 /**
- * Take them, in one commit.
+ * Take them, in one commit, named with what went.
  *
- * One commit for the lot, named with what went: a sweep that spread itself
- * over eleven commits would bury the history it is supposed to be
- * recoverable from. Committed even when auto-commit is off, and that is
- * deliberate — auto-commit is about whether your *edits* are recorded as you
- * make them, and this is not an edit you made. A deletion that is not in the
- * history is the one thing here that would be unrecoverable.
- *
- * Which is also why what is about to go is filed first, and why the deletion
- * is then held to what the history can be seen to have. Filing is the fix;
- * the check is the part that cannot be wrong, because it asks git rather than
- * assuming git did as it was told.
+ * The filing before it and the check that holds the deletion to what the
+ * history has are `removeWhatIsFiled`, which the workspace retirement uses
+ * too: the argument for deleting something nobody asked to delete is the same
+ * in both places, and so is the hole that was in it.
  */
 export async function sweepTemporary(
   store: Store,
@@ -98,27 +77,17 @@ export async function sweepTemporary(
   const due = dueToGo(store.load(), { days, now });
   if (due.length === 0) return { swept: [], held: [], days };
 
-  const filesOf = (d: DueToGo) =>
-    Store.resumeFiles(d.id).filter((rel) => fs.existsSync(path.join(store.root, rel)));
-
-  /*
-   * File what is about to go, if it is not filed already.
-   *
-   * Scoped to those files: everything else in the save is the user's work in
-   * progress, and a sweep is no reason to commit it for them. A resume that is
-   * already committed stages nothing and this makes no commit at all.
-   */
-  await repo
-    .commitAll(`File ${naming(due)} before sweeping`, due.flatMap(filesOf))
-    .catch(() => undefined);
-
-  const inHistory = await committed(repo);
-  const swept = due.filter((d) => Store.resumeFiles(d.id).some((rel) => inHistory.has(rel)));
-  const held = due.filter((d) => !swept.includes(d));
-  if (swept.length === 0) return { swept, held, days };
-
-  await withCommit(repo, true, `Sweep ${naming(swept)} — temporary, and done with`, () => {
-    for (const { id } of swept) store.deleteResume(id);
-  });
-  return { swept, held, days };
+  const { removed, held } = await removeWhatIsFiled(
+    repo,
+    store.root,
+    due.map((d) => ({ paths: Store.resumeFiles(d.id), what: d })),
+    {
+      filing: `File ${naming(due)} before sweeping`,
+      // Named with what actually goes, not with what was due: one that
+      // could not be filed is still there and does not belong in the message.
+      removing: (swept) => `Sweep ${naming(swept)} — temporary, and done with`,
+    },
+    (d) => store.deleteResume(d.id),
+  );
+  return { swept: removed, held, days };
 }

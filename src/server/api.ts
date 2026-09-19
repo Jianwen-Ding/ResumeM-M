@@ -30,7 +30,7 @@ import type { SessionState } from '../mcp/session.js';
 import type { AuthoringState } from '../mcp/authoring.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
-import { Repo, withCommit } from '../git/repo.js';
+import { Repo, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
@@ -2569,27 +2569,53 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * It cannot stay forever, or the list becomes an archive of everything ever
    * applied for, which the tracker already is and does better. Two weeks
    * without a keystroke is the line: long enough to cover the week-later
-   * follow-up, short enough that the list is still a list of live work. What
-   * is lost is the editing surface, not the content — the application record
-   * keeps the letter, the answers and the files exactly as they went out.
+   * follow-up, short enough that the list is still a list of live work.
+   *
+   * Mostly what is lost is the editing surface and not the content: the
+   * application record keeps the letter, the answers and the files exactly as
+   * they went out. Mostly, because the fortnight is there for the week-later
+   * follow-up — a letter rewritten because they asked for it again is in the
+   * space and not in the record, and it is precisely the thing somebody would
+   * come back for. So this goes through `removeWhatIsFiled`, like the resume
+   * sweep: filed first, and never taken unless the version history can be
+   * seen to have it.
    */
   const KEEP_SENT_FOR_DAYS = 14;
 
   /** Let go of the spaces that have been sent and untouched since. */
-  const retireStaleDrafts = (): void => {
+  const retireStaleDrafts = async (): Promise<void> => {
     const cutoff = Date.now() - KEEP_SENT_FOR_DAYS * 24 * 60 * 60 * 1000;
-    for (const draft of store.loadDrafts()) {
-      if (draft.status !== 'submitted') continue;
+    const going = store.loadDrafts().filter((draft) => {
+      if (draft.status !== 'submitted') return false;
       const touched = Date.parse(draft.updatedAt ?? '');
       // An unparseable date is not a reason to delete somebody's work.
-      if (Number.isFinite(touched) && touched < cutoff) store.deleteDraft(draft.id);
-    }
+      return Number.isFinite(touched) && touched < cutoff;
+    });
+    if (going.length === 0) return;
+
+    const name = (d: Draft) => `${d.company} — ${d.role}`;
+    await removeWhatIsFiled(
+      repo,
+      store.root,
+      going.map((draft) => ({ paths: [`drafts/${draft.id}.yaml`], what: draft })),
+      {
+        filing: `File ${going.map(name).join(', ')} before closing the space`,
+        removing: (closed) =>
+          `Close the workspace for ${closed.map(name).join(', ')} — sent, and quiet since`,
+      },
+      (draft) => store.deleteDraft(draft.id),
+    );
   };
 
   api.get(
     '/workspace',
     handler(async (_req, res) => {
-      retireStaleDrafts();
+      /*
+       * Not fatal to the list. Retiring is housekeeping, and a save whose git
+       * is not answering should still show somebody the applications they are
+       * in the middle of writing.
+       */
+      await retireStaleDrafts().catch(() => undefined);
       res.json({ drafts: store.loadDrafts() });
     }),
   );

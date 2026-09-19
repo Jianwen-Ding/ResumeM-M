@@ -523,3 +523,59 @@ export async function cloneRepo(url: string, into: string): Promise<void> {
     throw new Error(`git clone failed: ${said.split('\n').slice(-2).join(' ') || 'unknown error'}`);
   }
 }
+
+/**
+ * Take things away, and only ones the version history already has.
+ *
+ * The two places this program deletes something nobody asked it to — the
+ * sweep that removes a resume built for one posting, and the retirement that
+ * closes a workspace a fortnight after it was sent — are both acceptable for
+ * the same reason: it is all still in the history. That argument has a hole
+ * in it, and both of them fell through it. Committing the *deletion* of a
+ * file git has never seen recovers nothing, and a file can easily have never
+ * been seen: auto-commit is a setting people switch off, and even left on, a
+ * commit that fails is a console warning with no retry.
+ *
+ * So whatever is about to go is filed first — scoped to those files, because
+ * the rest of the save is somebody's work in progress and this is no reason
+ * to commit it for them — and then what actually goes is held to what git can
+ * be seen to have. Filing is the fix; the check is the part that cannot be
+ * wrong, because it asks rather than assuming the filing worked. What is held
+ * back is handed to the caller to report: somebody pressed a button, or
+ * opened a list, and is owed a reason.
+ *
+ * One commit for the lot on each side. A deletion spread over eleven commits
+ * buries the history it is meant to be recoverable from.
+ */
+export async function removeWhatIsFiled<T>(
+  repo: Repo,
+  root: string,
+  going: { paths: string[]; what: T }[],
+  messages: { filing: string; removing: (removed: T[]) => string },
+  remove: (what: T) => void,
+): Promise<{ removed: T[]; held: T[] }> {
+  if (going.length === 0) return { removed: [], held: [] };
+
+  const onDisk = going.flatMap((g) => g.paths.filter((p) => fs.existsSync(path.join(root, p))));
+  await repo.commitAll(messages.filing, onDisk).catch(() => undefined);
+
+  let filed: Set<string>;
+  try {
+    const [head] = await repo.log(1);
+    filed = head ? new Set((await repo.treeAt(head.hash)).keys()) : new Set();
+  } catch {
+    // Git is not answering. Nothing is known to be recoverable, so nothing is.
+    filed = new Set();
+  }
+
+  const taking = going.filter((g) => g.paths.some((p) => filed.has(p)));
+  const held = going.filter((g) => !taking.includes(g)).map((g) => g.what);
+  if (taking.length === 0) return { removed: [], held };
+
+  // `true` whatever auto-commit is set to: that setting is about whether your
+  // *edits* are recorded as you make them, and this is not an edit you made.
+  await withCommit(repo, true, messages.removing(taking.map((g) => g.what)), () => {
+    for (const g of taking) remove(g.what);
+  });
+  return { removed: taking.map((g) => g.what), held };
+}

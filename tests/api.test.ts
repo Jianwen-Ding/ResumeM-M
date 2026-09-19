@@ -1441,6 +1441,9 @@ describe('workspace', () => {
    * live work instead of becoming a second, worse tracker.
    */
   it('keeps a sent workspace, and lets it go once it is a fortnight stale', async () => {
+    // A repository, because a space is only ever closed once the history has
+    // it — see the test below, and `removeWhatIsFiled`.
+    await repo.ensure();
     const { body } = await open().expect(200);
     const id = body.draft.id;
     const age = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -1470,6 +1473,65 @@ describe('workspace', () => {
     leave('submitted', 15);
     list = await request(app).get('/api/workspace').expect(200);
     expect(list.body.drafts).toHaveLength(0);
+  });
+
+  /*
+   * And it is in the history when it goes, which is the only thing that makes
+   * closing it on somebody's behalf acceptable.
+   *
+   * "What is lost is the editing surface, not the content" is true of the
+   * letter that was sent — the application record has that — and not of the
+   * one rewritten a week later because they asked for it again. That lives in
+   * the space and nowhere else, and it is exactly what the fortnight is for.
+   * Auto-commit is off in this fixture, as it is in any save where somebody
+   * has switched it off, so nothing had committed the space at all: it was
+   * unlinked, and the rewrite went with it.
+   */
+  it('files a sent workspace before closing it', async () => {
+    await repo.ensure();
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const sent = t.store.getDraft(id)!;
+    // Rewritten after sending — the thing the application record does not have.
+    t.store.saveDraft({
+      ...sent,
+      status: 'submitted',
+      coverLetter: { ...sent.coverLetter, body: 'The one they asked me to send again.' },
+    });
+    const file = path.join(t.dir, 'drafts', `${id}.yaml`);
+    const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
+
+    await request(app).get('/api/workspace').expect(200);
+
+    expect(fs.existsSync(file)).toBe(false);
+    const holds = await Promise.all(
+      (await repo.log(10)).map(async (entry) => (await repo.treeAt(entry.hash)).get(`drafts/${id}.yaml`)),
+    );
+    const objectId = holds.find(Boolean);
+    expect(objectId, 'no commit in the history holds the closed workspace').toBeTruthy();
+    expect(await repo.blob(objectId!)).toContain('asked me to send again');
+  });
+
+  /*
+   * And when it cannot be filed it is not taken. A save that is not a
+   * repository at all — which is every save until somebody presses Save, and
+   * any save whose git has stopped answering — is one where closing a space
+   * would be the one act here that cannot be undone.
+   */
+  it('keeps one it could not file, rather than closing it anyway', async () => {
+    const { body } = await open().expect(200);
+    const id = body.draft.id;
+    const sent = t.store.getDraft(id)!;
+    t.store.saveDraft({ ...sent, status: 'submitted' });
+    const file = path.join(t.dir, 'drafts', `${id}.yaml`);
+    const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
+
+    const list = await request(app).get('/api/workspace').expect(200);
+
+    expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
+    expect(fs.existsSync(file)).toBe(true);
   });
 
   it('falls back to the closest previous letter when the AI is off', async () => {
