@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { PLACEHOLDER_NAME } from './resolve.js';
 import { Store } from './store.js';
 
 export const projectsFile = () => process.env.RMM_PROJECTS_FILE || path.join(os.homedir(), '.resumem-m', 'projects.json');
@@ -86,7 +87,7 @@ export function prepareProject(current: Store | undefined, input: string, mode: 
         fs.cpSync(oldOutput, path.join(stage, 'out'), { recursive: true, dereference: true });
       }
     } else {
-      staged.saveProfile({ name: 'Your Name' });
+      staged.saveProfile({ name: PLACEHOLDER_NAME });
       staged.saveResume({ id: 'base', label: 'My resume', tier: 'base', sections: [
         { kind: 'education', entries: [] }, { kind: 'experience', entries: [] },
         { kind: 'project', entries: [] }, { kind: 'skills', entries: [], groups: [] },

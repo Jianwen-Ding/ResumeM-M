@@ -1,5 +1,6 @@
 import YAML from 'yaml';
 import { normalizeEntries, normalizeProfile, normalizeSkillGroups } from './normalize.js';
+import { PLACEHOLDER_NAME } from './resolve.js';
 import type { Entry, Profile, ResumeSpec, SkillGroup, StoreData } from './types.js';
 
 /**
@@ -60,7 +61,7 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
      * the timeline then described a real regression (the name gone from the
      * PDF) as the name having been changed to that.
      */
-    profile: normalizeProfile(parse<Profile>(files.get('profile.yaml'), { name: 'Your Name' })),
+    profile: normalizeProfile(parse<Profile>(files.get('profile.yaml'), { name: PLACEHOLDER_NAME })),
     entries: normalizeEntries(entries),
     /*
      * And the skill groups, for the same reason the profile is. A group with

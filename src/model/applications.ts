@@ -6,7 +6,7 @@ import type { Store } from './store.js';
 import type { Application, ApplicationStatus, ResolvedResume } from './types.js';
 import { compileLetter, compileResume } from '../render/compile.js';
 import { syncCurrent } from './current.js';
-import { resolveResume } from './resolve.js';
+import { resolveResume, unsendableReason } from './resolve.js';
 
 /**
  * One hyphenated part of a filename.
@@ -341,6 +341,17 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
 async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data = store.load();
   const resolved: ResolvedResume = resolveResume(req.resumeId, data);
+
+  /*
+   * Before anything is compiled, named or filed — see `unsendableReason`.
+   *
+   * This is the last point at which a document is still nobody's but yours.
+   * Past here it is a PDF with a name on it, an application marked as sent,
+   * and a file in the folder a portal's picker is pointed at, and every one
+   * of those steps used to report success over a page headed "Your Name".
+   */
+  const unsendable = unsendableReason(resolved.profile);
+  if (unsendable) throw new Error(unsendable);
   /*
    * Taken here, beside the resolve, and not read again when the snapshot is
    * written further down.
