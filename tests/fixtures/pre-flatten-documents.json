@@ -1,0 +1,1039 @@
+{
+  "awards": {
+    "label": "With awards",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.5,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected May 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Algorithms, Databases, Operating Systems"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "TypeScript",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "custom",
+        "heading": "Awards",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "custom",
+        "heading": "Leadership",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      }
+    ]
+  },
+  "awards-child": {
+    "label": "Awards child",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.5,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected May 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Algorithms, Databases, Operating Systems"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "TypeScript",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "custom",
+        "heading": "Awards",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "custom",
+        "heading": "Leadership",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          },
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      }
+    ]
+  },
+  "base": {
+    "label": "Base resume",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.5,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected May 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Algorithms, Databases, Operating Systems"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "TypeScript",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "hidden": {
+    "label": "One line hidden",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.5,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected May 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Algorithms, Databases, Operating Systems"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "TypeScript",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "leaf": {
+    "label": "Leaf",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.75,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected May 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Operating Systems, Algorithms"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "SWE Co-op, Acme",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_kafka",
+                "text": "Built a Kafka pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "TypeScript",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "mid": {
+    "label": "Middle",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.5,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected May 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Operating Systems, Algorithms"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_kafka",
+                "text": "Built a Kafka pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "TypeScript",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "narrow": {
+    "label": "Narrowed skills",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.5,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected May 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Algorithms, Databases, Operating Systems"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "newgrad": {
+    "label": "New grad",
+    "profile": {
+      "name": "Test Person",
+      "email": "test@example.com",
+      "phone": "555-0100"
+    },
+    "layout": {
+      "fontSizePt": 11,
+      "marginIn": 0.5,
+      "spacing": 1,
+      "paper": "letter",
+      "autoFit": true,
+      "fitBounds": {
+        "minFontSizePt": 10,
+        "minSpacing": 0.92,
+        "minMarginIn": 0.4
+      },
+      "maxPages": 1
+    },
+    "sections": [
+      {
+        "kind": "education",
+        "heading": "Education",
+        "entries": [
+          {
+            "id": "edu_neu",
+            "kind": "education",
+            "title": "Northeastern University",
+            "dates": "Expected December 2026",
+            "subtitle": "BS Computer Science",
+            "bullets": [
+              {
+                "id": "b_course",
+                "variantId": "__list__",
+                "text": "Algorithms, Databases, Operating Systems"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "experience",
+        "heading": "Experience",
+        "entries": [
+          {
+            "id": "exp_acme",
+            "kind": "experience",
+            "title": "Software Engineer Co-op, Acme Co.",
+            "subtitle": "Boston, MA",
+            "bullets": [
+              {
+                "id": "b_pipeline",
+                "variantId": "v_generic",
+                "text": "Built a data pipeline handling ten million rows a day."
+              },
+              {
+                "id": "b_testing",
+                "variantId": "v_tests",
+                "text": "Raised test coverage from forty to ninety per cent."
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "project",
+        "heading": "Projects",
+        "entries": [
+          {
+            "id": "proj_thing",
+            "kind": "project",
+            "title": "A Thing",
+            "bullets": [
+              {
+                "id": "b_thing",
+                "variantId": "v_thing",
+                "text": "Wrote a thing that does the thing."
+              },
+              {
+                "id": "b_stack",
+                "variantId": "__list__",
+                "text": "Postgres, React"
+              }
+            ]
+          }
+        ],
+        "skillGroups": []
+      },
+      {
+        "kind": "skills",
+        "heading": "Technical Skills",
+        "entries": [],
+        "skillGroups": [
+          {
+            "id": "sk_lang",
+            "name": "Languages",
+            "items": [
+              "Python",
+              "TypeScript",
+              "Go"
+            ]
+          },
+          {
+            "id": "sk_tools",
+            "name": "Tools",
+            "items": [
+              "Git"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -268,7 +268,14 @@ describe('editing a variation', () => {
 
   const written = (id) => requests.filter((r) => r.method === 'PUT' && r.url.includes(`/resumes/${id}`)).pop()?.body;
 
-  it('records a hidden bullet without pinning the entry list', async () => {
+  it('records a hidden bullet, and leaves the rest of the resume as it was', async () => {
+    /*
+     * Snapshotted before the click, not read back after it: the fake API
+     * writes the saved spec into `data`, so reading it afterwards compares
+     * the write against itself and passes whatever happened.
+     */
+    const before = structuredClone(data.resumes.find((r) => r.id === 'newgrad').sections ?? []);
+
     // Switch off one bullet of one entry on the variation.
     const rows = [...document.querySelectorAll('#editor .bullet-row input[type=checkbox], #editor .bullet input[type=checkbox]')];
     const box = rows.find((b) => !b.disabled);
@@ -283,14 +290,17 @@ describe('editing a variation', () => {
     expect(touched.length, 'the section holding the bullet').toBeGreaterThan(0);
 
     /*
-     * And nothing else came down with it. Writing the flattened chain back
-     * copied every inherited section into the variation, after which entries
-     * later added to the base arrived switched off rather than inherited.
+     * And nothing else moved.
+     *
+     * This used to be an assertion that the untouched sections stayed
+     * *absent*, because absent meant inherited and writing them down pinned
+     * the variation to the entries its base had at that moment. Resumes stand
+     * alone now, so every section is written every time and the question is
+     * the simpler one it always should have been: did hiding one line change
+     * anything other than that line?
      */
-    for (const section of spec.sections ?? []) {
-      if (section.bullets && Object.keys(section.bullets).length) continue;
-      expect(section.entries, `${section.kind} should still be inherited`).toBeUndefined();
-    }
+    const untouched = (s) => ({ ...s, bullets: undefined });
+    expect((spec.sections ?? []).map(untouched)).toEqual(before.map(untouched));
   });
 });
 

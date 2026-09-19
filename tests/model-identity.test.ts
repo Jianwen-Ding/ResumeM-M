@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mergeSections, resolveResume } from '../src/model/resolve.js';
+import { mergeSections } from '../src/model/flatten.js';
+import { resolveResume } from '../src/model/resolve.js';
 import type { Entry, SectionSpec } from '../src/model/types.js';
 import { makeTempStore } from './helpers.js';
 
@@ -104,7 +105,13 @@ describe('an archived entry', () => {
   });
 });
 
-describe('a child resume overriding one section', () => {
+/*
+ * `mergeSections` is migration-only now — resumes stand alone, and this runs
+ * only when folding a save written by a version that inherited. The rules it
+ * has to keep are exactly the ones below, because getting any of them wrong
+ * changes a document the migration promised not to change.
+ */
+describe('folding one section over another', () => {
   const custom = (heading: string, entries: string[]): SectionSpec =>
     ({ kind: 'custom', heading, entries }) as SectionSpec;
 

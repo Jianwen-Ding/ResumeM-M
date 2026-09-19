@@ -14,13 +14,26 @@ describe('which resume you start from', () => {
     expect(defaultBaseId([spec('intern'), spec('newgrad')])).toBe('newgrad');
   });
 
-  it('prefers a resume nothing extends over one three levels deep', () => {
-    const resumes = [spec('tailored', { extends: 'systems' }), spec('systems')];
+  /*
+   * A store fills up with resumes copied off postings that closed months ago.
+   * One somebody actually wrote is a better guess at "where do I start" than
+   * the leftovers of an application sent in March, whichever sorted first.
+   */
+  it('prefers a resume somebody wrote over one copied off a posting', () => {
+    const resumes = [spec('tailored', { copiedFrom: 'systems' }), spec('systems')];
+    expect(defaultBaseId(resumes)).toBe('systems');
+  });
+
+  it('counts a resume the extension generated as one of those leftovers', () => {
+    const resumes = [
+      spec('job-adobe', { generatedFor: { company: 'Adobe' } }),
+      spec('systems'),
+    ];
     expect(defaultBaseId(resumes)).toBe('systems');
   });
 
   it('takes whatever is there rather than nothing', () => {
-    expect(defaultBaseId([spec('only', { extends: 'gone' })])).toBe('only');
+    expect(defaultBaseId([spec('only', { copiedFrom: 'gone' })])).toBe('only');
     expect(defaultBaseId([])).toBeUndefined();
   });
 
@@ -62,17 +75,17 @@ describe('building a posting’s copy again', () => {
   const adobe = 'job-adobe-2027-intern-software-engineer';
 
   it('takes what was asked for when it is not the copy itself', () => {
-    const resumes = [spec('newgrad'), spec('intern'), spec(adobe, { extends: 'newgrad' })];
+    const resumes = [spec('newgrad'), spec('intern'), spec(adobe, { copiedFrom: 'newgrad' })];
     expect(baseForCopy(resumes, 'intern', adobe)).toBe('intern');
   });
 
-  it('builds from the copy’s own parent when the copy is what was asked for', () => {
-    const resumes = [spec('newgrad'), spec('intern'), spec(adobe, { extends: 'intern' })];
+  it('builds from where the copy came from when the copy is what was asked for', () => {
+    const resumes = [spec('newgrad'), spec('intern'), spec(adobe, { copiedFrom: 'intern' })];
     expect(baseForCopy(resumes, adobe, adobe)).toBe('intern');
   });
 
-  it('walks the chain, because a parent can be a copy of a copy', () => {
-    const resumes = [spec('newgrad'), spec(adobe, { extends: adobe })];
+  it('walks the record, because a copy can be a copy of a copy', () => {
+    const resumes = [spec('newgrad'), spec(adobe, { copiedFrom: adobe })];
     expect(baseForCopy(resumes, adobe, adobe)).toBe('newgrad');
   });
 
@@ -81,15 +94,15 @@ describe('building a posting’s copy again', () => {
    * and fail two lines later as `No resume "…"`, which says nothing about
    * what went wrong or what to do.
    */
-  it('falls back to the store’s default when the copy has no parent left', () => {
-    const gone = [spec('newgrad'), spec(adobe, { extends: 'a-resume-that-is-gone' })];
+  it('falls back to the store’s default when the copy’s source is gone', () => {
+    const gone = [spec('newgrad'), spec(adobe, { copiedFrom: 'a-resume-that-is-gone' })];
     expect(baseForCopy(gone, adobe, adobe)).toBe('newgrad');
     // And where it never named one either.
     expect(baseForCopy([spec('newgrad'), spec(adobe)], adobe, adobe)).toBe('newgrad');
   });
 
   it('never answers with the copy, even in a store that has nothing else', () => {
-    expect(baseForCopy([spec(adobe, { extends: adobe })], adobe, adobe)).toBeUndefined();
+    expect(baseForCopy([spec(adobe, { copiedFrom: adobe })], adobe, adobe)).toBeUndefined();
   });
 
   it('still picks a default when nothing was asked for', () => {

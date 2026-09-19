@@ -40,11 +40,12 @@ import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
+import { flattenOne } from '../model/flatten.js';
 import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
-import { buildMaster, flattenSpec, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
+import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
 import type { Store } from '../model/store.js';
 import { DEFAULT_LAYOUT, isVariantField } from '../model/types.js';
@@ -507,37 +508,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
 
       /*
-       * A resume cannot be based on itself, or on anything based on it.
+       * A write that still says `extends` is folded before it lands.
        *
-       * Nothing checked before, on any write — the endpoint took whatever
-       * `extends` it was handed. The two callers that could get it wrong have
-       * both been fixed at their own end, but the rule belongs here: the CLI
-       * and the MCP tools write through this too, and a loop is not something
-       * to find out about later from a resume that will not open.
+       * Resumes stand alone, but this endpoint is what the CLI, the MCP tools
+       * and any older client write through, and one of those may still be
+       * sending the shape a previous version used. Refusing it would break a
+       * client for saying something that used to be true; storing it would
+       * put a field back on disk that nothing downstream reads, so the resume
+       * would silently lose whatever the base was contributing. Folding it in
+       * writes down exactly what that client meant.
        */
-      if (spec.extends) {
-        const all = store.load().resumes;
-        const seen = new Set<string>([spec.id]);
-        let at: string | undefined = spec.extends;
-        while (at) {
-          if (seen.has(at)) {
-            throw new Error(
-              `"${spec.id}" cannot be based on "${spec.extends}" — that would make it inherit from itself.`,
-            );
-          }
-          seen.add(at);
-          at = all.find((r) => r.id === at)?.extends;
-        }
-      }
+      const flat = spec.extends ? flattenOne(spec, store.loadResumes()) : spec;
 
       // `?commit=0` writes without committing. The editor auto-saves as you
       // work, and a commit per keystroke would bury the history it feeds; it
       // commits once the editing stops, through /store/save.
       const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
-      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${spec.id}"`, () =>
-        store.saveResume(spec),
+      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${flat.id}"`, () =>
+        store.saveResume(flat),
       );
-      res.json(spec);
+      res.json(flat);
     }),
   );
 
@@ -1974,16 +1964,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * application form, and there is more than one of those. Named for
        * where it came from instead — see `employerFallback`.
        */
-      /*
-       * What the base asks for on skills, with what it inherits folded in.
-       *
-       * Read from the flattened base rather than `base.sections` because a
-       * base that extends another one may hold none of this itself, and "the
-       * base has no opinion" and "the base's parent has one" are different
-       * answers — the second is the one that has to come back when a skills
-       * swap is undone.
-       */
-      const baseSkillItems = flattenSpec(base, data.resumes).sections?.find((s) => s.kind === 'skills')?.items;
+      /* What the base asks for on skills, which is what undoing a swap restores. */
+      const baseSkillItems = base.sections?.find((s) => s.kind === 'skills')?.items;
 
       const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${employer}`, finalMatch, {
         url,
@@ -2212,22 +2194,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           : [];
 
       /*
-       * The base by the name its owner gave it.
+       * Where it was copied from, by the name its owner gave it.
        *
-       * `extends` is an id, and the detail pane printed it raw — "Built on
+       * `copiedFrom` is an id, and the detail pane printed it raw — "Built on
        * base." is not a sentence, it is a filename with a full stop after it.
        * Resolved here because the pane has only this one response to work
        * from and no reason to hold the whole store.
        */
       const sent = app.resumeId ? (store.getResume(app.resumeId) ?? null) : null;
-      const extendsLabel = sent?.extends
-        ? (store.getResume(sent.extends)?.label ?? sent.extends)
+      const copiedFromLabel = sent?.copiedFrom
+        ? (store.getResume(sent.copiedFrom)?.label ?? sent.copiedFrom)
         : undefined;
 
       res.json({
         application: app,
         resume: sent,
-        extendsLabel,
+        copiedFromLabel,
         letter: letter ?? (app.coverLetter ? { id: null, body: app.coverLetter, title: 'As sent' } : null),
         files,
         dir: dir ?? null,
@@ -2744,13 +2726,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const { baseResumeId, label } = req.body as { baseResumeId?: string; label?: string };
       const data = store.load();
 
-      // What it inherits from. Never the draft's own tailored copy, or the
-      // variation would inherit from a thing it is meant to sit beside.
+      // What it is copied from. Never the draft's own tailored copy: that one
+      // has already been narrowed for this posting, so starting from it would
+      // narrow what was narrowed rather than give the variation a fair start.
       let baseId = baseResumeId ?? draft.resumeId ?? defaultBaseId(data.resumes);
       const seen = new Set<string>();
       while (baseId && data.resumes.find((r) => r.id === baseId)?.generatedFor && !seen.has(baseId)) {
         seen.add(baseId);
-        baseId = data.resumes.find((r) => r.id === baseId)?.extends ?? defaultBaseId(data.resumes);
+        baseId = data.resumes.find((r) => r.id === baseId)?.copiedFrom ?? defaultBaseId(data.resumes);
       }
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');
@@ -2761,12 +2744,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let id = wanted;
       for (let n = 2; data.resumes.some((r) => r.id === id); n++) id = `${wanted}-${n}`.slice(0, 60);
 
+      /*
+       * A copy of the base, not a link to it. What the base selects comes
+       * across whole — an empty variation used to mean "everything the base
+       * shows", and it has to go on meaning that now that nothing resolves
+       * through the base at render time.
+       */
       const spec: ResumeSpec = {
+        ...base,
         id,
         label: label?.trim() || `${draft.role} — ${draft.company}`,
-        extends: base.id,
+        copiedFrom: base.id,
+        tier: 'temporary',
         generatedFor: { url: draft.url, company: draft.company, role: draft.role, at: new Date().toISOString() },
       };
+      // The base's identity, as opposed to its contents, stays with the base.
+      delete spec.base;
+      delete spec.notes;
+      delete spec.collapsed;
+      delete spec.extends;
 
       await withCommit(repo, autoCommit(), `Start a resume variation for ${draft.company}`, () =>
         store.saveResume(spec),
@@ -3457,16 +3453,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * the document unchanged, and not even a commit in the timeline to show
        * for it.
        *
-       * What is restored is this resume's own file, and nothing else. Anything
-       * it inherits belongs to every other resume too, and silently rewriting
-       * those is worse than not restoring: this used to walk the whole
-       * `extends` chain and write every ancestor back at the old commit's
-       * content, so rolling one tailored variation back to last week's version
-       * also rolled `base` back — and with it every other variation that
-       * inherits from `base`. A week of work on the shared resume, gone, under
-       * a confirmation that said only "the current version will be replaced"
-       * and a reply carrying no warnings, because the check below re-resolves
-       * the restored resume, which of course now matches.
+       * What is restored is this resume's own file, and nothing else. The
+       * text it points at belongs to every other resume too, and silently
+       * rewriting that is worse than not restoring: back when resumes
+       * inherited, this walked the whole chain and wrote every ancestor back
+       * at the old commit's content, so rolling one tailored variation back to
+       * last week's version also rolled `base` back — and with it every other
+       * variation built on `base`. A week of work on the shared resume, gone,
+       * under a confirmation that said only "the current version will be
+       * replaced" and a reply carrying no warnings, because the check below
+       * re-resolves the restored resume, which of course now matches.
        *
        * So the result is checked against the version that was asked for, and
        * whatever still differs is named rather than forced.

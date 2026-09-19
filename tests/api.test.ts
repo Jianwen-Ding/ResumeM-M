@@ -172,7 +172,7 @@ describe('job analysis', () => {
     expect(res.body.isJobPosting).toBe(true);
     expect(res.body.job.company).toBe('Streamly');
     expect(res.body.job.keywords).toContain('kafka');
-    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.copiedFrom).toBe('intern');
     expect(res.body.spec.choices.b_pipeline).toBe('v_kafka');
   });
 
@@ -412,10 +412,20 @@ describe('job analysis', () => {
 
     expect(res.body.tailor).toBe('none');
     // Still a spec of its own, so the folder and the history name the posting.
-    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.copiedFrom).toBe('intern');
     expect(res.body.spec.generatedFor.company).toBe('Streamly');
-    // And it selects nothing, so it resolves to exactly the base.
-    expect(res.body.spec.choices).toEqual({});
+    /*
+     * And it decides nothing of its own, so it resolves to exactly the base.
+     * A copy rather than a link, so what it holds *is* the base's selections
+     * — the claim is that none of them were changed, which the empty diff is
+     * the direct statement of.
+     */
+    // Through `load`, not `getResume`: the deriving reads the normalised
+    // store, where a section that has never said how it wants to be ordered
+    // has taken over its own date order. See `adoptDateOrder`.
+    const base = t.store.load().resumes.find((r) => r.id === 'intern');
+    expect(res.body.spec.choices).toEqual(base?.choices ?? {});
+    expect(res.body.spec.sections).toEqual(base?.sections);
     expect(res.body.diff).toEqual([]);
     expect(res.body.rationale).toEqual([]);
   });
@@ -1890,45 +1900,50 @@ describe('a resume id the save cannot hold', () => {
 });
 
 /*
- * A saved loop is the one fault that hides the controls for fixing itself:
- * every read of the resume went through the resolver, so the editor would not
- * open the resume whose base you needed to change. The resolver no longer
- * throws on it, but the write is where the loop should never have got through.
+ * A write that still names a base is folded, not refused.
+ *
+ * This endpoint is what the CLI, the MCP tools and any older client save
+ * through, and one of those may still be sending the shape a previous version
+ * used. Refusing it would break a client for saying something that used to be
+ * true. Storing it would put a field on disk that nothing reads, so the resume
+ * would silently lose whatever the base was contributing — which is how a
+ * store ends up disagreeing with the document it prints.
  */
-describe('a base that would make a resume inherit from itself', () => {
-  it('refuses a resume based on itself, and names both ends', async () => {
+describe('a resume saved with a base it used to inherit from', () => {
+  it('folds what the base contributed into the file it writes', async () => {
     const res = await request(app)
-      .put('/api/resumes/intern')
-      .send({ label: 'Summer intern', extends: 'intern' })
-      .expect(400);
-
-    expect(res.body.error).toContain('intern');
-    expect(res.body.error).toMatch(/inherit from itself/i);
-    // And the resume that was already there is untouched by the attempt.
-    expect(t.store.getResume('intern')?.extends).toBe('base');
-  });
-
-  it('refuses a loop closed through a chain, not only a direct one', async () => {
-    t.store.saveResume({ id: 'mid', label: 'Middle', extends: 'intern' });
-    t.store.saveResume({ id: 'leaf', label: 'Leaf', extends: 'mid' });
-
-    // `intern` is above both, so pointing it at `leaf` closes intern→leaf→mid→intern.
-    const res = await request(app)
-      .put('/api/resumes/intern')
-      .send({ label: 'Summer intern', extends: 'leaf' })
-      .expect(400);
-
-    expect(res.body.error).toMatch(/inherit from itself/i);
-    expect(t.store.getResume('intern')?.extends).toBe('base');
-  });
-
-  it('still allows a base that is merely deep', async () => {
-    t.store.saveResume({ id: 'mid', label: 'Middle', extends: 'intern' });
-    await request(app)
-      .put('/api/resumes/leaf')
-      .send({ label: 'Leaf', extends: 'mid' })
+      .put('/api/resumes/oldshape')
+      .send({ label: 'Old shape', extends: 'base', choices: { b_pipeline: 'v_kafka' } })
       .expect(200);
-    expect(t.store.getResume('leaf')?.extends).toBe('mid');
+
+    expect(res.body.extends).toBeUndefined();
+    expect(res.body.copiedFrom).toBe('base');
+    // What the base was giving it is in the file now, not behind a link.
+    expect(res.body.sections?.length).toBeGreaterThan(0);
+    expect(res.body.choices.b_pipeline).toBe('v_kafka');
+    expect(t.store.getResume('oldshape')?.extends).toBeUndefined();
+  });
+
+  it('takes a self-naming base without hanging or throwing', async () => {
+    // The shape a real store arrived in, and the one that used to make the
+    // resume unopenable: it was saved, and every read of it raised.
+    const res = await request(app)
+      .put('/api/resumes/selfy')
+      .send({ label: 'Selfy', extends: 'selfy', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    expect(res.body.extends).toBeUndefined();
+    expect(res.body.choices.b_pipeline).toBe('v_kafka');
+  });
+
+  it('takes a base the save does not have, rather than losing the write', async () => {
+    const res = await request(app)
+      .put('/api/resumes/orphan')
+      .send({ label: 'Orphan', extends: 'a-resume-that-is-gone', choices: { b_pipeline: 'v_kafka' } })
+      .expect(200);
+
+    expect(res.body.extends).toBeUndefined();
+    expect(res.body.choices.b_pipeline).toBe('v_kafka');
   });
 });
 
@@ -2155,10 +2170,17 @@ describe('pinning', () => {
 
     const res = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
 
-    // A thin selection over the base, not a copy of it: nothing decided yet,
-    // because deciding is what you are about to go and do.
-    expect(res.body.spec.extends).toBeTruthy();
-    expect(res.body.spec.choices).toBeUndefined();
+    /*
+     * A copy of the base, with nothing changed yet — because changing it is
+     * what you are about to go and do. It has to arrive holding what the base
+     * holds: an empty variation used to mean "everything the base shows"
+     * because it resolved through the base, and it still has to mean that now
+     * that nothing does.
+     */
+    const base = t.store.load().resumes.find((r) => r.id === res.body.spec.copiedFrom);
+    expect(res.body.spec.copiedFrom).toBeTruthy();
+    expect(res.body.spec.choices).toEqual(base?.choices);
+    expect(res.body.spec.sections).toEqual(base?.sections);
     expect(res.body.spec.label).toBe('Platform Engineer — Altair Labs');
     expect(res.body.draft.resumeId).toBe(res.body.spec.id);
     // The way there and the way back, in one link, so the two ends cannot
@@ -2172,7 +2194,7 @@ describe('pinning', () => {
     expect(again.body.spec.id).not.toBe(res.body.spec.id);
     // And the second inherits from the base, never from the first — a
     // variation of a variation of a variation is how a store becomes a maze.
-    expect(again.body.spec.extends).toBe(res.body.spec.extends);
+    expect(again.body.spec.copiedFrom).toBe(res.body.spec.copiedFrom);
   });
 
   it('refuses to start a variation for a draft that is not there', async () => {
@@ -2259,6 +2281,6 @@ describe('pinning', () => {
       .post('/api/extension/analyze')
       .send({ html: JOB_HTML, url: 'https://example.com/job' })
       .expect(200);
-    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.copiedFrom).toBe('intern');
   });
 });

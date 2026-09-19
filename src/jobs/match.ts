@@ -1,6 +1,5 @@
 import type { ResumeSpec, StoreData, Variant } from '../model/types.js';
 import { isVariantField } from '../model/types.js';
-import { flattenSpec } from '../model/resolve.js';
 import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
 
 /**
@@ -205,11 +204,18 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
 }
 
 /**
- * Build a posting-specific resume spec from a base one. It inherits rather
- * than copies, so later edits to the base still reach it.
+ * Build a posting-specific resume spec by copying a base one.
  *
- * `all` is every resume in the store, which is needed to see what the base
- * inherits — see `buildSkillSections`.
+ * A copy, not a link. This used to record `extends: base.id` and a handful of
+ * overrides, so what the resume actually contained was worked out at render
+ * time by laying one spec over another — which meant the file did not say
+ * what the document was, and a copy made from a copy grew a chain nobody had
+ * chosen. Resumes stand alone now: the base's selections come across whole,
+ * the posting's changes are laid over them here, once, and from then on
+ * editing either one leaves the other exactly as it was.
+ *
+ * `all` is no longer needed to know what the base holds, and is kept only so
+ * the callers that pass it do not all have to change at once.
  */
 export function deriveSpec(
   base: ResumeSpec,
@@ -217,52 +223,61 @@ export function deriveSpec(
   label: string,
   match: MatchResult,
   meta: { url?: string; company?: string; role?: string },
-  all: ResumeSpec[] = [],
+  _all: ResumeSpec[] = [],
 ): ResumeSpec {
-  const sections =
-    Object.keys(match.skills).length > 0 ? buildSkillSections(base, match.skills, all) : undefined;
-  return {
+  const spec: ResumeSpec = {
+    ...base,
     id,
     label,
-    extends: base.id,
-    choices: match.choices,
-    ...(sections ? { sections } : {}),
+    /*
+     * The base's choices underneath, the posting's over them. Only the second
+     * half used to be written down, because the first half arrived through
+     * inheritance; dropping it now would quietly revert every wording the
+     * base had pinned back to the store's default.
+     */
+    choices: { ...(base.choices ?? {}), ...match.choices },
+    sections: narrowSkills(base.sections, match.skills),
     generatedFor: { ...meta, at: new Date().toISOString() },
+    /* Where it came from, as a record. Nothing merges behind it. */
+    copiedFrom: base.id,
+    /* Made for one posting, and swept a week after that posting is done. */
+    tier: 'temporary',
   };
+
+  /*
+   * What the base *was*, as opposed to what it contained, does not come
+   * across. A copy is not itself pinned as a base; it did not inherit the
+   * explanation somebody wrote about a different document; and it has its own
+   * `generatedFor`, set above — taking the base's would have it claiming it
+   * was written for a posting it was not.
+   */
+  delete spec.base;
+  delete spec.notes;
+  delete spec.collapsed;
+  delete spec.extends;
+  if (!spec.sections) delete spec.sections;
+  return spec;
 }
 
 /**
- * The skills section, narrowed to what the posting asked for.
+ * The base's sections, with the skills groups narrowed to what the posting
+ * asked for.
  *
- * Looked up on the *flattened* base, not on its own sections. Almost nobody's
- * base states a skills section itself: the usual arrangement is one resume
- * holding the sections and "new grad" and "intern" extending it by a handful
- * of choices, which is the whole point of `extends`. Read off `base.sections`
- * alone, every one of those found nothing here and returned `undefined` — so
- * the match decided which skills to keep, said so in the change list, and the
- * resume that was compiled and sent had every group in full. The proposal and
- * the document disagreed, and the document was the one nobody looked at.
+ * Narrowed in place rather than stated as an override. The override shape —
+ * a bare `{ kind: 'skills', items }` leaning on the merge to supply `groups`
+ * — was the right answer when a resume inherited, and is a section with no
+ * groups at all now that it does not. What a person would have seen is the
+ * skills heading and nothing under it.
  *
- * What comes back states the narrowing and nothing else. It used to be the
- * whole inherited section spread into a new one, which pinned every part of
- * it: `groups` most of all. A skills group added to the base afterwards then
- * never reached a resume tailored before it, because that resume was now
- * saying "these groups, exactly" when all it had ever meant was "fewer items
- * in this one". `mergeSections` lays a child's `items` over the parent's and
- * inherits everything the child leaves out, which is the whole mechanism —
- * so leaving it out is how you use it. The same reasoning is written up over
- * `mergeSections` for entries, where it was learned.
- *
- * `entries` is in the shape because the type requires it and for no other
- * reason: nothing reads it on a skills section, which is resolved from
- * `groups`.
+ * A base with no skills section is left alone: there is nothing to narrow,
+ * and inventing one would print a heading the base never had.
  */
-function buildSkillSections(
-  base: ResumeSpec,
+function narrowSkills(
+  sections: ResumeSpec['sections'],
   skills: Record<string, string[]>,
-  all: ResumeSpec[],
 ): ResumeSpec['sections'] {
-  const flat = base.extends ? flattenSpec(base, all) : base;
-  if (!flat.sections?.some((s) => s.kind === 'skills')) return undefined;
-  return [{ kind: 'skills', entries: [], items: { ...skills } }];
+  if (!sections?.length || Object.keys(skills).length === 0) return sections;
+  return sections.map((s) =>
+    s.kind === 'skills' ? { ...s, items: { ...(s.items ?? {}), ...skills } } : s,
+  );
 }

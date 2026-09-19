@@ -208,7 +208,7 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       for (const r of resumes) {
-        const from = r.extends ? ` (extends ${r.extends})` : '';
+        const from = r.copiedFrom ? ` (copied from ${r.copiedFrom})` : '';
         const n = Object.keys(r.choices ?? {}).length;
         console.log(`  ${r.id.padEnd(20)} ${r.label}${from}  — ${n} choice${n === 1 ? '' : 's'}`);
       }
@@ -231,9 +231,9 @@ async function main(argv: string[]): Promise<number> {
         try {
           /*
            * Inside the try, so `--all` is a batch rather than a queue that
-           * stops at the first problem. One resume with a dangling `extends`
-           * threw out here and killed the run: the rest were never built and
-           * never mentioned, and the exit code said only that something failed.
+           * stops at the first problem. One unresolvable resume threw out here
+           * and killed the run: the rest were never built and never mentioned,
+           * and the exit code said only that something failed.
            */
           const resolved = resolveResume(id, data);
           for (const w of resolved.warnings) console.warn(`  ! ${w}`);

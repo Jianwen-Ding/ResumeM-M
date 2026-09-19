@@ -396,23 +396,28 @@ describe('deleting a variation', () => {
    * goes. Saying so is the difference between a delete somebody makes and one
    * they back away from.
    */
-  it('says what happens to the resumes built on it', async () => {
+  it('says what happens to the resumes copied from it', async () => {
     /*
      * Opened once to find out which resume the editor lands on — that is the
      * store's default base, not whichever happens to be first in the file —
-     * and again with a child of exactly that one. Guessing it would make the
-     * child extend a resume nobody is looking at, and the sentence under test
+     * and again with a copy of exactly that one. Guessing it would record the
+     * copy against a resume nobody is looking at, and the sentence under test
      * would correctly say nothing.
+     *
+     * What the sentence is for: the list shows where each copy came from, so
+     * that name is about to stop resolving. Nothing about the copies changes
+     * — they hold their own sections and always did — and saying so is the
+     * point, because the old behaviour was to rewrite every one of them.
      */
     await open();
     const opensOn = document.querySelector('#resume-select').value;
-    await open({ resumes: (all) => [...all, { id: 'built-on-it', label: 'Built on it', extends: opensOn }] });
+    await open({ resumes: (all) => [...all, { id: 'built-on-it', label: 'Built on it', copiedFrom: opensOn }] });
     expect(document.querySelector('#resume-select').value).toBe(opensOn);
 
     document.querySelector('#btn-delete-resume').click();
     await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
-    expect(modalNote()).toMatch(/1 resume based on it/i);
-    expect(modalNote()).toMatch(/keeps what it gave them/i);
+    expect(modalNote()).toMatch(/1 resume copied from it/i);
+    expect(modalNote()).toMatch(/untouched/i);
     document.querySelector('#modal-cancel').click();
   });
 

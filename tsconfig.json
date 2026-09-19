@@ -14,5 +14,10 @@
     "declaration": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "dist", "web"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "web",
+    "tests/fixtures/make-golden.ts"
+  ]
 }

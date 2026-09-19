@@ -74,24 +74,24 @@ describe('tailoring from a space', () => {
    * The one this endpoint has a comment about, and the reason to test it.
    *
    * The second run finds the space already pointing at the resume the first
-   * run made. Starting from that would make a resume whose `extends` names
-   * itself. Nothing is silently corrupted if it does — `flattenSpec` catches
-   * the loop and the request comes back "Resume inheritance cycle at
-   * job-streamly-intern", which is how this reads with the guard removed. But
-   * an error is what the person gets instead of a resume, on the ordinary act
-   * of tailoring the same posting twice, and the wrong thing is already on
-   * disk by then.
+   * run made. Building from that is the wrong answer, and quietly: the copy's
+   * skills are already narrowed to this posting and its wordings already
+   * chosen for it, so matching it again narrows what was narrowed and each
+   * pass keeps fewer skills than the last. Back when this was a link rather
+   * than a copy it was worse — the resume named itself as its base and every
+   * read of it raised "Resume inheritance cycle" — but the fix is the same
+   * either way: build it again from where it came from.
    */
-  it('does not make a resume that inherits from itself when run twice', async () => {
+  it('does not build a posting’s copy from itself when run twice', async () => {
     serve();
     const draft = await openSpace();
     const first = await tailor(draft.id).expect(200);
     const second = await tailor(first.body.draft.id).expect(200);
 
-    expect(second.body.spec.extends).not.toBe(second.body.spec.id);
+    expect(second.body.spec.copiedFrom).not.toBe(second.body.spec.id);
     const saved = t.store.load().resumes.find((r) => r.id === second.body.spec.id);
-    expect(saved?.extends).not.toBe(saved?.id);
-    // And it still resolves, which is what a self-reference would end.
+    expect(saved?.copiedFrom).not.toBe(saved?.id);
+    // And it still resolves, which is what a self-reference would have ended.
     await request(app).get(`/api/resumes/${encodeURIComponent(second.body.spec.id)}/resolved`).expect(200);
   });
 
@@ -100,14 +100,14 @@ describe('tailoring from a space', () => {
     const draft = await openSpace();
     const first = await tailor(draft.id).expect(200);
     const second = await tailor(first.body.draft.id).expect(200);
-    expect(second.body.spec.extends).toBe(first.body.spec.extends);
+    expect(second.body.spec.copiedFrom).toBe(first.body.spec.copiedFrom);
   });
 
   it('starts from the base it is told to', async () => {
     serve();
     const draft = await openSpace();
     const res = await tailor(draft.id, { baseResumeId: 'intern' }).expect(200);
-    expect(res.body.spec.extends).toBe('intern');
+    expect(res.body.spec.copiedFrom).toBe('intern');
   });
 
   it('says which space it cannot find', async () => {

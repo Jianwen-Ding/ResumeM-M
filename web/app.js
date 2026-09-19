@@ -15,7 +15,7 @@ import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
-import { bulletsAreHandOrdered, mergeSections, orderedBullets } from './sections.js';
+import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -428,44 +428,26 @@ function resumeById(id) {
   return state.store.resumes.find((r) => r.id === id);
 }
 
-/** The `extends` chain, root first. */
-function chain(id) {
-  const out = [];
-  let spec = resumeById(id);
-  const seen = new Set();
-  while (spec && !seen.has(spec.id)) {
-    seen.add(spec.id);
-    out.unshift(spec);
-    spec = spec.extends ? resumeById(spec.extends) : null;
-  }
-  return out;
-}
-
-/** Choices as they resolve today, including unsaved edits. */
+/**
+ * Choices as they resolve today, including unsaved edits.
+ *
+ * One resume's own choices and nothing else. This used to fold in every
+ * ancestor's, because a resume inherited; resumes stand alone now, and a key
+ * absent here still means "whatever the store has pinned as the default",
+ * which is the cascade that actually earns its keep.
+ */
 function effectiveChoices() {
-  return Object.assign({}, ...chain(state.resumeId).map((s) => s.choices ?? {}), state.choices);
+  return { ...(resumeById(state.resumeId)?.choices ?? {}), ...state.choices };
 }
 
-/** Flattened section list through the chain, each child laid over its parent. */
+/** The sections this resume shows. */
 function resolveSections(id = state.resumeId) {
-  /*
-   * Through the shared rule, rather than the `child ?? parent` this used to
-   * do. See web/sections.js: replacing the parent's section outright meant a
-   * child that mentioned only bullets was read as a section with no entries,
-   * so saving a bullet reorder emptied the section out of the editor on the
-   * next load while the PDF went on printing it.
-   */
-  let sections = [];
-  for (const spec of chain(id)) {
-    if (!spec.sections?.length) continue;
-    sections = mergeSections(sections, spec.sections);
-  }
-  return sections;
+  return resumeById(id)?.sections ?? [];
 }
 
 /** Which items a list bullet shows right now, including unsaved edits. */
 function listSelection(bullet) {
-  const saved = Object.assign({}, ...chain(state.resumeId).map((s) => s.lists ?? {}));
+  const saved = resumeById(state.resumeId)?.lists ?? {};
   return state.listEdits?.[bullet.id] ?? saved[bullet.id] ?? bullet.items.map((i) => i.id);
 }
 
@@ -501,59 +483,50 @@ function currentSpec() {
   };
 
   /*
-   * Only what this resume actually changes.
+   * The resume's own sections, with this session's edits written into them.
    *
-   * This wrote the *flattened* chain — the parent's sections with the child's
-   * overrides folded in — back onto the resume being edited. Ticking one bullet
-   * on a variation therefore copied every inherited section down into it, and
-   * from then on the variation was pinned to the entries the base had at that
-   * moment: anything added to the base afterwards arrived switched off.
-   *
-   * A section the user has not touched is left inherited. A section they have
-   * carries only the part they changed, which mergeSections now lays over the
-   * parent's rather than replacing it outright.
+   * There is nothing underneath any more, so "leave it out and it stays
+   * inherited" — which every line below used to be arranged around — no
+   * longer says anything. What the resume holds is what it prints.
    */
   const touchesSections =
     state.skillEdits || state.entryEdits || state.bulletEdits || state.orderEdits || state.bulletOrderEdits;
   if (touchesSections) {
-    const own = new Map((base.sections ?? []).map((s) => [s.kind, s]));
     const sections = [];
 
-    for (const section of resolveSections()) {
-      const mine = own.get(section.kind);
-      const entries = entrySelection(section);
+    /*
+     * The resume's own sections, in place, rather than a map keyed by kind.
+     * A store can hold two `custom` sections — "Awards" and "Leadership" —
+     * and a map keyed by kind silently keeps one of them.
+     */
+    for (const mine of resolveSections()) {
+      const entries = entrySelection(mine);
 
       const editedHere =
-        section.kind === 'skills'
-          ? Boolean(state.skillEdits && (section.groups ?? []).some((g) => g in state.skillEdits))
-          : Boolean(state.entryEdits && section.kind in state.entryEdits) ||
-            Boolean(state.orderEdits && section.kind in state.orderEdits) ||
+        mine.kind === 'skills'
+          ? Boolean(state.skillEdits && (mine.groups ?? []).some((g) => g in state.skillEdits))
+          : Boolean(state.entryEdits && mine.kind in state.entryEdits) ||
+            Boolean(state.orderEdits && mine.kind in state.orderEdits) ||
             Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits)) ||
             Boolean(state.bulletOrderEdits && entries.some((eid) => eid in state.bulletOrderEdits));
 
-      // Untouched and not already this resume's own: leave it inherited.
-      if (!mine && !editedHere) continue;
       if (!editedHere) {
         sections.push(mine);
         continue;
       }
 
-      if (section.kind === 'skills') {
-        sections.push({ ...(mine ?? { kind: section.kind }), items: { ...(mine?.items ?? {}), ...state.skillEdits } });
+      if (mine.kind === 'skills') {
+        sections.push({ ...mine, items: { ...(mine.items ?? {}), ...state.skillEdits } });
         continue;
       }
 
-      const next = { ...(mine ?? { kind: section.kind }) };
-      // The entry list is only written down when the user changed which
-      // entries show. A bullet the user hid does not pin the entry list.
-      if (state.entryEdits && section.kind in state.entryEdits) next.entries = entries;
-      /*
-       * What decides the order, written down whenever it was chosen here — and
-       * only then, so a section left alone stays inherited rather than being
-       * pinned to whatever it happened to be when something else was edited.
-       */
-      if (state.orderEdits && section.kind in state.orderEdits) next.order = state.orderEdits[section.kind];
-      const bullets = { ...(mine?.bullets ?? {}) };
+      const next = { ...mine };
+      // The entry list is written down when the user changed which entries
+      // show. A bullet they hid is not a decision about the entry list.
+      if (state.entryEdits && mine.kind in state.entryEdits) next.entries = entries;
+      /* What decides the order, written down whenever it was chosen here. */
+      if (state.orderEdits && mine.kind in state.orderEdits) next.order = state.orderEdits[mine.kind];
+      const bullets = { ...(mine.bullets ?? {}) };
       for (const eid of entries) {
         if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
       }
@@ -2987,16 +2960,17 @@ async function addEntry(kind) {
   }
 
   /*
-   * A new entry nobody references is invisible, so add it to the section of the
-   * resume being edited — at the root of the chain, so every resume gets it.
+   * A new entry nobody references is invisible, so it is switched on in the
+   * resume being edited — that one and no other.
    *
-   * From the root's *own* sections, not the flattened chain. Built from the
-   * flattened chain, this carried the child's overrides down onto the base with
-   * it: adding an entry while "New grad" was selected wrote New grad's hidden
-   * coursework line into the base, and every other variation lost it too.
+   * It used to go to the root of the inheritance chain, so every variation
+   * got it. Resumes stand alone now, and quietly writing into a resume other
+   * than the open one is exactly the surprise that was worth removing. The
+   * entry itself is in the save either way; switching it on elsewhere is a
+   * tick per resume, and a decision rather than a side effect.
    */
-  const root = chain(state.resumeId)[0];
-  const rootEntries = (id2) => resolveSections(root.id).find((s) => s.kind === id2)?.entries ?? [];
+  const root = resumeById(state.resumeId);
+  const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
   const sections = (root.sections ?? []).map((s) =>
     s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
   );
@@ -3047,9 +3021,8 @@ async function removeEntry(entry) {
       lane.server = null;
     });
 
-    // Drop the reference too, so the next compile does not warn about it. From
-    // the root's own sections, for the reason given in addEntry.
-    const root = chain(state.resumeId)[0];
+    // Drop the reference too, so the next compile does not warn about it.
+    const root = resumeById(state.resumeId);
     const sections = (root.sections ?? []).map((s) => ({
       ...s,
       entries: (s.entries ?? []).filter((id) => id !== entry.id),
@@ -4015,16 +3988,13 @@ async function addSkillGroup() {
     ];
   });
 
-  // The root's own sections, for the reason given in addEntry: built from the
-  // flattened chain this carried the selected variation's overrides down onto
-  // the base along with the new group.
-  const root = chain(state.resumeId)[0];
+  // The open resume's own sections, for the reason given in addEntry.
+  const root = resumeById(state.resumeId);
   const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
   );
   if (!sections.some((s) => s.kind === 'skills')) {
-    const inherited = resolveSections(root.id).find((s) => s.kind === 'skills');
-    sections.push({ kind: 'skills', entries: [], groups: [...(inherited?.groups ?? []), id] });
+    sections.push({ kind: 'skills', entries: [], groups: [id] });
   }
   await saveResumeSpec({ ...root, sections }, 'Skill group added');
   render();
@@ -4034,7 +4004,7 @@ async function addSkillGroup() {
 async function removeSkillGroup(group) {
   if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the save.'))) return;
   await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
-  const root = chain(state.resumeId)[0];
+  const root = resumeById(state.resumeId);
   const sections = (root.sections ?? []).map((s) =>
     s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
   );
@@ -4293,12 +4263,14 @@ async function deleteVariation() {
     return;
   }
 
-  const children = (state.store.resumes ?? []).filter((r) => r.extends === mine.id);
+  const copies = (state.store.resumes ?? []).filter((r) => r.copiedFrom === mine.id);
   const ok = await confirmModal(`Delete “${mine.label ?? mine.id}”?`, [
     'It is removed from the save. The entries and wordings it selected are the store’s and stay.',
-    children.length > 0
-      ? `${plural(children.length, 'resume')} based on it ${children.length === 1 ? 'keeps' : 'keep'} what it gave them and ` +
-        `${children.length === 1 ? 'moves' : 'move'} up to its own base.`
+    // Said because the list shows where each copy came from, so the name is
+    // about to stop resolving there. Nothing about the copies themselves
+    // changes — they hold their own sections and always did.
+    copies.length > 0
+      ? `${plural(copies.length, 'resume')} copied from it ${copies.length === 1 ? 'is' : 'are'} untouched.`
       : null,
     'The version history keeps it, the way it keeps a deleted entry.',
   ].filter(Boolean).join(' '));
@@ -4331,7 +4303,7 @@ async function saveAsVariation() {
   const answer = await form('Save as variation', [
     { name: 'label', label: 'Name', value: `${parentLabel} variation` },
     { name: 'id', label: 'Filename', value: `${state.resumeId}-variant` },
-  ], `Inherits from ${parentLabel}, so later edits there still reach it.`);
+  ], `A copy of ${parentLabel} as it is right now. The two are separate from here on — editing either leaves the other alone.`);
   if (!answer) return;
 
   /*
@@ -4343,18 +4315,29 @@ async function saveAsVariation() {
   const chosenId = slug(answer.id?.trim() || chosenLabel || '');
   if (!chosenId) return;
 
-  // A variation is the whole bundle: which entries and bullets are switched
-  // on, which phrasings are used, and which list items are shown. Saving only
-  // the phrasings would silently drop half of what you just did.
+  /*
+   * A variation is the whole bundle: which entries and bullets are switched
+   * on, which phrasings are used, and which list items are shown. Saving only
+   * the phrasings would silently drop half of what you just did — and now
+   * that nothing resolves through the resume it came from, saving only what
+   * changed in this session would drop everything the original decided.
+   *
+   * `currentSpec()` is that whole bundle already: the open resume plus this
+   * session's unsaved edits. So the copy is it, renamed.
+   */
   const built = currentSpec();
   const spec = {
+    ...built,
     id: chosenId,
     label: chosenLabel || chosenId,
-    extends: state.resumeId,
-    choices: { ...state.choices },
-    ...(state.listEdits ? { lists: { ...state.listEdits } } : {}),
-    ...(built.sections ? { sections: built.sections } : {}),
+    copiedFrom: state.resumeId,
+    /* A variation somebody named and saved is theirs to keep, not a draft. */
+    tier: 'extended',
   };
+  // What the original *was* stays with the original. See flatten.ts.
+  delete spec.base;
+  delete spec.generatedFor;
+  delete spec.extends;
 
   await saveResumeSpec(spec, `Saved ${spec.id}`);
   clearEdits();
@@ -4815,7 +4798,7 @@ async function openApplication(id) {
   setChildren(panel, skeleton('detail', 3));
 
   try {
-    const { application: a, resume, extendsLabel, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
+    const { application: a, resume, copiedFromLabel, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
 
     const sections = [];
 
@@ -4836,7 +4819,7 @@ async function openApplication(id) {
         }),
         // And the base by its name too: "Built on base." was an id with a
         // full stop after it, not a sentence.
-        extendsLabel ? el('div', { className: 'hint', textContent: `Built on ${extendsLabel}.` }) : null,
+        copiedFromLabel ? el('div', { className: 'hint', textContent: `Copied from ${copiedFromLabel}.` }) : null,
       ]),
     );
 
@@ -7908,7 +7891,7 @@ async function loadStore() {
     state.resumeId =
       resumes.find((r) => r.base)?.id ??
       resumes.find((r) => r.id === 'newgrad')?.id ??
-      resumes.find((r) => !r.extends)?.id ??
+      resumes.find((r) => !r.copiedFrom && !r.generatedFor)?.id ??
       resumes[0]?.id ??
       null;
   }

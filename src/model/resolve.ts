@@ -1,3 +1,4 @@
+import { flattenOne } from './flatten.js';
 import { endsBeforeItStarts, sortKey, startKey } from './period.js';
 import {
   DEFAULT_LAYOUT,
@@ -26,169 +27,6 @@ const DEFAULT_HEADINGS: Record<EntryKind, string> = {
   skills: 'Technical Skills',
   custom: 'Additional',
 };
-
-/**
- * Flatten a resume's `extends` chain. Child choices win over parent choices;
- * child sections replace the parent's section of the same kind entirely, since
- * a half-merged section ordering is never what anyone means.
- */
-export function flattenSpec(
-  spec: ResumeSpec,
-  all: ResumeSpec[],
-  seen = new Set<string>(),
-  warnings?: string[],
-): ResumeSpec {
-  /*
-   * A loop stops the walk; it does not stop the resume.
-   *
-   * This threw, and throwing is the one thing that cannot be right here: a
-   * resume whose `extends` points back at itself is *already saved*, and the
-   * error came out of every read of it — so the editor would not open it,
-   * which is where the only controls for changing its base or deleting it
-   * are. The fault made itself unfixable.
-   *
-   * There is a correct answer and it is not an error: stop following the
-   * chain at the repeat. What comes back is the resume laid over as much of
-   * its ancestry as could be walked, which is exactly what it would resolve
-   * to if the bad link were removed — and the warning says the link is
-   * there, so nobody is left thinking the store is fine.
-   */
-  if (seen.has(spec.id)) {
-    warnings?.push(
-      `Resume "${spec.id}" inherits from itself, directly or through a chain. ` +
-        `The loop is ignored. Change what it is based on, or delete it.`,
-    );
-    return spec;
-  }
-  seen.add(spec.id);
-  if (!spec.extends) return spec;
-
-  const parent = all.find((r) => r.id === spec.extends);
-  if (!parent) {
-    throw new Error(`Resume "${spec.id}" extends "${spec.extends}", which does not exist`);
-  }
-  return mergeOnto(flattenSpec(parent, all, seen, warnings), spec);
-}
-
-/** One inheritance step: `spec` laid over `base`. */
-function mergeOnto(base: ResumeSpec, spec: ResumeSpec): ResumeSpec {
-  return {
-    ...base,
-    ...spec,
-    sections: mergeSections(base.sections ?? [], spec.sections ?? []),
-    choices: { ...(base.choices ?? {}), ...(spec.choices ?? {}) },
-    lists: { ...(base.lists ?? {}), ...(spec.lists ?? {}) },
-    layout: { ...(base.layout ?? {}), ...(spec.layout ?? {}) },
-  };
-}
-
-/**
- * Rewrite a resume that extends one being deleted, so it stands without it.
- *
- * The deleted resume's own contribution is folded in underneath the child's,
- * and the child is re-pointed at the deleted resume's parent — which is to say
- * the child resolves to exactly what it resolved to before, because this runs
- * the same merge `flattenSpec` would have run at render time. Deleting one
- * resume should not change how any other one looks.
- */
-export function absorbBase(child: ResumeSpec, removed: ResumeSpec): ResumeSpec {
-  const merged = mergeOnto(removed, child);
-
-  /*
-   * What the parent *contributed to the document* — sections, choices, lists,
-   * layout — the child keeps. What the parent *was*, it does not.
-   *
-   * The spread copies every key the child lacks, and some of those keys are
-   * the parent's identity rather than its content. Deleting a pinned base
-   * turned every tailored variation into a pinned base, and handed each of
-   * them the parent's `generatedFor` — so a resume made for one posting came
-   * back claiming it had been written for another, and the base pickers filled
-   * up with resumes nobody pinned. A child with no label of its own would have
-   * taken the parent's, leaving two resumes with one name and no parent to
-   * explain it.
-   */
-  for (const own of ['label', 'base', 'notes', 'generatedFor'] as const) {
-    if (child[own] === undefined) delete merged[own];
-  }
-
-  merged.id = child.id;
-  if (removed.extends) merged.extends = removed.extends;
-  else delete merged.extends;
-  return merged;
-}
-
-/**
- * Which of the parent's sections a child's section replaces.
- *
- * Matching on `kind` alone is not enough, and `heading` exists precisely
- * because it is not: a store can hold two `custom` sections, "Awards" and
- * "Leadership". A child re-stating only Awards replaced *both* of them with
- * Awards, so the document printed Awards twice and Leadership, with its
- * entries, was silently gone. Nothing warned, and the editor runs the same
- * algorithm, so the preview agreed with the wrong answer.
- *
- * It cannot simply become an exact match on the heading either, because the
- * ordinary child does not repeat the heading at all — it just lists different
- * entries under Experience, and must go on replacing the parent's Experience
- * rather than adding a second one.
- *
- * So: a heading that matches wins first; then a child that named no heading
- * takes the parent's section of that kind; then a renamed heading is allowed to
- * take it, but only where the parent has one section of that kind and there is
- * therefore nothing to be ambiguous about. Whatever is left is a section the
- * parent never had.
- */
-export function mergeSections(base: SectionSpec[], override: SectionSpec[]): SectionSpec[] {
-  if (override.length === 0) return base;
-
-  const out = [...base];
-  const claimed = new Set<number>();
-
-  /*
-   * What the child states, over what the parent had — not instead of it.
-   *
-   * A child section used to replace its parent's outright, so expressing "hide
-   * one bullet of one entry" meant restating the entry list as well. The editor
-   * duly wrote that list down, and from then on the variation was pinned to the
-   * entries the base had at that moment: anything added to the base afterwards
-   * arrived switched off, because the child was now saying "these entries,
-   * exactly" when all it had ever meant was "this bullet, hidden".
-   *
-   * Absent means inherited, which is how `choices`, `lists` and `layout`
-   * already work one level up in `mergeOnto`.
-   */
-  const over = (parent: SectionSpec, child: SectionSpec): SectionSpec => ({
-    ...parent,
-    ...child,
-    entries: child.entries ?? parent.entries,
-    groups: child.groups ?? parent.groups,
-    bullets:
-      child.bullets || parent.bullets
-        ? { ...(parent.bullets ?? {}), ...(child.bullets ?? {}) }
-        : undefined,
-    items:
-      child.items || parent.items ? { ...(parent.items ?? {}), ...(child.items ?? {}) } : undefined,
-  });
-
-  const claim = (o: SectionSpec, where: (s: SectionSpec, i: number) => boolean): boolean => {
-    const at = out.findIndex((s, i) => !claimed.has(i) && s.kind === o.kind && where(s, i));
-    if (at < 0) return false;
-    out[at] = over(out[at]!, o);
-    claimed.add(at);
-    return true;
-  };
-
-  const heading = (s: SectionSpec) => s.heading ?? '';
-  const onlyOneOfItsKind = (o: SectionSpec) => base.filter((s) => s.kind === o.kind).length === 1;
-
-  let pending = override.filter((o) => !claim(o, (s) => heading(s) === heading(o)));
-  pending = pending.filter((o) => !(heading(o) === '' && claim(o, () => true)));
-  pending = pending.filter((o) => !(onlyOneOfItsKind(o) && claim(o, () => true)));
-
-  // Sections the parent never had are appended in the child's order.
-  for (const o of pending) out.push(o);
-  return out;
-}
 
 /**
  * The choice key for the name on the page.
@@ -537,7 +375,19 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
    * looking at" are counted as they are found.
    */
   const lost: { kind: 'entry' | 'wording'; id: string }[] = [];
-  const flat = flattenSpec(spec, data.resumes, new Set(), warnings);
+  /*
+   * Resumes stand alone, so this is the resume — with one exception it costs
+   * four lines to be right about.
+   *
+   * Specs reach here from places the store never saw: a preview of something
+   * the extension proposed, an older client, a fixture. Any of those can
+   * still carry the `extends` of a version that inherited, and dropping it
+   * silently would render a different document from the one whoever wrote it
+   * meant. So it is folded in, exactly as it used to be, and said out loud.
+   * Everything loaded through the store arrives flat already and never takes
+   * this branch. See flatten.ts.
+   */
+  const flat = spec.extends ? flattenOne(spec, data.resumes, warnings) : spec;
   const choices = flat.choices ?? {};
   const lists = flat.lists ?? {};
 

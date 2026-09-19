@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { absorbBase, adoptBulletOrder, adoptDateOrder } from './resolve.js';
+import { flattenResumes, needsFlattening } from './flatten.js';
+import { adoptBulletOrder, adoptDateOrder } from './resolve.js';
 import {
   DEFAULT_CONFIG,
   type AnswerBankItem,
@@ -720,6 +721,55 @@ export class Store {
 
   /** Resumes live one-per-file so a new variation is a new small file. */
   loadResumes(): ResumeSpec[] {
+    /*
+     * A save written by a version that had inheritance is folded flat here,
+     * on the way in, so nothing past this line has to know that `extends`
+     * ever existed.
+     *
+     * In memory rather than on disk, and on every read rather than once:
+     * `migrateResumes` writes the flattened files back and commits them, but
+     * it is not the thing that makes this safe. A store can be cloned from a
+     * git link, restored from history, or hand-edited between two reads, and
+     * any of those can put an `extends` back under a running server. Folding
+     * on read means the worst case is a file that still says something the
+     * app no longer means, never a resume that resolves to the wrong
+     * document.
+     */
+    return flattenResumes(this.loadResumesAsWritten());
+  }
+
+  /**
+   * Fold an older save's inheritance into the files themselves, once.
+   *
+   * Returns what it changed and what it found wrong, for the caller to log —
+   * and nothing at all when the save is already flat, which is the case every
+   * time after the first. See `flatten.ts` for why the fold cannot change any
+   * document.
+   */
+  migrateResumes(): { flattened: string[]; problems: string[] } {
+    const all = this.loadResumesAsWritten();
+    if (!needsFlattening(all)) return { flattened: [], problems: [] };
+
+    const problems: string[] = [];
+    const flattened: string[] = [];
+    for (const spec of flattenResumes(all, problems)) {
+      if (!all.find((r) => r.id === spec.id)?.extends) continue;
+      this.saveResume(spec);
+      flattened.push(spec.id);
+    }
+    return { flattened, problems };
+  }
+
+  /**
+   * The resume files as written, before any migration.
+   *
+   * Public because the migration needs it and because a test that claims the
+   * fold changes no document has to be able to read what was there before.
+   * Nothing else should: `loadResumes` is the one that answers "what does
+   * this save hold", and this one can hand back a shape the app no longer
+   * understands.
+   */
+  loadResumesAsWritten(): ResumeSpec[] {
     const dir = this.file('resumes');
     return (
       this.listing('resumes', (f) => f.endsWith('.yaml') || f.endsWith('.yml'))
@@ -775,27 +825,32 @@ export class Store {
   }
 
   /**
-   * Deleting a resume must not break the ones built on it.
+   * Deleting a resume takes nothing else with it.
    *
-   * Variations are thin — "new grad" is the base plus a handful of choices,
-   * recorded as `extends: base`. Unlinking the base and nothing else left every
-   * variation throwing "extends 'base', which does not exist" from that moment
-   * on, in the editor, the preview and the tracker alike, with nothing in the
-   * UI able to edit `extends` and so no way back but hand-editing YAML.
+   * This used to be the most dangerous write in the store. Variations were
+   * thin — "new grad" was the base plus a handful of choices, recorded as
+   * `extends: base` — so unlinking the base left every variation throwing
+   * "extends 'base', which does not exist" from that moment on, in the
+   * editor, the preview and the tracker alike, with nothing in the UI able to
+   * edit `extends` and so no way back but hand-editing YAML. The fix was a
+   * rewrite of every child on the way past, which then had to be careful
+   * about which of the parent's fields were content and which were identity,
+   * and got that wrong too.
    *
-   * So each child absorbs what the deleted resume contributed and re-points at
-   * its parent. The children are written first: if anything fails partway, the
-   * base is still there and they still resolve.
+   * Resumes stand alone now, so none of that has anything to rewrite — as
+   * long as they actually do, which is what the fold below makes sure of.
+   *
+   * A save can still be sitting on disk in the old shape: folding happens on
+   * read, and the write-back is a separate pass that a given process may not
+   * have run. Delete the base of an unfolded save and the children lose
+   * everything it was contributing, silently — the next read finds nothing to
+   * fold and they resolve to their own handful of overrides. So the files are
+   * brought up to date first, and only then is one of them removed. It costs
+   * one pass over a folder of small files, once, on the first delete after an
+   * upgrade.
    */
   deleteResume(id: string): void {
-    const all = this.loadResumes();
-    const removed = all.find((r) => r.id === id);
-
-    if (removed) {
-      for (const child of all) {
-        if (child.extends === id) this.saveResume(absorbBase(child, removed));
-      }
-    }
+    this.migrateResumes();
 
     for (const ext of ['yaml', 'yml']) {
       const f = this.file('resumes', `${id}.${ext}`);

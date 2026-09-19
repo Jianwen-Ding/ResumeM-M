@@ -216,33 +216,66 @@ export interface SectionSpec {
 }
 
 /**
- * A resume is a thin selection layer. `extends` lets "new grad" and "intern"
- * differ by three lines instead of being two whole files that drift apart.
+ * A resume is a thin selection layer over the store: which entries are shown,
+ * which bullets of each, which wording of each bullet, which items of each
+ * skills group. The text itself lives once, in `entries/` and `skills.yaml`,
+ * so a resume is small — and self-contained. What the file says is what the
+ * resume is.
  */
 export interface ResumeSpec {
   id: string;
   label: string;
-  /** Id of another resume to inherit sections and choices from. */
+  /**
+   * Resumes used to inherit, through `extends`, and no longer do. A store
+   * written by an older version is folded flat on the way in — see
+   * `flatten.ts` — so nothing downstream ever sees this; it is declared only
+   * so the migration has a name for what it is reading.
+   *
+   * @deprecated Read by the migration, written by nothing.
+   */
   extends?: string;
   /**
-   * Pinned as a starting point. A store accumulates one-off resumes tailored
-   * for postings that have long since closed; a handful of them are the ones
-   * you actually build from. Marking those keeps the pickers honest about
-   * which is which, instead of guessing from the id.
+   * Which resume this one was copied from, as a plain record.
+   *
+   * The link is gone; the fact is worth keeping. "Built on Summer intern" is
+   * the right thing to show in an application's detail, and as provenance it
+   * says that without anything merging behind it.
+   */
+  copiedFrom?: string;
+  /**
+   * How permanent this resume is, and how eagerly it is offered.
+   *
+   * `base` — what you actually build from, and what the extension offers
+   * first. `extended` — a permanent resume in the save that is not offered
+   * first: kept, findable, never swept. `temporary` — made for one posting,
+   * worked on, sent, and then gone a week later, recoverable from the version
+   * history like anything else deleted.
+   *
+   * Absent means `extended`, which is the reading that cannot lose anybody's
+   * work: a resume written by a version that had no tiers, or by hand, is
+   * permanent until somebody says otherwise.
+   */
+  tier?: ResumeTier;
+  /**
+   * Pinned as a starting point.
+   *
+   * @deprecated Superseded by `tier: 'base'`. Read by the migration only.
    */
   base?: boolean;
   sections?: SectionSpec[];
   /**
    * Variant selection. Keys are either a bullet id (`b_kafka`) or a field path
-   * (`edu_neu.dates`). Values are variant ids. Merged over the parent's.
+   * (`edu_neu.dates`). Values are variant ids. A key absent means the wording
+   * pinned as the default in the store, so re-pinning still reaches every
+   * resume that has not decided for itself.
    */
   choices?: Record<string, string>;
   /**
    * Which items to show on a list bullet, keyed by bullet id. Absent means all
-   * of them. Merged over the parent's, per bullet.
+   * of them.
    */
   lists?: Record<string, string[]>;
-  /** Rendering knobs; merged over defaults and the parent's. */
+  /** Rendering knobs, over the save's own defaults. */
   layout?: Partial<LayoutOptions>;
   /**
    * Entry ids folded away in the editor for this resume.
@@ -250,14 +283,31 @@ export interface ResumeSpec {
    * A view preference, and it prints nothing — but it belongs to the resume
    * rather than to the browser, because which entries you are done with is a
    * fact about the document you are building and it should still be true on
-   * another machine, or after the save is cloned. Kept per resume and not
-   * inherited through `extends`: folding is about the list in front of you,
-   * and a variation is a different list.
+   * another machine, or after the save is cloned.
    */
   collapsed?: string[];
   notes?: string;
   /** Set when the extension generated this for a specific posting. */
   generatedFor?: { url?: string; company?: string; role?: string; at?: string };
+}
+
+/** See `ResumeSpec.tier`. */
+export type ResumeTier = 'base' | 'extended' | 'temporary';
+
+/** Tiers in the order every picker and list shows them. */
+export const RESUME_TIERS: ResumeTier[] = ['base', 'extended', 'temporary'];
+
+/**
+ * A resume with no tier written down is permanent.
+ *
+ * Absent has to mean `extended` rather than `temporary`, and it is worth
+ * saying why in code rather than in a comment somewhere else: the sweep
+ * deletes temporary resumes, and a file written by an older version — or by
+ * hand, in a folder advertised as editable YAML — must never be swept because
+ * of a field its author had no way to know about.
+ */
+export function tierOf(spec: Pick<ResumeSpec, 'tier'>): ResumeTier {
+  return spec.tier ?? 'extended';
 }
 
 export interface LayoutOptions {

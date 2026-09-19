@@ -288,15 +288,17 @@ const data: StoreData = {
 const base: ResumeSpec = { id: 'base', label: 'Base' };
 
 /**
- * A tailored resume is a selection over the base, not a copy of it — so what
- * it states is what the posting decided and nothing else.
+ * A tailored resume is a copy of the base with the posting's decisions laid
+ * over it. It used to be a link — `extends: base` plus a handful of overrides
+ * — and what it actually contained was worked out at render time, so the file
+ * did not say what the document was and a copy of a copy grew a chain nobody
+ * had chosen.
  */
 describe('deriving a resume for a posting', () => {
   const withSkills: StoreData = {
     ...data,
     resumes: [
       { id: 'root', label: 'Root', sections: [{ kind: 'skills', entries: [], groups: ['sk'] }] },
-      { id: 'grad', label: 'New grad', extends: 'root' },
     ],
   };
   const derive = (from: string, store: StoreData) =>
@@ -309,36 +311,46 @@ describe('deriving a resume for a posting', () => {
       store.resumes,
     );
 
-  /*
-   * Read off the base's own sections, a resume that inherits its skills
-   * section found nothing here and narrowed nothing — so the match decided
-   * which skills to keep, said so in the change list, and the document that
-   * was compiled had every group in full.
-   */
-  it('narrows skills on a base that inherits its skills section', () => {
-    const section = derive('grad', withSkills).sections?.find((s) => s.kind === 'skills');
+  it('narrows the skills group the posting asked about', () => {
+    const section = derive('root', withSkills).sections?.find((s) => s.kind === 'skills');
     expect(section?.items?.sk).toEqual(['s_py']);
   });
 
   /*
-   * And states only that. Spreading the inherited section into a new one
-   * pinned `groups`, so a skills group added to the base afterwards never
-   * reached a resume tailored before it — the same failure `mergeSections`
-   * documents for entries, in the other list.
+   * And brings the base's groups with it.
+   *
+   * The narrowing used to be stated as a bare `{ kind: 'skills', items }`,
+   * deliberately leaving `groups` out so the merge would supply it — which
+   * was right while resumes inherited and is a section with no groups at all
+   * now that they do not. What a person would have seen is the skills heading
+   * and nothing under it.
    */
-  it('does not pin the group list, so the base can still grow', () => {
-    const spec = derive('grad', withSkills);
-    expect(spec.sections?.find((s) => s.kind === 'skills')?.groups).toBeUndefined();
+  it('keeps the groups the base showed, so the section still prints', () => {
+    const spec = derive('root', withSkills);
+    expect(spec.sections?.find((s) => s.kind === 'skills')?.groups).toEqual(['sk']);
 
-    const grown: StoreData = {
+    const resolved = resolveResume(spec, { ...withSkills, resumes: [...withSkills.resumes, spec] });
+    expect(resolved.sections.flatMap((s) => s.skillGroups.map((g) => g.name))).toEqual(['Languages']);
+    expect(resolved.sections.flatMap((s) => s.skillGroups.flatMap((g) => g.items))).toEqual(['Python']);
+  });
+
+  /*
+   * What the base *was*, as opposed to what it selects, stays with the base:
+   * a copy is not itself pinned as a starting point, and it does not inherit
+   * an explanation somebody wrote about a different document.
+   */
+  it('does not take the base’s identity with the base’s selections', () => {
+    const pinned: StoreData = {
       ...withSkills,
-      skillGroups: [...withSkills.skillGroups, { id: 'sk2', name: 'Tools', items: [{ id: 't_git', text: 'Git' }] }],
-      resumes: withSkills.resumes.map((r) =>
-        r.id === 'root' ? { ...r, sections: [{ kind: 'skills' as const, entries: [], groups: ['sk', 'sk2'] }] } : r,
-      ),
+      resumes: [{ ...withSkills.resumes[0]!, base: true, notes: 'The one I keep up to date.' }],
     };
-    const resolved = resolveResume(spec, { ...grown, resumes: [...grown.resumes, spec] });
-    expect(resolved.sections.flatMap((s) => s.skillGroups.map((g) => g.name))).toEqual(['Languages', 'Tools']);
+    const spec = derive('root', pinned);
+    expect(spec.base).toBeUndefined();
+    expect(spec.notes).toBeUndefined();
+    expect(spec.copiedFrom).toBe('root');
+    expect(spec.generatedFor).toBeTruthy();
+    // Made for one posting, so it is swept a week after that posting is done.
+    expect(spec.tier).toBe('temporary');
   });
 
   it('says nothing about skills where the base has no skills section', () => {
