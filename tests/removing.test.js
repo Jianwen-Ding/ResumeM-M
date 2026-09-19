@@ -34,8 +34,10 @@ afterEach(() => {
 
 let saved;
 let putAnswers;
+/** How many resumes other than the open one chose the wording under test. */
+let chooserCount = 0;
 
-async function open({ answers } = {}) {
+async function open({ answers, chooser } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
   document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
@@ -44,6 +46,28 @@ async function open({ answers } = {}) {
   const data = fixture.store.load();
   fixture.cleanup();
   if (answers) data.answers = answers;
+  /*
+   * A second resume that has chosen the wording about to be deleted. Built
+   * from the store rather than written out, because the ids are the
+   * fixture's and a hand-written choice that matches nothing would make the
+   * test pass by describing no resume at all.
+   */
+  if (chooser) {
+    const entry = data.entries.find((e) => (e.bullets ?? []).some((b) => (b.variants ?? []).length > 1));
+    const bullet = entry?.bullets.find((b) => (b.variants ?? []).length > 1);
+    if (!bullet) throw new Error('the fixture has no line with alternates to choose between');
+    /*
+     * Every resume chooses it, the one about to be open included. That is
+     * what makes the count discriminating: leave the open one in and the
+     * sentence names one resume too many, which is a stranger being blamed
+     * for what you are doing yourself.
+     */
+    data.resumes = [
+      ...data.resumes.map((r) => ({ ...r, choices: { ...(r.choices ?? {}), [bullet.id]: bullet.default } })),
+      { id: 'someone-else', label: "Someone else's resume", choices: { [bullet.id]: bullet.default } },
+    ];
+    chooserCount = data.resumes.length - 1;
+  }
 
   saved = [];
   putAnswers = null;
@@ -269,5 +293,59 @@ describe('deleting an alternate of a heading field', () => {
     document.querySelector('#modal-cancel').click();
     await vi.waitFor(() => expect(document.querySelector('#modal').classList.contains('hidden')).toBe(true));
     expect(saved).toEqual([]);
+  });
+});
+
+/*
+ * What a delete costs somebody who is not looking at it.
+ *
+ * Two things make removing one wording more than local, and neither was said
+ * before pressing the button. The *pinned* one is the answer every resume
+ * that has not chosen another gets, so deleting it moves all of them at once.
+ * And a wording another resume has chosen leaves that resume naming something
+ * that is not there — the resolver falls back to the default and warns, which
+ * is right, but the warning turns up later on a build nobody connects to this
+ * ("Choice edu_neu.subtitle asked for variant v_systems, which does not
+ * exist").
+ */
+describe('saying what a delete costs before it happens', () => {
+  const modalNote = () => document.querySelector('#modal p')?.textContent ?? '';
+
+  it('says when the wording being deleted is the pinned one', async () => {
+    await open();
+    const block = bulletWithAlternates();
+    // Whichever is on screen is the chosen one; on an untouched resume that
+    // is the pinned one, which is the case being described.
+    buttonIn(block, 'Delete phrasing').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    expect(modalNote()).toMatch(/pinned wording/i);
+    expect(modalNote()).toMatch(/becomes the pinned one instead/i);
+    document.querySelector('#modal-cancel').click();
+  });
+
+  it('names the other resumes that chose it, and says what happens to them', async () => {
+    await open({ chooser: true });
+    const block = bulletWithAlternates();
+    buttonIn(block, 'Delete phrasing').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    expect(modalNote()).toMatch(/Someone else's resume/);
+    expect(modalNote()).toMatch(/fall(s)? back/i);
+    // The count, which is the part that must leave the open resume out.
+    expect(modalNote()).toContain(`${chooserCount} other resume`);
+    document.querySelector('#modal-cancel').click();
+  });
+
+  /*
+   * And it does not invent one. The open resume's own choice is cleared as
+   * part of the delete, so counting it would tell somebody their own action
+   * is about to affect a stranger.
+   */
+  it('does not count the resume you have open', async () => {
+    await open();
+    const block = bulletWithAlternates();
+    buttonIn(block, 'Delete phrasing').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    expect(modalNote()).not.toMatch(/other resume/i);
+    document.querySelector('#modal-cancel').click();
   });
 });

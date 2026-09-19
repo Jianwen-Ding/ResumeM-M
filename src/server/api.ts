@@ -39,7 +39,7 @@ import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, slug, stats } from '../model/applications.js';
-import { byBaseFirst, defaultBaseId } from '../model/bases.js';
+import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { syncCurrent, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
@@ -1801,7 +1801,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const score = Math.max(verdict.score, ...others.map((v) => v.score));
       const anyPageIsAJob = verdict.kind !== 'none' || others.some((v) => v.kind !== 'none');
 
-      const baseId = baseResumeId ?? defaultBaseId(data.resumes);
+      /*
+       * What this posting's copy will be called, worked out before the base
+       * is chosen rather than after — because the two can be the same
+       * resume, and then the copy is asked to extend itself. See
+       * `baseForCopy`. It was computed further down, which is why this path
+       * never had the guard the Workspace's tailor already had.
+       */
+      const employer = job.company ?? employerFallback(url);
+      const specId = `job-${slug(employer)}-${slug(job.title ?? 'role')}`.slice(0, 60);
+
+      const baseId = baseForCopy(data.resumes, baseResumeId, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error(`No resume "${baseId}"`);
@@ -1951,8 +1961,6 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const baseSkillItems = flattenSpec(base, data.resumes).sections?.find((s) => s.kind === 'skills')?.items;
 
-      const employer = job.company ?? employerFallback(url);
-      const specId = `job-${slug(employer)}-${slug(job.title ?? 'role')}`.slice(0, 60);
       const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${employer}`, finalMatch, {
         url,
         company: job.company,
@@ -2790,10 +2798,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * second run finds the draft already pointing at the tailored copy, so
        * start from what that copy was built on rather than from the copy.
        */
-      let baseId = baseResumeId ?? draft.resumeId ?? defaultBaseId(data.resumes);
-      if (baseId === specId) {
-        baseId = data.resumes.find((r) => r.id === specId)?.extends ?? defaultBaseId(data.resumes);
-      }
+      // The same rule as the extension's path, from one place: a copy named
+      // after the posting cannot be built from itself. See `baseForCopy`.
+      const baseId = baseForCopy(data.resumes, baseResumeId ?? draft.resumeId, specId);
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');
 

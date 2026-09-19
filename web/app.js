@@ -1740,16 +1740,28 @@ function entryBlock(entry, section, choices) {
         addLabel: '+ alternate',
         onAdd: () => addFieldAlternate(entry, name),
         onEdit: chosen ? () => editFieldVariant(entry, name, chosen) : null,
-        // Beside "+ alternate", because adding and removing one are the same
-        // act in two directions. Only where there is more than one: the last
-        // alternate of a field is not a thing to delete, it is a field that
-        // should go back to being a plain string.
+        /*
+         * Beside "+ alternate", because adding and removing one are the same
+         * act in two directions.
+         *
+         * Offered on the last one too, which it was not. The rule was that a
+         * field with one alternate is a field that should go back to being a
+         * plain string — true of the model, and no use to somebody who wants
+         * the line gone: there was no control anywhere that would remove it,
+         * so a role you tried two ways and then dropped, or an AI-drafted
+         * location you never wanted, could be narrowed to one alternate and
+         * never to none. A line is the last thing it says, so the button
+         * says that.
+         */
         trailingActions: [
-          field.variants.length > 1 && chosen
+          chosen
             ? el('button', {
                 className: 'tiny danger',
-                textContent: 'Delete alternate',
-                title: 'Remove this wording from the save — every resume loses it',
+                textContent: field.variants.length > 1 ? 'Delete alternate' : `Delete ${FIELD_LABELS[name] ?? name}`,
+                title:
+                  field.variants.length > 1
+                    ? 'Remove this wording from the save — every resume loses it'
+                    : `Remove the ${FIELD_LABELS[name] ?? name} line from this entry`,
                 onclick: () => removeFieldAlternate(entry, name, chosen),
               })
             : null,
@@ -3527,19 +3539,89 @@ async function editVariant(entry, bullet, variant) {
  * a line with no text, which every reader of it would have to special-case,
  * and "delete the line" is what that action already is.
  */
+/**
+ * What deleting one wording would cost, beyond the wording.
+ *
+ * Two things make a deletion more than local, and neither was said before
+ * pressing it. A wording other resumes have *chosen* leaves them naming
+ * something that is not there — `resolveResume` falls back to the default and
+ * warns, which is right, but the warning turns up later on a build nobody
+ * connected to this ("Choice edu_neu.subtitle asked for variant v_systems,
+ * which does not exist"). And the *pinned* one is the answer every resume
+ * that has not chosen gets, so deleting it moves all of them at once.
+ *
+ * The open resume is left out of the count: its own choice is cleared by the
+ * callers as part of the delete, so it is not something that happens to
+ * somebody else later.
+ */
+function variantFallout(key, variantId, isDefault, nextDefaultText) {
+  const others = (state.store?.resumes ?? []).filter(
+    (r) => r.id !== state.resumeId && (r.choices ?? {})[key] === variantId,
+  );
+  const lines = [];
+  if (isDefault) {
+    lines.push(
+      `This is the pinned wording — what every resume that has not chosen another one gets. ` +
+        `“${clipText(nextDefaultText, 50)}” becomes the pinned one instead.`,
+    );
+  }
+  if (others.length > 0) {
+    const named = others.slice(0, 3).map((r) => r.label ?? r.id);
+    const rest = others.length - named.length;
+    lines.push(
+      `${plural(others.length, 'other resume')} ${others.length === 1 ? 'chooses' : 'choose'} it — ` +
+        `${named.join(', ')}${rest > 0 ? ` and ${rest} more` : ''}. ` +
+        `${others.length === 1 ? 'It falls' : 'They fall'} back to the pinned wording.`,
+    );
+  }
+  return lines;
+}
+
+/** A wording, short enough to put in a sentence. */
+function clipText(text, max = 60) {
+  const s = String(text ?? '');
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
 async function removeBulletVariant(entry, bullet, variant) {
-  if (bullet.variants.length < 2) {
-    setStatus('A line needs at least one wording — delete the line itself instead', true);
+  const remaining = bullet.variants.filter((v) => v.id !== variant.id);
+
+  /*
+   * The last wording of a line is the line.
+   *
+   * This used to refuse and say "delete the line itself instead", which is
+   * correct about the model and unhelpful about the act: somebody deleting
+   * the only phrasing of a line wants the line gone, and was sent to find
+   * another button to do it with. It is offered here instead, named for what
+   * it actually does.
+   */
+  if (remaining.length === 0) {
+    const ok = await confirmModal(`Delete the line “${clipText(variant.text)}”?`, [
+      'It is the only wording this line has, so the line goes with it.',
+      ...variantFallout(bullet.id, variant.id, true, '(nothing)'),
+    ].join(' '));
+    if (!ok) return;
+    await saveEntry({ ...entry, bullets: entry.bullets.filter((b) => b.id !== bullet.id) }, 'Line deleted');
+    if (state.choices[bullet.id]) {
+      const { [bullet.id]: _gone, ...rest } = state.choices;
+      state.choices = rest;
+      markDirty();
+    }
+    scheduleRender();
     return;
   }
-  const left = bullet.variants.length - 1;
+
+  const left = remaining.length;
+  const isDefault = bullet.default === variant.id;
   const ok = await confirmModal(
-    `Delete “${String(variant.text).slice(0, 60)}${String(variant.text).length > 60 ? '…' : ''}”?`,
-    `This wording is removed from the save. The line keeps its other ${plural(left, 'phrasing')}.`,
+    `Delete “${clipText(variant.text)}”?`,
+    [
+      `This wording is removed from the save. The line keeps its other ${plural(left, 'phrasing')}.`,
+      ...variantFallout(bullet.id, variant.id, isDefault, remaining[0].text),
+    ].join(' '),
   );
   if (!ok) return;
 
-  const remaining = bullet.variants.filter((v) => v.id !== variant.id);
   const next = {
     ...entry,
     bullets: entry.bullets.map((b) =>
@@ -3589,19 +3671,54 @@ async function removeBulletVariant(entry, bullet, variant) {
  */
 async function removeFieldAlternate(entry, name, variant) {
   const field = entry[name];
-  if (!isVariantField(field) || field.variants.length < 2) {
-    setStatus('A field needs at least one wording', true);
+  if (!isVariantField(field)) {
+    setStatus('That field has no alternates to delete', true);
     return;
   }
-  const left = field.variants.length - 1;
+  const remaining = field.variants.filter((v) => v.id !== variant.id);
+  const key = `${entry.id}.${name}`;
+  const label = FIELD_LABELS[name] ?? name;
+
+  /*
+   * The last alternate of a field.
+   *
+   * This used to refuse outright — "a field needs at least one wording" —
+   * which is true of a field that stays and unhelpful to somebody who wants
+   * it gone. A heading field is optional except for the title, which is what
+   * the entry is called and cannot be nothing; so the title refuses and says
+   * why, and the rest offer to take the field off the entry.
+   */
+  if (remaining.length === 0) {
+    if (name === 'title') {
+      setStatus('An entry needs a title — rewrite it rather than deleting it', true);
+      return;
+    }
+    const gone = await confirmModal(`Delete the ${label} “${clipText(variant.text)}”?`, [
+      `It is the only one this entry has, so the ${label} line goes with it.`,
+      ...variantFallout(key, variant.id, true, '(nothing)'),
+    ].join(' '));
+    if (!gone) return;
+    const { [name]: _dropped, ...without } = entry;
+    await saveEntry(without, `${label} deleted`);
+    if (state.choices[key]) {
+      const { [key]: _stale, ...rest } = state.choices;
+      state.choices = rest;
+      markDirty();
+    }
+    scheduleRender();
+    return;
+  }
+
+  const left = remaining.length;
   const ok = await confirmModal(
-    `Delete “${String(variant.text).slice(0, 60)}${String(variant.text).length > 60 ? '…' : ''}”?`,
-    `This wording is removed from the save. ${FIELD_LABELS[name] ?? name} keeps its other ${plural(left, 'alternate')}.`,
+    `Delete “${clipText(variant.text)}”?`,
+    [
+      `This wording is removed from the save. ${label} keeps its other ${plural(left, 'alternate')}.`,
+      ...variantFallout(key, variant.id, field.default === variant.id, remaining[0].text),
+    ].join(' '),
   );
   if (!ok) return;
 
-  const remaining = field.variants.filter((v) => v.id !== variant.id);
-  const key = `${entry.id}.${name}`;
   await saveEntry(
     {
       ...entry,
