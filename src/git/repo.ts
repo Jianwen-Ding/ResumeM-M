@@ -46,6 +46,24 @@ export class Repo {
    */
   readonly scope: string[];
 
+  /**
+   * Why the last automatic commit did not happen, if one did not.
+   *
+   * An auto-commit that fails cannot stop the edit — the file is already
+   * written and losing it would be worse than losing its history — so the
+   * failure was a line in the server's console and nothing else. Nobody reads
+   * that, and the cost of not reading it is silent: the editor goes on saying
+   * "All changes saved", because it is telling the truth about the file, while
+   * the version history has quietly stopped recording. Everything built on the
+   * history is then built on nothing — "restore this version", the diff
+   * between two resumes, and the sweep, which now refuses to delete a resume
+   * the history does not have and needs to be able to say why.
+   *
+   * Cleared by the next commit that works, so this is the current state of the
+   * save rather than a log of everything that has ever gone wrong.
+   */
+  lastCommitError?: { message: string; at: string };
+
   constructor(root: string, scope: string[] = ['.']) {
     this.root = path.resolve(root);
     this.scope = scope.length > 0 ? scope : ['.'];
@@ -441,9 +459,30 @@ export async function withCommit<T>(
   const result = await fn();
   if (enabled) {
     try {
-      await repo.commitAll(message);
+      const hash = await repo.commitAll(message);
+      /*
+       * No hash is usually "nothing had changed", and sometimes "there is no
+       * repository to commit to" — `commitAll` returns the same nothing for
+       * both. The second is the quietest way for a save to end up with no
+       * history at all, and the check only runs in the rare case, because
+       * auto-commit is invoked by a write that has just changed something.
+       */
+      repo.lastCommitError =
+        !hash && !(await repo.isRepo())
+          ? {
+              message:
+                'the save is not a git repository yet, so there is nothing keeping a history of it',
+              at: new Date().toISOString(),
+            }
+          : undefined;
     } catch (err) {
       // A failed commit must not lose the write that already landed on disk.
+      // Remembered as well as logged: see `lastCommitError`, because a console
+      // line in a server nobody is looking at is the same as saying nothing.
+      repo.lastCommitError = {
+        message: (err as Error).message,
+        at: new Date().toISOString(),
+      };
       console.warn(`[rmm] auto-commit failed: ${(err as Error).message}`);
     }
   }

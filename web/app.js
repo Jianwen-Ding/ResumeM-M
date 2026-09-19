@@ -6823,10 +6823,25 @@ async function loadProjectSettings() {
   };
 
   const pending = info.pending ?? [];
+  /*
+   * The version history has stopped recording, and nothing else would say so.
+   *
+   * A failed auto-commit cannot be allowed to fail the edit — the file is
+   * written, and losing it would be worse than losing its history — so it was
+   * a line in a console nobody reads. The editor goes on saying "All changes
+   * saved", truthfully, about the file. Meanwhile "restore this version" has
+   * nothing to restore to, and the sweep will not take a resume the history
+   * does not have. This is the only place that can say it.
+   */
+  const brokenHistory = config.git.autoCommit ? info.lastCommitError : null;
   const unsaved = el('div', {
-    className: pending.length > 0 ? 'result idle' : 'result ok',
-    textContent:
-      pending.length > 0
+    className: brokenHistory ? 'result bad' : pending.length > 0 ? 'result idle' : 'result ok',
+    textContent: brokenHistory
+      ? 'Nothing has been recorded in the version history since ' +
+        `${new Date(brokenHistory.at).toLocaleString()}: ` +
+        `${brokenHistory.message}. Your files are all written — it is the history that has stopped. ` +
+        'Save History below will say the same thing, and the reason is usually in it.'
+      : pending.length > 0
         ? `${plural(pending.length, 'file')} changed since the last save: ${pending
             .slice(0, 4)
             .map((f) => f.path)

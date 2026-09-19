@@ -35,6 +35,8 @@ vi.mock('../web/assets.js', () => ({
 describe('sweeping from the save panel', () => {
   let reply;
   let asked;
+  let brokenHistory;
+  let autoCommit;
 
   const openPanel = async () => {
     document.querySelector('#tabs button[data-tab="save"]').click();
@@ -66,6 +68,8 @@ describe('sweeping from the save panel', () => {
       { id: 'job-lyra', label: 'Data Scientist — Lyra' },
     ];
     reply = { swept: due, held: [], days: 7 };
+    brokenHistory = undefined;
+    autoCommit = true;
     asked = [];
 
     vi.stubGlobal(
@@ -78,9 +82,14 @@ describe('sweeping from the save panel', () => {
         else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
         // `overrides` says which settings an environment variable has taken
         // out of the user's hands; the panel reads it to disable those boxes.
-        else if (url === '/api/config') result = { ...data.config, overrides: {} };
+        else if (url === '/api/config') {
+          result = { ...data.config, git: { ...data.config.git, autoCommit }, overrides: {} };
+        }
         else if (url === '/api/config/store') {
-          result = { dir: '/test-save', isRepo: true, commits: 3, remote: {}, pending: [] };
+          result = {
+            dir: '/test-save', isRepo: true, commits: 3, remote: {}, pending: [],
+            lastCommitError: brokenHistory,
+          };
         } else if (url === '/api/resumes/expiring') result = { due, days: 7 };
         else if (url === '/api/resumes/sweep' && options.method === 'POST') result = reply;
         return { ok: true, json: async () => structuredClone(result) };
@@ -160,6 +169,39 @@ describe('sweeping from the save panel', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('#status').textContent).toMatch(/Kept 2 resumes that are due/),
     );
+  });
+
+  /*
+   * Why a resume could not be filed, said where somebody will see it.
+   *
+   * The refusal above is the safe outcome, but on its own it is a mystery: a
+   * button that says it will remove two resumes, pressed, and two resumes are
+   * still there. The cause is one panel up — auto-commit has been failing, in
+   * silence, because a failed commit cannot be allowed to fail the edit that
+   * it goes with.
+   */
+  it('says the version history has stopped, when it has', async () => {
+    brokenHistory = { message: "Unable to create '.git/index.lock': File exists", at: '2026-09-12T10:00:00Z' };
+
+    await openPanel();
+
+    const said = document.querySelector('#project-settings .result.bad')?.textContent;
+    expect(said).toMatch(/version history/i);
+    expect(said).toMatch(/index\.lock/);
+    // And the reassurance that goes with it, because the frightening reading
+    // of "nothing has been recorded" is that the work itself is gone.
+    expect(said).toMatch(/files are all written/i);
+  });
+
+  it('says nothing about it when the history was never meant to run itself', async () => {
+    // Auto-commit off is a choice. A stale failure from before it was
+    // switched off is not news, and reads as a fault that needs fixing.
+    brokenHistory = { message: 'anything at all', at: '2026-09-12T10:00:00Z' };
+    autoCommit = false;
+
+    await openPanel();
+
+    expect(document.querySelector('#project-settings .result.bad')).toBeNull();
   });
 
   it('does nothing at all if the question is answered no', async () => {

@@ -825,6 +825,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         commits: (await repo.log(1)).length,
         remote,
         pending: await repo.pending(),
+        // Why the history stopped recording, when it has. See
+        // `Repo.lastCommitError`.
+        lastCommitError: repo.lastCommitError,
       });
     }),
   );
