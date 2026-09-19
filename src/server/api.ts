@@ -2020,6 +2020,36 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             aiParsed = null;
           }
         }
+
+        /*
+         * Wired for tools, and neither the tools nor a reply came back.
+         *
+         * Then the tools were not there. Whether the flag was wrong, the CLI
+         * changed its configuration key, or the server would not start, the
+         * model was left in the worst of the three states this code knows
+         * about: told to use tools it does not have, told not to answer in
+         * prose or JSON, and — because the inventory is left out precisely
+         * when the tools are supposed to carry it — with nothing to answer
+         * from either. The run produced nothing and said nothing, and the
+         * tailoring somebody asked for quietly did not happen.
+         *
+         * So it is asked again the old way, which needs no wiring and has
+         * always worked. Only in this case: a run that answered costs no
+         * second run, and a run that failed to start throws before here.
+         */
+        if (aiParsed === null && withTools) {
+          const again = await runAgent(
+            configForTask(data.config, 'tailor'),
+            tailorPrompt(data, resolved, posting, { tools: false }),
+          );
+          aiRaw = again.output;
+          try {
+            aiParsed = extractJson(again.output);
+            aiVia = 'json';
+          } catch {
+            aiParsed = null;
+          }
+        }
         } catch (err) {
           // See `aiFailed`: a run that never started is a reply that will not
           // parse, from further away. Same answer.

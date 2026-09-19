@@ -637,6 +637,63 @@ describe('job analysis', () => {
    * as whatever was asked for — a resume nobody asked for, wearing the name
    * of the one they did.
    */
+  /*
+   * Wired for the tools, and the tools were not there.
+   *
+   * The prompt for a tools run says "use them; do not answer in prose or
+   * JSON", and it leaves the inventory out — deliberately, because the tools
+   * are what the inventory is for. So a CLI whose wiring silently does
+   * nothing leaves the model in the worst state this code has: told to call
+   * tools it does not have, told not to answer any other way, and with
+   * nothing to answer from. The run came back empty, `extractJson` threw, and
+   * the tailoring somebody asked for did not happen and did not say so.
+   *
+   * Whether any particular CLI's wiring works is not something this can
+   * settle — the flag can be right today and wrong after an update, and the
+   * server can fail to start for reasons of its own. So the failure is
+   * detected rather than predicted: nothing through the tools and nothing to
+   * parse means ask again the old way, which needs no wiring.
+   */
+  it('asks again without the tools when the tools were never there', async () => {
+    /*
+     * A stand-in for a CLI that is wired for tools and does not have them.
+     * Named `codex` because that is what decides whether the tools prompt is
+     * used at all — `canWire` matches the command, which is the same thing
+     * the real path does.
+     */
+    const fake = path.join(t.dir, 'codex');
+    fs.writeFileSync(
+      fake,
+      [
+        '#!/usr/bin/env node',
+        'const prompt = process.argv.slice(2).join(" ");',
+        // The tools prompt gets what a model with no tools can say; the JSON
+        // prompt gets a plan.
+        'if (/tools under/.test(prompt)) process.stdout.write("I do not have any tools named resume.");',
+        'else process.stdout.write(JSON.stringify({ choices: {}, disable: ["exp_acme"], reasoning: "asked the old way" }));',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    fs.chmodSync(fake, 0o755);
+
+    const config = t.store.loadConfig();
+    t.store.saveConfig({
+      ...config,
+      ai: { ...config.ai, enabled: true, command: fake, args: ['{promptText}'], timeoutMs: 60_000 },
+    });
+
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'ai' })
+      .expect(200);
+
+    // It answered, and by the way that needs no wiring.
+    expect(res.body.aiUsed).toBe(true);
+    expect(res.body.aiVia).toBe('json');
+    expect(res.body.aiReasoning).toBe('asked the old way');
+  }, 60_000);
+
   it('refuses a way of tailoring it does not have', async () => {
     const res = await request(app)
       .post('/api/extension/analyze')
