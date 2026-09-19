@@ -1723,3 +1723,15 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   white-space: nowrap;
 }
 .date-wrong::before { content: '!'; font-weight: 700; }
+
+
+/*
+ * A resume on its way out. Amber rather than red: it is not an error, and it
+ * is not urgent — it says "this will go by itself unless you keep it", and
+ * the button beside it is how you keep it.
+ */
+.tiny.temporary {
+  border-color: #e0a800;
+  color: #8a6400;
+  background: #fff8e6;
+}

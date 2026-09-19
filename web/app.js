@@ -6661,9 +6661,96 @@ function pageDefaults(config) {
   ]);
 }
 
+/**
+ * How long a resume made for one posting sticks around, and what is due.
+ *
+ * Shown beside the number rather than only behind a menu, because this is the
+ * one setting in the program whose value deletes something. A person changing
+ * it should be able to see what that means for the save in front of them
+ * without having to work it out from a date.
+ */
+function temporaryLife(config, expiring) {
+  const was = String(config.resumes?.temporaryDays ?? 7);
+  const box = el('input', { type: 'number', value: was, step: '1', min: '0', max: '3650' });
+
+  const due = expiring?.due ?? [];
+  const note = el('div', {
+    className: due.length > 0 ? 'result idle' : 'result ok',
+    textContent:
+      Number(was) <= 0
+        ? 'Switched off. Nothing is swept, and temporary resumes stay until you delete them.'
+        : due.length > 0
+          ? `${plural(due.length, 'resume')} due to go next time this save is opened: ` +
+            `${due.slice(0, 4).map((d) => d.label).join(', ')}${due.length > 4 ? '…' : ''}`
+          : 'Nothing is due. A resume is only swept once its application is done with.',
+  });
+
+  box.onchange = async () => {
+    const n = Number(box.value);
+    if (!Number.isFinite(n)) { box.value = was; return; }
+    try {
+      await api('/config', { method: 'PUT', body: JSON.stringify({ resumes: { temporaryDays: n } }) });
+      setStatus(n > 0 ? `Temporary resumes go after ${plural(n, 'day')}` : 'Temporary resumes are no longer swept');
+      loadProjectSettings().catch(() => {});
+    } catch (err) {
+      box.value = was;
+      setStatus(err.message, true);
+    }
+  };
+
+  return el('div', { className: 'temporary-life' }, [
+    el('div', { className: 'lbl', textContent: 'Resumes Made For One Posting' }),
+    el('div', {
+      className: 'hint',
+      style: 'margin-bottom:8px',
+      textContent:
+        'The extension makes one of these per posting. They are removed once the application is done with — ' +
+        'not while it is still being written, and never while an interview or an offer is live. ' +
+        'The version history keeps them, the way it keeps a deleted entry.',
+    }),
+    el('label', { className: 'f' }, [
+      el('div', { className: 'lbl', textContent: 'Days to keep them (0 switches this off)' }),
+      box,
+    ]),
+    note,
+    due.length > 0
+      ? el('div', { className: 'row' }, [
+          el('button', {
+            textContent: `Sweep ${plural(due.length, 'resume')} now`,
+            onclick: async () => {
+              const ok = await confirmModal(
+                `Remove ${plural(due.length, 'resume')}?`,
+                `${due.map((d) => `“${d.label}”`).join(', ')}. ` +
+                  'The entries and wordings they selected are the store’s and stay, and the version history keeps them.',
+              );
+              if (!ok) return;
+              try {
+                const res = await api('/resumes/sweep', { method: 'POST' });
+                setStatus(`Swept ${plural(res.swept.length, 'resume')}`);
+                await loadStore();
+                render();
+                loadProjectSettings().catch(() => {});
+              } catch (err) {
+                setStatus(err.message, true);
+              }
+            },
+          }),
+          el('span', { className: 'hint', textContent: 'Or leave it — this happens when the save is next opened.' }),
+        ])
+      : null,
+    el('div', { className: 'hint', style: 'margin-bottom:12px' }),
+  ]);
+}
+
 /** Where the store lives, and whether it is backed up anywhere. */
 async function loadProjectSettings() {
-  const [info, config] = await Promise.all([api('/config/store'), api('/config')]);
+  const [info, config, expiring] = await Promise.all([
+    api('/config/store'),
+    api('/config'),
+    // Not fatal: the panel is worth showing without it, and an older server
+    // does not have this endpoint at all.
+    api('/resumes/expiring').catch(() => null),
+  ]);
   const box = $('#project-settings');
   const autoCommit = el('input', { type: 'checkbox', checked: config.git.autoCommit, disabled: config.overrides.autoCommit });
   autoCommit.onchange = async () => {
@@ -6716,6 +6803,7 @@ async function loadProjectSettings() {
     }),
 
     pageDefaults(config),
+    temporaryLife(config, expiring),
 
     // Edits made here are committed as they happen; this is for everything
     // else — YAML edited by hand, or auto-commit switched off.
@@ -7876,34 +7964,36 @@ function render() {
   const option = (r) => el('option', { value: r.id, textContent: r.label, selected: r.id === state.resumeId });
 
   /*
-   * Bases in their own group. A store fills up with resumes tailored for one
-   * posting each; the two or three you actually build from should not have to
-   * be found among them.
+   * One group per tier. A save fills up with resumes made for one posting
+   * each; the two or three you actually build from should not have to be
+   * found among them, and the ones on their way out should sort last rather
+   * than alphabetically through the middle.
    *
-   * That grouping only appeared once something had been pinned, and nothing is
-   * pinned in a store nobody has pinned anything in — which is every store to
-   * begin with. So the list stayed flat for exactly the people who had not yet
-   * found the pin, growing by one per application until the documents worth
-   * starting from were scattered alphabetically through everything ever sent.
+   * This used to key off a pin, and the grouping therefore only appeared once
+   * something had been pinned — which is never, in a save nobody has pinned
+   * anything in, meaning every save to begin with. So the list stayed flat
+   * for exactly the people who had not yet found the pin. Every resume has a
+   * tier now, including the ones a migration gave one to, so there is always
+   * something to group by.
    *
-   * A resume the extension built for a posting is named `job-<company>-<role>`
-   * by the server, and nothing else is named that way. The extension's own
-   * picker already falls back to it for this reason; this is the same answer
-   * on this side of the round trip. A pin still wins where there is one —
-   * pinning a tailored resume is a perfectly reasonable thing to do with a
-   * good one, and a guess made from a name must not quietly overrule it.
+   * An empty group is left out rather than shown empty: "Temporary" over
+   * nothing reads as a section that failed to load.
    */
-  const forAPosting = (r) => /^job-/.test(r.id ?? '');
-  const pinned = state.store.resumes.filter((r) => r.base);
-  const mine = pinned.length > 0 ? pinned : state.store.resumes.filter((r) => !forAPosting(r));
-  const rest = state.store.resumes.filter((r) => !mine.includes(r));
+  const GROUPS = [
+    ['base', 'Bases — what you build from'],
+    ['extended', 'Kept'],
+    ['temporary', 'Made for a posting — swept when it is done'],
+  ];
+  const tierOf = (r) => r.tier ?? 'extended';
+  const groups = GROUPS.map(([tier, label]) => [label, state.store.resumes.filter((r) => tierOf(r) === tier)])
+    .filter(([, list]) => list.length > 0);
+
   select.replaceChildren(
     el('option', { value: '__master__', textContent: 'Master Document — All Source Content' }),
-    ...(mine.length > 0 && rest.length > 0
-      ? [
-          el('optgroup', { label: pinned.length > 0 ? 'Bases' : 'Your resumes' }, mine.map(option)),
-          el('optgroup', { label: pinned.length > 0 ? 'Variations' : 'Built for a posting' }, rest.map(option)),
-        ]
+    // One group is no grouping: a save with three resumes all of one kind
+    // reads better as a plain list than as a list under a heading.
+    ...(groups.length > 1
+      ? groups.map(([label, list]) => el('optgroup', { label }, list.map(option)))
       : state.store.resumes.map(option)),
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
@@ -7935,27 +8025,57 @@ function render() {
   renderEditor();
 }
 
-/** The pin itself: what this resume is, and the one click that changes it. */
+/**
+ * What this resume is, and the one click that changes it.
+ *
+ * A cycle rather than three buttons. There are three tiers and two of the
+ * moves are rare — you mark a base once and leave it, and you promote a
+ * temporary resume you turned out to want — so three controls in a toolbar
+ * would be two pieces of permanent furniture for one occasional act. The
+ * button says what the resume *is*; its title says what pressing it does.
+ */
+const TIER_LOOK = {
+  base: {
+    label: '★ Base',
+    className: 'tiny pinned',
+    next: 'extended',
+    title: 'New resumes and tailored drafts start from this one. Click to keep it without starting from it.',
+    said: 'Now a base',
+  },
+  extended: {
+    label: '☆ Kept',
+    className: 'tiny',
+    next: 'base',
+    title: 'Kept in this save and never swept. Click to make it one of the ones you build from.',
+    said: 'Kept',
+  },
+  temporary: {
+    label: '⌛ Temporary',
+    className: 'tiny temporary',
+    next: 'extended',
+    title: 'Made for one posting, and swept a week after that posting is done. Click to keep it.',
+    said: 'Now temporary',
+  },
+};
+
 function renderBaseButton() {
   const btn = $('#btn-base');
   if (!btn) return;
   const spec = state.store.resumes.find((r) => r.id === state.resumeId);
-  const pinned = Boolean(spec?.base);
+  const look = TIER_LOOK[spec?.tier ?? 'extended'];
 
-  btn.textContent = pinned ? '★ Base' : '☆ Pin as base';
-  btn.className = pinned ? 'tiny pinned' : 'tiny';
-  btn.title = pinned
-    ? 'New resumes and tailored drafts start from this one. Click to unpin.'
-    : 'Pin this as a starting point for new resumes and tailored drafts';
+  btn.textContent = look.label;
+  btn.className = look.className;
+  btn.title = look.title;
   btn.disabled = !spec;
   btn.onclick = async () => {
     try {
-      await api(`/resumes/${encodeURIComponent(state.resumeId)}/base`, {
+      await api(`/resumes/${encodeURIComponent(state.resumeId)}/tier`, {
         method: 'PUT',
-        body: JSON.stringify({ base: !pinned }),
+        body: JSON.stringify({ tier: look.next }),
       });
       await loadStore();
-      setStatus(pinned ? 'No longer a base' : 'Pinned as a base');
+      setStatus(TIER_LOOK[look.next].said);
       render();
     } catch (err) {
       setStatus(err.message, true);
@@ -7970,7 +8090,7 @@ async function loadStore() {
     // conventional id is only the guess for a store that has never said.
     const resumes = state.store.resumes;
     state.resumeId =
-      resumes.find((r) => r.base)?.id ??
+      resumes.find((r) => r.tier === 'base')?.id ??
       resumes.find((r) => r.id === 'newgrad')?.id ??
       resumes.find((r) => !r.copiedFrom && !r.generatedFor)?.id ??
       resumes[0]?.id ??
