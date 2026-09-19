@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { flattenResumes, needsFlattening } from './flatten.js';
+import { liftLayout } from './lift-layout.js';
 import { needsTiering, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder } from './resolve.js';
 import {
@@ -775,23 +776,39 @@ export class Store {
    * time after the first. See `flatten.ts` for why the fold cannot change any
    * document.
    */
-  migrateResumes(): { flattened: string[]; tiered: string[]; problems: string[] } {
+  migrateResumes(): { flattened: string[]; tiered: string[]; lifted: string[]; problems: string[] } {
     const all = this.loadResumesAsWritten();
-    if (!needsFlattening(all) && !needsTiering(all)) return { flattened: [], tiered: [], problems: [] };
+    if (!needsFlattening(all) && !needsTiering(all)) {
+      return { flattened: [], tiered: [], lifted: [], problems: [] };
+    }
 
     const problems: string[] = [];
     const flattened: string[] = [];
     const flat = flattenResumes(all, problems);
     const { tiered: withTiers, changed: tiered } = tierResumes(flat);
 
-    for (const spec of withTiers) {
+    /*
+     * And a page setting every one of them agrees on goes up to the save.
+     *
+     * Only on a save actually being migrated, which is why it is inside the
+     * guard above rather than run on every start. Folding copied each base's
+     * layout down into every resume that had been inheriting it — correct,
+     * and it leaves the save-wide setting saying nothing, because every
+     * resume overrules it. See `liftLayout`: no document changes, and from
+     * then on the number in Settings moves all of them.
+     */
+    const config = this.loadConfig();
+    const { layout, resumes: lightened, keys: lifted } = liftLayout(withTiers, config.layout);
+    if (lifted.length > 0) this.saveConfig({ layout });
+
+    for (const spec of lightened) {
       const before = all.find((r) => r.id === spec.id);
       const wasFolded = Boolean(before?.extends);
       if (wasFolded) flattened.push(spec.id);
       // One write per resume however many migrations touched it.
-      if (wasFolded || tiered.includes(spec.id)) this.saveResume(spec);
+      if (wasFolded || tiered.includes(spec.id) || lifted.length > 0) this.saveResume(spec);
     }
-    return { flattened, tiered, problems };
+    return { flattened, tiered, lifted, problems };
   }
 
   /**

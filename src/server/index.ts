@@ -66,13 +66,19 @@ function projectSession(store: Store) {
  * is the point. A save upgraded today loses nothing tonight.
  */
 async function openSave(store: Store, repo: Repo): Promise<void> {
-  const { flattened, tiered, problems } = store.migrateResumes();
+  const { flattened, tiered, lifted, problems } = store.migrateResumes();
   for (const problem of problems) console.warn(`ResumeM-M: ${problem}`);
   if (flattened.length > 0) {
     console.log(`ResumeM-M: folded ${flattened.length} resume(s) that recorded a base into themselves.`);
   }
   if (tiered.length > 0) {
     console.log(`ResumeM-M: sorted ${tiered.length} resume(s) into base, kept and temporary.`);
+  }
+  if (lifted.length > 0) {
+    console.log(
+      `ResumeM-M: moved ${lifted.join(', ')} up to the save, since every resume agreed on ` +
+        'them. Changing them in Settings now changes all of them.',
+    );
   }
 
   const { swept } = await sweepTemporary(store, repo);
