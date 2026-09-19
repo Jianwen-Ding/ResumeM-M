@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AgentError, explainSilence, extractJson, runAgent, trimToLetter } from '../src/ai/agent.js';
+import { AgentError, explainSilence, extractJson, runAgent, trimToLetter, unwrapAgentFraming } from '../src/ai/agent.js';
 import { AI_PRESETS } from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 import { repairAiArgs } from '../src/model/store.js';
@@ -311,6 +311,134 @@ describe('runAgent', () => {
   });
 });
 
+/*
+ * Codex does not print an answer. It prints a session.
+ *
+ * `codex exec` writes a version banner, the working directory, the model and
+ * the sandbox mode; then, under "User instructions", the whole prompt echoed
+ * back; then its reasoning under "thinking"; then the answer under "codex";
+ * then a token count. Taken as it came, that is what was saved as the cover
+ * letter — and the prompt quotes the user's previous letters as examples of
+ * their voice, so the "letter" contained letters written to other companies,
+ * with the real one several hundred lines down.
+ *
+ * `trimToLetter` made it worse rather than better: the first salutation in
+ * that wall is the one in the quoted example, so the letter it kept was the
+ * one addressed to somebody else.
+ */
+describe('a CLI that prints a session rather than an answer', () => {
+  const session = (answer: string, prompt = 'Write a letter.') =>
+    [
+      '[2026-09-19T17:20:01] OpenAI Codex v0.9.0 (research preview)',
+      '--------',
+      'workdir: /tmp/rmm-ai-abc123',
+      'model: gpt-5-codex',
+      'sandbox: read-only',
+      '--------',
+      '[2026-09-19T17:20:01] User instructions:',
+      prompt,
+      '[2026-09-19T17:20:04] thinking',
+      '',
+      'I should match the posting to the strongest bullets.',
+      '',
+      '[2026-09-19T17:20:09] codex',
+      '',
+      answer,
+      '',
+      '[2026-09-19T17:20:09] tokens used: 4821',
+    ].join('\n');
+
+  it('keeps the answer and nothing around it', () => {
+    const got = unwrapAgentFraming(session('Dear Helios,\n\nI build ingest pipelines.\n\nJianwen'));
+    expect(got).toBe('Dear Helios,\n\nI build ingest pipelines.\n\nJianwen');
+  });
+
+  /*
+   * The one that matters most: the prompt quotes a letter to another company,
+   * because that is how the voice is taught. Left in, it is the letter with
+   * the salutation nearest the top — so it is the one that got sent.
+   */
+  it('does not leave the letter the prompt quoted as an example', () => {
+    const quoted = [
+      'Write a letter to Helios.',
+      '',
+      'Here is one you wrote before, for its voice:',
+      'Dear Northwind,',
+      '',
+      'I am writing about the data engineering role.',
+      '',
+      'Yours,',
+      'Jianwen',
+    ].join('\n');
+    const whole = session('Dear Helios,\n\nI build ingest pipelines.\n\nJianwen', quoted);
+
+    expect(trimToLetter(unwrapAgentFraming(whole))).not.toMatch(/Northwind/);
+    expect(trimToLetter(unwrapAgentFraming(whole))).toMatch(/^Dear Helios,/);
+    // And the wall of transcript, which is what actually reached the PDF.
+    expect(unwrapAgentFraming(whole)).not.toMatch(/OpenAI Codex|workdir:|thinking|tokens used/);
+  });
+
+  /*
+   * And the plan. `extractJson` takes the first object it can parse, and an
+   * echoed prompt is full of them — so the plan that was applied was a
+   * fragment of the store quoted back at us, and an AI run that changed
+   * nothing reported success.
+   */
+  it('finds the plan the model wrote, not one quoted in the prompt', () => {
+    const asked = 'Return JSON. The store is {"resumes":[{"id":"base"}]}. Not {"example":"this"}.';
+    const whole = session('{"choices":{"b_pipeline":"v_kafka"},"disable":["exp_old"]}', asked);
+
+    expect(extractJson(unwrapAgentFraming(whole))).toEqual({
+      choices: { b_pipeline: 'v_kafka' },
+      disable: ['exp_old'],
+    });
+  });
+
+  it('takes the last turn when there are several', () => {
+    const two = `${session('first')}\n[2026-09-19T17:21:00] codex\n\nsecond\n\n[2026-09-19T17:21:00] tokens used: 12`;
+    expect(unwrapAgentFraming(two)).toBe('second');
+  });
+
+  /*
+   * Matched on the shape, not on the command, because the command is whatever
+   * somebody typed — a path, a wrapper script, `npx codex`. Which also means
+   * it has to leave every other CLI's output exactly alone.
+   */
+  /*
+   * A session that never reached an answer.
+   *
+   * The model returned nothing, the key was refused, a future version moved
+   * the marker — whichever it was, the run did not answer. Left as it came,
+   * the banner and the echoed prompt *are* the output, so they became the
+   * cover letter: a failure saved and bundled as though it had worked.
+   */
+  it('treats a transcript with no answer in it as silence', () => {
+    const stopped = [
+      '[2026-09-19T17:20:01] OpenAI Codex v0.9.0 (research preview)',
+      '--------',
+      'workdir: /tmp/rmm-ai-abc123',
+      '--------',
+      '[2026-09-19T17:20:01] User instructions:',
+      'Write a letter to Helios.',
+      '[2026-09-19T17:20:03] thinking',
+      '',
+      'I will not be able to do that.',
+    ].join('\n');
+    expect(unwrapAgentFraming(stopped)).toBe('');
+  });
+
+  it('leaves an answer that is only an answer untouched', () => {
+    const plain = 'Dear Helios,\n\nI build ingest pipelines.\n\nJianwen';
+    expect(unwrapAgentFraming(plain)).toBe(plain);
+    expect(unwrapAgentFraming('{"choices":{}}')).toBe('{"choices":{}}');
+  });
+
+  it('does not take a mention of codex in prose for a marker', () => {
+    const prose = 'I have used the codex tool.\n\n[not a timestamp] codex\n\nstill the letter';
+    expect(unwrapAgentFraming(prose)).toBe(prose);
+  });
+});
+
 describe('confinement', () => {
   it('runs the command in an empty scratch directory, not the server’s own', async () => {
     // An agent CLI that "looks around the project" must find nothing but the
@@ -371,13 +499,26 @@ describe('repairing an AI command that cannot work', () => {
       'read-only',
       '--cd',
       '{sandbox}',
+      '--output-last-message',
+      '{sandbox}/last-message.txt',
       '{promptText}',
     ]);
   });
 
-  it('leaves a codex command that already has it alone', () => {
-    const args = ['exec', '--skip-git-repo-check', '{promptText}'];
-    expect(repairAiArgs('codex', args)).toBe(args);
+  /*
+   * And asks for the answer by itself, rather than leaving it to be found
+   * inside the printed session. In front of the prompt, which Codex takes as
+   * a positional: anything after it is read as more prompt.
+   */
+  it('asks a codex exec for its last message in a file', () => {
+    const repaired = repairAiArgs('codex', ['exec', '--skip-git-repo-check', '{promptText}']);
+    expect(repaired).toEqual(['exec', '--skip-git-repo-check', '--output-last-message', '{sandbox}/last-message.txt', '{promptText}']);
+
+    // Whatever spelling is already there is theirs, and is left alone.
+    const mine = ['exec', '--skip-git-repo-check', '-o', '/tmp/mine.txt', '{promptText}'];
+    expect(repairAiArgs('codex', mine)).toEqual(mine);
+    const joined = ['exec', '--skip-git-repo-check', '--output-last-message=/tmp/mine.txt', '{promptText}'];
+    expect(repairAiArgs('codex', joined)).toEqual(joined);
   });
 
   it('recognises codex by path and on Windows', () => {

@@ -118,4 +118,61 @@ describe.runIf(latex && hasPdfToText)('what the reader actually sees', () => {
     expect(text).toContain('Zoë Müller');
     expect(text).toContain('Nestlé');
   }, 120_000);
+
+  /*
+   * Text that ran off the right-hand edge, which is the one loss the fit
+   * report could not see.
+   *
+   * Everything about fitting here is vertical: how tall the content came out,
+   * how many pages that took. Nothing asked how wide a line was, and TeX does
+   * not break a word it cannot break — it sets a long link past the margin and
+   * off the paper. The glyphs are not in the PDF, so `pdftotext` cannot find
+   * them and neither can an applicant tracking system.
+   *
+   * Compiled with an ordinary Google Docs share link, this reported "✓ 1 page,
+   * ~13 lines of room left", passed `strict`, returned no warnings — and the
+   * link in the PDF ended `ouid=1234` where the one in the save ended
+   * `ouid=1234567890`.
+   *
+   * Two assertions on purpose: that the text really does go missing (so the
+   * warning is about something), and that the build now says so.
+   */
+  it('says when a line ran off the page, taking its text with it', async () => {
+    const link =
+      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg/edit?usp=sharing&ouid=1234567890';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-toowide-'));
+    try {
+      const pdfPath = path.join(dir, 'out.pdf');
+      const result = await compileResume(resume([`Wrote the runbook: ${link}`]), { pdfPath });
+      const { stdout } = await run('pdftotext', [pdfPath, '-']);
+
+      // The loss itself: the end of the link is not on the page.
+      expect(stdout).toContain('docs.google.com');
+      expect(stdout).not.toContain('ouid=1234567890');
+
+      const said = result.warnings.join(' ');
+      expect(said).toContain('past the right-hand edge');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  /*
+   * And nothing said about a resume whose lines all fit, which is every
+   * ordinary one. A warning that fires on the common case is a warning
+   * people learn to scroll past.
+   */
+  it('says nothing about a resume whose lines fit', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-fits-'));
+    try {
+      const pdfPath = path.join(dir, 'out.pdf');
+      const result = await compileResume(
+        resume(['Cut p99 latency by a third', 'Owned the deploy pipeline end to end']),
+        { pdfPath },
+      );
+      expect(result.warnings.join(' ')).not.toContain('past the right-hand edge');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

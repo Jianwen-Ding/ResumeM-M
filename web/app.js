@@ -91,6 +91,58 @@ const state = {
   fromDraft: null,
 };
 
+/**
+ * Which tier comes first, wherever resumes are listed or stepped through.
+ *
+ * One list because two would drift: the dropdown draws them in this order and
+ * `deleteVariation` steps to the neighbour in it, and a delete that landed
+ * somewhere other than the next line of the list you are looking at would
+ * read as the editor losing its place.
+ */
+const TIER_ORDER = ['base', 'extended', 'temporary'];
+
+/** A resume's tier, with the reading that never deletes anything: see tiers.ts. */
+const tierOf = (r) => r.tier ?? 'extended';
+
+/**
+ * What the drafting buttons are actually drawing on, said beside them.
+ *
+ * The AI here does not write out of nothing, and it is not meant to sound
+ * like an AI: it is handed the notes on how you write, the letters you have
+ * already sent and the answers you have already given, and asked for one in
+ * that voice. That is the entire reason the letter bank, the answer bank and
+ * the writing notes exist — and it was said only in a tooltip, so the button
+ * read as "have a machine write this", which is the thing people are right to
+ * be wary of and the thing this does not do.
+ *
+ * Counted, because a count is checkable and a claim is not: "from the nine
+ * letters you have sent" is something somebody can go and look at. And honest
+ * when there is nothing to draw on yet, because a first letter with an empty
+ * bank really is written from the posting and the notes alone, and saying
+ * otherwise would be the one thing worse than saying nothing.
+ */
+function draftedFrom(kind) {
+  const bank = kind === 'letter' ? (state.store.coverLetters ?? []) : (state.store.answers ?? []);
+  const samples = (state.store.samples ?? []).length;
+  const notes = String(state.store.voice ?? '').trim().length > 0;
+  const written = kind === 'letter' ? 'letter' : 'answer';
+
+  const sources = [];
+  if (bank.length > 0) sources.push(`the ${plural(bank.length, `${written} you have already written`, `${written}s you have already written`)}`);
+  if (samples > 0) sources.push(plural(samples, 'writing sample'));
+  if (notes) sources.push('your notes on how you write');
+
+  if (sources.length === 0) {
+    return (
+      `Written in your voice — but there is nothing of yours to learn it from yet. ` +
+      `Add a ${written} you have written, or say how you write, under Voice & AI.`
+    );
+  }
+  const last = sources.pop();
+  const from = sources.length > 0 ? `${sources.join(', ')} and ${last}` : last;
+  return `Written in your voice, from ${from} — not from nothing.`;
+}
+
 /** Forget every unsaved edit — used when switching resumes. */
 function clearEdits() {
   state.choices = {};
@@ -4290,16 +4342,55 @@ async function deleteVariation() {
   ].filter(Boolean).join(' '));
   if (!ok) return;
 
-  await api(`/resumes/${encodeURIComponent(mine.id)}`, { method: 'DELETE' });
   /*
-   * Off this resume before reloading, or the reload lands on an id the store
-   * no longer has and the editor opens on nothing.
+   * Somewhere else first, and only then the delete.
+   *
+   * This used to delete and then set `state.resumeId = null`, which is not
+   * anywhere: the editor sat on the resume it had just removed until the
+   * reload came back, and then on nothing at all, with the dropdown blank and
+   * the preview showing a document that no longer exists. You had to go and
+   * pick something before the editor was an editor again — after an action
+   * whose whole point was to stop dealing with this one.
+   *
+   * The neighbour in the list the dropdown draws, so it moves the way
+   * stepping down that list would, and the one above when this was the last.
+   * There is always one: the button is hidden while the save holds a single
+   * resume.
+   *
+   * Doing it in this order also means a delete that fails leaves you on a
+   * resume that exists rather than on nothing, with the one you tried to
+   * remove still in the list to try again.
    */
+  const order = [...(state.store.resumes ?? [])].sort(
+    (a, b) => TIER_ORDER.indexOf(tierOf(a)) - TIER_ORDER.indexOf(tierOf(b)),
+  );
+  const at = order.findIndex((r) => r.id === mine.id);
+  const landing = order[at + 1] ?? order[at - 1];
+
   clearEdits();
-  state.resumeId = null;
+  state.masterView = false;
+  state.resumeId = landing?.id ?? null;
   location.hash = '';
-  await loadStore();
-  setStatus('Variation deleted');
+  setSaveState('saved');
+  render();
+  scheduleRender();
+
+  try {
+    await api(`/resumes/${encodeURIComponent(mine.id)}`, { method: 'DELETE' });
+    setStatus(`Deleted “${mine.label ?? mine.id}”`);
+  } catch (err) {
+    /*
+     * Caught here rather than left to reject into nothing. A delete the store
+     * refuses — a folder that is not writable, a save that has changed under
+     * the editor — is something the person has to be told, and this is the
+     * only place that knows which resume it was about.
+     */
+    setStatus(`“${mine.label ?? mine.id}” was not deleted — ${err.message}`, true);
+  } finally {
+    // Whether it went or not: the list on screen has to agree with the store.
+    await loadStore();
+    render();
+  }
 }
 
 async function saveAsVariation() {
@@ -5395,6 +5486,8 @@ function renderDraft(draft) {
           }),
           letterFeedbackBtn,
         ]),
+        // What "Draft it" writes from, beside "Draft it". See `draftedFrom`.
+        el('div', { className: 'hint voice-from', textContent: draftedFrom('letter') }),
         letterNotes,
         el('div', { className: 'letter-split' }, [letter, letterPane]),
         letterFit,
@@ -5513,6 +5606,8 @@ function renderDraft(draft) {
             onclick: () => generate(draft, 'questions', notes),
           }),
         ]),
+        // The same for the answers as for the letter. See `draftedFrom`.
+        el('div', { className: 'hint voice-from', textContent: draftedFrom('answer') }),
         qs,
       ]),
     );
@@ -6994,7 +7089,25 @@ async function loadSettings() {
    */
   const research = el('input', { type: 'checkbox', checked: Boolean(config.ai.research) });
   const researchNote = el('div', { className: 'hint', style: 'margin-bottom:12px' });
+  /*
+   * And whose setting it actually is.
+   *
+   * This box is drawn whichever CLI is configured, and it only decides
+   * anything for the one whose deny list this tool writes. For the others it
+   * was making a promise in both directions over a command line it had not
+   * changed — and the direction that would be believed is the one it could
+   * not keep: "off: it works only from the posting and what you have
+   * written". Somebody choosing not to let a model read about their employer
+   * should not be told they have when they have not.
+   */
   const showResearchNote = (on) => {
+    if (config.overrides.research) {
+      researchNote.textContent =
+        `This does not reach ${config.ai.command || 'the command you have configured'} — the switch only ` +
+        'writes the tool list for Claude Code. Whether another CLI may read the web is its own setting, ' +
+        'in its own configuration, and this tool neither grants it nor takes it away.';
+      return;
+    }
     researchNote.textContent = on
       ? 'It may read about the company before writing. What it finds can shape which of your experience is worth raising — it never becomes a claim about you. Your files stay out of reach either way.'
       : 'Off: it works only from the posting and what you have written. A letter that knows what the team actually ships reads differently from one that knows only the advertisement.';
@@ -8074,13 +8187,12 @@ function render() {
    * An empty group is left out rather than shown empty: "Temporary" over
    * nothing reads as a section that failed to load.
    */
-  const GROUPS = [
-    ['base', 'Bases — what you build from'],
-    ['extended', 'Kept'],
-    ['temporary', 'Made for a posting — swept when it is done'],
-  ];
-  const tierOf = (r) => r.tier ?? 'extended';
-  const groups = GROUPS.map(([tier, label]) => [label, state.store.resumes.filter((r) => tierOf(r) === tier)])
+  const LABELS = {
+    base: 'Bases — what you build from',
+    extended: 'Kept',
+    temporary: 'Made for a posting — swept when it is done',
+  };
+  const groups = TIER_ORDER.map((tier) => [LABELS[tier], state.store.resumes.filter((r) => tierOf(r) === tier)])
     .filter(([, list]) => list.length > 0);
 
   select.replaceChildren(

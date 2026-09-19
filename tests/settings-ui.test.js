@@ -76,6 +76,39 @@ describe('the settings panel', () => {
    * from the server. A command typed but not yet saved was simply replaced by
    * the old one, mid-sentence, with nothing to say it had happened.
    */
+  /*
+   * "Let it look up the company online" is drawn whichever CLI is
+   * configured, and it only writes a tool list for one of them. For the
+   * others it was promising in both directions over a command line it had
+   * not touched — and the direction people would believe is the one it could
+   * not keep: "off: it works only from the posting and what you have
+   * written". Somebody deciding not to let a model read about their employer
+   * should not be told they have decided it when they have not.
+   */
+  describe('the switch that only reaches one of the CLIs', () => {
+    const note = () =>
+      [...document.querySelectorAll('#settings .hint')].map((n) => n.textContent).join(' | ');
+
+    it('makes its promise for the CLI whose tool list it writes', () => {
+      expect(note()).toMatch(/works only from the posting/i);
+      expect(note()).not.toMatch(/does not reach/i);
+    });
+
+    it('says whose setting it is for one it does not reach', async () => {
+      config.overrides = { research: true };
+      config.ai = { ...config.ai, command: 'codex' };
+      // Reopening the panel is what a save change or a preset change does.
+      document.querySelector('button[data-tab="resumes"]').click();
+      document.querySelector('button[data-tab="voice"]').click();
+      await vi.waitFor(() => expect(note()).toMatch(/does not reach/i));
+
+      expect(note()).toMatch(/codex/);
+      expect(note()).toMatch(/its own setting/i);
+      // And never the promise it cannot keep.
+      expect(note()).not.toMatch(/works only from the posting/i);
+    });
+  });
+
   it('keeps a command you are still typing when the research switch is flipped', async () => {
     const command = commandBox();
     command.value = 'my-own-cli --with-a-flag';

@@ -108,7 +108,24 @@ export const AI_PRESETS: AiPreset[] = [
      * a repository — without it Codex refuses to start, assuming you want
      * version control before it touches anything. It touches nothing.
      */
-    args: ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--cd', '{sandbox}', '{promptText}'],
+    /*
+     * `--output-last-message` is the third: Codex prints its whole session to
+     * stdout — every turn, the reasoning, and a "tokens used" line at the end
+     * — and this writes the final message, and only that, to a file. Reading
+     * the transcript back and hoping to find the answer in it is how another
+     * company's quoted cover letter once got saved as this one's.
+     */
+    args: [
+      'exec',
+      '--sandbox',
+      'read-only',
+      '--skip-git-repo-check',
+      '--cd',
+      '{sandbox}',
+      '--output-last-message',
+      '{sandbox}/last-message.txt',
+      '{promptText}',
+    ],
     note: 'Runs in Codex’s own read-only sandbox, in a scratch directory.',
     model: { flag: '--model', suggestions: ['gpt-5-codex', 'gpt-5', 'o4-mini'] },
     /*
@@ -195,10 +212,26 @@ export function repairAiArgs(command: string, args: string[]): string[] {
     return out;
   }
 
-  // Codex: refuses to start outside a git repository unless told not to check.
-  if (named(/(^|[\\/])codex(\.exe)?$/i) && args.includes('exec') && !args.includes('--skip-git-repo-check')) {
+  if (named(/(^|[\\/])codex(\.exe)?$/i) && args.includes('exec')) {
     const out = [...args];
-    out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
+    // Refuses to start outside a git repository unless told not to check.
+    if (!out.includes('--skip-git-repo-check')) out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
+    /*
+     * Without this the answer has to be found inside Codex's printed session
+     * — every turn of it, and a "tokens used" line at the end — which is how
+     * a letter Codex had quoted from the corpus once got saved as this
+     * application's. Asking for the final message by itself is a file Codex
+     * writes on purpose, and it costs one flag.
+     */
+    if (!out.some((a) => a === '--output-last-message' || a === '-o' || a.startsWith('--output-last-message='))) {
+      /*
+       * In front of the prompt, which Codex takes as a positional: anything
+       * after it is read as more prompt.
+       */
+      const promptAt = out.findIndex((a) => a === '{promptText}' || a === '{prompt}');
+      const at = promptAt < 0 ? out.length : promptAt;
+      out.splice(at, 0, '--output-last-message', '{sandbox}/last-message.txt');
+    }
     return out;
   }
 
@@ -278,8 +311,27 @@ const CONFINED_TOOLS = 'Bash,BashOutput,KillShell,Write,Edit,NotebookEdit,Read,G
  * whether the model may read the company's own careers page, not whether it
  * may read yours.
  */
+/**
+ * Does this switch actually decide anything for that CLI?
+ *
+ * Only where the deny list is ours to write. Claude Code is told which tools
+ * it may not use, so taking the web ones off that list is what "let it look
+ * things up" means; nothing is added that was not there. Every other CLI here
+ * is run as it comes, and whether it can reach the web is its own setting, in
+ * its own configuration — this tool neither grants it nor takes it away.
+ *
+ * Which matters because the checkbox is drawn for all of them and its note
+ * made a promise in both directions: "it may read about the company" and
+ * "off: it works only from the posting and what you have written". The second
+ * is the one that would be believed and the one this cannot keep. So the box
+ * says whose setting it is.
+ */
+export function researchIsOurs(command: string): boolean {
+  return /(^|[\\/])claude(\.exe)?$/i.test(command.trim());
+}
+
 export function applyResearch(command: string, args: string[], research: boolean): string[] {
-  if (!/(^|[\\/])claude(\.exe)?$/i.test(command.trim())) return args;
+  if (!researchIsOurs(command)) return args;
 
   const at = args.indexOf('--disallowedTools');
   if (at < 0) {
@@ -364,18 +416,55 @@ function matchesCommand(name: string, command: string): boolean {
  * model chosen and then cleared has to take its flag with it, or the box says
  * "whatever the CLI defaults to" while the command line still pins one.
  */
-function setSwitch(args: string[], spec: AiSwitch | undefined, value: string | undefined): string[] {
+function setSwitch(
+  args: string[],
+  spec: (AiSwitch & { values?: Record<string, string> }) | undefined,
+  value: string | undefined,
+): string[] {
   if (!spec) return args;
   const out: string[] = [];
+
+  /*
+   * Which occurrences of this flag are this switch's to remove.
+   *
+   * A flag like `--model` is the setting: every `--model` on the line is one
+   * of these and replacing it is right. `-c` is not — it is Codex's general
+   * config override, and the effort switch is only one of the things people
+   * put behind it. Removing every `-c` pair meant that picking an effort
+   * silently deleted `-c model_provider=myproxy` off somebody's command line,
+   * and clearing the effort afterwards did not bring it back. Measured: the
+   * override was gone from the args and nothing said so.
+   *
+   * So a switch with named values owns only the values it names — matched on
+   * the key in front of the `=`, since that is what is being set.
+   */
+  const owned = spec.values
+    ? new Set(Object.values(spec.values).map((v) => v.split('=')[0]))
+    : null;
+  const mine = (v: string | undefined) => !owned || (v !== undefined && owned.has(v.split('=')[0]!));
 
   // Drop whatever is there now, in either spelling.
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === spec.flag) {
-      i++; // and its value
+      const next = args[i + 1];
+      if (mine(next)) {
+        i++; // and its value
+        continue;
+      }
+      // Somebody else's use of the same flag. Both parts stay where they are.
+      out.push(a);
+      if (next !== undefined) {
+        out.push(next);
+        i++;
+      }
       continue;
     }
-    if (a.startsWith(`${spec.flag}=`)) continue;
+    if (a.startsWith(`${spec.flag}=`)) {
+      if (mine(a.slice(spec.flag.length + 1))) continue;
+      out.push(a);
+      continue;
+    }
     out.push(a);
   }
 

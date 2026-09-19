@@ -23,7 +23,7 @@ import {
   type TailorContext,
 } from '../ai/prompts.js';
 import { listModels } from '../ai/models.js';
-import { AI_PRESETS, AI_TASKS, configForTask } from '../ai/presets.js';
+import { AI_PRESETS, AI_TASKS, configForTask, researchIsOurs } from '../ai/presets.js';
 import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
 import { readState } from '../mcp/main.js';
 import type { SessionState } from '../mcp/session.js';
@@ -765,6 +765,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           autoCommit: process.env.RMM_AUTOCOMMIT === '0',
           ai: process.env.RMM_AI === '0',
           engine: Boolean(process.env.RMM_LATEX_ENGINE),
+          /*
+           * And the one setting whose effect depends on which CLI is
+           * configured. "Let it look up the company online" is drawn for all
+           * of them and only decides anything for the one whose deny list is
+           * ours to write — see `researchIsOurs`. The box promised in both
+           * directions, and the direction that would be believed is the one
+           * it could not keep: "off: it works only from the posting and what
+           * you have written".
+           */
+          research: !researchIsOurs(c.ai.command),
         },
       });
     }),
@@ -2020,6 +2030,36 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             aiParsed = null;
           }
         }
+
+        /*
+         * Wired for tools, and neither the tools nor a reply came back.
+         *
+         * Then the tools were not there. Whether the flag was wrong, the CLI
+         * changed its configuration key, or the server would not start, the
+         * model was left in the worst of the three states this code knows
+         * about: told to use tools it does not have, told not to answer in
+         * prose or JSON, and — because the inventory is left out precisely
+         * when the tools are supposed to carry it — with nothing to answer
+         * from either. The run produced nothing and said nothing, and the
+         * tailoring somebody asked for quietly did not happen.
+         *
+         * So it is asked again the old way, which needs no wiring and has
+         * always worked. Only in this case: a run that answered costs no
+         * second run, and a run that failed to start throws before here.
+         */
+        if (aiParsed === null && withTools) {
+          const again = await runAgent(
+            configForTask(data.config, 'tailor'),
+            tailorPrompt(data, resolved, posting, { tools: false }),
+          );
+          aiRaw = again.output;
+          try {
+            aiParsed = extractJson(again.output);
+            aiVia = 'json';
+          } catch {
+            aiParsed = null;
+          }
+        }
         } catch (err) {
           // See `aiFailed`: a run that never started is a reply that will not
           // parse, from further away. Same answer.
@@ -2102,6 +2142,33 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * See the `x-rmm-project` check where saves are switched.
          */
         save: store.root,
+        /*
+         * What the AI would be writing from, so the card can say it.
+         *
+         * A model writing a cover letter is the part of this people are
+         * rightly wariest of, and the answer to that wariness — that it works
+         * from their own letters, their own samples and their own notes on
+         * how they write — is exactly why the banks exist. The card asks for
+         * a letter and never said where one would come from.
+         *
+         * Counted rather than claimed, because a count is something somebody
+         * can go and check, and because zero is the honest answer on the
+         * first application and the one most worth showing: a letter written
+         * with nothing of yours to learn from is a different offer.
+         */
+        voice: {
+          letters: data.coverLetters.length,
+          answers: data.answers.length,
+          /*
+           * Live samples only. An archived one is skipped everywhere the
+           * writing happens — the voice context that leads every prompt drops
+           * it, and so does the corpus listing — so counting it made the card
+           * overstate its case in the one place the count exists to be
+           * checkable.
+           */
+          samples: data.samples.filter((s) => !s.archived).length,
+          notes: String(data.voice ?? '').trim().length > 0,
+        },
         /*
          * "You have applied to this one before."
          *

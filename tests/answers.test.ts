@@ -226,6 +226,55 @@ describe('the same question, asked by another system', () => {
     }
   });
 
+  /*
+   * The same failure through a word too short to be looked at.
+   *
+   * `terms` drops anything of two characters or fewer, so the only word that
+   * distinguishes "authorized to work in the US" from "…in the UK" is not in
+   * the comparison at all. The two questions are then identical to the
+   * matcher: it scores them 1.000 and calls it confident — and confident is
+   * not advisory, it is written into the draft unmarked and carried into the
+   * bundle by "Complete this application".
+   *
+   * So a UK or EU form comes back saying the applicant is a US citizen
+   * authorized to work in the United States. That is a false declaration
+   * about somebody's right to work, made on their behalf and sent unread,
+   * which is the exact harm the test above this one was written to stop. It
+   * was stopped for long words and left open for short ones.
+   */
+  it('does not answer about one country with the answer about another', () => {
+    for (const [asked, stored] of [
+      ['Are you legally authorized to work in the UK?', 'Are you legally authorized to work in the US?'],
+      ['Are you legally authorized to work in the EU?', 'Are you legally authorized to work in the US?'],
+      ['Are you legally authorized to work in the US?', 'Are you legally authorized to work in the UK?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+  });
+
+  /*
+   * And the same thing where the short word is a language rather than a
+   * country. "How many years with Go?" answered by the stored answer about
+   * C# is a claim about experience nobody has.
+   */
+  it('does not answer about one language with the answer about another', () => {
+    for (const [asked, stored] of [
+      ['How many years of experience do you have with Go?', 'How many years of experience do you have with C#?'],
+      ['How many years of experience do you have with R?', 'How many years of experience do you have with Go?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+  });
+
+  /*
+   * Without demoting the match this must not touch: the same question, short
+   * words and all, is still safe to send as it stands.
+   */
+  it('still sends the same question’s own answer as it stands', () => {
+    expect(ask('Are you legally authorized to work in the US?', 'Are you legally authorized to work in the US?').confident).toBe(true);
+    expect(ask('How many years of experience do you have with Go?', 'How many years of experience do you have with Go?').confident).toBe(true);
+  });
+
   it('still reuses a stored question the form has only padded out', () => {
     // The case the coverage bias exists for, and which must keep working: the
     // stored question says nothing the asked one did not.

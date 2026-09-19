@@ -79,6 +79,124 @@ describe('picking a resume out of a store that has been used', () => {
     { id: 'job-lyra-data-scientist', label: 'Lyra — Data Scientist', tier: 'temporary', choices: {} },
   ];
 
+  /*
+   * Deleting the one you are looking at.
+   *
+   * The button removed it and then set the open resume to nothing: the editor
+   * stayed on the document it had just deleted until the reload came back,
+   * and then sat on an empty dropdown with a preview of something that no
+   * longer existed. You had to go and choose a resume before the editor was
+   * an editor again — after pressing a button whose entire point was to stop
+   * dealing with that one.
+   *
+   * It moves first now, to the next resume in the list the dropdown draws, so
+   * the editor steps down the list rather than losing its place.
+   */
+  describe('deleting the resume that is open', () => {
+    let asked;
+
+    async function openAndDelete(resumes, id, { fails = false } = {}) {
+      vi.resetModules();
+      document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+      window.location.hash = `#resumes/${id}`;
+
+      const fixture = makeTempStore();
+      const data = { ...fixture.store.load(), resumes: structuredClone(resumes) };
+      fixture.cleanup();
+      asked = [];
+
+      vi.stubGlobal('confirm', () => true);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url, options = {}) => {
+          const method = options.method ?? 'GET';
+          asked.push(`${method} ${url}`);
+          let result = {};
+          if (url === '/api/store') result = data;
+          else if (url === '/api/ai/jobs') result = { jobs: [] };
+          else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
+          else if (method === 'DELETE' && String(url).startsWith('/api/resumes/')) {
+            if (fails) {
+              return { ok: false, status: 400, statusText: 'Bad Request', json: async () => ({ error: 'the save folder is not writable' }) };
+            }
+            const gone = decodeURIComponent(String(url).split('/').pop());
+            data.resumes = data.resumes.filter((r) => r.id !== gone);
+          }
+          return { ok: true, json: async () => structuredClone(result) };
+        }),
+      );
+
+      await import('../web/app.js');
+      await vi.waitFor(() => expect(document.querySelector('#resume-select')?.value).toBe(id));
+
+      document.querySelector('#btn-delete-resume').click();
+      await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+      document.querySelector('#modal-ok').click();
+    }
+
+    const three = [
+      { id: 'base', label: 'Base', tier: 'base', choices: {} },
+      { id: 'new-grad', label: 'New Grad', tier: 'extended', choices: {} },
+      { id: 'job-helios', label: 'Helios — Platform Engineer', tier: 'temporary', choices: {} },
+    ];
+
+    it('moves to the next one in the list before the delete goes out', async () => {
+      await openAndDelete(three, 'new-grad');
+
+      // The editor is on the next resume by the time the request is made,
+      // rather than on the one being removed or on nothing at all.
+      const moved = document.querySelector('#resume-select').value;
+      expect(moved).toBe('job-helios');
+      await vi.waitFor(() => expect(asked.some((a) => a.startsWith('DELETE'))).toBe(true));
+      expect(document.querySelector('#resume-select').value).toBe('job-helios');
+    });
+
+    it('takes the one above when there is nothing below', async () => {
+      await openAndDelete(three, 'job-helios');
+      expect(document.querySelector('#resume-select').value).toBe('new-grad');
+    });
+
+    it('never lands on nothing', async () => {
+      await openAndDelete(three, 'base');
+      const landed = document.querySelector('#resume-select').value;
+      expect(landed).toBeTruthy();
+      expect(landed).not.toBe('base');
+      expect(landed).not.toBe('__master__');
+    });
+
+    /*
+     * And the list catches up: the deleted one is gone from the dropdown
+     * without anybody having to change tab and come back.
+     */
+    it('takes it out of the list straight away', async () => {
+      await openAndDelete(three, 'new-grad');
+      await vi.waitFor(() => {
+        const ids = [...document.querySelectorAll('#resume-select option')].map((o) => o.value);
+        expect(ids).not.toContain('new-grad');
+      });
+    });
+
+    /*
+     * A delete the store refuses. Moving first means the editor is on a
+     * resume that exists, and the one that would not go is still in the list
+     * to try again — rather than the editor sitting on nothing over a store
+     * that still has everything.
+     */
+    it('leaves you somewhere real when the delete is refused', async () => {
+      await openAndDelete(three, 'new-grad', { fails: true });
+      await vi.waitFor(() => {
+        const said = document.querySelector('#status.err')?.textContent ?? '';
+        // Which resume, and what the store said about it.
+        expect(said).toMatch(/New Grad/);
+        expect(said).toMatch(/was not deleted/i);
+        expect(said).toMatch(/not writable/i);
+      });
+      expect(document.querySelector('#resume-select').value).toBe('job-helios');
+      const ids = [...document.querySelectorAll('#resume-select option')].map((o) => o.value);
+      expect(ids).toContain('new-grad');
+    });
+  });
+
   it('separates what you keep from what was built for a posting', async () => {
     await open([...written, ...built]);
     expect(groups()).toEqual([KEPT, GOING]);

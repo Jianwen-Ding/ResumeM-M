@@ -637,6 +637,146 @@ describe('job analysis', () => {
    * as whatever was asked for — a resume nobody asked for, wearing the name
    * of the one they did.
    */
+  /*
+   * Wired for the tools, and the tools were not there.
+   *
+   * The prompt for a tools run says "use them; do not answer in prose or
+   * JSON", and it leaves the inventory out — deliberately, because the tools
+   * are what the inventory is for. So a CLI whose wiring silently does
+   * nothing leaves the model in the worst state this code has: told to call
+   * tools it does not have, told not to answer any other way, and with
+   * nothing to answer from. The run came back empty, `extractJson` threw, and
+   * the tailoring somebody asked for did not happen and did not say so.
+   *
+   * Whether any particular CLI's wiring works is not something this can
+   * settle — the flag can be right today and wrong after an update, and the
+   * server can fail to start for reasons of its own. So the failure is
+   * detected rather than predicted: nothing through the tools and nothing to
+   * parse means ask again the old way, which needs no wiring.
+   */
+  it('asks again without the tools when the tools were never there', async () => {
+    /*
+     * A stand-in for a CLI that is wired for tools and does not have them.
+     * Named `codex` because that is what decides whether the tools prompt is
+     * used at all — `canWire` matches the command, which is the same thing
+     * the real path does.
+     */
+    const fake = path.join(t.dir, 'codex');
+    fs.writeFileSync(
+      fake,
+      [
+        '#!/usr/bin/env node',
+        'const prompt = process.argv.slice(2).join(" ");',
+        // The tools prompt gets what a model with no tools can say; the JSON
+        // prompt gets a plan.
+        'if (/tools under/.test(prompt)) process.stdout.write("I do not have any tools named resume.");',
+        'else process.stdout.write(JSON.stringify({ choices: {}, disable: ["exp_acme"], reasoning: "asked the old way" }));',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    fs.chmodSync(fake, 0o755);
+
+    const config = t.store.loadConfig();
+    t.store.saveConfig({
+      ...config,
+      ai: { ...config.ai, enabled: true, command: fake, args: ['{promptText}'], timeoutMs: 60_000 },
+    });
+
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'ai' })
+      .expect(200);
+
+    // It answered, and by the way that needs no wiring.
+    expect(res.body.aiUsed).toBe(true);
+    expect(res.body.aiVia).toBe('json');
+    expect(res.body.aiReasoning).toBe('asked the old way');
+  }, 60_000);
+
+  /*
+   * Which settings are not the file's to decide, said by the one thing that
+   * knows. "Let it look up the company online" writes a tool list, and only
+   * one of the CLIs takes one — so for the rest the switch reaches nothing,
+   * and the panel has to be able to say so rather than promise in both
+   * directions over a command line it never touched.
+   */
+  it('says when the research switch does not reach the configured command', async () => {
+    const base = t.store.loadConfig();
+
+    t.store.saveConfig({ ...base, ai: { ...base.ai, command: 'claude' } });
+    const ours = await request(app).get('/api/config').expect(200);
+    expect(ours.body.overrides.research).toBe(false);
+
+    t.store.saveConfig({ ...base, ai: { ...base.ai, command: 'codex' } });
+    const theirs = await request(app).get('/api/config').expect(200);
+    expect(theirs.body.overrides.research).toBe(true);
+
+    // By what the command is, not by where it lives.
+    t.store.saveConfig({ ...base, ai: { ...base.ai, command: '/opt/bin/claude' } });
+    expect((await request(app).get('/api/config').expect(200)).body.overrides.research).toBe(false);
+  });
+
+  /*
+   * What the card needs to say where a drafted letter would come from.
+   *
+   * The counts, not the letters: the card is saying "in your voice, from the
+   * nine you have written", and nine is all it needs. Sending the letters
+   * themselves would put the user's whole correspondence through a content
+   * script on every posting they look at, to print one number.
+   */
+  it('says how much of the person’s own writing a draft would have to go on', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'none' })
+      .expect(200);
+
+    const data = t.store.load();
+    expect(res.body.voice).toEqual({
+      letters: data.coverLetters.length,
+      answers: data.answers.length,
+      samples: data.samples.filter((s) => !s.archived).length,
+      notes: data.voice.trim().length > 0,
+    });
+    // The fixture has some of each, or this would pass on all zeros.
+    expect(res.body.voice.letters).toBeGreaterThan(0);
+    expect(res.body.voice.answers).toBeGreaterThan(0);
+  });
+
+  /*
+   * And counts only what a draft could actually go on.
+   *
+   * An archived sample is skipped everywhere the writing happens — the voice
+   * context that leads every prompt drops it, and so does the corpus listing
+   * — so counting it makes the card overstate its case in exactly the place
+   * the count exists to be checkable. "From 3 writing samples" is a claim,
+   * and a claim about material nothing will read is the worst kind.
+   */
+  it('does not count writing it has archived and would never read', async () => {
+    const counted = async () => {
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'intern', tailor: 'none' })
+        .expect(200);
+      return res.body.voice.samples as number;
+    };
+    const start = await counted();
+
+    const sample = {
+      id: 'a-talk-i-gave',
+      title: 'A talk I gave',
+      kind: 'other' as const,
+      text: 'I spent a year on a queue that nobody wanted to own, and this is what it taught me about ownership.',
+      createdAt: new Date().toISOString(),
+    };
+    t.store.saveSample(sample);
+    expect(await counted()).toBe(start + 1);
+
+    // Archived: still in the folder, read by nothing, and so counted by nothing.
+    t.store.saveSample({ ...sample, archived: true });
+    expect(await counted()).toBe(start);
+  });
+
   it('refuses a way of tailoring it does not have', async () => {
     const res = await request(app)
       .post('/api/extension/analyze')

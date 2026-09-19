@@ -451,7 +451,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     texPath: opts.texPath,
     tex: best.tex,
     engine,
-    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log)],
+    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log), ...tooWideWarnings(best.raw.log)],
     log: tail(best.raw.log, 30),
     fastPath: usedFast,
   };
@@ -482,6 +482,49 @@ function fontWarnings(log: string): string[] {
     ];
   }
   return [];
+}
+
+/**
+ * Text that ran off the right-hand edge of the paper, and is therefore gone.
+ *
+ * The whole fit system here is vertical: `measure` asks how tall the content
+ * came out and how many pages that took. Nothing asked how *wide* anything
+ * was, and TeX does not wrap a word it cannot break — a long share link, a
+ * Windows path, a token — so it sets it past the margin and off the page. The
+ * glyphs are not in the PDF; `pdftotext` does not find them, and neither does
+ * an applicant tracking system.
+ *
+ * What that looked like: a bullet holding an ordinary Google Docs link
+ * compiled to "✓ 1 page, ~13 lines of room left", `strict` passed, `warnings`
+ * was empty — and the link in the PDF ended `ouid=1234` where the one in the
+ * save ended `ouid=1234567890`. A resume went out with a link nobody can
+ * open, and nothing anywhere said so.
+ *
+ * A warning rather than a refusal: the document is otherwise fine, the person
+ * is the one who can shorten the line, and failing the build would take away
+ * a resume they could still send. But it has to be said, because losing text
+ * silently is the one thing a document tool must not do.
+ *
+ * Above `\hfuzz` and then some. TeX reports an overfull box at 0.1pt, which is
+ * a hairline nobody can see and nothing is lost to; a couple of points in is
+ * where a glyph starts going missing.
+ */
+const TOO_WIDE = /^Overfull \\hbox \(([\d.]+)pt too wide\)/gm;
+const NOTICEABLE_PT = 2;
+
+function tooWideWarnings(log: string): string[] {
+  const worst = [...log.matchAll(TOO_WIDE)]
+    .map((m) => Number(m[1]))
+    .filter((pt) => pt >= NOTICEABLE_PT)
+    .sort((a, b) => b - a);
+  if (worst.length === 0) return [];
+
+  const many = worst.length > 1 ? `${worst.length} lines run` : 'A line runs';
+  return [
+    `${many} past the right-hand edge of the page — the widest by ${Math.round(worst[0]!)}pt — and ` +
+      'whatever is past the edge is not in the PDF at all. This is usually one long unbroken ' +
+      'thing: a link, a file path, a token. Shorten it, or put it behind a few words of link text.',
+  ];
 }
 
 function readBaseline(log: string): number | undefined {

@@ -164,7 +164,10 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
      */
     const decided = wiring ? tools?.read(wiring.out) : undefined;
 
-    const output = stdout.trim();
+    // The answer, not the session transcript it may be wrapped in. See
+    // `unwrapAgentFraming` — this is before every reader of `output`, because
+    // all of them were reading the wrapper.
+    const output = lastMessage(config.ai.command, args) ?? unwrapAgentFraming(stdout.trim());
     /*
      * Silence is only a failure when there was no other way to answer.
      *
@@ -376,6 +379,104 @@ export function extractJson<T>(text: string): T {
     }
   }
   throw new AgentError(`Could not find JSON in the agent's reply. Raw output:\n${text.slice(0, 2000)}`);
+}
+
+/**
+ * The answer, out of the transcript the CLI wrapped it in.
+ *
+ * `codex exec` does not print an answer; it prints a session. A version
+ * banner, the working directory, the model, the sandbox mode — then, under
+ * "User instructions", **the whole prompt echoed back**, then its reasoning
+ * under "thinking", then the answer under "codex", then a token count.
+ *
+ * Taken whole, as it was, that is what became the cover letter: a letter that
+ * opens with a version number and a working directory, contains the prompt,
+ * contains the letters the prompt quoted as examples of the user's voice —
+ * which are letters to *other companies* — and reaches the actual letter
+ * several hundred lines down. `trimToLetter` cannot save it, and makes it
+ * worse: the first salutation it finds is the one in the echoed example, so
+ * the letter it keeps is the one written to somebody else.
+ *
+ * The tailoring plan went the same way for the same reason. `extractJson`
+ * takes the first JSON object it can parse, and the echoed prompt is full of
+ * them — so the plan applied was a fragment of the store that had been quoted
+ * back, and an AI run that changed nothing reported success.
+ *
+ * Matched on the shape rather than on the configured command, because the
+ * command is whatever the user typed: a path, a wrapper script, `npx codex`.
+ * A timestamped line that is exactly the word `codex` is not something a
+ * cover letter contains, and the last one is the answer — the earlier ones
+ * are earlier turns.
+ */
+/*
+ * A date in the brackets, not merely brackets. "[not a timestamp] codex" is a
+ * line somebody could write, and taking it for a marker would throw away
+ * everything above it — the rule has to be narrow enough that only a machine
+ * writes it. Both spellings, because the separator has moved between
+ * versions.
+ */
+const STAMP = String.raw`\[\d{4}-\d{2}-\d{2}[T ][^\]]*\]`;
+const CODEX_ANSWER = new RegExp(`^${STAMP}[ \\t]*codex[ \\t]*$`, 'gm');
+const CODEX_TOKENS = new RegExp(`\\n${STAMP}[ \\t]*tokens used:[^\\n]*$`);
+
+/*
+ * And the same session with no answer in it at all.
+ *
+ * A run that prints its banner, echoes the prompt and then stops — the model
+ * returned nothing, the key was refused, a future version moved the marker —
+ * has not answered. Left alone, the banner and the echoed prompt *are* the
+ * output, so they became the cover letter: a run that failed, saved and
+ * bundled as though it had worked. Silence is the honest reading, and the
+ * caller already knows how to report that.
+ *
+ * Only when the transcript is unmistakably one. "User instructions:" under a
+ * timestamp is not a line anybody's letter contains.
+ */
+const CODEX_SESSION = new RegExp(`^${STAMP}[ \\t]*User instructions:`, 'm');
+
+/**
+ * The answer the CLI wrote to a file because it was asked to, if it did.
+ *
+ * `unwrapAgentFraming` below is a rule about the shape of Codex's printed
+ * session, and a rule about a shape is only ever as good as the version that
+ * printed it. Codex also takes `--output-last-message <file>`, which writes
+ * the final message and nothing else — no turns above it, no "tokens used"
+ * line under it, nothing to recognise or strip. When the command line asks
+ * for one, that file is the answer and the transcript is not consulted.
+ *
+ * Silence stays silence: an empty or missing file falls through to the
+ * transcript, so a version that does not write the file behaves exactly as
+ * before rather than reporting that the model said nothing.
+ */
+function lastMessage(command: string, args: string[]): string | null {
+  /*
+   * `--output-last-message` is Codex's alone, and means only ever this, so it
+   * is honoured whatever the command is. `-o` is its short spelling, and `-o`
+   * on somebody else's tool means something else entirely — an output format,
+   * a report file. Read everywhere, a custom command carrying `-o report.txt`
+   * would have had that file returned as the model's answer.
+   */
+  const isCodex = /(^|[\\/])codex(\.exe)?$/i.test(command.trim());
+  const at = args.findIndex((a) => a === '--output-last-message' || (isCodex && a === '-o'));
+  const joined = args.find((a) => a.startsWith('--output-last-message='));
+  const file = joined ? joined.slice('--output-last-message='.length) : at >= 0 ? args[at + 1] : undefined;
+  if (!file) return null;
+  try {
+    const said = fs.readFileSync(file, 'utf8').trim();
+    return said || null;
+  } catch {
+    // Not written: an older Codex, a run that died, a path it could not use.
+    return null;
+  }
+}
+
+export function unwrapAgentFraming(text: string): string {
+  const marks = [...text.matchAll(CODEX_ANSWER)];
+  const last = marks[marks.length - 1];
+  if (last && last.index !== undefined) {
+    return text.slice(last.index + last[0].length).replace(CODEX_TOKENS, '').trim();
+  }
+  return CODEX_SESSION.test(text) ? '' : text;
 }
 
 /**
