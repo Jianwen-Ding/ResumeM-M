@@ -110,6 +110,31 @@ process.stdin.on('end', () => {
 });
 `;
 
+/*
+ * The same Codex, doing what `--output-last-message` says: the final message
+ * goes to the file, and the printed session — turns, reasoning, the "tokens
+ * used" line — goes to stdout, where it is nobody's answer.
+ */
+const CODEX_WITH_FILE = `
+const argv = process.argv.slice(2);
+const fs = require('node:fs');
+const out = argv[argv.indexOf('--output-last-message') + 1];
+fs.writeFileSync(out, 'Dear Hiring Manager,\\n\\nThis is the letter.\\n');
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  /*
+   * The session says what it did, not what it wrote — which is the case the
+   * file exists for. Reading the transcript here gets a sentence about a
+   * letter instead of the letter.
+   */
+  process.stdout.write(
+    '[2026-02-01T10:00:00] User instructions:\\n' + argv[argv.length - 1] + '\\n' +
+    '[2026-02-01T10:00:01] codex\\nI have written the draft out to the file you asked for.\\n' +
+    '[2026-02-01T10:00:02] tokens used: 1234\\n',
+  );
+});
+`;
+
 /** Gemini: `-p <prompt>`, inline, answer on stdout. */
 const GEMINI = `
 const argv = process.argv.slice(2);
@@ -231,6 +256,39 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
+  /*
+   * The answer taken from the file Codex was asked to write, not from the
+   * session it printed.
+   *
+   * Reading it out of the transcript works until it does not: the shape of
+   * that transcript is Codex's to change, and when the rule misses, what gets
+   * saved as the cover letter is the banner, the reasoning, or a letter the
+   * run had quoted from the corpus. `--output-last-message` is a contract —
+   * the final message, in a file, and nothing else in it.
+   */
+  it('takes the answer from the file Codex wrote, not the session it printed', { timeout: 30_000 }, async () => {
+    const preset = AI_PRESETS.find((p) => p.label === 'Codex CLI')!;
+    const { command, prefix } = stub('codex', CODEX_WITH_FILE);
+
+    const result = await runAgent(config(command, [...prefix, ...preset.args]), PROMPT);
+    expect(result.output).toBe('Dear Hiring Manager,\n\nThis is the letter.');
+    // Nothing of the printed session came through with it.
+    expect(result.output).not.toContain('User instructions');
+    expect(result.output).not.toContain('tokens used');
+  });
+
+  /*
+   * And a Codex too old to write the file, or one whose run died before it
+   * could: the transcript is still there, and is still read. Silence would be
+   * a worse answer than the one that worked before the flag existed.
+   */
+  it('falls back to the printed session when no file was written', { timeout: 30_000 }, async () => {
+    const preset = AI_PRESETS.find((p) => p.label === 'Codex CLI')!;
+    const { command, prefix } = stub('codex', CODEX);
+    const result = await runAgent(config(command, [...prefix, ...preset.args]), PROMPT);
+    expect((JSON.parse(result.output) as { cli: string }).cli).toBe('codex');
+  });
+
   it('fails the way the real Codex failed, when the flag is missing', async () => {
     const { command, prefix } = stub('codex', CODEX);
     const withoutFlag = ['exec', '--sandbox', 'read-only', '--cd', '{sandbox}', '{promptText}'];
@@ -247,6 +305,9 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
       'read-only',
       '--cd',
       '{sandbox}',
+      // No prompt token in this one, so the answer file goes on the end.
+      '--output-last-message',
+      '{sandbox}/last-message.txt',
     ]);
     // Wherever it is installed, and whatever it is called on Windows.
     expect(repairAiArgs('/usr/local/bin/codex', ['exec'])).toContain('--skip-git-repo-check');

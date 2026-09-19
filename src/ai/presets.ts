@@ -108,7 +108,24 @@ export const AI_PRESETS: AiPreset[] = [
      * a repository — without it Codex refuses to start, assuming you want
      * version control before it touches anything. It touches nothing.
      */
-    args: ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--cd', '{sandbox}', '{promptText}'],
+    /*
+     * `--output-last-message` is the third: Codex prints its whole session to
+     * stdout — every turn, the reasoning, and a "tokens used" line at the end
+     * — and this writes the final message, and only that, to a file. Reading
+     * the transcript back and hoping to find the answer in it is how another
+     * company's quoted cover letter once got saved as this one's.
+     */
+    args: [
+      'exec',
+      '--sandbox',
+      'read-only',
+      '--skip-git-repo-check',
+      '--cd',
+      '{sandbox}',
+      '--output-last-message',
+      '{sandbox}/last-message.txt',
+      '{promptText}',
+    ],
     note: 'Runs in Codex’s own read-only sandbox, in a scratch directory.',
     model: { flag: '--model', suggestions: ['gpt-5-codex', 'gpt-5', 'o4-mini'] },
     /*
@@ -195,10 +212,26 @@ export function repairAiArgs(command: string, args: string[]): string[] {
     return out;
   }
 
-  // Codex: refuses to start outside a git repository unless told not to check.
-  if (named(/(^|[\\/])codex(\.exe)?$/i) && args.includes('exec') && !args.includes('--skip-git-repo-check')) {
+  if (named(/(^|[\\/])codex(\.exe)?$/i) && args.includes('exec')) {
     const out = [...args];
-    out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
+    // Refuses to start outside a git repository unless told not to check.
+    if (!out.includes('--skip-git-repo-check')) out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
+    /*
+     * Without this the answer has to be found inside Codex's printed session
+     * — every turn of it, and a "tokens used" line at the end — which is how
+     * a letter Codex had quoted from the corpus once got saved as this
+     * application's. Asking for the final message by itself is a file Codex
+     * writes on purpose, and it costs one flag.
+     */
+    if (!out.some((a) => a === '--output-last-message' || a === '-o' || a.startsWith('--output-last-message='))) {
+      /*
+       * In front of the prompt, which Codex takes as a positional: anything
+       * after it is read as more prompt.
+       */
+      const promptAt = out.findIndex((a) => a === '{promptText}' || a === '{prompt}');
+      const at = promptAt < 0 ? out.length : promptAt;
+      out.splice(at, 0, '--output-last-message', '{sandbox}/last-message.txt');
+    }
     return out;
   }
 

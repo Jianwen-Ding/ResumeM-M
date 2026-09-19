@@ -499,13 +499,26 @@ describe('repairing an AI command that cannot work', () => {
       'read-only',
       '--cd',
       '{sandbox}',
+      '--output-last-message',
+      '{sandbox}/last-message.txt',
       '{promptText}',
     ]);
   });
 
-  it('leaves a codex command that already has it alone', () => {
-    const args = ['exec', '--skip-git-repo-check', '{promptText}'];
-    expect(repairAiArgs('codex', args)).toBe(args);
+  /*
+   * And asks for the answer by itself, rather than leaving it to be found
+   * inside the printed session. In front of the prompt, which Codex takes as
+   * a positional: anything after it is read as more prompt.
+   */
+  it('asks a codex exec for its last message in a file', () => {
+    const repaired = repairAiArgs('codex', ['exec', '--skip-git-repo-check', '{promptText}']);
+    expect(repaired).toEqual(['exec', '--skip-git-repo-check', '--output-last-message', '{sandbox}/last-message.txt', '{promptText}']);
+
+    // Whatever spelling is already there is theirs, and is left alone.
+    const mine = ['exec', '--skip-git-repo-check', '-o', '/tmp/mine.txt', '{promptText}'];
+    expect(repairAiArgs('codex', mine)).toEqual(mine);
+    const joined = ['exec', '--skip-git-repo-check', '--output-last-message=/tmp/mine.txt', '{promptText}'];
+    expect(repairAiArgs('codex', joined)).toEqual(joined);
   });
 
   it('recognises codex by path and on Windows', () => {

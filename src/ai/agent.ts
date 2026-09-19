@@ -167,7 +167,7 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
     // The answer, not the session transcript it may be wrapped in. See
     // `unwrapAgentFraming` — this is before every reader of `output`, because
     // all of them were reading the wrapper.
-    const output = unwrapAgentFraming(stdout.trim());
+    const output = lastMessage(args) ?? unwrapAgentFraming(stdout.trim());
     /*
      * Silence is only a failure when there was no other way to answer.
      *
@@ -433,6 +433,34 @@ const CODEX_TOKENS = new RegExp(`\\n${STAMP}[ \\t]*tokens used:[^\\n]*$`);
  * timestamp is not a line anybody's letter contains.
  */
 const CODEX_SESSION = new RegExp(`^${STAMP}[ \\t]*User instructions:`, 'm');
+
+/**
+ * The answer the CLI wrote to a file because it was asked to, if it did.
+ *
+ * `unwrapAgentFraming` below is a rule about the shape of Codex's printed
+ * session, and a rule about a shape is only ever as good as the version that
+ * printed it. Codex also takes `--output-last-message <file>`, which writes
+ * the final message and nothing else — no turns above it, no "tokens used"
+ * line under it, nothing to recognise or strip. When the command line asks
+ * for one, that file is the answer and the transcript is not consulted.
+ *
+ * Silence stays silence: an empty or missing file falls through to the
+ * transcript, so a version that does not write the file behaves exactly as
+ * before rather than reporting that the model said nothing.
+ */
+function lastMessage(args: string[]): string | null {
+  const at = args.findIndex((a) => a === '--output-last-message' || a === '-o');
+  const joined = args.find((a) => a.startsWith('--output-last-message='));
+  const file = joined ? joined.slice('--output-last-message='.length) : at >= 0 ? args[at + 1] : undefined;
+  if (!file) return null;
+  try {
+    const said = fs.readFileSync(file, 'utf8').trim();
+    return said || null;
+  } catch {
+    // Not written: an older Codex, a run that died, a path it could not use.
+    return null;
+  }
+}
 
 export function unwrapAgentFraming(text: string): string {
   const marks = [...text.matchAll(CODEX_ANSWER)];
