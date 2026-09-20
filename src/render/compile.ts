@@ -587,6 +587,25 @@ export async function compileLetter(
   opts: Omit<CompileOptions, 'strict' | 'maxAttempts'> = {},
 ): Promise<LetterCompileResult> {
   const engine = await detectEngine(opts.engine);
+  /*
+   * The sixth place, which the note in `compileResume` said was the last.
+   *
+   * A letter's header is the name set large, and with nothing to set it emits
+   * `{\Huge \scshape } \\` — a `\\` with no line in front of it, which is a
+   * TeX error rather than a document. The preview then reported
+   * `latexmk failed: LaTeX Error: There's no line here to end.`, which names
+   * nothing anybody could act on, against a save whose only fault is a
+   * `profile.yaml` missing its `name:`. The resume path answers the same
+   * situation in words; there is no reason for the letter to answer it in
+   * TeX's.
+   */
+  if (!String(letter.profile?.name ?? '').trim()) {
+    const reason =
+      'This save has no name in it, so the letter would have nothing at the top of it. ' +
+      'Put your name in under Master — profile.yaml may be missing its `name:`.';
+    throw new LatexError(reason, reason);
+  }
+
   const tex = renderLetterLatex(letter, layout);
   assertRenderable(tex);
 
