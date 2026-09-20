@@ -47,7 +47,10 @@ export interface AgentResult {
  */
 export interface AgentTools {
   /** Given the scratch directory and the command, wire a server into it. */
-  wire: (sandbox: string, command: string) => { args: string[]; out: string; env: Record<string, string> } | null;
+  wire: (
+    sandbox: string,
+    command: string,
+  ) => { args: string[]; trust?: string[]; out: string; env: Record<string, string> } | null;
   /** Read back whatever the run decided. */
   read: (out: string) => unknown;
 }
@@ -70,7 +73,17 @@ export interface AgentTools {
  * What this stops: an agent that decides to "look around the project" ending up
  * in your source tree, your store, or your home directory.
  */
-export async function runAgent(config: StoreConfig, prompt: string, tools?: AgentTools): Promise<AgentResult> {
+export async function runAgent(
+  config: StoreConfig,
+  prompt: string,
+  tools?: AgentTools,
+  /**
+   * Internal. Set on the one retry a rejected trust setting earns — see
+   * `Wiring.trust` and `rejectedTrust`. Its only job is to make sure the
+   * retry cannot itself retry.
+   */
+  without?: { trust?: boolean },
+): Promise<AgentResult> {
   if (!config.ai.enabled) {
     return { output: prompt, executed: false };
   }
@@ -93,6 +106,14 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
    * JSON, which is what every run did before any of this existed.
    */
   const wiring = tools?.wire(dir, config.ai.command) ?? null;
+  /*
+   * "You may call this server without asking" — dropped on the retry.
+   *
+   * Kept in its own binding rather than folded into `wiring.args` because the
+   * catch below has to be able to tell whether the CLI's complaint was about
+   * one of these, and because the retry has to be able to leave them out.
+   */
+  const trust = without?.trust ? [] : (wiring?.trust ?? []);
 
   // `{prompt}` is the prompt file path; `{promptText}` inlines it for CLIs that
   // insist on an argument; `{sandbox}` is the directory the child is confined
@@ -119,10 +140,11 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
    * prompt.
    */
   const args = (() => {
-    if (!wiring || wiring.args.length === 0) return expanded;
+    const added = wiring ? [...wiring.args, ...trust] : [];
+    if (added.length === 0) return expanded;
     const promptAt = expanded.findIndex((a) => a === prompt || a === promptFile || a.endsWith(prompt));
-    if (promptAt < 0) return [...expanded, ...wiring.args];
-    return [...expanded.slice(0, promptAt), ...wiring.args, ...expanded.slice(promptAt)];
+    if (promptAt < 0) return [...expanded, ...added];
+    return [...expanded.slice(0, promptAt), ...added, ...expanded.slice(promptAt)];
   })();
   const usesFile = config.ai.args.some((a) => a.includes('{prompt}') && !a.includes('{promptText}'));
 
@@ -245,6 +267,22 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
     // command failed: AI command failed: …" helps nobody.
     if (err instanceof AgentError) throw err;
     const e = err as { code?: string; message?: string; stderr?: string; stdout?: string };
+    /*
+     * The CLI would not take the trust setting. Run it again without.
+     *
+     * `Wiring.trust` names a config key we could not verify from here, so this
+     * is the recovery that makes guessing acceptable: the worst case is one
+     * wasted start and a run that ends up exactly where it was before the key
+     * existed, rather than a CLI that refuses to start at all and a tailoring
+     * that produces nothing.
+     *
+     * Once only, and only when the complaint names the key — a CLI that failed
+     * for its own reasons would otherwise be run twice for nothing.
+     */
+    if (trust.length > 0 && rejectedTrust(`${e.stdout ?? ''}\n${e.stderr ?? ''}\n${e.message ?? ''}`, trust)) {
+      watching?.ended('failed', 'The CLI would not take the setting that lets it call the tools unprompted; trying again without it.');
+      return await runAgent(config, prompt, tools, { trust: true });
+    }
     if (e.code === 'ENOENT') {
       watching?.ended('failed', `"${config.ai.command}" is not installed or not on PATH.`);
       throw new AgentError(
@@ -374,6 +412,35 @@ export function tidyUp(dir: string): void {
  * stopped to ask for a shell is a run that was configured to do more than it
  * needs to. Say that, and say where the switch is.
  */
+/**
+ * Did the CLI fail *because of* the trust setting, rather than despite it?
+ *
+ * The narrow question, asked narrowly. `Wiring.trust` carries a config key
+ * this codebase cannot verify — there is no Codex here to check it against —
+ * and the whole reason that is acceptable is that a rejection costs one retry
+ * instead of the run. But only a rejection should: re-running a CLI that fell
+ * over for its own reasons doubles every real failure's wait, and on a
+ * tailoring pass that wait is minutes.
+ *
+ * So both halves have to hold. The output has to name the key we passed (the
+ * dotted path, or its last segment — a CLI complaining about a config key
+ * usually quotes the field rather than the whole override), *and* it has to be
+ * complaining rather than merely echoing its configuration back, which several
+ * of these CLIs do at startup.
+ */
+export function rejectedTrust(output: string, trust: string[]): boolean {
+  const keys = trust
+    .map((a) => (a.includes('=') ? a.slice(0, a.indexOf('=')) : a))
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0 && !/^-{1,2}c$/.test(k));
+  if (keys.length === 0) return false;
+  const named = keys.some((k) => output.includes(k) || output.includes(k.split('.').pop() ?? k));
+  if (!named) return false;
+  return /unknown|unrecognis|unrecogniz|unexpected|invalid|unsupported|not supported|no such|deserializ|failed to parse|cannot parse/i.test(
+    output,
+  );
+}
+
 /**
  * Was the run stopped from using the tools it was given?
  *

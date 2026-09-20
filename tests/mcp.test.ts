@@ -625,6 +625,35 @@ describe('wiring a CLI up to it', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  /*
+   * Codex knows about the server and still will not call it: "MCP tool call
+   * requires approval, but approval policy is never". `codex exec` cannot
+   * prompt anybody, so a call needing approval is denied and the run spends
+   * its whole timeout looking for another way round.
+   *
+   * The trust setting says this one server may be called. It is kept out of
+   * `args` on purpose — the key cannot be verified from here, and `runAgent`
+   * can only retry without it if it is a separate list.
+   */
+  it('marks the one server it wired in as trusted, for the CLI that asks', () => {
+    const dir = sandbox();
+    const wiring = wireUp(dir, 'codex', payload(), '/somewhere/bin.js');
+    expect(wiring!.trust.join(' ')).toContain('mcp_servers.resume.trust_level');
+    // Named, not blanket: nothing here touches the sandbox or any other
+    // approval, and nothing bypasses approvals wholesale.
+    expect(wiring!.trust.join(' ')).not.toMatch(/approval_policy|sandbox|dangerous|bypass|full-auto/i);
+    // Droppable, which is the whole point of it being its own list.
+    expect(wiring!.args.join(' ')).not.toContain('trust_level');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds no trust setting to a CLI that has not asked for one', () => {
+    const dir = sandbox();
+    expect(wireUp(dir, 'claude', payload(), '/somewhere/bin.js')!.trust).toEqual([]);
+    expect(wireUp(dir, 'gemini', payload(), '/somewhere/bin.js')!.trust).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('finds the CLI behind a path', () => {
     const dir = sandbox();
     expect(wireUp(dir, '/usr/local/bin/claude', payload(), '/x/bin.js')).not.toBeNull();
