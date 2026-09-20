@@ -235,13 +235,38 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
      */
     const killed = (err as { killed?: boolean }).killed;
     if (killed) {
+      const seconds = Math.round(config.ai.timeoutMs / 1000);
+
+      /*
+       * Did it ever reach the tools it was given?
+       *
+       * A run that was handed a tool server writes its decisions after every
+       * call, so the absence of that file after three minutes says the model
+       * never called one — and that changes the advice completely. Raising the
+       * timeout is right for a model that is thinking and wrong for one that
+       * cannot see the tools and is filling the time some other way.
+       *
+       * Measured, from a real run's own output: with the server unreachable
+       * the model spent forty seconds trying to start it by hand and ninety
+       * more reading our session file with `jq`, then hit the limit with
+       * nothing decided. "Raise ai.timeoutMs" was the one thing that would
+       * not have helped.
+       */
+      const toolless = wiring !== null && !fs.existsSync(wiring.out);
+      const advice = toolless
+        ? `It never called any of the resume tools, so the time went somewhere else — raising ` +
+          `ai.timeoutMs will not help until it can reach them. "What the AI is doing" shows what ` +
+          `it did instead.`
+        : `Raise ai.timeoutMs in config.yaml if it needs longer.`;
+
       watching?.ended(
         'timeout',
-        `Stopped after ${Math.round(config.ai.timeoutMs / 1000)}s. Raise the AI timeout in Settings if it needs longer.`,
+        toolless
+          ? `Stopped after ${seconds}s, having never called a tool. See what it did instead.`
+          : `Stopped after ${seconds}s. Raise the AI timeout in Settings if it needs longer.`,
       );
       throw new AgentError(
-        `AI command "${config.ai.command}" ran for longer than ${Math.round(config.ai.timeoutMs / 1000)}s ` +
-          `and was stopped. Raise ai.timeoutMs in config.yaml if it needs longer.`,
+        `AI command "${config.ai.command}" ran for longer than ${seconds}s and was stopped. ${advice}`,
         e.stdout,
         'timeout',
       );

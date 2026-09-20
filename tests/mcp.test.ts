@@ -237,7 +237,7 @@ describe('reading the page back', () => {
    */
   it('shows a bullet the model has just turned on, with its words', () => {
     const s = narrow();
-    s.setShown('b_testing', true);
+    s.show('b_testing');
     const text = s.describeResume();
     expect(text).toContain('[b_testing]');
     expect(text).toMatch(/\[b_testing\]\s+\S/);
@@ -248,7 +248,7 @@ describe('reading the page back', () => {
   it('shows an entry the model has just turned on', () => {
     const s = narrow();
     expect(s.describeResume()).not.toContain('[proj_thing]');
-    s.setShown('proj_thing', true);
+    s.show('proj_thing');
     expect(s.describeResume()).toContain('[proj_thing]');
   });
 
