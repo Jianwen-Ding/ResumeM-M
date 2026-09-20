@@ -107,6 +107,26 @@ function diffBullets(before: ResolvedEntry, after: ResolvedEntry, out: DocChange
         to: plain(bullet.text),
         text: `${where}: reworded — "${clip(was.text, 40)}" → "${clip(bullet.text, 40)}"`,
       });
+    } else if (was.text !== bullet.text) {
+      /*
+       * Same words, different markup — and it used to be reported as nothing
+       * at all.
+       *
+       * `plain` strips `**`, backticks, `*` and link syntax before comparing,
+       * which is right for a history entry that should read as prose. But
+       * `sameDocument` compares the raw text, so taking the bold off "handling
+       * **2M events/day**" *did* create a version — one whose change list was
+       * empty, so the card fell back to the raw commit message and read
+       * `Update entry "exp_acme"`. A change that reaches the PDF has to have a
+       * line of its own, even when the line is only about how it is set.
+       */
+      out.push({
+        kind: 'changed',
+        where,
+        from: was.text,
+        to: bullet.text,
+        text: `${where}: same words, different formatting — "${clip(bullet.text, 40)}"`,
+      });
     }
   }
 
@@ -114,6 +134,25 @@ function diffBullets(before: ResolvedEntry, after: ResolvedEntry, out: DocChange
     if (!aMap.has(bullet.id)) {
       out.push({ kind: 'removed', where, from: plain(bullet.text), text: `${where}: dropped "${clip(bullet.text)}"` });
     }
+  }
+
+  /*
+   * And the order they print in, which was never compared at all.
+   *
+   * `diffBullets` keys on `bullet.id`, so swapping two bullets on an entry
+   * matched every id and reported nothing — while `sameDocument` compares the
+   * list in order and therefore made a version. An empty change list on a
+   * version that exists is the shape this file's own doc warns about, and
+   * reordering is one of the three things the AI is allowed to do.
+   *
+   * Only the ones both versions have: an added or dropped bullet moves
+   * everything after it, and saying "reordered" about that is noise on top of
+   * a line that already said what happened.
+   */
+  const bOrder = b.filter((x) => aMap.has(x.id)).map((x) => x.id);
+  const aOrder = a.filter((x) => bMap.has(x.id)).map((x) => x.id);
+  if (bOrder.join('\u0000') !== aOrder.join('\u0000')) {
+    out.push({ kind: 'moved', where, text: `${where}: bullets reordered` });
   }
 }
 
@@ -223,11 +262,19 @@ export function diffResumes(
 
   diffSkills(before, after, out);
 
-  // Order within a section is part of the document too, but only worth
-  // mentioning when nothing else about the entry changed.
+  /*
+   * Order within a section is part of the document too.
+   *
+   * This was `out.length === 0 &&` — "only worth mentioning when nothing else
+   * changed" — which was defensible while reordering was something a person
+   * did on its own. The AI reorders now, in the same pass in which it turns
+   * entries on and off, so the one combination the suppression hides is the
+   * commonest one there is: every tailoring pass that moved an entry *and*
+   * changed one reported only the change.
+   */
   const bOrder = [...bEntries.keys()].filter((id) => aEntries.has(id));
   const aOrder = [...aEntries.keys()].filter((id) => bEntries.has(id));
-  if (out.length === 0 && bOrder.join() !== aOrder.join()) {
+  if (bOrder.join() !== aOrder.join()) {
     out.push({ kind: 'moved', text: 'Reordered' });
   }
 

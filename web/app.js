@@ -369,10 +369,51 @@ async function stepHistory(direction) {
      */
     clearEdits();
     await loadStore();
+
+    /*
+     * Go to the resume that moved, so what happened is on screen.
+     *
+     * The stack is per-save, and `stepHistory` never checked that the step it
+     * was about to replay belonged to the resume being edited. So: edit
+     * resume A, pick resume B from the dropdown, press Ctrl+Z — and A was
+     * rolled back behind your back. The screen did not change, the status
+     * line said "Undid change", and nothing named the resume that had moved.
+     * Ctrl+Z was already refused on the other tabs for exactly this reason;
+     * two resumes inside the Build tab was the case that was left.
+     *
+     * Switched rather than refused, because the press means something: the
+     * step is the user's own most recent edit, and taking them to it is
+     * kinder than telling them they are in the wrong place. Only when the
+     * step names exactly one resume — a step that touched an entry or a
+     * skills group changed something every resume shares, and there is
+     * nowhere in particular to go.
+     */
+    const moved = [
+      ...new Set(
+        entry.changes
+          .map((c) => c.docKey)
+          .filter((k) => k.startsWith('resume:'))
+          .map((k) => k.slice('resume:'.length)),
+      ),
+    ];
+    const elsewhere =
+      moved.length === 1 && moved[0] !== state.resumeId && state.store.resumes.some((r) => r.id === moved[0])
+        ? moved[0]
+        : null;
+    if (elsewhere) {
+      state.masterView = false;
+      state.resumeId = elsewhere;
+      const select = $('#resume-select');
+      if (select) select.value = elsewhere;
+    }
+
     render();
     scheduleRender();
     scheduleCommit();
-    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${entry.label}`);
+    const label = elsewhere
+      ? `${entry.label} in "${state.store.resumes.find((r) => r.id === elsewhere)?.label ?? elsewhere}"`
+      : entry.label;
+    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${label}`);
   } catch (err) {
     // Put it back on the stack it came off: a failed undo has not happened.
     if (direction === 'undo') history.redo();
@@ -706,6 +747,20 @@ function bulletName(entry, bullet) {
  */
 function markDirty(message = 'Changed', { recompile = true } = {}) {
   state.dirty = true;
+  /*
+   * An edit past a redo throws the redo away — now, not when the save lands.
+   *
+   * `history.record` clears it, and that runs on the write coming back: 900ms
+   * of debounce plus a round trip later. Until then Redo was enabled and
+   * destructive, because `stepHistory` drops the unsaved overlay — so making
+   * an edit, pressing Ctrl+Z, making a different edit and pressing Redo
+   * within the second took the new edit with it, with nothing said and no
+   * step recorded for what was lost.
+   *
+   * Not while an undo is being applied: that is the one caller whose writes
+   * are the redo stack rather than an edit past it.
+   */
+  if (!undoing && history.dropRedo()) paintUndo();
   if (message !== 'Changed') setStatus(message);
   if (recompile) scheduleRender();
   scheduleAutoSave();
@@ -7393,6 +7448,15 @@ function temporaryLife(config, expiring) {
                 } else {
                   setStatus(`Swept ${plural(res.swept.length, 'resume')}`);
                 }
+                /*
+                 * The stack goes, as it does for a restore and a project
+                 * switch. Its entries are "this resume before and after an
+                 * edit", and the sweep has just deleted some of the resumes
+                 * they describe — so one press of Ctrl+Z afterwards PUTs a
+                 * deliberately swept resume straight back, reports "Undid
+                 * change", and leaves nothing saying the sweep was reversed.
+                 */
+                forgetHistory();
                 await loadStore();
                 render();
                 loadProjectSettings().catch(() => {});

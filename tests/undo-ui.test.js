@@ -210,6 +210,80 @@ describe('undo in the builder', () => {
   });
 
   /*
+   * Redo stays armed through the auto-save debounce, and undoing drops the
+   * unsaved overlay — so pressing it destroys the edit you have just made.
+   *
+   * `history.record` clears the redo stack, and that runs when the *write*
+   * comes back: 900ms of debounce plus a round trip after the keystroke. In
+   * that window Redo is enabled and there is no step recorded for the thing
+   * it would overwrite, so the new edit goes with no message and no way back.
+   */
+  it('disarms redo the moment a new edit is made, not when it saves', async () => {
+    const boxes = [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+    boxes[0].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(2000);
+    const redoBtn = () => document.querySelector('#btn-redo');
+    expect(redoBtn().disabled, 'redo is armed after an undo').toBe(false);
+
+    /*
+     * A fresh edit, and deliberately one that goes through the debounced
+     * resume auto-save rather than a write of its own: the window this is
+     * about is the 900ms plus a round trip between the keystroke and the
+     * save, and an edit that writes immediately closes it by accident.
+     * Re-queried because the undo re-rendered the editor.
+     */
+    const wrote = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/resumes/')).length;
+    const before = wrote();
+    const fresh = [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+    fresh[0].click();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(wrote(), 'the edit has not been saved yet — this is the window').toBe(before);
+    expect(redoBtn().disabled, 'and disarmed the moment the next edit is made').toBe(true);
+
+    // And the press does nothing rather than taking the edit with it.
+    await vi.advanceTimersByTimeAsync(3000);
+    const settled = structuredClone(spec('newgrad'));
+    redoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(spec('newgrad').sections).toEqual(settled.sections);
+  });
+
+  /*
+   * Ctrl+Z was already refused on the other tabs, because "it silently rolled
+   * back an edit made somewhere the user was not looking" is the whole
+   * problem. Two resumes inside the Build tab is the same problem: the stack
+   * is per-save and `stepHistory` never checked which resume a step belonged
+   * to, so editing one, switching to another and pressing Ctrl+Z rolled back
+   * the first behind your back, with the screen unchanged and the status line
+   * saying only "Undid change".
+   */
+  it('goes to the resume it rolled back, rather than moving it out of sight', async () => {
+    const boxes = [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+    boxes[0].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+    const afterEdit = structuredClone(spec('newgrad'));
+
+    // Somewhere else in the same tab.
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'intern';
+    selector.dispatchEvent(new Event('change'));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+
+    // The roll-back happened, and it is on screen rather than behind you.
+    expect(spec('newgrad')).not.toEqual(afterEdit);
+    expect(selector.value, 'the editor followed the change').toBe('newgrad');
+    expect(document.querySelector('#status').textContent).toMatch(/new grad/i);
+  });
+
+  /*
    * Deleting a skill group is the same two writes, and the half-way state is
    * worse than an orphan: one press put the *reference* back without the
    * group, so `resolveResume` warned "Skills group … does not exist" on every

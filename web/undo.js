@@ -264,6 +264,23 @@ export function createHistory({ limit = 50 } = {}) {
       return copy(entry);
     },
 
+    /**
+     * Throw the redo away now, rather than when the save lands.
+     *
+     * `record` clears it, and `record` runs when the write comes back — which
+     * is 900ms of debounce plus a round trip after the keystroke that made it
+     * meaningless. In that window Redo was still enabled and still
+     * destructive: `stepHistory` drops the unsaved overlay, so pressing it
+     * took the fresh edit with it, silently, with no step recorded for the
+     * thing that was lost. Called from `markDirty`, which is the moment the
+     * edit exists.
+     */
+    dropRedo() {
+      const had = future.length > 0;
+      future = [];
+      return had;
+    },
+
     canUndo: () => past.length > 0,
     canRedo: () => future.length > 0,
 

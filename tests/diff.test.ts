@@ -168,7 +168,18 @@ describe('diffing two versions of a resume', () => {
     expect(texts).toContain('Name changed to Test Person Jr.');
   });
 
-  it('mentions reordering only when nothing else changed', () => {
+  /*
+   * Reordering is reported whatever else happened in the same version.
+   *
+   * This used to be suppressed whenever anything else had changed — "the
+   * reorder is noise" — which was defensible while reordering was something a
+   * person did on its own. The AI reorders now, in the same pass in which it
+   * turns entries on and off, so the suppression hid it on exactly the
+   * versions where it mattered: every tailoring pass that moved an entry and
+   * changed one reported only the change, and the order on the page moved
+   * with nothing saying so.
+   */
+  it('mentions reordering, including alongside a real edit', () => {
     const two = edited((d) => {
       d.sections[0]!.entries.push({ id: 'exp_b', kind: 'experience', title: 'B Co.', bullets: [] });
     });
@@ -177,10 +188,54 @@ describe('diffing two versions of a resume', () => {
 
     expect(diffResumes(two, swapped).map((c) => c.kind)).toEqual(['moved']);
 
-    // With a real edit in the same version, the reorder is noise.
     const swappedAndEdited = structuredClone(swapped);
     swappedAndEdited.sections[0]!.entries[0]!.title = 'B Corporation';
-    expect(diffResumes(two, swappedAndEdited).map((c) => c.kind)).not.toContain('moved');
+    expect(diffResumes(two, swappedAndEdited).map((c) => c.kind)).toContain('moved');
+  });
+
+  /*
+   * A bullet swap prints in a different order on every resume that shows the
+   * entry, and `diffBullets` keys on `bullet.id` — so it matched every id and
+   * reported nothing, while `sameDocument` compares the list in order and
+   * therefore made a version. An empty change list on a version that exists
+   * is what this file exists to prevent, and reordering is one of the three
+   * things the AI is allowed to do.
+   */
+  it('notices two bullets swapping places', () => {
+    const second = { id: 'b2', variantId: 'v', text: 'Kept the on-call rota honest' };
+    const two = edited((d) => {
+      d.sections[0]!.entries[0]!.bullets.push(second);
+    });
+    const swapped = structuredClone(two);
+    swapped.sections[0]!.entries[0]!.bullets.reverse();
+
+    // The documents really are different, which is why a version was made.
+    expect(sameDocument(two, swapped)).toBe(false);
+    const changes = diffResumes(two, swapped);
+    expect(changes.map((c) => c.kind)).toContain('moved');
+    expect(changes.map((c) => c.text).join(' ')).toMatch(/bullets reordered/i);
+  });
+
+  /*
+   * And a markup-only edit. `plain` strips `**`, backticks, `*` and links
+   * before comparing — right for an entry that should read as prose — but
+   * `sameDocument` compares the raw text, so taking the bold off a bullet
+   * made a version whose change list was empty and whose card fell back to
+   * the raw commit message.
+   */
+  it('says something about a change that is only formatting', () => {
+    const before = doc();
+    const first = before.sections[0]!.entries[0]!.bullets[0]!;
+    const after = edited((d) => {
+      d.sections[0]!.entries[0]!.bullets[0]!.text = first.text.replace(/\*\*/g, '');
+    });
+    // Only meaningful if the fixture bullet actually carries markup.
+    if (!/\*\*/.test(first.text)) {
+      after.sections[0]!.entries[0]!.bullets[0]!.text = `**${first.text}**`;
+    }
+    const changes = diffResumes(before, after);
+    expect(changes.length).toBeGreaterThan(0);
+    expect(changes.map((c) => c.text).join(' ')).toMatch(/different formatting/i);
   });
 
   it('finds nothing to say about an identical document', () => {
