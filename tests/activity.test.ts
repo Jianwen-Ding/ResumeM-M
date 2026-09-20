@@ -131,6 +131,67 @@ describe('watching a run as it happens', () => {
     await expect(runAgent(cross, 'hello')).rejects.toMatchObject({ kind: 'failed' });
   });
 
+  /*
+   * A run that was given tools and never touched them.
+   *
+   * "Raise ai.timeoutMs" is right for a model that is thinking and wrong for
+   * one that cannot see its tools and is filling the time some other way — and
+   * the two were told apart by nothing. From a real run's own output: forty
+   * seconds trying to start the tool server by hand, ninety more reading the
+   * session file with `jq`, then the limit, with nothing decided. The one
+   * piece of advice offered was the one that would not have helped.
+   */
+  it('says when a run that had tools never called one', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-toolless-'));
+    const config = configFor(`setTimeout(() => {}, 60_000);`, 700);
+    const err = await runAgent(config, 'hello', {
+      // Wired, and the decisions file is never written — which is what a run
+      // that called no tool leaves behind.
+      wire: () => ({ args: [], out: path.join(dir, 'never-written.json'), env: {} }),
+      read: () => null,
+    }).catch((e: Error) => e);
+
+    expect((err as Error).message).toMatch(/never called any of the resume tools/i);
+    expect((err as Error).message).not.toMatch(/Raise ai\.timeoutMs in config\.yaml/);
+    expect(recentRuns()[0]!.note).toMatch(/never called a tool/i);
+  });
+
+  it('still says to raise the timeout when there were no tools to call', async () => {
+    const config = configFor(`setTimeout(() => {}, 60_000);`, 700);
+    const err = await runAgent(config, 'hello').catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/Raise ai\.timeoutMs/);
+    expect((err as Error).message).not.toMatch(/never called/i);
+  });
+
+  /*
+   * And the quieter half of the same fault: a wired run that answers in prose
+   * instead of calling anything still counts as a success, because the caller
+   * asks again the old way and a tailoring does come out. From outside,
+   * nothing looks wrong — while every run costs twice what it should and the
+   * tools do nothing at all. That is the shape of bug this record exists to
+   * end, so it is written on the run.
+   */
+  it('marks a run that had tools and answered without them', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-unused-'));
+    const config = configFor(`process.stdout.write('{"choices":{}}\\n');`);
+    const result = await runAgent(config, 'hello', {
+      wire: () => ({ args: [], out: path.join(dir, 'never-written.json'), env: {} }),
+      read: () => null,
+    });
+
+    expect(result.executed).toBe(true);
+    expect(result.wiredButUnused).toBe(true);
+    expect(recentRuns()[0]!.outcome).toBe('ok');
+    expect(recentRuns()[0]!.note).toMatch(/never called any of the tools/i);
+  });
+
+  it('says nothing of the kind about a run that was never given tools', async () => {
+    const config = configFor(`process.stdout.write('hello\\n');`);
+    const result = await runAgent(config, 'hello');
+    expect(result.wiredButUnused).toBeUndefined();
+    expect(recentRuns()[0]!.note).toBeUndefined();
+  });
+
   it('records nothing at all when the AI is switched off', async () => {
     const config = { ai: { enabled: false, command: 'claude', args: [], timeoutMs: 5000 } } as unknown as StoreConfig;
     const result = await runAgent(config, 'the prompt');

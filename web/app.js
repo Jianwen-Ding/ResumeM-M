@@ -4177,6 +4177,22 @@ function promptBlock(text) {
   return el('div', {}, [el('div', { className: 'toolbar' }, [copy]), body]);
 }
 
+/**
+ * Put text into a pane without taking the reader's place away.
+ *
+ * Assigning `textContent` replaces the node, so an unchanged value is not a
+ * free write — it drops a selection somebody is part-way through making. And a
+ * pane that has grown should follow the tail only if the reader was already at
+ * the tail; otherwise reading back through a long run is impossible, which is
+ * the state every one of these panes was permanently in.
+ */
+function keepPlace(node, text) {
+  if (node.textContent === text) return;
+  const tail = node.scrollHeight - node.scrollTop - node.clientHeight < 8;
+  node.textContent = text;
+  if (tail) node.scrollTop = node.scrollHeight;
+}
+
 function advanced(summary, ...children) {
   const box = el('details', { className: 'advanced' });
   box.append(el('summary', { textContent: summary }));
@@ -4243,8 +4259,16 @@ function aiActivityPanel() {
   };
 
   /** The tail of one run's output, fetched only when asked for. */
+  /**
+   * Fill a run's detail pane, keeping the reader's place if it is already open.
+   *
+   * Called again on every poll for a row left open, so it cannot rebuild: the
+   * fold would snap shut and the output would jump to the top while somebody
+   * was reading up it. The pieces are made once per row and written into after
+   * that, and a pane that is not already at its end is left where it is.
+   */
   async function showOutput(run, into) {
-    into.textContent = 'Reading…';
+    if (!into.dataset.built) into.textContent = 'Reading…';
     try {
       const full = await api(`/ai/activity/${encodeURIComponent(run.id)}`);
       const said = (full.chunks ?? [])
@@ -4265,22 +4289,28 @@ function aiActivityPanel() {
        * answer to.
        */
       const size = full.promptBytes >= 1024 ? `${Math.round(full.promptBytes / 1024)} KB` : `${full.promptBytes} bytes`;
-      into.replaceChildren(
-        el('div', { className: 'hint', textContent: `${full.command} ${full.args.join(' ')}` }),
-        advanced(
-          `What it was given — ${size}${full.promptCut ? ', middle not kept' : ''}`,
-          el('pre', { className: 'ai-run-output', textContent: full.prompt || '(nothing)' }),
-        ),
-        el('div', { className: 'lbl', textContent: 'What it said' }),
-        el('pre', {
-          className: 'ai-run-output',
-          textContent:
-            (full.dropped ? `… ${full.dropped} earlier bytes not kept\n` : '') +
-            (said || 'It printed nothing at all.'),
-        }),
+      if (!into.dataset.built) {
+        into.replaceChildren(
+          el('div', { className: 'hint' }),
+          advanced('What it was given', el('pre', { className: 'ai-run-output' })),
+          el('div', { className: 'lbl', textContent: 'What it said' }),
+          el('pre', { className: 'ai-run-output' }),
+        );
+        into.dataset.built = '1';
+      }
+
+      const [cmd, given, , out] = into.children;
+      cmd.textContent = `${full.command} ${full.args.join(' ')}`;
+      given.querySelector('summary').textContent =
+        `What it was given — ${size}${full.promptCut ? ', middle not kept' : ''}`;
+      keepPlace(given.querySelector('pre'), full.prompt || '(nothing)');
+      keepPlace(
+        out,
+        (full.dropped ? `… ${full.dropped} earlier bytes not kept\n` : '') +
+          (said || 'It printed nothing at all.'),
       );
     } catch (err) {
-      into.textContent = err.message;
+      if (!into.dataset.built) into.textContent = err.message;
     }
   }
 
@@ -4293,26 +4323,58 @@ function aiActivityPanel() {
       return false;
     }
     const runs = activity.recent ?? [];
-    // Stays put whether or not there is anything to list; the empty state
-    // below says so in words. See the note where `box` is made.
-    list.replaceChildren(
-      ...runs.map((run) => {
-        const output = el('div', { className: 'ai-run-detail', hidden: true });
-        const head = el('button', {
-          className: `ai-run ${run.outcome}`,
-          onclick: () => {
-            output.hidden = !output.hidden;
-            if (!output.hidden) void showOutput(run, output);
-          },
-        }, [
-          el('span', { className: 'ai-run-dot' }),
-          el('span', { className: 'ai-run-cmd', textContent: run.command }),
-          el('span', { className: 'ai-run-when', textContent: seconds(run.elapsedMs) }),
-          el('span', { className: 'ai-run-said', textContent: aliveness(run) }),
-        ]);
-        return el('div', { className: 'ai-run-row' }, [head, output]);
-      }),
-    );
+    /*
+     * Rows are kept and written into, not rebuilt.
+     *
+     * This list is polled while the disclosure is open, and replacing its
+     * children each time closed whatever row you had opened and threw away
+     * where you were in it — so following a run meant losing your place once a
+     * second. The rows are keyed by run id; only a genuinely different set of
+     * runs touches the DOM's shape.
+     */
+    const have = new Map([...list.children].map((row) => [row.dataset.run, row]));
+    const rows = runs.map((run) => {
+      const already = have.get(run.id);
+      if (already) {
+        have.delete(run.id);
+        const head = already.querySelector('.ai-run');
+        head.className = `ai-run ${run.outcome}`;
+        head.querySelector('.ai-run-when').textContent = seconds(run.elapsedMs);
+        head.querySelector('.ai-run-said').textContent = aliveness(run);
+        // An open row keeps following its run, rather than freezing at
+        // whatever it said when it was opened.
+        const shown = already.querySelector('.ai-run-detail');
+        if (!shown.hidden) void showOutput(run, shown);
+        return already;
+      }
+      const output = el('div', { className: 'ai-run-detail', hidden: true });
+      const head = el('button', {
+        className: `ai-run ${run.outcome}`,
+        onclick: () => {
+          output.hidden = !output.hidden;
+          if (!output.hidden) void showOutput(run, output);
+        },
+      }, [
+        el('span', { className: 'ai-run-dot' }),
+        el('span', { className: 'ai-run-cmd', textContent: run.command }),
+        el('span', { className: 'ai-run-when', textContent: seconds(run.elapsedMs) }),
+        el('span', { className: 'ai-run-said', textContent: aliveness(run) }),
+      ]);
+      const row = el('div', { className: 'ai-run-row' }, [head, output]);
+      row.dataset.run = run.id;
+      return row;
+    });
+
+    /*
+     * Only when the set or the order has actually changed. `replaceChildren`
+     * detaches and reinserts even the nodes it is handed back, which loses
+     * scroll position just as surely as building new ones.
+     */
+    const same =
+      list.children.length === rows.length &&
+      rows.every((row, at) => list.children[at] === row);
+    if (!same) list.replaceChildren(...rows);
+
     return runs.some((r) => r.outcome === 'running');
   }
 
@@ -4369,6 +4431,44 @@ async function showLiveAiRun(doing = 'the AI') {
   // Whether a run was expected, which decides what "nothing here" means below.
   const busy = drafting.size > 0;
   showModal(busy ? `What ${doing.toLowerCase()} is doing` : 'What the AI has been doing', body);
+
+  /*
+   * Built once and then written into, rather than rebuilt every second.
+   *
+   * This redrew the whole window on every poll, which is a second's worth of
+   * work destroyed once a second: the output pane jumped back to the top while
+   * you were reading up it, the prompt fold snapped shut the moment you opened
+   * it, and any text you had selected to copy was gone before you could copy
+   * it. "Constantly resets scroll progress and whatnot" is exactly right, and
+   * it made the one window whose job is to be watched not worth watching.
+   *
+   * So the shape is made once here, each tick sets the text on the pieces that
+   * changed, and everything the browser is holding on your behalf — scroll
+   * position, what is open, what is selected — is simply never touched.
+   */
+  const liveState = el('div', { className: 'ai-live-state' });
+  const liveCommand = el('div', { className: 'hint' });
+  const promptPre = el('pre', { className: 'ai-run-output' });
+  const given = advanced('What it was given', promptPre);
+  const saidPre = el('pre', { className: 'ai-run-output ai-live-said' });
+  const shell = el('div', {}, [
+    liveState,
+    liveCommand,
+    given,
+    el('div', { className: 'lbl', textContent: 'What it has said' }),
+    saidPre,
+  ]);
+
+  /**
+   * Set text without throwing away where the reader is.
+   *
+   * Assigning `textContent` at all replaces the node, so an unchanged value is
+   * not a free write: it drops a selection the user is part-way through making.
+   * And a pane that has grown should follow the tail only if the reader was at
+   * the tail — otherwise reading back through a long run is impossible, which
+   * is the state this was permanently in.
+   */
+
 
   let stopped = false;
   const closer = $('#modal-ok');
@@ -4428,20 +4528,18 @@ async function showLiveAiRun(doing = 'the AI') {
             ? `Nothing for ${Math.round(newest.quietMs / 1000)}s — it may be stuck.`
             : `Still going; last spoke ${Math.round(newest.quietMs / 1000)}s ago.`;
 
-    body.replaceChildren(
-      el('div', { className: `ai-live-state ${newest.outcome}`, textContent: alive }),
-      el('div', { className: 'hint', textContent: `${full.command} ${full.args.join(' ')}` }),
-      advanced(
-        `What it was given — ${size}${full.promptCut ? ', middle not kept' : ''}`,
-        el('pre', { className: 'ai-run-output', textContent: full.prompt || '(nothing)' }),
-      ),
-      el('div', { className: 'lbl', textContent: 'What it has said' }),
-      el('pre', {
-        className: 'ai-run-output',
-        textContent:
-          (full.dropped ? `… ${full.dropped} earlier bytes not kept\n` : '') +
-          (said || 'Nothing yet.'),
-      }),
+    // Put the shape up the first time; after that only the words change.
+    if (!shell.isConnected) body.replaceChildren(shell);
+
+    liveState.className = `ai-live-state ${newest.outcome}`;
+    liveState.textContent = alive;
+    liveCommand.textContent = `${full.command} ${full.args.join(' ')}`;
+    given.querySelector('summary').textContent =
+      `What it was given — ${size}${full.promptCut ? ', middle not kept' : ''}`;
+    keepPlace(promptPre, full.prompt || '(nothing)');
+    keepPlace(
+      saidPre,
+      (full.dropped ? `… ${full.dropped} earlier bytes not kept\n` : '') + (said || 'Nothing yet.'),
     );
     return newest.outcome === 'running';
   };

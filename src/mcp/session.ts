@@ -33,6 +33,7 @@
  */
 
 import type { AiPlan } from '../jobs/aiPlan.js';
+import { pickBullet } from '../model/resolve.js';
 import type { Bullet, Entry, MaybeVariant, ResolvedResume, SkillGroup, StoreData } from '../model/types.js';
 
 export interface TailorPosting {
@@ -163,18 +164,45 @@ export class TailorSession {
       for (const entryId of this.orderedEntries(section.kind, section.entries.map((e) => e.id))) {
         const resolvedEntry = section.entries.find((e) => e.id === entryId);
         const entry = this.entries.get(entryId);
-        if (!resolvedEntry || !entry) continue;
+        /*
+         * An entry the model has just turned on is not in the resolved resume
+         * — that was resolved before any of this started, and `show` records
+         * an intention rather than rebuilding it. Requiring it here dropped
+         * exactly the entries whose appearance the model was checking for.
+         *
+         * `orderedEntries` had always returned them; this line then threw them
+         * away, which made the branch that finds them look like dead code.
+         */
+        if (!entry) continue;
         lines.push(
           `### [${entry.id}] ${plain(entry.title) || entry.id}` +
             `${plain(entry.subtitle) ? ` — ${plain(entry.subtitle)}` : ''}` +
             `${plain(entry.dates) ? ` (${plain(entry.dates)})` : ''}`,
         );
-        for (const bulletId of this.shownBullets(entry, resolvedEntry.bullets.map((b) => b.id))) {
+        for (const bulletId of this.shownBullets(entry, (resolvedEntry?.bullets ?? []).map((b) => b.id))) {
           const chosen = this.state.plan.choices[bulletId];
           const bullet = this.bullets.get(bulletId)?.bullet;
-          const text = chosen
-            ? bullet?.variants.find((v) => v.id === chosen)?.text
-            : resolvedEntry.bullets.find((b) => b.id === bulletId)?.text;
+          /*
+           * Three places a line's words can come from, in the order that says
+           * what this resume will actually print:
+           *
+           *   the wording the model chose, if it chose one;
+           *   what the resume already said, if the line was already on it;
+           *   the line's own default, for one the model has just turned on.
+           *
+           * The third was missing, so a bullet added by `show` printed as
+           * "- [b_testing] " with nothing after it — and the model, reading
+           * back to check its own move, saw a move that had worked as one
+           * that had produced an empty line.
+           *
+           * Through `pickBullet` rather than by picking a variant here,
+           * because a list bullet is assembled from its items rather than
+           * worded, and one implementation of that rule is enough.
+           */
+          const text =
+            (chosen && bullet ? pickBullet(bullet, { [bulletId]: chosen }, [])?.text : undefined) ??
+            resolvedEntry?.bullets.find((b) => b.id === bulletId)?.text ??
+            (bullet ? pickBullet(bullet, {}, [])?.text : undefined);
           lines.push(`- [${bulletId}] ${text ?? ''}`);
         }
       }
