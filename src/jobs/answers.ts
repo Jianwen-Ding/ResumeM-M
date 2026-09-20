@@ -144,6 +144,67 @@ function fullyAsked(a: string, b: string): boolean {
   return true;
 }
 
+/**
+ * Boilerplate a form adds that is not part of the question.
+ *
+ * These are the words that make an asked question longer without making it a
+ * different question: the length limit beside the box, the word "optional",
+ * the generic stand-in for the employer's name. Treating them as meaningful
+ * would demote perfectly good matches for nothing.
+ */
+const FURNITURE = new Set([
+  'optional', 'required', 'max', 'maximum', 'min', 'minimum', 'limit', 'words', 'word',
+  'characters', 'chars', 'briefly', 'brief', 'below', 'above', 'field', 'question',
+  'company', 'organisation', 'organization', 'employer', 'position', 'role', 'team',
+]);
+
+/**
+ * What the page is asking that the stored question did not.
+ *
+ * `fullyAsked` checks one direction — that the stored question said nothing
+ * extra — and the other direction was free. It is not free. A question can be
+ * made to mean the opposite, or something else entirely, purely by adding
+ * words, and every one of those additions scores as shared vocabulary:
+ *
+ *     stored "Why should we hire you?"
+ *     asked  "Why should we not hire you?"                     0.90, confident
+ *
+ *     stored "Are you legally authorized to work in the US?"
+ *     asked  "Are you NOT legally authorized to work in the US?"  0.95, confident
+ *
+ *     stored "Do you have a driver's license?"
+ *     asked  "...suspended or revoked in the last five years?"  0.78, confident
+ *            handing back "Yes, a full clean licence since 2019."
+ *
+ * `sameShortTerms` catches "no" because it is two characters; "not", "never"
+ * and "cannot" are three or more and fell through to `terms`, where an extra
+ * word on the asked side costs nothing. And `confident` is not advisory — it
+ * writes the answer into the box, badges it "answered before", and it lands
+ * verbatim in the file the employer reads.
+ *
+ * So: nothing the page added may be meaningful. The employer's own name is
+ * allowed, since "Why do you want to work at Acme?" is the same question as
+ * "Why do you want to work here?", and so is the furniture above. Everything
+ * else — a negation, a technology, a narrowing clause — takes the confidence
+ * away and leaves the match offered, which is what that distinction is for.
+ * This can only ever remove confidence, never grant it.
+ */
+function unanswered(asked: string, stored: string, company?: string): string[] {
+  const known = terms(stored);
+  const theirs = company ? terms(company) : new Set<string>();
+  return [...terms(asked)].filter(
+    (t) =>
+      !known.has(t) &&
+      !theirs.has(t) &&
+      !FURNITURE.has(t) &&
+      // A bare number is how a form pads itself — "(500 characters max)",
+      // "(2 pages max)" — and demoting a match over one would cost a read for
+      // nothing. `shortTerms` skips them for the same reason. A number that
+      // is part of the question is written out: "in the last five years".
+      !/^\d+$/.test(t),
+  );
+}
+
 export interface AnswerMatch {
   question: string;
   /** The stored item that best covers it, if any cleared the threshold. */
@@ -234,9 +295,10 @@ export function matchAnswer(
     score: Number(best.score.toFixed(3)),
     /*
      * A near-identical question is safe to reuse verbatim; a loose one is a
-     * starting point the user should read first. Near-identical means the
-     * stored question asked nothing extra — a high score alone is not enough,
-     * because adding a qualifier to a question only adds shared words.
+     * starting point the user should read first. Near-identical means neither
+     * question asked anything the other did not — a high score alone is not
+     * enough, because adding a qualifier to a question only adds shared words,
+     * and adding "not" to one adds a word that reverses it. See `unanswered`.
      *
      * And an answer that names somebody else is never safe to reuse verbatim,
      * however exactly the question matches: that is the one failure this
@@ -246,6 +308,7 @@ export function matchAnswer(
       !namesAnother &&
       best.score >= 0.7 &&
       fullyAsked(question, best.item.question) &&
+      unanswered(question, best.item.question, company).length === 0 &&
       sameShortTerms(question, best.item.question),
     ...(namesAnother ? { namesAnother } : {}),
   };
