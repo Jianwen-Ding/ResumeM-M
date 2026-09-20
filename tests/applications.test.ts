@@ -323,6 +323,76 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       expect(t.store.load().applications).toHaveLength(1);
     });
 
+    /*
+     * And not only when the submit lands before the build starts.
+     *
+     * "Never backwards" was checked against the row as it stood when the
+     * build *began*, and a build is a LaTeX run — a second or two, which is
+     * longer than it takes to press Submit. So the sequence that actually
+     * happens on a real application is: staging starts, the form goes out,
+     * the tracker records `applied`, and then the build lands and writes the
+     * row back from a snapshot in which it was still `applying` — taking the
+     * `applied` line out of the history with it, because that is rebuilt from
+     * the same snapshot. Measured on the ATS walk at five of thirty-six
+     * systems per run, a different five each time.
+     *
+     * Driven by waiting for the staging folder rather than by a timer. It is
+     * made a few synchronous lines before the tracker row is read and nothing
+     * between them yields, so a staging folder another task can see means the
+     * build has read the row and is now compiling — which is exactly the
+     * window this is about, on a fast machine and a slow one alike. The
+     * `settled` check below is what makes the test honest: if the build
+     * finished before the submit could land, this proved nothing.
+     */
+    it('nor when the form is submitted while the build is still compiling', async () => {
+      /*
+       * With the compile cache switched off for the length of this test.
+       *
+       * The window being tested is the length of a real LaTeX run, and a
+       * cached build does not have one: a first run filled the cache and
+       * every run after it finished in forty milliseconds, before the submit
+       * could be recorded — so the test would have gone green for the one
+       * reason that proves nothing. The cache is an opt-in read from the
+       * environment on every compile, so taking it away here is enough.
+       */
+      const cache = process.env.RMM_COMPILE_CACHE;
+      delete process.env.RMM_COMPILE_CACHE;
+
+      const req = { company: 'Streamly', role: 'Race', resumeId: 'intern', status: 'applying' as const };
+      const id = applicationId(req.company, req.role);
+      // The row as the extension leaves it when a workspace opens.
+      t.store.upsertApplication({
+        id,
+        company: req.company,
+        role: req.role,
+        status: 'applying',
+        history: [{ at: new Date().toISOString(), status: 'applying', note: 'Workspace opened' }],
+      });
+
+      let settled = false;
+      const building = buildBundle(t.store, req);
+      void building.then(() => {
+        settled = true;
+      });
+
+      const staging = path.join(t.store.outDir(), 'applications');
+      for (let i = 0; i < 2000 && !settled; i++) {
+        const names = fs.existsSync(staging) ? fs.readdirSync(staging) : [];
+        if (names.some((n) => n.startsWith('.rmm-building-'))) break;
+        await new Promise((done) => setTimeout(done, 5));
+      }
+      expect(settled, 'the build finished before the submit could land').toBe(false);
+
+      advance(t.store, id, 'applied', 'The form was submitted on the page');
+      const after = await building;
+
+      if (cache !== undefined) process.env.RMM_COMPILE_CACHE = cache;
+
+      expect(after.application.status).toBe('applied');
+      expect((after.application.history ?? []).some((h) => h.note?.includes('submitted on the page'))).toBe(true);
+      expect(t.store.load().applications.find((a) => a.id === id)?.status).toBe('applied');
+    });
+
     it('but still moves it forwards when that is what was asked', async () => {
       await buildBundle(t.store, staged);
       const sent = await buildBundle(t.store, { ...staged, status: 'applied' });
