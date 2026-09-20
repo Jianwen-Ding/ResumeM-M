@@ -20,9 +20,62 @@ Select model
 Select with numbers [1-5].
 `;
 
+/*
+ * What a client that has never been run in this environment actually answers
+ * with, captured from `claude --ax-screen-reader` in a fresh directory. The
+ * probe types `/model` into it and this is what comes back — a numbered list,
+ * which is exactly the shape the parser is looking for.
+ */
+const CLAUDE_FIRST_RUN = `
+[Screen Reader Mode: on via flag]
+
+Welcome to Claude Code v2.1.278
+
+Let's get started.
+
+Choose the text style that looks best with your terminal
+
+To change this later, run /theme
+
+1. Auto (match terminal)
+
+2. (selected) Dark mode
+
+3. Light mode
+
+4. Dark mode (colorblind-friendly)
+
+5. Light mode (colorblind-friendly)
+
+Select with numbers [1-5]. Then Enter to submit or Escape to cancel:
+`;
+
 describe('reading model choices from interactive CLI pickers', () => {
   it('reads Claude aliases and ignores the default and unavailable choices', () => {
     expect(modelsInPicker(CLAUDE_PICKER, 'claude')).toEqual(['opus', 'sonnet', 'haiku']);
+  });
+
+  /*
+   * This came back from a real machine as
+   * `{"models":["auto","dark","light"],"from":"cli"}`, and the Settings panel
+   * drew three buttons offering to run the tailoring on `dark`. A theme list
+   * is numbered too, and the parser takes the leading word of each line.
+   */
+  it('does not read a client’s first-run questions as a model list', () => {
+    expect(modelsInPicker(CLAUDE_FIRST_RUN, 'claude')).toEqual([]);
+  });
+
+  it('says which of the two it is, because they need different things done', async () => {
+    forgetModels();
+    const list = await listModels('claude', '/tmp', async () => CLAUDE_FIRST_RUN);
+    expect(list.models).toEqual([]);
+    expect(list.from).toBe('unavailable');
+    expect(list.message).toMatch(/not been set up/i);
+    expect(list.message).not.toMatch(/sign in/i);
+
+    forgetModels();
+    const quiet = await listModels('claude', '/tmp', async () => 'nothing to see here');
+    expect(quiet.message).toMatch(/did not show any model choices/i);
   });
 
   it('reads exact Codex identifiers without inventing a release list', () => {

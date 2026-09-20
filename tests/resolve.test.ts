@@ -185,6 +185,42 @@ describe('warnings', () => {
     expect(r.sections[0]?.entries[0]?.dates).toBe('Sep. 2022 -- May 2026');
   });
 
+  /*
+   * An entry with no title used to print `entry.id` — so a resume went out
+   * with `exp_example_co` typeset in bold where the employer's name belongs,
+   * on a document somebody sends to a stranger, with nothing anywhere saying
+   * it had happened. A gap is visible; a slug reads like a name.
+   */
+  describe('an entry with no title', () => {
+    const titleless = (title: Entry['title'] | undefined): StoreData => {
+      const data = store([base]);
+      data.entries = data.entries.map((e) =>
+        e.id === 'exp' ? ({ ...e, title } as Entry) : e,
+      );
+      return data;
+    };
+
+    it('prints nothing rather than its own identifier', () => {
+      const r = resolveResume('base', titleless(undefined));
+      const entry = r.sections.find((s) => s.kind === 'experience')?.entries[0];
+      expect(entry?.id).toBe('exp');
+      expect(entry?.title).toBe('');
+      expect(r.warnings.join(' ')).toMatch(/Entry "exp" has no title/);
+    });
+
+    it('says the same when the title is a set of alternates with none in it', () => {
+      const r = resolveResume('base', titleless({ default: 'v1', variants: [] }));
+      const entry = r.sections.find((s) => s.kind === 'experience')?.entries[0];
+      expect(entry?.title).toBe('');
+      expect(r.warnings.join(' ')).toMatch(/Entry "exp" has no title/);
+    });
+
+    it('says nothing about an entry that has one', () => {
+      const r = resolveResume('base', store([base]));
+      expect(r.warnings.join(' ')).not.toMatch(/has no title/);
+    });
+  });
+
   it('flags a section referencing a missing entry', () => {
     const spec: ResumeSpec = {
       id: 's',

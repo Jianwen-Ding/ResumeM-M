@@ -111,6 +111,19 @@ describe('characters the engine cannot set', () => {
   });
 
   /*
+   * This message is the only account of why a compile refused, and it said
+   * "This resume contains 1 character the LaTeX engine cannot typeset" over
+   * an emoji pasted into a cover letter — sending the reader to the wrong
+   * document, which on a save with a dozen resumes in it is an afternoon.
+   */
+  it('names the document it is about', () => {
+    expect(unrenderableReason('ship it 🚀')).toMatch(/^This resume contains/);
+    expect(unrenderableReason('ship it 🚀', 'cover letter')).toMatch(/^This cover letter contains/);
+    // The rest of it is the same sentence either way.
+    expect(unrenderableReason('ship it 🚀', 'cover letter')).toContain('U+1F680');
+  });
+
+  /*
    * The supported set was measured against this engine rather than assumed, so
    * this test measures it again: every character the checker passes is put
    * through a real compile. If a future edit widens the set past what the fonts

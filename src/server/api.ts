@@ -2980,7 +2980,30 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         resumeId: body.spec?.id ?? body.resumeId ?? existing?.resumeId,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
-        status: existing?.status ?? 'drafting',
+        /*
+         * A space for a job that has already gone out opens as sent.
+         *
+         * Filing an application marks its space submitted, which is right and
+         * was the only place it happened — so it depended on the space
+         * existing by then. In the extension it often does not: the card opens
+         * one from a keeper that runs every two seconds, and pressing Submit
+         * is faster than that. Measured on the ATS walk, eight of fourteen
+         * systems came out with the tracker saying `applied` and the Workspace
+         * still offering the same job as something to finish, and nothing
+         * would ever have changed it — the one moment that marks a space had
+         * already passed.
+         *
+         * Read off the tracker rather than remembered, so the two lists cannot
+         * disagree about the same job whichever of them was written first.
+         * `alreadySent` covers everything past `applying`, because an
+         * application at `interviewing` went out too.
+         */
+        status:
+          existing?.status === 'submitted'
+            ? 'submitted'
+            : alreadySent(data.applications, body.company, body.role)
+              ? 'submitted'
+              : (existing?.status ?? 'drafting'),
         coverLetter: existing?.coverLetter ?? {
           required: Boolean(body.coverLetterRequired),
           body: '',

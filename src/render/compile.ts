@@ -305,8 +305,8 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
  * knows how to show — the log body carries the same text, so a UI that renders
  * the log instead of the message still says something useful.
  */
-function assertRenderable(tex: string): void {
-  const reason = unrenderableReason(tex);
+function assertRenderable(tex: string, what: 'resume' | 'cover letter' = 'resume'): void {
+  const reason = unrenderableReason(tex, what);
   if (reason) throw new LatexError(reason, reason);
 }
 
@@ -746,7 +746,15 @@ export async function compileLetter(
   }
 
   const tex = renderLetterLatex(letter, layout);
-  assertRenderable(tex);
+  /*
+   * Named as a letter, because that is what somebody is looking at.
+   *
+   * This message is the only account of why a compile refused, and it said
+   * "This resume contains 1 character the LaTeX engine cannot typeset" over
+   * an emoji pasted into a cover letter — sending the reader to the wrong
+   * document, which on a save with a dozen resumes in it is an afternoon.
+   */
+  assertRenderable(tex, 'cover letter');
 
   let raw: RawCompile | undefined;
   let usedFast = false;
