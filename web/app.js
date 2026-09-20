@@ -6983,7 +6983,8 @@ async function loadVoice() {
                   },
                 }),
               ]),
-              el('div', { className: 'body sample', textContent: sample.text.slice(0, 300) }),
+              // `excerpt` is all the server sends; see `GET /voice`.
+              el('div', { className: 'body sample', textContent: sample.excerpt ?? '' }),
             ]),
           ),
           ...derived.map((u) =>
@@ -7234,7 +7235,22 @@ async function addSample() {
   loadVoice();
 }
 
-async function editSample(sample) {
+async function editSample(listed) {
+  /*
+   * The list carries an excerpt; the box needs the whole thing.
+   *
+   * `GET /voice` used to hand back every sample's full text so that this line
+   * could read it out of one — a megabyte on the wire and on the thread that
+   * draws the page, to fill a box the user may never open. One sample, asked
+   * for when it is opened.
+   */
+  const sample = await api(`/voice/samples/${encodeURIComponent(listed.id)}`).catch(() => null);
+  if (!sample) {
+    setStatus(`“${listed.title}” is not in the save any more.`, true);
+    loadVoice();
+    return;
+  }
+
   const answer = await form(sample.title, [
     { name: 'title', label: 'What is it?', value: sample.title },
     {

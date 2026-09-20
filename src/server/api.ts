@@ -498,9 +498,31 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/store',
     handler(async (_req, res) => {
       const data = store.load();
-      // config carries no secrets, but the AI command is machine-specific and
-      // the GUI has no use for it.
-      res.json({ ...data, config: { git: data.config.git, ai: { enabled: data.config.ai.enabled } } });
+      res.json({
+        ...data,
+        /*
+         * The writing samples by name, never by content.
+         *
+         * This is the reply the editor loads at startup and again after
+         * almost every edit — eighteen call sites — and the one thing in the
+         * store with no ceiling on its size is the corpus: the panel that
+         * owns it says "paste in an old resume, a cover letter you were
+         * pleased with, a README", and people do. Twenty dropped files made
+         * this reply 1,038,073 bytes, of which 1,002,733 were sample text,
+         * and the only thing the editor ever asks of that list is how long it
+         * is — see `draftedFrom`. Everything in that megabyte was parsed,
+         * structured-cloned and thrown away, on the thread that draws the
+         * page, every time anything was saved.
+         *
+         * `GET /voice` lists them with an excerpt each and
+         * `GET /voice/samples/:id` has one in full, which is what the two
+         * places that show a sample actually want.
+         */
+        samples: data.samples.map(({ text, ...rest }) => ({ ...rest, chars: text.length })),
+        // config carries no secrets, but the AI command is machine-specific and
+        // the GUI has no use for it.
+        config: { git: data.config.git, ai: { enabled: data.config.ai.enabled } },
+      });
     }),
   );
 
@@ -989,6 +1011,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * The voice as it will actually be used: the samples that will be sent, not
    * a description of them. Showing this is the point — you can see exactly
    * what the model will read.
+   *
+   * The samples come back as a list with an excerpt each, never their whole
+   * text. The panel shows three hundred characters of a sample and the
+   * `preview` below is already capped at the context budget, so the full text
+   * was sent for nobody: twenty dropped files came back as a 990KB reply, and
+   * the corpus is meant to grow — "paste in an old resume, a cover letter, a
+   * README" has no ceiling. A reply that large is parsed and held on the
+   * thread that draws the page, which is how opening this tab became a wait
+   * with nothing on screen. `GET /voice/samples/:id` has the whole of one,
+   * for the editor that needs it.
    */
   api.get(
     '/voice',
@@ -997,7 +1029,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const context = buildVoiceContext(data);
       res.json({
         voice: data.voice,
-        samples: data.samples,
+        samples: data.samples.map(({ text, ...rest }) => ({
+          ...rest,
+          chars: text.length,
+          // As much as the card in the panel shows, and not a character more.
+          excerpt: text.slice(0, 300),
+        })),
         context: {
           chars: context.chars,
           available: context.available,
@@ -1005,6 +1042,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         },
         preview: renderVoiceContext(context),
       });
+    }),
+  );
+
+  /** One sample, whole, for the box that edits it. */
+  api.get(
+    '/voice/samples/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const sample = store.load().samples.find((s) => s.id === id);
+      if (!sample) {
+        res.status(404).json({ error: `No writing sample "${id}"` });
+        return;
+      }
+      res.json(sample);
     }),
   );
 

@@ -66,6 +66,58 @@ describe('reads', () => {
     expect(res.body.voice).toContain('Plain and direct');
   });
 
+  /*
+   * The corpus is the one part of a save with no ceiling on its size — the
+   * panel that owns it asks for old resumes, cover letters and READMEs, and
+   * people oblige. Twenty dropped files made `GET /store` 1,038,073 bytes, of
+   * which 1,002,733 were sample text, and that reply is loaded at startup and
+   * again after almost every edit. The editor wants the count and a card's
+   * worth of each; both of those are cheap, and neither is the text.
+   */
+  describe('the size of what the editor loads', () => {
+    const long = 'A paragraph about the ingest rewrite and what it cost. '.repeat(400);
+
+    beforeEach(async () => {
+      for (const id of ['big-one', 'big-two']) {
+        await request(app)
+          .put(`/api/voice/samples/${id}`)
+          .send({ title: `Sample ${id}`, kind: 'other', text: long })
+          .expect(200);
+      }
+    });
+
+    it('does not send a writing sample body with the whole store', async () => {
+      const res = await request(app).get('/api/store').expect(200);
+      const samples = res.body.samples as { id: string; text?: string; chars?: number }[];
+
+      // Still every sample, because `draftedFrom` counts them.
+      expect(samples.map((s) => s.id)).toEqual(expect.arrayContaining(['big-one', 'big-two']));
+      expect(samples.every((s) => s.text === undefined)).toBe(true);
+      expect(samples.find((s) => s.id === 'big-one')?.chars).toBe(long.length);
+      expect(JSON.stringify(res.body).length).toBeLessThan(long.length);
+    });
+
+    it('lists the corpus with an excerpt each, not with the corpus', async () => {
+      const res = await request(app).get('/api/voice').expect(200);
+      const samples = res.body.samples as { id: string; text?: string; excerpt?: string }[];
+
+      expect(samples.every((s) => s.text === undefined)).toBe(true);
+      expect(samples.find((s) => s.id === 'big-one')?.excerpt).toBe(long.slice(0, 300));
+      // The preview is what the model will read and is capped by the context
+      // budget, so it is allowed to be the largest thing here.
+      expect(JSON.stringify(res.body.samples).length).toBeLessThan(long.length);
+    });
+
+    it('has the whole of one sample for the box that edits it', async () => {
+      const res = await request(app).get('/api/voice/samples/big-one').expect(200);
+      expect(res.body.text).toBe(long);
+      expect(res.body.title).toBe('Sample big-one');
+
+      const missing = await request(app).get('/api/voice/samples/not-a-sample').expect(404);
+      expect(missing.body.error).toMatch(/not-a-sample/);
+    });
+  });
+
   it('returns cover letters', async () => {
     const res = await request(app).get('/api/letters').expect(200);
     expect(res.body[0].company).toBe('Acme Co.');
