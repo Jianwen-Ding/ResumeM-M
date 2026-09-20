@@ -57,9 +57,33 @@ const el = (tag, props = {}, children = []) => {
  * arrive here.
  */
 function keptField(name, stored, props = {}) {
+  return keepsValue(el('input', { type: 'text', ...props, value: stored }), name, stored);
+}
+
+/**
+ * The same rescue, for a control that is not a text box.
+ *
+ * Everything above is written about typing, and the AI panel has two controls
+ * that wait for the same Save button without any typing in them: the effort
+ * slider and the LaTeX engine picker. They were built fresh each time and so
+ * were not covered — drag the slider to Thorough, glance at another tab, come
+ * back, and it is on "As it comes" again with the "Not saved yet." warning
+ * gone with it, because the warning is computed from the control that no
+ * longer holds the change.
+ *
+ * That is the worse half. A command that reverts is at least visible: it is a
+ * line of text you wrote and can see is not there. A slider that has slid back
+ * one notch looks exactly like a slider you never touched, and the setting it
+ * governs is one whose effect you would not notice for another three minutes.
+ *
+ * `value` is the whole interface a range input and a select have in common
+ * with a text box, and it is all this needs. The caller passes what the store
+ * said in the same units the control reads — the index for the slider, the
+ * engine name for the select.
+ */
+function keepsValue(input, name, stored) {
   const previous = document.querySelector(`[data-keeps="${name}"]`);
-  const edited = previous != null && previous.value !== previous.dataset.stored;
-  const input = el('input', { type: 'text', ...props, value: edited ? previous.value : stored });
+  if (previous != null && previous.value !== previous.dataset.stored) input.value = previous.value;
   input.dataset.keeps = name;
   input.dataset.stored = stored;
   return input;
@@ -7713,14 +7737,19 @@ async function loadSettings() {
     ['high', 'Thorough'],
   ];
   const effortAt = (i) => EFFORTS[Math.max(0, Math.min(EFFORTS.length - 1, Number(i) || 0))];
-  const effortSlider = el('input', {
-    type: 'range',
-    min: '0',
-    max: String(EFFORTS.length - 1),
-    step: '1',
-    className: 'effort-slider',
-    value: String(Math.max(0, EFFORTS.findIndex(([v]) => v === (config.ai.effort ?? '')))),
-  });
+  const storedEffortAt = String(Math.max(0, EFFORTS.findIndex(([v]) => v === (config.ai.effort ?? ''))));
+  const effortSlider = keepsValue(
+    el('input', {
+      type: 'range',
+      min: '0',
+      max: String(EFFORTS.length - 1),
+      step: '1',
+      className: 'effort-slider',
+      value: storedEffortAt,
+    }),
+    'ai-effort',
+    storedEffortAt,
+  );
   const effortValue = () => effortAt(effortSlider.value)[0];
   /*
    * The scale under the track is also the readout: the stop you are on is the
@@ -7832,6 +7861,8 @@ async function loadSettings() {
     );
   }
   let savedEngine = config.latex.engine ?? '';
+  // After the options exist, or there is nothing for a restored value to select.
+  keepsValue(engine, 'latex-engine', savedEngine);
 
   /*
    * The exact invocation, folded away.
@@ -7934,7 +7965,9 @@ async function loadSettings() {
      * rather than treat them as unsaved edits and keep them forever — which
      * would mean a change made in another window never arrived here again.
      */
-    for (const input of [command, args, timeout, model, ...perTask.values()]) input.dataset.stored = input.value;
+    for (const input of [command, args, timeout, model, effortSlider, engine, ...perTask.values()]) {
+      input.dataset.stored = input.value;
+    }
     savedEngine = engine.value || '';
     savedEffort = effortValue();
     markAiUnsaved();
