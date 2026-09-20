@@ -2935,3 +2935,75 @@ describe('pinning', () => {
     expect(res.body.spec.copiedFrom).toBe('intern');
   });
 });
+
+/*
+ * Voice is a selection over the writing already in the save, and the tab that
+ * reports its size has to be able to show — and change — what is in it.
+ */
+describe('which letters and answers count as your writing', () => {
+  const include = (body: Record<string, unknown>) => request(app).post('/api/voice/include').send(body);
+  const voice = async () => (await request(app).get('/api/voice').expect(200)).body;
+
+  it('lists them both, in by default, with no bodies attached', async () => {
+    const { writing } = await voice();
+    expect(writing.letters).toHaveLength(1);
+    expect(writing.letters[0]).toMatchObject({ id: '2026-01-01-acme', inVoice: true });
+    expect(writing.letters[0].body).toBeUndefined();
+    expect(writing.answers.length).toBeGreaterThan(0);
+    expect(writing.answers.every((a: { inVoice: boolean }) => a.inVoice)).toBe(true);
+  });
+
+  it('takes a letter out, and the corpus shrinks by what it was worth', async () => {
+    const before = await voice();
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
+
+    const after = await voice();
+    expect(after.writing.letters[0].inVoice).toBe(false);
+    expect(after.context.available).toBeLessThan(before.context.available);
+    expect(after.preview).not.toContain('Dear Acme');
+  });
+
+  it('and puts it back, leaving the file saying what it said before', async () => {
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: true }).expect(200);
+
+    expect((await voice()).writing.letters[0].inVoice).toBe(true);
+    /*
+     * Absent, not `voice: true`. The field means one thing — "keep this out" —
+     * and a save where every letter carries `voice: true` is a save that reads
+     * as though somebody decided about each of them, when what happened is
+     * that one was toggled twice.
+     */
+    const file = fs.readFileSync(path.join(t.dir, 'letters', '2026-01-01-acme.md'), 'utf8');
+    expect(file).not.toContain('voice:');
+    expect(file).toContain('Dear Acme');
+  });
+
+  it('takes an answer out without disturbing the rest of the bank', async () => {
+    const { answers } = (await request(app).get('/api/store').expect(200)).body;
+    const target = answers[0].id;
+
+    await include({ kind: 'answer', id: target, include: false }).expect(200);
+
+    const after = (await request(app).get('/api/store').expect(200)).body.answers;
+    expect(after).toHaveLength(answers.length);
+    expect(after.find((a: { id: string }) => a.id === target).voice).toBe(false);
+    for (const a of after.filter((x: { id: string }) => x.id !== target)) {
+      expect(a.voice).toBeUndefined();
+    }
+    // The answer itself is untouched: this says nothing about its text.
+    expect(after.find((a: { id: string }) => a.id === target).variants).toEqual(
+      answers.find((a: { id: string }) => a.id === target).variants,
+    );
+  });
+
+  it('refuses an id it does not have, rather than filing a new one', async () => {
+    const res = await include({ kind: 'letter', id: 'no-such-letter', include: false }).expect(400);
+    expect(res.body.error).toMatch(/no-such-letter/);
+  });
+
+  it('refuses a kind it does not know', async () => {
+    const res = await include({ kind: 'resume', id: 'intern', include: false }).expect(400);
+    expect(res.body.error).toMatch(/letter|answer/);
+  });
+});

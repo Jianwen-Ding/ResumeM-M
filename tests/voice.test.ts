@@ -151,3 +151,66 @@ describe('the section that leads every prompt', () => {
     expect(renderVoiceContext(buildVoiceContext(store({ voice: '   ' })))).not.toContain('Notes they added');
   });
 });
+
+/**
+ * Letters and answers are the bulk of most people's corpus, and until now all
+ * of them counted with no way to say otherwise.
+ *
+ * A letter written to somebody else's template, an answer that is a date, a
+ * draft nobody was pleased with — all things worth keeping as a record and
+ * none of them how you write. `voice: false` is the one thing the field says;
+ * absent still means yes, which is what every save written before it meant.
+ */
+describe('leaving one letter or answer out of your voice', () => {
+  const letters = [
+    { id: 'l1', title: 'To Acme', createdAt: '', body: prose(8) },
+    { id: 'l2', title: 'To Zenith', createdAt: '', body: prose(8, 'clause') },
+  ];
+  const answers = [
+    {
+      id: 'a1',
+      question: 'Why here?',
+      default: 'v1',
+      variants: [{ id: 'v1', label: 'Long', text: prose(6, 'reason') }],
+    },
+    {
+      id: 'a2',
+      question: 'Notice period?',
+      default: 'v1',
+      variants: [{ id: 'v1', label: 'Long', text: prose(6, 'week') }],
+    },
+  ];
+
+  const titles = (data: StoreData) => collectSamples(data).map((s) => s.title);
+
+  it('counts every one of them while nothing says otherwise', () => {
+    const got = titles(store({ coverLetters: letters, answers }));
+    expect(got).toEqual(expect.arrayContaining(['To Acme', 'To Zenith', 'Why here?', 'Notice period?']));
+  });
+
+  it('drops the letter that says it is not one', () => {
+    const got = titles(store({ coverLetters: [letters[0]!, { ...letters[1]!, voice: false }], answers: [] }));
+    expect(got).toContain('To Acme');
+    expect(got).not.toContain('To Zenith');
+  });
+
+  it('and the answer that says so, without touching its neighbour', () => {
+    const got = titles(store({ coverLetters: [], answers: [answers[0]!, { ...answers[1]!, voice: false }] }));
+    expect(got).toContain('Why here?');
+    expect(got).not.toContain('Notice period?');
+  });
+
+  it('reads `voice: true` as the yes it already was, not as a second meaning', () => {
+    const got = titles(store({ coverLetters: [{ ...letters[0]!, voice: true }], answers: [] }));
+    expect(got).toContain('To Acme');
+  });
+
+  it('leaves the budget to spend on what is left', () => {
+    const all = buildVoiceContext(store({ coverLetters: letters, answers }));
+    const fewer = buildVoiceContext(
+      store({ coverLetters: [letters[0]!, { ...letters[1]!, voice: false }], answers }),
+    );
+    expect(fewer.available).toBeLessThan(all.available);
+    expect(fewer.samples.map((s) => s.title)).not.toContain('To Zenith');
+  });
+});

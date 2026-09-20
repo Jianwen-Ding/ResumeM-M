@@ -6645,6 +6645,40 @@ async function completeDraft(draft, notes) {
 let letterFilter = '';
 let answerFilter = '';
 
+/**
+ * The one control that says whether something counts as how you write.
+ *
+ * Drawn the same in both places it appears — beside a letter or an answer on
+ * Letters & Answers, and in the list of them on Voice & AI — because it is
+ * one decision and two spellings of it would be two things to keep in step.
+ *
+ * It states what is true rather than what pressing it would do. A button
+ * reading "Use in voice" on a letter already in the corpus is unreadable:
+ * half the people take it as the state and half as the action, and the ones
+ * who take it as the action are the ones who press it.
+ */
+function voiceChip(kind, id, inVoice, after) {
+  return el('button', {
+    className: `tiny chip voice-flag${inVoice ? ' on' : ''}`,
+    textContent: inVoice ? 'In your voice' : 'Not in your voice',
+    title: inVoice
+      ? 'This is one of the examples any AI request is told to sound like. Click to leave it out.'
+      : 'This is kept, and left out of the examples any AI request is told to sound like. Click to count it.',
+    onclick: async () => {
+      try {
+        await api('/voice/include', {
+          method: 'POST',
+          body: JSON.stringify({ kind, id, include: !inVoice }),
+        });
+        setStatus(inVoice ? 'Left out of your voice' : 'Counted as your writing');
+        await after?.();
+      } catch (e) {
+        setStatus(e.message, true);
+      }
+    },
+  });
+}
+
 async function loadLetters() {
   const [letters, store] = await Promise.all([api('/letters'), api('/store')]);
 
@@ -6699,6 +6733,7 @@ async function loadLetters() {
                       },
                     })
                   : null,
+                voiceChip('letter', l.id, l.voice !== false, loadLetters),
                 el('button', { className: 'tiny', textContent: 'Open', onclick: () => editLetter(l) }),
               ]),
               el('div', { className: 'body', textContent: l.body.slice(0, 260) }),
@@ -6731,6 +6766,7 @@ async function loadLetters() {
                     })
                   : null,
                 el('span', { className: 'chip count', textContent: plural(a.variants.length, 'version') }),
+                voiceChip('answer', a.id, a.voice !== false, loadLetters),
                 el('button', { className: 'tiny', textContent: 'Edit', onclick: () => editAnswer(a) }),
                 el('button', {
                   className: 'tiny danger',
@@ -6881,6 +6917,73 @@ function markVoiceUnsaved() {
   if (flag) flag.hidden = !voiceIsDirty();
 }
 
+
+/**
+ * The letters and answers the save holds, and whether each one counts.
+ *
+ * In, then out, with a count on the summary, because the question somebody
+ * opens this for is "what is my voice made of" and the answer to it is a
+ * list. The same chip as Letters & Answers, so there is one switch rather
+ * than two that have to agree.
+ *
+ * Reloads the whole panel on a change rather than redrawing this list alone:
+ * the budget bar above and the exact text below are both computed from what
+ * is counted, and a list that moved while they did not would be three numbers
+ * disagreeing on one screen.
+ */
+function drawVoiceWriting(writing) {
+  const box = $('#voice-writing');
+  if (!box) return;
+  const letters = writing?.letters ?? [];
+  const answers = writing?.answers ?? [];
+
+  const row = (kind, id, name, chars, inVoice) =>
+    el('div', { className: 'mini-card' }, [
+      el('div', { className: 'row1' }, [
+        el('b', { textContent: name || '(untitled)' }),
+        el('span', { style: 'flex:1' }),
+        el('span', { className: 'chip count', textContent: `${chars.toLocaleString()} characters` }),
+        voiceChip(kind, id, inVoice, loadVoice),
+      ]),
+    ]);
+
+  const all = [
+    ...letters.map((l) => ({ kind: 'letter', id: l.id, name: l.title, chars: l.chars ?? 0, inVoice: l.inVoice })),
+    ...answers.map((a) => ({ kind: 'answer', id: a.id, name: a.question, chars: a.chars ?? 0, inVoice: a.inVoice })),
+  ];
+
+  const counted = all.filter((x) => x.inVoice);
+  const summary = $('#voice-writing-box')?.querySelector('summary');
+  if (summary) {
+    summary.textContent = all.length
+      ? `Letters and answers counted as your writing — ${counted.length} of ${all.length}`
+      : 'Letters and answers counted as your writing';
+  }
+
+  if (all.length === 0) {
+    setChildren(
+      box,
+      el('div', { className: 'empty' }, [
+        el('b', {}, 'Nothing written down yet'),
+        'Letters the extension drafts and answers you save land here, and count towards your voice from the moment they do.',
+      ]),
+    );
+    return;
+  }
+
+  const left = all.filter((x) => !x.inVoice);
+  setChildren(
+    box,
+    el('div', { className: 'card-list' }, counted.map((x) => row(x.kind, x.id, x.name, x.chars, true))),
+    left.length
+      ? el('p', { className: 'hint', textContent: `${plural(left.length, 'one')} left out — kept in the save, and not imitated.` })
+      : null,
+    left.length
+      ? el('div', { className: 'card-list' }, left.map((x) => row(x.kind, x.id, x.name, x.chars, false)))
+      : null,
+  );
+}
+
 async function loadVoice() {
   const data = await api('/voice');
   const box = $('#voice');
@@ -6923,6 +7026,8 @@ async function loadVoice() {
         : '',
     }),
   );
+
+  drawVoiceWriting(data.writing);
 
   /*
    * And the offer to read them.

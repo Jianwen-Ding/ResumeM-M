@@ -297,8 +297,9 @@
           Your voice is taken from things you have actually written, not from a
           description of it. Paste in an old resume, a cover letter you were
           pleased with, or an answer you gave — they need not belong to any
-          application. Letters you send and answers you save are included
-          automatically.
+          application. Every letter and answer in the save counts too, unless
+          you say otherwise: they are listed below, and on Letters &amp;
+          Answers, with the same switch in both places.
         </p>
 
         <!-- Drop anything in: what it holds is worked out for you. -->
@@ -322,6 +323,21 @@
         <div id="read-material-row" class="toolbar" hidden></div>
         <div id="read-material-notes" class="gen-notes"></div>
         <div id="samples" class="card-list"></div>
+
+        <!--
+          The letters and answers the save already holds.
+
+          The hint above used to say these were "included automatically" and
+          show none of them, so the panel reporting the size of your voice was
+          reporting mostly on things that were not on it — and there was
+          nowhere to say "not that one". They are the bulk of most people's
+          corpus, and a letter written to somebody else's template is still a
+          letter you sent.
+        -->
+        <details id="voice-writing-box" class="voice-extras">
+          <summary>Letters and answers counted as your writing</summary>
+          <div id="voice-writing"></div>
+        </details>
 
         <details id="voice-extras" class="voice-extras">
           <summary>Notes and the exact text the AI receives</summary>

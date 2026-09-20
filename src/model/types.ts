@@ -557,6 +557,22 @@ export interface CoverLetter {
   tags?: string[];
   /** The application this was written for, when it was written for one. */
   applicationId?: string;
+  /**
+   * Whether this counts as an example of how you write.
+   *
+   * Absent means yes, which is what every letter and answer in every save
+   * written before this meant and still means — so nothing has to be
+   * converted and nobody's voice changes under them. `false` is the one thing
+   * this field says: keep this one out.
+   *
+   * It is worth being able to say. The corpus is what any AI request is told
+   * to sound like, and a letter written to a template, an answer that is a
+   * date, or a draft somebody was not pleased with are all things you would
+   * keep and would not want imitated. Archiving is the same idea for pasted
+   * samples; a letter cannot be archived, because it is also a document you
+   * sent and that record stays.
+   */
+  voice?: boolean;
 }
 
 /** A reusable answer to an application question, written in the user's voice. */
@@ -567,6 +583,8 @@ export interface AnswerBankItem {
   variants: Variant[];
   default: string;
   tags?: string[];
+  /** See `CoverLetter.voice`: absent means yes, `false` keeps it out. */
+  voice?: boolean;
 }
 
 export interface StoreData {
