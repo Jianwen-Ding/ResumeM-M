@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { flattenResumes, needsFlattening } from './flatten.js';
+import { entryLosesIds, forgetMissing, liveIds, skillsLoseIds } from './forget.js';
 import { liftLayout } from './lift-layout.js';
 import { needsTiering, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
@@ -1110,6 +1111,11 @@ export class Store {
      * here is the only notice of that, which is why it must not be swallowed
      * by a caller.
      */
+    // Read before anything is written, so it is the entry as it stood rather
+    // than the one this call is about to put in its place.
+    const was = this.loadEntries();
+    const before = was.find((e) => e.id === clean.id);
+
     const list = this.readYaml<Entry[]>(rel, []);
     const idx = list.findIndex((e) => e.id === clean.id);
     if (idx >= 0) list[idx] = clean;
@@ -1122,10 +1128,23 @@ export class Store {
       const next = stale.filter((e) => e.id !== clean.id);
       if (next.length !== stale.length) this.writeYaml(other, next);
     }
+
+    /*
+     * A line, a wording or a list item removed here is removed everywhere.
+     *
+     * Most saves of an entry add or reword, and those change nothing any
+     * resume points at — so the question is asked first and the pass over the
+     * resumes only runs for the one kind of write that needs it. See
+     * `forget.ts`.
+     */
+    if (before && entryLosesIds(before, clean)) {
+      this.forgetInResumes(was.map((e) => (e.id === clean.id ? clean : e)));
+    }
   }
 
   /** Removes the id from every file, not merely the first one holding it. */
   deleteEntry(id: string): boolean {
+    const was = this.loadEntries();
     let removed = false;
     for (const rel of Store.ENTRY_FILES) {
       const list = this.readYaml<Entry[]>(rel, []);
@@ -1135,11 +1154,60 @@ export class Store {
         removed = true;
       }
     }
+    // And out of every resume that was showing it. A section listing an entry
+    // the store no longer has is not a resume that prints it — it is a resume
+    // that complains about it, on every resolve, with no way to say so back.
+    if (removed) this.forgetInResumes(was.filter((e) => e.id !== id));
     return removed;
   }
 
   saveSkillGroups(groups: SkillGroup[]): void {
+    const before = normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
     this.writeYaml('skills.yaml', groups);
+    // Dropping a skill from a group, or a whole group, reaches the resumes
+    // that had pinned it — same reasoning as entries above.
+    if (skillsLoseIds(before, groups)) this.forgetInResumes(undefined, groups);
+  }
+
+  /**
+   * Take every reference to something the store no longer holds out of the
+   * resumes, and say which ones that changed.
+   *
+   * The new entries and groups are passed in rather than read back, because
+   * they were written a moment ago and the read cache is keyed on a file's
+   * size and modification time: two writes inside one millisecond that happen
+   * to land on the same length would be served the copy from before the
+   * delete, and the pass would then prune against a store that no longer
+   * exists — which is the one way this could remove something somebody still
+   * had.
+   *
+   * Written through `saveResume` one file at a time, inside whatever commit
+   * the delete itself is being made in, so undoing the delete in the version
+   * history brings the resumes back with it.
+   */
+  private forgetInResumes(entries?: Entry[], groups?: SkillGroup[]): string[] {
+    const live = liveIds(
+      entries ?? this.loadEntries(),
+      groups ?? normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', [])),
+    );
+
+    const changed: string[] = [];
+    /*
+     * As written, not as resolved.
+     *
+     * `loadResumes` folds inheritance and stamps a date on anything it has to
+     * make temporary, and that date is deliberately never written to disk —
+     * see the note on `tierResumes`. Saving what it hands back would write it,
+     * and start a one-week clock on resumes nobody has touched.
+     */
+    for (const spec of this.loadResumesAsWritten()) {
+      const next = forgetMissing(spec, live);
+      if (JSON.stringify(next) !== JSON.stringify(spec)) {
+        this.saveResume(next);
+        changed.push(spec.id);
+      }
+    }
+    return changed;
   }
 
   saveProfile(profile: Profile): void {
