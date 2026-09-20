@@ -235,6 +235,33 @@ const unique = (values: Iterable<string>): string[] => {
   return [...byKey.values()];
 };
 
+/**
+ * A capture that is the CLI's first-run setup rather than an answer to
+ * `/model`.
+ *
+ * The probe types `/model` into a fresh terminal and reads what comes back,
+ * and a client that has never been run in this environment answers with its
+ * onboarding instead. Claude Code's first screen is a numbered list of
+ * themes, and the parser — which looks for numbered lines and takes the
+ * leading word of each — read it exactly as it reads a model menu. Measured:
+ * `/api/ai/models?command=claude` came back
+ * `{"models":["auto","dark","light"],"from":"cli"}`, and the Settings panel
+ * drew three buttons offering to run the tailoring on `dark`.
+ *
+ * Worth naming rather than filtering, because "nothing to show" and "this
+ * CLI has not been set up" want different things done about them, and only
+ * one of them is fixed by reopening Settings.
+ *
+ * Codex is already safe here by accident: it anchors on its picker's own
+ * heading and returns nothing without it. Claude's parser has no such
+ * anchor, and adding a real one needs the text of a picker that only opens
+ * for a signed-in client — so this closes the case that can be checked.
+ */
+export function needsSetUp(output: string): boolean {
+  const text = plainTerminal(output);
+  return /Let's get started|Choose the text style|run \/theme/i.test(text);
+}
+
 /** Identifiers printed by Codex, Gemini and Antigravity pickers. */
 const MODEL_ID = /\b(?:gpt|codex|gemini|claude|o[1-9])[-.][a-z0-9][a-z0-9._-]*\b/gi;
 
@@ -247,6 +274,8 @@ export function modelsInPicker(output: string, parser: AiModelPicker['parser']):
   const text = plainTerminal(output);
 
   if (parser === 'claude') {
+    // A CLI that has never been run here is not showing its model picker.
+    if (needsSetUp(text)) return [];
     const found: string[] = [];
     for (const line of text.split('\n')) {
       if (!/^\s*(?:❯\s*)?\d+[.)]\s+/.test(line) || /\bdisabled\b/i.test(line)) continue;
@@ -325,13 +354,16 @@ export async function listModels(
 
   let list: ModelList;
   try {
-    const models = modelsInPicker(await probe(name, preset.model.picker, cwd), preset.model.picker.parser);
+    const captured = await probe(name, preset.model.picker, cwd);
+    const models = modelsInPicker(captured, preset.model.picker.parser);
     list = models.length > 0
       ? { models, from: 'cli' }
       : {
           models: [],
           from: 'unavailable',
-          message: `${preset.label} did not show any model choices. Sign in to the CLI, then reopen Settings.`,
+          message: needsSetUp(captured)
+            ? `${preset.label} has not been set up on this machine yet — it answered with its first-run questions instead of its model list. Run it once in a terminal, then reopen Settings.`
+            : `${preset.label} did not show any model choices. Sign in to the CLI, then reopen Settings.`,
         };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;

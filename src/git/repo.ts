@@ -110,6 +110,9 @@ export class Repo {
     if (await this.isRepo()) return;
     fs.mkdirSync(this.root, { recursive: true });
     await this.git(['init']);
+    // Before the first `add`, so a store that already has a half-built
+    // application folder in it does not take one into its opening commit.
+    this.ensureIgnores();
 
     // --allow-empty so a brand-new store still gets a baseline commit. Without
     // one, git has no HEAD and every later read of the history fails.
@@ -165,8 +168,67 @@ export class Repo {
   /** Serialised per repository directory by `commitAll`. */
   private static readonly commits = new Map<string, Promise<void>>();
 
+  /**
+   * Paths that must never be committed, and must never be walked either.
+   *
+   * A bundle is built into `out/applications/.rmm-building-XXXXXX` and moved
+   * into place when it is whole — which is what makes a half-written archive
+   * impossible. But `git add -- .` walks the whole tree and stats what it
+   * finds, and a *second* application finishing during that walk takes its
+   * staging folder away mid-stat:
+   *
+   *   fatal: unable to stat 'out/applications/.rmm-building-sCPWqE/source/resume.tex':
+   *   No such file or directory
+   *
+   * git then aborts the entire add, the commit never happens, and
+   * `withCommit` has nowhere to put that but a line in the console. Nothing
+   * is lost from disk — the files were already written — but the version
+   * history quietly stops recording, and "restore this version", the diff
+   * between two resumes and the sweep are all built on it. Two applications
+   * being built at once is an ordinary afternoon.
+   *
+   * Ignoring them removes the walk rather than surviving it, and it is also
+   * the honest answer: a folder that exists for the duration of one rename is
+   * not part of anybody's history.
+   */
+  private static readonly IGNORED = ['.rmm-building-*/'];
+
+  /** Written once per process per store; see `IGNORED`. */
+  private ignoresWritten = false;
+
+  /**
+   * Make sure the store's `.gitignore` carries what it has to, without
+   * disturbing whatever else is in it.
+   *
+   * Called before every commit rather than at `ensure`, because `ensure` only
+   * runs when a repository is being created and the stores that need this
+   * most are the ones that already exist. Appending, never rewriting: this
+   * file belongs to whoever opened the store.
+   */
+  private ensureIgnores(): boolean {
+    if (this.ignoresWritten) return false;
+    this.ignoresWritten = true;
+    try {
+      const at = path.join(this.root, '.gitignore');
+      const had = fs.existsSync(at) ? fs.readFileSync(at, 'utf8') : '';
+      const lines = had.split('\n').map((l) => l.trim());
+      const missing = Repo.IGNORED.filter((p) => !lines.includes(p));
+      if (missing.length === 0) return false;
+
+      const block = ['# ResumeM-M: half-built application folders, mid-rename.', ...missing].join('\n');
+      const body = had && !had.endsWith('\n') ? `${had}\n${block}\n` : `${had}${block}\n`;
+      fs.writeFileSync(at, body, 'utf8');
+      return true;
+    } catch {
+      // A store whose .gitignore cannot be written still commits; it just
+      // keeps the race this was for. Not a reason to refuse the save.
+      return false;
+    }
+  }
+
   private async commitNow(message: string, paths?: string[]): Promise<string | undefined> {
     if (!(await this.isRepo())) return undefined;
+    const wroteIgnores = this.ensureIgnores();
     const targets = paths ?? this.scope;
     await this.git(['add', '--', ...targets]);
 
@@ -174,6 +236,19 @@ export class Repo {
     // elsewhere in the repo must not ride along.
     const staged = await this.git(['diff', '--cached', '--name-only', '--', ...targets]);
     if (!staged.trim()) return undefined;
+
+    /*
+     * And a `.gitignore` this process has just written is not a change
+     * somebody made.
+     *
+     * A save with nothing in it must not produce a commit — that is what the
+     * whole `staged` check above is for — and adding the ignore file to an
+     * existing store would have turned the next empty save into one. It stays
+     * staged and rides along with the next real edit, which is where it
+     * belongs: it is part of the store, not an event in its history.
+     */
+    const files = staged.split('\n').map((f) => f.trim()).filter(Boolean);
+    if (wroteIgnores && files.length === 1 && files[0] === '.gitignore') return undefined;
 
     /*
      * No pathspec on the commit itself.

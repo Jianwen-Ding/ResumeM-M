@@ -527,3 +527,60 @@ describe('a store someone has also used git on', () => {
     expect(pending.every((p) => p.path.endsWith('.yaml'))).toBe(true);
   });
 });
+
+/*
+ * A bundle is built into `out/applications/.rmm-building-XXXXXX` and moved
+ * into place when it is whole, which is what makes a half-written archive
+ * impossible. `git add -- .` walks the whole tree, and a second application
+ * finishing during that walk takes its staging folder away mid-stat:
+ *
+ *   fatal: unable to stat 'out/applications/.rmm-building-sCPWqE/source/resume.tex':
+ *   No such file or directory
+ *
+ * git aborts the entire add, the commit never happens, and `withCommit` has
+ * nowhere to put that but a line in the console. The files are already on
+ * disk, so nothing is lost there — but the version history quietly stops
+ * recording, and "restore this version", the diff between two resumes and
+ * the sweep are all built on it.
+ */
+describe('folders that exist only between two renames', () => {
+  const building = () => path.join(root, 'out', 'applications', '.rmm-building-aBcDeF');
+
+  beforeEach(() => {
+    fs.mkdirSync(path.join(building(), 'source'), { recursive: true });
+    fs.writeFileSync(path.join(building(), 'source', 'resume.tex'), '\\documentclass{article}');
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Test Person\n');
+  });
+
+  it('are not committed, and not walked either', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await repo.commitAll('Save the profile');
+
+    const tracked = git(['ls-files']).split('\n').filter(Boolean);
+    expect(tracked).toContain('profile.yaml');
+    expect(tracked.some((f) => f.includes('.rmm-building-'))).toBe(false);
+
+    // Ignored rather than merely unstaged: `git add` skips what it is told to
+    // ignore before it stats it, which is the whole point.
+    const seen = git(['status', '--porcelain', '--untracked-files=all']);
+    expect(seen).not.toContain('.rmm-building-');
+    expect(repo.lastCommitError).toBeUndefined();
+  });
+
+  it('says so in the store’s own .gitignore, appending to whatever is there', async () => {
+    fs.writeFileSync(path.join(root, '.gitignore'), 'scratch/\n');
+    const repo = new Repo(root);
+    await repo.ensure();
+    await repo.commitAll('Save the profile');
+
+    const ignores = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+    expect(ignores).toContain('scratch/');
+    expect(ignores).toContain('.rmm-building-*/');
+    // And not again on the next commit.
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Someone Else\n');
+    await new Repo(root).commitAll('Rename');
+    const after = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+    expect(after.split('.rmm-building-*/').length - 1).toBe(1);
+  });
+});

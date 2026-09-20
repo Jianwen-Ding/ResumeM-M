@@ -2204,6 +2204,57 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
     expect(done.body.warnings.join(' ')).toMatch(/cover letter and notes changed while this was compiling/i);
   });
 
+  /*
+   * The two lists cannot disagree about the same job, whichever was written
+   * first.
+   *
+   * Filing an application marks its space submitted, and that was the only
+   * place it happened — so it depended on the space existing by then. In the
+   * extension it often does not: the card opens one from a keeper that runs
+   * every two seconds, and pressing Submit is faster than that. Measured on
+   * the ATS walk, eight of fourteen systems ended with the tracker reading
+   * `applied` and the Workspace still offering the same job as something to
+   * finish, and nothing would ever have changed it — the one moment that
+   * marks a space had already gone by.
+   */
+  describe('a space for a job that has already gone out', () => {
+    const sent = (company: string, role: string, status = 'applied') =>
+      request(app).post('/api/applications').send({ company, role, status }).expect(200);
+
+    const open = (company: string, role: string) =>
+      request(app).post('/api/workspace').send({ company, role, questions: [] }).expect(200);
+
+    it('opens as sent when the application went out first', async () => {
+      await sent('Helios', 'Platform Engineer');
+      const created = await open('Helios', 'Platform Engineer');
+      expect(created.body.draft.status).toBe('submitted');
+    });
+
+    it('catches up when the application goes out while it is open', async () => {
+      const first = await open('Vega Robotics', 'Platform Engineer');
+      expect(first.body.draft.status).toBe('drafting');
+
+      await sent('Vega Robotics', 'Platform Engineer');
+      // The extension re-posts the space as you move through an application,
+      // which is where this lands in practice.
+      const again = await open('Vega Robotics', 'Platform Engineer');
+      expect(again.body.draft.id).toBe(first.body.draft.id);
+      expect(again.body.draft.status).toBe('submitted');
+    });
+
+    it('leaves a space alone while its application is still being worked on', async () => {
+      await sent('Lyra Systems', 'Platform Engineer', 'applying');
+      const created = await open('Lyra Systems', 'Platform Engineer');
+      expect(created.body.draft.status).toBe('drafting');
+    });
+
+    it('reads an application past applied as gone out too', async () => {
+      await sent('Orion Data', 'Platform Engineer', 'interview');
+      const created = await open('Orion Data', 'Platform Engineer');
+      expect(created.body.draft.status).toBe('submitted');
+    });
+  });
+
   it('can keep the draft, marked submitted', async () => {
     const created = await request(app)
       .post('/api/workspace')

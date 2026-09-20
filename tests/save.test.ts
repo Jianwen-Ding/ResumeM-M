@@ -64,7 +64,17 @@ describe('saveStore', () => {
     const result = await saveStore(repo);
     expect(result.initialised).toBe(true);
     expect(result.saved).toBe(true);
-    expect(result.files.map((f) => f.path).sort()).toEqual(['profile.yaml', 'resumes/newgrad.yaml']);
+    /*
+     * `.gitignore` is one of the files a store has. It is written when the
+     * repository is made — see `Repo.IGNORED`, which keeps half-built
+     * application folders out of the walk `git add` does — so it is saved
+     * with everything else rather than appearing untracked afterwards.
+     */
+    expect(result.files.map((f) => f.path).sort()).toEqual([
+      '.gitignore',
+      'profile.yaml',
+      'resumes/newgrad.yaml',
+    ]);
     expect(await repo.isRepo()).toBe(true);
   });
 
