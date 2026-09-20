@@ -156,6 +156,43 @@ describe('when a temporary resume is done with', () => {
     // A copy made and abandoned. Without this nothing would ever clear it.
     expect(doneAt(spec('job-x', made), [])).toBe('2026-01-01T00:00:00.000Z');
   });
+
+  /*
+   * The case the rule above was written for and could not see.
+   *
+   * "A posting you are still writing a cover letter for" is a workspace, and
+   * a workspace is where the resume is usually attached: `/workspace/:id/
+   * variation` and `/workspace/:id/tailor` set `resumeId` on the draft and
+   * never on the tracker row, and `POST /workspace` writes it onto the row
+   * only when it creates one — so a job already saved as `interested` has a
+   * row that does not name the resume either. With nothing in `applications`
+   * pointing at it, this fell through to the resume's own date and started
+   * the clock the moment it was made.
+   */
+  const draft = (over: Record<string, unknown> = {}) =>
+    ({ id: 'd1', company: 'Acme', role: 'SWE', status: 'drafting', resumeId: 'job-x', ...over }) as never;
+
+  it('does not start counting while a workspace is still open on it', () => {
+    expect(doneAt(spec('job-x', made), [], [draft()])).toBeUndefined();
+    expect(doneAt(spec('job-x', made), [], [draft({ status: 'ready' })])).toBeUndefined();
+  });
+
+  it('starts counting once that workspace has been sent', () => {
+    expect(doneAt(spec('job-x', made), [], [draft({ status: 'submitted' })])).toBe(
+      '2026-01-01T00:00:00.000Z',
+    );
+  });
+
+  it('is not held up by a workspace about some other resume', () => {
+    expect(doneAt(spec('job-x', made), [], [draft({ resumeId: 'job-y' })])).toBe(
+      '2026-01-01T00:00:00.000Z',
+    );
+  });
+
+  it('and the sweep asks the same question, so the list and the deletion agree', () => {
+    const data = { resumes: [spec('job-x', made)], applications: [], drafts: [draft()] } as never;
+    expect(dueToGo(data, { days: 7, now: Date.parse('2026-06-01T00:00:00.000Z') })).toEqual([]);
+  });
 });
 
 describe('which temporary resumes have run out their week', () => {

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
-import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js';
+import { runAgent, extractJson, trimToLetter, AgentError, type AgentFailure } from '../ai/agent.js';
+import { findRun, recentRuns, running, type AiRun } from '../ai/activity.js';
 import {
   answerPrompt,
   bulletFeedbackPrompt,
@@ -65,6 +66,7 @@ import type {
   Profile,
   ResolvedResume,
   ResumeSpec,
+  SectionSpec,
   SkillGroup,
   StoreData,
   Variant,
@@ -367,6 +369,45 @@ function sentBefore(
  * started. So "there is a file" is not the question — "is there a move in it"
  * is, and when there is not, the reply is read as JSON instead.
  */
+/**
+ * The AI's sections, keeping the narrowed skills the keyword match chose.
+ *
+ * Two things want to write `spec.sections` and they overlap in exactly one
+ * place. `deriveSpec` copies the base's sections and narrows the skills lists
+ * to what the posting asked for; `applyInclusion` copies the *same* base's
+ * sections and applies what the AI decided — what is shown, what is hidden,
+ * and what order it goes in. So the AI's version already carries everything
+ * the base had, and the only thing it is missing is the narrowed `items`.
+ *
+ * It used to be written the other way round — the AI's sections first and
+ * `deriveSpec`'s spread over the top, with `entries` and `bullets` named
+ * afterwards to put them back. `order` and `bulletOrder` were not named, and
+ * they are precisely what `applyInclusion` sets to `manual` to say the AI
+ * arranged this itself. `Store.load()` runs `adoptDateOrder` over every
+ * resume, so the base carries a date sort for very nearly every section, and
+ * the spread restored it: `manual` became `newest` and the arrangement was
+ * restacked into date order on the way to the page.
+ *
+ * Silently, and the tool had already told the model it worked — "experience
+ * will read: exp_old, exp_new" — which is the shape of failure that the
+ * comments in `applyInclusion` say the `manual` flags exist to prevent. They
+ * did their job; this call site undid it one line later.
+ *
+ * Naming the one field that actually differs, rather than spreading a whole
+ * object and patching up whatever it broke, is what stops the next field
+ * being lost the same way.
+ */
+function withNarrowedSkills(
+  decided: SectionSpec[],
+  derived: ResumeSpec['sections'],
+): SectionSpec[] {
+  const items = new Map((derived ?? []).map((s) => [s.kind, s.items]));
+  return decided.map((s) => {
+    const narrowed = items.get(s.kind);
+    return narrowed ? { ...s, items: narrowed } : s;
+  });
+}
+
 function decidedAnything(state: SessionState): boolean {
   const { plan, suggestions, reasoning } = state;
   return (
@@ -797,6 +838,52 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * intentionally does not use `--help`: help describes a flag, while these
    * sources contain the choices the signed-in account can actually use.
    */
+  /**
+   * What the AI is doing, and what it did last time.
+   *
+   * The question this answers is the one a timeout cannot: was it working, or
+   * was it wedged? `lastOutputAt` settles it — a run that printed something
+   * four seconds ago is thinking, and one that has said nothing at all since
+   * it started is not, and only the second is a reason to look at the command
+   * rather than at the clock. See `activity.ts`.
+   */
+  api.get(
+    '/ai/activity',
+    handler(async (_req, res) => {
+      const now = Date.now();
+      const summarise = (r: AiRun) => ({
+        id: r.id,
+        command: r.command,
+        args: r.args,
+        promptBytes: r.promptBytes,
+        startedAt: r.startedAt,
+        endedAt: r.endedAt,
+        /** Milliseconds so far, or in total — the caller should not do this sum. */
+        elapsedMs: (r.endedAt ?? now) - r.startedAt,
+        /** How long since it last said anything; null when it never has. */
+        quietMs: r.lastOutputAt ? now - r.lastOutputAt : null,
+        outcome: r.outcome ?? 'running',
+        note: r.note,
+        bytes: r.bytes,
+      });
+      res.json({ running: running().map(summarise), recent: recentRuns().map(summarise) });
+    }),
+  );
+
+  /** One run, with the tail of what it actually said. */
+  api.get(
+    '/ai/activity/:id',
+    handler(async (req, res) => {
+      const found = findRun(String(req.params.id));
+      if (!found) throw new Error(`No AI run "${req.params.id}" is still held`);
+      res.json({
+        ...found,
+        elapsedMs: (found.endedAt ?? Date.now()) - found.startedAt,
+        outcome: found.outcome ?? 'running',
+      });
+    }),
+  );
+
   api.get(
     '/ai/models',
     handler(async (req, res) => {
@@ -1710,6 +1797,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       let aiFailed: string | undefined;
+      let aiFailedKind: AgentFailure | undefined;
       let state: { letter?: string; answers?: Record<string, string> } | undefined;
       try {
         const agent = await runAgent(
@@ -1726,6 +1814,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // is a misconfigured command, and saying so beats a 502 in front of
         // somebody halfway through an application.
         aiFailed = err instanceof Error ? err.message : String(err);
+          // Which way it failed, so the card is not left guessing from the
+          // English. See `AgentFailure`.
+          aiFailedKind = err instanceof AgentError ? err.kind : 'failed';
       }
 
       const written = state?.letter?.trim();
@@ -1737,6 +1828,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         aiUsed: Boolean(written) || Object.keys(answers).length > 0,
         oneRun: true,
         aiFailed,
+        aiFailedKind,
       });
     }),
   );
@@ -1961,6 +2053,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * so it can say the AI did not run; this says why.
        */
       let aiFailed: string | undefined;
+      let aiFailedKind: AgentFailure | undefined;
       if (mode === 'ai' && data.config.ai.enabled) {
         const resolved = resolveResume(baseId, data);
         const posting = {
@@ -2061,6 +2154,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           // See `aiFailed`: a run that never started is a reply that will not
           // parse, from further away. Same answer.
           aiFailed = err instanceof Error ? err.message : String(err);
+          // Which way it failed, so the card is not left guessing from the
+          // English. See `AgentFailure`.
+          aiFailedKind = err instanceof AgentError ? err.kind : 'failed';
           aiParsed = null;
         }
       }
@@ -2094,10 +2190,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // Showing and hiding entries or bullets, the other half of what the AI
       // is allowed to do. Merged over whatever deriveSpec built for skills.
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
-      if (inclusion) {
-        const bySkills = new Map((spec.sections ?? []).map((s) => [s.kind, s]));
-        spec.sections = inclusion.map((s) => ({ ...s, ...(bySkills.get(s.kind) ?? {}), entries: s.entries, bullets: s.bullets }));
-      }
+      if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
 
       // What the tailoring actually did to the document, in the same words the
       // version history uses: the sentence it replaced and the one it chose.
@@ -2262,6 +2355,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // card can say the AI is misconfigured rather than leave the person
         // wondering why the star never lights up.
         aiFailed,
+        aiFailedKind,
         // What was actually done, not what was asked for: an AI run that came
         // back unusable falls through to the keyword match, and the card has
         // to be able to say so.
@@ -3050,6 +3144,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
       // Why the AI did not tailor this one; see the same field on `/analyze`.
       let aiFailed: string | undefined;
+      let aiFailedKind: AgentFailure | undefined;
       if (useAi && data.config.ai.enabled) {
         try {
           const agent = await runAgent(
@@ -3070,6 +3165,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           // Nor must a run that never started. The button says "with AI", so
           // the reason comes back with the resume rather than instead of it.
           aiFailed = err instanceof Error ? err.message : String(err);
+          // Which way it failed, so the card is not left guessing from the
+          // English. See `AgentFailure`.
+          aiFailedKind = err instanceof AgentError ? err.kind : 'failed';
           plan = null;
         }
       }
@@ -3084,10 +3182,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         role: draft.role,
       }, data.resumes);
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
-      if (inclusion) {
-        const bySkills = new Map((spec.sections ?? []).map((sec) => [sec.kind, sec]));
-        spec.sections = inclusion.map((sec) => ({ ...sec, ...(bySkills.get(sec.kind) ?? {}), entries: sec.entries, bullets: sec.bullets }));
-      }
+      if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
 
       await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => store.saveResume(spec));
 
@@ -3108,6 +3203,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         fetched,
         usedAi: Boolean(plan),
         aiFailed,
+        aiFailedKind,
         rejected: plan?.rejected ?? [],
         diff: diffResumes(resolveResume(baseId!, data), resolveResume(spec, after), { ignoreLabel: true }),
       });

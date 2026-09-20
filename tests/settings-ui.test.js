@@ -137,6 +137,56 @@ describe('the settings panel', () => {
    * another tab and coming back was enough to delete a command that had been
    * typed but — as is normal for a field with a Save button — not yet saved.
    */
+  /*
+   * The two controls on this panel that wait for Save without any typing in
+   * them. They were rebuilt fresh every time the Voice tab was opened, so a
+   * glance at another tab put the slider back where the store had it — and
+   * took the "Not saved yet." warning with it, since the warning is computed
+   * from the control that no longer held the change. Nothing on screen said
+   * anything had happened.
+   */
+  it('keeps an effort you have slid but not saved, across a tab switch', async () => {
+    const slider = document.querySelector('.effort-slider');
+    slider.value = '3';
+    slider.dispatchEvent(new Event('input'));
+    expect(document.querySelector('#settings').textContent).toContain('Not saved yet.');
+
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(document.querySelector('.effort-slider').value).toBe('3');
+    // And still says so, which is the half that makes it recoverable.
+    expect(document.querySelector('#settings').textContent).toContain('Not saved yet.');
+    // The scale reads the restored value, not the one on disk.
+    expect(document.querySelector('.effort-scale .on').textContent).toBe('Thorough');
+  });
+
+  it('keeps a LaTeX engine you have chosen but not saved', async () => {
+    const engineOf = () => [...document.querySelectorAll('#settings select')].find((s) => s.querySelector('option[value=pdflatex]'));
+    const engine = engineOf();
+    engine.value = 'pdflatex';
+    engine.dispatchEvent(new Event('change'));
+
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(engineOf().value).toBe('pdflatex');
+  });
+
+  // The other half, as for the text boxes: an untouched control must still
+  // follow the store, or a change made in another window never arrives.
+  it('still refreshes an effort and an engine you have not touched', async () => {
+    config.ai = { ...config.ai, effort: 'low' };
+    config.latex = { engine: 'tectonic' };
+
+    document.querySelector('button[data-tab="resumes"]').click();
+    document.querySelector('button[data-tab="voice"]').click();
+    await vi.waitFor(() => expect(document.querySelector('.effort-slider').value).toBe('1'));
+    expect([...document.querySelectorAll('#settings select')].find((s) => s.querySelector('option[value=pdflatex]')).value).toBe('tectonic');
+  });
+
   it('keeps a command you are still typing across a tab switch', async () => {
     const command = commandBox();
     command.value = 'my-own-cli --with-a-flag';

@@ -253,6 +253,52 @@ describe('the same question, asked by another system', () => {
   });
 
   /*
+   * A word the page added can reverse the question, and every added word
+   * scores as shared vocabulary.
+   *
+   * `sameShortTerms` caught "no" because it is two characters. "not",
+   * "never" and "cannot" are three or more, so they fell through to `terms`,
+   * where a word the *asked* question has and the stored one lacks cost
+   * nothing at all. The result was not a near miss: 0.95 and confident, on
+   * the question about somebody's right to work, answered with its exact
+   * opposite.
+   */
+  it('does not answer a question that has been negated', () => {
+    for (const [asked, stored] of [
+      ['Why should we not hire you?', 'Why should we hire you?'],
+      [
+        'Are you NOT legally authorized to work in the United States?',
+        'Are you legally authorized to work in the United States?',
+      ],
+      ['Are you unable to work weekends?', 'Are you able to work weekends?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(false);
+      // Still offered, because a person reading it may well want it as a
+      // starting point. It is sending it unread that is refused.
+      expect(reuses(asked, stored), `${asked} ⟵ ${stored}`).toBe(true);
+    }
+  });
+
+  /*
+   * And a question narrowed to something the stored answer never addressed.
+   * "Do you have a driver's license?" → "Yes, a full clean licence since
+   * 2019." is a fine answer, and a confident one to "has it been suspended
+   * or revoked?" is a different claim entirely.
+   */
+  it('does not answer a narrower question with the broader one’s answer', () => {
+    for (const [asked, stored] of [
+      [
+        "Has your driver's license been suspended or revoked in the last five years?",
+        "Do you have a driver's license?",
+      ],
+      ['Describe your experience with Kubernetes in production.', 'Describe your experience.'],
+      ['What interests you about our compliance and audit tooling?', 'What interests you?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+  });
+
+  /*
    * And the same thing where the short word is a language rather than a
    * country. "How many years with Go?" answered by the stored answer about
    * C# is a claim about experience nobody has.

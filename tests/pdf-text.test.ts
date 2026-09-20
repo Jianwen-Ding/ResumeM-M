@@ -23,7 +23,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compileResume } from '../src/render/compile.js';
+import { compileLetter, compileResume } from '../src/render/compile.js';
 import { hasLatex } from './helpers.js';
 import type { ResolvedResume } from '../src/model/types.js';
 import { DEFAULT_LAYOUT } from '../src/model/types.js';
@@ -181,6 +181,47 @@ describe.runIf(latex && hasPdfToText)('what the reader actually sees', () => {
       expect(said).not.toContain('no line here to end');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  /*
+   * The same save, the same missing key, the cover letter instead.
+   *
+   * The note above says the sentence was wired into the last of five places.
+   * There was a sixth. A letter's header is the name set large, so with
+   * nothing to set it emits the same bare `\\` and the letter preview showed
+   * the same TeX error the resume had stopped showing — on the one document
+   * where the name is the entire top of the page.
+   */
+  it('says the same about a cover letter, rather than letting TeX say it', async () => {
+    const letter = (profile: unknown) => ({
+      profile,
+      company: 'Acme',
+      role: 'Platform Engineer',
+      date: '2026-09-20',
+      paragraphs: ['Dear Acme,', 'I would like to apply.', 'Kind regards,'],
+    });
+
+    /*
+     * Both shapes, because they failed differently and neither said anything.
+     * `resolveProfile` hands back `name: ''`, which reached TeX and came back
+     * as "There's no line here to end."; a profile object with no `name` key
+     * at all — what the CLI passes straight through — did not get that far
+     * and threw `Cannot read properties of undefined (reading 'trim')`.
+     */
+    for (const profile of [
+      { name: '', email: 'jane@x.example', links: [] },
+      { email: 'jane@x.example', links: [] },
+    ]) {
+      const err = await compileLetter(letter(profile) as never, DEFAULT_LAYOUT, {
+        mode: 'final',
+      }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      const said = (err as Error).message;
+      expect(said, JSON.stringify(profile)).toContain('no name in it');
+      expect(said, JSON.stringify(profile)).toContain('under Master');
+      expect(said).not.toContain('no line here to end');
+      expect(said).not.toContain('Cannot read properties');
     }
   }, 120_000);
 

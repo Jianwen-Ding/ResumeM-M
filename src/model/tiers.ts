@@ -1,4 +1,4 @@
-import type { Application, ResumeSpec, ResumeTier, StoreData } from './types.js';
+import type { Application, Draft, ResumeSpec, ResumeTier, StoreData } from './types.js';
 import { tierOf } from './types.js';
 
 /**
@@ -108,7 +108,35 @@ export function byTier(resumes: ResumeSpec[]): ResumeSpec[] {
  * `undefined` means it is not counting yet, which is the answer for a resume
  * whose application is still in flight.
  */
-export function doneAt(spec: ResumeSpec, applications: Application[]): string | undefined {
+export function doneAt(
+  spec: ResumeSpec,
+  applications: Application[],
+  drafts: Draft[] = [],
+): string | undefined {
+  /*
+   * A workspace still open on this resume is the plainest statement there is
+   * that nobody is done with it, and it was the one this never asked for.
+   *
+   * The paragraph above says "a posting you are still writing a cover letter
+   * for is not something to take the resume away from", and then looked only
+   * at the tracker — which does not necessarily know. `POST /workspace` writes
+   * `resumeId` onto the tracker row only when it creates that row, so a job
+   * already saved as `interested` never gets it; and the two endpoints that
+   * attach a resume to a space, `/workspace/:id/variation` and
+   * `/workspace/:id/tailor`, set it on the draft alone. In all three the
+   * resume is referenced by the draft and by nothing else, so `mine` is empty
+   * and the fallback below dates the clock from the moment the resume was
+   * *made*.
+   *
+   * Seven days later it is deleted. The workspace card is still there, still
+   * `drafting`, still pointing at it, and Preview, Compile and Complete all
+   * fail with `No resume named "…"`. Nor does the space eventually close and
+   * make that moot: `retireStaleDrafts` only ever lets go of drafts that have
+   * been *submitted*, so one set aside and not sent stays open indefinitely
+   * while the document under it is taken.
+   */
+  if (drafts.some((d) => d.resumeId === spec.id && d.status !== 'submitted')) return undefined;
+
   const mine = applications.filter((a) => a.resumeId === spec.id);
 
   if (mine.length > 0) {
@@ -176,7 +204,7 @@ export interface DueToGo {
  * disagree.
  */
 export function dueToGo(
-  data: Pick<StoreData, 'resumes' | 'applications'>,
+  data: Pick<StoreData, 'resumes' | 'applications'> & Partial<Pick<StoreData, 'drafts'>>,
   { days = DEFAULT_TEMPORARY_DAYS, now = Date.now() }: { days?: number; now?: number } = {},
 ): DueToGo[] {
   const out: DueToGo[] = [];
@@ -189,7 +217,7 @@ export function dueToGo(
 
   for (const spec of data.resumes) {
     if (tierOf(spec) !== 'temporary') continue;
-    const since = doneAt(spec, data.applications ?? []);
+    const since = doneAt(spec, data.applications ?? [], data.drafts ?? []);
     if (!since) continue;
 
     const started = Date.parse(since);

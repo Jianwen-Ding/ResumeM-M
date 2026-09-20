@@ -234,6 +234,20 @@ export class WritingSession {
        * while the filter quietly dropped exactly that and checked the nouns
        * around it. "c#" is two characters as well, and it is a language.
        */
+      /*
+       * A full stop at the end of a sentence is not part of the last word.
+       *
+       * The split keeps `.` inside a token on purpose, so `node.js` survives
+       * — and so did the stop that ends a sentence. `carries` then looked for
+       * the literal `88%.` and did not find it, so "Raised coverage from 41%
+       * to 88%." was reported as partly unsupported with "Not in it: 88%.",
+       * and the model was told to drop the exact, true metric. The tool's own
+       * description invites a sentence ("cut latency from 900ms to 180ms with
+       * Kafka"), so this fired on the shape it asks for.
+       *
+       * Only trailing dots: the one in `node.js` has a letter after it.
+       */
+      .map((w) => w.replace(/\.+$/, ''))
       .filter((w) => w.length > 2 || /[\d+#%]/.test(w));
     if (words.length === 0) return no('Give a phrase to look for — a technology, a number, a piece of work.');
 

@@ -241,6 +241,56 @@ export class AuthoringSession {
         : bad;
     }
 
+    /*
+     * And the three fields beside it, which print on the resume and were not
+     * checked at all.
+     *
+     * Only `title` went through `quoted`, so `subtitle`, `dates` and
+     * `location` were stored exactly as the model sent them. Against a
+     * document whose whole text was "Acme Co. / I worked there for a while
+     * and helped out with the build system", this accepted a subtitle of
+     * "Principal Engineer, Distributed Systems", dates of "Jan. 2015 --
+     * Present" and a location of "San Francisco, CA" — a seniority and a
+     * ten-year tenure invented outright, in a tool whose stated contract is
+     * that everything it proposes is from the material. It is the same rule
+     * as the one above, and it was being applied to one field in four.
+     *
+     * A subtitle and a location are names, so they are held to a name's
+     * standard like the title: short, but they have to be *there*.
+     */
+    for (const [what, value] of [
+      ['subtitle', entry.subtitle],
+      ['location', entry.location],
+    ] as const) {
+      if (!value?.trim()) continue;
+      const wrong = this.quoted(entry.documentId, value, 2);
+      if (wrong) {
+        return wrong.text.includes('too short')
+          ? no(`The ${what} is too short to look for in the material. Leave it out rather than guessing it.`)
+          : no(
+              `The ${what} "${value}" is not in the material. A job title, a team or a place has to be something ` +
+                `they wrote down — leave it out rather than supplying it.`,
+            );
+      }
+    }
+
+    /*
+     * Dates are checked by their years rather than verbatim: "Jan. 2015 --
+     * Present" is a formatting of what the material says, not a quotation of
+     * it, and demanding the exact string would refuse every honest proposal.
+     * The year is the part that can be invented, and the part that matters.
+     */
+    const flat = flatten(this.docs.get(entry.documentId)?.text ?? '');
+    const invented = [...(entry.dates ?? '').matchAll(/\b(19|20)\d{2}\b/g)]
+      .map((m) => m[0])
+      .filter((year) => !flat.includes(year));
+    if (invented.length > 0) {
+      return no(
+        `The material does not mention ${some(invented)}. Dates have to come from what they wrote — ` +
+          `leave them out rather than estimating them.`,
+      );
+    }
+
     // Trimmed, because the id was validated trimmed: accepting " exp_acme"
     // and then storing it with the space makes an id nothing else can address.
     const id = entry.id.trim();
@@ -338,6 +388,13 @@ export class AuthoringSession {
     const lines: string[] = [];
     for (const e of entries) {
       lines.push(`### [${e.id}] ${e.title} — ${e.kind}${e.dates ? ` (${e.dates})` : ''}`);
+      /*
+       * Shown, because this is what the person is told to review, and two of
+       * the fields that print on their resume were not in it. A check the
+       * reader cannot see is not a check they can overrule.
+       */
+      if (e.subtitle) lines.push(`  ${e.subtitle}`);
+      if (e.location) lines.push(`  ${e.location}`);
       for (const b of e.bullets) lines.push(`  - ${b.text}`);
       if (e.bullets.length === 0) lines.push('  (no bullets yet — an entry with none is not worth proposing)');
     }
