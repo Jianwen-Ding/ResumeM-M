@@ -6142,6 +6142,25 @@ function renderDraftingChip() {
   const chip = $('#drafting-chip');
   if (!chip) return;
   const running = [...drafting.values()];
+
+  /*
+   * The way into the run, beside the thing that says a run is happening.
+   *
+   * Every AI action registers here — the ones that draft into a panel and the
+   * ones that only put a word in the status line — so this is the one place
+   * that covers all of them. Shown and hidden with the work, because what the
+   * model was given and what it has said are only worth looking at while it is
+   * saying them.
+   */
+  const peek = $('#ai-peek-chip');
+  if (peek) {
+    peek.className = running.length === 0 ? 'jobs-chip peek hidden' : 'jobs-chip peek';
+    peek.onclick =
+      running.length === 0
+        ? null
+        : () => showLiveAiRun(running.reduce((a, b) => (a.started <= b.started ? a : b)).what);
+  }
+
   if (running.length === 0) {
     chip.className = 'jobs-chip hidden';
     chip.textContent = '';

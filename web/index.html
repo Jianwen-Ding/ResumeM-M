@@ -23,6 +23,13 @@
   </nav>
   <button id="project-chip" class="tiny" title="Open or create a save">No Save Open</button>
   <button id="drafting-chip" class="jobs-chip hidden" title="Writing the AI is doing right now"></button>
+  <!--
+    Reachable from wherever you are, for as long as there is something to see.
+    Every AI action in the editor registers with `startDrafting`, so this one
+    control covers all of them — the three that draft into a panel and the
+    three that only ever put a word in the status line.
+  -->
+  <button id="ai-peek-chip" class="jobs-chip peek hidden" title="The prompt it was given, and what it has printed so far">What it’s doing</button>
   <span id="jobs-chip" class="jobs-chip hidden" title="Work the AI is doing, or has finished"></span>
   <span id="status" class="status"></span>
 </header>

@@ -1840,3 +1840,18 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 .ai-live-state.ok { color: var(--good); }
 .ai-live-state.failed { color: var(--bad); }
 .ai-live-state.timeout { color: var(--warn); }
+
+/*
+ * The header's way into whatever the AI is doing.
+ *
+ * Beside the chip that says something is running, and gone with it. Quieter
+ * than that chip on purpose: the chip is the news, this is the follow-up.
+ */
+.jobs-chip.peek {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+}
+.jobs-chip.peek:hover { color: var(--accent); border-color: var(--accent); }
+.jobs-chip.peek:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

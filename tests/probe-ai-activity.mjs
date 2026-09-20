@@ -98,11 +98,15 @@ try {
     // is nothing.
     console.log('panel on a fresh server is showing:', await panel.isVisible());
 
-    // The way in that matters: beside the clock on the button that started it.
+    // Two ways in, both appearing only while something is running: one beside
+    // the clock on the button that started it, one in the header for every
+    // action that does not draft into a panel at all.
+    console.log('header peek before anything runs:', await page.locator('#ai-peek-chip').isVisible());
     await page.click('button:has-text("Save and test")');
     const peek = page.locator('.ai-peek');
     await peek.waitFor({ timeout: 20_000 });
     console.log('while a run is going, beside the clock:', JSON.stringify(await peek.innerText()));
+    console.log('  and in the header:', await page.locator('#ai-peek-chip').isVisible());
     await peek.click();
     await page.locator('.ai-live-state').waitFor({ timeout: 15_000 });
     await page.waitForTimeout(1200);
