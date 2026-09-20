@@ -182,6 +182,28 @@ describe('checking a claim against the resume', () => {
   });
 
   /*
+   * A full stop is not part of the last word.
+   *
+   * The split keeps a dot inside a token so "node.js" survives — and the
+   * stop that ends a sentence survived with it, so the search was for the
+   * literal "88%." and failed. The tool then told the model its exact, true
+   * metric was not in the resume and to write only the part that was. The
+   * tool's own description invites a sentence, so this fired on the shape it
+   * asks for.
+   */
+  it('is not fooled by the full stop at the end of a sentence', () => {
+    const s = (text: string) =>
+      new WritingSession(store(), resolveResume('base', store()), POSTING, writing().draft as never, text);
+    const carries = s('Raised coverage from 41% to 88% across the service. Shipped on node.js.');
+    expect(carries.checkClaim('Raised coverage from 41% to 88%').ok).toBe(true);
+    expect(carries.checkClaim('Raised coverage from 41% to 88%.').ok, 'with a full stop').toBe(true);
+    expect(carries.checkClaim('Shipped on node.js.').ok, 'node.js keeps its own dot').toBe(true);
+    // And a number that is genuinely not there is still refused, so the fix
+    // has not simply blunted the check.
+    expect(carries.checkClaim('Raised coverage from 41% to 99%.').ok).toBe(false);
+  });
+
+  /*
    * A tool whose only job is keeping a letter honest cannot be the thing that
    * invents a language. `includes` said yes to Rust for a resume that says
    * "trust", and yes to SQL for one that only says PostgreSQL.
@@ -308,6 +330,87 @@ describe('reading material into a proposal', () => {
     });
     expect(r.ok).toBe(false);
     expect(r.text).toContain('not in old-resume.pdf');
+  });
+
+  /*
+   * The three fields beside the title, which print on the resume and were
+   * not checked at all.
+   *
+   * Only `title` went through the quote check, so a model could supply any
+   * subtitle, dates and location it liked. Against this document — which
+   * says "Backend Engineer, 2023–2024" and names no city — it accepted a
+   * seniority nobody wrote down and a tenure twice as long. That is the AI
+   * writing resume text, which is the one thing this session exists to
+   * prevent, and it was prevented for one field in four.
+   */
+  it('refuses a job title the material does not give', () => {
+    const r = authoring().proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      subtitle: 'Principal Engineer, Distributed Systems',
+      documentId: 'd1',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('not in the material');
+  });
+
+  it('refuses a place the material does not give', () => {
+    const r = authoring().proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      location: 'San Francisco, CA',
+      documentId: 'd1',
+    });
+    expect(r.ok).toBe(false);
+  });
+
+  it('refuses a year the material does not mention', () => {
+    const r = authoring().proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      dates: 'Jan. 2015 -- Present',
+      documentId: 'd1',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('2015');
+  });
+
+  /*
+   * Without refusing the honest version: the dates are checked by their
+   * years, not verbatim, because "2023 -- 2024" is a formatting of what the
+   * material says rather than a quotation of it.
+   */
+  it('takes the subtitle, dates and place the material does give', () => {
+    const s = authoring();
+    const r = s.proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      subtitle: 'Backend Engineer',
+      dates: '2023 -- 2024',
+      documentId: 'd1',
+    });
+    expect(r.ok, r.text).toBe(true);
+  });
+
+  /*
+   * And the person reviewing can see them. A check the reader cannot see is
+   * not a check they can overrule, and two of the fields that print on their
+   * resume were not in the artefact they are told to read.
+   */
+  it('shows the subtitle and the place in what the person reviews', () => {
+    const s = authoring();
+    s.proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      subtitle: 'Backend Engineer',
+      documentId: 'd1',
+    });
+    expect(s.describeProposal()).toContain('Backend Engineer');
   });
 
   it('refuses a bullet whose quote is not in the document', () => {
