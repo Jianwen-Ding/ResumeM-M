@@ -107,14 +107,14 @@ export function unsupportedCharacters(text: string): UnsupportedCharacter[] {
 }
 
 /** The message shown when a document cannot be set, or undefined when it can. */
-export function unrenderableReason(text: string): string | undefined {
+export function unrenderableReason(text: string, what: 'resume' | 'cover letter' = 'resume'): string | undefined {
   const bad = unsupportedCharacters(text);
   if (bad.length === 0) return undefined;
 
   const shown = bad.slice(0, 6).map((b) => `${b.char} (${b.codePoint})`).join(', ');
   const more = bad.length > 6 ? `, and ${bad.length - 6} more` : '';
   return (
-    `This resume contains ${bad.length} character${bad.length === 1 ? '' : 's'} the LaTeX ` +
+    `This ${what} contains ${bad.length} character${bad.length === 1 ? '' : 's'} the LaTeX ` +
     `engine cannot typeset: ${shown}${more}. It sets Latin scripts only, so text in ` +
     `Chinese, Japanese, Korean, Cyrillic, Greek, Arabic or Hebrew — and emoji — cannot go ` +
     `in the PDF. First occurrence near: "${bad[0]!.context}".`
@@ -172,8 +172,19 @@ export function unrenderableReason(text: string): string | undefined {
  * all mint URLs like that. One level is enough for every one of them, and
  * keeps the rule a regex.
  */
+/*
+ * **Three asterisks are bold *and* italic, and have to be tried first.**
+ *
+ * Alternation is left to right at each position, so with `**` ahead of it
+ * `***critical***` matched the bold rule — which took two asterisks off the
+ * front, left the third inside the span and the last one outside it, and
+ * printed `*critical` in bold followed by a literal `*`. Measured:
+ * `inlineTex('***both***')` returned `\textbf{*both}*`. It is the one
+ * markdown spelling nobody checks after typing, because in every editor
+ * that renders it, it looks right.
+ */
 const MARKUP =
-  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s(])\*(?=\S)([^*]+)(?<=\S)\*(?=[\s).,;:]|$)|`(.+?)`/g;
+  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s(])\*(?=\S)([^*]+)(?<=\S)\*(?=[\s).,;:]|$)|`(.+?)`/g;
 
 /** Enough for bold inside a link inside italics; a guard, not a limit anyone meets. */
 const MAX_NESTING = 4;
@@ -242,10 +253,12 @@ function markup(s: string, depth: number): string {
 
   while ((m = re.exec(s)) !== null) {
     out += tex(s.slice(last, m.index));
-    const [whole, label, url, bold, italic, code] = m;
+    const [whole, label, url, strongem, bold, italic, code] = m;
 
     if (label !== undefined) {
       out += `\\href{${texHref(url!)}}{\\underline{${markup(label, depth - 1)}}}`;
+    } else if (strongem !== undefined) {
+      out += `\\textbf{\\textit{${markup(strongem, depth - 1)}}}`;
     } else if (bold !== undefined) {
       out += `\\textbf{${markup(bold, depth - 1)}}`;
     } else if (italic !== undefined) {

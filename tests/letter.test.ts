@@ -119,4 +119,16 @@ describe.skipIf(!latex)('compiling a cover letter', { timeout: 180_000 }, () => 
     const result = await compileLetter(letter('I used \\newcommand{} and $x^2$ and 100% of it.'), DEFAULT_LAYOUT);
     expect(result.pages).toBe(1);
   });
+
+  /*
+   * The refusal is the only account of why nothing was produced, and it read
+   * "This resume contains 1 character the LaTeX engine cannot typeset" over
+   * an emoji pasted into a letter — sending the reader to the wrong document,
+   * which on a save with a dozen resumes in it is an afternoon.
+   */
+  it('says it is a letter when the letter is what it cannot typeset', async () => {
+    await expect(compileLetter(letter('Thanks for reading 🚀'), DEFAULT_LAYOUT)).rejects.toThrow(
+      /^This cover letter contains/,
+    );
+  });
 });

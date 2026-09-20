@@ -36,6 +36,21 @@ describe('inline markup', () => {
     expect(inlineTex('an *emphasis* here')).toBe('an \\textit{emphasis} here');
   });
 
+  /*
+   * The one markdown spelling nobody checks after typing, because in every
+   * editor that renders it, it looks right. Alternation is left to right, so
+   * with `**` ahead of it this matched the bold rule — two asterisks off the
+   * front, the third left inside the span and the last one outside it:
+   * `\textbf{*both}*`, which prints `*critical` in bold followed by a stray
+   * asterisk, on a resume.
+   */
+  it('turns ***both*** into bold italics, not bold with asterisks in it', () => {
+    expect(inlineTex('***critical***')).toBe('\\textbf{\\textit{critical}}');
+    expect(inlineTex('***a*** and **b** and *c*')).toBe(
+      '\\textbf{\\textit{a}} and \\textbf{b} and \\textit{c}',
+    );
+  });
+
   it('escapes inside markup rather than trusting it', () => {
     expect(inlineTex('**100% done**')).toBe('\\textbf{100\\% done}');
   });

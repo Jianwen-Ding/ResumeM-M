@@ -214,7 +214,24 @@ function resolveEntry(
         .filter((b): b is Bullet => Boolean(b))
     : available;
 
-  const title = pickField(entry.title, `${entry.id}.title`, choices, warnings) ?? entry.id;
+  /*
+   * An entry with no title prints nothing where its title goes, and says so.
+   *
+   * It used to fall back to `entry.id`, so a resume went out with
+   * `exp_example_co` typeset in bold where the employer's name belongs —
+   * an internal identifier, on a document somebody sends to a stranger, with
+   * nothing anywhere saying it had happened. Two ways in: a title missing
+   * from the YAML, and a title that is a set of alternates with none in it.
+   *
+   * A gap on the page is visible; a slug reads like a name. And the warning
+   * is what actually fixes it: `build`, `check`, `apply` and the editor all
+   * print these, so the entry gets named rather than guessed at.
+   */
+  const named = pickField(entry.title, `${entry.id}.title`, choices, warnings);
+  const title = named ?? '';
+  if (!title.trim()) {
+    warnings.push(`Entry "${entry.id}" has no title, so nothing is printed where its name goes.`);
+  }
   const dates = pickField(entry.dates, `${entry.id}.dates`, choices, warnings);
 
   /*
