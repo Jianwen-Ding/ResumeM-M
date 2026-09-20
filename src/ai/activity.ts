@@ -41,8 +41,22 @@ export interface AiRun {
   command: string;
   /** The argv as given, each argument shortened for display. See `shorten`. */
   args: string[];
-  /** How big the prompt was, since it is rarely in the argv and never shown. */
+  /** How big the prompt was, which the list can show without carrying it. */
   promptBytes: number;
+  /**
+   * What the model was actually given.
+   *
+   * The argv says which CLI and which flags; this is the reasoning material —
+   * the resume as it stands, the posting, the letters written before, the
+   * instructions about voice. When an answer comes back wrong the question is
+   * almost always what went in, and there was no way to look.
+   *
+   * Held only on the detail, never in the list: prompts here run to tens of
+   * kilobytes and a list of twenty of them is not a list.
+   */
+  prompt: string;
+  /** Bytes cut out of the middle of `prompt`, if it was longer than the cap. */
+  promptCut: number;
   startedAt: number;
   endedAt?: number;
   /** When anything last arrived on either stream; absent until something does. */
@@ -72,6 +86,27 @@ const KEEP_RUNS = 20;
  */
 const shorten = (arg: string): string =>
   arg.length > 200 ? `${arg.slice(0, 200)}… (${arg.length} chars)` : arg;
+
+/**
+ * A prompt long enough to need cutting is cut in the middle.
+ *
+ * The two ends are the parts worth reading: a prompt here opens with what the
+ * model is being asked to do and closes with the posting it is being asked to
+ * do it against, and the bulk in between is the store — every bullet, every
+ * past letter. Truncating the tail would throw away the job; truncating the
+ * head would throw away the instructions.
+ */
+const KEEP_PROMPT = 128 * 1024;
+
+function foldPrompt(prompt: string): { prompt: string; promptCut: number } {
+  const size = Buffer.byteLength(prompt);
+  if (size <= KEEP_PROMPT) return { prompt, promptCut: 0 };
+  const half = Math.floor(KEEP_PROMPT / 2);
+  return {
+    prompt: `${prompt.slice(0, half)}\n\n… ${size - KEEP_PROMPT} bytes not kept …\n\n${prompt.slice(-half)}`,
+    promptCut: size - KEEP_PROMPT,
+  };
+}
 
 const runs: AiRun[] = [];
 let counter = 0;
@@ -107,14 +142,17 @@ export interface RunHandle {
 export function startRun(about: {
   command: string;
   args: string[];
-  promptBytes: number;
+  prompt: string;
 }): RunHandle {
   counter += 1;
+  const folded = foldPrompt(about.prompt);
   const run: AiRun = {
     id: `run-${Date.now().toString(36)}-${counter}`,
     command: about.command,
     args: about.args.map(shorten),
-    promptBytes: about.promptBytes,
+    promptBytes: Buffer.byteLength(about.prompt),
+    prompt: folded.prompt,
+    promptCut: folded.promptCut,
     startedAt: Date.now(),
     bytes: { out: 0, err: 0 },
     dropped: 0,

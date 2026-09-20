@@ -1819,3 +1819,24 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   word-break: break-word;
   color: var(--ink-soft);
 }
+
+/*
+ * The way in to a run, beside the clock that says it is still going.
+ *
+ * Quiet on purpose: it sits next to "Writing the cover letter… 0:42" and must
+ * not compete with it. Almost nobody needs this, and the day they do it has to
+ * be where they are already looking.
+ */
+.ai-peek {
+  margin-left: 10px;
+  font-size: var(--t-xs, 12px);
+  color: var(--muted);
+}
+.ai-peek:hover { color: var(--accent); }
+
+.ai-live { display: flex; flex-direction: column; gap: 8px; min-width: min(70vw, 680px); }
+.ai-live-state { font-weight: 500; }
+.ai-live-state.running { color: var(--accent); }
+.ai-live-state.ok { color: var(--good); }
+.ai-live-state.failed { color: var(--bad); }
+.ai-live-state.timeout { color: var(--warn); }

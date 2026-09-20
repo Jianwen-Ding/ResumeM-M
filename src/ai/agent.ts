@@ -170,7 +170,7 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
      *
      * See `activity.ts` for why the copy is worth having.
      */
-    watching = startRun({ command: config.ai.command, args, promptBytes: Buffer.byteLength(prompt) });
+    watching = startRun({ command: config.ai.command, args, prompt });
     pending.child.stdout?.on('data', (d: Buffer | string) => watching?.saw('out', String(d)));
     pending.child.stderr?.on('data', (d: Buffer | string) => watching?.saw('err', String(d)));
 

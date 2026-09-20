@@ -93,9 +93,32 @@ try {
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.click('[data-tab="voice"]');
     const panel = page.locator('details.advanced', { hasText: 'what the AI has been running' });
-    await panel.waitFor({ timeout: 20_000 });
-    await panel.locator('summary').click();
-    console.log('empty state   :', JSON.stringify((await panel.innerText()).split('\n').slice(1).join(' | ')));
+    await page.waitForTimeout(2500);
+    // Hidden away until there is something to show, which on a fresh server
+    // is nothing.
+    console.log('panel on a fresh server is showing:', await panel.isVisible());
+
+    // The way in that matters: beside the clock on the button that started it.
+    await page.click('button:has-text("Save and test")');
+    const peek = page.locator('.ai-peek');
+    await peek.waitFor({ timeout: 20_000 });
+    console.log('while a run is going, beside the clock:', JSON.stringify(await peek.innerText()));
+    await peek.click();
+    await page.locator('.ai-live-state').waitFor({ timeout: 15_000 });
+    await page.waitForTimeout(1200);
+    console.log('  it says     :', JSON.stringify((await page.locator('.ai-live-state').innerText()).trim()));
+    const fold = page.locator('.ai-live details.advanced');
+    console.log('  given (fold):', JSON.stringify((await fold.locator('summary').innerText()).trim()));
+    await fold.locator('summary').click();
+    console.log('  its prompt  :', JSON.stringify((await fold.locator('pre').innerText()).slice(0, 80)));
+    await page.click('#modal-ok');
+    await page.waitForTimeout(6000);
+    console.log('panel once a run has happened:', await panel.isVisible());
+    if (!(await panel.isVisible())) {
+      console.log('  (so there is no way back to a finished run — that is the bug)');
+    } else {
+      await panel.locator('summary').click();
+    }
 
     // Start a run that will be stopped, and watch the panel while it goes.
     void fetch(`${url}/api/ai/answer`, {
@@ -111,8 +134,12 @@ try {
     console.log('  classes     :', await row.getAttribute('class'));
 
     await row.click();
-    await page.locator('.ai-run-output').waitFor({ timeout: 15_000 });
-    console.log('  its output  :', JSON.stringify((await page.locator('.ai-run-output').innerText()).slice(0, 160)));
+    // The prompt lives inside its own fold; open it before reading.
+    const given = page.locator('.ai-run-detail details.advanced');
+    console.log('  given (fold):', JSON.stringify((await given.locator('summary').innerText()).trim()));
+    await given.locator('summary').click();
+    console.log('  its prompt  :', JSON.stringify((await given.locator('pre').innerText()).slice(0, 90)));
+    console.log('  its output  :', JSON.stringify((await page.locator('.ai-run-output').last().innerText()).slice(0, 90)));
 
     // And once it has been stopped for taking too long.
     await page.waitForTimeout(6000);

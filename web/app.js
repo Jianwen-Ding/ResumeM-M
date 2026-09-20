@@ -4172,10 +4172,29 @@ function advanced(summary, ...children) {
  * Folded away and polled only while it is open. Nothing here is needed to use
  * the tool; it is needed on the day the tool will not work.
  */
+/*
+ * The mounted activity panel's own refresh, so the end of a run can reveal it.
+ *
+ * It is hidden while there is nothing to show and it only looks when it is
+ * opened — which between them meant it looked once, before anything had run,
+ * and stayed hidden for the rest of the session. Measured: "panel once a run
+ * has happened: false".
+ */
+let refreshAiActivity = null;
+
 function aiActivityPanel() {
   const list = el('div', { className: 'ai-runs' });
-  const note = el('div', { className: 'hint', textContent: 'Nothing has run yet this session.' });
-  const box = advanced('Advanced — what the AI has been running', note, list);
+  const box = advanced('Advanced — what the AI has been running', list);
+  /*
+   * Not there at all until there is something in it.
+   *
+   * The live view belongs beside the thing that is running — see
+   * `showLiveAiRun`, reachable from every AI button's own progress line while
+   * that run is going. This is only the way back to a run that has already
+   * ended, which on a fresh server is no runs, and a permanently-present
+   * disclosure promising a list that is always empty is furniture.
+   */
+  box.hidden = true;
 
   const seconds = (ms) => (ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
@@ -4202,8 +4221,28 @@ function aiActivityPanel() {
       const said = (full.chunks ?? [])
         .map((c) => `${String(Math.round(c.at / 100) / 10).padStart(6)}s ${c.stream === 'err' ? '!' : ' '} ${c.text.replace(/\n$/, '')}`)
         .join('\n');
+      /*
+       * What went in, then what came out.
+       *
+       * When an answer is wrong the question is nearly always what the model
+       * was given, and until now there was no way to look at it: the argv
+       * shows which CLI and which flags, and the prompt — the resume as it
+       * stands, the posting, the letters written before, the instructions
+       * about voice — went to a file in a scratch directory that is deleted
+       * the moment the run ends.
+       *
+       * Folded, because it runs to tens of kilobytes and is not what you open
+       * this panel for; above the output, because it is what the output is an
+       * answer to.
+       */
+      const size = full.promptBytes >= 1024 ? `${Math.round(full.promptBytes / 1024)} KB` : `${full.promptBytes} bytes`;
       into.replaceChildren(
         el('div', { className: 'hint', textContent: `${full.command} ${full.args.join(' ')}` }),
+        advanced(
+          `What it was given — ${size}${full.promptCut ? ', middle not kept' : ''}`,
+          el('pre', { className: 'ai-run-output', textContent: full.prompt || '(nothing)' }),
+        ),
+        el('div', { className: 'lbl', textContent: 'What it said' }),
         el('pre', {
           className: 'ai-run-output',
           textContent:
@@ -4225,7 +4264,7 @@ function aiActivityPanel() {
       return false;
     }
     const runs = activity.recent ?? [];
-    note.hidden = runs.length > 0;
+    box.hidden = runs.length === 0;
     list.replaceChildren(
       ...runs.map((run) => {
         const output = el('div', { className: 'ai-run-detail', hidden: true });
@@ -4252,6 +4291,14 @@ function aiActivityPanel() {
    * moving. A panel nobody has opened should not be putting a request a
    * second through a server that is busy running a model.
    */
+  /*
+   * One look on load, so the disclosure knows whether to exist at all — and
+   * then nothing until it is opened. Without it a panel hidden for having no
+   * runs stays hidden through a whole session of them.
+   */
+  void refresh();
+  refreshAiActivity = refresh;
+
   let timer = null;
   const stop = () => {
     clearInterval(timer);
@@ -4272,6 +4319,94 @@ function aiActivityPanel() {
   });
 
   return box;
+}
+
+/**
+ * The run that is happening now, while it is happening.
+ *
+ * Opened from beside the clock on whichever AI button started it, so it is
+ * reachable exactly when there is something to see and gone the moment there
+ * is not. It follows the newest run rather than an id: by the time somebody
+ * presses this, the run they mean is the one that is going.
+ *
+ * Two halves, and the first is the one that answers most questions: what the
+ * model was given. The second says whether it is alive — `lastOutputAt` is
+ * the difference between a model thinking and a CLI wedged on a prompt it
+ * will never read, which is the one thing a timeout message cannot tell you.
+ */
+async function showLiveAiRun(doing = 'the AI') {
+  const body = el('div', { className: 'ai-live' }, el('div', { className: 'hint', textContent: 'Looking…' }));
+  showModal(`What ${doing.toLowerCase()} is doing`, body);
+
+  let stopped = false;
+  const closer = $('#modal-ok');
+  const stopWatching = () => {
+    stopped = true;
+  };
+  closer?.addEventListener('click', stopWatching, { once: true });
+
+  const draw = async () => {
+    if (stopped || $('#modal').classList.contains('hidden')) return false;
+    let list;
+    try {
+      list = await api('/ai/activity');
+    } catch (err) {
+      body.replaceChildren(el('div', { className: 'hint', textContent: err.message }));
+      return false;
+    }
+    // The newest, running or just finished: the one that was pressed for.
+    const newest = (list.recent ?? [])[0];
+    if (!newest) {
+      body.replaceChildren(
+        el('div', { className: 'hint', textContent: 'No AI run has started. This may not be an AI step.' }),
+      );
+      return false;
+    }
+
+    let full;
+    try {
+      full = await api(`/ai/activity/${encodeURIComponent(newest.id)}`);
+    } catch {
+      return false;
+    }
+    const said = (full.chunks ?? [])
+      .map((c) => `${String(Math.round(c.at / 100) / 10).padStart(6)}s ${c.stream === 'err' ? '!' : ' '} ${c.text.replace(/\n$/, '')}`)
+      .join('');
+    const size = full.promptBytes >= 1024 ? `${Math.round(full.promptBytes / 1024)} KB` : `${full.promptBytes} bytes`;
+    const alive =
+      newest.outcome !== 'running'
+        ? (newest.note ?? 'Finished.')
+        : newest.quietMs === null
+          ? 'Nothing said yet.'
+          : newest.quietMs > 20_000
+            ? `Nothing for ${Math.round(newest.quietMs / 1000)}s — it may be stuck.`
+            : `Still going; last spoke ${Math.round(newest.quietMs / 1000)}s ago.`;
+
+    body.replaceChildren(
+      el('div', { className: `ai-live-state ${newest.outcome}`, textContent: alive }),
+      el('div', { className: 'hint', textContent: `${full.command} ${full.args.join(' ')}` }),
+      advanced(
+        `What it was given — ${size}${full.promptCut ? ', middle not kept' : ''}`,
+        el('pre', { className: 'ai-run-output', textContent: full.prompt || '(nothing)' }),
+      ),
+      el('div', { className: 'lbl', textContent: 'What it has said' }),
+      el('pre', {
+        className: 'ai-run-output',
+        textContent:
+          (full.dropped ? `… ${full.dropped} earlier bytes not kept\n` : '') +
+          (said || 'Nothing yet.'),
+      }),
+    );
+    return newest.outcome === 'running';
+  };
+
+  await draw();
+  const tick = setInterval(async () => {
+    const going = await draw();
+    // Stops itself when the run ends or the modal closes: this is a window on
+    // something happening, and when nothing is, it is only a poll.
+    if (!going) clearInterval(tick);
+  }, 1000);
 }
 
 function showPdf(frame, url) {
@@ -5997,6 +6132,9 @@ function startDrafting(what, go) {
       clearInterval(draftingTimer);
       draftingTimer = null;
     }
+    // A run has happened, so the panel that lists past runs now has something
+    // to list. It is hidden until it does; see `refreshAiActivity`.
+    void refreshAiActivity?.();
   };
 }
 
@@ -6035,6 +6173,21 @@ function showAiProgress(notes, doing, go, hint = 'Keep writing if you like — n
       el('span', { className: 'ai-mark spin', ariaHidden: 'true', textContent: '✦' }),
       el('span', { textContent: `${doing}… ` }),
       clock,
+      /*
+       * A way in, while there is something to look at.
+       *
+       * What the model was given and what it has said so far only mean
+       * anything while it is saying them — so the way to them lives here,
+       * beside the clock that says it is still going, and goes when the run
+       * does. Every AI button in the editor puts its progress up through this
+       * function, so every one of them gets it.
+       */
+      el('button', {
+        className: 'link ai-peek',
+        textContent: 'What it’s doing',
+        title: 'The prompt it was given, and what it has printed so far',
+        onclick: () => showLiveAiRun(doing),
+      }),
     ]),
     // The reassurance depends on what is running. "Keep writing" is the right
     // thing to say beside a letter being drafted and a strange thing to say
@@ -7698,6 +7851,8 @@ async function loadSettings() {
   commandBlock.open = !matching;
 
   const result = el('div', { className: 'result idle', textContent: 'Not tested yet.' });
+  /* Where the clock and the way into the run go while the test is running. */
+  const testNotes = el('div', { className: 'ai-notes' });
 
   /*
    * Whether what is on screen is what will actually run.
@@ -7768,6 +7923,21 @@ async function loadSettings() {
   };
 
   const saveAndTest = async () => {
+    /*
+     * "Running…" and nothing else, for as long as the command takes.
+     *
+     * This is the one button whose entire purpose is to find out what a
+     * command does, and it was the one that said least about it: no clock, no
+     * way into the run, and on a command that hangs, three minutes of a word.
+     * It goes through the same progress as every other AI action now, which
+     * is also what puts "What it's doing" beside it.
+     */
+    const stopProgress = showAiProgress(
+      testNotes,
+      'Trying the command',
+      null,
+      'This runs the command exactly as the rest of the tool will.',
+    );
     try {
       await save();
       result.className = 'result idle';
@@ -7783,6 +7953,8 @@ async function loadSettings() {
     } catch (err) {
       result.className = 'result bad';
       result.textContent = err.message;
+    } finally {
+      stopProgress();
     }
   };
 
@@ -7881,6 +8053,7 @@ async function loadSettings() {
       el('button', { textContent: 'Save and test', onclick: saveAndTest }),
       unsaved,
     ]),
+    testNotes,
     result,
   );
 }

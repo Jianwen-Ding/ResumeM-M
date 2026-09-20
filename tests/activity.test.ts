@@ -120,7 +120,7 @@ describe('watching a run as it happens', () => {
 describe('what the record holds', () => {
   it('shortens an argument long enough to be the prompt', () => {
     const prompt = 'x'.repeat(5000);
-    startRun({ command: 'codex', args: ['--model', 'gpt-5-codex', prompt], promptBytes: 5000 });
+    startRun({ command: 'codex', args: ['--model', 'gpt-5-codex', prompt], prompt });
 
     const [run] = recentRuns();
     expect(run!.args[0]).toBe('--model');
@@ -130,7 +130,7 @@ describe('what the record holds', () => {
   });
 
   it('keeps the end of a noisy run, and says how much it let go', () => {
-    const handle = startRun({ command: 'codex', args: [], promptBytes: 0 });
+    const handle = startRun({ command: 'codex', args: [], prompt: '' });
     for (let i = 0; i < 400; i++) handle.saw('out', `${'line '.repeat(60)}${i}\n`);
 
     const run = findRun(handle.id)!;
@@ -142,8 +142,35 @@ describe('what the record holds', () => {
     expect(held).not.toContain(' 0\n');
   });
 
+  it('keeps what the model was actually given', async () => {
+    const config = configFor(`process.stdout.write('ok\\n');`);
+    await runAgent(config, 'Tailor this resume for the posting below.\n\nPlatform Engineer at Helios');
+
+    const run = recentRuns()[0]!;
+    expect(run.prompt).toContain('Tailor this resume');
+    expect(run.prompt).toContain('Platform Engineer at Helios');
+    expect(run.promptBytes).toBeGreaterThan(40);
+    expect(run.promptCut).toBe(0);
+  });
+
+  it('cuts a very long prompt in the middle, keeping both ends', () => {
+    // The instructions open a prompt and the posting closes it; the store is
+    // the bulk in between, and it is the part worth losing.
+    const prompt = `WHAT TO DO\n${'filler '.repeat(40_000)}\nTHE POSTING`;
+    const handle = startRun({ command: 'codex', args: [], prompt });
+
+    const run = findRun(handle.id)!;
+    expect(run.promptCut).toBeGreaterThan(0);
+    expect(run.prompt).toContain('WHAT TO DO');
+    expect(run.prompt).toContain('THE POSTING');
+    expect(run.prompt).toContain('bytes not kept');
+    expect(Buffer.byteLength(run.prompt)).toBeLessThan(140 * 1024);
+    // And the real size is still reported, not the kept size.
+    expect(run.promptBytes).toBe(Buffer.byteLength(prompt));
+  });
+
   it('keeps the first outcome, so a backstop cannot overwrite the diagnosis', () => {
-    const handle = startRun({ command: 'codex', args: [], promptBytes: 0 });
+    const handle = startRun({ command: 'codex', args: [], prompt: '' });
     handle.ended('timeout', 'Stopped after 180s.');
     handle.ended('failed', 'The run ended without saying why.');
 
