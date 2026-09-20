@@ -280,17 +280,30 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
        * not have helped.
        */
       const toolless = wiring !== null && !fs.existsSync(wiring.out);
-      const advice = toolless
-        ? `It never called any of the resume tools, so the time went somewhere else — raising ` +
-          `ai.timeoutMs will not help until it can reach them. "What the AI is doing" shows what ` +
-          `it did instead.`
-        : `Raise ai.timeoutMs in config.yaml if it needs longer.`;
+      /*
+       * When the CLI said why, say that instead of guessing.
+       *
+       * A refused tool call does not stop a run — it sends it looking for
+       * another way round until the clock runs out, so this arrives here
+       * rather than as a failure. The refusal is the whole explanation and it
+       * is already in the output; it just never reached anybody.
+       */
+      const refused = deniedTools(`${e.stdout ?? ''}\n${e.stderr ?? ''}`);
+      const advice = refused
+        ? refused
+        : toolless
+          ? `It never called any of the resume tools, so the time went somewhere else — raising ` +
+            `ai.timeoutMs will not help until it can reach them. "What the AI is doing" shows what ` +
+            `it did instead.`
+          : `Raise ai.timeoutMs in config.yaml if it needs longer.`;
 
       watching?.ended(
         'timeout',
-        toolless
-          ? `Stopped after ${seconds}s, having never called a tool. See what it did instead.`
-          : `Stopped after ${seconds}s. Raise the AI timeout in Settings if it needs longer.`,
+        refused
+          ? `Stopped after ${seconds}s; the CLI refused every tool call.`
+          : toolless
+            ? `Stopped after ${seconds}s, having never called a tool. See what it did instead.`
+            : `Stopped after ${seconds}s. Raise the AI timeout in Settings if it needs longer.`,
       );
       throw new AgentError(
         `AI command "${config.ai.command}" ran for longer than ${seconds}s and was stopped. ${advice}`,
@@ -361,10 +374,52 @@ export function tidyUp(dir: string): void {
  * stopped to ask for a shell is a run that was configured to do more than it
  * needs to. Say that, and say where the switch is.
  */
+/**
+ * Was the run stopped from using the tools it was given?
+ *
+ * Returns the sentence to say, or undefined when this is not what happened.
+ * Shared with the timeout path, because the same refusal shows up there: a run
+ * that cannot call a tool does not fail, it casts about until the clock runs
+ * out, and the useful thing to say is the same either way.
+ */
+export function deniedTools(stderr: string): string | undefined {
+  const lower = stderr.toLowerCase();
+  if (!/approval|approve/.test(lower)) return undefined;
+  if (!/\bmcp\b|tool call/.test(lower)) return undefined;
+  return (
+    'The CLI would not let it use the resume tools: it asked to call one and its own approval ' +
+    'policy refused, because a run with nobody watching has nobody to ask. The tools are how this ' +
+    'tailoring is done, so nothing could be decided. Allow the tool calls in the CLI\u2019s own ' +
+    'settings, or switch to a command that permits them.'
+  );
+}
+
 export function explainSilence(command: string, stderr: string, args: string[] = []): string {
   const said = stderr.trim();
   const lower = said.toLowerCase();
   const head = `The AI command "${command}" finished without writing anything.`;
+
+  /*
+   * The opposite refusal, and it wants the opposite advice.
+   *
+   * The branch below is about a model reaching for a shell it does not need.
+   * This one is about a model reaching for *our own* tools — the ones it was
+   * told to use — and being refused by the CLI in between:
+   *
+   *   MCP tool call requires approval, but approval policy is never
+   *   mcp: resume/read_resume started
+   *
+   * The server was wired in and started; the very first call was turned down.
+   * `codex exec` cannot prompt anybody, so its approval policy is `never`, and
+   * under that policy an MCP call is refused rather than allowed. The run then
+   * spends its whole budget finding another way round and produces nothing.
+   *
+   * Told apart from the branch below by "approval", which the existing test
+   * does not look for — it asks for "permission", "denied" or "not allowed",
+   * and this message uses none of the three, so it fell through to a generic
+   * sentence that sent people looking at the wrong thing entirely.
+   */
+  if (deniedTools(said)) return `${head} ${deniedTools(said)}`;
 
   if (/permission|auto-denied|not allowed|denied/.test(lower) && /tool|command|bash|shell/.test(lower)) {
     return (

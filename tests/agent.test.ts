@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AgentError, explainSilence, extractJson, runAgent, tidyUp, trimToLetter, unwrapAgentFraming } from '../src/ai/agent.js';
+import { AgentError, deniedTools, explainSilence, extractJson, runAgent, tidyUp, trimToLetter, unwrapAgentFraming } from '../src/ai/agent.js';
 import { AI_PRESETS } from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 import { repairAiArgs } from '../src/model/store.js';
@@ -21,6 +21,41 @@ function config(patch: Partial<StoreConfig['ai']>): StoreConfig {
  * model had done the work; a temp directory would not delete and the work
  * went with it.
  */
+/*
+ * The CLI refusing the tools it was given, in its own words.
+ *
+ * Reported from a real run: "MCP tool call requires approval, but approval
+ * policy is never". The server had started and the very first call was turned
+ * down — `codex exec` cannot prompt anybody, so its policy is `never`, and
+ * under that policy an MCP call is refused rather than allowed.
+ *
+ * The existing test for an auto-denied permission cannot see this: it asks for
+ * "permission", "denied" or "not allowed", and this message uses none of the
+ * three. It fell through to a sentence about the command not writing anything,
+ * which sends somebody looking at the wrong thing entirely.
+ */
+describe('a CLI that refuses the tools', () => {
+  const REFUSED = 'MCP tool call requires approval, but approval policy is never\nmcp: resume/read_resume started\n';
+
+  it('is named as that, not as a command that wrote nothing', () => {
+    const said = explainSilence('codex', REFUSED);
+    expect(said).toMatch(/would not let it use the resume tools/i);
+    expect(said).toMatch(/nobody to ask/i);
+  });
+
+  it('is told apart from a model reaching for a shell it does not need', () => {
+    const shell = explainSilence('claude', 'tool use was auto-denied: Bash requires the command permission');
+    expect(shell).toMatch(/permission to run something on your machine/i);
+    expect(shell).not.toMatch(/would not let it use the resume tools/i);
+  });
+
+  it('says nothing of the kind about an ordinary quiet run', () => {
+    expect(deniedTools('warning: using cached credentials')).toBeUndefined();
+    // "approval" alone is not it either: the message has to be about a tool.
+    expect(deniedTools('your approval is pending for this account')).toBeUndefined();
+  });
+});
+
 describe('clearing up after a run', () => {
   it('removes the scratch directory', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-tidy-'));
