@@ -1847,7 +1847,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         force?: boolean;
       };
       const data = store.load();
-      const match = matchAnswer(question, data.answers);
+      /*
+       * Who is asking, so the bank knows which answers are theirs.
+       *
+       * Without it every caller looks like nobody, and an answer written for
+       * this very employer is read as naming "another" one — the check that
+       * exists to stop Acme's letter reaching Globex, turned on Acme. It was
+       * harmless only while nothing labelled its answers with a real company;
+       * the card does now, so this had to follow. See `namesAnother`.
+       */
+      const match = matchAnswer(question, data.answers, { company: job?.company });
 
       if (match.confident && !force) {
         res.json({
@@ -2890,7 +2899,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           };
         }
 
-        const match = matchAnswer(q.question, data.answers);
+        // See the note at the single-question endpoint: an answer written for
+        // this employer must not be read as naming another one.
+        const match = matchAnswer(q.question, data.answers, { company: body.company });
         return {
           id: prior?.id ?? `q${i + 1}`,
           question: q.question,
@@ -3358,7 +3369,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             continue;
           }
 
-          const match = matchAnswer(q.question, data.answers);
+          // Same again: this draft's own company, so its own answers count as
+          // its own.
+          const match = matchAnswer(q.question, data.answers, { company: draft.company });
           if (match.confident && !overwrite) {
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item?.id;
