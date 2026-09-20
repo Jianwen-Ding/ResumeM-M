@@ -53,17 +53,17 @@ export interface Wiring {
   /** Arguments to add to the CLI's own command line. */
   args: string[];
   /**
-   * Arguments that say the server may be called without asking, kept apart
-   * from the ones that say the server exists.
+   * Arguments that pre-approve calls to this server, kept apart from the ones
+   * that say the server exists.
    *
    * Separate because the two have opposite failure modes. `args` is knowledge:
    * drop it and the run has no tools, which is the thing this module exists to
-   * prevent. `trust` is a preference, and it names a key we cannot verify from
-   * here — so if a CLI rejects it, the run is better off without it than not
-   * running at all. `runAgent` retries once with this dropped, which is only
-   * possible because it is a separate list.
+   * prevent. `approval` is a preference added by newer Codex versions, so if
+   * an older CLI rejects it, the run is better off without it than not running
+   * at all. `runAgent` retries once with this dropped, which is only possible
+   * because it is a separate list.
    */
-  trust: string[];
+  approval: string[];
   /** The file the session's decisions will be written to. */
   out: string;
   /** Environment for the child, on top of whatever it already has. */
@@ -122,23 +122,21 @@ function codexOverrides(server: Server): string[] {
  * timeout looking for another way round, which is what the user saw.
  *
  * The blunt fix is to turn approvals off for the run, and that is far too
- * much: it would also unlock the sandbox and every other tool the CLI has. The
- * narrow one is to say that *this* server is trusted and leave the rest alone,
- * which is what this does — one key, under the server we ourselves wrote.
+ * much: it would also affect every other tool the CLI has. The narrow one is
+ * Codex's server-scoped MCP approval setting: approve calls to *this* server
+ * and leave the rest alone.
  *
- * The key is a guess. It is spelled the way Codex spells trust elsewhere in
- * its config, but there is no Codex here to check it against, and this module
- * has been wrong about an invented key before (see `codexOverrides`). So it
- * goes in `Wiring.trust` rather than `Wiring.args`: a Codex that rejects it
- * gets one more run without it, ending up exactly where it is today instead of
- * not running at all.
+ * `default_tools_approval_mode = "approve"` is the documented server-level
+ * setting. It still goes in `Wiring.approval` rather than `Wiring.args` for
+ * compatibility: a Codex version from before that setting existed gets one
+ * more run without it instead of failing before it can do any work.
  */
-function codexTrust(): string[] {
-  return ['-c', `mcp_servers.resume.trust_level=${JSON.stringify('trusted')}`];
+function codexApproval(): string[] {
+  return ['-c', `mcp_servers.resume.default_tools_approval_mode=${JSON.stringify('approve')}`];
 }
 
 /**
- * Which CLIs get a trust setting, and what it is.
+ * Which CLIs get a server-level approval setting, and what it is.
  *
  * Empty for the others on purpose. Claude's own config takes the server list
  * and asks nothing further about it, and Gemini reads the settings file it was
@@ -146,8 +144,8 @@ function codexTrust(): string[] {
  * spec to a CLI that does not want one is the failure this file's header warns
  * about.
  */
-const TRUST: Record<string, () => string[]> = {
-  codex: codexTrust,
+const APPROVAL: Record<string, () => string[]> = {
+  codex: codexApproval,
 };
 
 /**
@@ -228,7 +226,7 @@ export function wireUp(
 
   return {
     args: build(configPath, server),
-    trust: preset ? (TRUST[preset]?.() ?? []) : [],
+    approval: preset ? (APPROVAL[preset]?.() ?? []) : [],
     out,
     // Also on the environment, so a CLI that launches the server some other
     // way — or a person debugging one by hand — does not need the config.

@@ -50,7 +50,7 @@ export interface AgentTools {
   wire: (
     sandbox: string,
     command: string,
-  ) => { args: string[]; trust?: string[]; out: string; env: Record<string, string> } | null;
+  ) => { args: string[]; approval?: string[]; out: string; env: Record<string, string> } | null;
   /** Read back whatever the run decided. */
   read: (out: string) => unknown;
 }
@@ -78,11 +78,11 @@ export async function runAgent(
   prompt: string,
   tools?: AgentTools,
   /**
-   * Internal. Set on the one retry a rejected trust setting earns — see
-   * `Wiring.trust` and `rejectedTrust`. Its only job is to make sure the
+   * Internal. Set on the one retry a rejected approval setting earns — see
+   * `Wiring.approval` and `rejectedApproval`. Its only job is to make sure the
    * retry cannot itself retry.
    */
-  without?: { trust?: boolean },
+  without?: { approval?: boolean },
 ): Promise<AgentResult> {
   if (!config.ai.enabled) {
     return { output: prompt, executed: false };
@@ -113,7 +113,7 @@ export async function runAgent(
    * catch below has to be able to tell whether the CLI's complaint was about
    * one of these, and because the retry has to be able to leave them out.
    */
-  const trust = without?.trust ? [] : (wiring?.trust ?? []);
+  const approval = without?.approval ? [] : (wiring?.approval ?? []);
 
   // `{prompt}` is the prompt file path; `{promptText}` inlines it for CLIs that
   // insist on an argument; `{sandbox}` is the directory the child is confined
@@ -140,7 +140,7 @@ export async function runAgent(
    * prompt.
    */
   const args = (() => {
-    const added = wiring ? [...wiring.args, ...trust] : [];
+    const added = wiring ? [...wiring.args, ...approval] : [];
     if (added.length === 0) return expanded;
     const promptAt = expanded.findIndex((a) => a === prompt || a === promptFile || a.endsWith(prompt));
     if (promptAt < 0) return [...expanded, ...added];
@@ -268,20 +268,19 @@ export async function runAgent(
     if (err instanceof AgentError) throw err;
     const e = err as { code?: string; message?: string; stderr?: string; stdout?: string };
     /*
-     * The CLI would not take the trust setting. Run it again without.
+     * The CLI would not take the server approval setting. Run it again without.
      *
-     * `Wiring.trust` names a config key we could not verify from here, so this
-     * is the recovery that makes guessing acceptable: the worst case is one
-     * wasted start and a run that ends up exactly where it was before the key
-     * existed, rather than a CLI that refuses to start at all and a tailoring
-     * that produces nothing.
+     * `Wiring.approval` names a setting that older Codex versions may not
+     * understand. The worst case is one wasted start and a run that ends up
+     * exactly where it was before the setting existed, rather than a CLI that
+     * refuses to start at all and a tailoring that produces nothing.
      *
      * Once only, and only when the complaint names the key — a CLI that failed
      * for its own reasons would otherwise be run twice for nothing.
      */
-    if (trust.length > 0 && rejectedTrust(`${e.stdout ?? ''}\n${e.stderr ?? ''}\n${e.message ?? ''}`, trust)) {
+    if (approval.length > 0 && rejectedApproval(`${e.stdout ?? ''}\n${e.stderr ?? ''}\n${e.message ?? ''}`, approval)) {
       watching?.ended('failed', 'The CLI would not take the setting that lets it call the tools unprompted; trying again without it.');
-      return await runAgent(config, prompt, tools, { trust: true });
+      return await runAgent(config, prompt, tools, { approval: true });
     }
     if (e.code === 'ENOENT') {
       watching?.ended('failed', `"${config.ai.command}" is not installed or not on PATH.`);
@@ -413,14 +412,13 @@ export function tidyUp(dir: string): void {
  * needs to. Say that, and say where the switch is.
  */
 /**
- * Did the CLI fail *because of* the trust setting, rather than despite it?
+ * Did the CLI fail *because of* the approval setting, rather than despite it?
  *
- * The narrow question, asked narrowly. `Wiring.trust` carries a config key
- * this codebase cannot verify — there is no Codex here to check it against —
- * and the whole reason that is acceptable is that a rejection costs one retry
- * instead of the run. But only a rejection should: re-running a CLI that fell
- * over for its own reasons doubles every real failure's wait, and on a
- * tailoring pass that wait is minutes.
+ * The narrow question, asked narrowly. `Wiring.approval` carries a config key
+ * older Codex versions may not understand, and the whole reason that is safe
+ * is that a rejection costs one retry instead of the run. But only a rejection
+ * should: re-running a CLI that fell over for its own reasons doubles every
+ * real failure's wait, and on a tailoring pass that wait is minutes.
  *
  * So both halves have to hold. The output has to name the key we passed (the
  * dotted path, or its last segment — a CLI complaining about a config key
@@ -428,8 +426,8 @@ export function tidyUp(dir: string): void {
  * complaining rather than merely echoing its configuration back, which several
  * of these CLIs do at startup.
  */
-export function rejectedTrust(output: string, trust: string[]): boolean {
-  const keys = trust
+export function rejectedApproval(output: string, approval: string[]): boolean {
+  const keys = approval
     .map((a) => (a.includes('=') ? a.slice(0, a.indexOf('=')) : a))
     .map((k) => k.trim())
     .filter((k) => k.length > 0 && !/^-{1,2}c$/.test(k));

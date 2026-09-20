@@ -7,7 +7,7 @@ import {
   deniedTools,
   explainSilence,
   extractJson,
-  rejectedTrust,
+  rejectedApproval,
   runAgent,
   tidyUp,
   trimToLetter,
@@ -589,16 +589,16 @@ describe('confinement', () => {
  * The run is wired correctly, the server starts, the model finds the tools,
  * and every call it makes is refused — `codex exec` has nobody to ask, so its
  * approval policy is `never` and a call needing approval is simply denied.
- * The narrow fix is to mark the one server we ourselves wrote as trusted, and
- * to leave the sandbox and every other approval alone.
+ * The narrow fix is to pre-approve calls to the one server we ourselves wrote,
+ * and to leave the sandbox and every other approval alone.
  *
- * The key naming that trust cannot be verified from here, so the point of
- * these tests is the recovery: a CLI that will not take it gets one more run
- * without it and ends up exactly where it was, rather than not running.
+ * Older Codex versions may not know the server-level setting, so the point of
+ * these tests is also the recovery: a CLI that will not take it gets one more
+ * run without it and ends up exactly where it was, rather than not running.
  */
-describe('trusting the one server we wired in', () => {
+describe('pre-approving the one server we wired in', () => {
   const sandbox = () => fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-trust-'));
-  const TRUST = ['-c', 'mcp_servers.resume.trust_level="trusted"'];
+  const APPROVAL = ['-c', 'mcp_servers.resume.default_tools_approval_mode="approve"'];
 
   /** A stand-in CLI that records its arguments and can object to one of them. */
   function fakeCli(dir: string, body: string): { cli: string; log: string; seen: () => string[][] } {
@@ -623,17 +623,17 @@ describe('trusting the one server we wired in', () => {
     };
   }
 
-  const withTrust = (out: string) => ({
-    wire: () => ({ args: [], trust: TRUST, out, env: {} }),
+  const withApproval = (out: string) => ({
+    wire: () => ({ args: [], approval: APPROVAL, out, env: {} }),
     read: () => undefined,
   });
 
-  it('runs again without the trust setting when the CLI will not take it', async () => {
+  it('runs again without the approval setting when an older CLI will not take it', async () => {
     const dir = sandbox();
     const { cli, seen } = fakeCli(
       dir,
-      `if (seen.some((a) => a.includes('trust_level'))) {\n` +
-        `  process.stderr.write('error: unknown field \`trust_level\`, expected one of \`command\`, \`args\`, \`env\`\\n');\n` +
+      `if (seen.some((a) => a.includes('default_tools_approval_mode'))) {\n` +
+        `  process.stderr.write('error: unknown field \`default_tools_approval_mode\`, expected one of \`command\`, \`args\`, \`env\`\\n');\n` +
         `  process.exit(1);\n` +
         `}\n` +
         `process.stdout.write('done');\n`,
@@ -642,17 +642,17 @@ describe('trusting the one server we wired in', () => {
     const result = await runAgent(
       config({ enabled: true, command: process.execPath, args: [cli, '{prompt}'] }),
       'p',
-      withTrust(path.join(dir, 'decisions.json')),
+      withApproval(path.join(dir, 'decisions.json')),
     );
 
     const runs = seen();
     // The first half: it was actually offered. Without this the test passes
-    // against a build that never sends a trust setting at all.
+    // against a build that never sends an approval setting at all.
     expect(runs).toHaveLength(2);
     const [first, second] = runs as [string[], string[]];
-    expect(first.join(' ')).toContain('mcp_servers.resume.trust_level');
+    expect(first.join(' ')).toContain('mcp_servers.resume.default_tools_approval_mode');
     // The second half: the retry dropped it, and kept everything else.
-    expect(second.join(' ')).not.toContain('trust_level');
+    expect(second.join(' ')).not.toContain('default_tools_approval_mode');
     expect(second.some((a) => a.endsWith('prompt.md'))).toBe(true);
     // And the caller got an answer rather than a failure.
     expect(result.output).toBe('done');
@@ -670,7 +670,7 @@ describe('trusting the one server we wired in', () => {
       runAgent(
         config({ enabled: true, command: process.execPath, args: [cli, '{prompt}'] }),
         'p',
-        withTrust(path.join(dir, 'decisions.json')),
+        withApproval(path.join(dir, 'decisions.json')),
       ),
     ).rejects.toThrow(AgentError);
     expect(seen()).toHaveLength(1);
@@ -678,10 +678,10 @@ describe('trusting the one server we wired in', () => {
   });
 
   it('tells a complaint about the key apart from a CLI echoing its config', () => {
-    expect(rejectedTrust('error: unknown field `trust_level`', TRUST)).toBe(true);
-    expect(rejectedTrust('config: mcp_servers.resume.trust_level = "trusted"\nboom', TRUST)).toBe(false);
-    expect(rejectedTrust('invalid model name "gpt-nonesuch"', TRUST)).toBe(false);
-    expect(rejectedTrust('unknown field `trust_level`', [])).toBe(false);
+    expect(rejectedApproval('error: unknown field `default_tools_approval_mode`', APPROVAL)).toBe(true);
+    expect(rejectedApproval('config: mcp_servers.resume.default_tools_approval_mode = "approve"\nboom', APPROVAL)).toBe(false);
+    expect(rejectedApproval('invalid model name "gpt-nonesuch"', APPROVAL)).toBe(false);
+    expect(rejectedApproval('unknown field `default_tools_approval_mode`', [])).toBe(false);
   });
 });
 
