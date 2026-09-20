@@ -44,6 +44,41 @@ describe('inline markup', () => {
     expect(inlineTex('2 * 3 = 6')).toBe('2 * 3 = 6');
   });
 
+  /*
+   * And leaves *two* alone, which is the case that actually reached a PDF.
+   * One asterisk could not match a rule that needs a pair; two of them on a
+   * line with a space before the first and after the second became one span,
+   * and `[^*]+` took the whole clause between them. Both markers vanish from
+   * the document and half the bullet comes out in italics — and `SELECT *`
+   * printed as `SELECT` is a different claim about the work than the one
+   * that was typed.
+   */
+  it('leaves two asterisks alone when neither is against a word', () => {
+    expect(inlineTex('Rewrote SELECT * queries and DELETE * statements')).toBe(
+      'Rewrote SELECT * queries and DELETE * statements',
+    );
+    expect(inlineTex('Cleaned up *.log and *.tmp files')).toBe('Cleaned up *.log and *.tmp files');
+    // A markdown list pasted into a single line.
+    expect(inlineTex('* Led the team * Shipped the thing')).toBe('* Led the team * Shipped the thing');
+  });
+
+  it('does the same for a pair of double asterisks', () => {
+    expect(inlineTex('Globbed ** across the tree and ** again later')).toBe(
+      'Globbed ** across the tree and ** again later',
+    );
+  });
+
+  /*
+   * A URL that stopped at its first `)` produced an \href to a truncated
+   * address — a 404 in the file an employer opens — and printed the leftover
+   * `)` after the link text. Wikipedia, Jira and Confluence all mint these.
+   */
+  it('keeps a link target that has parentheses in it', () => {
+    expect(inlineTex('See [the wiki](https://en.wikipedia.org/wiki/Foo_(bar)) for detail')).toBe(
+      'See \\href{https://en.wikipedia.org/wiki/Foo_(bar)}{\\underline{the wiki}} for detail',
+    );
+  });
+
   it('renders a markdown link as \\href', () => {
     expect(inlineTex('[my site](https://example.com)')).toContain('\\href{https://example.com}');
   });

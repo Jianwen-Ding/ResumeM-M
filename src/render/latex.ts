@@ -140,9 +140,40 @@ export function unrenderableReason(text: string): string | undefined {
  * order the rules happen to run in.
  */
 
-/** Link, bold, italic, code — the order here breaks a tie at the same index. */
+/**
+ * Link, bold, italic, code — the order here breaks a tie at the same index.
+ *
+ * Two rules about where a marker may sit, both learned from resumes that came
+ * out saying something other than what was typed. Neither adds a capturing
+ * group: `markup` reads the groups by position.
+ *
+ * **An emphasis marker is not next to a space.** Markdown's own rule, and
+ * without it any two asterisks on a line that happened to have a space before
+ * the first and after the second became one span — `[^*]+` swallows a whole
+ * clause without ever asking whether it looks like emphasis. So
+ *
+ *     Rewrote SELECT * queries and DELETE * statements
+ *
+ * became `Rewrote SELECT \textit{ queries and DELETE } statements`: both
+ * asterisks gone from the PDF, half the bullet in italics, and `SELECT *`
+ * printed as `SELECT`, which is a different claim about what the work was.
+ * `Cleaned up *.log and *.tmp files` and a bullet list pasted in as `* one
+ * * two` went the same way, and bold had the identical hole with `**`.
+ * Requiring a non-space just inside each marker costs real emphasis nothing —
+ * nobody writes `* thing *` — and ends all four cases.
+ *
+ * **A link target may hold one level of balanced parentheses.** `[^)]+` stops
+ * at the first `)`, so
+ *
+ *     [the wiki](https://en.wikipedia.org/wiki/Foo_(bar))
+ *
+ * produced an `\href` to `…/Foo_(bar` — a 404 in the shipped PDF — and left a
+ * stray `)` printed after the link text. Wikipedia, Jira, Confluence and MSDN
+ * all mint URLs like that. One level is enough for every one of them, and
+ * keeps the rule a regex.
+ */
 const MARKUP =
-  /\[([^\]]+)\]\(([^)]+)\)|\*\*(.+?)\*\*|(?<=^|[\s(])\*([^*]+)\*(?=[\s).,;:]|$)|`(.+?)`/g;
+  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s(])\*(?=\S)([^*]+)(?<=\S)\*(?=[\s).,;:]|$)|`(.+?)`/g;
 
 /** Enough for bold inside a link inside italics; a guard, not a limit anyone meets. */
 const MAX_NESTING = 4;
