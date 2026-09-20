@@ -289,6 +289,21 @@ let openGroup = null;
 
 async function undoGroup(label, watch, run) {
   if (openGroup) return run(); // nested: the outermost action owns the step
+  /*
+   * Let the auto-save land first, on its own step.
+   *
+   * `openGroup` is a module global and `api` folds *every* write into it, so
+   * a debounced auto-save whose 900ms happened to elapse while a grouped
+   * action was in flight became part of that action. Measured: step a bullet
+   * to a different wording, then press "Make default" — which commits
+   * server-side and so takes long enough — and one press of Ctrl+Z took back
+   * both, under the label "pin the default wording". Two deliberate, separate
+   * decisions, one of them unnamed.
+   *
+   * Flushing rather than filtering, because the edit really is pending and
+   * dropping it from the group would only mean it was never recorded at all.
+   */
+  await flushAutoSave();
   openGroup = { label, before: new Map(), after: new Map() };
   for (const key of watch ?? []) openGroup.before.set(key, readDoc(state.store, key));
 
@@ -751,6 +766,24 @@ async function autoSave() {
     }
   })();
   return autoSaving;
+}
+
+/**
+ * Get any pending edit written before doing something else.
+ *
+ * The debounce is what makes an auto-save cheap and what makes it arrive at
+ * an arbitrary moment; `undoGroup` needs the second of those not to happen
+ * inside it. Both halves matter: a timer still counting down is brought
+ * forward, and a save already in flight is waited for.
+ */
+async function flushAutoSave() {
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    await autoSave();
+    return;
+  }
+  if (autoSaving) await autoSaving;
 }
 
 /** Commit once the editing stops, so one sitting is one version. */
@@ -3035,10 +3068,47 @@ async function addEntry(kind) {
       : [],
   };
 
-  // In the entry's lane like every other write to it, so a phrasing or an edit
-  // queued against the same id cannot cross with this one.
-  await inEntryLane(id, async (lane) => {
-    lane.server = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+  /*
+   * The entry and the section that lists it are one thing the user did, so
+   * they are one press of Ctrl+Z.
+   *
+   * `removeEntry` was grouped and this was not, even though the note on
+   * `openGroup` names adding an entry as the other half of the same case.
+   * Recorded per request, "+ Add entry" cost two presses — and the state
+   * between them is one no action ever produced: the entry is still in the
+   * save and nothing points at it. On screen the first press looked like it
+   * had worked, so the orphan stayed, showed up in the master view and the
+   * pickers, and became permanent as soon as the next edit dropped the redo
+   * stack.
+   */
+  await undoGroup(`add ${answer.title.trim()}`, [], async () => {
+    // In the entry's lane like every other write to it, so a phrasing or an
+    // edit queued against the same id cannot cross with this one.
+    await inEntryLane(id, async (lane) => {
+      lane.server = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+    });
+
+    if (state.masterView) return;
+
+    /*
+     * A new entry nobody references is invisible, so it is switched on in the
+     * resume being edited — that one and no other.
+     *
+     * It used to go to the root of the inheritance chain, so every variation
+     * got it. Resumes stand alone now, and quietly writing into a resume other
+     * than the open one is exactly the surprise that was worth removing. The
+     * entry itself is in the save either way; switching it on elsewhere is a
+     * tick per resume, and a decision rather than a side effect.
+     */
+    const root = resumeById(state.resumeId);
+    const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
+    const sections = (root.sections ?? []).map((s) =>
+      s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
+    );
+    if (!sections.some((s) => s.kind === kind)) {
+      sections.push({ kind, entries: [...rootEntries(kind), id] });
+    }
+    await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   });
 
   if (state.masterView) {
@@ -3048,25 +3118,6 @@ async function addEntry(kind) {
     return;
   }
 
-  /*
-   * A new entry nobody references is invisible, so it is switched on in the
-   * resume being edited — that one and no other.
-   *
-   * It used to go to the root of the inheritance chain, so every variation
-   * got it. Resumes stand alone now, and quietly writing into a resume other
-   * than the open one is exactly the surprise that was worth removing. The
-   * entry itself is in the save either way; switching it on elsewhere is a
-   * tick per resume, and a decision rather than a side effect.
-   */
-  const root = resumeById(state.resumeId);
-  const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
-  const sections = (root.sections ?? []).map((s) =>
-    s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
-  );
-  if (!sections.some((s) => s.kind === kind)) {
-    sections.push({ kind, entries: [...rootEntries(kind), id] });
-  }
-  await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   render();
   scheduleRender();
 }
@@ -4055,49 +4106,67 @@ async function addSkillGroup() {
   ]);
   if (!answer?.name?.trim()) return;
 
-  describeNext(`adding the group "${answer.name.trim()}"`);
-  let id;
-  await inSkillsLane((groups) => {
-    id = freeSkillGroupId(groups, `sk_${slug(answer.name)}`);
-    return [
-      ...groups,
-      {
-        id,
-        name: answer.name.trim(),
-        // Built against what has already been taken from the same list:
-        // "Python, Go, Python" is a typo, not two skills, and letting both be
-        // `s_python` would leave the second unselectable and remove both at
-        // once.
-        items: (answer.items ?? '')
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean)
-          .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
-      },
-    ];
-  });
+  /*
+   * The group and the section that lists it, in one step.
+   *
+   * Same shape as adding an entry, and the same two problems: it cost two
+   * presses, and the state in between is one no action produces. Deleting a
+   * group was the worse of the pair — one press put the *reference* back
+   * without the group, so `resolveResume` pushed `Skills group "sk_lang" does
+   * not exist.` on every compile from then on.
+   */
+  await undoGroup(`add the group "${answer.name.trim()}"`, [], async () => {
+    let id;
+    await inSkillsLane((groups) => {
+      id = freeSkillGroupId(groups, `sk_${slug(answer.name)}`);
+      return [
+        ...groups,
+        {
+          id,
+          name: answer.name.trim(),
+          // Built against what has already been taken from the same list:
+          // "Python, Go, Python" is a typo, not two skills, and letting both be
+          // `s_python` would leave the second unselectable and remove both at
+          // once.
+          items: (answer.items ?? '')
+            .split(',')
+            .map((t) => t.trim())
+            .filter(Boolean)
+            .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
+        },
+      ];
+    });
 
-  // The open resume's own sections, for the reason given in addEntry.
-  const root = resumeById(state.resumeId);
-  const sections = (root.sections ?? []).map((s) =>
-    s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
-  );
-  if (!sections.some((s) => s.kind === 'skills')) {
-    sections.push({ kind: 'skills', entries: [], groups: [id] });
-  }
-  await saveResumeSpec({ ...root, sections }, 'Skill group added');
+    // The open resume's own sections, for the reason given in addEntry.
+    const root = resumeById(state.resumeId);
+    const sections = (root.sections ?? []).map((s) =>
+      s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
+    );
+    if (!sections.some((s) => s.kind === 'skills')) {
+      sections.push({ kind: 'skills', entries: [], groups: [id] });
+    }
+    await saveResumeSpec({ ...root, sections }, 'Skill group added');
+  });
   render();
   scheduleRender();
 }
 
 async function removeSkillGroup(group) {
   if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the save.'))) return;
-  await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
-  const root = resumeById(state.resumeId);
-  const sections = (root.sections ?? []).map((s) =>
-    s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
-  );
-  await saveResumeSpec({ ...root, sections }, 'Group deleted');
+  /*
+   * The group and the reference to it, in one step — see `addSkillGroup`.
+   * One press used to put the reference back without the group, which is a
+   * state no action produces: `resolveResume` then warns "Skills group
+   * "sk_lang" does not exist." on every compile from then on.
+   */
+  await undoGroup(`delete the group "${group.name}"`, [], async () => {
+    await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
+    const root = resumeById(state.resumeId);
+    const sections = (root.sections ?? []).map((s) =>
+      s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
+    );
+    await saveResumeSpec({ ...root, sections }, 'Group deleted');
+  });
   render();
   scheduleRender();
 }
@@ -8733,6 +8802,7 @@ const TIER_LOOK = {
     next: 'extended',
     title: 'New resumes and tailored drafts start from this one. Click to keep it without starting from it.',
     said: 'Now a base',
+    undo: 'making this a base',
   },
   extended: {
     label: '☆ Kept',
@@ -8740,6 +8810,7 @@ const TIER_LOOK = {
     next: 'base',
     title: 'Kept in this save and never swept. Click to make it one of the ones you build from.',
     said: 'Kept',
+    undo: 'keeping this resume',
   },
   temporary: {
     label: '⌛ Temporary',
@@ -8747,6 +8818,7 @@ const TIER_LOOK = {
     next: 'extended',
     title: 'Made for one posting, and swept a week after that posting is done. Click to keep it.',
     said: 'Now temporary',
+    undo: 'making this temporary',
   },
 };
 
@@ -8762,9 +8834,24 @@ function renderBaseButton() {
   btn.disabled = !spec;
   btn.onclick = async () => {
     try {
-      await api(`/resumes/${encodeURIComponent(state.resumeId)}/tier`, {
-        method: 'PUT',
-        body: JSON.stringify({ tier: look.next }),
+      /*
+       * Grouped so that it is a step at all.
+       *
+       * `/resumes/:id/tier` is a partial write, which `docKeyFor` refuses —
+       * rightly, since it cannot snapshot a document from a path that does
+       * not name one. So no step was recorded, while every step already on
+       * the stack still carried the *old* tier, and undo replays a whole
+       * resume. Promote a temporary resume to Kept so the sweep can no longer
+       * delete it, then press Ctrl+Z meaning "take back that checkbox": the
+       * resume goes back to Temporary with its original start date, and the
+       * sweep deletes it. Naming the document it changes makes it an ordinary
+       * step, and stops a later undo silently reverting it.
+       */
+      await undoGroup(TIER_LOOK[look.next].undo ?? 'change', [`resume:${state.resumeId}`], async () => {
+        await api(`/resumes/${encodeURIComponent(state.resumeId)}/tier`, {
+          method: 'PUT',
+          body: JSON.stringify({ tier: look.next }),
+        });
       });
       await loadStore();
       setStatus(TIER_LOOK[look.next].said);
