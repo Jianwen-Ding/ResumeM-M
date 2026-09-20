@@ -109,6 +109,28 @@ describe('watching a run as it happens', () => {
     expect(running()).toHaveLength(0);
   });
 
+  /*
+   * Which way it failed, not only that it did.
+   *
+   * The message cannot be read for this without parsing English, and the one
+   * place that most needs to know — the extension's card — is furthest from
+   * it. So it said "The AI could not be started" about a run that had plainly
+   * been started and had run for three minutes, quoting the timeout in the
+   * same breath. The two halves suggested opposite fixes.
+   */
+  it('says which way a run failed, so a caller can put it in a sentence', async () => {
+    const gone = { ai: { enabled: true, command: 'definitely-not-a-cli', args: [], timeoutMs: 5000 } } as unknown as StoreConfig;
+    await expect(runAgent(gone, 'hello')).rejects.toMatchObject({ kind: 'not-installed' });
+
+    const slow = configFor(`setTimeout(() => {}, 60_000);`, 700);
+    await expect(runAgent(slow, 'hello')).rejects.toMatchObject({ kind: 'timeout' });
+
+    // Anything else is "failed", which is also what an AgentError built
+    // without a kind says, so a caller always has one to read.
+    const cross = configFor(`process.stderr.write('boom\n'); process.exit(3);`);
+    await expect(runAgent(cross, 'hello')).rejects.toMatchObject({ kind: 'failed' });
+  });
+
   it('records nothing at all when the AI is switched off', async () => {
     const config = { ai: { enabled: false, command: 'claude', args: [], timeoutMs: 5000 } } as unknown as StoreConfig;
     const result = await runAgent(config, 'the prompt');

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
-import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js';
+import { runAgent, extractJson, trimToLetter, AgentError, type AgentFailure } from '../ai/agent.js';
 import { findRun, recentRuns, running, type AiRun } from '../ai/activity.js';
 import {
   answerPrompt,
@@ -1797,6 +1797,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       let aiFailed: string | undefined;
+      let aiFailedKind: AgentFailure | undefined;
       let state: { letter?: string; answers?: Record<string, string> } | undefined;
       try {
         const agent = await runAgent(
@@ -1813,6 +1814,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // is a misconfigured command, and saying so beats a 502 in front of
         // somebody halfway through an application.
         aiFailed = err instanceof Error ? err.message : String(err);
+          // Which way it failed, so the card is not left guessing from the
+          // English. See `AgentFailure`.
+          aiFailedKind = err instanceof AgentError ? err.kind : 'failed';
       }
 
       const written = state?.letter?.trim();
@@ -1824,6 +1828,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         aiUsed: Boolean(written) || Object.keys(answers).length > 0,
         oneRun: true,
         aiFailed,
+        aiFailedKind,
       });
     }),
   );
@@ -2048,6 +2053,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * so it can say the AI did not run; this says why.
        */
       let aiFailed: string | undefined;
+      let aiFailedKind: AgentFailure | undefined;
       if (mode === 'ai' && data.config.ai.enabled) {
         const resolved = resolveResume(baseId, data);
         const posting = {
@@ -2148,6 +2154,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           // See `aiFailed`: a run that never started is a reply that will not
           // parse, from further away. Same answer.
           aiFailed = err instanceof Error ? err.message : String(err);
+          // Which way it failed, so the card is not left guessing from the
+          // English. See `AgentFailure`.
+          aiFailedKind = err instanceof AgentError ? err.kind : 'failed';
           aiParsed = null;
         }
       }
@@ -2346,6 +2355,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // card can say the AI is misconfigured rather than leave the person
         // wondering why the star never lights up.
         aiFailed,
+        aiFailedKind,
         // What was actually done, not what was asked for: an AI run that came
         // back unusable falls through to the keyword match, and the card has
         // to be able to say so.
@@ -3134,6 +3144,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       let plan: ReturnType<typeof sanitizeAiPlan> | null = null;
       // Why the AI did not tailor this one; see the same field on `/analyze`.
       let aiFailed: string | undefined;
+      let aiFailedKind: AgentFailure | undefined;
       if (useAi && data.config.ai.enabled) {
         try {
           const agent = await runAgent(
@@ -3154,6 +3165,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           // Nor must a run that never started. The button says "with AI", so
           // the reason comes back with the resume rather than instead of it.
           aiFailed = err instanceof Error ? err.message : String(err);
+          // Which way it failed, so the card is not left guessing from the
+          // English. See `AgentFailure`.
+          aiFailedKind = err instanceof AgentError ? err.kind : 'failed';
           plan = null;
         }
       }
@@ -3189,6 +3203,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         fetched,
         usedAi: Boolean(plan),
         aiFailed,
+        aiFailedKind,
         rejected: plan?.rejected ?? [],
         diff: diffResumes(resolveResume(baseId!, data), resolveResume(spec, after), { ignoreLabel: true }),
       });

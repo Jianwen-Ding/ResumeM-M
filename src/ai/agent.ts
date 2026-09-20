@@ -223,6 +223,8 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
       throw new AgentError(
         `AI command "${config.ai.command}" not found. Install it, or change ai.command in data/config.yaml, ` +
           `or set ai.enabled: false to get prompts back instead of answers.`,
+        undefined,
+        'not-installed',
       );
     }
     /*
@@ -241,6 +243,7 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
         `AI command "${config.ai.command}" ran for longer than ${Math.round(config.ai.timeoutMs / 1000)}s ` +
           `and was stopped. Raise ai.timeoutMs in config.yaml if it needs longer.`,
         e.stdout,
+        'timeout',
       );
     }
     const why = `AI command failed: ${e.stderr?.trim() || e.message || 'unknown error'}`;
@@ -359,12 +362,31 @@ const NOTHING_IS_LOST =
   'If you would rather not deal with it now, switch "Let the tool run the AI command" off: ' +
   'every AI button then hands you the prompt it would have sent, to paste into a chat of your own.';
 
+/**
+ * Which way a run failed, for a caller that has to put it into a sentence.
+ *
+ * The message alone cannot be read for this without parsing English, and the
+ * one place that most needs to know — the extension's card — is furthest from
+ * it. So it said "The AI could not be started" about every failure, including
+ * this one:
+ *
+ *   The AI could not be started, so nothing was tailored. It said: AI command
+ *   "codex" ran for longer than 180s and was stopped.
+ *
+ * A command that ran for three minutes was plainly started, and the sentence
+ * contradicts its own evidence in the same breath. The three cases want three
+ * different words and only this file knows which one applies.
+ */
+export type AgentFailure = 'not-installed' | 'timeout' | 'failed';
+
 export class AgentError extends Error {
   readonly partial?: string;
-  constructor(message: string, partial?: string) {
+  readonly kind: AgentFailure;
+  constructor(message: string, partial?: string, kind: AgentFailure = 'failed') {
     super(message);
     this.name = 'AgentError';
     this.partial = partial;
+    this.kind = kind;
   }
 }
 
