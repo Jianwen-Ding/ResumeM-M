@@ -139,8 +139,30 @@ export function applicationId(company: string, role: string, at = new Date()): s
  * the more likely half of the case, too — one field written in another script
  * is ordinary, both of them rather less so.
  */
+/**
+ * Characters a slug throws away that are part of the name, not punctuation
+ * between words.
+ *
+ * `slug` deleting a full stop is the leniency working: "Acme Corp." and "Acme
+ * Corp" are one employer and should not become two tracker rows. `slug`
+ * deleting a plus sign is the leniency going wrong — "C++ Engineer", "C#
+ * Engineer" and "C Engineer" all reduce to `c-engineer`, all three looked
+ * faithful, and all three collapsed onto one id. Applying to a company's C++
+ * role and then its C# role overwrote the first row with the second's company,
+ * role, url and answers, and `handOver` swept the first application's files
+ * out of the folder they shared. Nothing looked wrong afterwards: the tracker
+ * consistently showed one application.
+ *
+ * Deliberately short. Every character added here makes two names that differ
+ * only by it into two applications, which is the mistake in the other
+ * direction — so it holds the ones that name a different thing rather than
+ * spell the same thing differently.
+ */
+const MEANT_IT = /[+#]/;
+
 function faithful(company: string, role: string): boolean {
-  const says = (name: string) => slug(name).length > 0 && slug(name).length < 60;
+  const says = (name: string) =>
+    slug(name).length > 0 && slug(name).length < 60 && !MEANT_IT.test(name);
   return says(company) && says(role);
 }
 
@@ -598,15 +620,36 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       id,
       company: req.company,
       role: req.role,
-      url: req.url,
+      /*
+       * And what the build was not told stays as the tracker had it.
+       *
+       * The spread above is there to keep what the row already knew, and these
+       * five went straight back over the top of it with `undefined` — because
+       * a caller that does not mention a field is not asking for it to be
+       * cleared. `rmm apply` passes `{resumeId, company, role, url}` and
+       * nothing else, so every rebuild from the CLI threw away the source, the
+       * notes, the answers actually given and the letter actually sent, from
+       * the row and from the bundle both, and wrote "Files rebuilt" over it.
+       *
+       * `status`, `appliedAt` and `history` were already spared by hand for
+       * exactly this reason; these are the rest of it. The sibling route
+       * `POST /api/applications` has always done this (`body.answers ??
+       * existing?.answers`), which is what says the omission here was one.
+       *
+       * The letter keeps its own shape: an empty string still clears it, so
+       * "I decided not to send one" remains sayable, and only an absent field
+       * means "leave it alone".
+       */
+      url: req.url ?? before?.url,
       appliedAt: before?.appliedAt ?? now,
       status,
       resumeId: req.resumeId,
       snapshotDir: path.relative(store.outDir(), dir),
-      source: req.source,
-      notes: req.notes,
-      answers: req.answers,
-      coverLetter: req.coverLetter?.trim() || undefined,
+      source: req.source ?? before?.source,
+      notes: req.notes ?? before?.notes,
+      answers: req.answers ?? before?.answers,
+      coverLetter:
+        req.coverLetter === undefined ? before?.coverLetter : req.coverLetter.trim() || undefined,
       history: [
         ...(before?.history ?? []),
         { at: now, status, note: before ? 'Files rebuilt' : 'Bundle created' },

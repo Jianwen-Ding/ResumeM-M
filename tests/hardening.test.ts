@@ -84,6 +84,37 @@ describe('an id is a name, never a path', () => {
     expect(t.store.loadConfig().ai?.command).not.toBe('nope');
   });
 
+  /*
+   * The one name the path check was written for, and the one it let through.
+   *
+   * `segment.split('.').includes('..')` can never be true — splitting on `.`
+   * cannot leave a `.` in any piece — so `..` passed `assertName`, and
+   * `outFile`'s boundary allows the output folder itself. An application row
+   * with `id: ".."` therefore chose the output folder as its bundle folder,
+   * and `buildBundle` sweeps every loose file out of the folder it writes
+   * into. applications.yaml is hand-editable by design and the extension
+   * supplies `id` to `POST /api/applications` verbatim.
+   */
+  it('will not let an application id of ".." choose the output folder', async () => {
+    const keep = path.join(t.store.outDir(), 'notes-i-keep-here.txt');
+    fs.mkdirSync(t.store.outDir(), { recursive: true });
+    fs.writeFileSync(keep, 'mine', 'utf8');
+
+    expect(() => t.store.outFile('applications', '..')).toThrow(/not allowed/);
+    // And through the route that actually builds one, with the row in place.
+    await request(app)
+      .post('/api/applications')
+      .send({ id: '..', company: 'Acme', role: 'Platform Engineer', status: 'applying' });
+    await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Acme', role: 'Platform Engineer', resumeId: 'base' })
+      .expect((res) => {
+        expect(res.status).toBeGreaterThanOrEqual(400);
+      });
+
+    expect(fs.existsSync(keep)).toBe(true);
+  });
+
   it('still allows the ordinary ids people actually use', async () => {
     await request(app).put('/api/resumes/acme-platform-engineer-2').send({ label: 'Fine' }).expect(200);
     expect(t.store.getResume('acme-platform-engineer-2')?.label).toBe('Fine');

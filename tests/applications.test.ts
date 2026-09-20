@@ -343,6 +343,49 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       const again = await buildBundle(t.store, staged);
       expect(again.application.appliedAt).toBe(when);
     });
+
+    /*
+     * And keeps the rest of what the row knew.
+     *
+     * `status`, `history` and `appliedAt` were spared by hand; five fields
+     * beside them were written back over with `undefined` whenever a caller
+     * did not mention them. `rmm apply` passes company, role, url and the
+     * resume id and nothing else, so every rebuild from the CLI erased the
+     * source, the notes, the answers actually given and the letter actually
+     * sent — from the tracker row and from the bundle — and logged it as
+     * "Files rebuilt".
+     */
+    it('keeps the url, source, notes, answers and letter it was not asked about', async () => {
+      await buildBundle(t.store, {
+        ...staged,
+        url: 'https://streamly.example/jobs/intern',
+        source: 'JobHelper',
+        notes: 'Referred by Sam.',
+        answers: [{ question: 'Why us?', answer: 'The streaming work.' }],
+        coverLetter: 'Dear Streamly,\n\nI would like to join.\n',
+      });
+
+      // The way `rmm apply` rebuilds: the names and the resume, nothing else.
+      const again = await buildBundle(t.store, staged);
+      expect(again.application.url).toBe('https://streamly.example/jobs/intern');
+      expect(again.application.source).toBe('JobHelper');
+      expect(again.application.notes).toBe('Referred by Sam.');
+      expect(again.application.answers?.[0]?.answer).toBe('The streaming work.');
+      expect(again.application.coverLetter).toContain('I would like to join');
+
+      // On disk too, which is the copy that survives the process.
+      const stored = t.store.load().applications.find((a) => a.id === again.application.id);
+      expect(stored?.answers?.[0]?.question).toBe('Why us?');
+      expect(stored?.url).toBe('https://streamly.example/jobs/intern');
+    });
+
+    it('but still lets a letter be taken back', async () => {
+      // Absent means "leave it alone"; empty means "there is no letter". The
+      // second has to stay sayable, or a letter could never be withdrawn.
+      await buildBundle(t.store, { ...staged, coverLetter: 'Dear Streamly,\n\nHello.\n' });
+      const cleared = await buildBundle(t.store, { ...staged, coverLetter: '' });
+      expect(cleared.application.coverLetter).toBeUndefined();
+    });
   });
 
   /*
@@ -814,6 +857,33 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     expect(fs.existsSync(path.join(current.dir, 'transcripts', 'a.pdf'))).toBe(true);
     expect(after.files).toContain('Test-Person-Resume.pdf');
     expect(after.files).not.toContain('Transcript.pdf');
+  });
+
+  /*
+   * A manifest entry that is not a file in this folder.
+   *
+   * Every entry is handed to a recursive delete, so the filter exists to keep
+   * a hand edit or a bad merge from turning the sync into `rm -r` on
+   * something nobody meant. It refused `..` and let `.` through — and `.` is
+   * the worse of the two: `path.basename('.')` is `'.'`, so it looked like a
+   * plain name, and `path.join(dir, '.')` is the folder itself. One line in a
+   * JSON file and the sync deleted the whole upload folder, including the
+   * transcript its own documentation invites the user to keep there.
+   */
+  it('will not delete the upload folder on a manifest entry of "." or ".."', async () => {
+    await bundleFor('Streamly');
+    const current = syncCurrent(t.store);
+    const mine = path.join(current.dir, 'Transcript.pdf');
+    fs.writeFileSync(mine, 'my transcript');
+
+    const manifest = path.join(current.dir, '.rmm-current.json');
+    const held = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    fs.writeFileSync(manifest, JSON.stringify({ ...held, files: ['.', '..', ...held.files] }), 'utf8');
+
+    const after = syncCurrent(t.store);
+    expect(fs.existsSync(current.dir)).toBe(true);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(after.files).toContain('Test-Person-Resume.pdf');
   });
 
   /*

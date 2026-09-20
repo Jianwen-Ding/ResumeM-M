@@ -86,7 +86,16 @@ function readManifest(dir: string): string[] {
      * name in this folder describes nothing this sync put here.
      */
     return Array.isArray(parsed?.files)
-      ? parsed.files.filter((f: unknown) => typeof f === 'string' && f !== '' && f === path.basename(f) && f !== '..')
+      /*
+       * `.` has to go in the list beside `..`, and it is the worse of the two.
+       * `path.basename('.')` is `'.'`, so it passed the "plain name" test, and
+       * `path.join(dir, '.')` is `dir` — so the recursive delete below was
+       * handed the whole folder, including the transcript the folder's own
+       * documentation invites the user to keep there.
+       */
+      ? parsed.files.filter(
+          (f: unknown) => typeof f === 'string' && f !== '' && f === path.basename(f) && f !== '..' && f !== '.',
+        )
       : [];
   } catch {
     // No manifest, or an unreadable one. Owning nothing is the safe reading:

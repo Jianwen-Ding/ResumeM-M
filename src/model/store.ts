@@ -264,7 +264,17 @@ function splitFrontMatter(raw: string): { header: string; body: string } | undef
  * pointing at a path with a UUID in it.
  */
 function assertName(segment: string): void {
-  if (segment.includes('/') || segment.includes('\\') || segment.split('.').includes('..')) {
+  /*
+   * `segment === '..'`, and it used to be `segment.split('.').includes('..')`,
+   * which can never be true: splitting on `.` cannot leave a `.` in any piece,
+   * so the one name this clause was written to refuse was the one name it let
+   * through. `outFile('applications', '..')` therefore resolved to the output
+   * folder itself — which `outFile`'s own boundary check allows, since the
+   * output folder is inside the output folder — and `buildBundle` deletes
+   * every loose file in the folder it is about to write into. The id comes off
+   * a tracker row, and applications.yaml is hand-editable by design.
+   */
+  if (segment.includes('/') || segment.includes('\\') || segment === '..') {
     throw new Error('That name is not allowed — a name cannot contain a path.');
   }
   if (segment.includes('\u0000')) {
