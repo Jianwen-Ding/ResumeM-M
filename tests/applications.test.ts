@@ -81,7 +81,12 @@ describe('slug and id', () => {
   });
 
   it('does not leave a trailing dash when the role is unprintable', () => {
-    expect(applicationId('Acme', '!!!', new Date('2026-09-16T00:00:00Z'))).toBe('2026-09-16-acme');
+    // A role the slug cannot represent gets a fingerprint instead, because
+    // `!!!` and `???` are two different roles and the slug says so about
+    // neither. What it must not do is trail off after the company.
+    const id = applicationId('Acme', '!!!', new Date('2026-09-16T00:00:00Z'));
+    expect(id).toMatch(/^2026-09-16-acme-[0-9a-f]{8}$/);
+    expect(id).not.toBe(applicationId('Acme', '???', new Date('2026-09-16T00:00:00Z')));
   });
 });
 

@@ -116,17 +116,61 @@ export function applicationId(company: string, role: string, at = new Date()): s
   const date = at.toISOString().slice(0, 10);
   const readable = `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
 
-  /*
-   * The readable form is kept whenever it actually distinguishes one
-   * application from another. It does not when the names have no ASCII in
-   * them — the slug is empty and the id is just today's date — nor when two
-   * long role names share their first sixty characters, which `slug` truncates
-   * to. Both collapse two applications into one id, and an id is what the
-   * tracker row, the bundle folder and the upload file are all keyed on.
-   */
-  const slugged = `${slug(company)}-${slug(role)}`.replace(/^-|-$/g, '');
-  const faithful = slugged.length > 0 && slug(company).length < 60 && slug(role).length < 60;
-  return faithful ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
+  return faithful(company, role) ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
+}
+
+/**
+ * Does the slug still say which application this is?
+ *
+ * It does not when a name has no ASCII in it — the slug is empty — nor when a
+ * name is long enough that `slug` truncates it to sixty characters, since two
+ * that share a prefix truncate to the same thing. Either way two applications
+ * collapse into one id, and an id is what the tracker row, the bundle folder
+ * and the upload file are all keyed on.
+ *
+ * Asked of each name separately, which is the whole of it. Asking it of the
+ * two joined together — "is there any ASCII anywhere in this pair" — reads as
+ * the same question and is not: a Chinese company hiring for "Software
+ * Engineer" has plenty of ASCII in the pair and none of it in the half that
+ * says who the employer is. Measured, before this was a function: two
+ * different companies advertising that role on the same day both minted
+ * `2026-09-16--software-engineer`, so the second tracker row replaced the
+ * first and the second bundle was built into the first one's folder. That is
+ * the more likely half of the case, too — one field written in another script
+ * is ordinary, both of them rather less so.
+ */
+function faithful(company: string, role: string): boolean {
+  const says = (name: string) => slug(name).length > 0 && slug(name).length < 60;
+  return says(company) && says(role);
+}
+
+/**
+ * What makes two applications the same job.
+ *
+ * Not the id: an id carries the day it was made, and the same job looked at on
+ * two days is one job. So the finders below match on the names instead, and
+ * they match on the *slug* of the names deliberately — a posting board writing
+ * "Acme Corp." and a careers page writing "Acme Corp" are the same employer,
+ * and a person should not get two tracker rows for the difference.
+ *
+ * Which leaves the names a slug cannot represent, and there the leniency turns
+ * into the opposite mistake: every company written in Chinese slugs to the
+ * empty string, so `findApplication` handed back some entirely different
+ * employer's row, a build for one job landed in another's folder, and
+ * `alreadySent` told somebody they had already applied to a company they had
+ * never heard of. `applicationId` had already been taught to fingerprint those
+ * names; the three functions that decide what an id *means* had not, so the
+ * ids stayed distinct while everything that looked them up did not.
+ *
+ * The fingerprint is taken over a tidied name rather than the raw one, so the
+ * leniency survives where it can: trailing whitespace and letter case still do
+ * not make a second application.
+ */
+export function identity(company: string, role: string): string {
+  const key = `${slug(company)}\u0000${slug(role)}`;
+  if (faithful(company, role)) return key;
+  const tidy = (s: string) => s.normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
+  return `${key}\u0000${fingerprint(tidy(company), tidy(role))}`;
 }
 
 /**
@@ -176,8 +220,8 @@ export function describeLost(lost: { kind: 'entry' | 'wording' }[]): string | un
  * built were nowhere a file picker would find them.
  */
 export function findApplication(apps: Application[], company: string, role: string): Application | undefined {
-  const key = `${slug(company)}\u0000${slug(role)}`;
-  const same = apps.filter((a) => `${slug(a.company)}\u0000${slug(a.role)}` === key);
+  const key = identity(company, role);
+  const same = apps.filter((a) => identity(a.company, a.role) === key);
   if (same.length === 0) return undefined;
 
   const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
@@ -227,9 +271,9 @@ export function freshApplicationId(apps: Application[], company: string, role: s
  * one you would most like to be reminded about before writing another letter.
  */
 export function alreadySent(apps: Application[], company: string, role: string): Application | undefined {
-  const key = `${slug(company)}\u0000${slug(role)}`;
+  const key = identity(company, role);
   return apps
-    .filter((a) => `${slug(a.company)}\u0000${slug(a.role)}` === key)
+    .filter((a) => identity(a.company, a.role) === key)
     .filter((a) => a.status !== 'interested' && a.status !== 'applying')
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
 }
@@ -240,8 +284,8 @@ export function findDraft<T extends { id: string; company: string; role: string;
   company: string,
   role: string,
 ): T | undefined {
-  const key = `${slug(company)}\u0000${slug(role)}`;
-  const same = drafts.filter((d) => `${slug(d.company)}\u0000${slug(d.role)}` === key);
+  const key = identity(company, role);
+  const same = drafts.filter((d) => identity(d.company, d.role) === key);
   if (same.length === 0) return undefined;
   const open = same.filter((d) => d.status !== 'submitted');
   return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];

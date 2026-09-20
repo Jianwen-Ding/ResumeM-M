@@ -6,9 +6,9 @@
  * they get their own file.
  */
 import { describe, expect, it } from 'vitest';
-import { applicationId, bundleFileName, slug } from '../src/model/applications.js';
+import { alreadySent, applicationId, bundleFileName, findApplication, findDraft, slug } from '../src/model/applications.js';
 import { resolveResume } from '../src/model/resolve.js';
-import type { Entry, ResumeSpec, StoreData } from '../src/model/types.js';
+import type { Application, Entry, ResumeSpec, StoreData } from '../src/model/types.js';
 
 describe('an application id identifies the application', () => {
   const day = new Date('2026-09-16T12:00:00Z');
@@ -27,6 +27,19 @@ describe('an application id identifies the application', () => {
     expect(a).not.toBe('2026-09-16');
   });
 
+  it('tells them apart when only the company has no ASCII in it', () => {
+    // The likelier half, and the one the first fix missed: it asked whether
+    // the pair had any ASCII in it, and "Software Engineer" has plenty. Both
+    // of these minted `2026-09-16--software-engineer`.
+    expect(applicationId('北京字节跳动', 'Software Engineer', day)).not.toBe(
+      applicationId('上海腾讯控股', 'Software Engineer', day),
+    );
+  });
+
+  it('tells them apart when only the role has no ASCII in it', () => {
+    expect(applicationId('Acme', '软件工程师', day)).not.toBe(applicationId('Acme', '数据科学家', day));
+  });
+
   it('tells apart two roles whose names are long and share a prefix', () => {
     const long = 'Senior Staff Software Engineer, Platform Infrastructure and Developer';
     expect(applicationId('Acme', `${long} Experience`, day)).not.toBe(
@@ -36,6 +49,62 @@ describe('an application id identifies the application', () => {
 
   it('is still a name a person can read in a folder listing', () => {
     expect(applicationId('Acme', 'Platform Engineer', day)).toMatch(/^[a-z0-9-]+$/);
+  });
+});
+
+/*
+ * And the other half of the same bug: an id that tells two applications apart
+ * is no use if everything that looks one up cannot.
+ *
+ * `findApplication`, `alreadySent` and `findDraft` matched on the slug alone,
+ * so every application whose names a slug cannot represent matched every
+ * other one. The ids stayed distinct and the lookups did not, which is the
+ * worse shape of the two: a build for one job goes into another's folder
+ * while the tracker still shows two rows, so nothing looks wrong.
+ */
+describe('looking an application up finds that application', () => {
+  const day = new Date('2026-09-16T12:00:00Z');
+  const app = (company: string, role: string, status: string): Application =>
+    ({ id: applicationId(company, role, day), company, role, status, appliedAt: '2026-09-16' }) as Application;
+
+  it('does not hand back a different employer written in the same script', () => {
+    const apps = [app('北京字节跳动', '软件工程师', 'applying')];
+    expect(findApplication(apps, '上海腾讯控股', '数据科学家')).toBeUndefined();
+    // And still finds the one it is actually asked for.
+    expect(findApplication(apps, '北京字节跳动', '软件工程师')?.id).toBe(apps[0]!.id);
+  });
+
+  it('does not say you applied to a company you have never heard of', () => {
+    const apps = [app('北京字节跳动', '软件工程师', 'applied')];
+    expect(alreadySent(apps, '上海腾讯控股', '数据科学家')).toBeUndefined();
+    expect(alreadySent(apps, '北京字节跳动', '软件工程师')?.id).toBe(apps[0]!.id);
+  });
+
+  it('does not join two long roles that share their first sixty characters', () => {
+    const long = 'Senior Staff Software Engineer, Platform Infrastructure and Developer';
+    const apps = [app('Acme', `${long} Experience`, 'applying')];
+    expect(findApplication(apps, 'Acme', `${long} Productivity`)).toBeUndefined();
+  });
+
+  it('opens the right workspace', () => {
+    const drafts = [
+      { id: 'd1', company: '北京字节跳动', role: '软件工程师', status: 'open', updatedAt: '2026-09-16' },
+    ];
+    expect(findDraft(drafts, '上海腾讯控股', '数据科学家')).toBeUndefined();
+    expect(findDraft(drafts, '北京字节跳动', '软件工程师')?.id).toBe('d1');
+  });
+
+  it('is still forgiving about how a name was written down', () => {
+    // The leniency is the point of matching on a slug at all, and it has to
+    // survive the fix — a board writing "Acme Corp." and a careers page
+    // writing "Acme Corp" are one job, not two.
+    const apps = [app('Acme Corp.', 'Platform Engineer', 'applying')];
+    expect(findApplication(apps, 'Acme Corp', 'platform engineer')?.id).toBe(apps[0]!.id);
+
+    // Including for the names that get a fingerprint, which is why the
+    // fingerprint is taken over a tidied name rather than the raw one.
+    const cjk = [app('北京字节跳动', '软件工程师', 'applying')];
+    expect(findApplication(cjk, '  北京字节跳动 ', '软件工程师')?.id).toBe(cjk[0]!.id);
   });
 });
 
