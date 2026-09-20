@@ -139,8 +139,30 @@ export function applicationId(company: string, role: string, at = new Date()): s
  * the more likely half of the case, too — one field written in another script
  * is ordinary, both of them rather less so.
  */
+/**
+ * Characters a slug throws away that are part of the name, not punctuation
+ * between words.
+ *
+ * `slug` deleting a full stop is the leniency working: "Acme Corp." and "Acme
+ * Corp" are one employer and should not become two tracker rows. `slug`
+ * deleting a plus sign is the leniency going wrong — "C++ Engineer", "C#
+ * Engineer" and "C Engineer" all reduce to `c-engineer`, all three looked
+ * faithful, and all three collapsed onto one id. Applying to a company's C++
+ * role and then its C# role overwrote the first row with the second's company,
+ * role, url and answers, and `handOver` swept the first application's files
+ * out of the folder they shared. Nothing looked wrong afterwards: the tracker
+ * consistently showed one application.
+ *
+ * Deliberately short. Every character added here makes two names that differ
+ * only by it into two applications, which is the mistake in the other
+ * direction — so it holds the ones that name a different thing rather than
+ * spell the same thing differently.
+ */
+const MEANT_IT = /[+#]/;
+
 function faithful(company: string, role: string): boolean {
-  const says = (name: string) => slug(name).length > 0 && slug(name).length < 60;
+  const says = (name: string) =>
+    slug(name).length > 0 && slug(name).length < 60 && !MEANT_IT.test(name);
   return says(company) && says(role);
 }
 
@@ -178,15 +200,19 @@ export function identity(company: string, role: string): string {
  * not find. Undefined when it found everything, so the caller can ask
  * whether there is anything to say by asking whether this is there.
  */
-export function describeLost(lost: { kind: 'entry' | 'wording' }[]): string | undefined {
+export function describeLost(lost: { kind: 'entry' | 'wording' | 'skill' }[]): string | undefined {
   if (lost.length === 0) return undefined;
   const entries = lost.filter((l) => l.kind === 'entry').length;
   const wordings = lost.filter((l) => l.kind === 'wording').length;
+  const skills = lost.filter((l) => l.kind === 'skill').length;
   const parts: string[] = [];
   if (entries > 0) parts.push(`${entries} ${entries === 1 ? 'entry' : 'entries'}`);
   if (wordings > 0) parts.push(`${wordings} ${wordings === 1 ? 'wording' : 'wordings'}`);
-  const what = parts.join(' and ');
-  const verb = entries + wordings === 1 ? 'is' : 'are';
+  // A pinned skill the store no longer has counts too: the line it was on
+  // comes out shorter, and nothing else on the page says why.
+  if (skills > 0) parts.push(`${skills} ${skills === 1 ? 'skill' : 'skills'}`);
+  const what = parts.join(parts.length > 2 ? ', ' : ' and ');
+  const verb = entries + wordings + skills === 1 ? 'is' : 'are';
   return `${what} this resume chose ${verb} no longer in your store.`;
 }
 
@@ -488,6 +514,26 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    */
   const stage = fs.mkdtempSync(path.join(path.dirname(dir), '.rmm-building-'));
 
+  /*
+   * What this application's letter and answers actually are, read before
+   * anything is compiled — because the files below are built from them and
+   * the tracker row at the end is written from them, and the two disagreeing
+   * is how the archive got destroyed.
+   *
+   * The row keeps what the caller did not mention; the *files* were built
+   * from `req` alone. So `rmm apply`, which passes company, role, url and the
+   * resume id and nothing else, rebuilt the folder with the resume only —
+   * and `handOver` deletes every file in the destination the build did not
+   * write. Measured: a bundle filed from the editor with a letter and
+   * answers, rebuilt from the CLI, came back holding one PDF, while its
+   * tracker row still read `coverLetter: Dear Initech, …`. The folder is the
+   * archive — "six weeks later, when they ask about the pipeline project, the
+   * file that went out is still there" — and it was not.
+   */
+  const before = store.load().applications.find((a) => a.id === id);
+  const letter = req.coverLetter === undefined ? before?.coverLetter : req.coverLetter?.trim() || undefined;
+  const answers = req.answers ?? before?.answers;
+
   try {
     const pdfPath = path.join(stage, resumeName);
     const compiled = await compileResume(resolved, {
@@ -497,7 +543,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
 
     const files = [resumeName];
 
-    if (req.coverLetter?.trim()) {
+    if (letter) {
 
       // Typeset to match the resume, with the trusted engine — this is a file
       // that gets uploaded, so it never takes the preview shortcut. The plain
@@ -508,7 +554,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
           profile: resolved.profile,
           company: req.company,
           role: req.role,
-          body: req.coverLetter,
+          body: letter,
         },
         resolved.layout,
         { pdfPath: path.join(stage, letterName), texPath: path.join(stage, 'source', 'cover-letter.tex') },
@@ -516,11 +562,11 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       files.push(letterName);
 
       const textPath = path.join(stage, letterName.replace(/\.pdf$/, '.txt'));
-      fs.writeFileSync(textPath, req.coverLetter, 'utf8');
+      fs.writeFileSync(textPath, letter, 'utf8');
       files.push(path.basename(textPath));
     }
 
-    if (req.answers?.length) {
+    if (answers?.length) {
       /*
        * Named like the other two rather than `application-answers.md`. A
        * constant was fine inside a per-application folder and collided for any
@@ -544,7 +590,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       const title = [req.company, req.role].filter(Boolean).join(' — ');
       fs.writeFileSync(
         qaPath,
-        `# ${title}\n\n${req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n')}`,
+        `# ${title}\n\n${answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n')}`,
         'utf8',
       );
       files.push(path.basename(qaPath));
@@ -589,7 +635,6 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
      */
     const ORDER: ApplicationStatus[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
     const asked: ApplicationStatus = req.status ?? 'applied';
-    const before = store.load().applications.find((a) => a.id === id);
     const status =
       before && ORDER.indexOf(before.status) > ORDER.indexOf(asked) ? before.status : asked;
 
@@ -598,15 +643,42 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       id,
       company: req.company,
       role: req.role,
-      url: req.url,
+      /*
+       * And what the build was not told stays as the tracker had it.
+       *
+       * The spread above is there to keep what the row already knew, and these
+       * five went straight back over the top of it with `undefined` — because
+       * a caller that does not mention a field is not asking for it to be
+       * cleared. `rmm apply` passes `{resumeId, company, role, url}` and
+       * nothing else, so every rebuild from the CLI threw away the source, the
+       * notes, the answers actually given and the letter actually sent, from
+       * the row and from the bundle both, and wrote "Files rebuilt" over it.
+       *
+       * `status`, `appliedAt` and `history` were already spared by hand for
+       * exactly this reason; these are the rest of it. The sibling route
+       * `POST /api/applications` has always done this (`body.answers ??
+       * existing?.answers`), which is what says the omission here was one.
+       *
+       * The letter keeps its own shape: an empty string still clears it, so
+       * "I decided not to send one" remains sayable, and only an absent field
+       * means "leave it alone".
+       *
+       * `?.trim()`, and the optional chaining is load-bearing. The card sends
+       * `coverLetter: state.letter`, and `state.letter` is `null` on every
+       * application that does not want one — so dropping it turned every
+       * letterless "Submit" into "Cannot read properties of null (reading
+       * 'trim')". Caught by the ATS walk, where the first posting wanted a
+       * letter and the next fifteen did not.
+       */
+      url: req.url ?? before?.url,
       appliedAt: before?.appliedAt ?? now,
       status,
       resumeId: req.resumeId,
       snapshotDir: path.relative(store.outDir(), dir),
-      source: req.source,
-      notes: req.notes,
-      answers: req.answers,
-      coverLetter: req.coverLetter?.trim() || undefined,
+      source: req.source ?? before?.source,
+      notes: req.notes ?? before?.notes,
+      answers,
+      coverLetter: letter,
       history: [
         ...(before?.history ?? []),
         { at: now, status, note: before ? 'Files rebuilt' : 'Bundle created' },

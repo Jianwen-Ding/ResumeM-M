@@ -74,9 +74,20 @@ export function resolveStoreDir(projectRoot: string, chosen?: string): string {
   return home;
 }
 
-/** True when the directory holds no store yet. */
+/**
+ * True when the directory holds no store yet.
+ *
+ * A path that exists and is not a directory is not an empty store and never
+ * could be. This used to hand it straight to `readdirSync`, which throws
+ * ENOTDIR from the top of the CLI — outside `main`'s catch — so `rmm list
+ * --data notes.txt` answered with a raw Node stack trace naming this
+ * function, in a file that goes to some trouble everywhere else to say what
+ * went wrong in the user's own terms.
+ */
 export function isEmptyStore(dir: string): boolean {
-  if (!fs.existsSync(dir)) return true;
+  const at = fs.statSync(dir, { throwIfNoEntry: false });
+  if (!at) return true;
+  if (!at.isDirectory()) return false;
   const entries = fs.readdirSync(dir).filter((f) => !f.startsWith('.'));
   return entries.length === 0;
 }

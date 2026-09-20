@@ -227,6 +227,152 @@ describe('rmm --data', () => {
     }
   });
 
+  /*
+   * A value flag with nothing after it at all — the same mistake without a
+   * second flag to name it by.
+   *
+   * `arg` reads `argv[i + 1]`, so a flag at the end of the line, one followed
+   * by an empty string, and `--data=` all hand back nothing, which is
+   * indistinguishable from the flag never having been given. `rmm list
+   * --data` listed whichever save happened to be open — and `--data "$UNSET"`
+   * is how a script writes that by accident. This file's own header says the
+   * point of the flag: "a flag that is accepted and discarded can only be
+   * caught from outside".
+   */
+  it('refuses a value flag that was given no value', async () => {
+    const other = aSave('The Folder In The Environment');
+    try {
+      for (const args of [
+        ['list', '--data'],
+        ['list', '--data', ''],
+        ['list', '--data='],
+      ]) {
+        const said = await rmm(args, { RMM_DATA: other }).catch((e: { stderr: string }) => e);
+        const stderr = (said as { stderr: string }).stderr ?? '';
+        const stdout = (said as { stdout?: string }).stdout ?? '';
+        expect(stderr, args.join(' ')).toContain('--data was given nothing to be');
+        // And it did not quietly fall through to some other save.
+        expect(stdout, args.join(' ')).not.toContain('The Folder In The Environment');
+      }
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * A save is a folder. Pointed at a file, `isEmptyStore` handed it to
+   * `readdirSync`, which throws ENOTDIR from the top of the module — outside
+   * `main`'s catch — so the answer was a raw Node stack trace naming an
+   * internal function.
+   */
+  it('says a file is not a save folder, rather than throwing a stack trace', async () => {
+    const file = path.join(path.dirname(save), `${path.basename(save)}-notes.txt`);
+    fs.writeFileSync(file, 'notes\n', 'utf8');
+    try {
+      const said = await rmm(['list', '--data', file]).catch((e: { stderr: string }) => e);
+      const stderr = (said as { stderr: string }).stderr ?? '';
+      expect(stderr).toContain('is a file, not a save folder');
+      expect(stderr).not.toContain('ENOTDIR');
+      expect(stderr).not.toContain('at isEmptyStore');
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  /*
+   * Seeding runs at module load, before the command has been looked at — so
+   * `rmm --help` created and filled a fifteen-file store, and so did a
+   * mistyped command. A folder of somebody else's example resumes is not what
+   * either asked for, and both left it behind on the way to their output.
+   */
+  it('does not make a save for a command that does not use one', async () => {
+    const fresh = path.join(path.dirname(save), `${path.basename(save)}-helpstore`);
+    try {
+      const { stdout } = await rmm(['--help'], { RMM_DATA: fresh });
+      expect(stdout).toContain('rmm — resume mix-and-match');
+      expect(fs.existsSync(fresh), 'no save was made for --help').toBe(false);
+
+      const said = await rmm(['nonsense-command'], { RMM_DATA: fresh }).catch((e) => e);
+      void said;
+      expect(fs.existsSync(fresh), 'nor for a command that does not exist').toBe(false);
+    } finally {
+      fs.rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * `check` and `apply` say what `build` says about the same compile.
+   *
+   * Only the resolver's warnings were printed, so `check` — the command
+   * documented as "report fit without writing a PDF" — reported the fit and
+   * suppressed every finding. On one store, `build` said "A line runs past
+   * the right-hand edge of the page — the widest by 238pt — and whatever is
+   * past the edge is not in the PDF at all" and `check` on the next line said
+   * "✓ 1 page, ~16 lines of room left". `apply` was worse: it files the
+   * result as *sent*, and printed the folder, the filename and nothing else.
+   *
+   * Asserted on the entry a resume lists and the store does not have, because
+   * that one is produced by the store rather than by this machine's TeX
+   * install, so it says the same thing everywhere.
+   */
+  it('says what a build would say, on check and on apply', async () => {
+    fs.writeFileSync(
+      path.join(save, 'resumes', 'broken.yaml'),
+      'id: broken\nlabel: Broken\nsections:\n  - kind: experience\n    entries: [exp_gone_forever]\n',
+      'utf8',
+    );
+
+    const built = await rmm(['build', 'broken', '--data', save]);
+    expect(built.stderr).toContain('exp_gone_forever');
+
+    const checked = await rmm(['check', 'broken', '--data', save]);
+    expect(checked.stderr, 'check says it too').toContain('exp_gone_forever');
+
+    const applied = await rmm([
+      'apply', 'broken', '--company', 'Acme', '--role', 'Engineer', '--data', save,
+    ]);
+    expect(applied.stderr, 'and so does the one that files it as sent').toContain('exp_gone_forever');
+  });
+
+  /*
+   * And each resume's warnings go under its own name, once.
+   *
+   * `resolved.warnings` was printed *before* the header line, and
+   * `compileResume` returns it again inside `result.warnings` — so under
+   * `--all` every resume's warnings appeared under the previous resume's name
+   * and then a second time under its own. A reader of a twenty-resume batch
+   * went and fixed the wrong one.
+   */
+  it('puts each resume’s warnings under its own name, once', async () => {
+    fs.writeFileSync(
+      path.join(save, 'resumes', 'broken.yaml'),
+      'id: broken\nlabel: Broken\nsections:\n  - kind: experience\n    entries: [exp_gone_forever]\n',
+      'utf8',
+    );
+
+    /*
+     * Through a shell, so the two streams arrive interleaved the way a person
+     * reading a terminal sees them. The header goes to stdout and the warning
+     * to stderr, and this bug is entirely about which of them comes first —
+     * captured separately, the order is unrecoverable and the test could not
+     * see the fault at all.
+     */
+    const merged = await run(
+      'sh',
+      ['-c', `node node_modules/.bin/tsx src/cli.ts build --all --data ${JSON.stringify(save)} 2>&1`],
+      { cwd: root, env: { ...process.env, RMM_AUTOCOMMIT: '0' }, timeout: 120_000 },
+    );
+
+    // One mention, not two.
+    expect(merged.stdout.match(/exp_gone_forever/g) ?? []).toHaveLength(1);
+
+    // And under the resume it belongs to, not the one before it.
+    const lines = merged.stdout.split('\n');
+    const at = lines.findIndex((l) => l.includes('exp_gone_forever'));
+    const owner = lines.slice(0, at).reverse().find((l) => /^\S/.test(l)) ?? '';
+    expect(owner).toContain('broken');
+  });
+
   it('beats RMM_DATA', async () => {
     const other = aSave('The Folder In The Environment');
     try {

@@ -1,5 +1,5 @@
 import type { LayoutOptions, ResolvedProfile } from '../model/types.js';
-import { inlineTex, runtimeSetup, stablePreamble, tex, texHref } from './latex.js';
+import { inlineTex, lineTex, runtimeSetup, stablePreamble, tex, texHref } from './latex.js';
 
 /**
  * A cover letter, typeset to match the resume.
@@ -132,8 +132,8 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = ''): s
   if (letter.company) {
     blocks.push(
       letter.role
-        ? `${tex(letter.company)} \\\\\n\\textit{Re: ${tex(letter.role)}}`
-        : tex(letter.company),
+        ? `${lineTex(letter.company)} \\\\\n\\textit{Re: ${lineTex(letter.role)}}`
+        : lineTex(letter.company),
     );
   }
 

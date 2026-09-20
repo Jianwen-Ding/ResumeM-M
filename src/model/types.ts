@@ -417,7 +417,7 @@ export interface ResolvedResume {
    * mean the resume is not the one whoever built it was looking at, and both
    * have to be sayable without printing an id at a person.
    */
-  lost?: { kind: 'entry' | 'wording'; id: string }[];
+  lost?: { kind: 'entry' | 'wording' | 'skill'; id: string }[];
 }
 
 /* ------------------------------------------------------------------ *

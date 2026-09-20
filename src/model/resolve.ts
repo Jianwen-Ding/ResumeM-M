@@ -427,7 +427,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
    * typed. So the two kinds that mean "this is not the resume you were
    * looking at" are counted as they are found.
    */
-  const lost: { kind: 'entry' | 'wording'; id: string }[] = [];
+  const lost: { kind: 'entry' | 'wording' | 'skill'; id: string }[] = [];
   /*
    * Resumes stand alone, so this is the resume — with one exception it costs
    * four lines to be right about.
@@ -456,11 +456,27 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
           continue;
         }
         const wanted = section.items?.[gid];
-        const items = wanted
-          ? wanted
-              .map((iid) => group.items.find((i) => i.id === iid)?.text)
-              .filter((t): t is string => Boolean(t))
-          : group.items.map((i) => i.text);
+        /*
+         * A pinned skill the store no longer has, said out loud.
+         *
+         * The two exactly parallel cases — a bullet whose wording was renamed,
+         * an entry the section lists and the store has lost — both warn *and*
+         * record into `lost`, which is what puts "1 entry this resume chose is
+         * no longer in your store" in front of somebody about to attach the
+         * file. This one dropped the item silently, so renaming or deleting a
+         * skill made every resume pinning it print a shorter skills line with
+         * nothing anywhere saying so.
+         */
+        const items: string[] = [];
+        for (const iid of wanted ?? group.items.map((i) => i.id)) {
+          const item = group.items.find((i) => i.id === iid);
+          if (!item || !item.text) {
+            warnings.push(`Skills group "${group.name}" no longer has the skill "${iid}", so it was left off.`);
+            lost.push({ kind: 'skill', id: iid });
+            continue;
+          }
+          items.push(item.text);
+        }
         skillGroups.push({ id: group.id, name: group.name, items });
       }
     } else {

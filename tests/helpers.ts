@@ -220,6 +220,59 @@ export function makeTempStore(overrides: { config?: unknown; empty?: boolean } =
   };
 }
 
+/**
+ * `n` commits that touch nothing any resume reads, written in one git process.
+ *
+ * The history endpoint scans a window three hundred commits wide, so proving
+ * it can run out before the history does needs more than three hundred
+ * commits in front of it. Made the ordinary way that is four git processes
+ * each — add, diff, commit, and the rev-parse before them — and one test
+ * spent thirty-six seconds there, a quarter of the whole suite's wall clock
+ * for a single assertion.
+ *
+ * `fast-import` writes them all in one. What comes out is not a cheaper kind
+ * of commit: it is the same object in the same graph, and `git log` — which
+ * is all the code under test ever looks at — cannot tell the difference. The
+ * working tree is brought back into line afterwards so a later save through
+ * the normal path does not find a file it has never seen.
+ */
+export async function noiseCommits(dir: string, n: number, file = 'notes.md'): Promise<void> {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+
+  const ref = (await run('git', ['symbolic-ref', '--quiet', 'HEAD'], { cwd: dir })).stdout.trim();
+  const at = Math.floor(Date.now() / 1000);
+  const chunks: string[] = [];
+  const data = (text: string) => `data ${Buffer.byteLength(text)}\n${text}\n`;
+
+  for (let i = 0; i < n; i++) {
+    chunks.push(
+      `commit ${ref}\n`,
+      `mark :${i + 1}\n`,
+      `committer ResumeM-M <resumem-m@localhost> ${at + i} +0000\n`,
+      data(`Unrelated note ${i}`),
+      // Only the first needs telling where it comes from; after that
+      // fast-import knows the tip it has just written.
+      i === 0 ? `from ${ref}^0\n` : '',
+      `M 100644 inline ${file}\n`,
+      data(`note ${i}`),
+      '\n',
+    );
+  }
+
+  const stream = chunks.join('');
+  await new Promise<void>((done, fail) => {
+    const child = execFile('git', ['fast-import', '--quiet', '--date-format=raw'], { cwd: dir }, (err) =>
+      err ? fail(err) : done(),
+    );
+    child.stdin?.end(stream);
+  });
+  // fast-import moves the branch and leaves the index and working tree where
+  // they were, which would make the very next `git add` look like a deletion.
+  await run('git', ['reset', '--hard', '--quiet', ref], { cwd: dir });
+}
+
 /** True when a LaTeX engine is installed, for gating the slow tests. */
 export async function hasLatex(): Promise<boolean> {
   const { detectEngine } = await import('../src/render/compile.js');

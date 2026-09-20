@@ -2,7 +2,17 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AgentError, explainSilence, extractJson, runAgent, tidyUp, trimToLetter, unwrapAgentFraming } from '../src/ai/agent.js';
+import {
+  AgentError,
+  deniedTools,
+  explainSilence,
+  extractJson,
+  rejectedTrust,
+  runAgent,
+  tidyUp,
+  trimToLetter,
+  unwrapAgentFraming,
+} from '../src/ai/agent.js';
 import { AI_PRESETS } from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 import { repairAiArgs } from '../src/model/store.js';
@@ -21,6 +31,41 @@ function config(patch: Partial<StoreConfig['ai']>): StoreConfig {
  * model had done the work; a temp directory would not delete and the work
  * went with it.
  */
+/*
+ * The CLI refusing the tools it was given, in its own words.
+ *
+ * Reported from a real run: "MCP tool call requires approval, but approval
+ * policy is never". The server had started and the very first call was turned
+ * down — `codex exec` cannot prompt anybody, so its policy is `never`, and
+ * under that policy an MCP call is refused rather than allowed.
+ *
+ * The existing test for an auto-denied permission cannot see this: it asks for
+ * "permission", "denied" or "not allowed", and this message uses none of the
+ * three. It fell through to a sentence about the command not writing anything,
+ * which sends somebody looking at the wrong thing entirely.
+ */
+describe('a CLI that refuses the tools', () => {
+  const REFUSED = 'MCP tool call requires approval, but approval policy is never\nmcp: resume/read_resume started\n';
+
+  it('is named as that, not as a command that wrote nothing', () => {
+    const said = explainSilence('codex', REFUSED);
+    expect(said).toMatch(/would not let it use the resume tools/i);
+    expect(said).toMatch(/nobody to ask/i);
+  });
+
+  it('is told apart from a model reaching for a shell it does not need', () => {
+    const shell = explainSilence('claude', 'tool use was auto-denied: Bash requires the command permission');
+    expect(shell).toMatch(/permission to run something on your machine/i);
+    expect(shell).not.toMatch(/would not let it use the resume tools/i);
+  });
+
+  it('says nothing of the kind about an ordinary quiet run', () => {
+    expect(deniedTools('warning: using cached credentials')).toBeUndefined();
+    // "approval" alone is not it either: the message has to be about a tool.
+    expect(deniedTools('your approval is pending for this account')).toBeUndefined();
+  });
+});
+
 describe('clearing up after a run', () => {
   it('removes the scratch directory', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-tidy-'));
@@ -535,6 +580,108 @@ describe('confinement', () => {
       'p',
     );
     expect(result.output).toContain('rmm-ai-');
+  });
+});
+
+/*
+ * "MCP tool call requires approval, but approval policy is never."
+ *
+ * The run is wired correctly, the server starts, the model finds the tools,
+ * and every call it makes is refused — `codex exec` has nobody to ask, so its
+ * approval policy is `never` and a call needing approval is simply denied.
+ * The narrow fix is to mark the one server we ourselves wrote as trusted, and
+ * to leave the sandbox and every other approval alone.
+ *
+ * The key naming that trust cannot be verified from here, so the point of
+ * these tests is the recovery: a CLI that will not take it gets one more run
+ * without it and ends up exactly where it was, rather than not running.
+ */
+describe('trusting the one server we wired in', () => {
+  const sandbox = () => fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-trust-'));
+  const TRUST = ['-c', 'mcp_servers.resume.trust_level="trusted"'];
+
+  /** A stand-in CLI that records its arguments and can object to one of them. */
+  function fakeCli(dir: string, body: string): { cli: string; log: string; seen: () => string[][] } {
+    const log = path.join(dir, 'argv.log');
+    const cli = path.join(dir, 'cli.cjs');
+    fs.writeFileSync(
+      cli,
+      `const fs = require('fs');\n` +
+        `const seen = process.argv.slice(2);\n` +
+        `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(seen) + '\\n');\n` +
+        body,
+      'utf8',
+    );
+    return {
+      cli,
+      log,
+      seen: () =>
+        (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '')
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as string[]),
+    };
+  }
+
+  const withTrust = (out: string) => ({
+    wire: () => ({ args: [], trust: TRUST, out, env: {} }),
+    read: () => undefined,
+  });
+
+  it('runs again without the trust setting when the CLI will not take it', async () => {
+    const dir = sandbox();
+    const { cli, seen } = fakeCli(
+      dir,
+      `if (seen.some((a) => a.includes('trust_level'))) {\n` +
+        `  process.stderr.write('error: unknown field \`trust_level\`, expected one of \`command\`, \`args\`, \`env\`\\n');\n` +
+        `  process.exit(1);\n` +
+        `}\n` +
+        `process.stdout.write('done');\n`,
+    );
+
+    const result = await runAgent(
+      config({ enabled: true, command: process.execPath, args: [cli, '{prompt}'] }),
+      'p',
+      withTrust(path.join(dir, 'decisions.json')),
+    );
+
+    const runs = seen();
+    // The first half: it was actually offered. Without this the test passes
+    // against a build that never sends a trust setting at all.
+    expect(runs).toHaveLength(2);
+    const [first, second] = runs as [string[], string[]];
+    expect(first.join(' ')).toContain('mcp_servers.resume.trust_level');
+    // The second half: the retry dropped it, and kept everything else.
+    expect(second.join(' ')).not.toContain('trust_level');
+    expect(second.some((a) => a.endsWith('prompt.md'))).toBe(true);
+    // And the caller got an answer rather than a failure.
+    expect(result.output).toBe('done');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not run twice when the CLI failed for its own reasons', async () => {
+    const dir = sandbox();
+    const { cli, seen } = fakeCli(
+      dir,
+      `process.stderr.write('the model is unavailable right now\\n');\nprocess.exit(1);\n`,
+    );
+
+    await expect(
+      runAgent(
+        config({ enabled: true, command: process.execPath, args: [cli, '{prompt}'] }),
+        'p',
+        withTrust(path.join(dir, 'decisions.json')),
+      ),
+    ).rejects.toThrow(AgentError);
+    expect(seen()).toHaveLength(1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('tells a complaint about the key apart from a CLI echoing its config', () => {
+    expect(rejectedTrust('error: unknown field `trust_level`', TRUST)).toBe(true);
+    expect(rejectedTrust('config: mcp_servers.resume.trust_level = "trusted"\nboom', TRUST)).toBe(false);
+    expect(rejectedTrust('invalid model name "gpt-nonesuch"', TRUST)).toBe(false);
+    expect(rejectedTrust('unknown field `trust_level`', [])).toBe(false);
   });
 });
 

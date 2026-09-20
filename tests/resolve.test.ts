@@ -429,6 +429,55 @@ describe('an archived bullet stays archived', () => {
 });
 
 /*
+ * A pinned skill the store no longer has.
+ *
+ * The two exactly parallel cases — a bullet whose wording was renamed, an
+ * entry the section lists and the store has lost — both warn *and* record
+ * into `lost`, which is what puts "1 skill this resume chose is no longer in
+ * your store" in front of somebody about to attach the file. This one dropped
+ * the item silently, so renaming or deleting a skill made every resume
+ * pinning it print a shorter skills line with nothing anywhere saying why.
+ */
+describe('a skill a resume pinned and the store no longer has', () => {
+  const withSkills = (): StoreData => {
+    const data = store([
+      {
+        id: 'base',
+        label: 'Base',
+        sections: [{ kind: 'skills', entries: [], groups: ['g'], items: { g: ['i_go', 'i_gone', 'i_rust'] } }],
+      },
+    ]);
+    data.skillGroups = [
+      {
+        id: 'g',
+        name: 'Languages',
+        items: [
+          { id: 'i_go', text: 'Go' },
+          { id: 'i_rust', text: 'Rust' },
+        ],
+      },
+    ];
+    return data;
+  };
+
+  it('prints the ones that are left, and says which one is not', () => {
+    const out = resolveResume('base', withSkills());
+    expect(out.sections.flatMap((s) => s.skillGroups).flatMap((g) => g.items)).toEqual(['Go', 'Rust']);
+    expect(out.warnings.join(' ')).toMatch(/i_gone/);
+    expect(out.lost ?? []).toContainEqual({ kind: 'skill', id: 'i_gone' });
+  });
+
+  it('says nothing when the group is printed whole', () => {
+    const data = withSkills();
+    data.resumes[0]!.sections = [{ kind: 'skills', entries: [], groups: ['g'] }];
+    const out = resolveResume('base', data);
+    expect(out.sections.flatMap((s) => s.skillGroups).flatMap((g) => g.items)).toEqual(['Go', 'Rust']);
+    expect(out.warnings.join(' ')).not.toMatch(/no longer has/);
+    expect(out.lost ?? []).toEqual([]);
+  });
+});
+
+/*
  * A date that runs backwards, reported where somebody will see it.
  *
  * The control accepts any year at either end, because it has to — moving

@@ -106,7 +106,7 @@ export class Repo {
   }
 
   /** Initialise a repo if the store is not already inside one. */
-  async ensure(): Promise<void> {
+  async ensure(message = 'Initialise resume store'): Promise<void> {
     if (await this.isRepo()) return;
     fs.mkdirSync(this.root, { recursive: true });
     await this.git(['init']);
@@ -123,7 +123,7 @@ export class Repo {
       '-q',
       '--allow-empty',
       '-m',
-      'Initialise resume store',
+      message,
     ]);
   }
 

@@ -47,6 +47,31 @@ describe('an application id identifies the application', () => {
     );
   });
 
+  /*
+   * The languages, which is the case this codebase is most likely to meet.
+   *
+   * `slug` deletes everything outside `[a-z0-9]`, so "C++ Engineer", "C#
+   * Engineer" and "C Engineer" are all `c-engineer` — and `faithful` only
+   * asked whether the slug was empty or truncated, so all three were declared
+   * faithful and all three took the same id. Applying to a company's C++ role
+   * and then its C# role gave the second build the first one's folder, swept
+   * the first's files out of it, and wrote the second's company, role, url and
+   * answers over the first's tracker row. One row, consistently, for two jobs.
+   */
+  it('tells apart two roles that differ only by a character the slug drops', () => {
+    const ids = ['C++ Engineer', 'C# Engineer', 'C Engineer'].map((role) => applicationId('Acme', role, day));
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it('and does not split one employer over punctuation that is only punctuation', () => {
+    // The mistake in the other direction, which the leniency exists to avoid:
+    // a posting board writing "Acme Corp." and a careers page writing "Acme
+    // Corp" are one employer and must stay one tracker row.
+    expect(applicationId('Acme Corp.', 'Platform Engineer', day)).toBe(
+      applicationId('Acme Corp', 'Platform Engineer', day),
+    );
+  });
+
   it('is still a name a person can read in a folder listing', () => {
     expect(applicationId('Acme', 'Platform Engineer', day)).toMatch(/^[a-z0-9-]+$/);
   });
@@ -84,6 +109,16 @@ describe('looking an application up finds that application', () => {
     const long = 'Senior Staff Software Engineer, Platform Infrastructure and Developer';
     const apps = [app('Acme', `${long} Experience`, 'applying')];
     expect(findApplication(apps, 'Acme', `${long} Productivity`)).toBeUndefined();
+  });
+
+  it('does not say the C++ role is the C# one', () => {
+    // Both slug to `c-engineer`, so `findApplication` handed back the C++ row
+    // for the C# job: the second build went into the first's folder and its
+    // files were swept out from under it.
+    const apps = [app('Acme', 'C++ Engineer', 'applied')];
+    expect(findApplication(apps, 'Acme', 'C# Engineer')).toBeUndefined();
+    expect(alreadySent(apps, 'Acme', 'C# Engineer')).toBeUndefined();
+    expect(findApplication(apps, 'Acme', 'C++ Engineer')?.id).toBe(apps[0]!.id);
   });
 
   it('opens the right workspace', () => {

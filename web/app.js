@@ -289,6 +289,21 @@ let openGroup = null;
 
 async function undoGroup(label, watch, run) {
   if (openGroup) return run(); // nested: the outermost action owns the step
+  /*
+   * Let the auto-save land first, on its own step.
+   *
+   * `openGroup` is a module global and `api` folds *every* write into it, so
+   * a debounced auto-save whose 900ms happened to elapse while a grouped
+   * action was in flight became part of that action. Measured: step a bullet
+   * to a different wording, then press "Make default" — which commits
+   * server-side and so takes long enough — and one press of Ctrl+Z took back
+   * both, under the label "pin the default wording". Two deliberate, separate
+   * decisions, one of them unnamed.
+   *
+   * Flushing rather than filtering, because the edit really is pending and
+   * dropping it from the group would only mean it was never recorded at all.
+   */
+  await flushAutoSave();
   openGroup = { label, before: new Map(), after: new Map() };
   for (const key of watch ?? []) openGroup.before.set(key, readDoc(state.store, key));
 
@@ -354,10 +369,51 @@ async function stepHistory(direction) {
      */
     clearEdits();
     await loadStore();
+
+    /*
+     * Go to the resume that moved, so what happened is on screen.
+     *
+     * The stack is per-save, and `stepHistory` never checked that the step it
+     * was about to replay belonged to the resume being edited. So: edit
+     * resume A, pick resume B from the dropdown, press Ctrl+Z — and A was
+     * rolled back behind your back. The screen did not change, the status
+     * line said "Undid change", and nothing named the resume that had moved.
+     * Ctrl+Z was already refused on the other tabs for exactly this reason;
+     * two resumes inside the Build tab was the case that was left.
+     *
+     * Switched rather than refused, because the press means something: the
+     * step is the user's own most recent edit, and taking them to it is
+     * kinder than telling them they are in the wrong place. Only when the
+     * step names exactly one resume — a step that touched an entry or a
+     * skills group changed something every resume shares, and there is
+     * nowhere in particular to go.
+     */
+    const moved = [
+      ...new Set(
+        entry.changes
+          .map((c) => c.docKey)
+          .filter((k) => k.startsWith('resume:'))
+          .map((k) => k.slice('resume:'.length)),
+      ),
+    ];
+    const elsewhere =
+      moved.length === 1 && moved[0] !== state.resumeId && state.store.resumes.some((r) => r.id === moved[0])
+        ? moved[0]
+        : null;
+    if (elsewhere) {
+      state.masterView = false;
+      state.resumeId = elsewhere;
+      const select = $('#resume-select');
+      if (select) select.value = elsewhere;
+    }
+
     render();
     scheduleRender();
     scheduleCommit();
-    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${entry.label}`);
+    const label = elsewhere
+      ? `${entry.label} in "${state.store.resumes.find((r) => r.id === elsewhere)?.label ?? elsewhere}"`
+      : entry.label;
+    setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${label}`);
   } catch (err) {
     // Put it back on the stack it came off: a failed undo has not happened.
     if (direction === 'undo') history.redo();
@@ -691,6 +747,20 @@ function bulletName(entry, bullet) {
  */
 function markDirty(message = 'Changed', { recompile = true } = {}) {
   state.dirty = true;
+  /*
+   * An edit past a redo throws the redo away — now, not when the save lands.
+   *
+   * `history.record` clears it, and that runs on the write coming back: 900ms
+   * of debounce plus a round trip later. Until then Redo was enabled and
+   * destructive, because `stepHistory` drops the unsaved overlay — so making
+   * an edit, pressing Ctrl+Z, making a different edit and pressing Redo
+   * within the second took the new edit with it, with nothing said and no
+   * step recorded for what was lost.
+   *
+   * Not while an undo is being applied: that is the one caller whose writes
+   * are the redo stack rather than an edit past it.
+   */
+  if (!undoing && history.dropRedo()) paintUndo();
   if (message !== 'Changed') setStatus(message);
   if (recompile) scheduleRender();
   scheduleAutoSave();
@@ -751,6 +821,24 @@ async function autoSave() {
     }
   })();
   return autoSaving;
+}
+
+/**
+ * Get any pending edit written before doing something else.
+ *
+ * The debounce is what makes an auto-save cheap and what makes it arrive at
+ * an arbitrary moment; `undoGroup` needs the second of those not to happen
+ * inside it. Both halves matter: a timer still counting down is brought
+ * forward, and a save already in flight is waited for.
+ */
+async function flushAutoSave() {
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    await autoSave();
+    return;
+  }
+  if (autoSaving) await autoSaving;
 }
 
 /** Commit once the editing stops, so one sitting is one version. */
@@ -3035,10 +3123,47 @@ async function addEntry(kind) {
       : [],
   };
 
-  // In the entry's lane like every other write to it, so a phrasing or an edit
-  // queued against the same id cannot cross with this one.
-  await inEntryLane(id, async (lane) => {
-    lane.server = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+  /*
+   * The entry and the section that lists it are one thing the user did, so
+   * they are one press of Ctrl+Z.
+   *
+   * `removeEntry` was grouped and this was not, even though the note on
+   * `openGroup` names adding an entry as the other half of the same case.
+   * Recorded per request, "+ Add entry" cost two presses — and the state
+   * between them is one no action ever produced: the entry is still in the
+   * save and nothing points at it. On screen the first press looked like it
+   * had worked, so the orphan stayed, showed up in the master view and the
+   * pickers, and became permanent as soon as the next edit dropped the redo
+   * stack.
+   */
+  await undoGroup(`add ${answer.title.trim()}`, [], async () => {
+    // In the entry's lane like every other write to it, so a phrasing or an
+    // edit queued against the same id cannot cross with this one.
+    await inEntryLane(id, async (lane) => {
+      lane.server = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+    });
+
+    if (state.masterView) return;
+
+    /*
+     * A new entry nobody references is invisible, so it is switched on in the
+     * resume being edited — that one and no other.
+     *
+     * It used to go to the root of the inheritance chain, so every variation
+     * got it. Resumes stand alone now, and quietly writing into a resume other
+     * than the open one is exactly the surprise that was worth removing. The
+     * entry itself is in the save either way; switching it on elsewhere is a
+     * tick per resume, and a decision rather than a side effect.
+     */
+    const root = resumeById(state.resumeId);
+    const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
+    const sections = (root.sections ?? []).map((s) =>
+      s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
+    );
+    if (!sections.some((s) => s.kind === kind)) {
+      sections.push({ kind, entries: [...rootEntries(kind), id] });
+    }
+    await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   });
 
   if (state.masterView) {
@@ -3048,25 +3173,6 @@ async function addEntry(kind) {
     return;
   }
 
-  /*
-   * A new entry nobody references is invisible, so it is switched on in the
-   * resume being edited — that one and no other.
-   *
-   * It used to go to the root of the inheritance chain, so every variation
-   * got it. Resumes stand alone now, and quietly writing into a resume other
-   * than the open one is exactly the surprise that was worth removing. The
-   * entry itself is in the save either way; switching it on elsewhere is a
-   * tick per resume, and a decision rather than a side effect.
-   */
-  const root = resumeById(state.resumeId);
-  const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
-  const sections = (root.sections ?? []).map((s) =>
-    s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
-  );
-  if (!sections.some((s) => s.kind === kind)) {
-    sections.push({ kind, entries: [...rootEntries(kind), id] });
-  }
-  await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   render();
   scheduleRender();
 }
@@ -4055,49 +4161,67 @@ async function addSkillGroup() {
   ]);
   if (!answer?.name?.trim()) return;
 
-  describeNext(`adding the group "${answer.name.trim()}"`);
-  let id;
-  await inSkillsLane((groups) => {
-    id = freeSkillGroupId(groups, `sk_${slug(answer.name)}`);
-    return [
-      ...groups,
-      {
-        id,
-        name: answer.name.trim(),
-        // Built against what has already been taken from the same list:
-        // "Python, Go, Python" is a typo, not two skills, and letting both be
-        // `s_python` would leave the second unselectable and remove both at
-        // once.
-        items: (answer.items ?? '')
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean)
-          .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
-      },
-    ];
-  });
+  /*
+   * The group and the section that lists it, in one step.
+   *
+   * Same shape as adding an entry, and the same two problems: it cost two
+   * presses, and the state in between is one no action produces. Deleting a
+   * group was the worse of the pair — one press put the *reference* back
+   * without the group, so `resolveResume` pushed `Skills group "sk_lang" does
+   * not exist.` on every compile from then on.
+   */
+  await undoGroup(`add the group "${answer.name.trim()}"`, [], async () => {
+    let id;
+    await inSkillsLane((groups) => {
+      id = freeSkillGroupId(groups, `sk_${slug(answer.name)}`);
+      return [
+        ...groups,
+        {
+          id,
+          name: answer.name.trim(),
+          // Built against what has already been taken from the same list:
+          // "Python, Go, Python" is a typo, not two skills, and letting both be
+          // `s_python` would leave the second unselectable and remove both at
+          // once.
+          items: (answer.items ?? '')
+            .split(',')
+            .map((t) => t.trim())
+            .filter(Boolean)
+            .reduce((items, text) => [...items, { id: freeSkillItemId({ items }, `s_${slug(text)}`), text }], []),
+        },
+      ];
+    });
 
-  // The open resume's own sections, for the reason given in addEntry.
-  const root = resumeById(state.resumeId);
-  const sections = (root.sections ?? []).map((s) =>
-    s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
-  );
-  if (!sections.some((s) => s.kind === 'skills')) {
-    sections.push({ kind: 'skills', entries: [], groups: [id] });
-  }
-  await saveResumeSpec({ ...root, sections }, 'Skill group added');
+    // The open resume's own sections, for the reason given in addEntry.
+    const root = resumeById(state.resumeId);
+    const sections = (root.sections ?? []).map((s) =>
+      s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
+    );
+    if (!sections.some((s) => s.kind === 'skills')) {
+      sections.push({ kind: 'skills', entries: [], groups: [id] });
+    }
+    await saveResumeSpec({ ...root, sections }, 'Skill group added');
+  });
   render();
   scheduleRender();
 }
 
 async function removeSkillGroup(group) {
   if (!(await confirmModal(`Delete "${group.name}"?`, 'The group and its skills are removed from the save.'))) return;
-  await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
-  const root = resumeById(state.resumeId);
-  const sections = (root.sections ?? []).map((s) =>
-    s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
-  );
-  await saveResumeSpec({ ...root, sections }, 'Group deleted');
+  /*
+   * The group and the reference to it, in one step — see `addSkillGroup`.
+   * One press used to put the reference back without the group, which is a
+   * state no action produces: `resolveResume` then warns "Skills group
+   * "sk_lang" does not exist." on every compile from then on.
+   */
+  await undoGroup(`delete the group "${group.name}"`, [], async () => {
+    await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
+    const root = resumeById(state.resumeId);
+    const sections = (root.sections ?? []).map((s) =>
+      s.kind === 'skills' ? { ...s, groups: (s.groups ?? []).filter((g) => g !== group.id) } : s,
+    );
+    await saveResumeSpec({ ...root, sections }, 'Group deleted');
+  });
   render();
   scheduleRender();
 }
@@ -7324,6 +7448,15 @@ function temporaryLife(config, expiring) {
                 } else {
                   setStatus(`Swept ${plural(res.swept.length, 'resume')}`);
                 }
+                /*
+                 * The stack goes, as it does for a restore and a project
+                 * switch. Its entries are "this resume before and after an
+                 * edit", and the sweep has just deleted some of the resumes
+                 * they describe — so one press of Ctrl+Z afterwards PUTs a
+                 * deliberately swept resume straight back, reports "Undid
+                 * change", and leaves nothing saying the sweep was reversed.
+                 */
+                forgetHistory();
                 await loadStore();
                 render();
                 loadProjectSettings().catch(() => {});
@@ -8251,6 +8384,14 @@ async function loadSettings() {
 
 let selectedCommit = null;
 let historyResumeId = null;
+/**
+ * How far back to ask for, which the button at the bottom of the timeline
+ * raises. Thirty was the server's default and the only value there was, so
+ * everything past it — including, on a busy save, the resume's whole real
+ * history — was simply absent with nothing saying so.
+ */
+const HISTORY_PAGE = 30;
+let historyWanted = HISTORY_PAGE;
 
 /**
  * The friendly, Google-Docs-style view: every version *this one resume* has
@@ -8277,9 +8418,12 @@ async function loadResumeHistory() {
   }
 
   timeline.replaceChildren(skeleton('versions', 4));
+  showRestoreNote([]);
   try {
-    const { versions } = await api(`/resumes/${encodeURIComponent(historyResumeId)}/history`);
-    renderResumeTimeline(versions);
+    const { versions, more } = await api(
+      `/resumes/${encodeURIComponent(historyResumeId)}/history?limit=${historyWanted}`,
+    );
+    renderResumeTimeline(versions, Boolean(more));
   } catch (err) {
     timeline.replaceChildren(el('div', { className: 'err', textContent: err.message }));
   }
@@ -8337,7 +8481,7 @@ function changeRow(c) {
   return el('div', { className: `c ${c.kind}` }, [where, el('span', { className: 'c-plain', textContent: detail })]);
 }
 
-function renderResumeTimeline(versions) {
+function renderResumeTimeline(versions, more = false) {
   const timeline = $('#resume-timeline');
   if (versions.length === 0) {
     timeline.replaceChildren(
@@ -8366,9 +8510,17 @@ function renderResumeTimeline(versions) {
         el(
           'div',
           { className: 'changes' },
-          changes.length > 0
-            ? changes.map(changeRow)
-            : [el('div', { className: 'c', textContent: v.message || 'Edited' })],
+          /*
+           * `earliest` means the scan stopped here, not that the resume
+           * started here. Without it this card fell back to the commit
+           * message — which, on a busy save, is some unrelated commit's
+           * message presented as the moment this resume was created.
+           */
+          v.earliest
+            ? [el('div', { className: 'c muted', textContent: 'The oldest version shown — there are older ones further back.' })]
+            : changes.length > 0
+              ? changes.map(changeRow)
+              : [el('div', { className: 'c', textContent: v.message || 'Edited' })],
         ),
         el('div', { className: 'actions-row' }, [
           isCurrent
@@ -8382,6 +8534,30 @@ function renderResumeTimeline(versions) {
       ]);
     }),
   );
+
+  /*
+   * And a way to the rest of it.
+   *
+   * The server scans a window of the store's commits and then keeps the
+   * newest `limit` of what it found, so two different cut-offs could hide a
+   * version — and neither said anything. The reply reports either as `more`,
+   * and the answer to both is the same: ask again for more.
+   */
+  if (more) {
+    timeline.append(
+      el('div', { className: 'actions-row' }, [
+        el('button', {
+          className: 'tiny',
+          textContent: 'Show older versions',
+          onclick: (event) => {
+            event.currentTarget.disabled = true;
+            historyWanted += HISTORY_PAGE;
+            void loadResumeHistory();
+          },
+        }),
+      ]),
+    );
+  }
 }
 
 async function restoreResumeVersion(hash) {
@@ -8409,7 +8585,7 @@ async function restoreResumeVersion(hash) {
      * the opposite of what the version history is for.
      */
     if (wanted === state.resumeId) await flushEdits();
-    await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
+    const back = await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });
     /*
@@ -8422,7 +8598,21 @@ async function restoreResumeVersion(hash) {
      * no sign that the version somebody had just gone to fetch was gone.
      */
     forgetHistory();
-    setStatus('Restored.');
+    /*
+     * And what the server said about how much of that version actually came
+     * back, which this used to throw away.
+     *
+     * The endpoint compares the document as it was at that commit against the
+     * document as it is now and reports the difference, precisely so a
+     * half-restore is not announced as a whole one: the rest of that version
+     * can live in a bullet, a date or a profile this resume shares with
+     * others, and those are left alone rather than changed for every resume
+     * at once. The reply carried the explanation and the editor discarded it,
+     * so the document came back visibly not matching the version that had
+     * just been clicked, under the word "Restored."
+     */
+    const said = Array.isArray(back?.warnings) ? back.warnings : [];
+    setStatus(said.length > 0 ? 'Restored — some of it was left alone. See the note above.' : 'Restored.', said.length > 0);
     await loadStore();
     if (wanted === state.resumeId) {
       clearEdits();
@@ -8431,9 +8621,20 @@ async function restoreResumeVersion(hash) {
       scheduleRender();
     }
     await loadResumeHistory();
+    // After the reload, which clears it: the note is about the restore that
+    // has just happened, not about the timeline being redrawn.
+    showRestoreNote(said);
   } catch (err) {
     setStatus(err.message, true);
   }
+}
+
+/** What a restore could not put back, beside the timeline it came from. */
+function showRestoreNote(lines) {
+  const note = $('#restore-note');
+  if (!note) return;
+  note.hidden = lines.length === 0;
+  note.replaceChildren(...lines.map((w) => el('div', { textContent: w })));
 }
 
 function setupHistoryTab() {
@@ -8733,6 +8934,7 @@ const TIER_LOOK = {
     next: 'extended',
     title: 'New resumes and tailored drafts start from this one. Click to keep it without starting from it.',
     said: 'Now a base',
+    undo: 'making this a base',
   },
   extended: {
     label: '☆ Kept',
@@ -8740,6 +8942,7 @@ const TIER_LOOK = {
     next: 'base',
     title: 'Kept in this save and never swept. Click to make it one of the ones you build from.',
     said: 'Kept',
+    undo: 'keeping this resume',
   },
   temporary: {
     label: '⌛ Temporary',
@@ -8747,6 +8950,7 @@ const TIER_LOOK = {
     next: 'extended',
     title: 'Made for one posting, and swept a week after that posting is done. Click to keep it.',
     said: 'Now temporary',
+    undo: 'making this temporary',
   },
 };
 
@@ -8762,9 +8966,24 @@ function renderBaseButton() {
   btn.disabled = !spec;
   btn.onclick = async () => {
     try {
-      await api(`/resumes/${encodeURIComponent(state.resumeId)}/tier`, {
-        method: 'PUT',
-        body: JSON.stringify({ tier: look.next }),
+      /*
+       * Grouped so that it is a step at all.
+       *
+       * `/resumes/:id/tier` is a partial write, which `docKeyFor` refuses —
+       * rightly, since it cannot snapshot a document from a path that does
+       * not name one. So no step was recorded, while every step already on
+       * the stack still carried the *old* tier, and undo replays a whole
+       * resume. Promote a temporary resume to Kept so the sweep can no longer
+       * delete it, then press Ctrl+Z meaning "take back that checkbox": the
+       * resume goes back to Temporary with its original start date, and the
+       * sweep deletes it. Naming the document it changes makes it an ordinary
+       * step, and stops a later undo silently reverting it.
+       */
+      await undoGroup(TIER_LOOK[look.next].undo ?? 'change', [`resume:${state.resumeId}`], async () => {
+        await api(`/resumes/${encodeURIComponent(state.resumeId)}/tier`, {
+          method: 'PUT',
+          body: JSON.stringify({ tier: look.next }),
+        });
       });
       await loadStore();
       setStatus(TIER_LOOK[look.next].said);

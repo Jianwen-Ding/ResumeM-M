@@ -52,6 +52,18 @@ function howToRun(entry: string): { command: string; args: string[] } {
 export interface Wiring {
   /** Arguments to add to the CLI's own command line. */
   args: string[];
+  /**
+   * Arguments that say the server may be called without asking, kept apart
+   * from the ones that say the server exists.
+   *
+   * Separate because the two have opposite failure modes. `args` is knowledge:
+   * drop it and the run has no tools, which is the thing this module exists to
+   * prevent. `trust` is a preference, and it names a key we cannot verify from
+   * here — so if a CLI rejects it, the run is better off without it than not
+   * running at all. `runAgent` retries once with this dropped, which is only
+   * possible because it is a separate list.
+   */
+  trust: string[];
   /** The file the session's decisions will be written to. */
   out: string;
   /** Environment for the child, on top of whatever it already has. */
@@ -95,6 +107,48 @@ function codexOverrides(server: Server): string[] {
     `mcp_servers.resume.env={${env}}`,
   ];
 }
+
+/**
+ * Codex knows about the server and still will not call it.
+ *
+ * Reported from a real tailoring pass, from the run's own transcript:
+ *
+ *   MCP tool call requires approval, but approval policy is never
+ *
+ * Which is not a wiring fault — the server started, the model found the tools,
+ * and every call it made was refused. `codex exec` is non-interactive, so it
+ * has nobody to ask and its approval policy is `never`; a tool call needing
+ * approval under that policy is simply denied. The run then spends its whole
+ * timeout looking for another way round, which is what the user saw.
+ *
+ * The blunt fix is to turn approvals off for the run, and that is far too
+ * much: it would also unlock the sandbox and every other tool the CLI has. The
+ * narrow one is to say that *this* server is trusted and leave the rest alone,
+ * which is what this does — one key, under the server we ourselves wrote.
+ *
+ * The key is a guess. It is spelled the way Codex spells trust elsewhere in
+ * its config, but there is no Codex here to check it against, and this module
+ * has been wrong about an invented key before (see `codexOverrides`). So it
+ * goes in `Wiring.trust` rather than `Wiring.args`: a Codex that rejects it
+ * gets one more run without it, ending up exactly where it is today instead of
+ * not running at all.
+ */
+function codexTrust(): string[] {
+  return ['-c', `mcp_servers.resume.trust_level=${JSON.stringify('trusted')}`];
+}
+
+/**
+ * Which CLIs get a trust setting, and what it is.
+ *
+ * Empty for the others on purpose. Claude's own config takes the server list
+ * and asks nothing further about it, and Gemini reads the settings file it was
+ * given; neither has been seen refusing its own tools, and a flag added on
+ * spec to a CLI that does not want one is the failure this file's header warns
+ * about.
+ */
+const TRUST: Record<string, () => string[]> = {
+  codex: codexTrust,
+};
 
 /**
  * How each CLI is told. Absent means "this one has no MCP support we can rely
@@ -174,6 +228,7 @@ export function wireUp(
 
   return {
     args: build(configPath, server),
+    trust: preset ? (TRUST[preset]?.() ?? []) : [],
     out,
     // Also on the environment, so a CLI that launches the server some other
     // way — or a person debugging one by hand — does not need the config.

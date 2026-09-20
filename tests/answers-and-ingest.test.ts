@@ -180,6 +180,58 @@ describe('an answer that only loosely matched', () => {
  * 2. api.ts:1279 / api.ts:2100 — two different questions get one id.  *
  * ================================================================== */
 
+/*
+ * Asking on behalf of somebody, through the endpoints that do the asking.
+ *
+ * The bank refuses to call an answer safe to send unread when it names a
+ * *different* employer, and works out who the employers are from the labels
+ * on the answers it holds. A caller that does not say who is asking is
+ * nobody, so every employer counts as different — including the one being
+ * applied to.
+ *
+ * Driven through the endpoints rather than through `matchAnswer`, because
+ * that function was never wrong: it does the right thing when it is told the
+ * company, and three callers were not telling it. A test at the function
+ * level passes against the broken build, which is the whole reason this one
+ * is here.
+ */
+describe('reusing an answer for the employer it was written for', () => {
+  const WHY = 'Why do you want to work here?';
+  const FOR_HELIOS = 'Helios is why I applied — I have followed the Helios platform for years.';
+
+  it('does not treat this employer’s own answer as somebody else’s', async () => {
+    t.write('answers.yaml', []);
+    await request(app)
+      .post('/api/answers/save')
+      .send({ question: WHY, answer: FOR_HELIOS, label: 'Helios' })
+      .expect(200);
+
+    const mine = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: WHY, job: { company: 'Helios', jobTitle: 'Platform Engineer', jobDescription: 'Kafka.' } })
+      .expect(200);
+
+    expect(mine.body.source).toBe('answer-bank');
+    expect(mine.body.output).toBe(FOR_HELIOS);
+  });
+
+  it('and a workspace for that employer fills it in', async () => {
+    t.write('answers.yaml', []);
+    await request(app)
+      .post('/api/answers/save')
+      .send({ question: WHY, answer: FOR_HELIOS, label: 'Helios' })
+      .expect(200);
+
+    const draft = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Helios', role: 'Platform Engineer', questions: [{ question: WHY, required: true }] })
+      .expect(200);
+
+    const asked = (draft.body.draft ?? draft.body).questions.find((q: { question: string }) => q.question === WHY);
+    expect(asked.answer).toBe(FOR_HELIOS);
+  });
+});
+
 describe('two questions that slug alike', () => {
   it('gives two different stored questions two different ids', async () => {
     t.write('answers.yaml', []);

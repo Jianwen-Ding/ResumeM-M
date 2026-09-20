@@ -167,6 +167,58 @@ describe('saveStore', () => {
     expect(result.pushed?.ok).toBe(false);
     expect(result.pushed?.output).toBeTruthy();
   });
+
+  /*
+   * And a push that cannot even be attempted is still a failed push, not a
+   * failed save.
+   *
+   * `repo.push` throws for the two cases it cannot act on — no remote
+   * configured, HEAD detached — and that throw went past the whole report:
+   * `rmm save --push -m "keep my work"` printed "No remote is configured for
+   * the store", exited 1, and said nothing about the commit it had just made.
+   * The command whose job is to make "is my work safe?" unambiguous left it
+   * maximally ambiguous.
+   */
+  it('reports a push it could not even start, and still reports the save', async () => {
+    write('profile.yaml', 'name: Test Person\n');
+    await saveStore(repo);
+    write('answers.yaml', '[]\n');
+
+    const result = await saveStore(repo, { push: true, message: 'keep my work' });
+
+    expect(result.saved).toBe(true);
+    expect(result.message).toBe('keep my work');
+    expect((await repo.log(1))[0]?.message).toBe('keep my work');
+    expect(result.pushed?.ok).toBe(false);
+    expect(result.pushed?.output).toMatch(/no remote/i);
+  });
+
+  /*
+   * The message on a store's very first save, which went nowhere.
+   *
+   * `ensure` makes the initial commit itself, so `pending()` came back empty,
+   * `commitAll(message)` never ran, and the "report that first commit as the
+   * save it was" branch overwrote the message from HEAD. `rmm save -m "my
+   * very first save of real work"` put that sentence in no commit and printed
+   * "Saved 15 files — Initialise resume store" as though it were the user's.
+   */
+  it('uses the message it was given for the very first save too', async () => {
+    write('profile.yaml', 'name: Test Person\n');
+    write('resumes/newgrad.yaml', 'id: newgrad\n');
+
+    const result = await saveStore(repo, { message: 'my very first save of real work' });
+
+    expect(result.initialised).toBe(true);
+    expect(result.saved).toBe(true);
+    expect(result.message).toBe('my very first save of real work');
+    expect((await repo.log(1))[0]?.message).toBe('my very first save of real work');
+  });
+
+  it('and still names it for itself when no message was given', async () => {
+    write('profile.yaml', 'name: Test Person\n');
+    const result = await saveStore(repo);
+    expect(result.message).toBe('Initialise resume store');
+  });
 });
 
 describe('Repo.pending', () => {

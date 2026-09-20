@@ -139,4 +139,40 @@ describe('characters the engine cannot set', () => {
   it('does not trip on the .tex the renderer writes for an ordinary resume', () => {
     expect(unrenderableReason(renderLatex(resume()))).toBeUndefined();
   });
+
+  /*
+   * And a blank line in a field that is one line, which is a real compile
+   * rather than a string check because the failure is the engine's.
+   *
+   * `\par` inside a `tabular*` cell is fatal: "Paragraph ended before
+   * \text@command was complete", which names no field and nothing to do. It
+   * took the whole save with it — the Master document compiles every entry,
+   * so one blank line in one title stopped every resume rendering, including
+   * ones that do not list the entry.
+   */
+  it('typesets an employer name somebody pasted with a blank line in it', async () => {
+    const r = resume({
+      sections: [
+        {
+          kind: 'experience',
+          heading: 'Experience',
+          skillGroups: [],
+          entries: [
+            {
+              id: 'e',
+              kind: 'experience',
+              title: 'Acme\n\nCorp',
+              subtitle: 'Engineer\n\nII',
+              location: 'Boston\n\nMA',
+              dates: '2024',
+              bullets: [{ id: 'b', variantId: 'v', text: 'Did the work.' }],
+            },
+          ],
+        },
+      ],
+    });
+
+    const out = await compileResume(r, { maxAttempts: 1 });
+    expect(out.pages).toBeGreaterThan(0);
+  }, 60_000);
 });

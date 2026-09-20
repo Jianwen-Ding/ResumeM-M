@@ -253,6 +253,44 @@ describe('the same question, asked by another system', () => {
   });
 
   /*
+   * Your own company's answers are yours.
+   *
+   * The bank works out which employers it has written for from the labels on
+   * its answers, and refuses to call one safe to send unread when it names a
+   * *different* employer. Ask without saying who is asking and the caller is
+   * nobody, so every employer in the bank counts as "different" — including
+   * the one you are applying to.
+   *
+   * This was harmless only for as long as nothing labelled its answers with
+   * a real company: the extension filed everything as "Saved", so the list of
+   * employers was the word "Saved" and the check never fired at all. Teaching
+   * the card to send the company made this reachable in the same change, and
+   * it points the guard at exactly the answer it should be protecting.
+   */
+  it('does not call an answer written for this employer somebody else’s', () => {
+    const bank = [
+      {
+        id: 'a1',
+        question: 'Why do you want to work here?',
+        default: 'v1',
+        variants: [
+          { id: 'v1', label: 'Helios', text: 'Helios is why I applied — I have followed the Helios platform for years.' },
+        ],
+      },
+    ];
+    const asked = 'Why do you want to work here?';
+
+    const mine = matchAnswer(asked, bank as never, { company: 'Helios' });
+    expect(mine.namesAnother).toBeUndefined();
+    expect(mine.confident).toBe(true);
+
+    // And the guard still does its job for somebody else.
+    const theirs = matchAnswer(asked, bank as never, { company: 'Globex' });
+    expect(theirs.namesAnother).toBe('Helios');
+    expect(theirs.confident).toBe(false);
+  });
+
+  /*
    * A word the page added can reverse the question, and every added word
    * scores as shared vocabulary.
    *

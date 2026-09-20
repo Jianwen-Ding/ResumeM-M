@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
@@ -1201,10 +1201,12 @@ describe.skipIf(!latex)('letter rendering', { timeout: 180_000 }, () => {
 
     expect(res.body.pages).toBe(1);
     expect(res.body.fits).toBe(true);
-    expect(res.body.pdfUrl).toMatch(/^\/pdf\/letter-streamly\.pdf/);
+    // Named for the letter and then made unique, because a preview is one
+    // request's file: two drafts at once, or one redrafted while the last
+    // compile is still running, used to race for `out/letter-<id>.pdf`.
+    expect(res.body.pdfUrl).toMatch(/^\/pdf\/\.previews\/letter-streamly-[0-9a-f]{8}\.pdf$/);
 
-    const name = res.body.pdfUrl.split('/').pop().split('?')[0];
-    const pdf = await request(app).get(`/pdf/${name}`).expect(200);
+    const pdf = await request(app).get(res.body.pdfUrl).expect(200);
     expect(pdf.body.subarray(0, 4).toString()).toBe('%PDF');
   });
 
@@ -1252,7 +1254,7 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
     expect(res.body.pages).toBe(1);
     expect(res.body.fits).toBe(true);
-    expect(res.body.pdfUrl).toMatch(/^\/pdf\/newgrad\.pdf/);
+    expect(res.body.pdfUrl).toMatch(/^\/pdf\/\.previews\/newgrad-[0-9a-f]{8}\.pdf$/);
   });
 
   it('compiles an unsaved spec, so a preview goes through the same path', async () => {
@@ -1265,7 +1267,7 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
 
   it('compiles the master document', async () => {
     const res = await request(app).post('/api/render').send({ master: true }).expect(200);
-    expect(res.body.pdfUrl).toContain('master.pdf');
+    expect(res.body.pdfUrl).toMatch(/^\/pdf\/\.previews\/master-[0-9a-f]{8}\.pdf$/);
   });
 
   it('allows a master beyond two pages without shrinking or rejecting it', async () => {
@@ -1278,6 +1280,36 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     const res = await request(app).post('/api/render').send({ master: true, strict: true }).expect(200);
     expect(res.body.pages).toBeGreaterThan(2);
     expect(res.body.fits).toBe(true);
+    expect(res.body.adjustments).toEqual([]);
+  });
+
+  /*
+   * "Squeezed to fit" is a claim about the result, and it was printed about
+   * documents that did not fit.
+   *
+   * When even the tightest layout overflows, `best` *is* the tightest one, so
+   * the knobs really were turned — and the report listed them anyway. The
+   * editor renders that as "Squeezed to fit — font 10.5pt → 10pt, spacing ×1
+   * → ×0.92, margins 0.45in → 0.4in", and printed it directly under "2 pages
+   * — about 67 lines too long. Pick a shorter phrasing or drop a bullet."
+   */
+  it('does not say it squeezed a resume to fit when it did not fit', async () => {
+    const entry = t.store.load().entries.find((e) => e.id === 'exp_acme')!;
+    entry.bullets = Array.from({ length: 70 }, (_, i) => ({
+      id: `over_${i}`,
+      default: 'v_base',
+      variants: [
+        {
+          id: 'v_base',
+          label: 'Default',
+          text: `Implemented source capability ${i}, validating incoming records and documenting reproducible measurements.`,
+        },
+      ],
+    }));
+    t.store.saveEntry(entry);
+
+    const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    expect(res.body.fits).toBe(false);
     expect(res.body.adjustments).toEqual([]);
   });
 
@@ -1363,10 +1395,70 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
   });
 
   it('serves the compiled PDF and 404s for anything else', async () => {
-    await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
-    const pdf = await request(app).get('/pdf/newgrad.pdf').expect(200);
+    const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    const pdf = await request(app).get(res.body.pdfUrl).expect(200);
     expect(pdf.headers['content-type']).toContain('application/pdf');
     await request(app).get('/pdf/nothing-here.pdf').expect(404);
+    await request(app).get('/pdf/.previews/nothing-here.pdf').expect(404);
+  });
+
+  /*
+   * Two renders of one resume, in flight together.
+   *
+   * The output path used to be a pure function of the id, so both wrote one
+   * file — and "last to finish" is "shortest to compile", not "last asked
+   * for". The request that asked for the long document was handed a url
+   * serving the short one: a reply reading `fits: true, pages: 1` whose own
+   * PDF had three pages. The editor debounces at 350ms and a compile takes
+   * between half a second and several, so this is the ordinary case.
+   *
+   * `renderToken` in the editor guards the stale *reply*. It cannot guard a
+   * file the discarded compile has already overwritten.
+   */
+  it('does not let two renders of one resume share a file', async () => {
+    // One id, two documents: the shape the editor produces when a compile is
+    // still running and the next keystroke starts another.
+    const spec = (choices: Record<string, string>) => ({
+      id: 'newgrad',
+      label: 'New grad',
+      extends: 'base',
+      choices,
+    });
+
+    const both = await Promise.all([
+      request(app).post('/api/render').send({ spec: spec({ b_pipeline: 'v_kafka' }) }),
+      request(app).post('/api/render').send({ spec: spec({}) }),
+    ]);
+
+    /*
+     * The *file*, not the url. The old urls carried `?t=<now>`, so two
+     * requests a millisecond apart produced two different strings pointing at
+     * one file on disk — which is exactly how this looked correct while being
+     * wrong, and why comparing the urls whole proves nothing.
+     */
+    const files = both.map((r) => String(r.body.pdfUrl).split('?')[0] ?? '');
+    expect(new Set(files).size, 'two requests, two files').toBe(2);
+
+    // And each one still serves its own document, rather than one having
+    // overwritten the other on the way out.
+    const bytes = await Promise.all(files.map(async (f) => (await request(app).get(f).expect(200)).body));
+    expect(bytes[0]!.equals(bytes[1]!), 'and the two documents are not the same one').toBe(false);
+  });
+
+  /*
+   * And a preview never replaces `out/<id>.pdf`, which is what `rmm build`
+   * writes with the trusted engine and what the README tells the user to
+   * attach. A preview is compiled by the fast path, which `fastCompile.ts`
+   * says in as many words must never produce a file meant to leave the
+   * machine — and opening the editor replaced it.
+   */
+  it('leaves the file rmm build wrote alone', async () => {
+    const built = path.join(t.store.outDir(), 'newgrad.pdf');
+    fs.mkdirSync(path.dirname(built), { recursive: true });
+    fs.writeFileSync(built, '%PDF-1.4 the trusted one\n', 'utf8');
+
+    await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    expect(fs.readFileSync(built, 'utf8')).toContain('the trusted one');
   });
 
   it('refuses to serve a path outside the output directory', async () => {
@@ -2009,6 +2101,23 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
    * built from the copy read first.
    */
   it('does not discard what was typed while the bundle compiled', async () => {
+    /*
+     * The one place in this file that wants the engine to be slow.
+     *
+     * The premise is a window — the seconds between the draft being read and
+     * the bundle being written — and the test writes into it. Answered from
+     * the compiled-document cache `tests/setup.ts` switches on, the window
+     * closes before the write arrives, nothing overlaps, and the test fails
+     * for the one reason that is not a bug. Compiling for real is what it was
+     * always doing and is what makes the window exist.
+     */
+    const cache = process.env.RMM_COMPILE_CACHE;
+    delete process.env.RMM_COMPILE_CACHE;
+    onTestFinished(() => {
+      if (cache === undefined) delete process.env.RMM_COMPILE_CACHE;
+      else process.env.RMM_COMPILE_CACHE = cache;
+    });
+
     const created = await request(app)
       .post('/api/workspace')
       .send({
@@ -2325,6 +2434,28 @@ describe('a resume saved with a base it used to inherit from', () => {
 });
 
 describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, () => {
+  /*
+   * An application that does not want a cover letter.
+   *
+   * The card sends `coverLetter: state.letter`, and `state.letter` is `null`
+   * on every posting that does not ask for one — which is most of them. JSON
+   * carries that null through, so the route has to survive it: for one build
+   * it did not, and every letterless "Submit" came back "Cannot read
+   * properties of null (reading 'trim')" with no folder written. Asserted
+   * through the route rather than through `buildBundle`, because the type
+   * says `string | undefined` and the wire says otherwise.
+   */
+  it('files an application whose cover letter is explicitly nothing', async () => {
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern', coverLetter: null, answers: null })
+      .expect(200);
+
+    expect(res.body.application.coverLetter).toBeUndefined();
+    expect(res.body.files).toContain('Test-Person-Resume.pdf');
+    expect(res.body.files.join(' ')).not.toContain('Cover-Letter');
+  });
+
   it('hands back the flat folder alongside the archive it just wrote', async () => {
     const res = await request(app)
       .post('/api/applications/bundle')

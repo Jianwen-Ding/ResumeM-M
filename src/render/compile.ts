@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -118,8 +119,133 @@ interface RawCompile {
   log: string;
 }
 
+/**
+ * A directory of already-compiled documents, or nothing.
+ *
+ * Off unless `RMM_COMPILE_CACHE` names a directory — see `cacheKey` for why it
+ * is opt-in rather than on.
+ */
+function cacheDir(): string | undefined {
+  return process.env.RMM_COMPILE_CACHE?.trim() || undefined;
+}
+
+/** The engine's own version line, asked for once per engine per process. */
+const stamps = new Map<Engine, Promise<string>>();
+function toolStamp(engine: Engine): Promise<string> {
+  let asked = stamps.get(engine);
+  if (!asked) {
+    asked = run(engine, ['--version'], { timeout: 10_000 })
+      .then(({ stdout }) => stdout.split('\n')[0]?.trim() || engine)
+      // A binary that will not say what it is still compiles; the key just
+      // stops distinguishing versions of it, which is what the opt-in is for.
+      .catch(() => engine);
+    stamps.set(engine, asked);
+  }
+  return asked;
+}
+
+/**
+ * What identifies a compiled document.
+ *
+ * The .tex file is the whole input: `compileOnce` writes that one file into an
+ * empty directory and runs the engine there with nothing else to read, so two
+ * runs of the same text through the same engine on the same toolchain cannot
+ * produce different PDFs. That makes the text a sound key, and the repetition
+ * is not small — one full test run compiles a hundred and forty documents, of
+ * which forty-three are distinct and one appears fifty-eight times.
+ *
+ * It stays opt-in because the key cannot see everything the engine reads. The
+ * version line catches a different binary; it does not catch a TeX
+ * distribution whose *packages* moved underneath a binary that still calls
+ * itself the same thing. Tests and development want the speed and can throw
+ * the directory away; a build someone is going to send to an employer should
+ * pay for the certainty.
+ */
+async function cacheKey(tex: string, engine: Engine): Promise<string> {
+  return createHash('sha256')
+    .update(await toolStamp(engine))
+    .update('\0')
+    .update(engine)
+    .update('\0')
+    .update(tex)
+    .digest('hex');
+}
+
+/** The three artifacts under one key, or nothing if any of them is missing. */
+function cached(dir: string, key: string): RawCompile | undefined {
+  const at = path.join(dir, key);
+  try {
+    const pdf = fs.readFileSync(`${at}.pdf`);
+    // The same zero-byte guard the compile itself applies: an entry that says
+    // "no pages of output" must not be handed back as a document.
+    if (pdf.length === 0) return undefined;
+    return { pdf, aux: fs.readFileSync(`${at}.aux`, 'utf8'), log: fs.readFileSync(`${at}.log`, 'utf8') };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Sweeping is worth one readdir per process, not one per write. */
+let swept = false;
+const CACHE_KEPT = 600;
+
+function remember(dir: string, key: string, got: RawCompile): void {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    if (!swept) {
+      swept = true;
+      sweepCache(dir);
+    }
+    const at = path.join(dir, key);
+    const tag = `${process.pid}-${randomUUID().slice(0, 8)}`;
+    fs.writeFileSync(`${at}.${tag}.aux`, got.aux, 'utf8');
+    fs.writeFileSync(`${at}.${tag}.log`, got.log, 'utf8');
+    fs.writeFileSync(`${at}.${tag}.pdf`, got.pdf);
+    /*
+     * Moved into place rather than written into place, and the PDF last.
+     *
+     * Several workers compile at once, and `cached` opens the PDF first and
+     * abandons the whole entry if it is not there — so by the time a reader
+     * can see a PDF under the key, the other two are already beside it. A
+     * half-written PDF handed to a caller would be written into an
+     * application and attached to it.
+     */
+    fs.renameSync(`${at}.${tag}.aux`, `${at}.aux`);
+    fs.renameSync(`${at}.${tag}.log`, `${at}.log`);
+    fs.renameSync(`${at}.${tag}.pdf`, `${at}.pdf`);
+  } catch {
+    // A cache that cannot be written is a miss, not a failure.
+  }
+}
+
+/** Oldest out first, so a renderer change does not grow the directory for ever. */
+function sweepCache(dir: string): void {
+  try {
+    const pdfs = fs.readdirSync(dir).filter((f) => f.endsWith('.pdf'));
+    if (pdfs.length <= CACHE_KEPT) return;
+    const byAge = pdfs
+      .map((f) => ({ f, at: fs.statSync(path.join(dir, f), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
+      .sort((a, b) => a.at - b.at);
+    for (const { f } of byAge.slice(0, pdfs.length - CACHE_KEPT)) {
+      const base = f.slice(0, -4);
+      for (const ext of ['.pdf', '.aux', '.log']) {
+        fs.rmSync(path.join(dir, `${base}${ext}`), { force: true });
+      }
+    }
+  } catch {
+    // Same as above: a cache that cannot be tidied is not an error.
+  }
+}
+
 /** Compile one .tex to a PDF in a scratch directory, returning the artifacts. */
 async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
+  const store = cacheDir();
+  const key = store ? await cacheKey(tex, engine) : '';
+  if (store) {
+    const hit = cached(store, key);
+    if (hit) return hit;
+  }
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-'));
   const texFile = path.join(dir, 'resume.tex');
   fs.writeFileSync(texFile, tex, 'utf8');
@@ -167,6 +293,9 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
       : log,
   };
   fs.rmSync(dir, { recursive: true, force: true });
+  // Only what compiled: a failure throws above, so nothing that went wrong is
+  // ever answered from here.
+  if (store) remember(store, key, result);
   return result;
 }
 
@@ -456,7 +585,17 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     overflowPt: round(overflowPt, 1),
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),
     layout: best.layout,
-    adjustments: describe(base, best.layout),
+    /*
+     * Only when the squeezing worked, because that is what the word means.
+     *
+     * When even the tightest layout overflows, `best` is the tightest one —
+     * so the knobs really were turned, and this listed them anyway. The
+     * editor prints them as "Squeezed to fit — font 10.5pt → 10pt, …", and
+     * it printed that directly under "2 pages — about 67 lines too long".
+     * Nothing was made to fit; the document is still two pages and the
+     * shrinking is what could not save it.
+     */
+    adjustments: fits ? describe(base, best.layout) : [],
   };
 
   if (opts.strict && !report.fits) throw new OverflowError(resume, report);

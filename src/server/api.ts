@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1151,7 +1152,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const name = body.master ? 'master' : (body.resumeId ?? body.spec?.id ?? 'preview');
       const suffix = asWritten ? '-as-written' : '';
-      const pdfPath = path.join(store.outDir(), `${slug(name) || 'preview'}${suffix}.pdf`);
+      const pdfPath = previewPath(store, `${slug(name) || 'preview'}${suffix}`);
 
       const result = await compileResume(asWritten ? { ...resolved, layout: { ...resolved.layout, autoFit: false } } : resolved, {
         pdfPath,
@@ -1177,7 +1178,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         warnings: result.warnings,
-        pdfUrl: `/pdf/${path.basename(pdfPath)}?t=${Date.now()}`,
+        pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
       });
     }),
   );
@@ -1202,7 +1203,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const data = store.load();
 
       const name = slug(body.draftId ?? body.letterId ?? body.company ?? 'letter') || 'letter';
-      const pdfPath = path.join(store.outDir(), `letter-${name}.pdf`);
+      // A preview, and shared by id the same way the resume's was: two
+      // letters being drafted at once, or one redrafted while the last
+      // compile is still running, raced for `out/letter-<id>.pdf`.
+      const pdfPath = previewPath(store, `letter-${name}`);
 
       // The letter is set to match the resume it will be sent with, so the
       // pair looks like one document rather than two — which now includes the
@@ -1253,7 +1257,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         overflowLines: result.overflowLines,
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
-        pdfUrl: `/pdf/${path.basename(pdfPath)}?t=${Date.now()}`,
+        pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
       });
     }),
   );
@@ -1357,7 +1361,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         let fit: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] } | undefined;
         try {
           const compiled = await compileResume(resolved, {
-            pdfPath: path.join(store.outDir(), `${master ? 'master' : slug(resolved.id) || 'resume'}.pdf`),
+            // A preview too — the critic wants a typeset page to look at, not
+            // a file anybody sends — so it does not overwrite `rmm build`'s.
+            pdfPath: previewPath(store, master ? 'master' : slug(resolved.id) || 'resume'),
             engine: data.config.latex.engine,
           });
           tex = compiled.tex;
@@ -1847,7 +1853,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         force?: boolean;
       };
       const data = store.load();
-      const match = matchAnswer(question, data.answers);
+      /*
+       * Who is asking, so the bank knows which answers are theirs.
+       *
+       * Without it every caller looks like nobody, and an answer written for
+       * this very employer is read as naming "another" one — the check that
+       * exists to stop Acme's letter reaching Globex, turned on Acme. It was
+       * harmless only while nothing labelled its answers with a real company;
+       * the card does now, so this had to follow. See `namesAnother`.
+       */
+      const match = matchAnswer(question, data.answers, { company: job?.company });
 
       if (match.confident && !force) {
         res.json({
@@ -2890,7 +2905,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           };
         }
 
-        const match = matchAnswer(q.question, data.answers);
+        // See the note at the single-question endpoint: an answer written for
+        // this employer must not be read as naming another one.
+        const match = matchAnswer(q.question, data.answers, { company: body.company });
         return {
           id: prior?.id ?? `q${i + 1}`,
           question: q.question,
@@ -3358,7 +3375,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             continue;
           }
 
-          const match = matchAnswer(q.question, data.answers);
+          // Same again: this draft's own company, so its own answers count as
+          // its own.
+          const match = matchAnswer(q.question, data.answers, { company: draft.company });
           if (match.confident && !overwrite) {
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item?.id;
@@ -3683,9 +3702,31 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // Every commit is a candidate: any of the store's content files can
       // change this resume. Scan a generous window and keep the ones that
       // actually moved the document.
-      const commits = await repo.log(Math.min(Math.max(want * 4, 60), 300));
+      const scan = Math.min(Math.max(want * 4, 60), 300);
+      const commits = await repo.log(scan);
+      /*
+       * Did the window reach the beginning of the save, or merely run out?
+       *
+       * The window is over *all* commits, and every save in this application
+       * is a commit — entries, applications, letters, answers, drafts, sweeps,
+       * AI activity — so a store in regular use passes three hundred quickly.
+       * Once this resume's own commits fall outside it, `previous` is still
+       * undefined at the oldest commit the window holds, and `diffResumes`
+       * unconditionally calls that the first version. Measured: one real edit
+       * and a hundred and thirty commits touching nothing else, and the
+       * timeline showed a single card reading "Unrelated note 10 — First
+       * version, 4 sections, 4 bullet points". The real first version and the
+       * real change were gone, the resume was said to have been created by a
+       * commit that never touched it, and because the newest card is badged
+       * "Current" and given no Restore button, the whole of that resume's
+       * history had become unreachable.
+       *
+       * `log` returns fewer than asked for only when there are no more, so
+       * this is the honest test.
+       */
+      const reachedStart = commits.length < scan;
       if (commits.length === 0) {
-        res.json({ versions: [] });
+        res.json({ versions: [], more: false });
         return;
       }
 
@@ -3737,18 +3778,39 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // Unchanged document: not a version of this resume.
         if (previous && sameDocument(previous, resolved)) continue;
 
+        /*
+         * "First version" is a claim about the save, not about the window.
+         * When the window merely ran out, the oldest thing in it is the
+         * oldest thing *shown* — and saying which is the difference between
+         * a timeline and a timeline that has quietly lost its beginning.
+         */
+        const opening = previous === undefined;
+        const cutOff = opening && !reachedStart;
         versions.push({
           hash: c.hash,
           date: c.date,
           message: c.message,
           label: resolved.label,
-          changes: diffResumes(previous, resolved),
+          // Nothing rather than "First version": there is no earlier document
+          // here to diff against, only an earlier document we did not read.
+          changes: cutOff ? [] : diffResumes(previous, resolved),
+          ...(cutOff ? { earliest: true } : {}),
         });
         previous = resolved;
       }
 
-      // Newest first for display.
-      res.json({ versions: versions.slice(-want).reverse() });
+      /*
+       * Newest first for display, and say when there is more.
+       *
+       * Two ways for a version to be missing from this reply and the caller
+       * cannot tell them apart from the list alone: the slice below, and the
+       * scan window above. Both are answered by asking again with a larger
+       * `limit`, so both are reported the same way.
+       */
+      res.json({
+        versions: versions.slice(-want).reverse(),
+        more: versions.length > want || !reachedStart,
+      });
     }),
   );
 
@@ -3843,9 +3905,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
       restored.id = id; // the filename remains the source of truth for the id
 
-      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () =>
-        store.saveResume(restored),
-      );
+      /*
+       * Committed whether or not auto-commit is on, for the same reason the
+       * outgoing version was filed above.
+       *
+       * The two used to disagree — the filing commit was unconditional and
+       * this one went through `autoCommit()` — so with the setting off the
+       * version being replaced was written into the history and the version
+       * replacing it was not. The timeline then showed the *discarded*
+       * document at the top, badged "Current" and given no Restore button,
+       * with the one actually on disk sitting below it offering to be
+       * restored. The restore was invisible in the history it claims to be
+       * preserved by.
+       *
+       * Auto-commit is about keystrokes: it exists so that a sitting is one
+       * version rather than one per edit. This is a button somebody pressed
+       * to throw work away, which is exactly the kind of moment the history
+       * is for.
+       */
+      await withCommit(repo, true, `Restore "${id}" to an earlier version`, () => store.saveResume(restored));
 
       /*
        * Did it land? Compare what the resume resolves to now against what it
@@ -4001,9 +4079,69 @@ export function createCurrentRouter(store: Store): Router {
   return router;
 }
 
+/**
+ * Where a preview PDF goes, and why it is not `out/<id>.pdf`.
+ *
+ * Two different faults shared one cause: the output path was a pure function
+ * of the resume id, so every writer of that resume raced for one file.
+ *
+ * The editor debounces its live preview at 350ms and a compile takes 0.4 to 7
+ * seconds, so overlapping renders are the ordinary case rather than a corner.
+ * Both wrote `out/base.pdf`; the shorter one finished last, and the request
+ * that asked for the *long* document was handed a `pdfUrl` serving the short
+ * one. Measured: a render answering `fits: true, pages: 1` whose own url
+ * served a three-page PDF. `renderToken` in the editor guards the stale
+ * *reply*; it cannot guard a file the discarded compile already overwrote.
+ *
+ * And `out/<id>.pdf` is what `rmm build` writes — a user-facing artifact the
+ * README names, compiled with the trusted engine. A preview is compiled with
+ * the fast path, which `fastCompile.ts` says in as many words must never
+ * produce a file meant to leave the machine. Opening the editor replaced it.
+ *
+ * So previews live in their own folder, under their own names, and are swept.
+ * `out/` is a folder the user opens; this one is dotted and disposable.
+ */
+const PREVIEW_DIR = '.previews';
+const PREVIEWS_KEPT = 40;
+
+function previewPath(store: Store, name: string): string {
+  const dir = path.join(store.outDir(), PREVIEW_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+
+  /*
+   * Swept by count rather than by age: a compile that is still running holds
+   * no lock on its file, and deleting the newest would be deleting the one
+   * about to be served. Oldest first, and a generous floor — forty is a few
+   * minutes of editing, and each is tens of kilobytes.
+   */
+  try {
+    const held = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.pdf') || f.endsWith('.tex'))
+      .map((f) => ({ f, at: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.at - a.at);
+    for (const { f } of held.slice(PREVIEWS_KEPT * 2)) fs.rmSync(path.join(dir, f), { force: true });
+  } catch {
+    // A folder that cannot be listed is not a reason to fail a preview.
+  }
+
+  return path.join(dir, `${name}-${randomUUID().slice(0, 8)}.pdf`);
+}
+
 /** Serve generated PDFs, constrained to the output directory. */
 export function createPdfRouter(store: Store): Router {
   const router = express.Router();
+  // Previews live one folder down, so they cannot collide with `out/<id>.pdf`
+  // and can be swept without touching anything the user put there.
+  router.get(`/${PREVIEW_DIR}/:name`, (req, res) => {
+    const dir = path.join(store.outDir(), PREVIEW_DIR);
+    const file = path.join(dir, path.basename(String(req.params.name)));
+    if (!file.startsWith(dir) || !fs.existsSync(file)) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    res.type('application/pdf').sendFile(file);
+  });
   router.get('/:name', (req, res) => {
     const name = path.basename(String(req.params.name));
     const file = path.join(store.outDir(), name);

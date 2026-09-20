@@ -622,3 +622,23 @@ claims.
 It starts its own server on a scratch store, so it never touches yours. Point
 it at a running one with `RMM_SERVER=http://127.0.0.1:4788` if you would rather
 watch it work.
+
+### The compiled-document cache
+
+A run compiles about a hundred and forty documents and only forty-three of
+them are different: nearly every test file builds the same sample store and
+then checks something that is not the PDF — the file it landed in, the row in
+the tracker, the warning printed beside it. `RMM_COMPILE_CACHE` names a
+directory of compiled documents, keyed on the `.tex` itself, and `npm test`
+points it at one under your temp folder. Set it to something else, or to
+nothing, to compile everything every time.
+
+It is off by default outside the tests, and meant to stay that way for a real
+build. The key covers the document and the engine's version line, which is
+everything the compile reads *except* the TeX distribution's packages: upgrade
+those under a binary that still calls itself the same thing and the cache
+cannot tell. That is a fine trade for a test run and a bad one for a PDF you
+are about to send to an employer.
+
+It is worth setting on the servers JobHelper's suite runs against too — see
+the header of that repository's `tests/run.mjs`.

@@ -190,6 +190,28 @@ export function inlineTex(input: string): string {
 }
 
 /**
+ * A field that is one line, however it was typed.
+ *
+ * An employer's name, a job title, a location, a skills group heading: each
+ * lands inside a `tabular*` cell or a `\textbf{…}` argument, and a blank line
+ * in one of those is `\par`, which is fatal — "Paragraph ended before
+ * \text@command was complete", a message that names no field and nothing to
+ * do. Worse, it takes the whole save with it: the Master document compiles
+ * every entry, so one blank line pasted into one title stopped every resume
+ * *and* the browsable inventory from rendering, including resumes that do not
+ * list the entry at all.
+ *
+ * Reachable three ways, none of them exotic: pasting multi-line text into the
+ * inline editor, hand-editing the YAML (which the README invites), and `PUT
+ * /api/entries/:id`, which validates nothing. A single newline is harmless
+ * here and is collapsed for the same reason — these are lines, and a line
+ * break in one is a typo rather than a layout instruction.
+ */
+export function lineTex(input: string): string {
+  return inlineTex(String(input ?? '').replace(/\s*\n\s*/g, ' '));
+}
+
+/**
  * A link target, made safe to sit inside `\href{...}`.
  *
  * Escaping `%` and `#` is the documented recipe, and it was all this did. But
@@ -473,7 +495,7 @@ function section(s: ResolvedSection): string {
     const groups = s.skillGroups.filter((g) => g.items.length > 0);
     if (groups.length === 0) return '';
     const lines = groups
-      .map((g) => `     \\textbf{${tex(g.name)}}{: ${tex(g.items.join(', '))}}`)
+      .map((g) => `     \\textbf{${lineTex(g.name)}}{: ${lineTex(g.items.join(', '))}}`)
       .join(' \\\\\n');
     return `\\section{${tex(s.heading)}}
  \\begin{itemize}[leftmargin=0.15in, label={}]
@@ -497,15 +519,15 @@ ${lines}
       // Projects use the one-line heading form, like the original template.
       if (e.kind === 'project') {
         const left = e.subtitle
-          ? `\\textbf{${inlineTex(e.title)}} $|$ \\emph{${inlineTex(e.subtitle)}}`
-          : `\\textbf{${inlineTex(e.title)}}`;
+          ? `\\textbf{${lineTex(e.title)}} $|$ \\emph{${lineTex(e.subtitle)}}`
+          : `\\textbf{${lineTex(e.title)}}`;
         return `    \\resumeProjectHeading
-      {${left}}{${e.dates ? inlineTex(e.dates) : ''}}${bullets}`;
+      {${left}}{${e.dates ? lineTex(e.dates) : ''}}${bullets}`;
       }
 
       return `    \\resumeSubheading
-      {${inlineTex(e.title)}}{${e.dates ? inlineTex(e.dates) : ''}}
-      {${e.subtitle ? inlineTex(e.subtitle) : ''}}{${e.location ? inlineTex(e.location) : ''}}${bullets}`;
+      {${lineTex(e.title)}}{${e.dates ? lineTex(e.dates) : ''}}
+      {${e.subtitle ? lineTex(e.subtitle) : ''}}{${e.location ? lineTex(e.location) : ''}}${bullets}`;
     })
     .join('\n');
 
