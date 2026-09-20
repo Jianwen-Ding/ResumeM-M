@@ -154,6 +154,57 @@ describe('document generation', () => {
     expect(renderLatex(resume())).toContain('Acme \\& Co.');
   });
 
+  /*
+   * A blank line in a field that is one line is `\par`, and `\par` inside a
+   * `tabular*` cell or a `\textbf{…}` argument is fatal: "Paragraph ended
+   * before \text@command was complete", a message that names no field and
+   * nothing to do. It takes the whole save with it, too — the Master document
+   * compiles every entry, so one blank line pasted into one title stopped
+   * every resume from rendering, including ones that do not list the entry.
+   *
+   * Reachable by pasting multi-line text into the inline editor, by
+   * hand-editing the YAML, and through `PUT /api/entries/:id`, which
+   * validates nothing.
+   */
+  it('keeps a field that is one line on one line, however it was typed', () => {
+    const out = renderLatex(
+      resume({
+        sections: [
+          {
+            kind: 'experience',
+            heading: 'Experience',
+            skillGroups: [],
+            entries: [
+              {
+                id: 'e',
+                kind: 'experience',
+                title: 'Acme\n\nCorp',
+                dates: '2024\n2025',
+                subtitle: 'Engineer\n\nII',
+                location: 'Boston\n\nMA',
+                bullets: [],
+              },
+            ],
+          },
+          {
+            kind: 'skills',
+            heading: 'Skills',
+            entries: [],
+            skillGroups: [{ id: 'g', name: 'Languages\n\nand tools', items: ['Go', 'Rust'] }],
+          },
+        ],
+      }),
+    );
+
+    // Nothing that reaches the engine as a paragraph break.
+    const inArguments = out.slice(out.indexOf('\\begin{document}'));
+    expect(inArguments).not.toMatch(/\{[^{}]*\n\s*\n[^{}]*\}/);
+    expect(out).toContain('Acme Corp');
+    expect(out).toContain('Engineer II');
+    expect(out).toContain('Boston MA');
+    expect(out).toContain('Languages and tools');
+  });
+
   it('records positions so the fit checker can measure typeset height', () => {
     const out = renderLatex(resume());
     expect(out).toContain('\\zsavepos{rmmstart}');

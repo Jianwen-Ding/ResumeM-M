@@ -200,15 +200,19 @@ export function identity(company: string, role: string): string {
  * not find. Undefined when it found everything, so the caller can ask
  * whether there is anything to say by asking whether this is there.
  */
-export function describeLost(lost: { kind: 'entry' | 'wording' }[]): string | undefined {
+export function describeLost(lost: { kind: 'entry' | 'wording' | 'skill' }[]): string | undefined {
   if (lost.length === 0) return undefined;
   const entries = lost.filter((l) => l.kind === 'entry').length;
   const wordings = lost.filter((l) => l.kind === 'wording').length;
+  const skills = lost.filter((l) => l.kind === 'skill').length;
   const parts: string[] = [];
   if (entries > 0) parts.push(`${entries} ${entries === 1 ? 'entry' : 'entries'}`);
   if (wordings > 0) parts.push(`${wordings} ${wordings === 1 ? 'wording' : 'wordings'}`);
-  const what = parts.join(' and ');
-  const verb = entries + wordings === 1 ? 'is' : 'are';
+  // A pinned skill the store no longer has counts too: the line it was on
+  // comes out shorter, and nothing else on the page says why.
+  if (skills > 0) parts.push(`${skills} ${skills === 1 ? 'skill' : 'skills'}`);
+  const what = parts.join(parts.length > 2 ? ', ' : ' and ');
+  const verb = entries + wordings + skills === 1 ? 'is' : 'are';
   return `${what} this resume chose ${verb} no longer in your store.`;
 }
 

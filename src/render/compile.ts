@@ -456,7 +456,17 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     overflowPt: round(overflowPt, 1),
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),
     layout: best.layout,
-    adjustments: describe(base, best.layout),
+    /*
+     * Only when the squeezing worked, because that is what the word means.
+     *
+     * When even the tightest layout overflows, `best` is the tightest one —
+     * so the knobs really were turned, and this listed them anyway. The
+     * editor prints them as "Squeezed to fit — font 10.5pt → 10pt, …", and
+     * it printed that directly under "2 pages — about 67 lines too long".
+     * Nothing was made to fit; the document is still two pages and the
+     * shrinking is what could not save it.
+     */
+    adjustments: fits ? describe(base, best.layout) : [],
   };
 
   if (opts.strict && !report.fits) throw new OverflowError(resume, report);

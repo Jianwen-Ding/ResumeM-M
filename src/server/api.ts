@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1151,7 +1152,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const name = body.master ? 'master' : (body.resumeId ?? body.spec?.id ?? 'preview');
       const suffix = asWritten ? '-as-written' : '';
-      const pdfPath = path.join(store.outDir(), `${slug(name) || 'preview'}${suffix}.pdf`);
+      const pdfPath = previewPath(store, `${slug(name) || 'preview'}${suffix}`);
 
       const result = await compileResume(asWritten ? { ...resolved, layout: { ...resolved.layout, autoFit: false } } : resolved, {
         pdfPath,
@@ -1177,7 +1178,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         warnings: result.warnings,
-        pdfUrl: `/pdf/${path.basename(pdfPath)}?t=${Date.now()}`,
+        pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
       });
     }),
   );
@@ -1202,7 +1203,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const data = store.load();
 
       const name = slug(body.draftId ?? body.letterId ?? body.company ?? 'letter') || 'letter';
-      const pdfPath = path.join(store.outDir(), `letter-${name}.pdf`);
+      // A preview, and shared by id the same way the resume's was: two
+      // letters being drafted at once, or one redrafted while the last
+      // compile is still running, raced for `out/letter-<id>.pdf`.
+      const pdfPath = previewPath(store, `letter-${name}`);
 
       // The letter is set to match the resume it will be sent with, so the
       // pair looks like one document rather than two — which now includes the
@@ -1253,7 +1257,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         overflowLines: result.overflowLines,
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
-        pdfUrl: `/pdf/${path.basename(pdfPath)}?t=${Date.now()}`,
+        pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
       });
     }),
   );
@@ -1357,7 +1361,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         let fit: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] } | undefined;
         try {
           const compiled = await compileResume(resolved, {
-            pdfPath: path.join(store.outDir(), `${master ? 'master' : slug(resolved.id) || 'resume'}.pdf`),
+            // A preview too — the critic wants a typeset page to look at, not
+            // a file anybody sends — so it does not overwrite `rmm build`'s.
+            pdfPath: previewPath(store, master ? 'master' : slug(resolved.id) || 'resume'),
             engine: data.config.latex.engine,
           });
           tex = compiled.tex;
@@ -4073,9 +4079,69 @@ export function createCurrentRouter(store: Store): Router {
   return router;
 }
 
+/**
+ * Where a preview PDF goes, and why it is not `out/<id>.pdf`.
+ *
+ * Two different faults shared one cause: the output path was a pure function
+ * of the resume id, so every writer of that resume raced for one file.
+ *
+ * The editor debounces its live preview at 350ms and a compile takes 0.4 to 7
+ * seconds, so overlapping renders are the ordinary case rather than a corner.
+ * Both wrote `out/base.pdf`; the shorter one finished last, and the request
+ * that asked for the *long* document was handed a `pdfUrl` serving the short
+ * one. Measured: a render answering `fits: true, pages: 1` whose own url
+ * served a three-page PDF. `renderToken` in the editor guards the stale
+ * *reply*; it cannot guard a file the discarded compile already overwrote.
+ *
+ * And `out/<id>.pdf` is what `rmm build` writes — a user-facing artifact the
+ * README names, compiled with the trusted engine. A preview is compiled with
+ * the fast path, which `fastCompile.ts` says in as many words must never
+ * produce a file meant to leave the machine. Opening the editor replaced it.
+ *
+ * So previews live in their own folder, under their own names, and are swept.
+ * `out/` is a folder the user opens; this one is dotted and disposable.
+ */
+const PREVIEW_DIR = '.previews';
+const PREVIEWS_KEPT = 40;
+
+function previewPath(store: Store, name: string): string {
+  const dir = path.join(store.outDir(), PREVIEW_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+
+  /*
+   * Swept by count rather than by age: a compile that is still running holds
+   * no lock on its file, and deleting the newest would be deleting the one
+   * about to be served. Oldest first, and a generous floor — forty is a few
+   * minutes of editing, and each is tens of kilobytes.
+   */
+  try {
+    const held = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.pdf') || f.endsWith('.tex'))
+      .map((f) => ({ f, at: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.at - a.at);
+    for (const { f } of held.slice(PREVIEWS_KEPT * 2)) fs.rmSync(path.join(dir, f), { force: true });
+  } catch {
+    // A folder that cannot be listed is not a reason to fail a preview.
+  }
+
+  return path.join(dir, `${name}-${randomUUID().slice(0, 8)}.pdf`);
+}
+
 /** Serve generated PDFs, constrained to the output directory. */
 export function createPdfRouter(store: Store): Router {
   const router = express.Router();
+  // Previews live one folder down, so they cannot collide with `out/<id>.pdf`
+  // and can be swept without touching anything the user put there.
+  router.get(`/${PREVIEW_DIR}/:name`, (req, res) => {
+    const dir = path.join(store.outDir(), PREVIEW_DIR);
+    const file = path.join(dir, path.basename(String(req.params.name)));
+    if (!file.startsWith(dir) || !fs.existsSync(file)) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    res.type('application/pdf').sendFile(file);
+  });
   router.get('/:name', (req, res) => {
     const name = path.basename(String(req.params.name));
     const file = path.join(store.outDir(), name);
