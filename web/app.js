@@ -4160,6 +4160,120 @@ function advanced(summary, ...children) {
   return box;
 }
 
+/**
+ * What the AI has been running, and whether the one running now is alive.
+ *
+ * The question a timeout cannot answer: a model part-way through a long
+ * reasoning pass and a CLI sitting on a prompt it will never read both end as
+ * "ran for longer than 180s and was stopped", and raising the timeout is the
+ * right move for exactly one of them. What tells them apart is whether
+ * anything has arrived lately, so that is what this leads with.
+ *
+ * Folded away and polled only while it is open. Nothing here is needed to use
+ * the tool; it is needed on the day the tool will not work.
+ */
+function aiActivityPanel() {
+  const list = el('div', { className: 'ai-runs' });
+  const note = el('div', { className: 'hint', textContent: 'Nothing has run yet this session.' });
+  const box = advanced('Advanced — what the AI has been running', note, list);
+
+  const seconds = (ms) => (ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
+
+  /*
+   * The sentence that decides what to do about it.
+   *
+   * "Running, quiet for 174s" and "Running, last spoke 2s ago" are the same
+   * state as far as any spinner is concerned and opposite as far as the person
+   * waiting is concerned.
+   */
+  const aliveness = (run) => {
+    if (run.outcome !== 'running') return run.note ?? '';
+    if (run.quietMs === null) return `nothing said yet, ${seconds(run.elapsedMs)} in`;
+    return run.quietMs > 20_000
+      ? `nothing for ${seconds(run.quietMs)} — it may be stuck`
+      : `last spoke ${seconds(run.quietMs)} ago`;
+  };
+
+  /** The tail of one run's output, fetched only when asked for. */
+  async function showOutput(run, into) {
+    into.textContent = 'Reading…';
+    try {
+      const full = await api(`/ai/activity/${encodeURIComponent(run.id)}`);
+      const said = (full.chunks ?? [])
+        .map((c) => `${String(Math.round(c.at / 100) / 10).padStart(6)}s ${c.stream === 'err' ? '!' : ' '} ${c.text.replace(/\n$/, '')}`)
+        .join('\n');
+      into.replaceChildren(
+        el('div', { className: 'hint', textContent: `${full.command} ${full.args.join(' ')}` }),
+        el('pre', {
+          className: 'ai-run-output',
+          textContent:
+            (full.dropped ? `… ${full.dropped} earlier bytes not kept\n` : '') +
+            (said || 'It printed nothing at all.'),
+        }),
+      );
+    } catch (err) {
+      into.textContent = err.message;
+    }
+  }
+
+  async function refresh() {
+    let activity;
+    try {
+      activity = await api('/ai/activity');
+    } catch {
+      // The store answering nothing is its own problem, reported elsewhere.
+      return false;
+    }
+    const runs = activity.recent ?? [];
+    note.hidden = runs.length > 0;
+    list.replaceChildren(
+      ...runs.map((run) => {
+        const output = el('div', { className: 'ai-run-detail', hidden: true });
+        const head = el('button', {
+          className: `ai-run ${run.outcome}`,
+          onclick: () => {
+            output.hidden = !output.hidden;
+            if (!output.hidden) void showOutput(run, output);
+          },
+        }, [
+          el('span', { className: 'ai-run-dot' }),
+          el('span', { className: 'ai-run-cmd', textContent: run.command }),
+          el('span', { className: 'ai-run-when', textContent: seconds(run.elapsedMs) }),
+          el('span', { className: 'ai-run-said', textContent: aliveness(run) }),
+        ]);
+        return el('div', { className: 'ai-run-row' }, [head, output]);
+      }),
+    );
+    return runs.some((r) => r.outcome === 'running');
+  }
+
+  /*
+   * Asked for only while somebody is looking, and only while something is
+   * moving. A panel nobody has opened should not be putting a request a
+   * second through a server that is busy running a model.
+   */
+  let timer = null;
+  const stop = () => {
+    clearInterval(timer);
+    timer = null;
+  };
+  box.addEventListener('toggle', () => {
+    stop();
+    if (!box.open) return;
+    void refresh();
+    timer = setInterval(() => {
+      if (!box.isConnected || !box.open) return stop();
+      void refresh().then((busy) => {
+        // Still poll when idle, slowly enough not to matter: a run can start
+        // from the extension while this is open.
+        if (!busy) return;
+      });
+    }, 1000);
+  });
+
+  return box;
+}
+
 function showPdf(frame, url) {
   let preview = previews.get(frame);
   if (!preview) {
@@ -7750,6 +7864,12 @@ async function loadSettings() {
      * what is going to run.
      */
     commandBlock,
+    /*
+     * Below the command, because it is a record of that command being run:
+     * what it did last time is the first thing worth reading when what it
+     * does this time is nothing.
+     */
+    aiActivityPanel(),
     el('div', { className: 'sandbox-note' }, [
       el('b', {}, 'Confined to a scratch directory. '),
       'The command runs in an empty temporary folder containing only the prompt — never your save folder, ' +

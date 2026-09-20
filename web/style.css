@@ -1750,3 +1750,72 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   color: #8a6400;
   background: #fff8e6;
 }
+
+/*
+ * What the AI has been running.
+ *
+ * A list whose job is to answer one question at a glance — is the thing that
+ * is running now alive? — so the dot and the aliveness line carry the weight
+ * and the command is secondary. A running row pulses; a stopped one does not,
+ * because a still dot beside "nothing for 174s" is the whole diagnosis.
+ */
+.ai-runs { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.ai-run-row { border-bottom: 1px solid var(--line-soft); }
+.ai-run-row:last-child { border-bottom: 0; }
+
+.ai-run {
+  display: grid;
+  grid-template-columns: 10px minmax(0, max-content) 4.5em minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 4px;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: inherit;
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+  cursor: pointer;
+  border-radius: var(--radius-sm, 4px);
+}
+.ai-run:hover { background: var(--line-soft); }
+.ai-run:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.ai-run-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.ai-run.ok .ai-run-dot { background: var(--good); }
+.ai-run.failed .ai-run-dot { background: var(--bad); }
+.ai-run.timeout .ai-run-dot { background: var(--warn); }
+.ai-run.running .ai-run-dot { background: var(--accent); animation: ai-run-pulse 1.4s ease-in-out infinite; }
+@keyframes ai-run-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .ai-run.running .ai-run-dot { animation: none; }
+}
+
+.ai-run-cmd { font-family: var(--mono, ui-monospace, monospace); color: var(--ink); }
+.ai-run-when { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.ai-run-said { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-run.timeout .ai-run-said { color: var(--warn); }
+.ai-run.failed .ai-run-said { color: var(--bad); }
+
+.ai-run-detail { padding: 2px 4px 10px 18px; }
+/*
+ * Wrapped rather than scrolled sideways, and capped in height: these CLIs
+ * emit progress lines by the hundred, and a pane that grows without limit
+ * pushes the Save button off the panel.
+ */
+.ai-run-output {
+  margin: 4px 0 0;
+  padding: 8px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--panel-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 4px);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--t-xs, 12px);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink-soft);
+}
