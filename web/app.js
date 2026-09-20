@@ -4210,15 +4210,20 @@ function aiActivityPanel() {
   const list = el('div', { className: 'ai-runs' });
   const box = advanced('Advanced — what the AI has been running', list);
   /*
-   * Not there at all until there is something in it.
+   * Always here, even with nothing in it yet.
    *
-   * The live view belongs beside the thing that is running — see
-   * `showLiveAiRun`, reachable from every AI button's own progress line while
-   * that run is going. This is only the way back to a run that has already
-   * ended, which on a fresh server is no runs, and a permanently-present
-   * disclosure promising a list that is always empty is furniture.
+   * It used to hide itself until a run had happened, on the reasoning that a
+   * disclosure promising an empty list is furniture. That was wrong about what
+   * the thing is for. Asked for it, the answer was: "I don't actually see a
+   * way to see the inner working of the AI assistant" — and there was not one,
+   * because the live chips only exist while something is running and this only
+   * existed after something had. On a fresh page there was no entry point
+   * anywhere, which is precisely when somebody looking for one is looking.
+   *
+   * A closed disclosure costs a line. Knowing the window exists before you
+   * need it is the whole point of a window.
    */
-  box.hidden = true;
+  box.hidden = false;
 
   const seconds = (ms) => (ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
@@ -4288,7 +4293,8 @@ function aiActivityPanel() {
       return false;
     }
     const runs = activity.recent ?? [];
-    box.hidden = runs.length === 0;
+    // Stays put whether or not there is anything to list; the empty state
+    // below says so in words. See the note where `box` is made.
     list.replaceChildren(
       ...runs.map((run) => {
         const output = el('div', { className: 'ai-run-detail', hidden: true });
@@ -4360,7 +4366,9 @@ function aiActivityPanel() {
  */
 async function showLiveAiRun(doing = 'the AI') {
   const body = el('div', { className: 'ai-live' }, el('div', { className: 'hint', textContent: 'Looking…' }));
-  showModal(`What ${doing.toLowerCase()} is doing`, body);
+  // Whether a run was expected, which decides what "nothing here" means below.
+  const busy = drafting.size > 0;
+  showModal(busy ? `What ${doing.toLowerCase()} is doing` : 'What the AI has been doing', body);
 
   let stopped = false;
   const closer = $('#modal-ok');
@@ -4381,8 +4389,22 @@ async function showLiveAiRun(doing = 'the AI') {
     // The newest, running or just finished: the one that was pressed for.
     const newest = (list.recent ?? [])[0];
     if (!newest) {
+      /*
+       * Two ways to arrive at nothing, and they want different sentences.
+       * Opened from a button that has just started something, "no run" means
+       * that step does not use the AI. Opened from the header while nothing is
+       * happening — which is now possible, and is the ordinary way somebody
+       * looks — it means the server has not run anything yet, which is not a
+       * fault and should not read like one.
+       */
       body.replaceChildren(
-        el('div', { className: 'hint', textContent: 'No AI run has started. This may not be an AI step.' }),
+        el('div', {
+          className: 'hint',
+          textContent: busy
+            ? 'No AI run has started. This may not be an AI step.'
+            : 'Nothing has run yet. This is where an AI run shows what it was given and what it said — ' +
+              'open it again while something is drafting to watch it happen.',
+        }),
       );
       return false;
     }
@@ -6176,13 +6198,28 @@ function renderDraftingChip() {
    * model was given and what it has said are only worth looking at while it is
    * saying them.
    */
+  /*
+   * Always there, and louder while something is running.
+   *
+   * It used to disappear when nothing was going, which sounded tidy and meant
+   * that on a page where no AI had run yet there was no way in at all — the
+   * one state somebody hunting for one is actually in. Asked for it: "I don't
+   * actually see a way to see the inner working of the AI assistant."
+   *
+   * So it is a permanent, quiet button that names itself, and takes the clock
+   * and the emphasis when there is a live run to name. Idle it opens the last
+   * few runs; busy it opens the one that is going.
+   */
   const peek = $('#ai-peek-chip');
   if (peek) {
-    peek.className = running.length === 0 ? 'jobs-chip peek hidden' : 'jobs-chip peek';
-    peek.onclick =
-      running.length === 0
-        ? null
-        : () => showLiveAiRun(running.reduce((a, b) => (a.started <= b.started ? a : b)).what);
+    const live = running.length > 0;
+    peek.className = live ? 'jobs-chip peek busy' : 'jobs-chip peek';
+    peek.textContent = live ? 'What it’s doing' : 'What the AI is doing';
+    peek.title = live
+      ? 'The prompt it was given, and what it has said so far'
+      : 'The last few AI runs — what they were given, and what they said';
+    peek.onclick = () =>
+      showLiveAiRun(live ? running.reduce((a, b) => (a.started <= b.started ? a : b)).what : 'the AI');
   }
 
   if (running.length === 0) {
@@ -8900,6 +8937,17 @@ function setupTabs() {
 }
 
 async function boot() {
+  /*
+   * Wire the toolbar's chips once, at the start.
+   *
+   * This only ever ran from `startDrafting`, which is to say only once some
+   * AI work had begun — so on a freshly loaded page the "What the AI is
+   * doing" button was drawn by the markup and had no click handler attached
+   * to it at all. It looked like a way in and was not one, which is worse
+   * than not being there.
+   */
+  renderDraftingChip();
+
   $('#feedback-close').onclick = () => { $('#feedback-panel').hidden = true; };
   $('#feedback-select').onchange = event => {
     const job = feedbackJobs.find(item => item.id === event.target.value);

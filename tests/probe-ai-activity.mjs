@@ -91,17 +91,21 @@ try {
   page.on('pageerror', (e) => errors.push(String(e.message ?? e).slice(0, 140)));
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded' });
+    // The header button, before anything has run: the state somebody hunting
+    // for a way in is actually in.
+    const header = page.locator('#ai-peek-chip');
+    await page.waitForTimeout(1500);
+    console.log('header button on a fresh page  :', await header.isVisible(), JSON.stringify(await header.innerText()));
+    await header.click();
+    await page.waitForTimeout(800);
+    console.log('  opens a window               :', await page.locator('.ai-live').isVisible());
+    console.log('  it says                      :', JSON.stringify((await page.locator('.ai-live .hint').first().innerText()).slice(0, 80)));
+    await page.click('#modal-ok');
+
     await page.click('[data-tab="voice"]');
     const panel = page.locator('details.advanced', { hasText: 'what the AI has been running' });
     await page.waitForTimeout(2500);
-    // Hidden away until there is something to show, which on a fresh server
-    // is nothing.
     console.log('panel on a fresh server is showing:', await panel.isVisible());
-
-    // Two ways in, both appearing only while something is running: one beside
-    // the clock on the button that started it, one in the header for every
-    // action that does not draft into a panel at all.
-    console.log('header peek before anything runs:', await page.locator('#ai-peek-chip').isVisible());
     await page.click('button:has-text("Save and test")');
     const peek = page.locator('.ai-peek');
     await peek.waitFor({ timeout: 20_000 });
