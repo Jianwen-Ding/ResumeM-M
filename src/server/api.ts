@@ -66,6 +66,7 @@ import type {
   Profile,
   ResolvedResume,
   ResumeSpec,
+  SectionSpec,
   SkillGroup,
   StoreData,
   Variant,
@@ -368,6 +369,45 @@ function sentBefore(
  * started. So "there is a file" is not the question — "is there a move in it"
  * is, and when there is not, the reply is read as JSON instead.
  */
+/**
+ * The AI's sections, keeping the narrowed skills the keyword match chose.
+ *
+ * Two things want to write `spec.sections` and they overlap in exactly one
+ * place. `deriveSpec` copies the base's sections and narrows the skills lists
+ * to what the posting asked for; `applyInclusion` copies the *same* base's
+ * sections and applies what the AI decided — what is shown, what is hidden,
+ * and what order it goes in. So the AI's version already carries everything
+ * the base had, and the only thing it is missing is the narrowed `items`.
+ *
+ * It used to be written the other way round — the AI's sections first and
+ * `deriveSpec`'s spread over the top, with `entries` and `bullets` named
+ * afterwards to put them back. `order` and `bulletOrder` were not named, and
+ * they are precisely what `applyInclusion` sets to `manual` to say the AI
+ * arranged this itself. `Store.load()` runs `adoptDateOrder` over every
+ * resume, so the base carries a date sort for very nearly every section, and
+ * the spread restored it: `manual` became `newest` and the arrangement was
+ * restacked into date order on the way to the page.
+ *
+ * Silently, and the tool had already told the model it worked — "experience
+ * will read: exp_old, exp_new" — which is the shape of failure that the
+ * comments in `applyInclusion` say the `manual` flags exist to prevent. They
+ * did their job; this call site undid it one line later.
+ *
+ * Naming the one field that actually differs, rather than spreading a whole
+ * object and patching up whatever it broke, is what stops the next field
+ * being lost the same way.
+ */
+function withNarrowedSkills(
+  decided: SectionSpec[],
+  derived: ResumeSpec['sections'],
+): SectionSpec[] {
+  const items = new Map((derived ?? []).map((s) => [s.kind, s.items]));
+  return decided.map((s) => {
+    const narrowed = items.get(s.kind);
+    return narrowed ? { ...s, items: narrowed } : s;
+  });
+}
+
 function decidedAnything(state: SessionState): boolean {
   const { plan, suggestions, reasoning } = state;
   return (
@@ -2141,10 +2181,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // Showing and hiding entries or bullets, the other half of what the AI
       // is allowed to do. Merged over whatever deriveSpec built for skills.
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
-      if (inclusion) {
-        const bySkills = new Map((spec.sections ?? []).map((s) => [s.kind, s]));
-        spec.sections = inclusion.map((s) => ({ ...s, ...(bySkills.get(s.kind) ?? {}), entries: s.entries, bullets: s.bullets }));
-      }
+      if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
 
       // What the tailoring actually did to the document, in the same words the
       // version history uses: the sentence it replaced and the one it chose.
@@ -3131,10 +3168,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         role: draft.role,
       }, data.resumes);
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
-      if (inclusion) {
-        const bySkills = new Map((spec.sections ?? []).map((sec) => [sec.kind, sec]));
-        spec.sections = inclusion.map((sec) => ({ ...sec, ...(bySkills.get(sec.kind) ?? {}), entries: sec.entries, bullets: sec.bullets }));
-      }
+      if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
 
       await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => store.saveResume(spec));
 

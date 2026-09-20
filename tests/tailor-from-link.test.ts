@@ -236,6 +236,37 @@ describe('analysing a posting with the AI switched on', () => {
     expect(res.body.rationale.some((r: { key: string }) => r.key === 'b_pipeline')).toBe(true);
   });
 
+  /*
+   * The arrangement the model chose has to survive the trip to the document.
+   *
+   * `applyInclusion` marks a section it has reordered `manual`, precisely so
+   * the master's date sort does not restack it on the way to the page. The
+   * endpoint then merged the derived spec over the top and named `entries`
+   * and `bullets` to put them back, but not `order` — and `Store.load()`
+   * gives very nearly every section a date sort, so `manual` became `newest`
+   * and the model's order was undone. Silently, after the tool had already
+   * told the model it had worked.
+   *
+   * Asserted on the section rather than on the plan, because the plan was
+   * always right: it is the resume that came out wrong.
+   */
+  it('keeps the order the model chose, rather than restacking it by date', async () => {
+    serve(JSON.stringify({
+      entryOrder: { experience: ['exp_acme'] },
+      order: { exp_acme: ['b_testing', 'b_pipeline'] },
+    }));
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+
+    const experience = res.body.spec.sections.find((s: { kind: string }) => s.kind === 'experience');
+    expect(res.body.aiUsed).toBe(true);
+    // The lines, in the order asked for.
+    expect(experience.bullets.exp_acme).toEqual(['b_testing', 'b_pipeline']);
+    // And the resume saying it arranged them itself, which is what makes the
+    // line above survive rendering.
+    expect(experience.order).toBe('manual');
+    expect(experience.bulletOrder?.exp_acme).toBe('manual');
+  });
+
   it('discards a choice the model invented', async () => {
     // The AI selects; it never writes. Anything that is not an id it could
     // have chosen from is dropped before it reaches a resume.
