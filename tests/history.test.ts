@@ -193,6 +193,77 @@ describe('a resume version history', () => {
       .expect(200);
     expect(texts((await history())[0]!)).toContain('Renamed to "New grad 2026"');
   });
+
+  /*
+   * A save busy enough that this resume's own commits fall out of the window.
+   *
+   * The scan is over *all* commits — every save here is one: entries,
+   * applications, letters, answers, drafts, sweeps, AI activity — so a store
+   * in regular use passes the three-hundred cap quickly. Once it does,
+   * `previous` is still undefined at the oldest commit in the window, and
+   * `diffResumes` unconditionally calls that the first version.
+   *
+   * Measured before the fix, with one real edit and 130 commits touching only
+   * a note: the timeline showed a single card reading "Unrelated note 10 —
+   * First version, 4 sections, 4 bullet points". The real first version and
+   * the real change were gone; a commit that never touched this resume was
+   * presented as the moment it was created; and since the newest card is
+   * badged "Current" and given no Restore button, the whole of that resume's
+   * history had become unreachable from the editor.
+   */
+  describe('when the scan window runs out before the history does', () => {
+    const noise = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        fs.writeFileSync(path.join(t.dir, 'notes.md'), `note ${i}\n`, 'utf8');
+        await repo.commitAll(`Unrelated note ${i}`);
+      }
+    };
+
+    it('does not present an unrelated commit as the resume being created', async () => {
+      await request(app)
+        .put('/api/resumes/newgrad')
+        .send({ label: 'New grad', extends: 'base', choices: { 'edu_neu.dates': 'v_dec2026' } })
+        .expect(200);
+      // Past the cap, so the window cannot reach either of the two above.
+      await noise(310);
+
+      const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
+      const versions = res.body.versions as { message: string; changes: { text: string }[]; earliest?: boolean }[];
+      expect(versions.length).toBeGreaterThan(0);
+      const oldest = versions[versions.length - 1]!;
+      expect(oldest.changes.map((c) => c.text).join(' ')).not.toMatch(/First version/);
+      expect(oldest.earliest).toBe(true);
+      // And the caller is told there is more, so it can ask for it.
+      expect(res.body.more).toBe(true);
+    });
+
+    it('still calls the real first version the first version', async () => {
+      // A short history the window reaches the beginning of.
+      const res = await request(app).get('/api/resumes/newgrad/history').expect(200);
+      const versions = res.body.versions as { changes: { text: string }[]; earliest?: boolean }[];
+      const oldest = versions[versions.length - 1]!;
+      expect(oldest.changes.map((c) => c.text).join(' ')).toMatch(/First version/);
+      expect(oldest.earliest).toBeUndefined();
+      expect(res.body.more).toBe(false);
+    });
+
+    it('says when it kept only the newest of what it found', async () => {
+      for (let i = 0; i < 6; i++) {
+        await request(app)
+          .put('/api/resumes/newgrad')
+          .send({ label: `New grad v${i}`, extends: 'base' })
+          .expect(200);
+      }
+      const res = await request(app).get('/api/resumes/newgrad/history?limit=3').expect(200);
+      expect(res.body.versions).toHaveLength(3);
+      expect(res.body.more).toBe(true);
+
+      // And asking for more gets more, which is what `more` is for.
+      const all = await request(app).get('/api/resumes/newgrad/history?limit=50').expect(200);
+      expect(all.body.versions.length).toBeGreaterThan(3);
+      expect(all.body.more).toBe(false);
+    });
+  });
 });
 
 describe('auto-save writes', () => {
@@ -409,6 +480,39 @@ describe('restoring a version', () => {
     expect(restored.body.warnings.length).toBeGreaterThan(1);
 
     void before;
+  });
+
+  /*
+   * With the history switched off, the restore still goes into the history.
+   *
+   * The two commits in this route used to disagree: the outgoing version was
+   * filed unconditionally, the incoming one went through `autoCommit()`. So
+   * with the setting off the version being thrown away was written into the
+   * history and the version replacing it was not, and the timeline showed the
+   * *discarded* document at the top — badged "Current", given no Restore
+   * button — with the one actually on disk below it offering to be restored.
+   *
+   * Auto-commit is about keystrokes. This is a button somebody pressed to
+   * throw work away, which is exactly what the history is for.
+   */
+  it('files the restored version too, even with auto-commit off', async () => {
+    const original = await history();
+    const originalHash = original[0]!.hash;
+
+    await request(app)
+      .put('/api/resumes/newgrad')
+      .send({ label: 'New grad', extends: 'base', choices: { 'edu_neu.dates': 'v_dec2026' } })
+      .expect(200);
+
+    t.write('config.yaml', { ai: { enabled: false }, git: { autoCommit: false }, output: { dir: 'out' } });
+    await request(app).post(`/api/resumes/newgrad/history/${originalHash}/restore`).expect(200);
+
+    const after = await history();
+    expect(after[0]?.message).toBe('Restore "newgrad" to an earlier version');
+    // And the top of the timeline is the document that is actually on disk.
+    const onDisk = t.store.getResume('newgrad')?.choices?.['edu_neu.dates'];
+    expect(onDisk).toBe('v_may2026');
+    expect((await request(app).get('/api/config/store').expect(200)).body.pending).toEqual([]);
   });
 
   /*

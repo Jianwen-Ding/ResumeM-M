@@ -2325,6 +2325,28 @@ describe('a resume saved with a base it used to inherit from', () => {
 });
 
 describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, () => {
+  /*
+   * An application that does not want a cover letter.
+   *
+   * The card sends `coverLetter: state.letter`, and `state.letter` is `null`
+   * on every posting that does not ask for one — which is most of them. JSON
+   * carries that null through, so the route has to survive it: for one build
+   * it did not, and every letterless "Submit" came back "Cannot read
+   * properties of null (reading 'trim')" with no folder written. Asserted
+   * through the route rather than through `buildBundle`, because the type
+   * says `string | undefined` and the wire says otherwise.
+   */
+  it('files an application whose cover letter is explicitly nothing', async () => {
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern', coverLetter: null, answers: null })
+      .expect(200);
+
+    expect(res.body.application.coverLetter).toBeUndefined();
+    expect(res.body.files).toContain('Test-Person-Resume.pdf');
+    expect(res.body.files.join(' ')).not.toContain('Cover-Letter');
+  });
+
   it('hands back the flat folder alongside the archive it just wrote', async () => {
     const res = await request(app)
       .post('/api/applications/bundle')

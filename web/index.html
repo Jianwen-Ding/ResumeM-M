@@ -266,6 +266,13 @@
       <button id="btn-raw-history" class="tiny">Show raw git log instead</button>
     </div>
 
+    <!--
+      What a restore could not put back, said where the restore happened.
+      The Build tab's #warnings is about compiling and is on another tab; a
+      note about a half-restore has to be beside the timeline it came from.
+    -->
+    <div id="restore-note" class="warnings" hidden></div>
+
     <div id="resume-timeline" class="timeline-list"></div>
 
     <div id="raw-history" class="history-split" style="display:none">

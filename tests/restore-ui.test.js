@@ -26,6 +26,8 @@ describe('restoring a version', () => {
   let data;
   let requests;
   let releaseSave;
+  /** What the server says it could not put back, set by the test that cares. */
+  let warnings;
 
   const versions = [
     { hash: 'now000', date: '2026-09-18T10:00:00Z', message: 'Edited', changes: [] },
@@ -54,6 +56,7 @@ describe('restoring a version', () => {
     fixture.cleanup();
     requests = [];
     releaseSave = null;
+    warnings = [];
     vi.stubGlobal('confirm', () => true);
 
     vi.stubGlobal(
@@ -67,7 +70,7 @@ describe('restoring a version', () => {
         else if (url === '/api/ai/jobs') result = { jobs: [] };
         else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
         else if (String(url).includes('/history/') && String(url).endsWith('/restore')) {
-          result = { id: 'newgrad', label: 'New grad', warnings: [] };
+          result = { id: 'newgrad', label: 'New grad', warnings };
         } else if (String(url).includes('/history')) result = { versions };
         else if (String(url).startsWith('/api/resumes/') && method === 'PUT') {
           // The write the flush waits on, held open when a test asks.
@@ -162,5 +165,41 @@ describe('restoring a version', () => {
 
     expect(requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/resumes/')).length).toBe(wrote);
     expect(document.querySelector('#btn-undo').disabled).toBe(true);
+  });
+
+  /*
+   * A restore that only half happened must not be reported as a whole one.
+   *
+   * The endpoint compares the document as it was at that commit against the
+   * document as it is now and returns the difference in words, precisely so
+   * this can be said: the rest of that version can live in a bullet, a date
+   * or a profile this resume shares with others, and those are left alone
+   * rather than changed for every resume at once. The reply carried the
+   * explanation and the editor threw it away, so the document came back
+   * visibly not matching the version just clicked, under the word "Restored."
+   */
+  it('says what the restore could not put back', async () => {
+    warnings = [
+      'Some of that version is in things this resume shares with others — a bullet, a date, your profile, ' +
+        'or the resume this one is built on — so they were left alone rather than changed for every resume at once.',
+      'Acme Co.: dropped "Built a pipeline handling 2M events/day"',
+    ];
+
+    await openHistory('newgrad');
+    restoreButton().click();
+    await vi.waitFor(() => expect(restored()).toHaveLength(1));
+
+    const note = document.querySelector('#restore-note');
+    await vi.waitFor(() => expect(note.hidden).toBe(false));
+    expect(note.textContent).toMatch(/shares with others/i);
+    expect(note.textContent).toMatch(/2M events\/day/);
+  });
+
+  it('and says nothing when the whole of it came back', async () => {
+    await openHistory('newgrad');
+    restoreButton().click();
+    await vi.waitFor(() => expect(restored()).toHaveLength(1));
+    await new Promise((settle) => setTimeout(settle, 30));
+    expect(document.querySelector('#restore-note').hidden).toBe(true);
   });
 });

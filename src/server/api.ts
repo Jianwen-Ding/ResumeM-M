@@ -3696,9 +3696,31 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // Every commit is a candidate: any of the store's content files can
       // change this resume. Scan a generous window and keep the ones that
       // actually moved the document.
-      const commits = await repo.log(Math.min(Math.max(want * 4, 60), 300));
+      const scan = Math.min(Math.max(want * 4, 60), 300);
+      const commits = await repo.log(scan);
+      /*
+       * Did the window reach the beginning of the save, or merely run out?
+       *
+       * The window is over *all* commits, and every save in this application
+       * is a commit — entries, applications, letters, answers, drafts, sweeps,
+       * AI activity — so a store in regular use passes three hundred quickly.
+       * Once this resume's own commits fall outside it, `previous` is still
+       * undefined at the oldest commit the window holds, and `diffResumes`
+       * unconditionally calls that the first version. Measured: one real edit
+       * and a hundred and thirty commits touching nothing else, and the
+       * timeline showed a single card reading "Unrelated note 10 — First
+       * version, 4 sections, 4 bullet points". The real first version and the
+       * real change were gone, the resume was said to have been created by a
+       * commit that never touched it, and because the newest card is badged
+       * "Current" and given no Restore button, the whole of that resume's
+       * history had become unreachable.
+       *
+       * `log` returns fewer than asked for only when there are no more, so
+       * this is the honest test.
+       */
+      const reachedStart = commits.length < scan;
       if (commits.length === 0) {
-        res.json({ versions: [] });
+        res.json({ versions: [], more: false });
         return;
       }
 
@@ -3750,18 +3772,39 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // Unchanged document: not a version of this resume.
         if (previous && sameDocument(previous, resolved)) continue;
 
+        /*
+         * "First version" is a claim about the save, not about the window.
+         * When the window merely ran out, the oldest thing in it is the
+         * oldest thing *shown* — and saying which is the difference between
+         * a timeline and a timeline that has quietly lost its beginning.
+         */
+        const opening = previous === undefined;
+        const cutOff = opening && !reachedStart;
         versions.push({
           hash: c.hash,
           date: c.date,
           message: c.message,
           label: resolved.label,
-          changes: diffResumes(previous, resolved),
+          // Nothing rather than "First version": there is no earlier document
+          // here to diff against, only an earlier document we did not read.
+          changes: cutOff ? [] : diffResumes(previous, resolved),
+          ...(cutOff ? { earliest: true } : {}),
         });
         previous = resolved;
       }
 
-      // Newest first for display.
-      res.json({ versions: versions.slice(-want).reverse() });
+      /*
+       * Newest first for display, and say when there is more.
+       *
+       * Two ways for a version to be missing from this reply and the caller
+       * cannot tell them apart from the list alone: the slice below, and the
+       * scan window above. Both are answered by asking again with a larger
+       * `limit`, so both are reported the same way.
+       */
+      res.json({
+        versions: versions.slice(-want).reverse(),
+        more: versions.length > want || !reachedStart,
+      });
     }),
   );
 
@@ -3856,9 +3899,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
       restored.id = id; // the filename remains the source of truth for the id
 
-      await withCommit(repo, autoCommit(), `Restore "${id}" to an earlier version`, () =>
-        store.saveResume(restored),
-      );
+      /*
+       * Committed whether or not auto-commit is on, for the same reason the
+       * outgoing version was filed above.
+       *
+       * The two used to disagree — the filing commit was unconditional and
+       * this one went through `autoCommit()` — so with the setting off the
+       * version being replaced was written into the history and the version
+       * replacing it was not. The timeline then showed the *discarded*
+       * document at the top, badged "Current" and given no Restore button,
+       * with the one actually on disk sitting below it offering to be
+       * restored. The restore was invisible in the history it claims to be
+       * preserved by.
+       *
+       * Auto-commit is about keystrokes: it exists so that a sitting is one
+       * version rather than one per edit. This is a button somebody pressed
+       * to throw work away, which is exactly the kind of moment the history
+       * is for.
+       */
+      await withCommit(repo, true, `Restore "${id}" to an earlier version`, () => store.saveResume(restored));
 
       /*
        * Did it land? Compare what the resume resolves to now against what it

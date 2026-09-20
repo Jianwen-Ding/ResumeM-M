@@ -8320,6 +8320,14 @@ async function loadSettings() {
 
 let selectedCommit = null;
 let historyResumeId = null;
+/**
+ * How far back to ask for, which the button at the bottom of the timeline
+ * raises. Thirty was the server's default and the only value there was, so
+ * everything past it — including, on a busy save, the resume's whole real
+ * history — was simply absent with nothing saying so.
+ */
+const HISTORY_PAGE = 30;
+let historyWanted = HISTORY_PAGE;
 
 /**
  * The friendly, Google-Docs-style view: every version *this one resume* has
@@ -8346,9 +8354,12 @@ async function loadResumeHistory() {
   }
 
   timeline.replaceChildren(skeleton('versions', 4));
+  showRestoreNote([]);
   try {
-    const { versions } = await api(`/resumes/${encodeURIComponent(historyResumeId)}/history`);
-    renderResumeTimeline(versions);
+    const { versions, more } = await api(
+      `/resumes/${encodeURIComponent(historyResumeId)}/history?limit=${historyWanted}`,
+    );
+    renderResumeTimeline(versions, Boolean(more));
   } catch (err) {
     timeline.replaceChildren(el('div', { className: 'err', textContent: err.message }));
   }
@@ -8406,7 +8417,7 @@ function changeRow(c) {
   return el('div', { className: `c ${c.kind}` }, [where, el('span', { className: 'c-plain', textContent: detail })]);
 }
 
-function renderResumeTimeline(versions) {
+function renderResumeTimeline(versions, more = false) {
   const timeline = $('#resume-timeline');
   if (versions.length === 0) {
     timeline.replaceChildren(
@@ -8435,9 +8446,17 @@ function renderResumeTimeline(versions) {
         el(
           'div',
           { className: 'changes' },
-          changes.length > 0
-            ? changes.map(changeRow)
-            : [el('div', { className: 'c', textContent: v.message || 'Edited' })],
+          /*
+           * `earliest` means the scan stopped here, not that the resume
+           * started here. Without it this card fell back to the commit
+           * message — which, on a busy save, is some unrelated commit's
+           * message presented as the moment this resume was created.
+           */
+          v.earliest
+            ? [el('div', { className: 'c muted', textContent: 'The oldest version shown — there are older ones further back.' })]
+            : changes.length > 0
+              ? changes.map(changeRow)
+              : [el('div', { className: 'c', textContent: v.message || 'Edited' })],
         ),
         el('div', { className: 'actions-row' }, [
           isCurrent
@@ -8451,6 +8470,30 @@ function renderResumeTimeline(versions) {
       ]);
     }),
   );
+
+  /*
+   * And a way to the rest of it.
+   *
+   * The server scans a window of the store's commits and then keeps the
+   * newest `limit` of what it found, so two different cut-offs could hide a
+   * version — and neither said anything. The reply reports either as `more`,
+   * and the answer to both is the same: ask again for more.
+   */
+  if (more) {
+    timeline.append(
+      el('div', { className: 'actions-row' }, [
+        el('button', {
+          className: 'tiny',
+          textContent: 'Show older versions',
+          onclick: (event) => {
+            event.currentTarget.disabled = true;
+            historyWanted += HISTORY_PAGE;
+            void loadResumeHistory();
+          },
+        }),
+      ]),
+    );
+  }
 }
 
 async function restoreResumeVersion(hash) {
@@ -8478,7 +8521,7 @@ async function restoreResumeVersion(hash) {
      * the opposite of what the version history is for.
      */
     if (wanted === state.resumeId) await flushEdits();
-    await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
+    const back = await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });
     /*
@@ -8491,7 +8534,21 @@ async function restoreResumeVersion(hash) {
      * no sign that the version somebody had just gone to fetch was gone.
      */
     forgetHistory();
-    setStatus('Restored.');
+    /*
+     * And what the server said about how much of that version actually came
+     * back, which this used to throw away.
+     *
+     * The endpoint compares the document as it was at that commit against the
+     * document as it is now and reports the difference, precisely so a
+     * half-restore is not announced as a whole one: the rest of that version
+     * can live in a bullet, a date or a profile this resume shares with
+     * others, and those are left alone rather than changed for every resume
+     * at once. The reply carried the explanation and the editor discarded it,
+     * so the document came back visibly not matching the version that had
+     * just been clicked, under the word "Restored."
+     */
+    const said = Array.isArray(back?.warnings) ? back.warnings : [];
+    setStatus(said.length > 0 ? 'Restored — some of it was left alone. See the note above.' : 'Restored.', said.length > 0);
     await loadStore();
     if (wanted === state.resumeId) {
       clearEdits();
@@ -8500,9 +8557,20 @@ async function restoreResumeVersion(hash) {
       scheduleRender();
     }
     await loadResumeHistory();
+    // After the reload, which clears it: the note is about the restore that
+    // has just happened, not about the timeline being redrawn.
+    showRestoreNote(said);
   } catch (err) {
     setStatus(err.message, true);
   }
+}
+
+/** What a restore could not put back, beside the timeline it came from. */
+function showRestoreNote(lines) {
+  const note = $('#restore-note');
+  if (!note) return;
+  note.hidden = lines.length === 0;
+  note.replaceChildren(...lines.map((w) => el('div', { textContent: w })));
 }
 
 function setupHistoryTab() {

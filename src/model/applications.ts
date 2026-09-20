@@ -639,6 +639,13 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
        * The letter keeps its own shape: an empty string still clears it, so
        * "I decided not to send one" remains sayable, and only an absent field
        * means "leave it alone".
+       *
+       * `?.trim()`, and the optional chaining is load-bearing. The card sends
+       * `coverLetter: state.letter`, and `state.letter` is `null` on every
+       * application that does not want one — so dropping it turned every
+       * letterless "Submit" into "Cannot read properties of null (reading
+       * 'trim')". Caught by the ATS walk, where the first posting wanted a
+       * letter and the next fifteen did not.
        */
       url: req.url ?? before?.url,
       appliedAt: before?.appliedAt ?? now,
@@ -649,7 +656,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       notes: req.notes ?? before?.notes,
       answers: req.answers ?? before?.answers,
       coverLetter:
-        req.coverLetter === undefined ? before?.coverLetter : req.coverLetter.trim() || undefined,
+        req.coverLetter === undefined ? before?.coverLetter : req.coverLetter?.trim() || undefined,
       history: [
         ...(before?.history ?? []),
         { at: now, status, note: before ? 'Files rebuilt' : 'Bundle created' },
