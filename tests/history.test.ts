@@ -5,7 +5,7 @@ import express from 'express';
 import request from 'supertest';
 import { createApi } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
-import { makeTempStore, SAMPLE_EXPERIENCE, type TempStore } from './helpers.js';
+import { makeTempStore, noiseCommits, SAMPLE_EXPERIENCE, type TempStore } from './helpers.js';
 
 /**
  * The version history reads real commits back off disk, so these tests use a
@@ -212,12 +212,7 @@ describe('a resume version history', () => {
    * history had become unreachable from the editor.
    */
   describe('when the scan window runs out before the history does', () => {
-    const noise = async (n: number) => {
-      for (let i = 0; i < n; i++) {
-        fs.writeFileSync(path.join(t.dir, 'notes.md'), `note ${i}\n`, 'utf8');
-        await repo.commitAll(`Unrelated note ${i}`);
-      }
-    };
+    const noise = (n: number) => noiseCommits(t.dir, n);
 
     it('does not present an unrelated commit as the resume being created', async () => {
       await request(app)

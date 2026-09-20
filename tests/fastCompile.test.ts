@@ -51,23 +51,39 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
     resetFastPathCache();
     await hasFastPath(); // warm the availability check, not the format cache
 
-    const r = resume(2);
-    const t0 = Date.now();
-    await compileFast(r, r.layout);
-    const fastMs = Date.now() - t0;
+    /*
+     * The one test that must actually run the engine.
+     *
+     * Everything else in the suite is happy to be answered from the compiled-
+     * document cache `tests/setup.ts` switches on, which is the point of it.
+     * Here the number being compared *is* the engine's running time, and a
+     * cache hit would time a file copy instead — reporting the trusted path as
+     * faster than the fast one, or, worse, passing for the wrong reason.
+     */
+    const saved = process.env.RMM_COMPILE_CACHE;
+    delete process.env.RMM_COMPILE_CACHE;
+    try {
+      const r = resume(2);
+      const t0 = Date.now();
+      await compileFast(r, r.layout);
+      const fastMs = Date.now() - t0;
 
-    const t1 = Date.now();
-    await compileResume(r, {}); // default mode: 'final', the trusted engine
-    const trustedMs = Date.now() - t1;
+      const t1 = Date.now();
+      await compileResume(r, {}); // default mode: 'final', the trusted engine
+      const trustedMs = Date.now() - t1;
 
-    // The format is now warm; a second fast compile should not pay the
-    // package-loading cost the trusted engine pays on every run.
-    const t2 = Date.now();
-    await compileFast(r, r.layout);
-    const warmFastMs = Date.now() - t2;
+      // The format is now warm; a second fast compile should not pay the
+      // package-loading cost the trusted engine pays on every run.
+      const t2 = Date.now();
+      await compileFast(r, r.layout);
+      const warmFastMs = Date.now() - t2;
 
-    expect(warmFastMs).toBeLessThan(trustedMs);
-    void fastMs;
+      expect(warmFastMs).toBeLessThan(trustedMs);
+      void fastMs;
+    } finally {
+      if (saved === undefined) delete process.env.RMM_COMPILE_CACHE;
+      else process.env.RMM_COMPILE_CACHE = saved;
+    }
   });
 
   it('is used, and reported as used, through the preview mode', async () => {

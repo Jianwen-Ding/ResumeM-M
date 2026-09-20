@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
@@ -2101,6 +2101,23 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
    * built from the copy read first.
    */
   it('does not discard what was typed while the bundle compiled', async () => {
+    /*
+     * The one place in this file that wants the engine to be slow.
+     *
+     * The premise is a window — the seconds between the draft being read and
+     * the bundle being written — and the test writes into it. Answered from
+     * the compiled-document cache `tests/setup.ts` switches on, the window
+     * closes before the write arrives, nothing overlaps, and the test fails
+     * for the one reason that is not a bug. Compiling for real is what it was
+     * always doing and is what makes the window exist.
+     */
+    const cache = process.env.RMM_COMPILE_CACHE;
+    delete process.env.RMM_COMPILE_CACHE;
+    onTestFinished(() => {
+      if (cache === undefined) delete process.env.RMM_COMPILE_CACHE;
+      else process.env.RMM_COMPILE_CACHE = cache;
+    });
+
     const created = await request(app)
       .post('/api/workspace')
       .send({
