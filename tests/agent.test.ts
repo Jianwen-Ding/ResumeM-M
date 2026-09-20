@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { AgentError, explainSilence, extractJson, runAgent, trimToLetter, unwrapAgentFraming } from '../src/ai/agent.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { AgentError, explainSilence, extractJson, runAgent, tidyUp, trimToLetter, unwrapAgentFraming } from '../src/ai/agent.js';
 import { AI_PRESETS } from '../src/ai/presets.js';
 import { DEFAULT_CONFIG, type StoreConfig } from '../src/model/types.js';
 import { repairAiArgs } from '../src/model/store.js';
@@ -7,6 +10,53 @@ import { repairAiArgs } from '../src/model/store.js';
 function config(patch: Partial<StoreConfig['ai']>): StoreConfig {
   return { ...DEFAULT_CONFIG, ai: { ...DEFAULT_CONFIG.ai, ...patch } };
 }
+
+/*
+ * Taking the scratch directory away must never be the thing that fails.
+ *
+ * It ran unguarded in a `finally`, so a removal that threw replaced whatever
+ * the run had produced — including a run that had gone perfectly. Reported
+ * from a real tailoring pass: "The AI did not finish, so nothing was
+ * tailored. It said: ENOTEMPTY, Directory not empty: …/rmm-ai-UuaoCq". The
+ * model had done the work; a temp directory would not delete and the work
+ * went with it.
+ */
+describe('clearing up after a run', () => {
+  it('removes the scratch directory', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-tidy-'));
+    fs.writeFileSync(path.join(dir, 'prompt.md'), 'hello', 'utf8');
+    fs.mkdirSync(path.join(dir, 'tools'));
+    fs.writeFileSync(path.join(dir, 'tools', 'decisions.json'), '{}', 'utf8');
+
+    tidyUp(dir);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it('says nothing when it cannot, rather than throwing over the answer', () => {
+    // A path the process genuinely cannot remove, so this is a real failure
+    // rather than a stubbed one.
+    expect(fs.existsSync('/proc/sys')).toBe(true);
+
+    /*
+     * First, that the expression this replaced really does throw on it —
+     * otherwise the assertion below would pass against anything. This is
+     * character for character what sat unguarded in the `finally`, and
+     * `force` does not cover it: that suppresses "it was not there", not
+     * "it would not go".
+     */
+    expect(() => fs.rmSync('/proc/sys', { recursive: true, force: true })).toThrow();
+
+    expect(() => tidyUp('/proc/sys')).not.toThrow();
+    // And it left it alone, which is the other half of not throwing.
+    expect(fs.existsSync('/proc/sys')).toBe(true);
+  });
+
+  it('is not upset by a directory that has already gone', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-tidy-'));
+    fs.rmSync(dir, { recursive: true });
+    expect(() => tidyUp(dir)).not.toThrow();
+  });
+});
 
 describe('extractJson', () => {
   it('parses a bare object', () => {
