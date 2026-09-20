@@ -22,6 +22,14 @@ const ENTRY: Entry = {
       { id: 'v_intern', label: 'Intern', text: 'Software Engineer Intern' },
     ],
   },
+  dates: {
+    default: 'v_may2026',
+    variants: [
+      { id: 'v_may2026', label: 'May 2026', text: 'Sep. 2022 -- May 2026' },
+      { id: 'v_dec2026', label: 'Dec 2026', text: 'Sep. 2022 -- Dec. 2026' },
+      { id: 'v_vague', label: 'Vague', text: 'Various' },
+    ],
+  },
   bullets: [
     {
       id: 'b_kafka',
@@ -29,6 +37,7 @@ const ENTRY: Entry = {
       variants: [
         { id: 'v_long', label: 'Long', text: 'Built a Kafka pipeline moving 2M events a day.' },
         { id: 'v_short', label: 'Short', text: 'Built a Kafka pipeline.' },
+        { id: 'v_other', label: 'Other', text: 'Mentored two interns through their first ship.' },
       ],
     },
     { id: 'b_tests', default: 'v_1', variants: [{ id: 'v_1', label: 'Only', text: 'Wrote the tests.' }] },
@@ -56,7 +65,12 @@ const PICKY: ResumeSpec = {
     { kind: 'experience', entries: ['exp_acme'], bullets: { exp_acme: ['b_kafka', 'b_tests'] }, bulletOrder: { exp_acme: 'manual' } },
     { kind: 'skills', entries: [], groups: ['sk_lang', 'sk_tools'], items: { sk_lang: ['s_py', 's_go'], sk_tools: ['s_k8s'] } },
   ],
-  choices: { 'exp_acme.subtitle': 'v_intern', b_kafka: 'v_short', 'profile.name': 'v_formal' },
+  choices: {
+    'exp_acme.subtitle': 'v_intern',
+    'exp_acme.dates': 'v_dec2026',
+    b_kafka: 'v_short',
+    'profile.name': 'v_formal',
+  },
   collapsed: ['exp_acme'],
 };
 
@@ -149,16 +163,70 @@ describe('a delete reaches every resume that was using it', () => {
     }
   });
 
-  it('takes a deleted wording out of the resumes that pinned it', () => {
+  it('moves a pinned wording of a field onto the nearest one left, not onto the default', () => {
+    const t = seed();
+    try {
+      // The resume is pinned to "Sep. 2022 -- Dec. 2026". Deleting it leaves
+      // the May spelling and "Various"; the May spelling is the one that says
+      // nearly the same thing, and the default is not automatically it.
+      t.store.saveEntry({
+        ...ENTRY,
+        dates: {
+          default: 'v_vague',
+          variants: [
+            { id: 'v_may2026', label: 'May 2026', text: 'Sep. 2022 -- May 2026' },
+            { id: 'v_vague', label: 'Vague', text: 'Various' },
+          ],
+        },
+      });
+      expect(spec(t).choices?.['exp_acme.dates']).toBe('v_may2026');
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it('moves a pinned wording of a line the same way', () => {
+    const t = seed();
+    try {
+      t.store.saveEntry({
+        ...ENTRY,
+        bullets: ENTRY.bullets!.map((b) =>
+          b.id === 'b_kafka' ? { ...b, variants: b.variants.filter((v) => v.id !== 'v_short') } : b,
+        ),
+      });
+      // "Built a Kafka pipeline." is the short form of the long one, and
+      // nothing like the line about mentoring.
+      expect(spec(t).choices?.b_kafka).toBe('v_long');
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it('drops the pin when the field stops having alternates at all', () => {
     const t = seed();
     try {
       t.store.saveEntry({
         ...ENTRY,
         subtitle: { default: 'v_swe', variants: [{ id: 'v_swe', label: 'SWE', text: 'Software Engineer' }] },
       });
+      // One alternate left is the resume's, so it keeps it.
+      expect(spec(t).choices?.['exp_acme.subtitle']).toBe('v_swe');
+      // And a field with none at all has nothing to pin.
+      t.store.saveEntry({ ...ENTRY, subtitle: 'Software Engineer' });
       expect(spec(t).choices).not.toHaveProperty('exp_acme.subtitle');
-      // The line's own chosen wording is a different id and survives.
-      expect(spec(t).choices?.b_kafka).toBe('v_short');
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it('does not reach for another line when a whole line is deleted', () => {
+    const t = seed();
+    try {
+      t.store.saveEntry({ ...ENTRY, bullets: ENTRY.bullets!.filter((b) => b.id !== 'b_kafka') });
+      // The other lines of the entry are other lines, not other versions of
+      // this one, so nothing is substituted and the pin goes.
+      expect(spec(t).choices).not.toHaveProperty('b_kafka');
+      expect(spec(t).sections?.[0]?.bullets?.exp_acme).toEqual(['b_tests']);
     } finally {
       t.cleanup();
     }

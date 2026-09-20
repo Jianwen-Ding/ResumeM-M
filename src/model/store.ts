@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { flattenResumes, needsFlattening } from './flatten.js';
-import { entryLosesIds, forgetMissing, liveIds, skillsLoseIds } from './forget.js';
+import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
 import { liftLayout } from './lift-layout.js';
 import { needsTiering, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
@@ -1138,7 +1138,7 @@ export class Store {
      * `forget.ts`.
      */
     if (before && entryLosesIds(before, clean)) {
-      this.forgetInResumes(was.map((e) => (e.id === clean.id ? clean : e)));
+      this.forgetInResumes(was, was.map((e) => (e.id === clean.id ? clean : e)));
     }
   }
 
@@ -1157,7 +1157,7 @@ export class Store {
     // And out of every resume that was showing it. A section listing an entry
     // the store no longer has is not a resume that prints it — it is a resume
     // that complains about it, on every resolve, with no way to say so back.
-    if (removed) this.forgetInResumes(was.filter((e) => e.id !== id));
+    if (removed) this.forgetInResumes(was, was.filter((e) => e.id !== id));
     return removed;
   }
 
@@ -1166,7 +1166,7 @@ export class Store {
     this.writeYaml('skills.yaml', groups);
     // Dropping a skill from a group, or a whole group, reaches the resumes
     // that had pinned it — same reasoning as entries above.
-    if (skillsLoseIds(before, groups)) this.forgetInResumes(undefined, groups);
+    if (skillsLoseIds(before, groups)) this.forgetInResumes(undefined, undefined, before, groups);
   }
 
   /**
@@ -1185,11 +1185,20 @@ export class Store {
    * the delete itself is being made in, so undoing the delete in the version
    * history brings the resumes back with it.
    */
-  private forgetInResumes(entries?: Entry[], groups?: SkillGroup[]): string[] {
-    const live = liveIds(
-      entries ?? this.loadEntries(),
-      groups ?? normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', [])),
-    );
+  private forgetInResumes(
+    wasEntries?: Entry[],
+    nowEntries?: Entry[],
+    wasGroups?: SkillGroup[],
+    nowGroups?: SkillGroup[],
+  ): string[] {
+    const entries = this.loadEntries();
+    const groups = normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
+    const before = indexStore(wasEntries ?? entries, wasGroups ?? groups);
+    const after = indexStore(nowEntries ?? entries, nowGroups ?? groups);
+    // Where a deleted alternate sends the resumes that had pinned it. See
+    // `forget.ts`: only alternates move, because only alternates have a
+    // nearest surviving version of themselves.
+    const moved = findMovedWordings(before, after);
 
     const changed: string[] = [];
     /*
@@ -1201,7 +1210,7 @@ export class Store {
      * and start a one-week clock on resumes nobody has touched.
      */
     for (const spec of this.loadResumesAsWritten()) {
-      const next = forgetMissing(spec, live);
+      const next = forgetMissing(spec, after, moved);
       if (JSON.stringify(next) !== JSON.stringify(spec)) {
         this.saveResume(next);
         changed.push(spec.id);
