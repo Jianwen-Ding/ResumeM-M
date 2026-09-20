@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { runAgent, extractJson, trimToLetter, AgentError } from '../ai/agent.js';
+import { findRun, recentRuns, running, type AiRun } from '../ai/activity.js';
 import {
   answerPrompt,
   bulletFeedbackPrompt,
@@ -797,6 +798,52 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * intentionally does not use `--help`: help describes a flag, while these
    * sources contain the choices the signed-in account can actually use.
    */
+  /**
+   * What the AI is doing, and what it did last time.
+   *
+   * The question this answers is the one a timeout cannot: was it working, or
+   * was it wedged? `lastOutputAt` settles it — a run that printed something
+   * four seconds ago is thinking, and one that has said nothing at all since
+   * it started is not, and only the second is a reason to look at the command
+   * rather than at the clock. See `activity.ts`.
+   */
+  api.get(
+    '/ai/activity',
+    handler(async (_req, res) => {
+      const now = Date.now();
+      const summarise = (r: AiRun) => ({
+        id: r.id,
+        command: r.command,
+        args: r.args,
+        promptBytes: r.promptBytes,
+        startedAt: r.startedAt,
+        endedAt: r.endedAt,
+        /** Milliseconds so far, or in total — the caller should not do this sum. */
+        elapsedMs: (r.endedAt ?? now) - r.startedAt,
+        /** How long since it last said anything; null when it never has. */
+        quietMs: r.lastOutputAt ? now - r.lastOutputAt : null,
+        outcome: r.outcome ?? 'running',
+        note: r.note,
+        bytes: r.bytes,
+      });
+      res.json({ running: running().map(summarise), recent: recentRuns().map(summarise) });
+    }),
+  );
+
+  /** One run, with the tail of what it actually said. */
+  api.get(
+    '/ai/activity/:id',
+    handler(async (req, res) => {
+      const found = findRun(String(req.params.id));
+      if (!found) throw new Error(`No AI run "${req.params.id}" is still held`);
+      res.json({
+        ...found,
+        elapsedMs: (found.endedAt ?? Date.now()) - found.startedAt,
+        outcome: found.outcome ?? 'running',
+      });
+    }),
+  );
+
   api.get(
     '/ai/models',
     handler(async (req, res) => {

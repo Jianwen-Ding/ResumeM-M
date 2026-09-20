@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { startRun, type RunHandle } from './activity.js';
 import { AI_PRESETS } from './presets.js';
 import type { StoreConfig } from '../model/types.js';
 
@@ -113,6 +114,14 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
   })();
   const usesFile = config.ai.args.some((a) => a.includes('{prompt}') && !a.includes('{promptText}'));
 
+  /*
+   * Declared out here so `finally` can close the record whatever happens.
+   * Nullable because the work above — writing the prompt, wiring the tools —
+   * can throw before there is anything to watch, and a run that never reached
+   * a command is not a run to show.
+   */
+  let watching: RunHandle | null = null;
+
   try {
     const pending = run(config.ai.command, args, {
       timeout: config.ai.timeoutMs,
@@ -149,6 +158,22 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
       stdin.end(usesFile ? undefined : prompt);
     }
 
+    /*
+     * Watched as well as collected.
+     *
+     * `execFile` buffers both streams and hands them over at exit, so until
+     * the child exits there is nothing to see — and a run killed at the
+     * timeout is precisely the run nobody could see. Listening for `data`
+     * takes nothing away from that buffering: every listener on a stream
+     * receives the same chunk, so this is a copy for `activity` and changes
+     * nothing about what `await pending` returns.
+     *
+     * See `activity.ts` for why the copy is worth having.
+     */
+    watching = startRun({ command: config.ai.command, args, promptBytes: Buffer.byteLength(prompt) });
+    pending.child.stdout?.on('data', (d: Buffer | string) => watching?.saw('out', String(d)));
+    pending.child.stderr?.on('data', (d: Buffer | string) => watching?.saw('err', String(d)));
+
     const { stdout, stderr } = await pending;
 
     /*
@@ -177,8 +202,11 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
      * produced nothing" would fail the one kind of run that went best.
      */
     if (!output && !decided) {
-      throw new AgentError(explainSilence(config.ai.command, stderr, config.ai.args));
+      const why = explainSilence(config.ai.command, stderr, config.ai.args);
+      watching.ended('failed', why);
+      throw new AgentError(why);
     }
+    watching.ended('ok');
     return {
       output,
       executed: true,
@@ -191,6 +219,7 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
     if (err instanceof AgentError) throw err;
     const e = err as { code?: string; message?: string; stderr?: string; stdout?: string };
     if (e.code === 'ENOENT') {
+      watching?.ended('failed', `"${config.ai.command}" is not installed or not on PATH.`);
       throw new AgentError(
         `AI command "${config.ai.command}" not found. Install it, or change ai.command in data/config.yaml, ` +
           `or set ai.enabled: false to get prompts back instead of answers.`,
@@ -204,17 +233,23 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
      */
     const killed = (err as { killed?: boolean }).killed;
     if (killed) {
+      watching?.ended(
+        'timeout',
+        `Stopped after ${Math.round(config.ai.timeoutMs / 1000)}s. Raise the AI timeout in Settings if it needs longer.`,
+      );
       throw new AgentError(
         `AI command "${config.ai.command}" ran for longer than ${Math.round(config.ai.timeoutMs / 1000)}s ` +
           `and was stopped. Raise ai.timeoutMs in config.yaml if it needs longer.`,
         e.stdout,
       );
     }
-    throw new AgentError(
-      `AI command failed: ${e.stderr?.trim() || e.message || 'unknown error'}`,
-      e.stdout,
-    );
+    const why = `AI command failed: ${e.stderr?.trim() || e.message || 'unknown error'}`;
+    watching?.ended('failed', why);
+    throw new AgentError(why, e.stdout);
   } finally {
+    // Whatever left the try another way still closes the record; `ended` keeps
+    // the first outcome, so this only catches what nothing else named.
+    watching?.ended('failed', 'The run ended without saying why.');
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
