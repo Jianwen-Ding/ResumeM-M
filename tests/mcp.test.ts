@@ -190,6 +190,26 @@ describe('what it still cannot do', () => {
  * The tools are useless if the model cannot see what its own moves did — that
  * was the single-shot version's real problem, more than the parsing.
  */
+/**
+ * A resume that leaves a line and an entry off, so that turning one on is a
+ * real change rather than a no-op. The shared fixture has everything on.
+ */
+function narrow() {
+  const data = store();
+  const spec = {
+    id: 'narrow',
+    label: 'Narrow',
+    tier: 'base' as const,
+    sections: [
+      { kind: 'education', entries: ['edu_neu'] },
+      { kind: 'experience', entries: ['exp_acme'], bullets: { exp_acme: ['b_pipeline'] } },
+      { kind: 'project', entries: [] },
+    ],
+  };
+  data.resumes = [...data.resumes, spec as never];
+  return new TailorSession(data, resolveResume('narrow', data), POSTING);
+}
+
 describe('reading the page back', () => {
   it('shows the resume with the ids the tools take', () => {
     const text = session().describeResume();
@@ -202,6 +222,34 @@ describe('reading the page back', () => {
     expect(s.describeResume()).not.toContain('Kafka');
     s.choose('b_pipeline', 'v_kafka');
     expect(s.describeResume()).toContain('Kafka');
+  });
+
+  /*
+   * The whole promise of reading it back is that the model can check its own
+   * move. Both halves of that were broken for anything it turned *on*.
+   *
+   * A resume is resolved once, before any of this starts, and `show` records
+   * an intention rather than rebuilding it. So a bullet the model had just
+   * shown printed as "- [b_testing] " with nothing after it, and an entry it
+   * had just shown did not print at all — while the document it was building
+   * got both. A model checking its work saw two moves that had worked as two
+   * that had failed, which is an invitation to undo them.
+   */
+  it('shows a bullet the model has just turned on, with its words', () => {
+    const s = narrow();
+    s.setShown('b_testing', true);
+    const text = s.describeResume();
+    expect(text).toContain('[b_testing]');
+    expect(text).toMatch(/\[b_testing\]\s+\S/);
+    // And the words are the line's own, not an empty string.
+    expect(text).toContain('coverage');
+  });
+
+  it('shows an entry the model has just turned on', () => {
+    const s = narrow();
+    expect(s.describeResume()).not.toContain('[proj_thing]');
+    s.setShown('proj_thing', true);
+    expect(s.describeResume()).toContain('[proj_thing]');
   });
 
   it('shows a hidden bullet gone and a reordering applied', () => {

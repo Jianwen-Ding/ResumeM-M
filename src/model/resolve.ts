@@ -121,7 +121,14 @@ function pickField(
   return String(def.text);
 }
 
-function pickBullet(
+/**
+ * What a bullet says, given whatever has been chosen for it.
+ *
+ * Exported because the MCP session has to answer the same question when it
+ * reads a resume back to the model, and a second implementation of "prefix
+ * plus the items this resume keeps" is a second implementation to get wrong.
+ */
+export function pickBullet(
   bullet: Bullet,
   choices: Record<string, string>,
   warnings: string[],
