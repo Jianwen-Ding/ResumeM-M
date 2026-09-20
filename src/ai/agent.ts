@@ -253,7 +253,40 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
     // Whatever left the try another way still closes the record; `ended` keeps
     // the first outcome, so this only catches what nothing else named.
     watching?.ended('failed', 'The run ended without saying why.');
-    fs.rmSync(dir, { recursive: true, force: true });
+    tidyUp(dir);
+  }
+}
+
+/**
+ * Take the scratch directory away, and never let that be the thing that fails.
+ *
+ * This ran unguarded in a `finally`, so a removal that threw replaced whatever
+ * the run had produced — including a run that had gone perfectly. What that
+ * looked like, reported from a real tailoring pass:
+ *
+ *   The AI did not finish, so nothing was tailored. It said: ENOTEMPTY,
+ *   Directory not empty: /private/var/folders/…/T/rmm-ai-UuaoCq
+ *
+ * The model had done the work. A temp directory would not delete, and the work
+ * went with it.
+ *
+ * `force` does not cover this: it suppresses "it was not there", not "it is
+ * not empty". Not-empty means something wrote into the directory while the
+ * walk was removing it, and this sandbox has an obvious candidate — the tool
+ * server runs inside it, so its own output can land between the last unlink
+ * and the rmdir. Hence the retries: the race is short, and the second attempt
+ * is against a directory nothing is writing to any more.
+ *
+ * And if it still will not go, it stays. A few kilobytes left in the system
+ * temp directory, which the OS clears anyway, is not a reason to throw away
+ * somebody's cover letter.
+ */
+export function tidyUp(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch {
+    // Deliberately nothing. See above: the run's result is worth more than
+    // the directory, and there is nothing here the user could act on.
   }
 }
 

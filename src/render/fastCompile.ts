@@ -143,7 +143,31 @@ async function buildFormat(
 
     const built = path.join(buildDir, `${jobname}.fmt`);
     if (!fs.existsSync(built)) throw new Error('mylatexformat produced no .fmt file');
-    fs.copyFileSync(built, fmtPath);
+
+    /*
+     * Published by rename, never by writing onto the path others read.
+     *
+     * This copied seven megabytes straight to `fmtPath`, and that path is
+     * shared by every process on the machine — the server, the CLI, the MCP
+     * binary, each test worker. A reader arriving part-way through the copy
+     * gets a truncated format and pdftex refuses it. Measured, eight processes
+     * doing a cold first compile together: seven failed, all on the same
+     * half-written file.
+     *
+     * A rename within one directory is atomic, so a reader sees either no file
+     * or the whole of one. Two builders racing is then harmless: each writes
+     * its own temporary and the second rename replaces the first, and both are
+     * complete. The temporary has to live in the same directory as the target
+     * or the rename becomes a copy across filesystems and stops being atomic.
+     */
+    const staged = `${fmtPath}.${process.pid}.${Math.random().toString(36).slice(2)}`;
+    try {
+      fs.copyFileSync(built, staged);
+      fs.renameSync(staged, fmtPath);
+    } catch (err) {
+      fs.rmSync(staged, { force: true });
+      throw err;
+    }
     return { path: fmtPath };
   } finally {
     fs.rmSync(buildDir, { recursive: true, force: true });
@@ -227,6 +251,37 @@ ${body}`, 'utf8');
     const fileLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
     const combined = `${e.stdout ?? ''}\n${e.stderr ?? ''}\n${fileLog}`;
     fs.rmSync(dir, { recursive: true, force: true });
+
+    /*
+     * A format that will not load is thrown away rather than kept for ever.
+     *
+     * The cache is only ever checked for existing, so a bad file there is
+     * permanent: every later run short-circuits to it, fails, and falls back
+     * to the trusted engine — silently, because the caller catches this. The
+     * preview would simply stop being fast on that machine, with nothing said
+     * and nothing to do about it short of knowing which temp directory to
+     * empty.
+     *
+     * Only for a failure about loading the format itself. A document that will
+     * not compile is the ordinary case, says nothing about the preamble, and
+     * throwing the format away over a stray brace in a bullet would turn one
+     * bad document into a rebuild on every keystroke.
+     *
+     * The three phrases are the ones pdftex actually produces, and it does not
+     * use one message for this. A file of the wrong shape entirely gives
+     * "(Fatal format file error; I'm stymied)"; one that is merely cut short —
+     * which is what the copy race left behind, and the likelier case by far —
+     * gives "pdftex: fatal: Could not undump 36532 4-byte item(s) from …".
+     * Matching on the first wording alone left the second unhandled, which is
+     * to say left the real one unhandled.
+     *
+     * Deliberately not "does the message mention the format's filename": the
+     * banner names it on every run, successful ones included.
+     */
+    if (/undump|format file|stymied/i.test(combined)) {
+      fs.rmSync(fmt.path, { force: true });
+    }
+
     throw new Error(`fast preview compile failed: ${firstTexError(combined) ?? e.message ?? 'unknown error'}`);
   }
 
