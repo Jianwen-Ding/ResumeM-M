@@ -163,6 +163,35 @@ describe('watching a run as it happens', () => {
     expect((err as Error).message).not.toMatch(/never called/i);
   });
 
+  /*
+   * And the quieter half of the same fault: a wired run that answers in prose
+   * instead of calling anything still counts as a success, because the caller
+   * asks again the old way and a tailoring does come out. From outside,
+   * nothing looks wrong — while every run costs twice what it should and the
+   * tools do nothing at all. That is the shape of bug this record exists to
+   * end, so it is written on the run.
+   */
+  it('marks a run that had tools and answered without them', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-unused-'));
+    const config = configFor(`process.stdout.write('{"choices":{}}\\n');`);
+    const result = await runAgent(config, 'hello', {
+      wire: () => ({ args: [], out: path.join(dir, 'never-written.json'), env: {} }),
+      read: () => null,
+    });
+
+    expect(result.executed).toBe(true);
+    expect(result.wiredButUnused).toBe(true);
+    expect(recentRuns()[0]!.outcome).toBe('ok');
+    expect(recentRuns()[0]!.note).toMatch(/never called any of the tools/i);
+  });
+
+  it('says nothing of the kind about a run that was never given tools', async () => {
+    const config = configFor(`process.stdout.write('hello\\n');`);
+    const result = await runAgent(config, 'hello');
+    expect(result.wiredButUnused).toBeUndefined();
+    expect(recentRuns()[0]!.note).toBeUndefined();
+  });
+
   it('records nothing at all when the AI is switched off', async () => {
     const config = { ai: { enabled: false, command: 'claude', args: [], timeoutMs: 5000 } } as unknown as StoreConfig;
     const result = await runAgent(config, 'the prompt');

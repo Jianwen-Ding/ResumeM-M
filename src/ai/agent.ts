@@ -23,6 +23,18 @@ export interface AgentResult {
    * caller falls back to reading JSON out of it, exactly as before.
    */
   tools?: unknown;
+  /**
+   * True when a tool server was wired in and the run never called it.
+   *
+   * The two reasons `tools` can be absent look identical from outside and are
+   * not the same thing at all: a run that was never given tools answered the
+   * only way it could, and a run that *was* given them and never touched one
+   * could not see them. Only the second is a fault, and it is invisible
+   * without this — the run comes back looking like a model that answered
+   * badly, when it is a model that was never handed what the prompt told it
+   * to use.
+   */
+  wiredButUnused?: boolean;
 }
 
 /**
@@ -206,12 +218,27 @@ export async function runAgent(config: StoreConfig, prompt: string, tools?: Agen
       watching.ended('failed', why);
       throw new AgentError(why);
     }
-    watching.ended('ok');
+    /*
+     * A run that had tools and never touched one still "succeeded", and that
+     * is worth saying out loud where somebody can see it.
+     *
+     * The caller quietly asks again the old way when this happens, which is
+     * the right thing to do and means a tailoring still comes out — so from
+     * the outside nothing looks wrong at all, while every run is silently
+     * costing twice what it should and the tools are doing nothing. Silent
+     * degradation is the shape of bug this whole panel exists to end, so it
+     * is written on the run.
+     */
+    watching.ended(
+      'ok',
+      wiring && !decided ? 'Finished, but never called any of the tools it was given.' : undefined,
+    );
     return {
       output,
       executed: true,
       command: `${config.ai.command} ${args.join(' ')}`,
       ...(decided ? { tools: decided } : {}),
+      ...(wiring && !decided ? { wiredButUnused: true } : {}),
     };
   } catch (err) {
     // Our own refusals already say what happened; re-wrapping them as "AI
