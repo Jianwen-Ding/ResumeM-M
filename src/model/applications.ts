@@ -510,6 +510,26 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    */
   const stage = fs.mkdtempSync(path.join(path.dirname(dir), '.rmm-building-'));
 
+  /*
+   * What this application's letter and answers actually are, read before
+   * anything is compiled — because the files below are built from them and
+   * the tracker row at the end is written from them, and the two disagreeing
+   * is how the archive got destroyed.
+   *
+   * The row keeps what the caller did not mention; the *files* were built
+   * from `req` alone. So `rmm apply`, which passes company, role, url and the
+   * resume id and nothing else, rebuilt the folder with the resume only —
+   * and `handOver` deletes every file in the destination the build did not
+   * write. Measured: a bundle filed from the editor with a letter and
+   * answers, rebuilt from the CLI, came back holding one PDF, while its
+   * tracker row still read `coverLetter: Dear Initech, …`. The folder is the
+   * archive — "six weeks later, when they ask about the pipeline project, the
+   * file that went out is still there" — and it was not.
+   */
+  const before = store.load().applications.find((a) => a.id === id);
+  const letter = req.coverLetter === undefined ? before?.coverLetter : req.coverLetter?.trim() || undefined;
+  const answers = req.answers ?? before?.answers;
+
   try {
     const pdfPath = path.join(stage, resumeName);
     const compiled = await compileResume(resolved, {
@@ -519,7 +539,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
 
     const files = [resumeName];
 
-    if (req.coverLetter?.trim()) {
+    if (letter) {
 
       // Typeset to match the resume, with the trusted engine — this is a file
       // that gets uploaded, so it never takes the preview shortcut. The plain
@@ -530,7 +550,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
           profile: resolved.profile,
           company: req.company,
           role: req.role,
-          body: req.coverLetter,
+          body: letter,
         },
         resolved.layout,
         { pdfPath: path.join(stage, letterName), texPath: path.join(stage, 'source', 'cover-letter.tex') },
@@ -538,11 +558,11 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       files.push(letterName);
 
       const textPath = path.join(stage, letterName.replace(/\.pdf$/, '.txt'));
-      fs.writeFileSync(textPath, req.coverLetter, 'utf8');
+      fs.writeFileSync(textPath, letter, 'utf8');
       files.push(path.basename(textPath));
     }
 
-    if (req.answers?.length) {
+    if (answers?.length) {
       /*
        * Named like the other two rather than `application-answers.md`. A
        * constant was fine inside a per-application folder and collided for any
@@ -566,7 +586,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       const title = [req.company, req.role].filter(Boolean).join(' — ');
       fs.writeFileSync(
         qaPath,
-        `# ${title}\n\n${req.answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n')}`,
+        `# ${title}\n\n${answers.map((a) => `## ${a.question}\n\n${a.answer}\n`).join('\n')}`,
         'utf8',
       );
       files.push(path.basename(qaPath));
@@ -611,7 +631,6 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
      */
     const ORDER: ApplicationStatus[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
     const asked: ApplicationStatus = req.status ?? 'applied';
-    const before = store.load().applications.find((a) => a.id === id);
     const status =
       before && ORDER.indexOf(before.status) > ORDER.indexOf(asked) ? before.status : asked;
 
@@ -654,9 +673,8 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       snapshotDir: path.relative(store.outDir(), dir),
       source: req.source ?? before?.source,
       notes: req.notes ?? before?.notes,
-      answers: req.answers ?? before?.answers,
-      coverLetter:
-        req.coverLetter === undefined ? before?.coverLetter : req.coverLetter?.trim() || undefined,
+      answers,
+      coverLetter: letter,
       history: [
         ...(before?.history ?? []),
         { at: now, status, note: before ? 'Files rebuilt' : 'Bundle created' },

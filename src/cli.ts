@@ -40,7 +40,42 @@ const dataDir = resolveStoreDir(projectRoot, arg(process.argv.slice(2), 'data'))
  * does not exist. One line is the difference, and refusing instead would
  * break the first run this exists for.
  */
-if (seedStore(path.join(projectRoot, 'data'), dataDir)) {
+/**
+ * The commands that actually work in a store, so nothing else makes one.
+ *
+ * Seeding runs at module load, before the command has been looked at — so
+ * `rmm --help` created and filled a fifteen-file store, and so did a
+ * mistyped command, and so did `rmm --data /some/path list`, which this file
+ * claims to support and which reaches the switch as the command `--data`.
+ * A folder full of somebody else's example resumes is not what any of those
+ * three asked for, and all three left it behind on the way to an error.
+ */
+const WORKS_IN_A_STORE = new Set([
+  'list',
+  'build',
+  'check',
+  'master',
+  'feedback',
+  'apply',
+  'track',
+  'save',
+  'voice',
+  'serve',
+]);
+
+/*
+ * A save is a folder. Said here, because everything below assumes it: the
+ * store reads and writes files inside this path, and pointed at a file it
+ * quietly found nothing and reported "No resumes yet. Add one under
+ * data/resumes/" about a text file the user had named on purpose.
+ */
+const at = fs.statSync(dataDir, { throwIfNoEntry: false });
+if (at && !at.isDirectory()) {
+  console.error(`${dataDir} is a file, not a save folder. Point --data at a folder, or at a new one to start.`);
+  process.exit(1);
+}
+
+if (WORKS_IN_A_STORE.has(process.argv[2] ?? '') && seedStore(path.join(projectRoot, 'data'), dataDir)) {
   console.error(`Started a new save at ${dataDir}, from the bundled example — there was nothing there.`);
 }
 
@@ -137,11 +172,29 @@ function unknownFlag(command: string, rest: string[]): string | null {
       `so ${flag} has no value. Put the value after ${flag}, or write ${spelled}=${next} if that really is the value.`
     );
   };
+  /*
+   * And a flag with nothing after it at all, which is the same mistake
+   * without a second flag to name.
+   *
+   * `arg` reads `argv[i + 1]`, so a flag at the end of the line, one followed
+   * by an empty string, and `--data=` all hand back nothing — and nothing is
+   * indistinguishable from "the flag was never given". `rmm list --data`
+   * listed whichever save happened to be open; `rmm apply … --url` wrote a
+   * tracker row with no url and exited 0; `rmm feedback base --focus` dropped
+   * the focus and produced a generic prompt. `--data "$UNSET"` is how a
+   * script writes the first of those by accident, and this file's own note
+   * says the point of `--data` is that "a flag that is accepted and discarded
+   * is worse than one that is rejected".
+   */
+  const nothingAfter = (flag: string): string =>
+    `${flag} was given nothing to be. Put its value after it, or leave ${flag} off — ` +
+    `as it stands ${flag} does nothing, which is not what it looks like.`;
 
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i] ?? '';
     if (token === '--') break; // everything after it is a value, by convention
     if (token === '-m' && value.has('m')) {
+      if (rest[i + 1] === undefined || rest[i + 1] === '') return nothingAfter('-m');
       if (stolenFlag(rest[i + 1])) return noValue('-m', rest[i + 1]!);
       i++;
       continue;
@@ -149,10 +202,13 @@ function unknownFlag(command: string, rest: string[]): string | null {
     if (!token.startsWith('--')) continue;
     const name = token.slice(2).split('=')[0] ?? '';
     if (value.has(name)) {
-      if (!token.includes('=')) {
-        if (stolenFlag(rest[i + 1])) return noValue(token, rest[i + 1]!);
-        i++; // its value is not a flag
+      if (token.includes('=')) {
+        if (token.slice(token.indexOf('=') + 1) === '') return nothingAfter(`--${name}`);
+        continue;
       }
+      if (rest[i + 1] === undefined || rest[i + 1] === '') return nothingAfter(token);
+      if (stolenFlag(rest[i + 1])) return noValue(token, rest[i + 1]!);
+      i++; // its value is not a flag
       continue;
     }
     if (bare.has(name)) continue;
@@ -326,7 +382,6 @@ async function main(argv: string[]): Promise<number> {
            * and the exit code said only that something failed.
            */
           const resolved = resolveResume(id, data);
-          for (const w of resolved.warnings) console.warn(`  ! ${w}`);
           const out = path.join(store.outDir(), `${id}.pdf`);
           const result = await compileResume(resolved, {
             pdfPath: out,
@@ -344,6 +399,14 @@ async function main(argv: string[]): Promise<number> {
            * edge of the page taking its text with it — was gathered, returned,
            * and dropped on the floor by the one command whose whole job is to
            * report on a build.
+           *
+           * After the header line, and only from here, which is a second
+           * thing this used to get wrong. `resolved.warnings` was printed
+           * *before* the header and `compileResume` returns it again inside
+           * `result.warnings`, so under `--all` every resume's warnings
+           * appeared under the previous resume's name and then a second time
+           * under its own. A reader of a twenty-resume batch went and fixed
+           * the wrong one.
            */
           for (const w of result.warnings) console.warn(`  ! ${w}`);
         } catch (err) {
@@ -362,9 +425,17 @@ async function main(argv: string[]): Promise<number> {
       }
       const data = store.load();
       const resolved = resolveResume(id, data);
-      for (const w of resolved.warnings) console.warn(`  ! ${w}`);
       const result = await compileResume(resolved, { engine: data.config.latex.engine });
       console.log(`${id}: ${fmtFit(result)}`);
+      /*
+       * Everything `build` says, because this is the command for asking
+       * without writing a PDF — and it reported the fit and suppressed the
+       * findings. On the same resume, `build` said "A line runs past the
+       * right-hand edge of the page — the widest by 238pt — and whatever is
+       * past the edge is not in the PDF at all", and `check` said
+       * "✓ 1 page, ~16 lines of room left".
+       */
+      for (const w of result.warnings) console.warn(`  ! ${w}`);
       console.log(`  used ${result.usedPt}pt of ${result.availablePt}pt available`);
       return result.fits ? 0 : 1;
     }
@@ -418,6 +489,22 @@ async function main(argv: string[]): Promise<number> {
       console.log(`Bundle → ${path.relative(process.cwd(), result.dir)}`);
       for (const f of result.files) console.log(`  ${f}`);
       if (!result.fits) console.warn(`  ! resume is ${result.pages} pages`);
+      /*
+       * And everything `build` says about the same compile, which this threw
+       * away — on the one command that files the result as *sent*.
+       *
+       * Measured on one store: `rmm build` reported "A line runs past the
+       * right-hand edge of the page — the widest by 238pt — and whatever is
+       * past the edge is not in the PDF at all", and `rmm apply` on the very
+       * next line printed the folder, the filename, and nothing else. The URL
+       * was absent from the PDF that had just been filed as sent.
+       *
+       * `missing` is separate from `warnings` and exists solely to be shown:
+       * an entry the spec lists and the store has since lost means the resume
+       * that went out is not the one that was on screen.
+       */
+      for (const w of result.warnings) console.warn(`  ! ${w}`);
+      if (result.missing) console.warn(`  ! ${result.missing}`);
       return 0;
     }
 

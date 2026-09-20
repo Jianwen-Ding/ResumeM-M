@@ -90,9 +90,18 @@ export function describePending(files: PendingChange[]): string {
 
 export async function saveStore(repo: Repo, opts: SaveOptions = {}): Promise<SaveResult> {
   const initialised = !(await repo.isRepo());
-  // A store that is not a repository yet becomes one here: "save my work"
-  // should never fail on a setup step the user did not know about.
-  if (initialised) await repo.ensure();
+  /*
+   * A store that is not a repository yet becomes one here: "save my work"
+   * should never fail on a setup step the user did not know about.
+   *
+   * With the user's own message, because `ensure` makes the first commit
+   * itself — so on a store's very first save `pending()` came back empty,
+   * `commitAll(message)` never ran, and the block below overwrote `message`
+   * from HEAD. `rmm save -m "my very first save of real work"` put that
+   * sentence nowhere at all and printed "Saved 15 files — Initialise resume
+   * store" as though it were what the user had written.
+   */
+  if (initialised) await repo.ensure(opts.message?.trim() || undefined);
 
   // Read the pending list before committing — afterwards there is nothing to
   // read, and this is what the caller reports back to the user.
@@ -125,7 +134,20 @@ export async function saveStore(repo: Repo, opts: SaveOptions = {}): Promise<Sav
   if (opts.push) {
     // Pushing with nothing new locally is still worth doing: an earlier save
     // may not have reached the remote.
-    result.pushed = await repo.push();
+    /*
+     * And a push that cannot even be attempted is a failed push, not a failed
+     * save. `repo.push` throws for the two cases it cannot act on — no remote
+     * configured, HEAD detached — and this call was unguarded, so the throw
+     * went past the whole report: `rmm save --push -m "keep my work"` printed
+     * "No remote is configured for the store", exited 1, and said nothing
+     * about the commit it had just made. The one command whose job is to make
+     * "is my work safe?" unambiguous left it maximally ambiguous.
+     */
+    try {
+      result.pushed = await repo.push();
+    } catch (err) {
+      result.pushed = { ok: false, output: err instanceof Error ? err.message : String(err) };
+    }
     result.remote = await repo.remoteStatus();
   }
 

@@ -379,6 +379,39 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       expect(stored?.url).toBe('https://streamly.example/jobs/intern');
     });
 
+    /*
+     * And the folder keeps them too, not only the row.
+     *
+     * The row learned to keep what the caller did not mention; the *files*
+     * were still built from the request alone, and `handOver` deletes every
+     * file in the destination the build did not write. So `rmm apply` — which
+     * passes company, role, url and the resume id and nothing else — rebuilt
+     * the bundle with the resume only, while the tracker row went on saying
+     * `coverLetter: Dear Streamly, …`. The folder is the archive this tool
+     * promises will still hold what was sent six weeks later, and the row and
+     * the archive disagreeing is worse than either being wrong alone.
+     */
+    it('and the bundle folder keeps the letter and answers through a rebuild', async () => {
+      const first = await buildBundle(t.store, {
+        ...staged,
+        coverLetter: 'Dear Streamly,\n\nI would like to join.\n',
+        answers: [{ question: 'Why us?', answer: 'The streaming work.' }],
+      });
+      expect(first.files.join(' ')).toContain('Cover-Letter.pdf');
+
+      // The way `rmm apply` rebuilds: the names and the resume, nothing else.
+      const again = await buildBundle(t.store, staged);
+      expect(again.files.join(' '), 'the letter is still in the bundle').toContain('Cover-Letter.pdf');
+      expect(again.files.join(' '), 'and so are the answers').toContain('Answers.md');
+
+      // On disk, which is the copy that is still there in six weeks.
+      const held = fs.readdirSync(again.dir);
+      expect(held.join(' ')).toContain('Cover-Letter.pdf');
+      expect(held.join(' ')).toContain('Answers.md');
+      const text = held.find((f) => f.endsWith('Cover-Letter.txt'))!;
+      expect(fs.readFileSync(path.join(again.dir, text), 'utf8')).toContain('I would like to join');
+    });
+
     it('but still lets a letter be taken back', async () => {
       // Absent means "leave it alone"; empty means "there is no letter". The
       // second has to stay sayable, or a letter could never be withdrawn.
@@ -563,17 +596,46 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
    * two builds of one application must not overlap — a build without a letter
    * landing after one with a letter would take the letter with it. They are
    * serialised for that reason; see `inBuildLane`.
+   *
+   * Said with an empty letter rather than an absent one, and the difference
+   * is the whole of a bug. This used to read absence as deletion, which is
+   * fine for the card — it sends `coverLetter: state.letter` on every build,
+   * so it says "no letter" as `null` and never by omission — and wrong for
+   * every other caller. `rmm apply` passes company, role, url and the resume
+   * id and nothing else, so it meant "rebuild the files" and was heard as
+   * "and throw the letter away": the folder came back holding one PDF while
+   * the tracker row still read `coverLetter: Dear Streamly, …`. The folder is
+   * the archive, and the row and the archive disagreeing is worse than either
+   * being wrong alone.
+   *
+   * So: mentioned and empty clears it, mentioned and set replaces it, absent
+   * leaves it alone.
    */
   it('mirrors what is being sent now, rather than accumulating', async () => {
     const req = { company: 'Streamly', role: 'Intern', resumeId: 'intern', status: 'applying' as const };
     const withLetter = await buildBundle(t.store, { ...req, coverLetter: 'Dear Streamly, this is the letter.' });
     expect(fs.readdirSync(withLetter.dir)).toContain('Test-Person-Cover-Letter.pdf');
 
-    const without = await buildBundle(t.store, req);
+    // The card's own way of saying the letter is gone.
+    const without = await buildBundle(t.store, { ...req, coverLetter: '' });
     expect(fs.readdirSync(without.dir)).not.toContain('Test-Person-Cover-Letter.pdf');
     // And the answer describes the folder that exists, which is what the card
     // prints under "named and ready to attach".
     expect([...without.files].sort()).toEqual(fs.readdirSync(without.dir).filter((f) => f !== 'source').sort());
+  });
+
+  /*
+   * `null` says it too, because that is literally what arrives: the card
+   * sends `coverLetter: state.letter`, and `state.letter` is null on every
+   * posting that does not ask for one.
+   */
+  it('takes null as "there is no letter", the way the card sends it', async () => {
+    const req = { company: 'Streamly', role: 'Intern', resumeId: 'intern', status: 'applying' as const };
+    await buildBundle(t.store, { ...req, coverLetter: 'Dear Streamly, this is the letter.' });
+
+    const cleared = await buildBundle(t.store, { ...req, coverLetter: null as unknown as string });
+    expect(fs.readdirSync(cleared.dir)).not.toContain('Test-Person-Cover-Letter.pdf');
+    expect(cleared.application.coverLetter).toBeUndefined();
   });
 
   it('freezes the choices that were actually used', async () => {
