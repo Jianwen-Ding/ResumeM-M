@@ -1436,16 +1436,30 @@ function listItems(entry, bullet) {
   return wrap;
 }
 
-/** Flip a bullet's inclusion in `section`, keeping the entry's store order. */
+/**
+ * Flip a line's inclusion in `section`, keeping whatever order is in force.
+ *
+ * It used to rebuild the list from `entry.bullets`, the master's order — so
+ * on an entry whose lines this resume had arranged by hand, unticking any one
+ * of them silently restacked the rest into the master's order. And
+ * `bulletOrder` stayed `manual`, so the chip still read "Lines arranged here"
+ * about an arrangement that no longer existed, and the entry went on ignoring
+ * the master it had just been restacked to match.
+ *
+ * Keeping the order it is in is right either way: where the lines were not
+ * arranged here the list is read as a set and redrawn through
+ * `orderedBullets`, so where a newly ticked line sits in it cannot be seen.
+ */
 function setBulletIncluded(entry, section, bullet, checked) {
   const current = bulletSelection(section, entry);
   const next = new Set(current);
   if (checked) next.add(bullet.id);
   else next.delete(bullet.id);
-  state.bulletEdits = {
-    ...(state.bulletEdits ?? {}),
-    [entry.id]: (entry.bullets ?? []).filter((b) => next.has(b.id)).map((b) => b.id),
-  };
+  const kept = current.filter((id) => next.has(id));
+  const added = (entry.bullets ?? [])
+    .map((b) => b.id)
+    .filter((id) => next.has(id) && !kept.includes(id));
+  state.bulletEdits = { ...(state.bulletEdits ?? {}), [entry.id]: [...kept, ...added] };
 }
 
 /** Everything the user can do to one bullet, in one block. */
@@ -1638,13 +1652,21 @@ function listPreview(bullet) {
   return markup(bullet.prefix ? `${bullet.prefix} ${body}` : body);
 }
 
-/** Flip an entry's inclusion in `section`, keeping the section's own order. */
+/**
+ * Flip an entry's inclusion in `section`, keeping the order it is in.
+ *
+ * Membership came from `current`, which knows about unsaved changes, and the
+ * order came from `section.entries`, which does not — so dragging an entry
+ * and then ticking anything in the same section undid the drag in front of
+ * you and auto-saved the undoing. The section stayed marked `manual`, so
+ * nothing put the arrangement back either.
+ */
 function setEntryIncluded(section, entry, checked) {
   const current = entrySelection(section);
   const next = new Set(current);
   if (checked) next.add(entry.id);
   else next.delete(entry.id);
-  const ordered = (section.entries ?? []).filter((id) => next.has(id));
+  const ordered = current.filter((id) => next.has(id));
   for (const id of next) if (!ordered.includes(id)) ordered.push(id);
   state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
 }
@@ -2104,9 +2126,7 @@ function entryBlock(entry, section, choices) {
    * resume was arranged by hand, which is recorded by the two disagreeing.
    * See `orderedBullets`.
    */
-  const picked = bulletSelection(section, entry);
-  const byHand = handOrdered(section, entry.id);
-  const shown = byHand ? picked : orderedBullets(picked, entry);
+  const shown = shownBullets(section, entry);
   const ordered = [
     ...shown.map((id) => (entry.bullets ?? []).find((b) => b.id === id)).filter(Boolean),
     ...(entry.bullets ?? []).filter((b) => !shown.includes(b.id)),
@@ -2126,7 +2146,7 @@ function entryBlock(entry, section, choices) {
        * that has to be visible or it is a rule you discover by being
        * surprised.
        */
-      byHand
+      handOrdered(section, entry.id)
         ? el('span', { className: 'by-hand' }, [
             el('span', { textContent: 'Lines arranged here' }),
             el('button', {
@@ -2225,6 +2245,32 @@ function setBulletOrder(entry, ordered, { byHand = true } = {}) {
   render();
 }
 
+/**
+ * This entry's lines in the order the resume draws them.
+ *
+ * Which lines is the resume's; what order is the master's, unless the resume
+ * arranged them itself. Three places need the same answer and only one of
+ * them had it: the block that draws the lines worked it out inline, and the
+ * drag and the keyboard nudge both went off `bulletSelection` — the stored
+ * list, which `SectionSpec.bullets` says is read as a set precisely because
+ * its order can be stale.
+ *
+ * So dragging a line moved it relative to an order nobody could see.
+ * Rearrange an entry in the master, open a resume that had ever unticked a
+ * line on it, and the stored list is in the old order while the screen is in
+ * the new one: drag the top line to the bottom and a different line jumps to
+ * the top instead. Worse, the drop writes `bulletOrder: manual`, so the
+ * arrangement you did not make is recorded as deliberate and the entry stops
+ * following the master for good.
+ *
+ * `dropEntry` has always done this correctly, with a comment saying why. This
+ * is the same fix one level down.
+ */
+function shownBullets(section, entry) {
+  const picked = bulletSelection(section, entry);
+  return handOrdered(section, entry.id) ? picked : orderedBullets(picked, entry);
+}
+
 /** Whether this entry's lines were arranged here, including unsaved changes. */
 function handOrdered(section, entryId) {
   const edited = state.bulletOrderEdits?.[entryId];
@@ -2272,7 +2318,9 @@ async function setMasterBulletOrder(entry, ordered) {
 }
 
 function dropBullet(entry, section, moved, onto, side) {
-  const list = bulletSelection(section, entry);
+  // The order on screen, which is what the user was aiming at. See
+  // `shownBullets`, and `dropEntry` for the same fix a level up.
+  const list = shownBullets(section, entry);
   if (!list.includes(moved)) return;
   const at = list.indexOf(onto);
   const before = side === 'after' ? (list[at + 1] ?? null) : onto;
@@ -2313,7 +2361,7 @@ function bulletGrip(entry, section, bullet) {
     kind: 'bullet',
     id: bullet.id,
     label: 'this line',
-    onStep: (delta) => setBulletOrder(entry, moveBy(bulletSelection(section, entry), bullet.id, delta)),
+    onStep: (delta) => setBulletOrder(entry, moveBy(shownBullets(section, entry), bullet.id, delta)),
   });
 }
 
