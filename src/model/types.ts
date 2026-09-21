@@ -74,8 +74,16 @@ export type EntryKind = 'education' | 'experience' | 'project' | 'skills' | 'cus
 export interface Entry {
   id: string;
   kind: EntryKind;
-  /** Left heading: school, company, or project name. */
-  title: MaybeVariant;
+  /**
+   * Left heading: school, company, or project name.
+   *
+   * Optional in the type because it is optional on disk. It used to be
+   * required, and `normalizeEntry` kept that true by substituting the entry's
+   * id — which is how `exp_helios` came to be typeset in bold where an
+   * employer's name belongs. `resolveEntry` prints nothing and warns instead;
+   * see the note there.
+   */
+  title?: MaybeVariant;
   /**
    * Right heading: dates, as the words that get printed.
    *

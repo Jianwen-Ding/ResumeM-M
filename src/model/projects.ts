@@ -85,6 +85,20 @@ export function prepareProject(current: Store | undefined, input: string, mode: 
         fs.cpSync(oldOutput, path.join(stage, 'out'), { recursive: true, dereference: true });
       } else if (inside(source, oldOutput) && oldOutput !== path.join(source, 'out') && fs.existsSync(oldOutput)) {
         fs.cpSync(oldOutput, path.join(stage, 'out'), { recursive: true, dereference: true });
+        /*
+         * And the copy the whole-tree copy above already made, which is now a
+         * second one.
+         *
+         * `config.yaml` is hand-editable and says so, so `output.dir` can be
+         * anything; a save configured to build into `build/` had that folder
+         * copied once as part of the tree and once again into `out/` by the
+         * line above, and then `saveConfig` below repointed the save at
+         * `out`. What was left was a live `out/` and a dead `build/` holding
+         * the same files, referenced by nothing and cleaned up by nothing —
+         * and since a save's own folder is its git history, both got
+         * committed.
+         */
+        fs.rmSync(path.join(stage, path.relative(source, oldOutput)), { recursive: true, force: true });
       }
     } else {
       staged.saveProfile({ name: PLACEHOLDER_NAME });

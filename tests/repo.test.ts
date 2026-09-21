@@ -611,3 +611,4 @@ describe('folders that exist only between two renames', () => {
     expect(after.split('.rmm-building-*/').length - 1).toBe(1);
   });
 });
+

@@ -343,6 +343,28 @@ function describeNext(label) {
 }
 
 async function stepHistory(direction) {
+  /*
+   * Whatever is still on the debounce goes down first, for the reason
+   * `undoGroup` gives and one more.
+   *
+   * A change made in the nine hundred milliseconds before it saves is held
+   * only in `state.choices` and friends, and `clearEdits` below drops all of
+   * them and sets `state.dirty` false. So an undo landing in that window
+   * replayed an older step and took the newest change with it — never
+   * written, never recorded, never undoable. The timer then fired into
+   * `autoSave`'s `if (!state.dirty) return`: no request, no error, and the
+   * save chip left reading "Unsaved changes" for ever about a change that no
+   * longer existed anywhere.
+   *
+   * The mid-typing guard is no help. It reads `document.activeElement`, and a
+   * tick box or an order nudge calls `render()`, which rebuilds the editor and
+   * puts focus on the body — so the key goes straight through, from exactly
+   * the actions most likely to be followed by one.
+   *
+   * Flushed rather than blocked, because the edit is real: it lands as its own
+   * step, and then this undo takes back the thing the person actually did last.
+   */
+  await flushAutoSave();
   const entry = direction === 'undo' ? history.undo() : history.redo();
   if (!entry) {
     setStatus(direction === 'undo' ? 'Nothing to undo' : 'Nothing to redo');
@@ -862,7 +884,20 @@ async function flushEdits() {
   // closing the tab, switching resumes, following a deep link — and the draft
   // was the one thing it did not cover.
   await flushDraftEdits().catch(() => {});
-  await Promise.all([...inlineSaves]);
+  /*
+   * Settled, and reported. `Promise.all` rejects on the first inline commit
+   * that failed, and nothing here caught it — the `.catch` at the call site
+   * is on a *derived* promise, so the one in this set is still rejected. That
+   * rejection went straight out through `leaveResume` and out of the
+   * dropdown's own handler, past both of `leaveResume`'s exits, so neither
+   * its refusal message nor the line that puts the dropdown back ever ran: an
+   * unhandled rejection in the console, and a resume switch that half
+   * happened.
+   *
+   * The answer for the caller is the same one `state.dirty` gets — the edit
+   * did not land, so the screen stays where it is and says why.
+   */
+  const inline = await Promise.allSettled([...inlineSaves]);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
   if (state.dirty) await autoSave();
@@ -872,6 +907,7 @@ async function flushEdits() {
   if (state.store?.config?.git?.autoCommit) {
     await api('/store/save', { method: 'POST', body: JSON.stringify({}), keepalive: true }).catch(() => {});
   }
+  return inline.every((r) => r.status === 'fulfilled');
 }
 
 /** Docs says "All changes saved"; so does this, in the same quiet way. */
@@ -1220,7 +1256,34 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     if (commit && next && next !== raw) {
       const save = Promise.resolve().then(() => onCommit(next));
       inlineSaves.add(save);
-      save.catch(err => setStatus(err.message, true)).finally(() => inlineSaves.delete(save));
+      save
+        .catch((err) => {
+          /*
+           * The sentence stays in the box it was typed in.
+           *
+           * A failed commit only put a message in the status line, and the
+           * line itself was left holding text the store does not have — so
+           * the next render anywhere in the editor rebuilt it from the store
+           * and the wording was simply gone, with nothing but a status
+           * message that had scrolled past to say it had ever existed. There
+           * was no way to retry it but to type it again from memory.
+           *
+           * Now it goes back into edit mode holding what was typed, so Enter
+           * is another attempt and Escape is giving up on purpose. Focus is
+           * only taken back if nothing else has it: this arrives whenever the
+           * store answers, and pulling the caret out of whatever the person
+           * has started doing since would be worse than the message alone.
+           */
+          setStatus(`${err.message} The wording is still in the line — press Enter to try again.`, true);
+          if (!node.isConnected) return;
+          editing = true;
+          node.contentEditable = 'plaintext-only';
+          node.classList.add('editing');
+          node.textContent = next;
+          const busy = document.activeElement;
+          if (!busy || busy === document.body) node.focus();
+        })
+        .finally(() => inlineSaves.delete(save));
     } else {
       // Put the markup back: the raw text is what gets edited, the rendered
       // form is what gets shown.
@@ -3187,6 +3250,21 @@ async function editEntry(entry) {
     { name: 'tags', label: 'Tags, comma separated', value: (entry.tags ?? []).join(', ') },
   ], 'Fields that have alternates are edited through their own dropdown.');
   if (!answer) return;
+
+  /*
+   * The same refusal the alternates dropdown gives, on the form that was the
+   * other way in.
+   *
+   * Deleting the last alternate of a title says "An entry needs a title —
+   * rewrite it rather than deleting it"; emptying the box here simply did
+   * `delete next.title` and saved. Nothing downstream asks for one, so the
+   * entry went to the renderer nameless and printed a blank where the
+   * employer's name belongs.
+   */
+  if (!isVariantField(entry.title) && !answer.title?.trim()) {
+    setStatus('An entry needs a title — rewrite it rather than clearing it', true);
+    return;
+  }
 
   const next = { ...entry };
   for (const f of ['title', 'subtitle', 'dates', 'location']) {
@@ -7650,9 +7728,23 @@ async function loadProjectSettings() {
    * does not have. This is the only place that can say it.
    */
   const brokenHistory = config.git.autoCommit ? info.lastCommitError : null;
+  /*
+   * And git refusing to say what has changed, which is worse than either.
+   *
+   * An empty list of unsaved files is what this panel shows when everything
+   * is saved, so a git that will not answer must not be allowed to render as
+   * that — it is the exact confusion `rmm save` used to cause by reporting
+   * "already saved" for a store it had not managed to look at. First, because
+   * it is the news: nothing else here can be trusted while it is true.
+   */
+  const cannotLook = info.pendingError;
   const unsaved = el('div', {
-    className: brokenHistory ? 'result bad' : pending.length > 0 ? 'result idle' : 'result ok',
-    textContent: brokenHistory
+    className: cannotLook || brokenHistory ? 'result bad' : pending.length > 0 ? 'result idle' : 'result ok',
+    textContent: cannotLook
+      ? `Git would not say what has changed here: ${cannotLook}. ` +
+        'Until that is fixed nothing can be saved to the history, and this panel cannot tell you ' +
+        'whether anything is waiting to be.'
+      : brokenHistory
       ? 'Nothing has been recorded in the version history since ' +
         `${new Date(brokenHistory.at).toLocaleString()}: ` +
         `${brokenHistory.message}. Your files are all written — it is the history that has stopped. ` +
@@ -9344,9 +9436,9 @@ async function applyHash() {
  * Returns whether it moved.
  */
 async function leaveResume(go) {
-  await flushEdits();
+  const landed = await flushEdits();
   if (state.dirty) await autoSave().catch(() => {});
-  if (state.dirty) {
+  if (state.dirty || !landed) {
     setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
     return false;
   }

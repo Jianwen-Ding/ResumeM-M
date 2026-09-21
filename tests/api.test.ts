@@ -1708,6 +1708,41 @@ describe('workspace', () => {
     expect(tracked.status).toBe('interview'); // left alone
   });
 
+  /*
+   * The same thing, for a row that was not made today.
+   *
+   * An id carries the date it was made — that is what `findApplication`
+   * exists to see past, and every other path that creates or finds an
+   * application goes through it. This one asked `findDraft` and then minted
+   * `applicationId`, which is today's date, and compared *that* against the
+   * tracker by id. So a job applied for yesterday and revisited today did not
+   * match its own row, and merely opening the workspace filed a second one.
+   *
+   * Yesterday's row can be left with no draft in a dozen ordinary ways: the
+   * extension's quick submit, which opens no workspace at all, or opening one
+   * and then deleting it, which is a button.
+   */
+  it('finds the row this job already has, even if it was opened another day', async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const created = await request(app)
+      .post('/api/applications')
+      .send({
+        id: `${yesterday.slice(0, 10)}-streamly-data-platform-intern`,
+        company: 'Streamly',
+        role: 'Data Platform Intern',
+        status: 'applied',
+        appliedAt: yesterday,
+      })
+      .expect(200);
+
+    await open().expect(200);
+
+    const { body } = await request(app).get('/api/applications').expect(200);
+    const mine = body.applications.filter((a: { company: string }) => a.company === 'Streamly');
+    expect(mine.map((a: { id: string }) => a.id)).toEqual([created.body.id]);
+    expect(mine[0].status).toBe('applied');
+  });
+
   it('pre-fills what the answer bank already covers', async () => {
     const res = await open().expect(200);
     const draft = res.body.draft;
@@ -3037,6 +3072,35 @@ describe('which letters and answers count as your writing', () => {
   it('refuses a kind it does not know', async () => {
     const res = await include({ kind: 'resume', id: 'intern', include: false }).expect(400);
     expect(res.body.error).toMatch(/letter|answer/);
+  });
+});
+
+/*
+ * The panel that explains a broken save must not be the one that breaks.
+ *
+ * `pending()` refuses to report an empty list when git would not answer —
+ * that refusal is what stopped `rmm save` calling it "already saved". This
+ * route feeds Save & Files, where somebody goes to find out what is wrong, so
+ * it has to keep rendering: the list empty, with the reason beside it.
+ */
+describe('the store panel when git will not answer', () => {
+  it('still answers, and says why the list is empty', async () => {
+    await request(app).post('/api/store/save').send({}).expect(200);
+    // What a killed `git add` leaves behind.
+    fs.writeFileSync(path.join(t.dir, '.git', 'index'), 'not an index', 'utf8');
+
+    const res = await request(app).get('/api/config/store').expect(200);
+    expect(res.body.pending).toEqual([]);
+    expect(String(res.body.pendingError)).toMatch(/index|corrupt|fatal/i);
+    // And the rest of the panel is still there to be read.
+    expect(res.body.dir).toBe(t.dir);
+    expect(res.body.isRepo).toBe(true);
+  });
+
+  it('and says nothing of the sort when git is fine', async () => {
+    await request(app).post('/api/store/save').send({}).expect(200);
+    const res = await request(app).get('/api/config/store').expect(200);
+    expect(res.body.pendingError).toBeUndefined();
   });
 });
 

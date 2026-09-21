@@ -118,8 +118,48 @@ describe('making the rest of the store’s shape true', () => {
     expect(normalizeAnswers(undefined)).toEqual([]);
   });
 
-  it('gives an entry with no title one it can print', () => {
-    expect(normalizeEntries([{ id: 'exp_x', kind: 'experience' }])[0]?.title).toBe('exp_x');
+  /*
+   * This test used to assert the opposite — "gives an entry with no title one
+   * it can print" — and what it printed was the slug. `resolveEntry` carries a
+   * warning for exactly this, written after a resume went out with
+   * `exp_example_co` typeset in bold, and the substitution here was what kept
+   * that warning from ever firing: every entry reaches the resolver through
+   * `normalizeEntry`, so `title.trim()` was never empty.
+   */
+  it('leaves an entry with no title without one, so the resolver can say so', () => {
+    expect(normalizeEntries([{ id: 'exp_x', kind: 'experience' }])[0]?.title).toBeUndefined();
+  });
+
+  /*
+   * The migration for the saves that already have it. `saveEntry` normalizes
+   * on the way out too, so the id was written into the YAML: removing the
+   * substitution alone would leave those entries printing the slug for ever.
+   */
+  it('undoes the substitution where it was already written to disk', () => {
+    expect(normalizeEntries([{ id: 'exp_x', kind: 'experience', title: 'exp_x' }])[0]?.title).toBeUndefined();
+    // A real title that happens to sit on an entry named after it is kept —
+    // only the exact id, and only as a plain string, is taken for the bug.
+    expect(normalizeEntries([{ id: 'exp_x', kind: 'experience', title: 'Exp X' }])[0]?.title).toBe('Exp X');
+  });
+
+  /*
+   * A stray `-` left behind after deleting a bullet's text is `null` to the
+   * YAML parser, and `normalizeBullet` reads `bullet.variants` on its first
+   * line. Every other list in the file filters; this one did not, so one blank
+   * item made the whole save unopenable — "Cannot read properties of null
+   * (reading 'variants')" on every screen, thrown before the machinery that
+   * names the offending file gets to run.
+   */
+  it('survives a blank item in an entry’s bullet list', () => {
+    const entries = normalizeEntries([
+      {
+        id: 'exp_x',
+        kind: 'experience',
+        title: 'Helios',
+        bullets: [null, undefined, 'not an object', { id: 'b_one', variants: [{ id: 'v1', label: 'a', text: 'Shipped it' }] }],
+      },
+    ]);
+    expect(entries[0]?.bullets?.map((b) => b.id)).toEqual(['b_one']);
   });
 
   it('gives an answer with no phrasings an empty list rather than a crash', () => {

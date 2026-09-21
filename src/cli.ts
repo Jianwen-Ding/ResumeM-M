@@ -75,10 +75,6 @@ if (at && !at.isDirectory()) {
   process.exit(1);
 }
 
-if (WORKS_IN_A_STORE.has(process.argv[2] ?? '') && seedStore(path.join(projectRoot, 'data'), dataDir)) {
-  console.error(`Started a new save at ${dataDir}, from the bundled example — there was nothing there.`);
-}
-
 const USAGE = `rmm — resume mix-and-match
 
   rmm list                        List resumes in the store
@@ -211,7 +207,30 @@ function unknownFlag(command: string, rest: string[]): string | null {
       i++; // its value is not a flag
       continue;
     }
-    if (bare.has(name)) continue;
+    if (bare.has(name)) {
+      /*
+       * And a bare flag given one, which is the same mistake the other way up.
+       *
+       * `--dry-run` is read with `rest.includes('--dry-run')`, so the token
+       * `--dry-run=true` is not it — and this line waved it through, because
+       * the name in front of the `=` is a flag the command takes. `rmm voice
+       * add letters.txt --dry-run=true` therefore saved every sample it found
+       * and committed them, having been told to preview; `--no-ai=true` sent
+       * the files to the AI after an explicit refusal.
+       *
+       * `--data=` is a real spelling this file supports, which is exactly why
+       * somebody writes `--dry-run=true`. This note's own rule settles it: a
+       * flag that is accepted and discarded is worse than one that is
+       * rejected.
+       */
+      if (token.includes('=')) {
+        return (
+          `--${name} takes no value, so ${token} is not it — and \`rmm ${command}\` would have ignored ` +
+          `the whole thing and carried on. Write --${name} on its own, or leave it off.`
+        );
+      }
+      continue;
+    }
 
     const known = [...value, ...bare].sort().map((f) => `--${f}`);
     return `"${token}" is not something ${command ? `\`rmm ${command}\`` : 'rmm'} takes. It takes: ${known.join(', ')}.`;
@@ -450,6 +469,15 @@ async function main(argv: string[]): Promise<number> {
       });
       console.log(`master: ${result.pages} page(s) → ${path.relative(process.cwd(), out)}`);
       console.log('Every entry, bullet, and phrasing in the store, labelled with its id.');
+      /*
+       * The same warnings `build`, `check` and `apply` print, which this one
+       * threw away. They are about the compile rather than about any resume —
+       * a font the engine had to substitute, a line that runs past the right
+       * edge and is therefore not in the PDF at all — and the master document
+       * is the one most likely to produce them, because it holds every entry
+       * in the store at once.
+       */
+      for (const w of result.warnings) console.warn(`  ! ${w}`);
       return 0;
     }
 
@@ -505,6 +533,24 @@ async function main(argv: string[]): Promise<number> {
        */
       for (const w of result.warnings) console.warn(`  ! ${w}`);
       if (result.missing) console.warn(`  ! ${result.missing}`);
+      /*
+       * And the exit code says what the warnings say.
+       *
+       * This returned 0 whatever it had just filed. `check` fails on a resume
+       * that does not fit, and this is the command that writes the bundle and
+       * records the application as sent — so a script that files an
+       * application and reads the exit code to decide whether it went out
+       * cleanly was told yes about a two-page resume, or about one missing an
+       * entry its spec still lists.
+       *
+       * The files are written and the row is filed either way: this reports
+       * the state of what happened, it does not undo it. Hence the line
+       * saying so, rather than leaving the number to speak for itself.
+       */
+      if (!result.fits || result.missing) {
+        console.warn('The bundle is written and the application is filed — but not cleanly. See above.');
+        return 1;
+      }
       return 0;
     }
 
@@ -678,6 +724,29 @@ async function main(argv: string[]): Promise<number> {
       console.error(`Unknown command "${command}"\n`);
       console.log(USAGE);
       return 1;
+  }
+}
+
+/*
+ * Seeded last: after the command has been looked at, and after its flags have.
+ *
+ * The command half of this was already here — see `WORKS_IN_A_STORE` — and the
+ * flags were not. `--data` is read out of the raw argv before anything
+ * validates it, so `rmm apply mine --data --company Acme --role SWE`, a
+ * forgotten folder after `--data`, resolved the save to `./--company`, created
+ * it, filled it with the bundled example and said "Started a new save at
+ * ./--company". Only then did `main` reach the check that names the real
+ * mistake and exit 1 — leaving a folder of somebody else's resumes in the
+ * working directory of a person who had made a typo.
+ *
+ * `unknownFlag` is the same call `main` makes, on the same arguments. Running
+ * it twice costs nothing; running it too late cost a folder.
+ */
+{
+  const command = process.argv[2] ?? '';
+  const refused = ['help', '--help', '-h'].includes(command) ? null : unknownFlag(command, process.argv.slice(3));
+  if (!refused && WORKS_IN_A_STORE.has(command) && seedStore(path.join(projectRoot, 'data'), dataDir)) {
+    console.error(`Started a new save at ${dataDir}, from the bundled example — there was nothing there.`);
   }
 }
 

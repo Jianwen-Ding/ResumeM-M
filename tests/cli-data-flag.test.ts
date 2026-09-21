@@ -328,10 +328,22 @@ describe('rmm --data', () => {
     const checked = await rmm(['check', 'broken', '--data', save]);
     expect(checked.stderr, 'check says it too').toContain('exp_gone_forever');
 
+    /*
+     * And `apply` fails, rather than warning and reporting success.
+     *
+     * It returned 0 whatever it had just filed, while `check` fails on the
+     * same resume — so a script that files an application and reads the exit
+     * code to decide whether it went out cleanly was told yes about one
+     * missing an entry its spec still lists, or about a resume that runs to
+     * two pages.
+     */
     const applied = await rmm([
       'apply', 'broken', '--company', 'Acme', '--role', 'Engineer', '--data', save,
-    ]);
+    ]).catch((e) => e);
     expect(applied.stderr, 'and so does the one that files it as sent').toContain('exp_gone_forever');
+    expect(applied.code, 'and it does not call that a clean run').toBe(1);
+    // The work is not undone by saying so: the bundle is on disk either way.
+    expect(applied.stderr).toContain('filed — but not cleanly');
   });
 
   /*
@@ -372,6 +384,79 @@ describe('rmm --data', () => {
     const owner = lines.slice(0, at).reverse().find((l) => /^\S/.test(l)) ?? '';
     expect(owner).toContain('broken');
   });
+
+  /*
+   * A bare flag given a value, which the validator waved through because the
+   * name in front of the `=` is one the command takes.
+   *
+   * `--dry-run` is read with `rest.includes('--dry-run')`, so the token
+   * `--dry-run=true` is not it: the preview flag was dropped and the samples
+   * were written and committed. `--no-ai=true` sent the file to the AI after
+   * an explicit refusal. Both silently, both doing the opposite of what was
+   * typed — and `--data=folder` is a spelling this CLI does support, which is
+   * exactly why somebody writes the other one.
+   */
+  it('refuses a bare flag that was given a value, rather than ignoring it', async () => {
+    const letter = path.join(save, 'letter.txt');
+    fs.writeFileSync(letter, 'Dear Acme, I have spent four years on ingest pipelines and would like to keep going.\n');
+
+    const refused = await rmm(['voice', 'add', letter, '--dry-run=true', '--data', save]).catch((e) => e);
+    expect(refused.code, refused.stdout ?? '').toBe(1);
+    expect(refused.stderr).toContain('--dry-run takes no value');
+    // And nothing was written on the way to saying so.
+    expect(fs.existsSync(path.join(save, 'corpus'))).toBe(false);
+
+    // The spelling that is real still works, and still saves nothing.
+    const dry = await rmm(['voice', 'add', letter, '--dry-run', '--no-ai', '--data', save]);
+    expect(dry.stdout).toContain('dry run');
+    expect(fs.existsSync(path.join(save, 'corpus'))).toBe(false);
+  }, 120_000);
+
+  /*
+   * `--data` is read out of the raw argv before anything validates it, and the
+   * seeding runs at module load. So a forgotten folder after `--data` resolved
+   * the save to `./--company`, created it, filled it with the bundled example
+   * and announced it — and only then did the real error about the typo appear.
+   */
+  it('does not start a save for a command line it is about to refuse', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-cwd-'));
+    try {
+      const refused = await run(
+        process.execPath,
+        [path.join(root, 'node_modules/.bin/tsx'), path.join(root, 'src/cli.ts'),
+         'apply', 'base', '--data', '--company', 'Acme', '--role', 'SWE'],
+        { cwd, env: { ...process.env, RMM_AUTOCOMMIT: '0' }, timeout: 60_000 },
+      ).catch((e) => e);
+
+      expect(refused.code).toBe(1);
+      expect(refused.stderr).toContain('--data was given --company as its value');
+      expect(refused.stderr).not.toContain('Started a new save');
+      expect(fs.readdirSync(cwd), 'nothing was left behind').toEqual([]);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  /*
+   * The master document gets the same warnings as everything else.
+   *
+   * `build`, `check` and `apply` all print `result.warnings`; `master` never
+   * read them. They are about the compile rather than about any one resume —
+   * a font the engine had to substitute, a line running past the right edge
+   * and therefore missing from the PDF — and the master document is the most
+   * likely of all of them to produce one, because it holds every entry in the
+   * store at once.
+   */
+  it('says on the master document what it says on a resume', async () => {
+    const built = await rmm(['build', '--all', '--data', save]);
+    const warned = (built.stderr.match(/^\s*! /gm) ?? []).length > 0;
+    // This machine's TeX install produces one; a machine with lmodern would
+    // not, and there would then be nothing for this to compare.
+    expect(warned, 'the compile warns about something here').toBe(true);
+
+    const master = await rmm(['master', '--data', save]);
+    expect(master.stderr).toMatch(/^\s*! /m);
+  }, 120_000);
 
   it('beats RMM_DATA', async () => {
     const other = aSave('The Folder In The Environment');

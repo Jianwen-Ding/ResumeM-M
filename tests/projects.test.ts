@@ -44,6 +44,25 @@ describe('project folders', () => {
     expect(fs.existsSync(path.join(t.store.outDir(), 'resume.pdf'))).toBe(true);
   });
 
+  /*
+   * `config.yaml` is hand-editable and says so, so `output.dir` can be
+   * anything. A save built into `build/` had that folder copied twice by a
+   * move — once as part of the tree, once into `out/` — and then repointed at
+   * `out`, leaving a dead duplicate referenced by nothing. A save's own folder
+   * is its git history, so both were committed.
+   */
+  it('moves a custom output folder without leaving a copy of it behind', () => {
+    const { t, dest } = setup();
+    t.store.saveConfig({ ...t.store.loadConfig(), output: { dir: 'build', withinProject: true } });
+    fs.mkdirSync(t.store.outDir(), { recursive: true });
+    fs.writeFileSync(path.join(t.store.outDir(), 'resume.pdf'), 'generated PDF');
+
+    const next = prepareProject(t.store, dest, 'move');
+    expect(next.outDir()).toBe(path.join(dest, 'out'));
+    expect(fs.readFileSync(path.join(dest, 'out', 'resume.pdf'), 'utf8')).toBe('generated PDF');
+    expect(fs.existsSync(path.join(dest, 'build'))).toBe(false);
+  });
+
   it('rejects occupied, invalid, nested, and symlink-nested destinations', () => {
     const { t, dir, dest } = setup();
     fs.mkdirSync(dest); fs.writeFileSync(path.join(dest, 'keep.txt'), 'keep');
