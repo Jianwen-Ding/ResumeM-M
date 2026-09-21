@@ -4,7 +4,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import type { Store } from './store.js';
 import type { Application, ApplicationStatus, ResolvedResume } from './types.js';
-import { compileLetter, compileResume, type LetterCompileResult } from '../render/compile.js';
+import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
 import { syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
 
@@ -378,6 +378,32 @@ export interface BundleResult {
    * "b_ec_pipeline".
    */
   missing?: string;
+}
+
+/**
+ * What was done to the resume to get it onto a page, said out loud.
+ *
+ * Auto-fit is a search: it shrinks the font, the spacing and the margins
+ * until the least shrinking that fits is found, and the editor says so under
+ * the preview — "Squeezed to fit — font 10.5pt → 9.8pt, spacing ×1 → ×0.88".
+ * The bundle is the copy that gets attached and sent, and it said nothing.
+ *
+ * The layout is not lost — `source/resume.tex` beside the PDF has every
+ * number in it — but nobody opens a `.tex` to find out what they sent, and
+ * the moment to know is the moment before attaching it, not afterwards. It
+ * matters because the floor is low: a resume can come out at a size the
+ * author would have cut a bullet rather than accept, and the only sign of it
+ * in the folder is the PDF looking a bit tight.
+ *
+ * Only the case where the squeezing worked, which is the one nothing else
+ * reports. A resume that overflows even at the floor already comes back as
+ * `fits: false` with a page count beside it, and `adjustments` is empty there
+ * by design — nothing was adjusted *successfully*, and "Squeezed to fit" over
+ * a document still two pages long was its own bug once.
+ */
+function aboutTheResume(out: FitReport): string[] {
+  if (!out.fits || out.adjustments.length === 0) return [];
+  return [`The resume was squeezed to fit: ${out.adjustments.join(', ')}.`];
 }
 
 /**
@@ -782,7 +808,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
        * documents are fixed in different places and "a line runs past the
        * edge" sends whoever reads it to the resume otherwise.
        */
-      warnings: [...compiled.warnings, ...aboutTheLetter(letterOut)],
+      warnings: [...compiled.warnings, ...aboutTheResume(compiled), ...aboutTheLetter(letterOut)],
       missing: describeLost(resolved.lost ?? []),
     };
   } finally {
