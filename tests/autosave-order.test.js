@@ -231,3 +231,85 @@ describe('deleting a resume with a save of it still out', () => {
     expect(data.resumes.some((r) => r.id === doomed), 'and it is gone for good').toBe(false);
   });
 });
+
+/*
+ * Forking a resume out of an edit that has not landed yet.
+ *
+ * "Save as variation" builds the copy from `currentSpec()`, which folds in
+ * the unsaved overlays — so the new variation is right. Then it clears those
+ * overlays and moves to the copy, without ever writing them to the resume
+ * they were made on.
+ *
+ * Which resume keeps the edit therefore depended on how fast you typed. Take
+ * longer than the debounce over the name — the usual case — and the original
+ * keeps it. Accept the two pre-filled boxes straight away and it does not,
+ * and the timer that would have saved it fires into nothing, because
+ * clearing the overlays un-dirties them first. The same edit, two answers,
+ * neither of them announced.
+ */
+describe('saving a variation out of an edit that has not landed', () => {
+  it('leaves the edit on the resume it was made on', async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#resumes';
+
+    const fixture = makeTempStore();
+    const data = fixture.store.load();
+    fixture.cleanup();
+
+    const puts = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init = {}) => {
+        const method = init.method ?? 'GET';
+        let result = {};
+        if (url === '/api/store') result = data;
+        else if (url === '/api/ai/jobs') result = { jobs: [] };
+        else if (url === '/api/config') {
+          result = { ai: { enabled: false }, latex: {}, git: {}, output: {}, overrides: {}, resumes: {} };
+        } else if (url === '/api/resumes/expiring') result = { due: [] };
+        else if (String(url).startsWith('/api/render')) {
+          result = { pages: 1, fits: true, adjustments: [], warnings: [], lost: [], pdfUrl: '/pdf/x.pdf' };
+        } else if (String(url).startsWith('/api/resumes/') && method === 'PUT') {
+          const spec = JSON.parse(init.body);
+          puts.push(spec);
+          const at = data.resumes.findIndex((r) => r.id === spec.id);
+          if (at >= 0) Object.assign(data.resumes[at], spec);
+          else data.resumes.push(spec);
+          result = spec;
+        }
+        return { ok: true, json: async () => structuredClone(result) };
+      }),
+    );
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelectorAll('#editor .entry').length).toBeGreaterThan(1));
+
+    const original = document.querySelector('#resume-select').value;
+    const row = [...document.querySelectorAll('#editor .entry')].find(
+      (e) => e.querySelector(':scope > .entry-head input[type=checkbox]'),
+    );
+    expect(row, 'an entry that can be ticked off').toBeTruthy();
+    const ticked = row.querySelector(':scope > .title')?.textContent ?? '';
+    row.querySelector(':scope > .entry-head input[type=checkbox]').click();
+
+    /*
+     * And forked at once, inside the debounce — both boxes come pre-filled,
+     * so accepting them is two presses.
+     */
+    const answered = (async () => {
+      await vi.waitFor(() => expect(document.querySelector('#modal [name=label]')).not.toBeNull());
+      document.querySelector('#modal-ok').click();
+    })();
+    document.querySelector('#btn-save-as').click();
+    await answered;
+
+    await vi.waitFor(() => expect(puts.some((p) => p.id !== original)).toBe(true), { timeout: 4000 });
+
+    // The copy is right either way; the question is the resume it came from.
+    await vi.waitFor(
+      () => expect(puts.some((p) => p.id === original), `${ticked} was written back to ${original}`).toBe(true),
+      { timeout: 4000 },
+    );
+  });
+});

@@ -5306,6 +5306,25 @@ async function saveAsVariation() {
   delete spec.generatedFor;
   delete spec.extends;
 
+  /*
+   * The edit stays on the resume it was made on, as well as going into the
+   * copy.
+   *
+   * `currentSpec()` above folds the unsaved overlays into the variation, so
+   * the copy was always right. Then `clearEdits()` threw those overlays away
+   * — and the save that would have written them to the *original* had not
+   * necessarily happened yet, because clearing them un-dirties them and the
+   * timer fires into nothing.
+   *
+   * So which resume kept the edit depended on how fast somebody typed. Take
+   * longer than the debounce over the name, which is the usual way, and the
+   * original keeps it; accept the two pre-filled boxes straight away and it
+   * does not. The same action, two answers, neither of them announced. The
+   * common one is also the right one: the edit was made before the fork, so
+   * it belongs to both.
+   */
+  await flushAutoSave().catch(() => undefined);
+
   await saveResumeSpec(spec, `Saved ${spec.id}`);
   clearEdits();
   state.resumeId = spec.id;
