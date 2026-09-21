@@ -207,6 +207,21 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   fs.mkdirSync(dir, { recursive: true });
 
   const claims: { name: string; app: Application; from: string }[] = [];
+  /*
+   * The applications this folder could not put anything out for, and why.
+   *
+   * Every `continue` below is an in-flight application with a `snapshotDir`
+   * that goes nowhere: a bundle folder the user deleted, one built under a
+   * previous `output.dir` that no longer resolves, or a path that leads out
+   * of the output folder and is refused. Each of those was skipped in
+   * silence, and then counted at the bottom of this function as an
+   * application "whose files are in the folder" — so the Applications tab
+   * read "1 application's files are ready in out/current" beside a list that
+   * did not include it, with nothing naming what was missing.
+   */
+  const missing: string[] = [];
+  const says = (app: Application) => `${app.company} — ${app.role}`;
+
   for (const app of apps) {
     if (!IN_FLIGHT.includes(app.status) || !app.snapshotDir) continue;
     /*
@@ -217,7 +232,14 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
      * which is served over HTTP to any origin that asks.
      */
     const from = store.outPath(app.snapshotDir);
-    if (!from || !fs.existsSync(from)) continue;
+    if (!from) {
+      missing.push(`${says(app)}: its files are recorded at a path outside the output folder, so they were not read`);
+      continue;
+    }
+    if (!fs.existsSync(from)) {
+      missing.push(`${says(app)}: the folder its files were built into is not there any more`);
+      continue;
+    }
 
     for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
       // `source/` holds the .tex and the frozen spec: archive material, not
@@ -229,8 +251,13 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
 
   const renamed = uniqueNames(claims);
   const wanted = new Map<string, string>(); // final name → where to copy it from
+  // And whose it is, so the count at the bottom can be what actually landed
+  // rather than what the tracker hoped for.
+  const owner = new Map<string, string>(); // final name → application id
   for (const claim of claims) {
-    wanted.set(renamed.get(`${claim.app.id} ${claim.name}`) ?? claim.name, claim.from);
+    const name = renamed.get(`${claim.app.id} ${claim.name}`) ?? claim.name;
+    wanted.set(name, claim.from);
+    owner.set(name, claim.app.id);
   }
 
   // Anything this folder put here and no longer wants leaves. Only those: a
@@ -338,6 +365,8 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
     }
   }
 
+  problems.push(...missing);
+
   const files = landed.sort();
   // And which bundle each one came out of, so the next sync can tell a
   // different application's file from a stale copy of the same one.
@@ -353,7 +382,9 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   return {
     dir,
     files,
-    applications: apps.filter((a) => IN_FLIGHT.includes(a.status) && a.snapshotDir).length,
+    // What is actually here, not what the tracker says should be: a row whose
+    // bundle folder has gone is named in `problems` above rather than counted.
+    applications: new Set(files.map((name) => owner.get(name)).filter(Boolean)).size,
     inFlight: apps.filter((a) => IN_FLIGHT.includes(a.status)).length,
     ...(problems.length ? { problems } : {}),
   };

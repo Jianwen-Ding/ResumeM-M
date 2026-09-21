@@ -638,3 +638,45 @@ describe('a file of your own in the upload folder', () => {
     expect(fs.readFileSync(path.join(after.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('the generated one');
   });
 });
+
+/**
+ * The count beside the folder has to be about the folder.
+ *
+ * `applications` is documented as "In-flight applications whose files are in
+ * the folder" and was computed from the tracker alone — every in-flight row
+ * with a `snapshotDir` written on it, whether or not that path led anywhere.
+ * So an application whose bundle folder the user deleted, or one built under
+ * a previous `output.dir` that no longer resolves, was counted as ready while
+ * contributing nothing, and nothing named it: the skip was silent and
+ * `problems` stayed empty.
+ */
+describe('an application whose files are not where the tracker says', () => {
+  it('is not counted as ready, and is named', () => {
+    const bundle = path.join(t.store.outDir(), 'applications', 'a1');
+    fs.mkdirSync(bundle, { recursive: true });
+    fs.writeFileSync(path.join(bundle, 'Test-Person-Resume.pdf'), 'here', 'utf8');
+    t.write('applications.yaml', [
+      { id: 'a1', company: 'Acme', role: 'Engineer', status: 'applied', snapshotDir: 'applications/a1' },
+      { id: 'a2', company: 'Zenith', role: 'Platform', status: 'applied', snapshotDir: 'applications/a2-gone' },
+    ]);
+
+    const folder = syncCurrent(t.store);
+
+    expect(folder.files).toEqual(['Test-Person-Resume.pdf']);
+    expect(folder.applications).toBe(1);
+    // Both are in flight; only one has anything here.
+    expect(folder.inFlight).toBe(2);
+    expect((folder.problems ?? []).join(' ')).toMatch(/Zenith — Platform[\s\S]*not there any more/);
+  });
+
+  it('and a path leading out of the output folder is named as that', () => {
+    t.write('applications.yaml', [
+      { id: 'a1', company: 'Acme', role: 'Engineer', status: 'applied', snapshotDir: '../../../.ssh' },
+    ]);
+
+    const folder = syncCurrent(t.store);
+    expect(folder.files).toEqual([]);
+    expect(folder.applications).toBe(0);
+    expect((folder.problems ?? []).join(' ')).toMatch(/Acme — Engineer[\s\S]*outside the output folder/);
+  });
+});
