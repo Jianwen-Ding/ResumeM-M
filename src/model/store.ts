@@ -608,7 +608,6 @@ export class Store {
         fs.closeSync(fd);
       }
       fs.renameSync(temp, f);
-      fsyncDirectory(path.dirname(f));
     } catch (err) {
       fs.rmSync(temp, { force: true });
       /*
@@ -625,6 +624,29 @@ export class Store {
        */
       const said = err instanceof Error ? err.message : String(err);
       throw new Error(`${path.basename(f)} could not be saved to ${path.dirname(f)} — ${said}`, { cause: err });
+    }
+
+    /*
+     * After the rename, and outside everything above, because by here the
+     * save has happened.
+     *
+     * This used to sit inside the try. `fsyncDirectory` re-throws any errno
+     * outside its short allow-list — `EIO` among them — so a directory flush
+     * failing on a file that was already on disk under its real name came
+     * back as "resume.yaml could not be saved to /…/resumes — EIO". The
+     * caller is `withCommit`, which has no catch, so the commit was skipped
+     * too: the edit was on disk, absent from the history, and reported to the
+     * person as not saved. They redo work that is already done.
+     *
+     * What the flush actually buys is the rename surviving a power cut, and
+     * losing that quietly is the smaller harm by a long way — the alternative
+     * is a false negative that costs somebody their afternoon and drops their
+     * change out of the history.
+     */
+    try {
+      fsyncDirectory(path.dirname(f));
+    } catch {
+      // A durability caveat on a write that has already landed.
     }
   }
 
