@@ -161,6 +161,24 @@ describe('choosing which letters and answers count as your writing', () => {
     expect(Number(counted)).toBe(Number(all) - 1);
   });
 
+  it('counts the ones left out in English', async () => {
+    out.add('l-zen');
+    await open('voice');
+    const said = document.querySelector('#voice-writing').textContent;
+    // `plural(n, 'one')` would have written "1 one left out", and "2 ones"
+    // for the pair — which reads as the program not knowing what it is
+    // counting, on a panel whose whole job is saying what it is counting.
+    expect(said).toContain('One left out');
+    expect(said).not.toMatch(/\bones?\b(?! left)/i);
+
+    out.add('l-acme');
+    await open('resumes');
+    await open('voice');
+    const both = document.querySelector('#voice-writing').textContent;
+    expect(both).toContain('2 left out');
+    expect(both).not.toMatch(/\bones\b/i);
+  });
+
   it('says what it would do, not only what is true, in the tooltip', async () => {
     await open('letters');
     const on = flags(document.querySelector('#letters'))[0];

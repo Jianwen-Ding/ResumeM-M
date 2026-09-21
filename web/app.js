@@ -6976,7 +6976,16 @@ function drawVoiceWriting(writing) {
     box,
     el('div', { className: 'card-list' }, counted.map((x) => row(x.kind, x.id, x.name, x.chars, true))),
     left.length
-      ? el('p', { className: 'hint', textContent: `${plural(left.length, 'one')} left out — kept in the save, and not imitated.` })
+      ? el('p', {
+          className: 'hint',
+          // Counted by what they are, not by "one" — `plural` would have made
+          // this "2 ones left out", which is the sort of thing that reads as
+          // the program not knowing what it is talking about.
+          textContent:
+            left.length === 1
+              ? 'One left out — kept in the save, and not imitated.'
+              : `${left.length} left out — kept in the save, and not imitated.`,
+        })
       : null,
     left.length
       ? el('div', { className: 'card-list' }, left.map((x) => row(x.kind, x.id, x.name, x.chars, false)))
