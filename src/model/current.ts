@@ -30,7 +30,18 @@ export const CURRENT_DIR = 'current';
  * transcript that belongs to every one of them must not add a phantom to that
  * number — "1 application's files are ready" on a save with none in flight.
  */
-const STANDING = '\u0000standing';
+export const STANDING = '\u0000standing';
+
+/**
+ * Recorded as the source of a file whose copy did not happen.
+ *
+ * A NUL, like `STANDING` above and for the same reason: no path can be this,
+ * so a name carrying it is always re-copied and is never mistaken for a file
+ * of the user's. An empty string was the obvious choice and does not survive
+ * the round trip — `readSources` drops falsy sources on the way back in,
+ * because a source is supposed to be a path.
+ */
+const FAILED = '\u0000failed';
 
 /**
  * What this folder put here last time.
@@ -327,6 +338,12 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   const ours = readManifest(dir);
   const cameFrom = readSources(dir);
   /*
+   * Everything this folder owns, which is not the same as everything it is
+   * holding correctly: a name whose copy failed is still ours to retry and
+   * still ours to delete. See the manifest written at the end.
+   */
+  const owned = new Set([...ours, ...Object.keys(cameFrom)]);
+  /*
    * Whether this folder has a record of what it put here.
    *
    * `readManifest` answers `[]` both for "the manifest lists nothing" and for
@@ -335,8 +352,8 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
    * be said about any name and the old behaviour is the only safe one.
    */
   const tracked = fs.existsSync(path.join(dir, MANIFEST));
-  const claimed = new Set(ours);
-  for (const existing of ours) {
+  const claimed = owned;
+  for (const existing of owned) {
     if (wanted.has(existing) || existing === MANIFEST) continue;
     try {
       // `recursive` because a stale entry may be a directory — without it,
@@ -430,9 +447,29 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   problems.push(...missing);
 
   const files = landed.sort();
-  // And which bundle each one came out of, so the next sync can tell a
-  // different application's file from a stale copy of the same one.
-  const from = Object.fromEntries(files.map((name) => [name, wanted.get(name)!]));
+  /*
+   * And which bundle each one came out of, so the next sync can tell a
+   * different application's file from a stale copy of the same one.
+   *
+   * Including the ones that did not land, which is the part that was wrong.
+   * `landed` is pushed to after the copy, so a name whose copy threw was left
+   * out of both halves of the manifest — and the next sync, finding the file
+   * still on disk with nothing claiming it, read it as a file of the user's
+   * and refused to touch it. For ever: never re-copied when the application
+   * is rebuilt, never deleted when it ships, and no longer listed for the
+   * extension to attach. One `EBUSY` from a PDF open in a viewer, and the
+   * upload folder keeps yesterday's resume under exactly the right name while
+   * the card shows nothing.
+   *
+   * Recorded under `FAILED`, so the next sync always re-copies it: it is not
+   * a path any bundle can have produced, and it is not `undefined`, which is
+   * what the guard reads as "somebody else's".
+   */
+  const failed = [...wanted.keys()].filter((name) => !landed.includes(name));
+  const from = Object.fromEntries([
+    ...files.map((name) => [name, wanted.get(name)!]),
+    ...failed.map((name) => [name, FAILED]),
+  ]);
   try {
     fs.writeFileSync(path.join(dir, MANIFEST), JSON.stringify({ files, from }, null, 2), 'utf8');
   } catch {
@@ -444,9 +481,19 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   return {
     dir,
     files,
-    belongsTo: Object.fromEntries(
-      files.map((name) => [name, owner.get(name) === STANDING ? 'standing' : (owner.get(name) ?? '')]),
-    ),
+    /*
+     * Carrying the sentinel, not flattening it to the word.
+     *
+     * `STANDING` is a NUL followed by "standing" precisely so that no
+     * application id can ever be mistaken for it, and this turned it into the
+     * ordinary string "standing" — which an application id can be. The one
+     * consumer, `/attachments`, then offers every file of an application
+     * called "standing" to every other application: the wrong resume in
+     * somebody else's form, which is the single thing that filter exists to
+     * prevent. Ids are date-slugs by default, but `POST /api/applications`
+     * takes an id from the caller.
+     */
+    belongsTo: Object.fromEntries(files.map((name) => [name, owner.get(name) ?? ''])),
     // What is actually here, not what the tracker says should be: a row whose
     // bundle folder has gone is named in `problems` above rather than counted.
     applications: new Set(files.map((name) => owner.get(name)).filter((id) => id && id !== STANDING)).size,

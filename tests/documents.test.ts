@@ -60,6 +60,76 @@ describe('keeping a transcript in the save', () => {
     expect(folder.applications).toBe(0);
   });
 
+  /*
+   * A copy that fails once must not disown the file for ever.
+   *
+   * `landed` is pushed to after the copy, and the manifest was rewritten from
+   * `landed` alone — so a name whose copy threw was left out of both halves of
+   * it, and the next sync, finding the file still on disk with nothing
+   * claiming it, read it as a file of the user's and refused to touch it. For
+   * ever: never re-copied, never deleted, and no longer offered to the
+   * extension. One `EBUSY` from a PDF open in a viewer is enough, and the
+   * folder then holds yesterday's document under exactly the right name.
+   *
+   * A directory in the way is the same failure with a cause that can be
+   * arranged: the sync refuses to copy over something that is not a file, and
+   * says so.
+   */
+  it('keeps hold of a document whose copy failed, and puts it there next time', async () => {
+    await request(app).post('/api/documents').send({ name: 'Transcript.pdf', data: pdf('t') }).expect(200);
+    const dir = syncCurrent(t.store).dir;
+
+    // Take it back out and leave something in the way that cannot be written
+    // over, so this sync's copy throws.
+    fs.rmSync(path.join(dir, 'Transcript.pdf'), { force: true });
+    fs.mkdirSync(path.join(dir, 'Transcript.pdf'), { recursive: true });
+    const refused = syncCurrent(t.store);
+    expect(refused.files).not.toContain('Transcript.pdf');
+    expect((refused.problems ?? []).join(' ')).toContain('Transcript.pdf');
+
+    /*
+     * And now the state a real failure leaves: the name is there, holding the
+     * old copy, because the rename never happened. A directory is only the
+     * device for making the copy throw on demand — what is being asked is
+     * what the manifest remembers afterwards, and the answer has to be "this
+     * one is still mine" rather than "somebody else's file is in the way".
+     */
+    fs.rmSync(path.join(dir, 'Transcript.pdf'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(dir, 'Transcript.pdf'), 'the copy that never got replaced');
+    const after = syncCurrent(t.store);
+    expect((after.problems ?? []).join(' ')).not.toContain('Transcript.pdf');
+    expect(after.files).toContain('Transcript.pdf');
+    // And the stale copy really was replaced, not merely tolerated.
+    expect(fs.readFileSync(path.join(dir, 'Transcript.pdf'), 'utf8')).not.toContain('never got replaced');
+  });
+
+  /*
+   * And the other half of owning it: taking it away again.
+   *
+   * The manifest's list of files is "what is here and correct", which a copy
+   * that failed is not — so the delete loop, reading that list, never knew
+   * the stale copy was the folder's to remove. Delete the document and it
+   * stayed, under exactly the name an upload dialog is pointed at, with
+   * nothing in the panel mentioning it.
+   */
+  it('takes away a stale copy of a document, even one whose copy had failed', async () => {
+    await request(app).post('/api/documents').send({ name: 'Transcript.pdf', data: pdf('t') }).expect(200);
+    const dir = syncCurrent(t.store).dir;
+    const at = path.join(dir, 'Transcript.pdf');
+
+    // A copy that fails, leaving the old file where it was.
+    fs.rmSync(at, { force: true });
+    fs.mkdirSync(at, { recursive: true });
+    syncCurrent(t.store);
+    fs.rmSync(at, { recursive: true, force: true });
+    fs.writeFileSync(at, 'the copy that never got replaced');
+
+    await request(app).delete('/api/documents/Transcript.pdf').expect(200);
+    const after = syncCurrent(t.store);
+    expect(after.files).not.toContain('Transcript.pdf');
+    expect(fs.existsSync(at)).toBe(false);
+  });
+
   it('takes it out of the folder again when it is removed', async () => {
     await request(app).post('/api/documents').send({ name: 'Transcript.pdf', data: pdf('t') }).expect(200);
     expect(syncCurrent(t.store).files).toContain('Transcript.pdf');

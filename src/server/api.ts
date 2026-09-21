@@ -45,7 +45,7 @@ import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
-import { syncCurrent, currentDir, CURRENT_DIR } from '../model/current.js';
+import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
@@ -704,7 +704,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const attachments = folder.files
         .filter((name) => {
           const whose = folder.belongsTo[name] ?? '';
-          if (whose === 'standing') return true;
+          if (whose === STANDING) return true;
           // No application named: the standing documents only. A card that
           // has not built anything yet has nothing of its own here, and the
           // files that *are* here belong to somebody else's form.
@@ -712,7 +712,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         })
         .map((name) => ({
           name,
-          standing: folder.belongsTo[name] === 'standing',
+          standing: folder.belongsTo[name] === STANDING,
           url: `/current/${encodeURIComponent(name)}`,
         }));
       res.json({ attachments, dir: folder.dir });
