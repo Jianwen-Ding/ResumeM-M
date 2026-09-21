@@ -147,6 +147,37 @@ describe('editing a line in place', () => {
     expect(document.querySelector('#status')?.textContent ?? '').toMatch(/has not saved yet/i);
   });
 
+  /*
+   * And the typed sentence is still there to try again with.
+   *
+   * A failed commit put a message in the status line and left the line
+   * holding text the store does not have — so the next render anywhere in the
+   * editor rebuilt it from the store and the wording was gone, with no way
+   * back but typing it from memory.
+   */
+  it('keeps a failed wording in its line, so it can be tried again', async () => {
+    await openMaster();
+    refuseEntryWrites = true;
+
+    const row = rowFor('Built a pipeline handling');
+    const line = row.querySelector('.editable');
+    line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    const typed = `${line.textContent} at p95`;
+    line.textContent = typed;
+    line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(line.textContent, 'the sentence that was typed').toBe(typed);
+    expect(line.classList.contains('editing'), 'still open for another go').toBe(true);
+    expect(document.querySelector('#status')?.textContent ?? '').toMatch(/try again/i);
+
+    // And pressing Enter again, once the store is answering, saves it.
+    refuseEntryWrites = false;
+    line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(storedText('v_base')).toBe('Built a pipeline handling **2M events/day** at p95');
+  });
+
   it('leaves the store alone when the text comes back unchanged', async () => {
     await openMaster();
     const row = rowFor('Built a pipeline handling');

@@ -1256,7 +1256,34 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     if (commit && next && next !== raw) {
       const save = Promise.resolve().then(() => onCommit(next));
       inlineSaves.add(save);
-      save.catch(err => setStatus(err.message, true)).finally(() => inlineSaves.delete(save));
+      save
+        .catch((err) => {
+          /*
+           * The sentence stays in the box it was typed in.
+           *
+           * A failed commit only put a message in the status line, and the
+           * line itself was left holding text the store does not have — so
+           * the next render anywhere in the editor rebuilt it from the store
+           * and the wording was simply gone, with nothing but a status
+           * message that had scrolled past to say it had ever existed. There
+           * was no way to retry it but to type it again from memory.
+           *
+           * Now it goes back into edit mode holding what was typed, so Enter
+           * is another attempt and Escape is giving up on purpose. Focus is
+           * only taken back if nothing else has it: this arrives whenever the
+           * store answers, and pulling the caret out of whatever the person
+           * has started doing since would be worse than the message alone.
+           */
+          setStatus(`${err.message} The wording is still in the line — press Enter to try again.`, true);
+          if (!node.isConnected) return;
+          editing = true;
+          node.contentEditable = 'plaintext-only';
+          node.classList.add('editing');
+          node.textContent = next;
+          const busy = document.activeElement;
+          if (!busy || busy === document.body) node.focus();
+        })
+        .finally(() => inlineSaves.delete(save));
     } else {
       // Put the markup back: the raw text is what gets edited, the rendered
       // form is what gets shown.
