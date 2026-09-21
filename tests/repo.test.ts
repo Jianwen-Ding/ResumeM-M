@@ -341,6 +341,33 @@ describe('commit detail', () => {
     expect(await new Repo(path.join(root, 'nope')).commit('abc1234')).toBeUndefined();
   });
 
+  /*
+   * The patch is read through an 8 MB buffer, and a commit larger than that
+   * does not come back truncated — `execFile` kills the child and rejects
+   * with `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`. Nothing caught it, so the
+   * first save of an imported store, which is one commit holding the whole
+   * of it, threw *after* making the commit: `rmm save` reported failure for
+   * a save that had worked, and the history endpoint answered 500 for that
+   * commit from then on.
+   */
+  it('says a commit is too large rather than failing to read it', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    // Past the line drawn from `--numstat`, which is what stops the read
+    // being attempted at all.
+    fs.writeFileSync(
+      path.join(root, 'imported.txt'),
+      Array.from({ length: 250_000 }, (_, i) => `a line of somebody's writing, number ${i}`).join('\n'),
+    );
+    const hash = await repo.commitAll('import a store');
+
+    const detail = await repo.commit(hash!);
+    expect(detail).toBeTruthy();
+    // The file list still works, which is what the panel is mostly for.
+    expect(detail!.files.map((f) => f.path)).toContain('imported.txt');
+    expect(detail!.diff).toMatch(/too much to show/i);
+  });
+
   it('truncates an enormous diff rather than returning it whole', async () => {
     const repo = new Repo(root);
     await repo.ensure();

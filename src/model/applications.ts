@@ -633,13 +633,40 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
      * And `appliedAt` was stamped afresh, so the day you applied drifted to
      * the day you last rebuilt.
      */
+    /*
+     * And the row as it is *now*, not as it was before the build.
+     *
+     * "Never backwards" above was written against `before`, which is read at
+     * the top of this function — before the LaTeX runs. A build takes a
+     * second or two, and pressing Submit on the page takes less than that, so
+     * the sequence that actually happens is: staging starts, the form is
+     * submitted, `/extension/sent` writes the row as `applied`, the build
+     * finishes and writes it back from a snapshot in which it was still
+     * `applying`. The guard compared the right two things and one of them was
+     * out of date, so the status went backwards anyway — and because the
+     * history is rebuilt from `before` too, the `applied` line went with it,
+     * leaving a row reading `applying` whose history says only "Bundle
+     * created". No error, nothing in the log, and an application that has
+     * gone out sitting in the tracker as one still being worked on. Which is
+     * the one you apply for twice.
+     *
+     * Measured on the ATS walk: five of thirty-six systems per run, a
+     * different five each time, depending only on whether the submit landed
+     * inside the compile.
+     *
+     * `POST /workspace` learnt this and re-reads; this did not. Nothing
+     * between here and `upsertApplication` below yields, so the read and the
+     * write are one step as far as anything else on this server is concerned.
+     */
+    const settled = store.load().applications.find((a) => a.id === id) ?? before;
+
     const ORDER: ApplicationStatus[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
     const asked: ApplicationStatus = req.status ?? 'applied';
     const status =
-      before && ORDER.indexOf(before.status) > ORDER.indexOf(asked) ? before.status : asked;
+      settled && ORDER.indexOf(settled.status) > ORDER.indexOf(asked) ? settled.status : asked;
 
     const application: Application = {
-      ...before,
+      ...settled,
       id,
       company: req.company,
       role: req.role,
@@ -670,18 +697,18 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
        * 'trim')". Caught by the ATS walk, where the first posting wanted a
        * letter and the next fifteen did not.
        */
-      url: req.url ?? before?.url,
-      appliedAt: before?.appliedAt ?? now,
+      url: req.url ?? settled?.url,
+      appliedAt: settled?.appliedAt ?? now,
       status,
       resumeId: req.resumeId,
       snapshotDir: path.relative(store.outDir(), dir),
-      source: req.source ?? before?.source,
-      notes: req.notes ?? before?.notes,
+      source: req.source ?? settled?.source,
+      notes: req.notes ?? settled?.notes,
       answers,
       coverLetter: letter,
       history: [
-        ...(before?.history ?? []),
-        { at: now, status, note: before ? 'Files rebuilt' : 'Bundle created' },
+        ...(settled?.history ?? []),
+        { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' },
       ],
     };
     store.upsertApplication(application);

@@ -686,6 +686,30 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .chip.suggested { background: var(--warn-bg); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn-line); }
 /* Pinned: what the store falls back to, and the resumes you build from. */
 .chip.pinned { background: var(--accent-soft); color: #174ea6; font-weight: 550; }
+
+/*
+ * Whether a letter or an answer counts as an example of how you write.
+ *
+ * A chip rather than a checkbox, because it reads as a label of what is true
+ * and happens to be pressable — which is what it is. Filled when it counts,
+ * outlined when it does not, so a list of them can be read at a glance rather
+ * than word by word: which of these am I being imitated from is the question
+ * this panel exists to answer.
+ */
+.chip.voice-flag {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--t-xs);
+  font-weight: 500;
+  padding: 1px 8px;
+}
+.chip.voice-flag:hover { background: var(--state-hover); }
+.chip.voice-flag.on { background: var(--accent-soft); border-color: transparent; color: #174ea6; }
+.chip.voice-flag.on:hover { background: #d2e3fc; }
+.chip.voice-flag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button.tiny.pinned {
   background: var(--accent-soft);
   border-color: #c6d4f2;

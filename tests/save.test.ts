@@ -318,3 +318,39 @@ describe('what goes into the history', () => {
     expect(await repo.pending()).toEqual([{ path: 'out/base.pdf', state: 'modified' }]);
   });
 });
+
+/**
+ * "Nothing to save" has to mean git looked and found nothing.
+ *
+ * `pending()` swallowed every way git can refuse to answer and returned an
+ * empty list, and `saveStore` reads that list as the whole question: nothing
+ * pending means nothing to commit, reported as `saved: false` and documented
+ * as "everything was already committed — *not an error*". So a store whose
+ * index a killed git process had left truncated came back from `rmm save` as
+ * nothing-to-save, exit 0, and from the editor's Save button as success. The
+ * one command whose entire job is to make "is my work safe?" unambiguous
+ * answered yes without having asked.
+ */
+describe('a save that could not look', () => {
+  it('fails rather than reporting that everything was already committed', async () => {
+    write('profile.yaml', 'name: Test Person\n');
+    await saveStore(repo);
+
+    // Exactly what a killed `git add` leaves behind. `rev-parse` still
+    // answers, so this is a repository by every check before the status.
+    write('resumes/newgrad.yaml', 'id: newgrad\n');
+    fs.writeFileSync(path.join(root, '.git', 'index'), 'not an index', 'utf8');
+
+    await expect(saveStore(repo)).rejects.toThrow(/index|corrupt|fatal/i);
+  });
+
+  it('and a store that is simply not a repository yet is still not an error', async () => {
+    // The one empty answer that is true, and the one this must keep giving.
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-bare-'));
+    try {
+      expect(await Repo.forStore(bare).pending()).toEqual([]);
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true });
+    }
+  });
+});

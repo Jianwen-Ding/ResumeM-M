@@ -300,3 +300,83 @@ describe('a save being read before it has been migrated', () => {
     expect(Date.parse(written.temporaryFrom ?? '')).toBeGreaterThan(Date.parse('2026-01-01T00:00:00.000Z'));
   });
 });
+
+/**
+ * The promise the migration makes, and which of its resumes were getting it.
+ *
+ * `tierForMigration` says it in as many words: "the clock on a resume that
+ * became temporary in a migration starts when the migration ran, not when the
+ * posting was applied to — a save upgraded today does not lose three months of
+ * resumes tonight because a field appeared under it". The `temporaryFrom` the
+ * migration stamps is how that is meant to work.
+ *
+ * `doneAt` reached for it only when the resume had no application at all.
+ * Every resume the extension made has one — that is what the extension does —
+ * so on the overwhelming majority the clock came from `appliedAt`, which on a
+ * save worth migrating is months old. The sweep runs on the same start as the
+ * migration, one line later.
+ */
+describe('a save upgraded today', () => {
+  const MIGRATED = '2026-06-01T00:00:00.000Z';
+  const LONG_AGO = '2026-03-01T00:00:00.000Z';
+
+  /** What the extension leaves behind: a resume for a posting, and its row. */
+  const fromAnOlderVersion = () => {
+    const { tiered } = tierResumes([spec('job-acme', { generatedFor: { company: 'Acme', at: LONG_AGO } })], MIGRATED);
+    return {
+      resumes: tiered,
+      applications: [app('a1', { resumeId: 'job-acme', status: 'applied', appliedAt: LONG_AGO })],
+      drafts: [],
+    };
+  };
+
+  it('is made temporary and dated from the migration, not from the posting', () => {
+    const data = fromAnOlderVersion();
+    expect(tierOf(data.resumes[0]!)).toBe('temporary');
+    expect(data.resumes[0]!.temporaryFrom).toBe(MIGRATED);
+  });
+
+  it('does not lose three months of resumes on the start that upgraded it', () => {
+    const data = fromAnOlderVersion();
+    // The sweep runs one line after the migration, on the same start.
+    expect(dueToGo(data, { now: at(MIGRATED) })).toEqual([]);
+  });
+
+  it('and still has them the day after', () => {
+    const data = fromAnOlderVersion();
+    expect(dueToGo(data, { now: at(MIGRATED) + DAY })).toEqual([]);
+  });
+
+  it('but lets them go a week after the upgrade, which is what the week is', () => {
+    const data = fromAnOlderVersion();
+    expect(dueToGo(data, { now: at(MIGRATED) + 8 * DAY }).map((d) => d.id)).toEqual(['job-acme']);
+  });
+
+  /*
+   * The same reasoning, reached the other way round. Marking a resume
+   * temporary stamps the date and the comment on that route worries about
+   * exactly this — "promoting it out has to forget the date, or demoting it
+   * later would sweep it immediately" — but demoting an old resume *with* an
+   * application was swept immediately anyway, for the same reason.
+   */
+  it('gives a resume marked temporary today its week, however old the application is', () => {
+    const data = {
+      resumes: [spec('old-one', { tier: 'temporary', temporaryFrom: MIGRATED })],
+      applications: [app('a1', { resumeId: 'old-one', status: 'applied', appliedAt: LONG_AGO })],
+      drafts: [],
+    };
+    expect(dueToGo(data, { now: at(MIGRATED) })).toEqual([]);
+    expect(dueToGo(data, { now: at(MIGRATED) + 8 * DAY }).map((d) => d.id)).toEqual(['old-one']);
+  });
+
+  it('leaves a resume that was temporary all along dated from the application', () => {
+    // No `temporaryFrom`: nothing ever said "it became temporary at", so the
+    // application is the only clock there is, and it is the right one.
+    const data = {
+      resumes: [spec('job-zen', { tier: 'temporary' })],
+      applications: [app('a1', { resumeId: 'job-zen', status: 'applied', appliedAt: LONG_AGO })],
+      drafts: [],
+    };
+    expect(dueToGo(data, { now: at(LONG_AGO) + 8 * DAY }).map((d) => d.id)).toEqual(['job-zen']);
+  });
+});

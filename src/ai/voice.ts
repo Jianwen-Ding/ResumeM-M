@@ -49,13 +49,22 @@ export function collectSamples(data: StoreData): VoiceSample[] {
     out.push({ kind: s.kind, title: s.title, text });
   }
 
+  /*
+   * Letters and answers are in unless they are taken out, which is the whole
+   * of what `voice: false` says. See the note on `CoverLetter.voice`: a save
+   * that has never heard of the field reads exactly as it always did, and the
+   * field exists because a letter written to somebody else's template is
+   * still a letter you sent and is not how you write.
+   */
   for (const letter of data.coverLetters ?? []) {
+    if (letter.voice === false) continue;
     const text = clean(letter.body);
     if (text.length < 40) continue;
     out.push({ kind: 'letter', title: letter.title, text });
   }
 
   for (const item of data.answers ?? []) {
+    if (item.voice === false) continue;
     for (const v of item.variants) {
       const text = clean(v.text);
       // One-word answers ("No") say nothing about how someone writes.

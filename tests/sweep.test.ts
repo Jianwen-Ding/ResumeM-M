@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Repo } from '../src/git/repo.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from '../src/server/sweep.js';
 import { makeTempStore } from './helpers.js';
@@ -103,6 +105,41 @@ describe('sweeping', () => {
     expect(latest?.message).toMatch(/Sweep/);
     // And by name, so the history says what to go looking for.
     expect(latest?.message).toMatch(/Backend Engineer — Acme/);
+  });
+
+  /*
+   * And it commits nothing else.
+   *
+   * The filing commit that runs first is scoped, and says why: "the rest of
+   * the save is somebody's work in progress and this is no reason to commit
+   * it for them". The deletion commit one line below it was not, so it was
+   * `git add -- .`: opening the app half-way through hand-editing the profile,
+   * with one resume due, put the unfinished profile into the history under
+   * "Sweep …, temporary and done with". Auto-commit being off made it worse
+   * rather than better — the setting that says "do not record my edits as I
+   * make them" was overruled by the one pass that had just finished saying it
+   * was not recording anybody's edits.
+   */
+  it('leaves work in progress out of the history', async () => {
+    planted();
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+
+    // Something the user is in the middle of, saved to disk and not committed.
+    temp.write('profile.yaml', { name: 'Half A Name', email: '' });
+
+    const { swept } = await sweepTemporary(temp.store, repo);
+    expect(swept.map((d) => d.id)).toEqual(['job-old']);
+
+    const [latest] = await repo.log(1);
+    const changed = await repo.commit(latest!.hash);
+    expect(changed?.files.map((f) => f.path)).toEqual(['resumes/job-old.yaml']);
+
+    // And it is still sitting there, uncommitted, exactly as it was left.
+    expect((temp.read('profile.yaml') as { name: string }).name).toBe('Half A Name');
+    const waiting = await repo.pending();
+    expect(waiting.map((f) => f.path)).toContain('profile.yaml');
   });
 
   it('is one commit however many it took', async () => {
@@ -311,5 +348,65 @@ describe('a resume the history has never had', () => {
     expect(swept).toHaveLength(3);
     // One to file them, one to take them.
     expect((await repo.log(50)).length).toBe(before + 2);
+  });
+});
+
+/**
+ * A resume whose newest version the history has never had.
+ *
+ * The block above covers a file git has never seen at all. This is the other
+ * half, and it was passing the check: `filedPaths` is HEAD's *tree*, so it
+ * says the path is in the history, not that the version about to be deleted
+ * is. A resume committed a fortnight ago and edited every day since satisfied
+ * it exactly as well as one committed a second ago.
+ *
+ * A fortnight of uncommitted edits is an ordinary state, not a contrived one.
+ * The filing commit the sweep makes first is allowed to fail quietly — the
+ * doc on `removeWhatIsFiled` says so — and every commit this program makes is
+ * a console warning nobody reads when it fails. `commit.gpgsign` set with no
+ * usable key does it; so does a `pre-commit` hook that exits non-zero.
+ */
+describe('a resume the history has an older version of', () => {
+  /** Commits succeed, then stop, the way a signing or hook failure does. */
+  function commitsStopWorking() {
+    fs.writeFileSync(
+      path.join(temp.dir, '.git', 'hooks', 'pre-commit'),
+      '#!/bin/sh\nexit 1\n',
+      { mode: 0o755 },
+    );
+  }
+
+  it('is held rather than taken, and said out loud', async () => {
+    planted();
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('A fortnight ago');
+
+    // Edited since, and every commit since has failed.
+    commitsStopWorking();
+    temp.write('resumes/job-old.yaml', {
+      id: 'job-old',
+      label: 'Backend Engineer — Acme',
+      tier: 'temporary',
+      temporaryFrom: daysAgo(30),
+      notes: 'Everything I learned in the fortnight since it was last committed.',
+    });
+
+    const { swept, held } = await sweepTemporary(temp.store, repo);
+
+    expect(swept).toEqual([]);
+    expect(held.map((d) => d.id)).toEqual(['job-old']);
+    expect(temp.exists('resumes/job-old.yaml')).toBe(true);
+    expect(String((temp.read('resumes/job-old.yaml') as { notes: string }).notes)).toMatch(/fortnight/);
+  });
+
+  it('and is taken once the history has the version on disk', async () => {
+    planted();
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('A fortnight ago');
+
+    const { swept } = await sweepTemporary(temp.store, repo);
+    expect(swept.map((d) => d.id)).toEqual(['job-old']);
   });
 });

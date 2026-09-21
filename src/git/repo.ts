@@ -287,13 +287,31 @@ export class Repo {
    * half the reason it is plain YAML. Knowing there is unsaved work is what
    * makes an explicit save worth offering.
    */
-  async pending(): Promise<PendingChange[]> {
+  async pending(paths?: string[]): Promise<PendingChange[]> {
     if (!(await this.isRepo())) return [];
+    const where = paths ?? this.scope;
     // `-uall` because porcelain otherwise collapses a wholly untracked
     // directory to a single entry, so `rmm save` said "Saved 1 file — drafts/"
     // and committed six, and the editor's unsaved-work list under-reported the
     // same way.
-    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...this.scope]).catch(() => '');
+    /*
+     * Not caught.
+     *
+     * This used to be `.catch(() => '')`, which turned every way git can
+     * refuse to answer — an index left truncated by a killed process, a
+     * `status` that outgrew the 8 MB buffer, a permission problem in `.git` —
+     * into an empty list. `saveStore` reads that list as the whole question:
+     * nothing pending means nothing to commit, which it reports as `saved:
+     * false`, documented as "everything was already committed — *not an
+     * error*". So `rmm save` printed nothing-to-save and exited 0, and the
+     * editor's Save button reported success, for a store where git had not
+     * been able to look. The one command whose entire job is to make "is my
+     * work safe?" unambiguous answered yes without having asked.
+     *
+     * A repository that is not there yet is the one empty answer that is
+     * true, and it is already handled above.
+     */
+    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...where]);
 
     const records = out.split('\0');
     const changes: PendingChange[] = [];
@@ -495,7 +513,39 @@ export class Repo {
         };
       });
 
-    const diff = await this.git(['show', '--pretty=format:', '--unified=3', hash]);
+    /*
+     * The patch, when there is any prospect of showing it.
+     *
+     * The cap below is applied to what git handed back, which is too late:
+     * `this.git` reads through an 8 MB buffer, and a commit whose patch is
+     * larger than that does not come back truncated, it rejects with
+     * `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`. Nothing caught it. The first save
+     * of an imported store is one commit holding the whole of it — a corpus
+     * of years of writing included — so `rmm save` threw *after* making that
+     * commit, reporting failure for a save that had worked, and
+     * `GET /api/history/:hash` answered 500 for that commit from then on.
+     *
+     * `--numstat` above already says how much changed, without parsing
+     * anything, so the size is known before the patch is asked for. The line
+     * below is drawn against the *buffer*, not against the 200,000-character
+     * display cap: a patch between those two is fetched and truncated as it
+     * always was, because the first 200,000 characters of a large diff are
+     * worth more than a sentence saying there was one. Two hundred thousand
+     * changed lines is 8 MB at forty bytes a line, which is longer than any
+     * line in a store of YAML and prose.
+     *
+     * Caught as well as counted, because bytes per line is not fixed and a
+     * commit of very long lines can clear the count and still overflow. A
+     * history entry that says it is too large to show is a working panel; one
+     * that throws is not.
+     */
+    const lines = files.reduce((n, f) => n + (f.added ?? 0) + (f.removed ?? 0), 0);
+    const TOO_MUCH_TO_SHOW = 200_000;
+    const enormous = `This commit changes ${lines.toLocaleString()} lines, which is too much to show here.`;
+    const diff =
+      lines > TOO_MUCH_TO_SHOW
+        ? enormous
+        : await this.git(['show', '--pretty=format:', '--unified=3', hash]).catch(() => enormous);
 
     return {
       hash: full.trim(),
@@ -524,17 +574,24 @@ function stateOf(code: string): PendingChange['state'] {
  * Wrap a mutation so the store is committed after it succeeds. Every write
  * path goes through this, which is what makes `autoCommit` a single switch
  * rather than a call scattered through every handler.
+ *
+ * `paths` scopes the commit the way `commitAll` does. Almost every caller
+ * here is an edit somebody just made through the app, where the whole store
+ * is the right scope; the one that is not is the sweep, which is the app
+ * removing something on its own and has no business recording whatever else
+ * happens to be unsaved on disk while it does.
  */
 export async function withCommit<T>(
   repo: Repo,
   enabled: boolean,
   message: string,
   fn: () => T | Promise<T>,
+  paths?: string[],
 ): Promise<T> {
   const result = await fn();
   if (enabled) {
     try {
-      const hash = await repo.commitAll(message);
+      const hash = await repo.commitAll(message, paths);
       /*
        * No hash is usually "nothing had changed", and sometimes "there is no
        * repository to commit to" — `commitAll` returns the same nothing for
@@ -653,14 +710,65 @@ export async function removeWhatIsFiled<T>(
 
   const filed = await filedPaths(repo);
 
-  const taking = going.filter((g) => g.paths.some((p) => filed.has(p)));
+  /*
+   * And what git has is not the same question as what is on disk.
+   *
+   * `filed` is HEAD's tree: it says the *path* is in the history, not that
+   * the version about to be deleted is. Two weeks of edits to a resume git
+   * committed a fortnight ago satisfy it exactly as well as a file committed
+   * a second ago — and a fortnight of uncommitted edits is an ordinary state,
+   * because the filing commit two lines up is allowed to fail quietly and
+   * auto-commit is a switch people turn off. Set `commit.gpgsign` with no
+   * usable key, or leave a `pre-commit` hook that exits non-zero, and every
+   * commit this program makes is a console warning nobody reads.
+   *
+   * So the check asks the whole question: git has the path, and the working
+   * tree agrees with it. Anything else is held and reported, which is what
+   * `held` is for.
+   *
+   * A status that will not run at all holds everything, for the same reason:
+   * this is the one unrecoverable act in the program, and "I could not check"
+   * is not permission to go ahead.
+   */
+  const unsaved = new Set(
+    await repo
+      .pending(going.flatMap((g) => g.paths))
+      .then((changes) => changes.map((c) => c.path))
+      .catch(() => going.flatMap((g) => g.paths)),
+  );
+
+  const taking = going.filter((g) => g.paths.some((p) => filed.has(p)) && !g.paths.some((p) => unsaved.has(p)));
   const held = going.filter((g) => !taking.includes(g)).map((g) => g.what);
   if (taking.length === 0) return { removed: [], held };
 
-  // `true` whatever auto-commit is set to: that setting is about whether your
-  // *edits* are recorded as you make them, and this is not an edit you made.
-  await withCommit(repo, true, messages.removing(taking.map((g) => g.what)), () => {
-    for (const g of taking) remove(g.what);
-  });
+  /*
+   * `true` whatever auto-commit is set to: that setting is about whether your
+   * *edits* are recorded as you make them, and this is not an edit you made.
+   *
+   * Which is also why it is scoped, for the reason the filing commit above is
+   * scoped and said so — and this one was not, so it did the opposite of what
+   * that comment promises. `withCommit` without paths is `git add -- .`, so
+   * opening the app half-way through hand-editing `profile.yaml` and having
+   * one resume fall due committed the unfinished profile too, under "Sweep
+   * …, temporary and done with". With auto-commit switched off it was worse
+   * than untidy: the one setting that says "do not record my edits as I make
+   * them" was overruled by a pass that had just finished explaining it was
+   * not recording anybody's edits.
+   *
+   * Held to the paths git can be seen to have, which is the same set the
+   * check above admitted: those are tracked, so adding them stages the
+   * deletion, and a pathspec naming a file git has never heard of is a fatal
+   * error rather than a no-op.
+   */
+  const leaving = taking.flatMap((g) => g.paths).filter((p) => filed.has(p));
+  await withCommit(
+    repo,
+    true,
+    messages.removing(taking.map((g) => g.what)),
+    () => {
+      for (const g of taking) remove(g.what);
+    },
+    leaving,
+  );
   return { removed: taking.map((g) => g.what), held };
 }

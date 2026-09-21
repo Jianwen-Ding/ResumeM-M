@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { flattenResumes, needsFlattening } from './flatten.js';
+import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
 import { liftLayout } from './lift-layout.js';
 import { needsTiering, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
@@ -1110,6 +1111,11 @@ export class Store {
      * here is the only notice of that, which is why it must not be swallowed
      * by a caller.
      */
+    // Read before anything is written, so it is the entry as it stood rather
+    // than the one this call is about to put in its place.
+    const was = this.loadEntries();
+    const before = was.find((e) => e.id === clean.id);
+
     const list = this.readYaml<Entry[]>(rel, []);
     const idx = list.findIndex((e) => e.id === clean.id);
     if (idx >= 0) list[idx] = clean;
@@ -1122,10 +1128,23 @@ export class Store {
       const next = stale.filter((e) => e.id !== clean.id);
       if (next.length !== stale.length) this.writeYaml(other, next);
     }
+
+    /*
+     * A line, a wording or a list item removed here is removed everywhere.
+     *
+     * Most saves of an entry add or reword, and those change nothing any
+     * resume points at — so the question is asked first and the pass over the
+     * resumes only runs for the one kind of write that needs it. See
+     * `forget.ts`.
+     */
+    if (before && entryLosesIds(before, clean)) {
+      this.forgetInResumes(was, was.map((e) => (e.id === clean.id ? clean : e)));
+    }
   }
 
   /** Removes the id from every file, not merely the first one holding it. */
   deleteEntry(id: string): boolean {
+    const was = this.loadEntries();
     let removed = false;
     for (const rel of Store.ENTRY_FILES) {
       const list = this.readYaml<Entry[]>(rel, []);
@@ -1135,11 +1154,69 @@ export class Store {
         removed = true;
       }
     }
+    // And out of every resume that was showing it. A section listing an entry
+    // the store no longer has is not a resume that prints it — it is a resume
+    // that complains about it, on every resolve, with no way to say so back.
+    if (removed) this.forgetInResumes(was, was.filter((e) => e.id !== id));
     return removed;
   }
 
   saveSkillGroups(groups: SkillGroup[]): void {
+    const before = normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
     this.writeYaml('skills.yaml', groups);
+    // Dropping a skill from a group, or a whole group, reaches the resumes
+    // that had pinned it — same reasoning as entries above.
+    if (skillsLoseIds(before, groups)) this.forgetInResumes(undefined, undefined, before, groups);
+  }
+
+  /**
+   * Take every reference to something the store no longer holds out of the
+   * resumes, and say which ones that changed.
+   *
+   * The new entries and groups are passed in rather than read back, because
+   * they were written a moment ago and the read cache is keyed on a file's
+   * size and modification time: two writes inside one millisecond that happen
+   * to land on the same length would be served the copy from before the
+   * delete, and the pass would then prune against a store that no longer
+   * exists — which is the one way this could remove something somebody still
+   * had.
+   *
+   * Written through `saveResume` one file at a time, inside whatever commit
+   * the delete itself is being made in, so undoing the delete in the version
+   * history brings the resumes back with it.
+   */
+  private forgetInResumes(
+    wasEntries?: Entry[],
+    nowEntries?: Entry[],
+    wasGroups?: SkillGroup[],
+    nowGroups?: SkillGroup[],
+  ): string[] {
+    const entries = this.loadEntries();
+    const groups = normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
+    const before = indexStore(wasEntries ?? entries, wasGroups ?? groups);
+    const after = indexStore(nowEntries ?? entries, nowGroups ?? groups);
+    // Where a deleted alternate sends the resumes that had pinned it. See
+    // `forget.ts`: only alternates move, because only alternates have a
+    // nearest surviving version of themselves.
+    const moved = findMovedWordings(before, after);
+
+    const changed: string[] = [];
+    /*
+     * As written, not as resolved.
+     *
+     * `loadResumes` folds inheritance and stamps a date on anything it has to
+     * make temporary, and that date is deliberately never written to disk —
+     * see the note on `tierResumes`. Saving what it hands back would write it,
+     * and start a one-week clock on resumes nobody has touched.
+     */
+    for (const spec of this.loadResumesAsWritten()) {
+      const next = forgetMissing(spec, after, moved);
+      if (JSON.stringify(next) !== JSON.stringify(spec)) {
+        this.saveResume(next);
+        changed.push(spec.id);
+      }
+    }
+    return changed;
   }
 
   saveProfile(profile: Profile): void {
@@ -1203,8 +1280,29 @@ export class Store {
       });
   }
 
-  saveCoverLetter(letter: CoverLetter): void {
+  /**
+   * Write a cover letter.
+   *
+   * `voice` is taken from the copy on disk when the letter being written does
+   * not state one, because it is a decision *about* the letter rather than a
+   * part of it — and every writer here bar one is replacing the letter's
+   * text. The Workspace files the letter when the application goes out; the
+   * AI files the one it drafted; both mint the id from the company and the
+   * day, so re-running either for the same job lands on the same letter.
+   * Written literally, saying "this one is not how I write" and then sending
+   * that application would quietly say the opposite, with nothing on screen
+   * about it and the corpus silently a letter larger.
+   *
+   * `decidesVoice` is for the one caller that is deciding rather than
+   * writing. `POST /voice/include` says "counted again" by taking the key
+   * away, so it has to be able to write an absence and mean it.
+   */
+  saveCoverLetter(letter: CoverLetter, { decidesVoice = false } = {}): void {
     const { body, id, ...meta } = letter;
+    if (!decidesVoice && meta.voice === undefined) {
+      const stored = this.loadCoverLetters().find((l) => l.id === id)?.voice;
+      if (stored !== undefined) meta.voice = stored;
+    }
     const dir = this.file('letters');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();

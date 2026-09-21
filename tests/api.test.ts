@@ -2935,3 +2935,176 @@ describe('pinning', () => {
     expect(res.body.spec.copiedFrom).toBe('intern');
   });
 });
+
+/*
+ * Voice is a selection over the writing already in the save, and the tab that
+ * reports its size has to be able to show — and change — what is in it.
+ */
+describe('which letters and answers count as your writing', () => {
+  const include = (body: Record<string, unknown>) => request(app).post('/api/voice/include').send(body);
+  const voiceNow = async () => (await request(app).get('/api/voice').expect(200)).body;
+
+  it('lists them both, in by default, with no bodies attached', async () => {
+    const { writing } = await voiceNow();
+    expect(writing.letters).toHaveLength(1);
+    expect(writing.letters[0]).toMatchObject({ id: '2026-01-01-acme', inVoice: true });
+    expect(writing.letters[0].body).toBeUndefined();
+    expect(writing.answers.length).toBeGreaterThan(0);
+    expect(writing.answers.every((a: { inVoice: boolean }) => a.inVoice)).toBe(true);
+  });
+
+  it('takes a letter out, and the corpus shrinks by what it was worth', async () => {
+    const before = await voiceNow();
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
+
+    const after = await voiceNow();
+    expect(after.writing.letters[0].inVoice).toBe(false);
+    expect(after.context.available).toBeLessThan(before.context.available);
+    expect(after.preview).not.toContain('Dear Acme');
+  });
+
+  it('and puts it back, leaving the file saying what it said before', async () => {
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: true }).expect(200);
+
+    expect((await voiceNow()).writing.letters[0].inVoice).toBe(true);
+    /*
+     * Absent, not `voice: true`. The field means one thing — "keep this out" —
+     * and a save where every letter carries `voice: true` is a save that reads
+     * as though somebody decided about each of them, when what happened is
+     * that one was toggled twice.
+     */
+    const file = fs.readFileSync(path.join(t.dir, 'letters', '2026-01-01-acme.md'), 'utf8');
+    expect(file).not.toContain('voice:');
+    expect(file).toContain('Dear Acme');
+  });
+
+  it('takes an answer out without disturbing the rest of the bank', async () => {
+    const { answers } = (await request(app).get('/api/store').expect(200)).body;
+    const target = answers[0].id;
+
+    await include({ kind: 'answer', id: target, include: false }).expect(200);
+
+    const after = (await request(app).get('/api/store').expect(200)).body.answers;
+    expect(after).toHaveLength(answers.length);
+    expect(after.find((a: { id: string }) => a.id === target).voice).toBe(false);
+    for (const a of after.filter((x: { id: string }) => x.id !== target)) {
+      expect(a.voice).toBeUndefined();
+    }
+    // The answer itself is untouched: this says nothing about its text.
+    expect(after.find((a: { id: string }) => a.id === target).variants).toEqual(
+      answers.find((a: { id: string }) => a.id === target).variants,
+    );
+  });
+
+  /*
+   * A decision about a letter outlives the letter's text.
+   *
+   * Three writers replace a letter by id — the editor's own save, the
+   * Workspace filing one when the application goes out, and the AI filing the
+   * one it drafted — and the last two mint the id from the company and the
+   * day, so re-running either for the same job lands on the same letter. All
+   * three are about the words. None of them is about whether the letter is an
+   * example of how you write, and a save that forgets that would put a letter
+   * somebody had taken out of their voice quietly back into it.
+   */
+  it('survives the letter being written again', async () => {
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
+
+    const letter = (await request(app).get('/api/letters').expect(200)).body.find(
+      (l: { id: string }) => l.id === '2026-01-01-acme',
+    );
+    // As a caller replacing the text would send it: no `voice` in the body,
+    // because that caller has nothing to say about it.
+    const { voice, ...text } = letter;
+    expect(voice).toBe(false);
+    await request(app)
+      .put('/api/letters/2026-01-01-acme')
+      .send({ ...text, body: 'Dear Acme, a second draft.' })
+      .expect(200);
+
+    const after = (await voiceNow()).writing.letters.find((l: { id: string }) => l.id === '2026-01-01-acme');
+    expect(after.inVoice).toBe(false);
+    const file = fs.readFileSync(path.join(t.dir, 'letters', '2026-01-01-acme.md'), 'utf8');
+    expect(file).toContain('a second draft');
+  });
+
+  it('refuses an id it does not have, rather than filing a new one', async () => {
+    const res = await include({ kind: 'letter', id: 'no-such-letter', include: false }).expect(400);
+    expect(res.body.error).toMatch(/no-such-letter/);
+  });
+
+  it('refuses a kind it does not know', async () => {
+    const res = await include({ kind: 'resume', id: 'intern', include: false }).expect(400);
+    expect(res.body.error).toMatch(/letter|answer/);
+  });
+});
+
+/*
+ * An entry write says what it says, and nothing about what it leaves out.
+ *
+ * The rule is stated twice elsewhere in `api.ts` — "a caller that does not
+ * mention a field is not asking for it to be cleared" — and this was the one
+ * write that did not follow it. It matters more than it used to: a line that
+ * goes now goes out of every resume that was showing it, so an entry saved
+ * without its lines would have taken the whole save's selections with it.
+ */
+describe('saving an entry without mentioning its lines', () => {
+  const lines = async () => (await request(app).get('/api/store').expect(200)).body.entries.find(
+    (e: { id: string }) => e.id === 'exp_acme',
+  ).bullets;
+
+  it('keeps the lines it did not mention', async () => {
+    const before = await lines();
+    expect(before.length).toBeGreaterThan(0);
+
+    await request(app)
+      .put('/api/entries/exp_acme')
+      .send({ id: 'exp_acme', kind: 'experience', title: 'Acme Co.' })
+      .expect(200);
+
+    expect(await lines()).toEqual(before);
+  });
+
+  it('and leaves the resumes that had chosen them alone', async () => {
+    // A resume that has actually chosen some of this entry's lines, because a
+    // resume that has chosen none has nothing for the cascade to take and
+    // would pass whatever happened.
+    const spec = (await request(app).get('/api/store').expect(200)).body.resumes.find(
+      (r: { id: string }) => r.id === 'base',
+    );
+    const lineIds = (await lines()).map((b: { id: string }) => b.id);
+    expect(lineIds.length).toBeGreaterThan(0);
+    await request(app)
+      .put('/api/resumes/base')
+      .send({
+        ...spec,
+        sections: spec.sections.map((sec: { kind: string }) =>
+          sec.kind === 'experience' ? { ...sec, bullets: { exp_acme: lineIds } } : sec,
+        ),
+      })
+      .expect(200);
+
+    // Read off disk, because the question is what the save says: a resume
+    // that still lists the lines is one the cascade did not reach.
+    const file = path.join(t.dir, 'resumes', 'base.yaml');
+    const before = fs.readFileSync(file, 'utf8');
+    expect(before).toContain(lineIds[0]);
+
+    await request(app)
+      .put('/api/entries/exp_acme')
+      .send({ id: 'exp_acme', kind: 'experience', title: 'Acme Co.' })
+      .expect(200);
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+  });
+
+  it('but an empty list still means there are none', async () => {
+    await request(app)
+      .put('/api/entries/exp_acme')
+      .send({ id: 'exp_acme', kind: 'experience', title: 'Acme Co.', bullets: [] })
+      .expect(200);
+
+    expect(await lines()).toEqual([]);
+  });
+});

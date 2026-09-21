@@ -149,10 +149,55 @@ export function doneAt(
     const sent = mine.map((a) => sentAt(a));
     if (sent.some((at) => at === undefined)) return undefined;
     // The latest, so the week is measured from the last thing that happened.
-    return sent.filter((at): at is string => Boolean(at)).sort().pop();
+    const last = sent.filter((at): at is string => Boolean(at)).sort().pop();
+
+    /*
+     * And never before the resume became temporary.
+     *
+     * `tierForMigration` promises this in as many words — "a save upgraded
+     * today does not lose three months of resumes tonight because a field
+     * appeared under it" — and `temporaryFrom` is how it was meant to work.
+     * This branch never looked at it. It only ever reached the fallback
+     * below when a resume had no application at all, and every resume the
+     * extension makes has one, because filing the application is what the
+     * extension does.
+     *
+     * So on the start that upgraded the save: the migration stamps
+     * `temporary` and today's date, the sweep runs one line later in
+     * `openSave`, this hands it an `appliedAt` from three months ago, and
+     * every tailored resume in the save is deleted at once. The console says
+     * "swept 47 temporary resume(s) … They are in the version history",
+     * which is true and is not what anybody wanted to read.
+     *
+     * The same fix covers the other direction, which the route that marks a
+     * resume temporary already worried about: "promoting it out has to
+     * forget the date, or demoting it later would sweep it immediately".
+     * Demoting one that had been applied with swept it immediately anyway.
+     * A week means a week from the moment it was called temporary.
+     */
+    return later(last, spec.temporaryFrom);
   }
 
   return spec.temporaryFrom ?? spec.generatedFor?.at;
+}
+
+/**
+ * The later of two moments, either of which may be missing or unreadable.
+ *
+ * Compared as instants rather than as strings, because `appliedAt` can have
+ * been typed by hand or written by another tool and need not be the fixed-
+ * width UTC form everything here produces. An unreadable one is handed back
+ * as it is: `dueToGo` refuses to measure from a date it cannot read and keeps
+ * the resume, which is the answer that cannot lose work.
+ */
+function later(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const ta = Date.parse(a);
+  if (!Number.isFinite(ta)) return a;
+  const tb = Date.parse(b);
+  if (!Number.isFinite(tb)) return b;
+  return tb > ta ? b : a;
 }
 
 /**

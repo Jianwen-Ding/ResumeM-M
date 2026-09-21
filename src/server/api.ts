@@ -696,7 +696,44 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.put(
     '/entries/:id',
     handler(async (req, res) => {
-      const entry = withDatesFrom({ ...(req.body as Entry), id: String(req.params.id) }, store);
+      const id = String(req.params.id);
+      const body = req.body as Partial<Entry>;
+
+      /*
+       * What the caller did not mention stays as the store had it.
+       *
+       * `normalizeEntry` reads an absent `bullets` as an empty list, which is
+       * the right reading of a *file* — an entry written by hand with no
+       * bullets has none — and the wrong reading of a request. Every field
+       * here except this one survives being left out, because leaving one out
+       * is what a caller does when it has nothing to say about it, and the
+       * two sibling writes in this file already say so in as many words:
+       * "a caller that does not mention a field is not asking for it to be
+       * cleared" (`POST /applications`, and `buildBundle` for the same five
+       * fields it once cleared).
+       *
+       * The editor always sends the whole entry, so this was not costing
+       * anybody anything yet — and the moment it did it would have cost them
+       * quietly, and now more than quietly: a delete cascades into the
+       * resumes, so an entry PUT without its lines would take every
+       * resume's selection of those lines with it, on every resume in the
+       * save, in one commit. A rule the rest of the file follows is worth
+       * following here before that happens rather than after.
+       *
+       * `[]` still clears them. Absent means "I have nothing to say about
+       * the lines"; an empty list means "there are none", and an entry whose
+       * lines have all been deleted has to remain sayable.
+       */
+      const stored = store.load().entries.find((e) => e.id === id);
+      const entry = withDatesFrom(
+        {
+          ...body,
+          id,
+          bullets: body.bullets ?? stored?.bullets,
+        } as Entry,
+        store,
+      );
+
       await withCommit(repo, autoCommit(), `Update entry "${entry.id}"`, () => store.saveEntry(entry));
       res.json(entry);
     }),
@@ -1041,7 +1078,102 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           used: context.samples.map((x) => ({ kind: x.kind, title: x.title, chars: x.text.length })),
         },
         preview: renderVoiceContext(context),
+        /*
+         * And the letters and answers, with whether each one counts.
+         *
+         * The tab used to say "letters you send and answers you save are
+         * included automatically" and show none of them, so the corpus it
+         * reports the size of was mostly made of things that were not on the
+         * screen — and there was nowhere to say "not that one". They are the
+         * bulk of most people's corpus; a panel about your voice that does
+         * not list them is not about your voice.
+         *
+         * Names and lengths only. The bodies are already in `preview` up to
+         * the budget, and sending every letter whole is the reply size that
+         * made this tab a wait with nothing on it. See the note above.
+         */
+        writing: {
+          letters: data.coverLetters.map((l) => ({
+            id: l.id,
+            title: l.title,
+            company: l.company,
+            chars: (l.body ?? '').length,
+            inVoice: l.voice !== false,
+          })),
+          answers: data.answers.map((a) => ({
+            id: a.id,
+            question: a.question,
+            chars: Math.max(0, ...a.variants.map((v) => String(v.text ?? '').length)),
+            inVoice: a.voice !== false,
+          })),
+        },
       });
+    }),
+  );
+
+  /**
+   * Count a letter or an answer as an example of how you write, or stop.
+   *
+   * Its own route rather than a field on the letter and answer writes,
+   * because it is its own decision and the two writes it would otherwise ride
+   * on are whole-document saves: the answer bank is written as one list, so
+   * "keep this answer out of my voice" would have to send every answer back
+   * to say it, and a letter save would have to carry the body. One id and one
+   * boolean says exactly what happened, which is also what the history reads
+   * as afterwards.
+   */
+  api.post(
+    '/voice/include',
+    handler(async (req, res) => {
+      const { kind, id, include } = req.body as {
+        kind?: 'letter' | 'answer';
+        id?: string;
+        include?: boolean;
+      };
+      if (!id) throw new Error('An id is required');
+      // Absent means yes, so the flag is only ever written when it is `false`
+      // — a save keeps reading the way it always did until somebody opts one
+      // thing out, and opting it back in takes the key away again.
+      const wanted = include !== false;
+      const keep = wanted ? undefined : false;
+
+      if (kind === 'letter') {
+        const letter = store.loadCoverLetters().find((l) => l.id === id);
+        if (!letter) throw new Error(`No cover letter "${id}"`);
+        const next = { ...letter, voice: keep };
+        if (wanted) delete next.voice;
+        await withCommit(
+          repo,
+          autoCommit(),
+          `${wanted ? 'Count' : 'Stop counting'} "${letter.title}" as your writing`,
+          // Deciding, not writing: `next` means it by leaving `voice` out.
+          () => store.saveCoverLetter(next, { decidesVoice: true }),
+        );
+        res.json({ kind, id, inVoice: wanted });
+        return;
+      }
+
+      if (kind === 'answer') {
+        const answers = store.load().answers;
+        const item = answers.find((a) => a.id === id);
+        if (!item) throw new Error(`No answer "${id}"`);
+        const next = answers.map((a) => {
+          if (a.id !== id) return a;
+          const copy = { ...a, voice: keep };
+          if (wanted) delete copy.voice;
+          return copy;
+        });
+        await withCommit(
+          repo,
+          autoCommit(),
+          `${wanted ? 'Count' : 'Stop counting'} an answer as your writing`,
+          () => store.saveAnswers(next),
+        );
+        res.json({ kind, id, inVoice: wanted });
+        return;
+      }
+
+      throw new Error('kind must be "letter" or "answer"');
     }),
   );
 
