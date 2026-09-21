@@ -5213,6 +5213,22 @@ async function deleteVariation() {
   const at = order.findIndex((r) => r.id === mine.id);
   const landing = order[at + 1] ?? order[at - 1];
 
+  /*
+   * Any save of this resume that is still out, first.
+   *
+   * `leaveResume` flushes before it moves and `restoreResumeVersion` does the
+   * same; this did neither. Clearing the overlays below takes care of a save
+   * still on its timer — it un-dirties it, so the timer fires into nothing —
+   * and does nothing at all about one already in the air.
+   *
+   * `PUT /resumes/:id` has no existence check; it writes the file. So a save
+   * that left before the delete and landed after it put the resume straight
+   * back, and it turned up in the list on the next load looking like a
+   * deletion that had not taken. There is no second chance to remove it
+   * either, because as far as the editor is concerned it already did.
+   */
+  await flushAutoSave().catch(() => undefined);
+
   clearEdits();
   state.masterView = false;
   state.resumeId = landing?.id ?? null;
