@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findProjectRoot, isEmptyStore, resolveStoreDir, seedStore } from '../src/model/location.js';
 import { cloneProject } from '../src/model/projects.js';
+import { Store } from '../src/model/store.js';
 import { tempDir } from './helpers.js';
 
 describe('resolveStoreDir', () => {
@@ -143,6 +144,28 @@ describe('seedStore', () => {
     expect(seeded).toBe(true);
     expect(fs.readFileSync(path.join(to, 'config.yaml'), 'utf8')).toContain('ai:');
     expect(fs.readFileSync(path.join(to, 'resumes', 'newgrad.yaml'), 'utf8')).toContain('newgrad');
+  });
+
+  /*
+   * Against the real seed, not a synthetic one. Every save the app makes for
+   * itself is written with `withinProject: true` (see `cloneProject`), and the
+   * shipped `data/config.yaml` — the seed for a save made by pointing
+   * `rmm serve --data` at an empty folder — was the one that did not say so.
+   * Without the flag the path resolves against the save's parent, so the PDFs
+   * landed beside the save and two saves seeded side by side shared one folder
+   * — and the flat upload folder is rebuilt from whichever tracker asked last,
+   * so one save tidied away the other's files.
+   */
+  it('seeds a save whose built files go inside it', () => {
+    const shipped = path.join(findProjectRoot(process.cwd()) ?? process.cwd(), 'data');
+    const fresh = tempDir('rmm-seeded-');
+    fs.rmSync(fresh, { recursive: true, force: true });
+    try {
+      expect(seedStore(shipped, fresh)).toBe(true);
+      expect(new Store(fresh).outDir()).toBe(path.join(fresh, 'out'));
+    } finally {
+      fs.rmSync(fresh, { recursive: true, force: true });
+    }
   });
 
   it('never copies the source .git or node_modules', () => {

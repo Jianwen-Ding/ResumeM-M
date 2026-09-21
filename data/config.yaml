@@ -26,4 +26,17 @@ git:
   autoCommit: true
 
 output:
+  # Where built PDFs, bundles and the flat upload folder go.
+  #
+  # Inside the save, which is where every save the app itself makes puts them
+  # — `cloneProject` writes `withinProject: true` on each one. This file is the
+  # seed for a save made by pointing `rmm serve --data` at an empty folder, and
+  # it was the one that did not say so: without the flag the path resolves
+  # against the save's *parent*, so `rmm serve --data ~/Documents/resumes` put
+  # an `out/` full of PDFs in ~/Documents, and two saves seeded side by side
+  # shared one. The flat folder is rebuilt from whichever tracker asked last,
+  # so sharing it means one save quietly tidies away the other's files.
+  #
+  # Only new saves are seeded from here, so nothing already on disk moves.
   dir: out
+  withinProject: true
