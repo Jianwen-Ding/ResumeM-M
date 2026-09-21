@@ -1317,6 +1317,47 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     expect(res.body.fits).toBe(true);
   });
 
+  /*
+   * And says what the resume asked for that is not there, as things and not
+   * only as sentences.
+   *
+   * The editor draws a "Remove from this resume" button off this. A warning
+   * about an id that names nothing is a dead end on its own — the thing it
+   * points at is in no picker, it being gone is the problem — so without
+   * this the only ways out of a resume left pointing at a deleted line were
+   * editing the YAML or building the resume again.
+   */
+  it('names what the resume asks for and the store has lost', async () => {
+    const res = await request(app)
+      .post('/api/render')
+      .send({
+        spec: {
+          id: 'preview',
+          label: 'Preview',
+          sections: [
+            { kind: 'experience', entries: ['exp_acme', 'exp_gone'], bullets: { exp_acme: ['b_pipeline', 'b_cut'] } },
+          ],
+          choices: { b_pipeline: 'v_renamed' },
+        },
+      })
+      .expect(200);
+    expect(res.body.lost).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'entry', id: 'exp_gone' }),
+        expect.objectContaining({ kind: 'bullet', id: 'b_cut' }),
+        expect.objectContaining({ kind: 'wording', id: 'b_pipeline' }),
+      ]),
+    );
+    // Each one word for word as the warning beside it, which is how the
+    // editor shows one row per problem rather than two.
+    for (const l of res.body.lost) expect(res.body.warnings).toContain(l.says);
+  });
+
+  it('says nothing lost about a resume that asks only for what exists', async () => {
+    const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    expect(res.body.lost).toEqual([]);
+  });
+
   it('compiles the master document', async () => {
     const res = await request(app).post('/api/render').send({ master: true }).expect(200);
     expect(res.body.pdfUrl).toMatch(/^\/pdf\/\.previews\/master-[0-9a-f]{8}\.pdf$/);
@@ -2592,6 +2633,48 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
     expect(res.body.application.coverLetter).toBeUndefined();
     expect(res.body.files).toContain('Test-Person-Resume.pdf');
     expect(res.body.files.join(' ')).not.toContain('Cover-Letter');
+  });
+
+  /*
+   * A commit that fails is not an application that failed.
+   *
+   * This route builds the bundle, writes the tracker row, marks the space as
+   * sent and copies the files to the upload folder, and then commits — and it
+   * called `repo.commitAll` bare rather than through `withCommit`. `handler`
+   * turns anything thrown at it into a 400, so a git failure that has nothing
+   * to do with the application arrived as:
+   *
+   *   400 {"error":"Command failed: git add -- ."}
+   *
+   * over work that had entirely succeeded. The person sees the application
+   * fail and builds it again, which is how one application becomes two. And
+   * the failure is real rather than invented for this test: a concurrent
+   * save's scratch file vanishing mid-walk does exactly this. See
+   * `scratch-files.test.ts`, which is the other half of the same bug.
+   */
+  it('files the application even when the commit does not happen', async () => {
+    const committing = makeTempStore({
+      config: { git: { autoCommit: true }, ai: { enabled: false }, output: { dir: 'out' } },
+    });
+    const angry = Repo.forStore(committing.dir);
+    await angry.ensure();
+    angry.commitAll = async () => {
+      throw new Error('Command failed: git add -- .');
+    };
+    const live = express();
+    live.use('/api', createApi({ store: committing.store, repo: angry }));
+
+    const res = await request(live)
+      .post('/api/applications/bundle')
+      .send({ company: 'Streamly', role: 'Intern', resumeId: 'intern' })
+      .expect(200);
+    expect(res.body.files).toContain('Test-Person-Resume.pdf');
+    expect(committing.store.load().applications).toHaveLength(1);
+
+    // And the history not recording is remembered, because that is the part
+    // that did go wrong and the git panel is where it is owed.
+    expect(angry.lastCommitError?.message).toContain('git add');
+    committing.cleanup();
   });
 
   it('hands back the flat folder alongside the archive it just wrote', async () => {

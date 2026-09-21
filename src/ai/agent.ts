@@ -63,15 +63,34 @@ export interface AgentTools {
  * ## Confinement
  *
  * These CLIs are agents: left alone they can read and write whatever their
- * working directory gives them. None of these tasks needs a filesystem at all —
- * every prompt already carries the text it is reasoning about — so the child
- * runs in a fresh empty temp directory holding nothing but the prompt. That
- * alone is the guarantee, independent of whatever sandbox flags a particular
- * CLI happens to offer; `{sandbox}` in the argument template expands to that
- * directory for CLIs that want it named explicitly.
+ * working directory gives them. So the child runs in a fresh temp directory of
+ * its own, and `{sandbox}` in the argument template expands to it for CLIs
+ * that want it named explicitly.
  *
  * What this stops: an agent that decides to "look around the project" ending up
- * in your source tree, your store, or your home directory.
+ * in your source tree or your home directory.
+ *
+ * ## What it does not stop, said plainly
+ *
+ * The directory does not hold "nothing but the prompt", which this note used
+ * to claim. A tailoring run is given a session file — see `mcp/launch.ts` —
+ * and that file is the store: every entry, every unused variant, the profile
+ * with your address and phone number in it. A CLI with file tools can read all
+ * of it, which is the point, and can also read it for its own reasons.
+ *
+ * Nor is the directory a sandbox in the security sense. Nothing here blocks
+ * the child from opening a socket, and the server it would find on loopback
+ * has no authentication — so a CLI with a shell or a fetch tool can write to
+ * the store directly, around the id-only plan that `sanitizeAiPlan` exists to
+ * enforce. Some presets close that off themselves (`claude` denies Bash and
+ * Web, `codex` runs read-only, `agy` plans only); `gemini` and any command
+ * somebody configures by hand do not.
+ *
+ * That is a deliberate position rather than an oversight: this is a local tool
+ * running your own CLI, as you, on your own machine, and a resume store is not
+ * a multi-tenant boundary. It is written down because the guarantee this note
+ * used to assert was stronger than the one the code makes, and a comment that
+ * overstates a protection is worse than no comment at all.
  */
 export async function runAgent(
   config: StoreConfig,

@@ -500,7 +500,7 @@ describe('a skill a resume pinned and the store no longer has', () => {
     const out = resolveResume('base', withSkills());
     expect(out.sections.flatMap((s) => s.skillGroups).flatMap((g) => g.items)).toEqual(['Go', 'Rust']);
     expect(out.warnings.join(' ')).toMatch(/i_gone/);
-    expect(out.lost ?? []).toContainEqual({ kind: 'skill', id: 'i_gone' });
+    expect(out.lost ?? []).toContainEqual(expect.objectContaining({ kind: 'skill', id: 'i_gone' }));
   });
 
   it('says nothing when the group is printed whole', () => {

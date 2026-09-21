@@ -118,6 +118,16 @@
         <p id="save-default-status" class="hint">Choose which save opens when ResumeM-M starts.</p>
         <div data-project-required hidden>
         <hr>
+        <!-- Files you attach again and again and never generate. Kept beside
+             the inbox because both are "files in this save", and apart from it
+             because the inbox is material the AI reads and these are not. -->
+        <h3>Documents to Attach</h3>
+        <p class="hint">A transcript, a portfolio, anything a form asks you to upload that this app does not write. They are copied into the folder you attach from, and the browser extension can put them straight into a form.</p>
+        <div id="doc-list" class="card-list"></div>
+        <div class="toolbar"><span class="grow"></span><button id="doc-add">Add Document…</button></div>
+        <input id="doc-file" type="file" hidden>
+        <p id="doc-status" class="hint"></p>
+        <hr>
         <h3>Inbox Folder</h3>
         <p class="hint">Save files here from any app. While ResumeM-M is running, the inbox can import supported documents automatically, including subfolders.</p>
         <div id="asset-inbox" class="mono-path"></div>

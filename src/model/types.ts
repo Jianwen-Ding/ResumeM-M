@@ -123,6 +123,20 @@ export interface Entry {
   archived?: boolean;
 }
 
+/**
+ * A file kept in the save to be attached, not to be written from.
+ *
+ * A transcript, a portfolio, a reference letter: it arrives finished and the
+ * only thing wanted of it is to go into an upload box. Named by the name it
+ * will be uploaded under, because that is the part a reviewer sees.
+ */
+export interface StandingDocument {
+  name: string;
+  bytes: number;
+  /** When the file was last written, so a stale transcript is visible as one. */
+  at: string;
+}
+
 /** A named group of skills, e.g. "Languages: Python, Go". */
 export interface SkillGroup {
   id: string;
@@ -420,12 +434,42 @@ export interface ResolvedResume {
   /** Non-fatal problems: dangling ids, choices that matched nothing. */
   warnings: string[];
   /**
-   * The same two of those, counted rather than described: an entry the resume
-   * lists and the store has lost, and a choice that matches nothing. Both
-   * mean the resume is not the one whoever built it was looking at, and both
-   * have to be sayable without printing an id at a person.
+   * The same problems, as things rather than as sentences: every id this
+   * resume asks for that the store no longer has.
+   *
+   * Two jobs. One is counting — "2 entries this resume chose are no longer in
+   * your store", which is what somebody about to attach a file needs, and
+   * which cannot be said by printing `b_ec_pipeline` at them. The other is
+   * offering to do something about it: a reference that names nothing is not
+   * a thing to go and fix in the master document, it is a thing to take out
+   * of this resume, and the editor can only offer that button if it is told
+   * which reference and of what kind. See `describeLost` and the warnings
+   * panel.
    */
-  lost?: { kind: 'entry' | 'wording' | 'skill'; id: string }[];
+  lost?: LostReference[];
+}
+
+/**
+ * One id a resume asks for and the store does not have.
+ *
+ * `says` is the warning printed beside it, carried here verbatim so that the
+ * two never drift and so the editor can show each problem once: it draws a
+ * row per entry here and then the warnings that are not one of these. They
+ * are the same string because they are pushed from the same place — see
+ * `resolveResume`.
+ */
+export interface LostReference {
+  /**
+   * What the resume was asking for. `wording` is a choice key: either one
+   * that matches no field or bullet at all, or one naming a variant that has
+   * since been renamed or deleted. Both are undone the same way — the choice
+   * comes out and the default is used — so both are one kind.
+   */
+  kind: 'entry' | 'bullet' | 'wording' | 'skill' | 'skillGroup' | 'listItem';
+  /** The id itself, which is what a removal takes out of the spec. */
+  id: string;
+  /** The warning beside it, word for word. */
+  says: string;
 }
 
 /* ------------------------------------------------------------------ *

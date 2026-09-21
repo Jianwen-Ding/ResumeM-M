@@ -9,6 +9,7 @@ import {
   type Entry,
   type EntryKind,
   type LayoutOptions,
+  type LostReference,
   type MaybeVariant,
   type ResolvedBullet,
   type ResolvedEntry,
@@ -37,6 +38,22 @@ const DEFAULT_HEADINGS: Record<EntryKind, string> = {
  * had to learn that the profile is a special case.
  */
 export const PROFILE_NAME_KEY = 'profile.name';
+
+/**
+ * Say that this resume asks for something the store does not have.
+ *
+ * Passed down rather than returned because the places that find these are
+ * spread through the resolver — a choice is noticed while picking a field, a
+ * bullet while assembling an entry — and every one of them already takes a
+ * `warnings` array it pushes a sentence onto. This is that push and the
+ * record of it in one call, so the two can never say different things, and it
+ * is optional everywhere: `pickBullet` is exported and the MCP session calls
+ * it to read a line back to a model, which has no resume to take anything out
+ * of.
+ *
+ * See `LostReference` for what the editor does with them.
+ */
+export type NoteLost = (kind: LostReference['kind'], id: string, says: string) => void;
 
 /**
  * What a brand-new store puts in `profile.yaml`, and what an empty or missing
@@ -88,8 +105,9 @@ export function resolveProfile(
   profile: Profile,
   choices: Record<string, string>,
   warnings: string[],
+  note?: NoteLost,
 ): ResolvedProfile {
-  return { ...profile, name: pickField(profile.name, PROFILE_NAME_KEY, choices, warnings) ?? '' };
+  return { ...profile, name: pickField(profile.name, PROFILE_NAME_KEY, choices, warnings, note) ?? '' };
 }
 
 /**
@@ -101,6 +119,7 @@ function pickField(
   key: string,
   choices: Record<string, string>,
   warnings: string[],
+  note?: NoteLost,
 ): string | undefined {
   if (field === undefined) return undefined;
   // YAML happily turns `dates: 2026` into a number, so normalise here rather
@@ -111,7 +130,9 @@ function pickField(
   if (wanted) {
     const hit = field.variants.find((v) => v.id === wanted);
     if (hit) return String(hit.text);
-    warnings.push(`Choice "${key}" asked for variant "${wanted}", which does not exist; using default.`);
+    const says = `Choice "${key}" asked for variant "${wanted}", which does not exist; using default.`;
+    if (note) note('wording', key, says);
+    else warnings.push(says);
   }
   const def = field.variants.find((v) => v.id === field.default) ?? field.variants[0];
   if (!def) {
@@ -133,6 +154,7 @@ export function pickBullet(
   choices: Record<string, string>,
   warnings: string[],
   lists: Record<string, string[]> = {},
+  note?: NoteLost,
 ): { variantId: string; text: string } | undefined {
   // A list bullet is not worded, it is assembled: prefix plus whichever items
   // this resume keeps, in store order.
@@ -142,7 +164,11 @@ export function pickBullet(
       ? wantedIds
           .map((id) => {
             const item = bullet.items!.find((i) => i.id === id);
-            if (!item) warnings.push(`Bullet "${bullet.id}" lists item "${id}", which does not exist.`);
+            if (!item) {
+              const says = `Bullet "${bullet.id}" lists item "${id}", which does not exist.`;
+              if (note) note('listItem', id, says);
+              else warnings.push(says);
+            }
             return item;
           })
           .filter((i): i is NonNullable<typeof i> => Boolean(i))
@@ -158,7 +184,9 @@ export function pickBullet(
   if (wanted) {
     const hit = bullet.variants.find((v) => v.id === wanted);
     if (hit) return { variantId: hit.id, text: String(hit.text) };
-    warnings.push(`Bullet "${bullet.id}" asked for variant "${wanted}", which does not exist; using default.`);
+    const says = `Bullet "${bullet.id}" asked for variant "${wanted}", which does not exist; using default.`;
+    if (note) note('wording', bullet.id, says);
+    else warnings.push(says);
   }
   const def = bullet.variants.find((v) => v.id === bullet.default) ?? bullet.variants[0];
   if (!def) {
@@ -174,6 +202,7 @@ function resolveEntry(
   choices: Record<string, string>,
   warnings: string[],
   lists: Record<string, string[]> = {},
+  note?: NoteLost,
 ): ResolvedEntry {
   const wantedBullets = section.bullets?.[entry.id];
   const available = (entry.bullets ?? []).filter((b) => !b.archived);
@@ -202,7 +231,9 @@ function resolveEntry(
         .map((id) => {
           const b = (entry.bullets ?? []).find((x) => x.id === id);
           if (!b) {
-            warnings.push(`Entry "${entry.id}" lists bullet "${id}", which does not exist.`);
+            const says = `Entry "${entry.id}" lists bullet "${id}", which does not exist.`;
+            if (note) note('bullet', id, says);
+            else warnings.push(says);
             return undefined;
           }
           if (b.archived) {
@@ -227,12 +258,12 @@ function resolveEntry(
    * is what actually fixes it: `build`, `check`, `apply` and the editor all
    * print these, so the entry gets named rather than guessed at.
    */
-  const named = pickField(entry.title, `${entry.id}.title`, choices, warnings);
+  const named = pickField(entry.title, `${entry.id}.title`, choices, warnings, note);
   const title = named ?? '';
   if (!title.trim()) {
     warnings.push(`Entry "${entry.id}" has no title, so nothing is printed where its name goes.`);
   }
-  const dates = pickField(entry.dates, `${entry.id}.dates`, choices, warnings);
+  const dates = pickField(entry.dates, `${entry.id}.dates`, choices, warnings, note);
 
   /*
    * A date that runs backwards, said once, where the person can still do
@@ -253,11 +284,11 @@ function resolveEntry(
     kind: entry.kind,
     title,
     dates,
-    subtitle: pickField(entry.subtitle, `${entry.id}.subtitle`, choices, warnings),
-    location: pickField(entry.location, `${entry.id}.location`, choices, warnings),
+    subtitle: pickField(entry.subtitle, `${entry.id}.subtitle`, choices, warnings, note),
+    location: pickField(entry.location, `${entry.id}.location`, choices, warnings, note),
     bullets: ordered
       .map((b) => {
-        const picked = pickBullet(b, choices, warnings, lists);
+        const picked = pickBullet(b, choices, warnings, lists, note);
         return picked ? { id: b.id, ...picked } : undefined;
       })
       .filter((b): b is NonNullable<typeof b> => Boolean(b)),
@@ -444,7 +475,21 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
    * typed. So the two kinds that mean "this is not the resume you were
    * looking at" are counted as they are found.
    */
-  const lost: { kind: 'entry' | 'wording' | 'skill'; id: string }[] = [];
+  const lost: LostReference[] = [];
+  /*
+   * One sentence, in both places, always.
+   *
+   * The panel in the editor draws a row with a "Remove from this resume"
+   * button for everything in `lost`, and then the warnings that are not one
+   * of those — matched on the sentence, which is safe precisely because it is
+   * this one string going to both. Pushing the warning at the call site and
+   * the record here, as the first three of these did, is how the panel ends
+   * up showing the same problem twice with only one of them actionable.
+   */
+  const note: NoteLost = (kind, id, says) => {
+    warnings.push(says);
+    lost.push({ kind, id, says });
+  };
   /*
    * Resumes stand alone, so this is the resume — with one exception it costs
    * four lines to be right about.
@@ -469,7 +514,14 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
       for (const gid of section.groups ?? []) {
         const group = data.skillGroups.find((g) => g.id === gid);
         if (!group) {
-          warnings.push(`Skills group "${gid}" does not exist.`);
+          /*
+           * Recorded, not only said. A resume pinning a skills group that has
+           * been deleted prints one line fewer than it used to and nothing on
+           * the page says which — and until this was in `lost` the only way
+           * out was to find the id in the YAML by hand, because the group it
+           * names does not exist to be unticked anywhere in the editor.
+           */
+          note('skillGroup', gid, `Skills group "${gid}" does not exist.`);
           continue;
         }
         const wanted = section.items?.[gid];
@@ -488,8 +540,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
         for (const iid of wanted ?? group.items.map((i) => i.id)) {
           const item = group.items.find((i) => i.id === iid);
           if (!item || !item.text) {
-            warnings.push(`Skills group "${group.name}" no longer has the skill "${iid}", so it was left off.`);
-            lost.push({ kind: 'skill', id: iid });
+            note('skill', iid, `Skills group "${group.name}" no longer has the skill "${iid}", so it was left off.`);
             continue;
           }
           items.push(item.text);
@@ -500,8 +551,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
       for (const eid of orderedEntries(section, data.entries)) {
         const entry = data.entries.find((e) => e.id === eid);
         if (!entry) {
-          warnings.push(`Section "${section.kind}" lists entry "${eid}", which does not exist.`);
-          lost.push({ kind: 'entry', id: eid });
+          note('entry', eid, `Section "${section.kind}" lists entry "${eid}", which does not exist.`);
           continue;
         }
         /*
@@ -516,7 +566,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
           warnings.push(`Entry "${eid}" is archived, so it was left off.`);
           continue;
         }
-        entries.push(resolveEntry(entry, section, choices, warnings, lists));
+        entries.push(resolveEntry(entry, section, choices, warnings, lists, note));
       }
     }
 
@@ -592,8 +642,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   }
   for (const key of Object.keys(choices)) {
     if (!knownKeys.has(key)) {
-      warnings.push(`Choice "${key}" does not match any field or bullet in the store.`);
-      lost.push({ kind: 'wording', id: key });
+      note('wording', key, `Choice "${key}" does not match any field or bullet in the store.`);
     }
   }
 
@@ -602,7 +651,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   return {
     id: flat.id,
     label: flat.label ?? flat.id,
-    profile: resolveProfile(data.profile, choices, warnings),
+    profile: resolveProfile(data.profile, choices, warnings, note),
     sections,
     layout,
     warnings,

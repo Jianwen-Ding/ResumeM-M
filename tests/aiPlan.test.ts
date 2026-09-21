@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyInclusion, sanitizeAiPlan } from '../src/jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../src/jobs/aiPlan.js';
 import { resolveResume } from '../src/model/resolve.js';
 import type { StoreData } from '../src/model/types.js';
 import {
@@ -346,5 +346,46 @@ describe('an order the AI asks for is the order that prints', () => {
       expect(s.bulletOrder).toBeUndefined();
       expect(s.order).not.toBe('manual');
     }
+  });
+});
+
+/*
+ * Suggestions are the one part of a tailoring reply that carries prose.
+ *
+ * They are not applied — they go to the card as "a new wording for this line"
+ * — but accepting one is a single click that writes it into the store, so
+ * what arrives has to be something the store could honour. The tool path has
+ * always checked this, in `SessionState.suggest`; the reply that arrives as
+ * JSON instead was echoed through untouched, an unbounded array of arbitrary
+ * objects offered beside the resume as though it had been vouched for.
+ */
+describe('a phrasing the model proposes', () => {
+  it('is kept when it belongs to a bullet that exists', () => {
+    const kept = sanitizeSuggestions(
+      { suggestions: [{ bulletId: 'b_pipeline', label: 'Shorter', text: 'Built the pipeline.', why: 'fits' }] },
+      data(),
+    );
+    expect(kept).toEqual([{ bulletId: 'b_pipeline', label: 'Shorter', text: 'Built the pipeline.', why: 'fits' }]);
+  });
+
+  it('is dropped when the bullet is not in the store', () => {
+    const kept = sanitizeSuggestions({ suggestions: [{ bulletId: 'b_invented', text: 'Did a thing.' }] }, data());
+    expect(kept).toEqual([]);
+  });
+
+  it('is dropped when there is no text to offer', () => {
+    expect(sanitizeSuggestions({ suggestions: [{ bulletId: 'b_pipeline', text: '   ' }] }, data())).toEqual([]);
+    expect(sanitizeSuggestions({ suggestions: [{ bulletId: 'b_pipeline' }] }, data())).toEqual([]);
+    expect(sanitizeSuggestions({ suggestions: ['a string', null, 7] }, data())).toEqual([]);
+  });
+
+  it('stops at three, and at one for any single bullet', () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ bulletId: 'b_pipeline', text: `Wording ${i}` }));
+    expect(sanitizeSuggestions({ suggestions: many }, data())).toHaveLength(1);
+  });
+
+  it('says nothing at all about a reply that is not a list', () => {
+    expect(sanitizeSuggestions({ suggestions: 'all of them' }, data())).toEqual([]);
+    expect(sanitizeSuggestions(null, data())).toEqual([]);
   });
 });

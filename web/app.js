@@ -4860,7 +4860,7 @@ async function renderPreview() {
     if (token !== renderToken) return;
 
     showPdf($('#preview-pane'), asWritten.pdfUrl);
-    $('#warnings').replaceChildren(...(asWritten.warnings ?? []).map((w) => el('div', { textContent: w })));
+    showWarnings(asWritten);
 
     // It fits as authored, or nothing is allowed to shrink it. Either way this
     // is the answer, and there is no second compile to pay for.
@@ -4877,13 +4877,130 @@ async function renderPreview() {
     setLive('ok');
     showPdf($('#preview-pane'), fitted.pdfUrl);
     fitSummary(fit, fitted, { master });
-    $('#warnings').replaceChildren(...(fitted.warnings ?? []).map((w) => el('div', { textContent: w })));
+    showWarnings(fitted);
   } catch (err) {
     if (token !== renderToken) return;
     setLive('bad');
     fit.className = 'fit bad';
     fit.textContent = err.message;
   }
+}
+
+/**
+ * What a lost reference is, in the words the button has to use.
+ *
+ * Mirrors `LOST_WORDS` on the server, which names the same kinds for the
+ * sentence the extension shows before attaching a file. Two lists because
+ * they are two sentences: that one counts ("2 entries"), this one is on a
+ * button that removes exactly one thing.
+ */
+const ORPHAN_WORDS = {
+  entry: 'entry',
+  bullet: 'line',
+  skillGroup: 'skills group',
+  skill: 'skill',
+  wording: 'wording',
+  listItem: 'list item',
+};
+
+/**
+ * The warnings panel: the ones that can be acted on first, with the button.
+ *
+ * A warning about an id that names nothing is a dead end on its own. "Entry
+ * 'exp_helios' does not exist" tells you the resume is asking for something
+ * gone, and then there is nowhere to go and untick it — it is gone, so it is
+ * in no list, no picker and no tick box. The only ways out were editing the
+ * YAML by hand or rebuilding the resume, and people do the second.
+ *
+ * So every one of those gets a row of its own with "Remove from this resume",
+ * and the plain warnings follow. `lost` carries the sentence it was reported
+ * with, so the two are matched exactly rather than by shape, and nothing is
+ * shown twice.
+ */
+function showWarnings(result) {
+  const lost = state.masterView ? [] : (result.lost ?? []);
+  const said = new Set(lost.map((l) => l.says));
+  $('#warnings').replaceChildren(
+    ...lost.map((l) =>
+      el('div', { className: 'orphan' }, [
+        el('span', { className: 'what', textContent: l.says }),
+        el('button', {
+          className: 'tiny drop-orphan',
+          type: 'button',
+          textContent: 'Remove from this resume',
+          title: `Stop this resume asking for the ${ORPHAN_WORDS[l.kind] ?? 'reference'} "${l.id}"`,
+          onclick: () => dropOrphan(l),
+        }),
+      ]),
+    ),
+    ...(result.warnings ?? []).filter((w) => !said.has(w)).map((w) => el('div', { textContent: w })),
+  );
+}
+
+/**
+ * Take a reference to something that no longer exists out of this resume.
+ *
+ * Everywhere it appears, and not only where the resolver happened to trip
+ * over it. The id names nothing, so there is no such thing as the right place
+ * to keep one: a bullet id left in a second entry's list, or in the unsaved
+ * overlay the panel was not built from, is the same warning back on the next
+ * compile with the button apparently having done nothing.
+ *
+ * Which is why this reaches into `state` as well as the stored spec. Both are
+ * real: `currentSpec` merges the session's edits over the store's copy, so a
+ * choice removed from one and left in the other comes straight back.
+ */
+async function dropOrphan(lost) {
+  const base = resumeById(state.resumeId);
+  if (!base) return;
+  const id = lost.id;
+  const without = (list) => (Array.isArray(list) ? list.filter((x) => x !== id) : list);
+  const scrub = (map) => {
+    if (!map) return;
+    for (const key of Object.keys(map)) map[key] = without(map[key]);
+  };
+
+  if (lost.kind === 'wording') {
+    delete base.choices?.[id];
+    delete state.choices?.[id];
+  } else if (lost.kind === 'listItem') {
+    scrub(base.lists);
+    scrub(state.listEdits);
+  } else if (lost.kind === 'skill') {
+    for (const section of base.sections ?? []) scrub(section.items);
+    scrub(state.skillEdits);
+  } else if (lost.kind === 'skillGroup') {
+    for (const section of base.sections ?? []) {
+      if (section.groups) section.groups = without(section.groups);
+      delete section.items?.[id];
+    }
+    delete state.skillEdits?.[id];
+  } else if (lost.kind === 'bullet') {
+    for (const section of base.sections ?? []) scrub(section.bullets);
+    scrub(state.bulletEdits);
+  } else if (lost.kind === 'entry') {
+    /*
+     * An entry takes its lines with it. Leaving `bullets[eid]` behind is not
+     * harmless: it is a list of ids under a key nothing reads, which is
+     * exactly the shape of the thing being cleaned up here, and it comes back
+     * the moment somebody adds an entry with that id again.
+     */
+    for (const section of base.sections ?? []) {
+      if (section.entries) section.entries = without(section.entries);
+      delete section.bullets?.[id];
+      delete section.bulletOrder?.[id];
+    }
+    for (const kind of Object.keys(state.entryEdits ?? {})) {
+      state.entryEdits[kind] = without(state.entryEdits[kind]);
+    }
+    delete state.bulletEdits?.[id];
+    delete state.bulletOrderEdits?.[id];
+  } else {
+    return;
+  }
+
+  describeNext(`removing a ${ORPHAN_WORDS[lost.kind] ?? 'reference'} the store no longer has`);
+  markDirty(`Removed "${id}" from this resume`);
 }
 
 /** Whether this resume is allowed to shrink itself to fit. */
@@ -7254,6 +7371,120 @@ function readAsBase64(file) {
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * Documents to attach                                                 *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Files that go into an upload box and are never written here.
+ *
+ * Everything else in a save is text this program composes or text it learns
+ * from. A transcript is neither: it arrives finished, from a registrar, and
+ * the only thing wanted of it is to be attached — to a third of the forms
+ * anybody fills in, unchanged, for a year.
+ *
+ * Deliberately not the inbox beside it. That is material the AI reads, and a
+ * transcript is not something to write from.
+ */
+async function loadDocuments() {
+  const list = $('#doc-list');
+  if (!list) return;
+  let documents = [];
+  try {
+    ({ documents } = await api('/documents'));
+  } catch (err) {
+    setChildren(list, el('p', { className: 'hint', textContent: err.message }));
+    return;
+  }
+
+  if (documents.length === 0) {
+    setChildren(
+      list,
+      el('p', {
+        className: 'hint',
+        textContent: 'Nothing here yet. A transcript is the usual first one.',
+      }),
+    );
+    return;
+  }
+
+  const size = (bytes) =>
+    bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`;
+
+  setChildren(
+    list,
+    ...documents.map((doc) =>
+      el('div', { className: 'card' }, [
+        el('div', { className: 'grow' }, [
+          el('b', { textContent: doc.name }),
+          el('div', {
+            className: 'faint',
+            // The name is what a reviewer opening the attachment sees, so it
+            // is the thing itself rather than a label over an id.
+            textContent: `${size(doc.bytes)}${doc.at ? ` · added ${doc.at.slice(0, 10)}` : ''}`,
+          }),
+        ]),
+        el('button', {
+          className: 'tiny',
+          textContent: 'Open',
+          onclick: () => window.open(`/api/documents/${encodeURIComponent(doc.name)}/file`, '_blank'),
+        }),
+        el('button', {
+          className: 'tiny',
+          textContent: 'Remove',
+          onclick: async () => {
+            if (!(await confirmModal(`Remove “${doc.name}”?`, 'It leaves the save and the folder you attach from. Nothing else changes.'))) return;
+            try {
+              await api(`/documents/${encodeURIComponent(doc.name)}`, { method: 'DELETE' });
+              setStatus(`Removed ${doc.name}`);
+              await loadDocuments();
+            } catch (err) {
+              setStatus(err.message, true);
+            }
+          },
+        }),
+      ]),
+    ),
+  );
+}
+
+function setupDocuments() {
+  const add = $('#doc-add');
+  const picker = $('#doc-file');
+  if (!add || !picker) return;
+  add.onclick = () => picker.click();
+  picker.onchange = async () => {
+    const file = picker.files?.[0];
+    picker.value = '';
+    if (!file) return;
+    const status = $('#doc-status');
+    if (status) status.textContent = `Adding ${file.name}…`;
+    try {
+      const added = await api('/documents', {
+        method: 'POST',
+        // Under the name it will be uploaded as. Renaming is adding it again
+        // under the better one, which is also how it is replaced.
+        body: JSON.stringify({ name: file.name, data: await readAsBase64(file) }),
+      });
+      if (status) status.textContent = '';
+      /*
+       * "Ready to attach" is a claim about the upload folder, not about the
+       * save, and the two come apart: a file of the user's already holding
+       * that name there means the copy did not happen and the document is
+       * nowhere anything can attach it from. The server reports that now, so
+       * this reports it too rather than the happy version of both.
+       */
+      const trouble = (added?.problems ?? []).join(' ');
+      if (trouble) setStatus(`${file.name} was saved, but ${trouble}`, true);
+      else setStatus(`${file.name} is ready to attach`);
+      await loadDocuments();
+    } catch (err) {
+      if (status) status.textContent = '';
+      setStatus(err.message, true);
+    }
+  };
+}
+
 /** Read each file, ask the server what is in it, then show the lot for review. */
 async function ingestFiles(files) {
   const zone = $('#voice-drop');
@@ -9459,7 +9690,10 @@ function setupTabs() {
       for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b === btn);
       for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === `tab-${btn.dataset.tab}`);
       if (btn.dataset.tab === 'resumes') scheduleRender();
-      if (btn.dataset.tab === 'save') assetUI.load().catch((e) => setStatus(e.message, true));
+      if (btn.dataset.tab === 'save') {
+        assetUI.load().catch((e) => setStatus(e.message, true));
+        loadDocuments().catch((e) => setStatus(e.message, true));
+      }
       if (btn.dataset.tab === 'workspace') loadDrafts().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
@@ -9502,7 +9736,9 @@ async function boot() {
       paintUndo();
     }, loadProjectSettings });
   setupTabs();
+  setupDocuments();
   const project = await assetUI.init();
+  loadDocuments().catch(() => {});
   if (!project.current) { showTab('save'); return; }
   setupHistoryTab();
   await loadStore();

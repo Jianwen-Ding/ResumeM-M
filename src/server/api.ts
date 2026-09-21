@@ -32,11 +32,11 @@ import type { SessionState } from '../mcp/session.js';
 import type { AuthoringState } from '../mcp/authoring.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
-import { Repo, removeWhatIsFiled, withCommit } from '../git/repo.js';
+import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
-import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
@@ -45,7 +45,7 @@ import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
-import { syncCurrent, CURRENT_DIR } from '../model/current.js';
+import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
@@ -605,6 +605,141 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         store.saveResume(spec),
       );
       res.json(spec);
+    }),
+  );
+
+  /* ------------------------------------------------------------------ *
+   * Standing documents                                                  *
+   * ------------------------------------------------------------------ */
+
+  /**
+   * Files that are attached rather than written: a transcript, a portfolio.
+   *
+   * They live in `documents/` in the save and are copied into the flat upload
+   * folder by `syncCurrent`, so the one folder a portal's dialog is pointed at
+   * holds everything that dialog is going to ask for.
+   */
+  api.get(
+    '/documents',
+    handler(async (_req, res) => {
+      res.json({ documents: store.listDocuments(), dir: currentDir(store) });
+    }),
+  );
+
+  api.post(
+    '/documents',
+    handler(async (req, res) => {
+      const body = req.body as { name?: string; data?: string };
+      const name = String(body.name ?? '').trim();
+      if (!name) throw new Error('Give the document a name.');
+      if (typeof body.data !== 'string') throw new Error('No file was sent.');
+      /*
+       * Named by what it will be uploaded as, extension and all.
+       *
+       * A reviewer opening the attachment sees this string, so it is not an
+       * id with a display name beside it — it is the thing itself. Refusing a
+       * name with no extension would be officious; refusing one with a path
+       * in it happens in `Store.file`, where every other name is checked.
+       */
+      const saved = store.saveDocument(name, Buffer.from(body.data, 'base64'));
+      /*
+       * Into the upload folder straight away, so it is attachable without
+       * waiting for the next application to be built — and the answer is
+       * read, not dropped.
+       *
+       * `syncCurrent` reports rather than throws: a file of the user's
+       * already holding that name in the folder means the copy did not
+       * happen, and the document is then in the save and not where anything
+       * can attach it. That came back as a plain 200 and the panel said
+       * "ready to attach", which was the one thing it was not.
+       */
+      const folder = syncCurrent(store);
+      const trouble = (folder.problems ?? []).filter((said) => said.includes(`"${saved.name}"`));
+      await withCommit(repo, autoCommit(), `Add document "${saved.name}"`, () => undefined);
+      res.json({ ...saved, ...(trouble.length ? { problems: trouble } : {}) });
+    }),
+  );
+
+  api.delete(
+    '/documents/:name',
+    handler(async (req, res) => {
+      const name = String(req.params.name);
+      const gone = store.deleteDocument(name);
+      let problems: string[] = [];
+      if (gone) {
+        /*
+         * The file is already off the disk by here, so a sync that throws
+         * must not turn a delete that happened into a 400 that says it did
+         * not. `syncCurrent` parses the whole store to work out what the
+         * folder should hold, and everything that can be wrong with a store
+         * can be wrong at this moment — a malformed `applications.yaml`, an
+         * output folder that cannot be made. The panel would then keep
+         * listing a document that is gone.
+         */
+        try {
+          problems = (syncCurrent(store).problems ?? []).filter((said) => said.includes(`"${name}"`));
+        } catch (err) {
+          problems = [err instanceof Error ? err.message : String(err)];
+        }
+        await withCommit(repo, autoCommit(), `Remove document "${name}"`, () => undefined);
+      }
+      res.json({ ok: gone, ...(problems.length ? { problems } : {}) });
+    }),
+  );
+
+  /**
+   * The bytes, for the browser extension to put into a form's upload box.
+   *
+   * Served from here rather than only out of the flat folder because the
+   * extension may want a document on a page where nothing has been built yet,
+   * and because the name in `documents/` is the one the user chose — the flat
+   * folder's copy can have been renamed around a collision.
+   */
+  api.get(
+    '/documents/:name/file',
+    handler(async (req, res) => {
+      const name = String(req.params.name);
+      const bytes = store.readDocument(name);
+      if (!bytes) {
+        res.status(404).json({ error: 'That document is not in this save.' });
+        return;
+      }
+      res.type(name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${name.replace(/"/g, '')}"`);
+      res.send(bytes);
+    }),
+  );
+
+  /**
+   * Everything this application could attach, in one list.
+   *
+   * The flat folder holds every application in flight at once, which is right
+   * for a person looking at it and exactly wrong for a form: attaching
+   * another job's resume is the worst thing the extension could do with a
+   * file picker. So the folder says whose each file is, and this filters to
+   * the one being applied for plus the standing documents, which belong to
+   * all of them.
+   */
+  api.get(
+    '/attachments',
+    handler(async (req, res) => {
+      const wanted = String(req.query.application ?? '').trim();
+      const folder = syncCurrent(store);
+      const attachments = folder.files
+        .filter((name) => {
+          const whose = folder.belongsTo[name] ?? '';
+          if (whose === STANDING) return true;
+          // No application named: the standing documents only. A card that
+          // has not built anything yet has nothing of its own here, and the
+          // files that *are* here belong to somebody else's form.
+          return Boolean(wanted) && whose === wanted;
+        })
+        .map((name) => ({
+          name,
+          standing: folder.belongsTo[name] === STANDING,
+          url: `/current/${encodeURIComponent(name)}`,
+        }));
+      res.json({ attachments, dir: folder.dir });
     }),
   );
 
@@ -1382,6 +1517,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         warnings: result.warnings,
+        /*
+         * The same problems again, as things the editor can offer to remove.
+         *
+         * `warnings` are sentences, and a sentence about an id that names
+         * nothing is a dead end: the thing it points at is not in any picker,
+         * because it does not exist, so there is nowhere to go and untick it.
+         * This is what the warnings panel hangs its "Remove from this resume"
+         * button off. See `LostReference`.
+         */
+        lost: resolved.lost ?? [],
         pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
       });
     }),
@@ -2455,6 +2600,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          */
         save: store.root,
         /*
+         * And where the files to attach live, from the first paint.
+         *
+         * The flat folder is a fixed place in the save and its whole purpose
+         * is to be pasted into a portal's upload dialog. The card only ever
+         * learned the path from the reply to a *staging* call, so it had one
+         * on the page where the resume was built and none on the form page —
+         * the only page where anybody needs it — and none at all until
+         * something had been built. `currentDir` is a `path.join` and a
+         * `mkdir`; `syncCurrent`, which also answers this, rebuilds the whole
+         * folder from the tracker and has no business running on a read.
+         */
+        currentDir: currentDir(store),
+        /*
          * What the AI would be writing from, so the card can say it.
          *
          * A model writing a cover letter is the part of this people are
@@ -2497,6 +2655,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * somebody they have done this already.
          */
         applied: sentBefore(data.applications, job.company, job.title),
+        /*
+         * And which application this page belongs to, from the first paint.
+         *
+         * The same reasoning as `currentDir` above, and the same bug: the
+         * card only ever learned its application's name from the reply to a
+         * *staging* call, so it had one on the page where the resume was
+         * built and none anywhere else. Following Apply tears the card down
+         * and rebuilds it, and the rebuilt one asked the store for "the files
+         * of no application in particular" — which correctly answers with the
+         * standing documents alone. Pressing Attach on the form, after a
+         * resume had just been built and filed, said "Nothing is built yet,
+         * so there is nothing to attach."
+         *
+         * The same three-step fallback the workspace endpoint uses, so the
+         * name here is the one the stager filed the files under rather than a
+         * second opinion about what this application should be called.
+         */
+        application:
+          job.company && job.title
+            ? {
+                id:
+                  findDraft(store.loadDrafts(), job.company, job.title)?.id ??
+                  findApplication(data.applications, job.company, job.title)?.id ??
+                  freshApplicationId(data.applications, job.company, job.title),
+              }
+            : null,
         score,
         kind: verdict.kind,
         why: verdict.why,
@@ -2564,7 +2748,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         entryByBullet: Object.fromEntries(
           data.entries.flatMap((e) => (e.bullets ?? []).map((b) => [b.id, e.id])),
         ),
-        suggestions: (aiParsed as { suggestions?: unknown[] } | null)?.suggestions ?? [],
+        suggestions: sanitizeSuggestions(aiParsed, data),
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
         // Which of the two ways the AI answered, so a run that went through
@@ -2897,7 +3081,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // The same files also go to the flat folder, which is the one a portal's
       // file picker should be pointed at — the archive is for later.
       const current = syncCurrent(store);
-      if (autoCommit()) await repo.commitAll(`Apply: ${result.application.company} — ${result.application.role}`);
+      if (autoCommit()) {
+        await commitQuietly(repo, `Apply: ${result.application.company} — ${result.application.role}`);
+      }
       /*
        * And anything that did not land there, by name.
        *
@@ -3856,7 +4042,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         );
       }
 
-      if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
+      if (autoCommit()) await commitQuietly(repo, `Apply: ${draft.company} — ${draft.role}`);
       res.json({
         warnings,
         application: app,
