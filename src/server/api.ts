@@ -2621,6 +2621,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * somebody they have done this already.
          */
         applied: sentBefore(data.applications, job.company, job.title),
+        /*
+         * And which application this page belongs to, from the first paint.
+         *
+         * The same reasoning as `currentDir` above, and the same bug: the
+         * card only ever learned its application's name from the reply to a
+         * *staging* call, so it had one on the page where the resume was
+         * built and none anywhere else. Following Apply tears the card down
+         * and rebuilds it, and the rebuilt one asked the store for "the files
+         * of no application in particular" — which correctly answers with the
+         * standing documents alone. Pressing Attach on the form, after a
+         * resume had just been built and filed, said "Nothing is built yet,
+         * so there is nothing to attach."
+         *
+         * The same three-step fallback the workspace endpoint uses, so the
+         * name here is the one the stager filed the files under rather than a
+         * second opinion about what this application should be called.
+         */
+        application:
+          job.company && job.title
+            ? {
+                id:
+                  findDraft(store.loadDrafts(), job.company, job.title)?.id ??
+                  findApplication(data.applications, job.company, job.title)?.id ??
+                  freshApplicationId(data.applications, job.company, job.title),
+              }
+            : null,
         score,
         kind: verdict.kind,
         why: verdict.why,
