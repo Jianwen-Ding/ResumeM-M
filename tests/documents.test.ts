@@ -130,6 +130,65 @@ describe('keeping a transcript in the save', () => {
     expect(fs.existsSync(at)).toBe(false);
   });
 
+  /*
+   * The same names every other file in the save is held to.
+   *
+   * This was the one write in the store that went straight to
+   * `writeFileSync`, so a document skipped the checks the rest of the class
+   * argues for at length. A save is a git repository meant to be cloned onto
+   * other machines, and a colon in a filename stops a Windows checkout
+   * partway through — on a name the user picked by dragging a file in.
+   */
+  it('refuses a document name the save could not be cloned with', async () => {
+    const said = await request(app)
+      .post('/api/documents')
+      .send({ name: 'Transcript: Fall 2024.pdf', data: pdf('t') })
+      .expect(400);
+    expect(said.body.error).toMatch(/not a name this save can hold/i);
+  });
+
+  /*
+   * And a dotted name says why it is a dotted name.
+   *
+   * Going through `writeAtomic` refuses this one anyway, as an unportable
+   * name — so this is about the sentence rather than the outcome. It is worth
+   * its own: `listDocuments` skips anything beginning with a dot because the
+   * manifest and the scratch files look like that, and somebody who dragged
+   * in `.transcript.pdf` is owed that reason rather than a paragraph about
+   * cloning onto Windows. Before the write went through `writeAtomic` at all,
+   * the file was written, committed, and then unlistable for ever.
+   */
+  it('refuses a name beginning with a dot, which it could never list again', async () => {
+    const said = await request(app)
+      .post('/api/documents')
+      .send({ name: '.transcript.pdf', data: pdf('t') })
+      .expect(400);
+    expect(said.body.error).toMatch(/begins with a dot/i);
+    const listed = await request(app).get('/api/documents').expect(200);
+    expect(listed.body.documents.map((d: { name: string }) => d.name)).not.toContain('.transcript.pdf');
+  });
+
+  /*
+   * And when the copy into the upload folder does not happen, the panel is
+   * told. A file of the user's already holding that name means the document
+   * is in the save and nowhere anything can attach it from — which came back
+   * as a plain 200 under the words "ready to attach".
+   */
+  it('says so when the upload folder would not take it', async () => {
+    // Something of the user's, already in the folder under that name.
+    const dir = syncCurrent(t.store).dir;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Transcript.pdf'), 'the one I polished myself');
+
+    const added = await request(app)
+      .post('/api/documents')
+      .send({ name: 'Transcript.pdf', data: pdf('t') })
+      .expect(200);
+    expect((added.body.problems ?? []).join(' ')).toMatch(/Transcript\.pdf/);
+    // And the user's own file is still theirs.
+    expect(fs.readFileSync(path.join(dir, 'Transcript.pdf'), 'utf8')).toContain('polished myself');
+  });
+
   it('takes it out of the folder again when it is removed', async () => {
     await request(app).post('/api/documents').send({ name: 'Transcript.pdf', data: pdf('t') }).expect(200);
     expect(syncCurrent(t.store).files).toContain('Transcript.pdf');

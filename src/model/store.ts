@@ -525,7 +525,14 @@ export class Store {
    * The pattern is already used for projects.json and the asset store; user
    * data deserves it at least as much.
    */
-  private writeAtomic(f: string, text: string): void {
+  /**
+   * @param text The contents. Bytes as well as text: a standing document is a
+   *   PDF from a registrar, and it wants every guarantee this gives a resume
+   *   — a name the save can be cloned with, no second name differing only in
+   *   case, and a rename into place rather than a truncating write in the one
+   *   folder a portal's upload dialog is pointed at.
+   */
+  private writeAtomic(f: string, text: string | Buffer): void {
     /*
      * A name is judged when it is created, and never afterwards.
      *
@@ -590,7 +597,9 @@ export class Store {
     try {
       const fd = fs.openSync(temp, 'w');
       try {
-        fs.writeFileSync(fd, text, 'utf8');
+        // No encoding named: a string is utf8 by default and a Buffer is
+        // written as it stands.
+        fs.writeFileSync(fd, text);
         // So a power cut cannot leave the rename pointing at empty bytes.
         fs.fsyncSync(fd);
       } finally {
@@ -1422,10 +1431,34 @@ export class Store {
   saveDocument(name: string, bytes: Buffer): StandingDocument {
     const clean = name.trim().normalize('NFC');
     if (!clean) throw new Error('Give the document a name.');
-    const dir = this.file('documents');
-    fs.mkdirSync(dir, { recursive: true });
+    /*
+     * Not a dotted name, which would be written and then invisible.
+     *
+     * `listDocuments` skips anything beginning with a dot — the manifest and
+     * the scratch files this folder keeps look like that — so a document
+     * saved as `.transcript.pdf` went to disk, went into the commit, and then
+     * could not be listed or removed from the panel by anybody.
+     */
+    /*
+     * The path check first, because `..` begins with a dot too and "that is a
+     * path" is the more useful thing to be told about `../config.yaml`.
+     */
     const f = this.file('documents', clean);
-    fs.writeFileSync(f, bytes);
+    if (clean.startsWith('.')) {
+      throw new Error(`"${clean}" begins with a dot, which this save keeps for files of its own. Choose another name.`);
+    }
+    fs.mkdirSync(this.file('documents'), { recursive: true });
+    /*
+     * Through the same write every other file in the save gets.
+     *
+     * This was a bare `writeFileSync`, the only one in the class, and it
+     * skipped all three of that method's guarantees: a name the save can be
+     * cloned with (`Transcript: Fall 2024.pdf` stops a checkout on Windows
+     * partway), no second name differing from an existing one only in case,
+     * and a rename into place instead of a truncating write — in the one
+     * folder whose whole purpose is that an upload dialog is open over it.
+     */
+    this.writeAtomic(f, bytes);
     return { name: clean, bytes: bytes.length, at: new Date().toISOString() };
   }
 

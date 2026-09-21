@@ -7343,14 +7343,23 @@ function setupDocuments() {
     const status = $('#doc-status');
     if (status) status.textContent = `Adding ${file.name}…`;
     try {
-      await api('/documents', {
+      const added = await api('/documents', {
         method: 'POST',
         // Under the name it will be uploaded as. Renaming is adding it again
         // under the better one, which is also how it is replaced.
         body: JSON.stringify({ name: file.name, data: await readAsBase64(file) }),
       });
       if (status) status.textContent = '';
-      setStatus(`${file.name} is ready to attach`);
+      /*
+       * "Ready to attach" is a claim about the upload folder, not about the
+       * save, and the two come apart: a file of the user's already holding
+       * that name there means the copy did not happen and the document is
+       * nowhere anything can attach it from. The server reports that now, so
+       * this reports it too rather than the happy version of both.
+       */
+      const trouble = (added?.problems ?? []).join(' ');
+      if (trouble) setStatus(`${file.name} was saved, but ${trouble}`, true);
+      else setStatus(`${file.name} is ready to attach`);
       await loadDocuments();
     } catch (err) {
       if (status) status.textContent = '';

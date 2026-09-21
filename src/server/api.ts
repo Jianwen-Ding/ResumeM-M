@@ -642,11 +642,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * in it happens in `Store.file`, where every other name is checked.
        */
       const saved = store.saveDocument(name, Buffer.from(body.data, 'base64'));
-      // Into the upload folder straight away, so it is attachable without
-      // waiting for the next application to be built.
-      syncCurrent(store);
+      /*
+       * Into the upload folder straight away, so it is attachable without
+       * waiting for the next application to be built — and the answer is
+       * read, not dropped.
+       *
+       * `syncCurrent` reports rather than throws: a file of the user's
+       * already holding that name in the folder means the copy did not
+       * happen, and the document is then in the save and not where anything
+       * can attach it. That came back as a plain 200 and the panel said
+       * "ready to attach", which was the one thing it was not.
+       */
+      const folder = syncCurrent(store);
+      const trouble = (folder.problems ?? []).filter((said) => said.includes(`"${saved.name}"`));
       await withCommit(repo, autoCommit(), `Add document "${saved.name}"`, () => undefined);
-      res.json(saved);
+      res.json({ ...saved, ...(trouble.length ? { problems: trouble } : {}) });
     }),
   );
 
@@ -655,11 +665,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const name = String(req.params.name);
       const gone = store.deleteDocument(name);
+      let problems: string[] = [];
       if (gone) {
-        syncCurrent(store);
+        /*
+         * The file is already off the disk by here, so a sync that throws
+         * must not turn a delete that happened into a 400 that says it did
+         * not. `syncCurrent` parses the whole store to work out what the
+         * folder should hold, and everything that can be wrong with a store
+         * can be wrong at this moment — a malformed `applications.yaml`, an
+         * output folder that cannot be made. The panel would then keep
+         * listing a document that is gone.
+         */
+        try {
+          problems = (syncCurrent(store).problems ?? []).filter((said) => said.includes(`"${name}"`));
+        } catch (err) {
+          problems = [err instanceof Error ? err.message : String(err)];
+        }
         await withCommit(repo, autoCommit(), `Remove document "${name}"`, () => undefined);
       }
-      res.json({ ok: gone });
+      res.json({ ok: gone, ...(problems.length ? { problems } : {}) });
     }),
   );
 
