@@ -550,3 +550,91 @@ describe('a save that outlives the machine it was written on', () => {
     }
   });
 });
+
+/**
+ * The flat folder is the app's, and everything else in it is the user's.
+ *
+ * The delete loop commits to that in as many words — "a name the manifest
+ * does not claim belongs to the user, whatever it is" — and then only the
+ * directory case was honoured on the way in. A *file* of theirs with a name a
+ * bundle also wanted was copied straight over: no warning, nothing in
+ * `problems`, and the name then went into the manifest, so the next sync
+ * would have deleted it as ours.
+ *
+ * The folder's own documentation invites people to open it and point an
+ * upload dialog at it, and the names it produces are made from the user's own
+ * name and the role — so a hand-polished copy of exactly that name is a thing
+ * somebody would plausibly keep there.
+ */
+describe('a file of your own in the upload folder', () => {
+  /** One in-flight application whose bundle holds one named file. */
+  const filed = (name: string, text = 'the generated one') => {
+    const bundle = path.join(t.store.outDir(), 'applications', 'a1');
+    fs.mkdirSync(bundle, { recursive: true });
+    const file = path.join(bundle, name);
+    fs.writeFileSync(file, text, 'utf8');
+    /*
+     * Dated a moment into the future, because "has this bundle been rebuilt
+     * since" is a modification-time comparison and two writes inside one
+     * millisecond are indistinguishable to it. A test that races the clock
+     * would pass or fail on how fast the machine is.
+     */
+    const soon = new Date(Date.now() + 2000);
+    fs.utimesSync(file, soon, soon);
+    t.write('applications.yaml', [
+      { id: 'a1', company: 'Acme', role: 'Engineer', status: 'applied', snapshotDir: 'applications/a1' },
+    ]);
+    return bundle;
+  };
+
+  it('is left alone, and said out loud, when a bundle wants its name', () => {
+    filed('Test-Person-Resume.pdf');
+    // A first sync, so the folder has a manifest and knows what is its own.
+    const first = syncCurrent(t.store);
+    expect(first.files).toEqual(['Test-Person-Resume.pdf']);
+
+    // Now the user puts one of their own in, under a name nothing claims.
+    fs.writeFileSync(path.join(first.dir, 'Jane-Doe-Resume.pdf'), 'MINE', 'utf8');
+    // And a rebuild produces exactly that name.
+    filed('Jane-Doe-Resume.pdf', 'the generated one');
+    t.write('config.yaml', {
+      ai: { enabled: false },
+      git: { autoCommit: false },
+      output: { dir: 'out', fileNames: 'type' },
+    });
+
+    const after = syncCurrent(t.store);
+    expect(fs.readFileSync(path.join(after.dir, 'Jane-Doe-Resume.pdf'), 'utf8')).toBe('MINE');
+    expect(after.files).not.toContain('Jane-Doe-Resume.pdf');
+    expect((after.problems ?? []).join(' ')).toMatch(/Jane-Doe-Resume\.pdf[\s\S]*your own/i);
+  });
+
+  it('but the folder still refreshes its own files', () => {
+    filed('Test-Person-Resume.pdf', 'first');
+    const first = syncCurrent(t.store);
+    fs.writeFileSync(path.join(first.dir, 'notes-of-mine.txt'), 'MINE', 'utf8');
+
+    filed('Test-Person-Resume.pdf', 'second');
+    const after = syncCurrent(t.store);
+    expect(after.files).toEqual(['Test-Person-Resume.pdf']);
+    expect(fs.readFileSync(path.join(after.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('second');
+    // And the file nobody claimed is still there, untouched.
+    expect(fs.readFileSync(path.join(after.dir, 'notes-of-mine.txt'), 'utf8')).toBe('MINE');
+  });
+
+  /*
+   * Without a manifest nothing in the folder can be attributed to anybody, so
+   * refusing every name would turn a missing file into a folder that has
+   * stopped working. The old behaviour is the only safe one there.
+   */
+  it('writes over what it finds when there is no record of what is its own', () => {
+    filed('Test-Person-Resume.pdf', 'the generated one');
+    const dir = path.join(t.store.outDir(), 'current');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Test-Person-Resume.pdf'), 'stale', 'utf8');
+
+    const after = syncCurrent(t.store);
+    expect(after.files).toEqual(['Test-Person-Resume.pdf']);
+    expect(fs.readFileSync(path.join(after.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('the generated one');
+  });
+});

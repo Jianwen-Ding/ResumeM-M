@@ -132,7 +132,7 @@ describe('sweeping', () => {
 
     const [latest] = await repo.log(1);
     const changed = await repo.commit(latest!.hash);
-    expect(changed.files.map((f) => f.path)).toEqual(['resumes/job-old.yaml']);
+    expect(changed?.files.map((f) => f.path)).toEqual(['resumes/job-old.yaml']);
 
     // And it is still sitting there, uncommitted, exactly as it was left.
     expect((temp.read('profile.yaml') as { name: string }).name).toBe('Half A Name');

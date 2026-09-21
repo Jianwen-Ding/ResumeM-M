@@ -237,6 +237,16 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
   // name the manifest does not claim belongs to the user, whatever it is.
   const ours = readManifest(dir);
   const cameFrom = readSources(dir);
+  /*
+   * Whether this folder has a record of what it put here.
+   *
+   * `readManifest` answers `[]` both for "the manifest lists nothing" and for
+   * "there is no manifest", and the copy below has to tell those apart: with
+   * a record, a name it does not hold is the user's; without one, nothing can
+   * be said about any name and the old behaviour is the only safe one.
+   */
+  const tracked = fs.existsSync(path.join(dir, MANIFEST));
+  const claimed = new Set(ours);
   for (const existing of ours) {
     if (wanted.has(existing) || existing === MANIFEST) continue;
     try {
@@ -267,6 +277,25 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
       const at = fs.statSync(to, { throwIfNoEntry: false });
       if (at && !at.isFile()) {
         throw new Error('something that is not a file already has that name here');
+      }
+      /*
+       * And a *file* of the user's is theirs too.
+       *
+       * The delete loop above commits to this in as many words — "a name the
+       * manifest does not claim belongs to the user, whatever it is" — and
+       * then only the directory case was honoured here. A file went straight
+       * into the copy, so somebody who kept their own polished
+       * `Jane-Doe-Resume.pdf` in the folder the app tells them to point the
+       * upload dialog at lost it the first time a bundle produced that name.
+       * Silently: it was not reported, and the name then went into the
+       * manifest, so the *next* sync would have deleted it as ours.
+       *
+       * Only where there is a manifest to ask. Without one nothing here can
+       * be attributed to anybody, and refusing every name would turn a
+       * missing file into a folder that has stopped working.
+       */
+      if (at && tracked && !claimed.has(name) && cameFrom[name] === undefined) {
+        throw new Error('a file of your own already has that name here, so it was left alone');
       }
       /*
        * Copy when it is a different bundle, or when the same bundle has been
