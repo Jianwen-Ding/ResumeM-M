@@ -267,6 +267,42 @@ describe('analysing a posting with the AI switched on', () => {
     expect(experience.bulletOrder?.exp_acme).toBe('manual');
   });
 
+  /*
+   * A wording the model wrote is offered, never applied.
+   *
+   * This is the rule the whole tailoring design rests on: the AI chooses
+   * between phrasings that are already yours and switches entries and lines
+   * on or off, and it does not write the resume. `suggest_wording` is the one
+   * tool that produces prose, and its whole contract is that the sentence
+   * goes to the person to accept or decline — so it must reach the response
+   * and must not reach the store or the resume on the way.
+   *
+   * Worth a test of its own rather than trusting the shape of the code: a
+   * future change that merges suggestions into the spec "so they take effect"
+   * would look like a convenience and would be the AI writing someone's
+   * resume.
+   */
+  it('offers a wording the model wrote, and does not apply it', async () => {
+    const invented = 'Ran a Kafka cluster nobody asked me to run';
+    serve(
+      JSON.stringify({
+        choices: {},
+        suggestions: [{ bulletId: 'b_pipeline', label: 'Kafka', text: invented, why: 'the posting names Kafka' }],
+      }),
+    );
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+
+    // Offered, by name, so the person can take it or leave it.
+    expect(res.body.suggestions?.some((s: { text: string }) => s.text === invented)).toBe(true);
+
+    // And nowhere near the document. Not chosen —
+    expect(JSON.stringify(res.body.spec)).not.toContain(invented);
+    // — and not written into the store as a phrasing either, which is the
+    // way it would survive past this one application.
+    const stored = t.store.load().entries.flatMap((e) => e.bullets ?? []).flatMap((b) => b.variants ?? []);
+    expect(stored.some((v) => v.text === invented)).toBe(false);
+  });
+
   it('discards a choice the model invented', async () => {
     // The AI selects; it never writes. Anything that is not an id it could
     // have chosen from is dropped before it reaches a resume.
