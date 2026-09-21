@@ -287,8 +287,9 @@ export class Repo {
    * half the reason it is plain YAML. Knowing there is unsaved work is what
    * makes an explicit save worth offering.
    */
-  async pending(): Promise<PendingChange[]> {
+  async pending(paths?: string[]): Promise<PendingChange[]> {
     if (!(await this.isRepo())) return [];
+    const where = paths ?? this.scope;
     // `-uall` because porcelain otherwise collapses a wholly untracked
     // directory to a single entry, so `rmm save` said "Saved 1 file — drafts/"
     // and committed six, and the editor's unsaved-work list under-reported the
@@ -310,7 +311,7 @@ export class Repo {
      * A repository that is not there yet is the one empty answer that is
      * true, and it is already handled above.
      */
-    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...this.scope]);
+    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...where]);
 
     const records = out.split('\0');
     const changes: PendingChange[] = [];
@@ -677,7 +678,34 @@ export async function removeWhatIsFiled<T>(
 
   const filed = await filedPaths(repo);
 
-  const taking = going.filter((g) => g.paths.some((p) => filed.has(p)));
+  /*
+   * And what git has is not the same question as what is on disk.
+   *
+   * `filed` is HEAD's tree: it says the *path* is in the history, not that
+   * the version about to be deleted is. Two weeks of edits to a resume git
+   * committed a fortnight ago satisfy it exactly as well as a file committed
+   * a second ago — and a fortnight of uncommitted edits is an ordinary state,
+   * because the filing commit two lines up is allowed to fail quietly and
+   * auto-commit is a switch people turn off. Set `commit.gpgsign` with no
+   * usable key, or leave a `pre-commit` hook that exits non-zero, and every
+   * commit this program makes is a console warning nobody reads.
+   *
+   * So the check asks the whole question: git has the path, and the working
+   * tree agrees with it. Anything else is held and reported, which is what
+   * `held` is for.
+   *
+   * A status that will not run at all holds everything, for the same reason:
+   * this is the one unrecoverable act in the program, and "I could not check"
+   * is not permission to go ahead.
+   */
+  const unsaved = new Set(
+    await repo
+      .pending(going.flatMap((g) => g.paths))
+      .then((changes) => changes.map((c) => c.path))
+      .catch(() => going.flatMap((g) => g.paths)),
+  );
+
+  const taking = going.filter((g) => g.paths.some((p) => filed.has(p)) && !g.paths.some((p) => unsaved.has(p)));
   const held = going.filter((g) => !taking.includes(g)).map((g) => g.what);
   if (taking.length === 0) return { removed: [], held };
 
