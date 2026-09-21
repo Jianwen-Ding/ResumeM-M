@@ -708,6 +708,20 @@ export interface LetterCompileResult {
   /** A cover letter that runs past one page is a mistake worth naming. */
   fits: boolean;
   overflowLines: number;
+  /**
+   * What the engine said about the page it set, in words.
+   *
+   * The resume has carried these from the start and the letter did not —
+   * which left the one warning this whole file calls the thing a document
+   * tool must not do reaching nobody. `\raggedright` is set in the preamble,
+   * so TeX cannot stretch a line to fit an unbreakable token; a Google Docs
+   * link, a Jira url or a file path pasted into a letter is set past the
+   * margin and the glyphs past the paper edge are simply not in the PDF. The
+   * letter was then compiled, written into the application folder, copied to
+   * the upload folder and attached, with `…ouid=1234` where `…ouid=1234567890`
+   * had been typed and nothing anywhere saying so.
+   */
+  warnings: string[];
   fastPath: boolean;
   log?: string;
 }
@@ -789,6 +803,7 @@ export async function compileLetter(
     texPath: opts.texPath,
     tex,
     engine,
+    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log)],
     pages: m.pages,
     fits,
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

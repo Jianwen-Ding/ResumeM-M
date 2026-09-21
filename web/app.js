@@ -6194,6 +6194,18 @@ function renderDraft(draft) {
     });
     const letterPane = el('div', { className: 'preview-frame letter-preview' }, [letterEmpty]);
     const letterFit = el('div', { className: 'fit idle', textContent: 'Not compiled yet.' });
+    /*
+     * What the engine said about the page, which the resume's preview has
+     * always shown and this one did not.
+     *
+     * The one that matters is a line set past the right-hand edge. The
+     * preamble sets `\raggedright`, so TeX cannot stretch a line to swallow
+     * an unbreakable token — a Google Docs link, a Jira url, a file path —
+     * and whatever is past the paper edge is not in the PDF. The letter then
+     * goes into the application folder and gets attached with the second half
+     * of a link missing, and the only place it was ever visible is here.
+     */
+    const letterWarnings = el('div', { className: 'warnings' });
     const liveChip = el('span', { className: 'live ok', textContent: 'Live' });
 
     const compile = async () => {
@@ -6229,6 +6241,9 @@ function renderDraft(draft) {
         letterFit.textContent = r.fits
           ? 'Fits on one page.'
           : `${plural(r.pages, 'page')} — about ${plural(r.overflowLines, 'line')} too long for one.`;
+        letterWarnings.replaceChildren(
+          ...(r.warnings ?? []).map((w) => el('div', { textContent: w })),
+        );
       } catch (err) {
         if (token !== letterToken) return;
         liveChip.className = 'live bad';
@@ -6305,6 +6320,7 @@ function renderDraft(draft) {
         letterNotes,
         el('div', { className: 'letter-split' }, [letter, letterPane]),
         letterFit,
+        letterWarnings,
       ]),
     );
 

@@ -1604,6 +1604,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         pages: result.pages,
         fits: result.fits,
         overflowLines: result.overflowLines,
+        /*
+         * What the engine said about the page, which the resume's preview has
+         * always carried and this one did not. The one that matters is a line
+         * set past the right-hand edge — see `tooWideWarnings`: whatever is
+         * past the edge is not in the PDF, and a letter is where somebody
+         * pastes a link.
+         */
+        warnings: result.warnings,
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
