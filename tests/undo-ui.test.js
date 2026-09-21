@@ -114,6 +114,56 @@ describe('undo in the builder', () => {
   });
 
   /*
+   * Ctrl+Z inside the nine hundred milliseconds before a change has saved.
+   *
+   * `undoGroup` flushes the pending auto-save before it does anything, and
+   * says why: the debounce makes a write arrive at an arbitrary moment and
+   * nothing should happen across one. `stepHistory` did not. So the undo
+   * replayed an *older* step and then called `clearEdits`, which drops every
+   * overlay and sets `state.dirty` false — taking the change made a moment
+   * ago with it, unsaved and unrecorded. The timer then fired into
+   * `autoSave`'s `if (!state.dirty) return`, so no request went out, no error
+   * was shown, and the save chip was left reading "Unsaved changes" for ever
+   * about something that no longer existed.
+   *
+   * The guard against undoing mid-typing does not help: it looks at
+   * `document.activeElement`, and a tick box calls `render()`, which rebuilds
+   * the whole editor and moves focus to the body. So the key goes straight
+   * through, from the very actions most likely to be followed by one.
+   */
+  it('saves what was just changed before undoing something older', async () => {
+    // The key only means anything on this tab, and this harness does not
+    // start on it. See "does nothing on a tab that has no history of its own".
+    for (const b of document.querySelectorAll('#tabs button')) b.disabled = false;
+    document.querySelector('button[data-tab="resumes"]').click();
+    await vi.advanceTimersByTimeAsync(100);
+
+    const boxes = () => [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+
+    // One change, saved and on the stack.
+    boxes()[0].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+    const first = structuredClone(spec('newgrad'));
+
+    // A second change, and the undo lands inside its debounce.
+    boxes()[1].click();
+    await vi.advanceTimersByTimeAsync(100);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }));
+    await vi.advanceTimersByTimeAsync(5000);
+
+    /*
+     * The second change is what one press of Ctrl+Z takes back, because it is
+     * the last thing that happened. What must not happen is it being dropped
+     * on the floor while an older step is replayed underneath it.
+     */
+    expect(spec('newgrad'), 'the undo took back the change that was still saving')
+      .toEqual(first);
+    expect(document.querySelector('#save-state')?.textContent ?? '')
+      .not.toMatch(/unsaved/i);
+  });
+
+  /*
    * Ctrl+Z belongs to the resume builder. It used to fire from any tab, so
    * pressing it while reading the Applications list silently rolled back an
    * edit made somewhere the user was not looking.

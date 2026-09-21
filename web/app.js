@@ -343,6 +343,28 @@ function describeNext(label) {
 }
 
 async function stepHistory(direction) {
+  /*
+   * Whatever is still on the debounce goes down first, for the reason
+   * `undoGroup` gives and one more.
+   *
+   * A change made in the nine hundred milliseconds before it saves is held
+   * only in `state.choices` and friends, and `clearEdits` below drops all of
+   * them and sets `state.dirty` false. So an undo landing in that window
+   * replayed an older step and took the newest change with it — never
+   * written, never recorded, never undoable. The timer then fired into
+   * `autoSave`'s `if (!state.dirty) return`: no request, no error, and the
+   * save chip left reading "Unsaved changes" for ever about a change that no
+   * longer existed anywhere.
+   *
+   * The mid-typing guard is no help. It reads `document.activeElement`, and a
+   * tick box or an order nudge calls `render()`, which rebuilds the editor and
+   * puts focus on the body — so the key goes straight through, from exactly
+   * the actions most likely to be followed by one.
+   *
+   * Flushed rather than blocked, because the edit is real: it lands as its own
+   * step, and then this undo takes back the thing the person actually did last.
+   */
+  await flushAutoSave();
   const entry = direction === 'undo' ? history.undo() : history.redo();
   if (!entry) {
     setStatus(direction === 'undo' ? 'Nothing to undo' : 'Nothing to redo');
