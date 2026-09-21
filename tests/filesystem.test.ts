@@ -482,6 +482,50 @@ describe('a save that outlives the machine it was written on', () => {
     }
   });
 
+  /*
+   * And a write that landed is not a write that failed.
+   *
+   * The directory flush used to sit inside the same try as the rename, and
+   * `fsyncDirectory` re-throws any errno outside its short allow-list. `EIO`
+   * is not on it — so a flush failing on a file that was already on disk
+   * under its real name came back as "resume.yaml could not be saved to
+   * …/resumes — EIO". `withCommit` has no catch, so the commit was skipped
+   * with it: the edit on disk, absent from the history, and reported to the
+   * person as not saved. They redo work that is already done.
+   *
+   * What the flush buys is the rename surviving a power cut. Losing that
+   * quietly is the smaller harm by a long way.
+   */
+  it('reports a save that landed as saved, whatever the directory flush says', () => {
+    const t = makeTempStore();
+    try {
+      const realFsync = fs.fsyncSync;
+      vi.spyOn(fs, 'fsyncSync').mockImplementation(((fd: number) => {
+        let isDir = false;
+        try {
+          isDir = fs.fstatSync(fd).isDirectory();
+        } catch {
+          isDir = false;
+        }
+        if (isDir) {
+          // A failing disk, rather than a platform that will not do this.
+          const err = new Error('EIO: i/o error, fsync') as NodeJS.ErrnoException;
+          err.code = 'EIO';
+          throw err;
+        }
+        return (realFsync as (f: number) => void)(fd);
+      }) as typeof fs.fsyncSync);
+
+      expect(() => t.store.saveResume({ id: 'landed', label: 'Landed', sections: [] })).not.toThrow();
+    } finally {
+      vi.restoreAllMocks();
+      // Read back with the real fsync in place, so this is the file on disk
+      // and not the mock agreeing with itself.
+      expect(t.store.getResume('landed')?.label).toBe('Landed');
+      t.cleanup();
+    }
+  });
+
   it('still saves where the platform will not fsync a directory', () => {
     const t = makeTempStore();
     try {
