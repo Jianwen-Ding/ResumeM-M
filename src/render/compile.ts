@@ -450,6 +450,34 @@ export class OverflowError extends Error {
 }
 
 /**
+ * Does a run's own page count agree with its own measured height?
+ *
+ * The two halves of one answer. On rare pathological layouts a raw
+ * `pdftex -fmt=` invocation has been observed to under-report the page break
+ * count while the height measurement stayed correct — which is reason enough
+ * to distrust the shortcut for that attempt rather than ship a number nothing
+ * else confirms.
+ *
+ * The slack is two lines, and it used to be a whole page. Written as
+ * `pages + 1 >= minPlausiblePages`, the test only rejected a disagreement of
+ * two pages or more, so an under-report by exactly one — the shape of the
+ * failure this was built for — passed it: content one and a half pages tall,
+ * reported as one page, and `fits: true` on a resume that is two pages long.
+ *
+ * Slack at all because `usedPt` legitimately runs a little over the text
+ * height of a page that does fit on one: `\raggedbottom`, and the depth of
+ * the final line. Two lines covers that and nothing near a page break. When
+ * it is wrong it is wrong in the safe direction — the attempt goes to the
+ * trusted engine, which costs a second and answers correctly.
+ */
+export function plausiblePageCount(pages: number, usedPt: number, layout: LayoutOptions): boolean {
+  const perPagePt = textHeightIn(layout) * PT_PER_IN;
+  const slackPt = layout.fontSizePt * 1.2 * 2;
+  const least = Math.max(1, Math.ceil((usedPt - slackPt) / perPagePt - 1e-6));
+  return pages >= least;
+}
+
+/**
  * Compile a resolved resume, shrinking within the configured bounds until it
  * fits on the allowed number of pages.
  */
@@ -492,9 +520,20 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   // the trusted engine — a resume must always compile correctly, with or
   // without the shortcut.
   const wantFast = opts.mode === 'preview' && (await hasFastPath());
-  let usedFast = false;
 
-  type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string };
+  /*
+   * Per attempt, because only one of them is shipped.
+   *
+   * This was one flag on the whole compile, set by the first attempt and
+   * never cleared — and the first attempt is the only one that ever tries
+   * the shortcut. So a resume that did not fit as authored took the fast
+   * path once, was then shrunk and recompiled by the trusted engine, shipped
+   * that PDF, and still reported `fastPath: true`. The editor prints that as
+   * "tectonic (fast preview)" under a preview tectonic alone had produced —
+   * the ordinary case for a resume a little too long, which is most of the
+   * resumes this loop exists for.
+   */
+  type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };
   let attemptsLeft = maxAttempts;
 
   const attempt = async (t: number): Promise<Attempt> => {
@@ -523,11 +562,8 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
         // its own answer contradict each other. That is reason enough to
         // distrust the shortcut for this one attempt rather than ship a
         // number nothing else confirms.
-        const perPagePt = textHeightIn(layout) * PT_PER_IN;
-        const minPlausiblePages = Math.max(1, Math.ceil(m.usedPt / perPagePt - 1e-6));
-        if (m.pages + 1 >= minPlausiblePages) {
-          usedFast = true;
-          return { layout, raw, m, tex };
+        if (plausiblePageCount(m.pages, m.usedPt, layout)) {
+          return { layout, raw, m, tex, fast: true };
         }
         // Falls through to the trusted engine below.
       } catch {
@@ -535,7 +571,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
       }
     }
     const raw = await compileOnce(tex, engine);
-    return { layout, raw, m: measure(raw.aux, layout, 1), tex };
+    return { layout, raw, m: measure(raw.aux, layout, 1), tex, fast: false };
   };
   const fitsAt = (a: Attempt) => a.m.pages <= base.maxPages;
 
@@ -617,7 +653,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     engine,
     warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log), ...tooWideWarnings(best.raw.log)],
     log: tail(best.raw.log, 30),
-    fastPath: usedFast,
+    fastPath: best.fast,
   };
 }
 
@@ -708,6 +744,20 @@ export interface LetterCompileResult {
   /** A cover letter that runs past one page is a mistake worth naming. */
   fits: boolean;
   overflowLines: number;
+  /**
+   * What the engine said about the page it set, in words.
+   *
+   * The resume has carried these from the start and the letter did not —
+   * which left the one warning this whole file calls the thing a document
+   * tool must not do reaching nobody. `\raggedright` is set in the preamble,
+   * so TeX cannot stretch a line to fit an unbreakable token; a Google Docs
+   * link, a Jira url or a file path pasted into a letter is set past the
+   * margin and the glyphs past the paper edge are simply not in the PDF. The
+   * letter was then compiled, written into the application folder, copied to
+   * the upload folder and attached, with `…ouid=1234` where `…ouid=1234567890`
+   * had been typed and nothing anywhere saying so.
+   */
+  warnings: string[];
   fastPath: boolean;
   log?: string;
 }
@@ -789,6 +839,7 @@ export async function compileLetter(
     texPath: opts.texPath,
     tex,
     engine,
+    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log)],
     pages: m.pages,
     fits,
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

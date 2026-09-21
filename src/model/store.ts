@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
+import { andList, newlyRepeated, type Option } from './duplicates.js';
 import { flattenResumes, needsFlattening } from './flatten.js';
 import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
 import { liftLayout } from './lift-layout.js';
@@ -13,6 +14,7 @@ import {
   type Application,
   type CoverLetter,
   type Draft,
+  isVariantField,
   type Entry,
   type Profile,
   type ResumeSpec,
@@ -1125,6 +1127,7 @@ export class Store {
     // than the one this call is about to put in its place.
     const was = this.loadEntries();
     const before = was.find((e) => e.id === clean.id);
+    refuseRepeatsInEntry(before, clean);
 
     const list = this.readYaml<Entry[]>(rel, []);
     const idx = list.findIndex((e) => e.id === clean.id);
@@ -1173,6 +1176,7 @@ export class Store {
 
   saveSkillGroups(groups: SkillGroup[]): void {
     const before = normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
+    refuseRepeats(before, groups);
     this.writeYaml('skills.yaml', groups);
     // Dropping a skill from a group, or a whole group, reaches the resumes
     // that had pinned it — same reasoning as entries above.
@@ -1591,5 +1595,70 @@ export class Store {
     if (!rel || rel.includes('\u0000')) return undefined;
     const full = path.resolve(out, rel);
     return full.startsWith(out + path.sep) ? full : undefined;
+  }
+}
+
+/**
+ * Refuse a skills write that would list the same skill, or the same group,
+ * twice.
+ *
+ * Named, and only for what this write adds — see `duplicates.ts`. A refusal
+ * here is the last line rather than the first: the editor checks before it
+ * sends so the message arrives without a round trip, and this is what catches
+ * the API, the CLI and the authoring tools, none of which go through it.
+ */
+function refuseRepeats(before: SkillGroup[], after: SkillGroup[]): void {
+  const repeatedNames = newlyRepeated(
+    before.map((g) => ({ id: g.id, text: g.name })),
+    after.map((g) => ({ id: g.id, text: g.name })),
+  );
+  if (repeatedNames.length > 0) {
+    throw new Error(
+      `There is already a skills group called ${andList(repeatedNames)}. Add to that one, or give this a different name.`,
+    );
+  }
+  for (const group of after) {
+    const was = before.find((g) => g.id === group.id);
+    const again = newlyRepeated((was?.items ?? []) as Option[], (group.items ?? []) as Option[]);
+    if (again.length > 0) {
+      throw new Error(`${andList(again)} is already in "${group.name}". A group lists each skill once.`);
+    }
+  }
+}
+
+/**
+ * The same rule inside an entry: a list line's items, and the alternate
+ * phrasings of a line or a field.
+ *
+ * A list bullet is the other place the word "option" means something — "Built
+ * with Unity, Unreal, Godot" is a list of them — and the alternates are a
+ * third: two identical wordings of one line are a stepper with a step that
+ * does nothing, which reads as the control being broken.
+ */
+function refuseRepeatsInEntry(before: Entry | undefined, after: Entry): void {
+  const say = (again: string[], where: string) => {
+    if (again.length > 0) throw new Error(`${andList(again)} is already ${where}.`);
+  };
+
+  for (const bullet of after.bullets ?? []) {
+    const was = (before?.bullets ?? []).find((b) => b.id === bullet.id);
+    if (Array.isArray(bullet.items)) {
+      say(newlyRepeated((was?.items ?? []) as Option[], bullet.items as Option[]), 'in this list');
+    }
+    say(
+      newlyRepeated((was?.variants ?? []) as Option[], (bullet.variants ?? []) as Option[]),
+      'a wording of this line',
+    );
+  }
+
+  for (const name of ['title', 'dates', 'subtitle', 'location'] as const) {
+    const now = after[name];
+    const was = before?.[name];
+    if (!isVariantField(now)) continue;
+    const had = isVariantField(was) ? (was.variants as unknown as Option[]) : [];
+    say(
+      newlyRepeated(had, now.variants as unknown as Option[]),
+      `a way of writing this entry's ${name === 'title' ? 'name' : name}`,
+    );
   }
 }

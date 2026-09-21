@@ -759,6 +759,33 @@ function bulletName(entry, bullet) {
  * stale page, and nothing to press to catch up.
  */
 /**
+ * Refuse a second copy of an option, before anything is sent.
+ *
+ * A skills group is a list of options and so is a list bullet — "Unity,
+ * Unreal, Godot" — and the add dialog shows neither of them while you type
+ * into it. The groups are long and a technology added six months ago is not
+ * something anybody remembers, so the same one goes in twice and what comes
+ * out is a resume line reading "Unity, Unreal, Unity": a mistake the reader
+ * notices and the writer never does.
+ *
+ * The rule itself lives in the store, where every writer passes — see
+ * `duplicates.ts`. This is the same rule asked here so the answer arrives
+ * without a round trip and names the group it is about, and so that nothing
+ * is written and then complained about.
+ *
+ * Case and spacing only. "Node" and "Node.js" are two names somebody may
+ * mean to keep apart, and merging them would be deleting a decision.
+ */
+function alreadyThere(items, text, where) {
+  const key = (s) => String(s ?? '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const wanted = key(text);
+  const clash = (items ?? []).find((i) => key(i.text) === wanted);
+  if (!clash) return false;
+  setStatus(`"${String(clash.text)}" is already in ${where}.`, true);
+  return true;
+}
+
+/**
  * Something changed, so save it — and recompile, unless it cannot show.
  *
  * `recompile: false` is for changes that alter the save without altering the
@@ -1436,16 +1463,30 @@ function listItems(entry, bullet) {
   return wrap;
 }
 
-/** Flip a bullet's inclusion in `section`, keeping the entry's store order. */
+/**
+ * Flip a line's inclusion in `section`, keeping whatever order is in force.
+ *
+ * It used to rebuild the list from `entry.bullets`, the master's order — so
+ * on an entry whose lines this resume had arranged by hand, unticking any one
+ * of them silently restacked the rest into the master's order. And
+ * `bulletOrder` stayed `manual`, so the chip still read "Lines arranged here"
+ * about an arrangement that no longer existed, and the entry went on ignoring
+ * the master it had just been restacked to match.
+ *
+ * Keeping the order it is in is right either way: where the lines were not
+ * arranged here the list is read as a set and redrawn through
+ * `orderedBullets`, so where a newly ticked line sits in it cannot be seen.
+ */
 function setBulletIncluded(entry, section, bullet, checked) {
   const current = bulletSelection(section, entry);
   const next = new Set(current);
   if (checked) next.add(bullet.id);
   else next.delete(bullet.id);
-  state.bulletEdits = {
-    ...(state.bulletEdits ?? {}),
-    [entry.id]: (entry.bullets ?? []).filter((b) => next.has(b.id)).map((b) => b.id),
-  };
+  const kept = current.filter((id) => next.has(id));
+  const added = (entry.bullets ?? [])
+    .map((b) => b.id)
+    .filter((id) => next.has(id) && !kept.includes(id));
+  state.bulletEdits = { ...(state.bulletEdits ?? {}), [entry.id]: [...kept, ...added] };
 }
 
 /** Everything the user can do to one bullet, in one block. */
@@ -1638,13 +1679,21 @@ function listPreview(bullet) {
   return markup(bullet.prefix ? `${bullet.prefix} ${body}` : body);
 }
 
-/** Flip an entry's inclusion in `section`, keeping the section's own order. */
+/**
+ * Flip an entry's inclusion in `section`, keeping the order it is in.
+ *
+ * Membership came from `current`, which knows about unsaved changes, and the
+ * order came from `section.entries`, which does not — so dragging an entry
+ * and then ticking anything in the same section undid the drag in front of
+ * you and auto-saved the undoing. The section stayed marked `manual`, so
+ * nothing put the arrangement back either.
+ */
 function setEntryIncluded(section, entry, checked) {
   const current = entrySelection(section);
   const next = new Set(current);
   if (checked) next.add(entry.id);
   else next.delete(entry.id);
-  const ordered = (section.entries ?? []).filter((id) => next.has(id));
+  const ordered = current.filter((id) => next.has(id));
   for (const id of next) if (!ordered.includes(id)) ordered.push(id);
   state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
 }
@@ -2104,9 +2153,7 @@ function entryBlock(entry, section, choices) {
    * resume was arranged by hand, which is recorded by the two disagreeing.
    * See `orderedBullets`.
    */
-  const picked = bulletSelection(section, entry);
-  const byHand = handOrdered(section, entry.id);
-  const shown = byHand ? picked : orderedBullets(picked, entry);
+  const shown = shownBullets(section, entry);
   const ordered = [
     ...shown.map((id) => (entry.bullets ?? []).find((b) => b.id === id)).filter(Boolean),
     ...(entry.bullets ?? []).filter((b) => !shown.includes(b.id)),
@@ -2126,7 +2173,7 @@ function entryBlock(entry, section, choices) {
        * that has to be visible or it is a rule you discover by being
        * surprised.
        */
-      byHand
+      handOrdered(section, entry.id)
         ? el('span', { className: 'by-hand' }, [
             el('span', { textContent: 'Lines arranged here' }),
             el('button', {
@@ -2225,6 +2272,32 @@ function setBulletOrder(entry, ordered, { byHand = true } = {}) {
   render();
 }
 
+/**
+ * This entry's lines in the order the resume draws them.
+ *
+ * Which lines is the resume's; what order is the master's, unless the resume
+ * arranged them itself. Three places need the same answer and only one of
+ * them had it: the block that draws the lines worked it out inline, and the
+ * drag and the keyboard nudge both went off `bulletSelection` — the stored
+ * list, which `SectionSpec.bullets` says is read as a set precisely because
+ * its order can be stale.
+ *
+ * So dragging a line moved it relative to an order nobody could see.
+ * Rearrange an entry in the master, open a resume that had ever unticked a
+ * line on it, and the stored list is in the old order while the screen is in
+ * the new one: drag the top line to the bottom and a different line jumps to
+ * the top instead. Worse, the drop writes `bulletOrder: manual`, so the
+ * arrangement you did not make is recorded as deliberate and the entry stops
+ * following the master for good.
+ *
+ * `dropEntry` has always done this correctly, with a comment saying why. This
+ * is the same fix one level down.
+ */
+function shownBullets(section, entry) {
+  const picked = bulletSelection(section, entry);
+  return handOrdered(section, entry.id) ? picked : orderedBullets(picked, entry);
+}
+
 /** Whether this entry's lines were arranged here, including unsaved changes. */
 function handOrdered(section, entryId) {
   const edited = state.bulletOrderEdits?.[entryId];
@@ -2272,7 +2345,9 @@ async function setMasterBulletOrder(entry, ordered) {
 }
 
 function dropBullet(entry, section, moved, onto, side) {
-  const list = bulletSelection(section, entry);
+  // The order on screen, which is what the user was aiming at. See
+  // `shownBullets`, and `dropEntry` for the same fix a level up.
+  const list = shownBullets(section, entry);
   if (!list.includes(moved)) return;
   const at = list.indexOf(onto);
   const before = side === 'after' ? (list[at + 1] ?? null) : onto;
@@ -2313,7 +2388,7 @@ function bulletGrip(entry, section, bullet) {
     kind: 'bullet',
     id: bullet.id,
     label: 'this line',
-    onStep: (delta) => setBulletOrder(entry, moveBy(bulletSelection(section, entry), bullet.id, delta)),
+    onStep: (delta) => setBulletOrder(entry, moveBy(shownBullets(section, entry), bullet.id, delta)),
   });
 }
 
@@ -3218,6 +3293,18 @@ async function addEntry(kind) {
      * entry itself is in the save either way; switching it on elsewhere is a
      * tick per resume, and a decision rather than a side effect.
      */
+    /*
+     * Into the overlay as well as the file.
+     *
+     * `entrySelection` prefers `state.entryEdits[kind]` over the stored list,
+     * and nothing clears the overlay once it exists — an auto-save folds it
+     * into the stored copy and leaves it standing. So on a resume where any
+     * entry had been ticked on or off this session, the new entry was written
+     * into the file and then drawn as "hidden on this variation", and the very
+     * next auto-save wrote the overlay back over it and took the reference out
+     * again. The entry survived in the store, orphaned from the resume it had
+     * just been added to.
+     */
     const root = resumeById(state.resumeId);
     const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
     const sections = (root.sections ?? []).map((s) =>
@@ -3225,6 +3312,9 @@ async function addEntry(kind) {
     );
     if (!sections.some((s) => s.kind === kind)) {
       sections.push({ kind, entries: [...rootEntries(kind), id] });
+    }
+    if (state.entryEdits?.[kind] && !state.entryEdits[kind].includes(id)) {
+      state.entryEdits = { ...state.entryEdits, [kind]: [...state.entryEdits[kind], id] };
     }
     await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   });
@@ -3294,12 +3384,24 @@ async function removeEntry(entry) {
       lane.server = null;
     });
 
-    // Drop the reference too, so the next compile does not warn about it.
+    /*
+     * Drop the reference too, so the next compile does not warn about it —
+     * from the overlay as well as from the file, for the reason `addEntry`
+     * gives. Left in the overlay, the id was written straight back by the
+     * next auto-save and every compile from then on said `Section
+     * "experience" lists entry "exp_acme", which does not exist.` — the exact
+     * orphan this line exists to prevent, put there by the line itself.
+     */
     const root = resumeById(state.resumeId);
     const sections = (root.sections ?? []).map((s) => ({
       ...s,
       entries: (s.entries ?? []).filter((id) => id !== entry.id),
     }));
+    for (const kind of Object.keys(state.entryEdits ?? {})) {
+      state.entryEdits[kind] = state.entryEdits[kind].filter((id) => id !== entry.id);
+    }
+    delete state.bulletEdits?.[entry.id];
+    delete state.bulletOrderEdits?.[entry.id];
     await saveResumeSpec({ ...root, sections }, `Deleted ${entry.id}`);
   });
   render();
@@ -6092,6 +6194,18 @@ function renderDraft(draft) {
     });
     const letterPane = el('div', { className: 'preview-frame letter-preview' }, [letterEmpty]);
     const letterFit = el('div', { className: 'fit idle', textContent: 'Not compiled yet.' });
+    /*
+     * What the engine said about the page, which the resume's preview has
+     * always shown and this one did not.
+     *
+     * The one that matters is a line set past the right-hand edge. The
+     * preamble sets `\raggedright`, so TeX cannot stretch a line to swallow
+     * an unbreakable token — a Google Docs link, a Jira url, a file path —
+     * and whatever is past the paper edge is not in the PDF. The letter then
+     * goes into the application folder and gets attached with the second half
+     * of a link missing, and the only place it was ever visible is here.
+     */
+    const letterWarnings = el('div', { className: 'warnings' });
     const liveChip = el('span', { className: 'live ok', textContent: 'Live' });
 
     const compile = async () => {
@@ -6127,6 +6241,9 @@ function renderDraft(draft) {
         letterFit.textContent = r.fits
           ? 'Fits on one page.'
           : `${plural(r.pages, 'page')} — about ${plural(r.overflowLines, 'line')} too long for one.`;
+        letterWarnings.replaceChildren(
+          ...(r.warnings ?? []).map((w) => el('div', { textContent: w })),
+        );
       } catch (err) {
         if (token !== letterToken) return;
         liveChip.className = 'live bad';
@@ -6203,6 +6320,7 @@ function renderDraft(draft) {
         letterNotes,
         el('div', { className: 'letter-split' }, [letter, letterPane]),
         letterFit,
+        letterWarnings,
       ]),
     );
 
@@ -9450,6 +9568,27 @@ function renderBaseButton() {
 async function loadStore() {
   state.store = await api('/store');
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
+    /*
+     * The resume that was open has gone, so the unsaved edits are about
+     * nothing.
+     *
+     * `state.choices` and the rest are an overlay on one resume, and the
+     * line below moves the editor to a different one. Left standing, the
+     * overlay was merged over whichever resume it landed on and written to
+     * *its* id by the next edit: entries switched off and phrasings changed
+     * on a document nobody had touched, under "All changes saved".
+     *
+     * The sweep is how this is reached — it deletes resumes, and one of them
+     * can be the one you have open — and it drops the undo stack for exactly
+     * this kind of reason, so there is nothing to press afterwards either.
+     * Here rather than there because this is the moment the overlay stops
+     * being about anything, whatever deleted the resume.
+     *
+     * Only on the branch that moves: an ordinary reload keeps the resume it
+     * had, and clearing edits there would throw away the change somebody is
+     * in the middle of making.
+     */
+    if (state.resumeId) clearEdits();
     // A pinned base is what this store says it starts from; the old
     // conventional id is only the guess for a store that has never said.
     const resumes = state.store.resumes;

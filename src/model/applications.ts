@@ -4,7 +4,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import type { Store } from './store.js';
 import type { Application, ApplicationStatus, ResolvedResume } from './types.js';
-import { compileLetter, compileResume } from '../render/compile.js';
+import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
 import { syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
 
@@ -381,6 +381,54 @@ export interface BundleResult {
 }
 
 /**
+ * What was done to the resume to get it onto a page, said out loud.
+ *
+ * Auto-fit is a search: it shrinks the font, the spacing and the margins
+ * until the least shrinking that fits is found, and the editor says so under
+ * the preview — "Squeezed to fit — font 10.5pt → 9.8pt, spacing ×1 → ×0.88".
+ * The bundle is the copy that gets attached and sent, and it said nothing.
+ *
+ * The layout is not lost — `source/resume.tex` beside the PDF has every
+ * number in it — but nobody opens a `.tex` to find out what they sent, and
+ * the moment to know is the moment before attaching it, not afterwards. It
+ * matters because the floor is low: a resume can come out at a size the
+ * author would have cut a bullet rather than accept, and the only sign of it
+ * in the folder is the PDF looking a bit tight.
+ *
+ * Only the case where the squeezing worked, which is the one nothing else
+ * reports. A resume that overflows even at the floor already comes back as
+ * `fits: false` with a page count beside it, and `adjustments` is empty there
+ * by design — nothing was adjusted *successfully*, and "Squeezed to fit" over
+ * a document still two pages long was its own bug once.
+ */
+function aboutTheResume(out: FitReport): string[] {
+  if (!out.fits || out.adjustments.length === 0) return [];
+  return [`The resume was squeezed to fit: ${out.adjustments.join(', ')}.`];
+}
+
+/**
+ * What the letter's compile found, said as the letter's.
+ *
+ * A cover letter that runs past one page is the other half: `fits` was
+ * documented here as "a mistake worth naming" and then computed and dropped,
+ * so a two-page letter was attached with nothing said. It is not shrunk to
+ * fit the way a resume is — the fix for a long letter is cutting a sentence
+ * — which is exactly why it has to be said out loud.
+ */
+function aboutTheLetter(out: LetterCompileResult | undefined): string[] {
+  if (!out) return [];
+  const said = out.warnings.map((w) => `In the cover letter: ${w}`);
+  if (!out.fits) {
+    said.push(
+      `The cover letter is ${out.pages} pages, about ${Math.abs(out.overflowLines)} ` +
+        `${Math.abs(out.overflowLines) === 1 ? 'line' : 'lines'} past one. It is attached as it is — ` +
+        'a letter is not shrunk to fit, because the fix is cutting a sentence.',
+    );
+  }
+  return said;
+}
+
+/**
  * One build at a time per application.
  *
  * Two builds of the same application write the same folder and the same
@@ -568,13 +616,14 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
 
     const files = [resumeName];
 
+    let letterOut: LetterCompileResult | undefined;
     if (letter) {
 
       // Typeset to match the resume, with the trusted engine — this is a file
       // that gets uploaded, so it never takes the preview shortcut. The plain
       // text goes alongside it, because as many portals want a letter pasted
       // into a box as want one attached.
-      await compileLetter(
+      letterOut = await compileLetter(
         {
           profile: resolved.profile,
           company: req.company,
@@ -747,7 +796,19 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       files,
       pages: compiled.pages,
       fits: compiled.fits,
-      warnings: compiled.warnings,
+      /*
+       * The letter's too, which were computed and thrown away.
+       *
+       * This route is the one that files the application, and the letter it
+       * compiles here is the file that gets attached. `compileLetter` has
+       * always reported a line set past the right-hand edge of the page —
+       * whatever is past it is not in the PDF, and a letter is where somebody
+       * pastes a link — and whether it ran to a second page, and the result
+       * was discarded on the spot. Named as the letter's, because the two
+       * documents are fixed in different places and "a line runs past the
+       * edge" sends whoever reads it to the resume otherwise.
+       */
+      warnings: [...compiled.warnings, ...aboutTheResume(compiled), ...aboutTheLetter(letterOut)],
       missing: describeLost(resolved.lost ?? []),
     };
   } finally {

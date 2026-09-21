@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { compileResume } from '../src/render/compile.js';
+import { compileResume, plausiblePageCount } from '../src/render/compile.js';
 import { compileFast, compileFastBody, hasFastPath, resetFastPathCache } from '../src/render/fastCompile.js';
 import { DEFAULT_LAYOUT, type ResolvedBullet, type ResolvedResume } from '../src/model/types.js';
 
@@ -137,6 +137,32 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
       expect(result.usedPt).toBeCloseTo(trusted.usedPt, 1);
     },
   );
+
+  /*
+   * And says so about the attempt that shipped, not about one that was
+   * thrown away.
+   *
+   * The shortcut is only ever tried for the layout as authored, because the
+   * format it loads has the layout baked into it and every shrinking step
+   * would dump a fourteen-megabyte format of its own. So a resume that does
+   * not fit as authored uses the shortcut once, is then shrunk and
+   * recompiled by the trusted engine, and ships that PDF — while the flag,
+   * set by the first attempt and never cleared, still said the shortcut
+   * produced it. `/render/resume` prints that straight out as
+   * "tectonic (fast preview)" over a preview tectonic alone had made.
+   *
+   * Not a cosmetic label: it is the one thing in the response that says
+   * whether the number beside it came from the engine that is trusted with
+   * the final document or from the one that is not.
+   */
+  it('does not claim the shortcut for a preview the fit loop recompiled', async () => {
+    const tooLong = resume(24);
+    expect(tooLong.layout.autoFit, 'the fit loop is what this is about').toBe(true);
+    const result = await compileResume(tooLong, { mode: 'preview' });
+    // The authored layout really did overflow, so the loop really did run.
+    expect(result.adjustments.length > 0 || result.fits === false).toBe(true);
+    expect(result.fastPath).toBe(false);
+  });
 
   it('falls back per-attempt, not for the whole compile, once the guard clears', async () => {
     // A resume that fits comfortably at ordinary margins should still use the
@@ -323,5 +349,51 @@ describe('availability check', () => {
       process.env.PATH = realPath;
       resetFastPathCache();
     }
+  });
+});
+
+/*
+ * The shortcut checking its own answer.
+ *
+ * `pdftex -fmt=` returns a page count and a measured content height from the
+ * same run, and they have to roughly agree; when they do not, the attempt
+ * goes to the trusted engine. Tested on the numbers rather than through a
+ * compile because the layout that used to provoke the disagreement no longer
+ * does — the guard is defence against an engine, and an engine that is
+ * behaving cannot be asked to misbehave for a test.
+ */
+describe('whether a run agrees with itself about how many pages it made', () => {
+  const layout = { ...DEFAULT_LAYOUT };
+  const pagePt = (11 - layout.marginIn * 2) * 72;
+
+  it('believes a page that is full, and one that is a hair over', () => {
+    expect(plausiblePageCount(1, pagePt * 0.8, layout)).toBe(true);
+    // `\raggedbottom` and the depth of the last line: a page that fits can
+    // measure a little past its own text height, and refusing those would
+    // send every nearly-full resume to the slow engine.
+    expect(plausiblePageCount(1, pagePt + 8, layout)).toBe(true);
+  });
+
+  /*
+   * And not a run that says one page over content half a page taller than
+   * one. This is the case the guard was built for and the case it let
+   * through: written as `pages + 1 >= least`, it only rejected a
+   * disagreement of two pages or more, so an under-report by exactly one
+   * passed — and a two-page resume came back "1 page, fits".
+   */
+  it('does not believe one page of content that is half a page longer', () => {
+    expect(plausiblePageCount(1, pagePt * 1.5, layout)).toBe(false);
+    expect(plausiblePageCount(1, pagePt * 2.4, layout)).toBe(false);
+    expect(plausiblePageCount(2, pagePt * 2.9, layout)).toBe(false);
+  });
+
+  it('believes the honest multi-page answers', () => {
+    expect(plausiblePageCount(2, pagePt * 1.5, layout)).toBe(true);
+    expect(plausiblePageCount(3, pagePt * 2.4, layout)).toBe(true);
+  });
+
+  it('never asks for less than one page, however little there is on it', () => {
+    expect(plausiblePageCount(1, 0, layout)).toBe(true);
+    expect(plausiblePageCount(1, 12, layout)).toBe(true);
   });
 });

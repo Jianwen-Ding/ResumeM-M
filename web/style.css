@@ -1081,6 +1081,33 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .apps-split { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .9fr); gap: 16px; align-items: start; }
 @media (max-width: 1150px) { .apps-split { grid-template-columns: 1fr; } }
 
+/*
+ * The table stays inside its half of the split.
+ *
+ * A grid item's default `min-width` is `auto`, which means "as wide as my
+ * content insists on being" — so `minmax(0, 1.25fr)` bounds the *track* and
+ * nothing bounds the table in it. One row whose role is an unbreakable token
+ * — and roles arrive from whatever a page called itself, so one of them is a
+ * `preview.redd.it` image url with no spaces in it — pushed the table
+ * hundreds of pixels past its column, under the detail panel beside it. The
+ * panel is later in the document and has a background, so it painted over
+ * the rows: the status dropdowns and Remove buttons of every row disappeared
+ * behind "Pick an application", and the whole thing read as two screens
+ * stacked on top of each other.
+ *
+ * `min-width: 0` is what makes the track's bound apply to the item; the
+ * scroll is for the case where the columns genuinely cannot fit.
+ */
+#apps-wrap { min-width: 0; overflow-x: auto; }
+
+/*
+ * And a long unbroken thing wraps rather than demanding the width in the
+ * first place. `anywhere` rather than `break-word` because the token has no
+ * break opportunities at all — a url with no spaces is one word to the line
+ * breaker, and `break-word` only helps once the box is already too small.
+ */
+#apps-wrap td { overflow-wrap: anywhere; }
+
 tbody tr.selected { background: var(--accent-soft); }
 tbody tr { cursor: pointer; }
 

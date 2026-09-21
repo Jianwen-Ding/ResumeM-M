@@ -1226,6 +1226,46 @@ describe('saying what the store no longer has', () => {
     expect(result.missing).not.toMatch(/ligature|font/i);
   });
 
+  /*
+   * What was done to the resume to get it onto a page, in the bundle that
+   * gets attached and sent.
+   *
+   * Auto-fit shrinks the font, the spacing and the margins until the least
+   * shrinking that fits is found, and the editor says so under the preview:
+   * "Squeezed to fit — font 10.5pt → 9.8pt". The files that actually go out
+   * said nothing, so a resume set smaller than the author would have accepted
+   * — the floor is low — went into the upload folder looking, from the
+   * response, exactly like one that fitted as written.
+   *
+   * Provoked with margins rather than with content, because the fit loop is
+   * what is under test and a page of invented bullets would only be a slower
+   * way of reaching it.
+   */
+  it.skipIf(!latex)('says when the resume had to be squeezed to fit', { timeout: 180_000 }, async () => {
+    const tight = makeTempStore({
+      config: {
+        ai: { enabled: false },
+        git: { autoCommit: false },
+        output: { dir: 'out' },
+        layout: { marginIn: 3.6 },
+      },
+    });
+    try {
+      const result = await buildBundle(tight.store, {
+        company: 'Meridian',
+        role: 'Platform Engineer',
+        resumeId: 'intern',
+      });
+      expect(result.fits, 'the squeezing worked, or this is the other case').toBe(true);
+      const said = result.warnings.join(' | ');
+      expect(said, said).toMatch(/squeezed to fit/i);
+      // And names what moved, rather than saying only that something did.
+      expect(said).toMatch(/font|spacing|margins/i);
+    } finally {
+      tight.cleanup();
+    }
+  });
+
   it.skipIf(!latex)('says nothing when the store has everything it asked for', { timeout: 180_000 }, async () => {
     const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'intern' });
     expect(result.missing).toBeUndefined();

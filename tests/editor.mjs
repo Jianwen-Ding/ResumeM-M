@@ -1281,6 +1281,80 @@ async function main() {
       check('there is a way to finish the application', false, 'no button');
     }
 
+    /* ---- The tracker stays inside its half of the screen ---- */
+    /*
+     * A grid item's default `min-width` is `auto` — "as wide as my content
+     * insists on being" — so the `minmax(0, …)` on the column bounded the
+     * track and nothing bounded the table in it. Roles arrive from whatever
+     * a page called itself, and one of them is a `preview.redd.it` image url
+     * with no spaces in it: one such row pushed the table hundreds of pixels
+     * past its column, under the detail panel beside it. The panel is later
+     * in the document and has a background, so it painted over the rows —
+     * every status dropdown and Remove button behind "Pick an application".
+     *
+     * Measured rather than asserted about the stylesheet: what was wrong was
+     * where the boxes ended up, and only a browser knows that.
+     */
+    await timed('the tracker and the detail panel do not overlap', 30_000, async () => {
+      const junk =
+        'https://preview.redd.it/has-any-structure-been-built-in-your-country-in-the-21st-v0-furs03cyooqh1.jpeg?width=1280&format=pjpg&auto=webp&s=936da4f8d7b4e875f62be58cdd94a7bc841d311a';
+      await fetch(`${server.url}/api/applications`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ company: 'Reddit', role: junk, url: 'https://example.invalid/x' }),
+      });
+      /*
+       * Whatever the last step left open, closed first. This runs at the end
+       * of a long walk and the apply flow finishes on a dialog; a tab button
+       * under a modal is not a tab button, and the failure reads as the tab
+       * being broken.
+       */
+      const open = await page.evaluate(() => {
+        const m = document.querySelector('#modal');
+        if (!m || m.classList.contains('hidden')) return null;
+        const said = document.querySelector('#modal-title')?.textContent ?? '';
+        m.classList.add('hidden');
+        return said;
+      });
+      if (open !== null) console.log(`    (a dialog was open and was closed: ${JSON.stringify(open)})`);
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      await page.locator('#apps-wrap tbody tr').first().waitFor({ timeout: 20_000 });
+      await page.waitForTimeout(400);
+    });
+
+    const split = await page.evaluate(() => {
+      const wrap = document.querySelector('#apps-wrap');
+      /*
+       * The table, not the div around it. The wrapper is a block and its box
+       * stays inside the grid track whatever happens; what spilled across the
+       * gap and under the panel was the table painting outside its parent, so
+       * a measurement of the wrapper reports no overlap in either case.
+       */
+      const table = wrap.querySelector('table') ?? wrap;
+      const panel = document.querySelector('#app-detail');
+      return {
+        tableRight: table.getBoundingClientRect().right,
+        panelLeft: panel.getBoundingClientRect().left,
+        scrollWidth: wrap.scrollWidth,
+        clientWidth: wrap.clientWidth,
+      };
+    });
+    check(
+      'the table ends before the panel begins',
+      split.tableRight <= split.panelLeft + 1,
+      `table ends at ${Math.round(split.tableRight)}, panel starts at ${Math.round(split.panelLeft)}`,
+    );
+    /*
+     * And the row is readable rather than merely clipped. A long url wraps,
+     * so the table does not want the width in the first place; a scrollbar
+     * would be the fallback and is not what should happen on one url.
+     */
+    check(
+      'and the long role wrapped rather than demanding the width',
+      split.scrollWidth <= split.clientWidth + 1,
+      `${Math.round(split.scrollWidth)} wide inside ${Math.round(split.clientWidth)}`,
+    );
+
     check('nothing threw along the way', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {
     await browser.close();

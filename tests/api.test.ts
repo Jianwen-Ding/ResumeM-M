@@ -1266,6 +1266,40 @@ describe.skipIf(!latex)('letter rendering', { timeout: 180_000 }, () => {
     const res = await request(app).post('/api/render/letter').send({ company: 'Streamly' }).expect(200);
     expect(res.body.pages).toBe(1);
   });
+
+  /*
+   * The one thing this whole file calls the thing a document tool must not
+   * do, on the document where it actually happens.
+   *
+   * The preamble sets `\raggedright`, so TeX cannot stretch a line to
+   * swallow an unbreakable token. A Google Docs link pasted into a letter is
+   * set past the margin and whatever is past the paper edge is not in the
+   * PDF at all — the reader gets `…ouid=1234` where `…ouid=1234567890` was
+   * typed. The resume path has warned about this from the start;
+   * `compileLetter` computed nothing and `LetterCompileResult` had nowhere
+   * to put it, so the letter was compiled, attached and sent in silence.
+   */
+  it('says when a line runs off the edge of the page', async () => {
+    const link =
+      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh/edit?usp=sharing&ouid=1234567890';
+    const res = await request(app)
+      .post('/api/render/letter')
+      .send({ body: `Here is the portfolio: ${link}`, company: 'Streamly', role: 'Intern', resumeId: 'newgrad' })
+      .expect(200);
+
+    expect(res.body.warnings.join(' ')).toMatch(/past the right-hand edge/i);
+    // And says what to do about it, because "overfull hbox" is not an
+    // instruction anybody outside TeX can act on.
+    expect(res.body.warnings.join(' ')).toMatch(/link|path|token/i);
+  });
+
+  it('and says nothing about a letter that sets cleanly', async () => {
+    const res = await request(app)
+      .post('/api/render/letter')
+      .send({ body: 'I would like to work on ingest.', company: 'Streamly', role: 'Intern', resumeId: 'newgrad' })
+      .expect(200);
+    expect(res.body.warnings).toEqual([]);
+  });
 });
 
 describe('application detail', () => {
@@ -1808,6 +1842,50 @@ describe('workspace', () => {
 
   it('requires a company and a role', async () => {
     await request(app).post('/api/workspace').send({ company: 'Only' }).expect(400);
+  });
+
+  /*
+   * The extension holds a place for an application the moment work has been
+   * done on one, off whatever the extractor made of the pages somebody walked
+   * through — nobody presses anything. When that guess was wrong the tracker,
+   * which is the record of what you have applied for, took the guess anyway:
+   *
+   *   Indeed    Now Hiring: 300 Software Intern Jobs
+   *   Reddit    https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg
+   *
+   * The refusal is worded as a refusal rather than an error because that is
+   * what it is: nothing went wrong, a row simply was not worth filing, and
+   * the person can file one.
+   */
+  it('refuses a row it was never asked to file, when the pair is not a job', async () => {
+    const junk = await request(app)
+      .post('/api/workspace')
+      .send({ auto: true, company: 'Reddit', role: 'https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg' })
+      .expect(400);
+    expect(junk.body.error).toMatch(/does not read like a job/);
+    expect(junk.body.error).toMatch(/Record it yourself/);
+
+    // And filed nothing: a refusal that half-lands leaves the row it refused.
+    const after = await request(app).get('/api/workspace').expect(200);
+    expect(after.body.drafts.some((d: { company: string }) => d.company === 'Reddit')).toBe(false);
+  });
+
+  /*
+   * And only the automatic route. Somebody typing a company and a role into
+   * "Record an application" means it, however odd it reads, and refusing them
+   * would be this guard deciding what counts as a job.
+   */
+  it('files whatever a person asks it to, however odd it reads', async () => {
+    const res = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Reddit', role: 'https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg' })
+      .expect(200);
+    expect(res.body.draft.company).toBe('Reddit');
+  });
+
+  it('and holds a place on its own for a job that reads like one', async () => {
+    const res = await open({ auto: true }).expect(200);
+    expect(res.body.draft.company).toBe('Streamly');
   });
 
   it('saves a posting-specific resume that arrives with the draft', async () => {
@@ -2675,6 +2753,35 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
     // that did go wrong and the git panel is where it is owed.
     expect(angry.lastCommitError?.message).toContain('git add');
     committing.cleanup();
+  });
+
+  /*
+   * And the same on the route that files it, which is the one that matters:
+   * this letter is written into the application folder, copied to the upload
+   * folder and attached. `compileLetter`'s result was discarded on the spot,
+   * so a link losing its second half reached nobody at all here — the editor
+   * at least draws the page.
+   */
+  it('names a cover letter whose link runs off the page, in the folder it files', async () => {
+    const link =
+      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh/edit?usp=sharing&ouid=1234567890';
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({
+        company: 'Streamly',
+        role: 'Intern',
+        resumeId: 'intern',
+        coverLetter: `Here is the portfolio: ${link}`,
+      })
+      .expect(200);
+
+    expect(res.body.files.join(' ')).toMatch(/Cover-Letter\.pdf/);
+    const said = (res.body.warnings ?? []).join(' ');
+    expect(said).toMatch(/past the right-hand edge/i);
+    // Named as the letter's. The two documents are fixed in different places,
+    // and an unqualified "a line runs past the edge" sends whoever reads it
+    // to the resume.
+    expect(said).toMatch(/In the cover letter:/);
   });
 
   it('hands back the flat folder alongside the archive it just wrote', async () => {

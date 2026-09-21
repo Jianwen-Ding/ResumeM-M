@@ -416,6 +416,74 @@ export function roleFromUrl(url?: string): string | undefined {
   return undefined;
 }
 
+/**
+ * A board's results page, which lists jobs and is not one.
+ *
+ * `Indeed — Now Hiring: 300 Software Intern Jobs` was a row in somebody's
+ * tracker: the extractor fell back to the site for the employer and to the
+ * page title for the role, and the title of a search is a count of jobs.
+ * Every marker here is a page advertising or counting jobs rather than
+ * naming one — a posting says what the work is, in the singular.
+ *
+ * Tested on the role rather than on the company, deliberately. The first
+ * version of this refused any application whose employer was Indeed,
+ * LinkedIn, Google or Reddit, on the grounds that those are where you look
+ * for jobs rather than who has them. They are also four of the largest
+ * employers anybody here is applying to, and the rule would have meant no
+ * automatic row for any of them.
+ */
+const A_LIST_OF_JOBS =
+  /\bnow hiring\b|\bhiring now\b|\b\d[\d,]*\+?\s+(?:[\w-]+\s+){0,3}jobs?\b|\bjobs?,\s*employment\b|\b(?:search|browse|all|view all|more)\s+jobs?\b|\bjob (?:search|results|alerts)\b/i;
+
+/**
+ * Does this read like the name of a job, rather than whatever a page had
+ * lying around where a title should be?
+ *
+ * The other half of `looksLikeCompanyName`, and it was missing. The company
+ * was checked and the role was taken on trust, so a tracker filled up with
+ * rows whose role is an image url pasted out of a Reddit thread —
+ * `https://preview.redd.it/...jpeg?width=1280&format=pjpg&...`, two hundred
+ * characters of it, in the Role column of a list of jobs somebody is
+ * applying for.
+ *
+ * Strict in the same direction and for the same reason: refusing a real role
+ * means an application is not filed automatically and the person files it
+ * themselves, which is a moment's work. Accepting a non-role puts a line in
+ * the one list that is supposed to be the record of what they have done.
+ */
+export function looksLikeRoleTitle(role?: string): boolean {
+  const r = (role ?? '').trim().replace(/\s+/g, ' ');
+  if (r.length < 2 || r.length > 120) return false;
+  // A url, whole or in part. Nobody's job title has a scheme or a query in it.
+  if (/^https?:|^www\.|\?[a-z0-9_]+=|&[a-z0-9_]+=/i.test(r)) return false;
+  // A bare hostname, for the same reason `looksLikeCompanyName` refuses one.
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(r)) return false;
+  if (NOT_A_ROLE.test(r.replace(/[!?.]+$/, ''))) return false;
+  if (A_LIST_OF_JOBS.test(r)) return false;
+  /*
+   * A word, somewhere in it. `R-129384` and `4021_A` are requisition numbers
+   * with a letter stuck to them, which is all the "has letters in it" test
+   * asks for; no job is named in fewer than two letters running.
+   */
+  if (!/[a-z]{2}/i.test(r)) return false;
+  /*
+   * A season and a year, and nothing else. "2027 Summer" is a filter somebody
+   * set on a board, or the tab group they were reading in, and it filed
+   * itself as a job. A real intake says what the work is as well as when —
+   * "Summer 2027 Software Engineering Intern" keeps every word here and adds
+   * the ones that make it a job, so the rule is only about what is left when
+   * those are gone.
+   */
+  if (/^((summer|fall|autumn|winter|spring|20\d\d|q[1-4]|h[12]|early|late|[-–—,/&]|and)\s*)+$/i.test(r)) return false;
+  return true;
+}
+
+/** Whether this pair is worth filing a row for without being asked. */
+export function looksLikeAnApplication(company?: string, role?: string): boolean {
+  return looksLikeCompanyName((company ?? '').trim()) && looksLikeRoleTitle(role);
+}
+
+
 /** A page title's parts, in the order they were written. */
 function titleParts(pageTitle?: string): string[] {
   return (pageTitle ?? '')
