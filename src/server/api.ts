@@ -36,7 +36,7 @@ import { Repo, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
-import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
@@ -2738,7 +2738,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         entryByBullet: Object.fromEntries(
           data.entries.flatMap((e) => (e.bullets ?? []).map((b) => [b.id, e.id])),
         ),
-        suggestions: (aiParsed as { suggestions?: unknown[] } | null)?.suggestions ?? [],
+        suggestions: sanitizeSuggestions(aiParsed, data),
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
         // Which of the two ways the AI answered, so a run that went through

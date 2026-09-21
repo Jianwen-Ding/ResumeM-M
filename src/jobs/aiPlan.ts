@@ -19,6 +19,14 @@ import { isVariantField, type Bullet, type ResumeSpec, type SectionSpec, type St
  * would otherwise become a silently broken choice.
  */
 
+/** A phrasing the model proposes for a bullet that already exists. */
+export interface AiSuggestion {
+  bulletId: string;
+  label: string;
+  text: string;
+  why: string;
+}
+
 export interface AiPlan {
   /** bulletId or "entryId.field" → variantId, both known to exist. */
   choices: Record<string, string>;
@@ -195,6 +203,43 @@ function reorder(current: string[], wanted: string[]): string[] {
  * the store, never from the reply, so a resume cannot be reshuffled into
  * something the person did not arrange.
  */
+/**
+ * A phrasing the model proposes, kept only when it could belong to something.
+ *
+ * Suggestions are the one part of a tailoring reply that carries prose, and
+ * they are not applied — they go to the card as "a new wording for this line",
+ * and accepting one is a click that writes it into the store. So the same
+ * checks the tool path makes when the model calls `suggest_wording` are made
+ * here, for the reply that arrives as JSON instead: the bullet has to exist,
+ * the text has to be text, and three is the limit. Without this the fallback
+ * path echoed whatever the model returned — an unbounded array of arbitrary
+ * objects, offered beside the resume as though the store had vouched for it.
+ */
+export function sanitizeSuggestions(parsed: unknown, data: StoreData): AiSuggestion[] {
+  const raw = (parsed as { suggestions?: unknown } | null)?.suggestions;
+  if (!Array.isArray(raw)) return [];
+
+  const bullets = bulletsOf(data);
+  const kept: AiSuggestion[] = [];
+  for (const item of raw) {
+    if (kept.length >= 3) break;
+    if (!item || typeof item !== 'object') continue;
+    const { bulletId, label, text, why } = item as Record<string, unknown>;
+    if (typeof bulletId !== 'string' || !bullets.has(bulletId)) continue;
+    if (typeof text !== 'string' || !text.trim()) continue;
+    // One per bullet, as the tool path has it: a model suggesting twice for
+    // one line is rewording its own proposal.
+    if (kept.some((s) => s.bulletId === bulletId)) continue;
+    kept.push({
+      bulletId,
+      label: (typeof label === 'string' && label.trim()) || 'Suggested',
+      text: text.trim().slice(0, 1500),
+      why: typeof why === 'string' ? why.trim().slice(0, 600) : '',
+    });
+  }
+  return kept;
+}
+
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
   const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
   if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;
