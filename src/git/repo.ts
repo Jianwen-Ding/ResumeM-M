@@ -190,8 +190,29 @@ export class Repo {
    * Ignoring them removes the walk rather than surviving it, and it is also
    * the honest answer: a folder that exists for the duration of one rename is
    * not part of anybody's history.
+   *
+   * And the same thing, one directory down and far more often: every write
+   * through `Store.writeAtomic` goes out to `.rmm-<uuid>.tmp` beside its
+   * target and is renamed over it. That is one file per save, in `resumes/`
+   * and `letters/` and the store root, and the add above walks all of them —
+   * so the identical race is not a two-bundles-at-once affair, it is two
+   * ordinary saves overlapping. Measured, with one save looping while
+   * `commitAll` ran forty times:
+   *
+   *   fatal: unable to stat 'resumes/.rmm-fb6b0e43-…-5eb7148d587c.tmp':
+   *   No such file or directory
+   *
+   * Nine of the forty commits never happened. Nothing is lost from disk, and
+   * the editor goes on saying "All changes saved" because that is true — but
+   * the version history stops recording, and "restore this version", the diff
+   * between two resumes and the sweep are all built on it.
+   *
+   * The other half is quieter and was reproduced first: when the walk wins
+   * the race, the scratch file is committed. A store with a `.rmm-…tmp` blob
+   * in its history, and a deletion of it in the next commit, for every save
+   * that happened to be timed that way.
    */
-  private static readonly IGNORED = ['.rmm-building-*/'];
+  private static readonly IGNORED = ['.rmm-building-*/', '.rmm-*.tmp'];
 
   /** Written once per process per store; see `IGNORED`. */
   private ignoresWritten = false;
@@ -215,7 +236,7 @@ export class Repo {
       const missing = Repo.IGNORED.filter((p) => !lines.includes(p));
       if (missing.length === 0) return false;
 
-      const block = ['# ResumeM-M: half-built application folders, mid-rename.', ...missing].join('\n');
+      const block = ['# ResumeM-M: files that exist for the length of one rename.', ...missing].join('\n');
       const body = had && !had.endsWith('\n') ? `${had}\n${block}\n` : `${had}${block}\n`;
       fs.writeFileSync(at, body, 'utf8');
       return true;
@@ -589,36 +610,59 @@ export async function withCommit<T>(
   paths?: string[],
 ): Promise<T> {
   const result = await fn();
-  if (enabled) {
-    try {
-      const hash = await repo.commitAll(message, paths);
-      /*
-       * No hash is usually "nothing had changed", and sometimes "there is no
-       * repository to commit to" — `commitAll` returns the same nothing for
-       * both. The second is the quietest way for a save to end up with no
-       * history at all, and the check only runs in the rare case, because
-       * auto-commit is invoked by a write that has just changed something.
-       */
-      repo.lastCommitError =
-        !hash && !(await repo.isRepo())
-          ? {
-              message:
-                'the save is not a git repository yet, so there is nothing keeping a history of it',
-              at: new Date().toISOString(),
-            }
-          : undefined;
-    } catch (err) {
-      // A failed commit must not lose the write that already landed on disk.
-      // Remembered as well as logged: see `lastCommitError`, because a console
-      // line in a server nobody is looking at is the same as saying nothing.
-      repo.lastCommitError = {
-        message: (err as Error).message,
-        at: new Date().toISOString(),
-      };
-      console.warn(`[rmm] auto-commit failed: ${(err as Error).message}`);
-    }
-  }
+  if (enabled) await commitQuietly(repo, message, paths);
   return result;
+}
+
+/**
+ * Commit, and let a failed commit be a failed commit rather than a failed
+ * request.
+ *
+ * This is the containment half of `withCommit`, pulled out because two write
+ * paths cannot use `withCommit` itself — `/api/apply` and the extension's
+ * apply both do several things in an order that matters and commit at a
+ * point in the middle — and both called `repo.commitAll` bare. `handler`
+ * turns anything thrown at it into a 400, so a commit that failed for a
+ * reason that has nothing to do with the application turned a bundle that
+ * was built, files that were copied to the upload folder and a tracker row
+ * that was written into:
+ *
+ *   400 {"error":"Command failed: git add -- ."}
+ *
+ * The person sees the application fail and builds it again, which is how one
+ * application becomes two. And the failure is not hypothetical: a concurrent
+ * save's scratch file disappearing mid-walk does exactly this — see
+ * `Repo.IGNORED`, which is the other half of the same bug.
+ *
+ * The write has landed either way. What is owed is a record that the history
+ * did not, which is what `lastCommitError` is for and what the editor's git
+ * panel reads.
+ */
+export async function commitQuietly(repo: Repo, message: string, paths?: string[]): Promise<void> {
+  try {
+    const hash = await repo.commitAll(message, paths);
+    /*
+     * No hash is usually "nothing had changed", and sometimes "there is no
+     * repository to commit to" — `commitAll` returns the same nothing for
+     * both. The second is the quietest way for a save to end up with no
+     * history at all, and the check only runs in the rare case, because
+     * auto-commit is invoked by a write that has just changed something.
+     */
+    repo.lastCommitError =
+      !hash && !(await repo.isRepo())
+        ? {
+            message:
+              'the save is not a git repository yet, so there is nothing keeping a history of it',
+            at: new Date().toISOString(),
+          }
+        : undefined;
+  } catch (err) {
+    // A failed commit must not lose the write that already landed on disk.
+    // Remembered as well as logged: see `lastCommitError`, because a console
+    // line in a server nobody is looking at is the same as saying nothing.
+    repo.lastCommitError = { message: (err as Error).message, at: new Date().toISOString() };
+    console.warn(`[rmm] auto-commit failed: ${(err as Error).message}`);
+  }
 }
 
 /**

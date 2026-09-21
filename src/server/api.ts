@@ -32,7 +32,7 @@ import type { SessionState } from '../mcp/session.js';
 import type { AuthoringState } from '../mcp/authoring.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
-import { Repo, removeWhatIsFiled, withCommit } from '../git/repo.js';
+import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
@@ -3081,7 +3081,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // The same files also go to the flat folder, which is the one a portal's
       // file picker should be pointed at — the archive is for later.
       const current = syncCurrent(store);
-      if (autoCommit()) await repo.commitAll(`Apply: ${result.application.company} — ${result.application.role}`);
+      if (autoCommit()) {
+        await commitQuietly(repo, `Apply: ${result.application.company} — ${result.application.role}`);
+      }
       /*
        * And anything that did not land there, by name.
        *
@@ -4040,7 +4042,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         );
       }
 
-      if (autoCommit()) await repo.commitAll(`Apply: ${draft.company} — ${draft.role}`);
+      if (autoCommit()) await commitQuietly(repo, `Apply: ${draft.company} — ${draft.role}`);
       res.json({
         warnings,
         application: app,
