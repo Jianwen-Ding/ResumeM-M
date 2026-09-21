@@ -524,17 +524,24 @@ function stateOf(code: string): PendingChange['state'] {
  * Wrap a mutation so the store is committed after it succeeds. Every write
  * path goes through this, which is what makes `autoCommit` a single switch
  * rather than a call scattered through every handler.
+ *
+ * `paths` scopes the commit the way `commitAll` does. Almost every caller
+ * here is an edit somebody just made through the app, where the whole store
+ * is the right scope; the one that is not is the sweep, which is the app
+ * removing something on its own and has no business recording whatever else
+ * happens to be unsaved on disk while it does.
  */
 export async function withCommit<T>(
   repo: Repo,
   enabled: boolean,
   message: string,
   fn: () => T | Promise<T>,
+  paths?: string[],
 ): Promise<T> {
   const result = await fn();
   if (enabled) {
     try {
-      const hash = await repo.commitAll(message);
+      const hash = await repo.commitAll(message, paths);
       /*
        * No hash is usually "nothing had changed", and sometimes "there is no
        * repository to commit to" — `commitAll` returns the same nothing for
@@ -657,10 +664,34 @@ export async function removeWhatIsFiled<T>(
   const held = going.filter((g) => !taking.includes(g)).map((g) => g.what);
   if (taking.length === 0) return { removed: [], held };
 
-  // `true` whatever auto-commit is set to: that setting is about whether your
-  // *edits* are recorded as you make them, and this is not an edit you made.
-  await withCommit(repo, true, messages.removing(taking.map((g) => g.what)), () => {
-    for (const g of taking) remove(g.what);
-  });
+  /*
+   * `true` whatever auto-commit is set to: that setting is about whether your
+   * *edits* are recorded as you make them, and this is not an edit you made.
+   *
+   * Which is also why it is scoped, for the reason the filing commit above is
+   * scoped and said so — and this one was not, so it did the opposite of what
+   * that comment promises. `withCommit` without paths is `git add -- .`, so
+   * opening the app half-way through hand-editing `profile.yaml` and having
+   * one resume fall due committed the unfinished profile too, under "Sweep
+   * …, temporary and done with". With auto-commit switched off it was worse
+   * than untidy: the one setting that says "do not record my edits as I make
+   * them" was overruled by a pass that had just finished explaining it was
+   * not recording anybody's edits.
+   *
+   * Held to the paths git can be seen to have, which is the same set the
+   * check above admitted: those are tracked, so adding them stages the
+   * deletion, and a pathspec naming a file git has never heard of is a fatal
+   * error rather than a no-op.
+   */
+  const leaving = taking.flatMap((g) => g.paths).filter((p) => filed.has(p));
+  await withCommit(
+    repo,
+    true,
+    messages.removing(taking.map((g) => g.what)),
+    () => {
+      for (const g of taking) remove(g.what);
+    },
+    leaving,
+  );
   return { removed: taking.map((g) => g.what), held };
 }

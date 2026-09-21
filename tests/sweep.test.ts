@@ -105,6 +105,41 @@ describe('sweeping', () => {
     expect(latest?.message).toMatch(/Backend Engineer — Acme/);
   });
 
+  /*
+   * And it commits nothing else.
+   *
+   * The filing commit that runs first is scoped, and says why: "the rest of
+   * the save is somebody's work in progress and this is no reason to commit
+   * it for them". The deletion commit one line below it was not, so it was
+   * `git add -- .`: opening the app half-way through hand-editing the profile,
+   * with one resume due, put the unfinished profile into the history under
+   * "Sweep …, temporary and done with". Auto-commit being off made it worse
+   * rather than better — the setting that says "do not record my edits as I
+   * make them" was overruled by the one pass that had just finished saying it
+   * was not recording anybody's edits.
+   */
+  it('leaves work in progress out of the history', async () => {
+    planted();
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+
+    // Something the user is in the middle of, saved to disk and not committed.
+    temp.write('profile.yaml', { name: 'Half A Name', email: '' });
+
+    const { swept } = await sweepTemporary(temp.store, repo);
+    expect(swept.map((d) => d.id)).toEqual(['job-old']);
+
+    const [latest] = await repo.log(1);
+    const changed = await repo.commit(latest!.hash);
+    expect(changed.files.map((f) => f.path)).toEqual(['resumes/job-old.yaml']);
+
+    // And it is still sitting there, uncommitted, exactly as it was left.
+    expect((temp.read('profile.yaml') as { name: string }).name).toBe('Half A Name');
+    const waiting = await repo.pending();
+    expect(waiting.map((f) => f.path)).toContain('profile.yaml');
+  });
+
   it('is one commit however many it took', async () => {
     for (const n of [1, 2, 3, 4]) {
       temp.write(`resumes/job-${n}.yaml`, {
