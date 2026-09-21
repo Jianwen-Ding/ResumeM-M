@@ -123,6 +123,20 @@ export interface Entry {
   archived?: boolean;
 }
 
+/**
+ * A file kept in the save to be attached, not to be written from.
+ *
+ * A transcript, a portfolio, a reference letter: it arrives finished and the
+ * only thing wanted of it is to go into an upload box. Named by the name it
+ * will be uploaded under, because that is the part a reviewer sees.
+ */
+export interface StandingDocument {
+  name: string;
+  bytes: number;
+  /** When the file was last written, so a stale transcript is visible as one. */
+  at: string;
+}
+
 /** A named group of skills, e.g. "Languages: Python, Go". */
 export interface SkillGroup {
   id: string;

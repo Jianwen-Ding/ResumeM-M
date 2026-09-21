@@ -7254,6 +7254,111 @@ function readAsBase64(file) {
   });
 }
 
+/* ------------------------------------------------------------------ *
+ * Documents to attach                                                 *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Files that go into an upload box and are never written here.
+ *
+ * Everything else in a save is text this program composes or text it learns
+ * from. A transcript is neither: it arrives finished, from a registrar, and
+ * the only thing wanted of it is to be attached — to a third of the forms
+ * anybody fills in, unchanged, for a year.
+ *
+ * Deliberately not the inbox beside it. That is material the AI reads, and a
+ * transcript is not something to write from.
+ */
+async function loadDocuments() {
+  const list = $('#doc-list');
+  if (!list) return;
+  let documents = [];
+  try {
+    ({ documents } = await api('/documents'));
+  } catch (err) {
+    setChildren(list, el('p', { className: 'hint', textContent: err.message }));
+    return;
+  }
+
+  if (documents.length === 0) {
+    setChildren(
+      list,
+      el('p', {
+        className: 'hint',
+        textContent: 'Nothing here yet. A transcript is the usual first one.',
+      }),
+    );
+    return;
+  }
+
+  const size = (bytes) =>
+    bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`;
+
+  setChildren(
+    list,
+    ...documents.map((doc) =>
+      el('div', { className: 'card' }, [
+        el('div', { className: 'grow' }, [
+          el('b', { textContent: doc.name }),
+          el('div', {
+            className: 'faint',
+            // The name is what a reviewer opening the attachment sees, so it
+            // is the thing itself rather than a label over an id.
+            textContent: `${size(doc.bytes)}${doc.at ? ` · added ${doc.at.slice(0, 10)}` : ''}`,
+          }),
+        ]),
+        el('button', {
+          className: 'tiny',
+          textContent: 'Open',
+          onclick: () => window.open(`/api/documents/${encodeURIComponent(doc.name)}/file`, '_blank'),
+        }),
+        el('button', {
+          className: 'tiny',
+          textContent: 'Remove',
+          onclick: async () => {
+            if (!(await confirmModal(`Remove “${doc.name}”?`, 'It leaves the save and the folder you attach from. Nothing else changes.'))) return;
+            try {
+              await api(`/documents/${encodeURIComponent(doc.name)}`, { method: 'DELETE' });
+              setStatus(`Removed ${doc.name}`);
+              await loadDocuments();
+            } catch (err) {
+              setStatus(err.message, true);
+            }
+          },
+        }),
+      ]),
+    ),
+  );
+}
+
+function setupDocuments() {
+  const add = $('#doc-add');
+  const picker = $('#doc-file');
+  if (!add || !picker) return;
+  add.onclick = () => picker.click();
+  picker.onchange = async () => {
+    const file = picker.files?.[0];
+    picker.value = '';
+    if (!file) return;
+    const status = $('#doc-status');
+    if (status) status.textContent = `Adding ${file.name}…`;
+    try {
+      await api('/documents', {
+        method: 'POST',
+        // Under the name it will be uploaded as. Renaming is adding it again
+        // under the better one, which is also how it is replaced.
+        body: JSON.stringify({ name: file.name, data: await readAsBase64(file) }),
+      });
+      if (status) status.textContent = '';
+      setStatus(`${file.name} is ready to attach`);
+      await loadDocuments();
+    } catch (err) {
+      if (status) status.textContent = '';
+      setStatus(err.message, true);
+    }
+  };
+}
+
 /** Read each file, ask the server what is in it, then show the lot for review. */
 async function ingestFiles(files) {
   const zone = $('#voice-drop');
@@ -9459,7 +9564,10 @@ function setupTabs() {
       for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b === btn);
       for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === `tab-${btn.dataset.tab}`);
       if (btn.dataset.tab === 'resumes') scheduleRender();
-      if (btn.dataset.tab === 'save') assetUI.load().catch((e) => setStatus(e.message, true));
+      if (btn.dataset.tab === 'save') {
+        assetUI.load().catch((e) => setStatus(e.message, true));
+        loadDocuments().catch((e) => setStatus(e.message, true));
+      }
       if (btn.dataset.tab === 'workspace') loadDrafts().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
@@ -9502,7 +9610,9 @@ async function boot() {
       paintUndo();
     }, loadProjectSettings });
   setupTabs();
+  setupDocuments();
   const project = await assetUI.init();
+  loadDocuments().catch(() => {});
   if (!project.current) { showTab('save'); return; }
   setupHistoryTab();
   await loadStore();

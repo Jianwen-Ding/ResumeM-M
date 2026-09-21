@@ -17,6 +17,7 @@ import {
   type Profile,
   type ResumeSpec,
   type SkillGroup,
+  type StandingDocument,
   type WritingSample,
   type StoreConfig,
   type StoreData,
@@ -1348,6 +1349,90 @@ export class Store {
     const f = this.file('corpus', `${id}.md`);
     if (!fs.existsSync(f)) return false;
     removeFile(f, 'That writing sample');
+    return true;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Standing documents                                                  *
+   * ------------------------------------------------------------------ */
+
+  /**
+   * Files you attach again and again and never generate: a transcript, a
+   * portfolio, a writing sample a form asks for as a PDF.
+   *
+   * Everything else in a save is either text this program composes or text it
+   * learns from. These are neither — they arrive finished, from a registrar
+   * or a designer, and the only thing wanted of them is to be attached. So
+   * they are stored as the bytes they came as, under the names they will be
+   * uploaded under, and copied into the flat folder beside the built resume
+   * so that one place holds everything a form is going to ask for.
+   *
+   * Not `assets/`, which is the voice corpus's inbox: material the AI reads.
+   * A transcript is not something to write from.
+   */
+  listDocuments(): StandingDocument[] {
+    const dir = this.file('documents');
+    return this.listing('documents', (f) => !f.startsWith('.'))
+      .map((name) => {
+        let bytes = 0;
+        let at = '';
+        try {
+          const stat = fs.statSync(path.join(dir, name));
+          bytes = stat.size;
+          at = stat.mtime.toISOString();
+        } catch {
+          // Removed between the listing and the stat. Report it without a
+          // size rather than failing the whole list over one file.
+        }
+        return { name: name.normalize('NFC'), bytes, at };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Where one is on disk, or undefined when the name is not allowed. */
+  documentPath(name: string): string | undefined {
+    try {
+      const f = this.file('documents', name);
+      return fs.existsSync(f) ? f : undefined;
+    } catch {
+      // `file` refuses a name with a path in it. Not there, as far as anything
+      // that wants to read it is concerned.
+      return undefined;
+    }
+  }
+
+  /** The bytes of one, or undefined when it is not there. */
+  readDocument(name: string): Buffer | undefined {
+    const f = this.file('documents', name);
+    try {
+      return fs.readFileSync(f);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Keep one, under the name it will be uploaded as.
+   *
+   * The name is the whole of the interface: a form's reviewer sees it, so
+   * "Transcript.pdf" is right and "scan_001 (3).pdf" is not, and renaming is
+   * saving it again under the better name. `file` refuses anything with a
+   * path in it, as everywhere else.
+   */
+  saveDocument(name: string, bytes: Buffer): StandingDocument {
+    const clean = name.trim().normalize('NFC');
+    if (!clean) throw new Error('Give the document a name.');
+    const dir = this.file('documents');
+    fs.mkdirSync(dir, { recursive: true });
+    const f = this.file('documents', clean);
+    fs.writeFileSync(f, bytes);
+    return { name: clean, bytes: bytes.length, at: new Date().toISOString() };
+  }
+
+  deleteDocument(name: string): boolean {
+    const f = this.file('documents', name);
+    if (!fs.existsSync(f)) return false;
+    removeFile(f, `"${name}"`);
     return true;
   }
 

@@ -608,6 +608,117 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }),
   );
 
+  /* ------------------------------------------------------------------ *
+   * Standing documents                                                  *
+   * ------------------------------------------------------------------ */
+
+  /**
+   * Files that are attached rather than written: a transcript, a portfolio.
+   *
+   * They live in `documents/` in the save and are copied into the flat upload
+   * folder by `syncCurrent`, so the one folder a portal's dialog is pointed at
+   * holds everything that dialog is going to ask for.
+   */
+  api.get(
+    '/documents',
+    handler(async (_req, res) => {
+      res.json({ documents: store.listDocuments(), dir: currentDir(store) });
+    }),
+  );
+
+  api.post(
+    '/documents',
+    handler(async (req, res) => {
+      const body = req.body as { name?: string; data?: string };
+      const name = String(body.name ?? '').trim();
+      if (!name) throw new Error('Give the document a name.');
+      if (typeof body.data !== 'string') throw new Error('No file was sent.');
+      /*
+       * Named by what it will be uploaded as, extension and all.
+       *
+       * A reviewer opening the attachment sees this string, so it is not an
+       * id with a display name beside it — it is the thing itself. Refusing a
+       * name with no extension would be officious; refusing one with a path
+       * in it happens in `Store.file`, where every other name is checked.
+       */
+      const saved = store.saveDocument(name, Buffer.from(body.data, 'base64'));
+      // Into the upload folder straight away, so it is attachable without
+      // waiting for the next application to be built.
+      syncCurrent(store);
+      await withCommit(repo, autoCommit(), `Add document "${saved.name}"`, () => undefined);
+      res.json(saved);
+    }),
+  );
+
+  api.delete(
+    '/documents/:name',
+    handler(async (req, res) => {
+      const name = String(req.params.name);
+      const gone = store.deleteDocument(name);
+      if (gone) {
+        syncCurrent(store);
+        await withCommit(repo, autoCommit(), `Remove document "${name}"`, () => undefined);
+      }
+      res.json({ ok: gone });
+    }),
+  );
+
+  /**
+   * The bytes, for the browser extension to put into a form's upload box.
+   *
+   * Served from here rather than only out of the flat folder because the
+   * extension may want a document on a page where nothing has been built yet,
+   * and because the name in `documents/` is the one the user chose — the flat
+   * folder's copy can have been renamed around a collision.
+   */
+  api.get(
+    '/documents/:name/file',
+    handler(async (req, res) => {
+      const name = String(req.params.name);
+      const bytes = store.readDocument(name);
+      if (!bytes) {
+        res.status(404).json({ error: 'That document is not in this save.' });
+        return;
+      }
+      res.type(name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${name.replace(/"/g, '')}"`);
+      res.send(bytes);
+    }),
+  );
+
+  /**
+   * Everything this application could attach, in one list.
+   *
+   * The flat folder holds every application in flight at once, which is right
+   * for a person looking at it and exactly wrong for a form: attaching
+   * another job's resume is the worst thing the extension could do with a
+   * file picker. So the folder says whose each file is, and this filters to
+   * the one being applied for plus the standing documents, which belong to
+   * all of them.
+   */
+  api.get(
+    '/attachments',
+    handler(async (req, res) => {
+      const wanted = String(req.query.application ?? '').trim();
+      const folder = syncCurrent(store);
+      const attachments = folder.files
+        .filter((name) => {
+          const whose = folder.belongsTo[name] ?? '';
+          if (whose === 'standing') return true;
+          // No application named: the standing documents only. A card that
+          // has not built anything yet has nothing of its own here, and the
+          // files that *are* here belong to somebody else's form.
+          return Boolean(wanted) && whose === wanted;
+        })
+        .map((name) => ({
+          name,
+          standing: folder.belongsTo[name] === 'standing',
+          url: `/current/${encodeURIComponent(name)}`,
+        }));
+      res.json({ attachments, dir: folder.dir });
+    }),
+  );
+
   /**
    * What the sweep would take, and taking it.
    *
