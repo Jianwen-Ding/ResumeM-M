@@ -1146,7 +1146,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           repo,
           autoCommit(),
           `${wanted ? 'Count' : 'Stop counting'} "${letter.title}" as your writing`,
-          () => store.saveCoverLetter(next),
+          // Deciding, not writing: `next` means it by leaving `voice` out.
+          () => store.saveCoverLetter(next, { decidesVoice: true }),
         );
         res.json({ kind, id, inVoice: wanted });
         return;

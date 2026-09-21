@@ -1280,8 +1280,29 @@ export class Store {
       });
   }
 
-  saveCoverLetter(letter: CoverLetter): void {
+  /**
+   * Write a cover letter.
+   *
+   * `voice` is taken from the copy on disk when the letter being written does
+   * not state one, because it is a decision *about* the letter rather than a
+   * part of it — and every writer here bar one is replacing the letter's
+   * text. The Workspace files the letter when the application goes out; the
+   * AI files the one it drafted; both mint the id from the company and the
+   * day, so re-running either for the same job lands on the same letter.
+   * Written literally, saying "this one is not how I write" and then sending
+   * that application would quietly say the opposite, with nothing on screen
+   * about it and the corpus silently a letter larger.
+   *
+   * `decidesVoice` is for the one caller that is deciding rather than
+   * writing. `POST /voice/include` says "counted again" by taking the key
+   * away, so it has to be able to write an absence and mean it.
+   */
+  saveCoverLetter(letter: CoverLetter, { decidesVoice = false } = {}): void {
     const { body, id, ...meta } = letter;
+    if (!decidesVoice && meta.voice === undefined) {
+      const stored = this.loadCoverLetters().find((l) => l.id === id)?.voice;
+      if (stored !== undefined) meta.voice = stored;
+    }
     const dir = this.file('letters');
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();

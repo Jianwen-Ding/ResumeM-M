@@ -2942,10 +2942,10 @@ describe('pinning', () => {
  */
 describe('which letters and answers count as your writing', () => {
   const include = (body: Record<string, unknown>) => request(app).post('/api/voice/include').send(body);
-  const voice = async () => (await request(app).get('/api/voice').expect(200)).body;
+  const voiceNow = async () => (await request(app).get('/api/voice').expect(200)).body;
 
   it('lists them both, in by default, with no bodies attached', async () => {
-    const { writing } = await voice();
+    const { writing } = await voiceNow();
     expect(writing.letters).toHaveLength(1);
     expect(writing.letters[0]).toMatchObject({ id: '2026-01-01-acme', inVoice: true });
     expect(writing.letters[0].body).toBeUndefined();
@@ -2954,10 +2954,10 @@ describe('which letters and answers count as your writing', () => {
   });
 
   it('takes a letter out, and the corpus shrinks by what it was worth', async () => {
-    const before = await voice();
+    const before = await voiceNow();
     await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
 
-    const after = await voice();
+    const after = await voiceNow();
     expect(after.writing.letters[0].inVoice).toBe(false);
     expect(after.context.available).toBeLessThan(before.context.available);
     expect(after.preview).not.toContain('Dear Acme');
@@ -2967,7 +2967,7 @@ describe('which letters and answers count as your writing', () => {
     await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
     await include({ kind: 'letter', id: '2026-01-01-acme', include: true }).expect(200);
 
-    expect((await voice()).writing.letters[0].inVoice).toBe(true);
+    expect((await voiceNow()).writing.letters[0].inVoice).toBe(true);
     /*
      * Absent, not `voice: true`. The field means one thing — "keep this out" —
      * and a save where every letter carries `voice: true` is a save that reads
@@ -2995,6 +2995,38 @@ describe('which letters and answers count as your writing', () => {
     expect(after.find((a: { id: string }) => a.id === target).variants).toEqual(
       answers.find((a: { id: string }) => a.id === target).variants,
     );
+  });
+
+  /*
+   * A decision about a letter outlives the letter's text.
+   *
+   * Three writers replace a letter by id — the editor's own save, the
+   * Workspace filing one when the application goes out, and the AI filing the
+   * one it drafted — and the last two mint the id from the company and the
+   * day, so re-running either for the same job lands on the same letter. All
+   * three are about the words. None of them is about whether the letter is an
+   * example of how you write, and a save that forgets that would put a letter
+   * somebody had taken out of their voice quietly back into it.
+   */
+  it('survives the letter being written again', async () => {
+    await include({ kind: 'letter', id: '2026-01-01-acme', include: false }).expect(200);
+
+    const letter = (await request(app).get('/api/letters').expect(200)).body.find(
+      (l: { id: string }) => l.id === '2026-01-01-acme',
+    );
+    // As a caller replacing the text would send it: no `voice` in the body,
+    // because that caller has nothing to say about it.
+    const { voice, ...text } = letter;
+    expect(voice).toBe(false);
+    await request(app)
+      .put('/api/letters/2026-01-01-acme')
+      .send({ ...text, body: 'Dear Acme, a second draft.' })
+      .expect(200);
+
+    const after = (await voiceNow()).writing.letters.find((l: { id: string }) => l.id === '2026-01-01-acme');
+    expect(after.inVoice).toBe(false);
+    const file = fs.readFileSync(path.join(t.dir, 'letters', '2026-01-01-acme.md'), 'utf8');
+    expect(file).toContain('a second draft');
   });
 
   it('refuses an id it does not have, rather than filing a new one', async () => {
