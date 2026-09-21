@@ -3293,6 +3293,18 @@ async function addEntry(kind) {
      * entry itself is in the save either way; switching it on elsewhere is a
      * tick per resume, and a decision rather than a side effect.
      */
+    /*
+     * Into the overlay as well as the file.
+     *
+     * `entrySelection` prefers `state.entryEdits[kind]` over the stored list,
+     * and nothing clears the overlay once it exists — an auto-save folds it
+     * into the stored copy and leaves it standing. So on a resume where any
+     * entry had been ticked on or off this session, the new entry was written
+     * into the file and then drawn as "hidden on this variation", and the very
+     * next auto-save wrote the overlay back over it and took the reference out
+     * again. The entry survived in the store, orphaned from the resume it had
+     * just been added to.
+     */
     const root = resumeById(state.resumeId);
     const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
     const sections = (root.sections ?? []).map((s) =>
@@ -3300,6 +3312,9 @@ async function addEntry(kind) {
     );
     if (!sections.some((s) => s.kind === kind)) {
       sections.push({ kind, entries: [...rootEntries(kind), id] });
+    }
+    if (state.entryEdits?.[kind] && !state.entryEdits[kind].includes(id)) {
+      state.entryEdits = { ...state.entryEdits, [kind]: [...state.entryEdits[kind], id] };
     }
     await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   });
@@ -3369,12 +3384,24 @@ async function removeEntry(entry) {
       lane.server = null;
     });
 
-    // Drop the reference too, so the next compile does not warn about it.
+    /*
+     * Drop the reference too, so the next compile does not warn about it —
+     * from the overlay as well as from the file, for the reason `addEntry`
+     * gives. Left in the overlay, the id was written straight back by the
+     * next auto-save and every compile from then on said `Section
+     * "experience" lists entry "exp_acme", which does not exist.` — the exact
+     * orphan this line exists to prevent, put there by the line itself.
+     */
     const root = resumeById(state.resumeId);
     const sections = (root.sections ?? []).map((s) => ({
       ...s,
       entries: (s.entries ?? []).filter((id) => id !== entry.id),
     }));
+    for (const kind of Object.keys(state.entryEdits ?? {})) {
+      state.entryEdits[kind] = state.entryEdits[kind].filter((id) => id !== entry.id);
+    }
+    delete state.bulletEdits?.[entry.id];
+    delete state.bulletOrderEdits?.[entry.id];
     await saveResumeSpec({ ...root, sections }, `Deleted ${entry.id}`);
   });
   render();
@@ -9525,6 +9552,27 @@ function renderBaseButton() {
 async function loadStore() {
   state.store = await api('/store');
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
+    /*
+     * The resume that was open has gone, so the unsaved edits are about
+     * nothing.
+     *
+     * `state.choices` and the rest are an overlay on one resume, and the
+     * line below moves the editor to a different one. Left standing, the
+     * overlay was merged over whichever resume it landed on and written to
+     * *its* id by the next edit: entries switched off and phrasings changed
+     * on a document nobody had touched, under "All changes saved".
+     *
+     * The sweep is how this is reached — it deletes resumes, and one of them
+     * can be the one you have open — and it drops the undo stack for exactly
+     * this kind of reason, so there is nothing to press afterwards either.
+     * Here rather than there because this is the moment the overlay stops
+     * being about anything, whatever deleted the resume.
+     *
+     * Only on the branch that moves: an ordinary reload keeps the resume it
+     * had, and clearing edits there would throw away the change somebody is
+     * in the middle of making.
+     */
+    if (state.resumeId) clearEdits();
     // A pinned base is what this store says it starts from; the old
     // conventional id is only the guess for a store that has never said.
     const resumes = state.store.resumes;
