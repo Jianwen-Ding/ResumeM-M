@@ -812,6 +812,44 @@ describe('a letter with no salutation to find', () => {
     expect(trimToLetter(letter)).toBe(letter);
   });
 
+  /*
+   * The verbs an agent uses about its own work are the verbs a letter uses
+   * about its writer's. "The assistant describing what it just did" was
+   * written as the verb alone, so an opening paragraph beginning "Here's what
+   * drew me to this role" or "I have written production Go since 2022" was
+   * taken for commentary and the whole paragraph dropped — silently, with the
+   * letter still long enough to clear every guard underneath.
+   *
+   * The same slip the test above pins for "I'll", in three more places.
+   */
+  it('does not eat an opening paragraph that talks about the writer', () => {
+    for (const opening of [
+      "Here's what drew me to this role: the scheduler work is the part I want.",
+      'I have written production Go since 2022, most of it under a latency budget.',
+      "I've created two ingest pipelines from nothing, and kept both of them up.",
+      'Below is not where I would start; the hard part is the tail latency.',
+      "I'll write the boring migration nobody volunteers for, and I have.",
+    ]) {
+      const letter = `${opening}\n\n${PROSE}`;
+      expect(trimToLetter(letter), opening.slice(0, 24)).toBe(letter);
+    }
+  });
+
+  /*
+   * And still drops the same shapes when they say what is being handed over,
+   * which is the difference: an agent names the artifact.
+   */
+  it('still drops a paragraph that hands over a letter', () => {
+    for (const preamble of [
+      "Here's the cover letter you asked for:",
+      'Below is a draft based on the posting.',
+      'I have written the letter and saved a plan alongside it.',
+      "I'll now draft the answers to the three questions.",
+    ]) {
+      expect(trimToLetter(`${preamble}\n\n${PROSE}`), preamble.slice(0, 24)).toBe(PROSE);
+    }
+  });
+
   it('hands back the whole reply when nearly all of it looks like commentary', () => {
     // A refusal, a clarifying question, an error: guessing which half is the
     // letter is how a draft disappears.

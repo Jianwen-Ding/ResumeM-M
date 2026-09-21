@@ -799,6 +799,25 @@ export function trimToLetter(output: string): string {
  * from the top, only while they keep matching, and never so much that the
  * letter itself could be what was thrown away.
  */
+/*
+ * What the assistant would be handing over, if it were describing itself.
+ *
+ * "The assistant describing what it just did" was written as the verb alone,
+ * and the verbs are ones a letter uses about its writer. `I have written` is
+ * how somebody opens a paragraph about four years of production Go, and
+ * `Here's` is how they open one about what drew them to the role — both
+ * matched, and the whole paragraph went, silently, with nothing saying the
+ * letter had been cut. `I'll` was already found to do this once; see the test
+ * below that pins it.
+ *
+ * So the sentence has to name the thing as well as the act, within the same
+ * clause. An agent handing over its work says what it is handing over — the
+ * run this whole net exists for said "the implementation plan and a
+ * candidate-voice-matched draft" — and a letter talking about its writer's
+ * work does not.
+ */
+const HANDED_OVER = String.raw`[^.\n]{0,80}?\b(?:cover letter|letter|draft|answers?|responses?|version|revision|write-?up|document|plan|file|markdown)\b`;
+
 const AGENT_META = new RegExp(
   [
     // Markup a letter never opens with: a heading, a rule, a fence, a quote.
@@ -806,7 +825,7 @@ const AGENT_META = new RegExp(
     // The assistant acknowledging the request.
     String.raw`^(?:sure|certainly|okay|ok|of course|got it|understood|alright)\b[,.!:]`,
     // The assistant describing what it just did, or is about to.
-    String.raw`^(?:here(?:'s| is| are)\b|below (?:is|are)\b|i(?:'ve| have) (?:prepared|written|drafted|created|put together|produced|generated)\b|i(?:'ll| will)(?: now)? (?:write|draft|prepare|put together|create|generate)\b)`,
+    String.raw`^(?:here(?:'s| is| are)|below (?:is|are)|i(?:'ve| have) (?:prepared|written|drafted|created|put together|produced|generated)|i(?:'ll| will)(?: now)? (?:write|draft|prepare|put together|create|generate))\b${HANDED_OVER}`,
     // A link to a file it wrote. There is nowhere for the reader to open it.
     String.raw`\]\(\s*(?:file://|\.{0,2}/)`,
   ].join('|'),

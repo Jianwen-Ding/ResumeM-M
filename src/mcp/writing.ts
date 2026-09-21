@@ -80,6 +80,46 @@ function carries(haystack: string, word: string): boolean {
 
 const plural = (n: number, word: string) => `${n} ${n === 1 ? word : `${word}s`}`;
 
+/*
+ * A gap the writer meant to come back to, in whatever bracket they reached for.
+ *
+ * One check, for the letter and the answers alike. There were two, and both
+ * leaked. The letter's read `<[a-z ]+>` with no `i` flag, so `<Company Name>`
+ * — a capitalised placeholder, which is how anybody writes one — went
+ * straight through; the answers had no angle-bracket rule at all, which
+ * matters because the shared instructions hand the model `your team's
+ * <product>` as the very shape to avoid, so that is the shape it reproduces
+ * when it cannot fill something in.
+ *
+ * Deliberately not every bracket. `<name@example.com>` is a real way to write
+ * an address and `[1]` is not a placeholder, so a match needs a letter, has
+ * to stay on one line, and has to be short: this is looking for a word or two
+ * in a slot, not for punctuation.
+ */
+const PLACEHOLDER = [
+  /\[[^\]\n]{0,40}[A-Za-z][^\]\n]{0,40}\]/,
+  /<[A-Za-z][A-Za-z ._'-]{0,40}>/,
+  /\{\{[^}\n]{0,60}\}\}/,
+  /\bTODO\b/,
+];
+
+/** The first placeholder in some text, or '' when there is none. */
+function placeholderIn(text: string): string {
+  for (const rule of PLACEHOLDER) {
+    const found = rule.exec(text);
+    if (found) return found[0];
+  }
+  return '';
+}
+
+/** Why it was not saved, naming the gap so the model knows which one. */
+function unfilled(gap: string): string {
+  return (
+    `That still has a placeholder in it — ${clip(gap, 60)}. Fill it in from the resume and the posting, ` +
+    'or leave the sentence out: a letter with [Company] in it is worse than one that never mentions them.'
+  );
+}
+
 /** Trim a body to something that will not bury everything else in the reply. */
 function clip(text: string, room: number): string {
   const clean = (text ?? '').trim();
@@ -298,12 +338,8 @@ export class WritingSession {
     if (text.length < 200) {
       return no(`That is ${text.length} characters, which is a sentence rather than a letter. Write the whole thing.`);
     }
-    if (/\[[A-Za-z ]+\]|\bTODO\b|<[a-z ]+>/.test(text)) {
-      return no(
-        'That still has a placeholder in it. Fill it in from the resume and the posting, or leave the sentence out — ' +
-          'a letter with [Company] in it is worse than one that never mentions them.',
-      );
-    }
+    const gap = placeholderIn(text);
+    if (gap) return no(unfilled(gap));
     this.state.letter = text;
     return ok(`Saved, ${text.split(/\s+/).length} words. Call read_work to see what is still outstanding.`);
   }
@@ -319,7 +355,8 @@ export class WritingSession {
     }
     const text = body.trim();
     if (!text) return no('The answer is empty.');
-    if (/\[[A-Za-z ]+\]|\bTODO\b/.test(text)) return no('That still has a placeholder in it.');
+    const gap = placeholderIn(text);
+    if (gap) return no(unfilled(gap));
     this.state.answers[questionId] = text;
     return ok(`Saved as the answer to "${clip(question.question, 80)}".`);
   }

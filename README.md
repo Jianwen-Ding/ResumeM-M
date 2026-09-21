@@ -219,6 +219,10 @@ bullets:
 `**bold**`, `*italic*`, `` `code` ``, and `[text](url)` are supported in any
 text field. Everything else is escaped, so `R&D` and `50%` are safe to type.
 
+An emphasis marker has to sit against the word it emphasises, so asterisks
+used as themselves are printed as themselves: `SELECT *`, `*.log`, `(*.tmp)`
+and a pasted `* one * two` all come out as typed.
+
 ### Resumes
 
 A resume selects; it does not contain.

@@ -40,7 +40,7 @@ import { applyInclusion, sanitizeAiPlan } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, alreadySent, applicationId, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats } from '../model/applications.js';
+import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats } from '../model/applications.js';
 import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -3059,8 +3059,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * only its id. The draft itself is read after the slow work below, and
        * reading it here instead is precisely the bug the test named "does not
        * reopen a workspace onto what it said before" exists to catch.
+       *
+       * Then the tracker, the same way everything else finds a row:
+       * `findApplication` is what sees past the date baked into an id, and
+       * this handler was the one path that did not ask it. It minted
+       * `applicationId` — today — and compared that against the tracker by id
+       * below, so a job applied for yesterday and revisited today did not
+       * match its own row and merely opening the workspace filed a second
+       * one, `applying`, under the one that had already gone out. Yesterday's
+       * row is left without a draft by ordinary things: the extension's quick
+       * submit opens no workspace at all, and deleting a workspace is a
+       * button.
+       *
+       * `freshApplicationId` rather than `applicationId` for the same reason
+       * every other path uses it — apply, be turned down, and apply again to
+       * the repost the same day, and today's id is already taken.
        */
-      const id = findDraft(store.loadDrafts(), body.company, body.role)?.id ?? applicationId(body.company, body.role);
+      const id =
+        findDraft(store.loadDrafts(), body.company, body.role)?.id ??
+        findApplication(data.applications, body.company, body.role)?.id ??
+        freshApplicationId(data.applications, body.company, body.role);
 
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
@@ -3206,7 +3224,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * Nothing awaits between this read and the write below, so the two are
        * one step as far as anything else on this server is concerned.
        */
-      const tracked = store.load().applications.find((a) => a.id === id);
+      /*
+       * By identity, not by id. A draft can legitimately carry an id the
+       * tracker row does not — the row may have been made by hand, or by a
+       * send on a different day — and matching on the id alone meant writing
+       * a second row for a job that already had one.
+       */
+      const tracked = findApplication(store.load().applications, draft.company, draft.role);
       if (!tracked) {
         store.upsertApplication({
           id,

@@ -67,6 +67,47 @@ describe('writing a letter as moves', () => {
     }
   });
 
+  /*
+   * The angle-bracket rule was `<[a-z ]+>` with no `i` flag, so a capitalised
+   * placeholder — which is how anybody writes one — went straight through. The
+   * shared instructions hand the model `your team's <product>` as the shape to
+   * avoid, so it is the shape it reproduces when it cannot fill something in.
+   */
+  it('refuses a placeholder whichever way it is capitalised or bracketed', () => {
+    const body = 'x'.repeat(300);
+    for (const bad of [
+      `${body} your team's <Product>`,
+      `${body} at <Company Name> in particular`,
+      `${body} the {{role}} you are hiring for`,
+      `${body} [Your Name]`,
+    ]) {
+      expect(writing().saveLetter(bad).ok, bad.slice(-30)).toBe(false);
+    }
+  });
+
+  /*
+   * And not on the brackets people write for real. An address in angle
+   * brackets is an address, and a footnote marker is not a gap.
+   */
+  it('does not call a real bracket a placeholder', () => {
+    const body = 'x'.repeat(300);
+    expect(writing().saveLetter(`${body} reach me at <casey@example.com>`).ok).toBe(true);
+    expect(writing().saveLetter(`${body} the 2M events a day figure [1] is measured`).ok).toBe(true);
+  });
+
+  /*
+   * `saveAnswer` had no angle-bracket rule at all, not even the lowercase one,
+   * so the same gap reached a saved application answer.
+   */
+  it('refuses a placeholder in an answer too, and says which one', () => {
+    const s = writing();
+    const bad = s.saveAnswer('q1', 'I want to work on <Product> because it is the hard part.');
+    expect(bad.ok).toBe(false);
+    expect(bad.text).toContain('<Product>');
+    expect(s.state.answers.q1).toBeUndefined();
+    expect(s.saveAnswer('q1', 'I want to work on the ingest path because it is the hard part.').ok).toBe(true);
+  });
+
   it('answers only the questions the form actually asked', () => {
     const s = writing();
     expect(s.saveAnswer('q1', 'Because the ingest work is the part I like.').ok).toBe(true);
