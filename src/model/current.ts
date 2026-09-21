@@ -201,6 +201,25 @@ function uniqueNames(claims: { name: string; app: Application }[]): Map<string, 
  * Rebuild the flat folder from the tracker. Returns what is in it, so the
  * caller can say where to look.
  */
+/**
+ * Where the flat upload folder is, without touching what is in it.
+ *
+ * `syncCurrent` answers this too, and it answers it by rebuilding the folder
+ * from the tracker — reading every application, working out which files are
+ * still in flight, copying and deleting. That is the right thing to do before
+ * somebody attaches a file and much too much to do to put a path on screen.
+ *
+ * The path is a fixed property of the save. The card needs it from its first
+ * paint, on any page, whether or not anything has been built yet: it is what
+ * you paste into a portal's upload dialog instead of trudging back through
+ * the save folder every time.
+ */
+export function currentDir(store: Store): string {
+  const dir = path.join(store.outDir(), CURRENT_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 export function syncCurrent(store: Store, applications?: Application[]): CurrentFolder {
   const apps = applications ?? store.load().applications;
   const dir = path.join(store.outDir(), CURRENT_DIR);

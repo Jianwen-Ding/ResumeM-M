@@ -45,7 +45,7 @@ import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
-import { syncCurrent, CURRENT_DIR } from '../model/current.js';
+import { syncCurrent, currentDir, CURRENT_DIR } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
@@ -2454,6 +2454,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * See the `x-rmm-project` check where saves are switched.
          */
         save: store.root,
+        /*
+         * And where the files to attach live, from the first paint.
+         *
+         * The flat folder is a fixed place in the save and its whole purpose
+         * is to be pasted into a portal's upload dialog. The card only ever
+         * learned the path from the reply to a *staging* call, so it had one
+         * on the page where the resume was built and none on the form page —
+         * the only page where anybody needs it — and none at all until
+         * something had been built. `currentDir` is a `path.join` and a
+         * `mkdir`; `syncCurrent`, which also answers this, rebuilds the whole
+         * folder from the tracker and has no business running on a read.
+         */
+        currentDir: currentDir(store),
         /*
          * What the AI would be writing from, so the card can say it.
          *
