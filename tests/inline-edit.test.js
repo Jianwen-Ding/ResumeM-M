@@ -24,6 +24,8 @@ afterEach(() => {
 describe('editing a line in place', () => {
   let data;
   let requests;
+  /** Set by the one test that needs the store to refuse a write. */
+  let refuseEntryWrites;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -33,11 +35,15 @@ describe('editing a line in place', () => {
     data = fixture.store.load();
     fixture.cleanup();
     requests = [];
+    refuseEntryWrites = false;
 
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : null;
       requests.push({ url, method: options.method ?? 'GET', body });
       let result = {};
+      if (refuseEntryWrites && url.startsWith('/api/entries/') && options.method === 'PUT') {
+        return { ok: false, status: 409, statusText: 'Conflict', json: async () => ({ error: 'The save moved under you.' }) };
+      }
       if (url === '/api/store') result = data;
       else if (url === '/api/ai/jobs') result = { jobs: [] };
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
@@ -108,6 +114,37 @@ describe('editing a line in place', () => {
     );
 
     expect(storedText('v_base')).toBe('Built a pipeline handling **2M events/day** at p95');
+  });
+
+  /*
+   * An inline commit that fails, and the resume switch that walks into it.
+   *
+   * `flushEdits` waited on the inline saves with `Promise.all`, which rejects
+   * on the first failure — and nothing caught it. The `.catch` at the call
+   * site is attached to a *derived* promise, so the one in the set is still
+   * rejected. That rejection went out through `leaveResume` and out of the
+   * dropdown's own handler, past both of `leaveResume`'s exits: neither its
+   * refusal message nor the line that puts the dropdown back ever ran. The
+   * dropdown was left naming a resume that is not the one on screen, with
+   * nothing said, and an unhandled rejection in the console.
+   */
+  it('refuses to switch resumes when an inline edit did not land', async () => {
+    await openMaster();
+    refuseEntryWrites = true;
+
+    const row = rowFor('Built a pipeline handling');
+    const line = row.querySelector('.editable');
+    line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    line.textContent = `${line.textContent} at p95`;
+    line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'newgrad';
+    selector.dispatchEvent(new Event('change'));
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(selector.value, 'the dropdown still names what is on screen').toBe('__master__');
+    expect(document.querySelector('#status')?.textContent ?? '').toMatch(/has not saved yet/i);
   });
 
   it('leaves the store alone when the text comes back unchanged', async () => {
@@ -231,6 +268,8 @@ describe('two edits in quick succession', () => {
 describe('editing a variation', () => {
   let data;
   let requests;
+  /** Set by the one test that needs the store to refuse a write. */
+  let refuseEntryWrites;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -240,11 +279,15 @@ describe('editing a variation', () => {
     data = fixture.store.load();
     fixture.cleanup();
     requests = [];
+    refuseEntryWrites = false;
 
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : null;
       requests.push({ url, method: options.method ?? 'GET', body });
       let result = {};
+      if (refuseEntryWrites && url.startsWith('/api/entries/') && options.method === 'PUT') {
+        return { ok: false, status: 409, statusText: 'Conflict', json: async () => ({ error: 'The save moved under you.' }) };
+      }
       if (url === '/api/store') result = data;
       else if (url === '/api/ai/jobs') result = { jobs: [] };
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };

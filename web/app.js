@@ -884,7 +884,20 @@ async function flushEdits() {
   // closing the tab, switching resumes, following a deep link — and the draft
   // was the one thing it did not cover.
   await flushDraftEdits().catch(() => {});
-  await Promise.all([...inlineSaves]);
+  /*
+   * Settled, and reported. `Promise.all` rejects on the first inline commit
+   * that failed, and nothing here caught it — the `.catch` at the call site
+   * is on a *derived* promise, so the one in this set is still rejected. That
+   * rejection went straight out through `leaveResume` and out of the
+   * dropdown's own handler, past both of `leaveResume`'s exits, so neither
+   * its refusal message nor the line that puts the dropdown back ever ran: an
+   * unhandled rejection in the console, and a resume switch that half
+   * happened.
+   *
+   * The answer for the caller is the same one `state.dirty` gets — the edit
+   * did not land, so the screen stays where it is and says why.
+   */
+  const inline = await Promise.allSettled([...inlineSaves]);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
   if (state.dirty) await autoSave();
@@ -894,6 +907,7 @@ async function flushEdits() {
   if (state.store?.config?.git?.autoCommit) {
     await api('/store/save', { method: 'POST', body: JSON.stringify({}), keepalive: true }).catch(() => {});
   }
+  return inline.every((r) => r.status === 'fulfilled');
 }
 
 /** Docs says "All changes saved"; so does this, in the same quiet way. */
@@ -9395,9 +9409,9 @@ async function applyHash() {
  * Returns whether it moved.
  */
 async function leaveResume(go) {
-  await flushEdits();
+  const landed = await flushEdits();
   if (state.dirty) await autoSave().catch(() => {});
-  if (state.dirty) {
+  if (state.dirty || !landed) {
     setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
     return false;
   }
