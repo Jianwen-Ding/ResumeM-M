@@ -35,7 +35,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
-import { classifyPage, employerFallback, extractJob, mergeJobPages, type PageSource } from '../jobs/extract.js';
+import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
@@ -3244,8 +3244,47 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         /** What the extension has already been written into, if anything. */
         coverLetter?: string;
         questions?: { question: string; required?: boolean; answer?: string }[];
+        /**
+         * Nobody pressed anything: this is the extension noticing that work
+         * has been done and holding a place for it. See `holdASpace`.
+         */
+        auto?: boolean;
       };
       if (!body.company || !body.role) throw new Error('company and role are required');
+      /*
+       * A row filed without being asked has to be a row worth having.
+       *
+       * The company was checked and the role was taken on trust, so a tracker
+       * filled up with lines nobody made: `Indeed — Now Hiring: 300 Software
+       * Intern Jobs`, and a role that is two hundred characters of
+       * `preview.redd.it` image url. Both are the extractor falling back to
+       * whatever the page had where a title should be, and both sat in the
+       * one list that is supposed to be the record of what somebody has
+       * applied for.
+       *
+       * Only on the automatic route. Somebody typing a company and a role
+       * into "Record an application" means it, however odd it looks, and
+       * refusing them would be this guard deciding what counts as a job.
+       */
+      if (body.auto && !looksLikeAnApplication(body.company, body.role)) {
+        /*
+         * Answered rather than thrown, so the refusal can be named. The
+         * caller holds a key against this pair to stop itself asking twice,
+         * and drops it when a write fails — because a store that is not
+         * running is not this application's fault and the next attempt should
+         * go. A refusal is the opposite: the answer will not change, and
+         * dropping the key would put this write on every keeper tick for as
+         * long as the tab is open. `kind` is how the extension tells them
+         * apart, the same way `no-project` and `other-save` are told apart.
+         */
+        res.status(400).json({
+          kind: 'not-a-job',
+          error:
+            `"${body.company} — ${body.role}" does not read like a job, so no space was opened for it. ` +
+            'Record it yourself if it is one.',
+        });
+        return;
+      }
 
       const data = store.load();
       /*

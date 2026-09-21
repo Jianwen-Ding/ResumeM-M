@@ -1844,6 +1844,50 @@ describe('workspace', () => {
     await request(app).post('/api/workspace').send({ company: 'Only' }).expect(400);
   });
 
+  /*
+   * The extension holds a place for an application the moment work has been
+   * done on one, off whatever the extractor made of the pages somebody walked
+   * through — nobody presses anything. When that guess was wrong the tracker,
+   * which is the record of what you have applied for, took the guess anyway:
+   *
+   *   Indeed    Now Hiring: 300 Software Intern Jobs
+   *   Reddit    https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg
+   *
+   * The refusal is worded as a refusal rather than an error because that is
+   * what it is: nothing went wrong, a row simply was not worth filing, and
+   * the person can file one.
+   */
+  it('refuses a row it was never asked to file, when the pair is not a job', async () => {
+    const junk = await request(app)
+      .post('/api/workspace')
+      .send({ auto: true, company: 'Reddit', role: 'https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg' })
+      .expect(400);
+    expect(junk.body.error).toMatch(/does not read like a job/);
+    expect(junk.body.error).toMatch(/Record it yourself/);
+
+    // And filed nothing: a refusal that half-lands leaves the row it refused.
+    const after = await request(app).get('/api/workspace').expect(200);
+    expect(after.body.drafts.some((d: { company: string }) => d.company === 'Reddit')).toBe(false);
+  });
+
+  /*
+   * And only the automatic route. Somebody typing a company and a role into
+   * "Record an application" means it, however odd it reads, and refusing them
+   * would be this guard deciding what counts as a job.
+   */
+  it('files whatever a person asks it to, however odd it reads', async () => {
+    const res = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Reddit', role: 'https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg' })
+      .expect(200);
+    expect(res.body.draft.company).toBe('Reddit');
+  });
+
+  it('and holds a place on its own for a job that reads like one', async () => {
+    const res = await open({ auto: true }).expect(200);
+    expect(res.body.draft.company).toBe('Streamly');
+  });
+
   it('saves a posting-specific resume that arrives with the draft', async () => {
     const res = await open({
       spec: { id: 'job-streamly', label: 'Streamly', extends: 'intern', choices: { b_pipeline: 'v_kafka' } },

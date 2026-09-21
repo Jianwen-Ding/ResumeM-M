@@ -3,7 +3,9 @@ import {
   classifyPage,
   companyFromUrl,
   employerFallback,
+  looksLikeAnApplication,
   looksLikeCompanyName,
+  looksLikeRoleTitle,
   extractJob,
   extractKeywords,
   JOB_SHAPED,
@@ -1024,5 +1026,84 @@ describe('reading the role out of the address', () => {
     const page = '<html><body><p>Submit application.</p></body></html>';
     const job = extractJob(page, 'http://127.0.0.1:9/acme/apply/platform-engineer', 'Data Scientist | Acme');
     expect(job.title).toBe('Data Scientist');
+  });
+});
+
+/*
+ * A row filed without being asked.
+ *
+ * `holdASpace` in the extension opens a tracker row on its own, off whatever
+ * the extractor made of the pages somebody walked through. The company went
+ * through `looksLikeCompanyName` and the role went through nothing, so a
+ * tracker that is supposed to be the record of what somebody applied for
+ * filled up with the board they were browsing:
+ *
+ *   Indeed    Now Hiring: 300 Software Intern Jobs
+ *   Reddit    https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg
+ *   ...       2027 Summer
+ *
+ * Refusing costs a moment — the application gets recorded by hand — and
+ * accepting costs a line in the list that nobody can tell from a real one.
+ */
+describe('whether a pair is worth filing a row for on its own', () => {
+  it("refuses a board's results page, which lists jobs and is not one", () => {
+    expect(looksLikeRoleTitle('Now Hiring: 300 Software Intern Jobs')).toBe(false);
+    expect(looksLikeRoleTitle('Software Intern Jobs, Employment in Boston, MA')).toBe(false);
+    expect(looksLikeRoleTitle('1,204 Backend Engineer jobs')).toBe(false);
+    expect(looksLikeRoleTitle('Search jobs')).toBe(false);
+    expect(looksLikeRoleTitle('Job search results')).toBe(false);
+  });
+
+  /*
+   * And not the employer, on a list of the places you look for work.
+   *
+   * The first version of this refused any application whose company was
+   * Indeed, LinkedIn, Google or Reddit, on the grounds that those are boards
+   * rather than employers. They are also four of the largest employers
+   * anybody using this is applying to, and the rule meant no automatic row
+   * for any of them — a worse error than the one it was fixing. What the
+   * tracker actually filled up with was a board's *results page*, which is
+   * something the role says.
+   */
+  it('and does not refuse an employer for having a job board', () => {
+    expect(looksLikeAnApplication('Google', 'Software Engineer, Early Career')).toBe(true);
+    expect(looksLikeAnApplication('LinkedIn', 'Software Engineer Intern')).toBe(true);
+    expect(looksLikeAnApplication('Indeed', 'Backend Engineer')).toBe(true);
+    // The Reddit row in the tracker was refused by what its role was, which
+    // was an image address, and that is still refused below.
+    expect(looksLikeAnApplication('Reddit', 'Android Engineer')).toBe(true);
+  });
+
+  it('refuses a role that is an address somebody pasted', () => {
+    expect(looksLikeRoleTitle('https://preview.redd.it/qz1.jpeg?width=1280&format=pjpg')).toBe(false);
+    expect(looksLikeRoleTitle('www.acme.test/careers')).toBe(false);
+    expect(looksLikeRoleTitle('boards.greenhouse.io')).toBe(false);
+    expect(looksLikeRoleTitle('Backend Engineer?utm_source=indeed')).toBe(false);
+  });
+
+  it('refuses a when with no what', () => {
+    expect(looksLikeRoleTitle('2027 Summer')).toBe(false);
+    expect(looksLikeRoleTitle('Summer 2027')).toBe(false);
+    expect(looksLikeRoleTitle('Fall 2026 / Spring 2027')).toBe(false);
+    // And keeps the real intake that says both.
+    expect(looksLikeRoleTitle('Summer 2027 Software Engineering Intern')).toBe(true);
+  });
+
+  it('refuses the page talking about itself, and a role that is not words', () => {
+    expect(looksLikeRoleTitle('Apply')).toBe(false);
+    expect(looksLikeRoleTitle('Job Details')).toBe(false);
+    expect(looksLikeRoleTitle('R-129384')).toBe(false);
+    expect(looksLikeRoleTitle('')).toBe(false);
+  });
+
+  it('takes the ordinary job, which is the whole point of the gate', () => {
+    expect(looksLikeAnApplication('Indeed', 'Now Hiring: 300 Software Intern Jobs')).toBe(false);
+    expect(looksLikeAnApplication('Streamly', 'Data Platform Intern')).toBe(true);
+    expect(looksLikeAnApplication('ByteDance', 'Software Engineer Intern (2027 Summer)')).toBe(true);
+    expect(looksLikeAnApplication('Helios', 'Platform Engineer')).toBe(true);
+    // Including the ones with no role noun anywhere in them, which is why the
+    // gate does not ask for one: these are real intakes.
+    expect(looksLikeAnApplication('Acme', 'Product Marketing, Early Career')).toBe(true);
+    expect(looksLikeAnApplication('Vega', 'Quantitative Trading')).toBe(true);
   });
 });
