@@ -293,7 +293,24 @@ export class Repo {
     // directory to a single entry, so `rmm save` said "Saved 1 file — drafts/"
     // and committed six, and the editor's unsaved-work list under-reported the
     // same way.
-    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...this.scope]).catch(() => '');
+    /*
+     * Not caught.
+     *
+     * This used to be `.catch(() => '')`, which turned every way git can
+     * refuse to answer — an index left truncated by a killed process, a
+     * `status` that outgrew the 8 MB buffer, a permission problem in `.git` —
+     * into an empty list. `saveStore` reads that list as the whole question:
+     * nothing pending means nothing to commit, which it reports as `saved:
+     * false`, documented as "everything was already committed — *not an
+     * error*". So `rmm save` printed nothing-to-save and exited 0, and the
+     * editor's Save button reported success, for a store where git had not
+     * been able to look. The one command whose entire job is to make "is my
+     * work safe?" unambiguous answered yes without having asked.
+     *
+     * A repository that is not there yet is the one empty answer that is
+     * true, and it is already handled above.
+     */
+    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...this.scope]);
 
     const records = out.split('\0');
     const changes: PendingChange[] = [];
