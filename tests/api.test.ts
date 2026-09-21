@@ -3041,6 +3041,35 @@ describe('which letters and answers count as your writing', () => {
 });
 
 /*
+ * The panel that explains a broken save must not be the one that breaks.
+ *
+ * `pending()` refuses to report an empty list when git would not answer —
+ * that refusal is what stopped `rmm save` calling it "already saved". This
+ * route feeds Save & Files, where somebody goes to find out what is wrong, so
+ * it has to keep rendering: the list empty, with the reason beside it.
+ */
+describe('the store panel when git will not answer', () => {
+  it('still answers, and says why the list is empty', async () => {
+    await request(app).post('/api/store/save').send({}).expect(200);
+    // What a killed `git add` leaves behind.
+    fs.writeFileSync(path.join(t.dir, '.git', 'index'), 'not an index', 'utf8');
+
+    const res = await request(app).get('/api/config/store').expect(200);
+    expect(res.body.pending).toEqual([]);
+    expect(String(res.body.pendingError)).toMatch(/index|corrupt|fatal/i);
+    // And the rest of the panel is still there to be read.
+    expect(res.body.dir).toBe(t.dir);
+    expect(res.body.isRepo).toBe(true);
+  });
+
+  it('and says nothing of the sort when git is fine', async () => {
+    await request(app).post('/api/store/save').send({}).expect(200);
+    const res = await request(app).get('/api/config/store').expect(200);
+    expect(res.body.pendingError).toBeUndefined();
+  });
+});
+
+/*
  * An entry write says what it says, and nothing about what it leaves out.
  *
  * The rule is stated twice elsewhere in `api.ts` — "a caller that does not

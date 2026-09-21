@@ -7650,9 +7650,23 @@ async function loadProjectSettings() {
    * does not have. This is the only place that can say it.
    */
   const brokenHistory = config.git.autoCommit ? info.lastCommitError : null;
+  /*
+   * And git refusing to say what has changed, which is worse than either.
+   *
+   * An empty list of unsaved files is what this panel shows when everything
+   * is saved, so a git that will not answer must not be allowed to render as
+   * that — it is the exact confusion `rmm save` used to cause by reporting
+   * "already saved" for a store it had not managed to look at. First, because
+   * it is the news: nothing else here can be trusted while it is true.
+   */
+  const cannotLook = info.pendingError;
   const unsaved = el('div', {
-    className: brokenHistory ? 'result bad' : pending.length > 0 ? 'result idle' : 'result ok',
-    textContent: brokenHistory
+    className: cannotLook || brokenHistory ? 'result bad' : pending.length > 0 ? 'result idle' : 'result ok',
+    textContent: cannotLook
+      ? `Git would not say what has changed here: ${cannotLook}. ` +
+        'Until that is fixed nothing can be saved to the history, and this panel cannot tell you ' +
+        'whether anything is waiting to be.'
+      : brokenHistory
       ? 'Nothing has been recorded in the version history since ' +
         `${new Date(brokenHistory.at).toLocaleString()}: ` +
         `${brokenHistory.message}. Your files are all written — it is the history that has stopped. ` +

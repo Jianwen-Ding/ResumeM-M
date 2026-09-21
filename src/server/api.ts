@@ -973,12 +973,33 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/config/store',
     handler(async (_req, res) => {
       const remote = await repo.remoteStatus();
+
+      /*
+       * Asked, and answered even when git will not answer.
+       *
+       * `pending()` refuses to report an empty list when it could not look —
+       * an empty list is what `rmm save` used to call "already saved". This
+       * panel is where somebody goes to find out what is wrong with their
+       * save, so it is the one place that has to keep rendering: the list
+       * empty, with the reason beside it, rather than an error where the
+       * diagnostics should be.
+       */
+      let pending: Awaited<ReturnType<typeof repo.pending>> = [];
+      let pendingError: string | undefined;
+      try {
+        pending = await repo.pending();
+      } catch (err) {
+        pendingError = err instanceof Error ? err.message : String(err);
+      }
+
       res.json({
         dir: store.root,
         isRepo: await repo.isRepo(),
         commits: (await repo.log(1)).length,
         remote,
-        pending: await repo.pending(),
+        pending,
+        // Empty above because git refused, not because there is nothing.
+        pendingError,
         // Why the history stopped recording, when it has. See
         // `Repo.lastCommitError`.
         lastCommitError: repo.lastCommitError,
