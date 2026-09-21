@@ -460,7 +460,17 @@ describe('restoring a version', () => {
       .send({
         ...entry,
         bullets: [
-          { ...bullet, variants: bullet.variants.map((v) => ({ ...v, text: 'REWRITTEN SHARED BULLET' })) },
+          /*
+           * Each phrasing rewritten to its own text. They used to be rewritten
+           * to one string, which is a state the store now refuses on the way
+           * in — three identical wordings of one line is a stepper with three
+           * steps that do nothing. See `duplicates.ts`. What this group is
+           * about is the change being shared, and it still is.
+           */
+          {
+            ...bullet,
+            variants: bullet.variants.map((v) => ({ ...v, text: `REWRITTEN SHARED BULLET (${v.label})` })),
+          },
           ...entry.bullets!.slice(1),
         ],
       })

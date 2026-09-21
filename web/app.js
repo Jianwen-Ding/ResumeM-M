@@ -759,6 +759,33 @@ function bulletName(entry, bullet) {
  * stale page, and nothing to press to catch up.
  */
 /**
+ * Refuse a second copy of an option, before anything is sent.
+ *
+ * A skills group is a list of options and so is a list bullet — "Unity,
+ * Unreal, Godot" — and the add dialog shows neither of them while you type
+ * into it. The groups are long and a technology added six months ago is not
+ * something anybody remembers, so the same one goes in twice and what comes
+ * out is a resume line reading "Unity, Unreal, Unity": a mistake the reader
+ * notices and the writer never does.
+ *
+ * The rule itself lives in the store, where every writer passes — see
+ * `duplicates.ts`. This is the same rule asked here so the answer arrives
+ * without a round trip and names the group it is about, and so that nothing
+ * is written and then complained about.
+ *
+ * Case and spacing only. "Node" and "Node.js" are two names somebody may
+ * mean to keep apart, and merging them would be deleting a decision.
+ */
+function alreadyThere(items, text, where) {
+  const key = (s) => String(s ?? '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const wanted = key(text);
+  const clash = (items ?? []).find((i) => key(i.text) === wanted);
+  if (!clash) return false;
+  setStatus(`"${String(clash.text)}" is already in ${where}.`, true);
+  return true;
+}
+
+/**
  * Something changed, so save it — and recompile, unless it cannot show.
  *
  * `recompile: false` is for changes that alter the save without altering the
