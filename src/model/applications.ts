@@ -196,24 +196,49 @@ export function identity(company: string, role: string): string {
 }
 
 /**
+ * What each kind of lost reference is called in a sentence a person reads,
+ * singular and plural, in the order they are listed.
+ *
+ * Ordered deliberately: an entry gone is the biggest hole in the document and
+ * a list item the smallest, and somebody skimming this line before attaching
+ * a file should meet the worst of it first.
+ */
+const LOST_WORDS: Record<string, [string, string]> = {
+  entry: ['entry', 'entries'],
+  bullet: ['line', 'lines'],
+  skillGroup: ['skills group', 'skills groups'],
+  skill: ['skill', 'skills'],
+  wording: ['wording', 'wordings'],
+  listItem: ['list item', 'list items'],
+};
+
+/**
  * "One entry and two wordings", from the resolver's count of what it could
  * not find. Undefined when it found everything, so the caller can ask
  * whether there is anything to say by asking whether this is there.
+ *
+ * Also undefined when everything in the list is of a kind this does not name,
+ * rather than "  this resume chose is no longer in your store." — the kinds
+ * grew and the counting did not, once.
  */
-export function describeLost(lost: { kind: 'entry' | 'wording' | 'skill' }[]): string | undefined {
-  if (lost.length === 0) return undefined;
-  const entries = lost.filter((l) => l.kind === 'entry').length;
-  const wordings = lost.filter((l) => l.kind === 'wording').length;
-  const skills = lost.filter((l) => l.kind === 'skill').length;
+export function describeLost(lost: { kind: string }[]): string | undefined {
   const parts: string[] = [];
-  if (entries > 0) parts.push(`${entries} ${entries === 1 ? 'entry' : 'entries'}`);
-  if (wordings > 0) parts.push(`${wordings} ${wordings === 1 ? 'wording' : 'wordings'}`);
-  // A pinned skill the store no longer has counts too: the line it was on
-  // comes out shorter, and nothing else on the page says why.
-  if (skills > 0) parts.push(`${skills} ${skills === 1 ? 'skill' : 'skills'}`);
-  const what = parts.join(parts.length > 2 ? ', ' : ' and ');
-  const verb = entries + wordings + skills === 1 ? 'is' : 'are';
-  return `${what} this resume chose ${verb} no longer in your store.`;
+  let total = 0;
+  for (const [kind, [one, many]] of Object.entries(LOST_WORDS)) {
+    const n = lost.filter((l) => l.kind === kind).length;
+    if (n === 0) continue;
+    total += n;
+    parts.push(`${n} ${n === 1 ? one : many}`);
+  }
+  if (total === 0) return undefined;
+  /*
+   * "a, b and c", not "a, b, c". The old form switched wholesale to commas
+   * the moment there were three parts, which read as a truncated list rather
+   * than a finished sentence — and the list can now run to six.
+   */
+  const what =
+    parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
+  return `${what} this resume chose ${total === 1 ? 'is' : 'are'} no longer in your store.`;
 }
 
 /**

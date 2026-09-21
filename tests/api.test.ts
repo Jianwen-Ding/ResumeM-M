@@ -1317,6 +1317,47 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     expect(res.body.fits).toBe(true);
   });
 
+  /*
+   * And says what the resume asked for that is not there, as things and not
+   * only as sentences.
+   *
+   * The editor draws a "Remove from this resume" button off this. A warning
+   * about an id that names nothing is a dead end on its own — the thing it
+   * points at is in no picker, it being gone is the problem — so without
+   * this the only ways out of a resume left pointing at a deleted line were
+   * editing the YAML or building the resume again.
+   */
+  it('names what the resume asks for and the store has lost', async () => {
+    const res = await request(app)
+      .post('/api/render')
+      .send({
+        spec: {
+          id: 'preview',
+          label: 'Preview',
+          sections: [
+            { kind: 'experience', entries: ['exp_acme', 'exp_gone'], bullets: { exp_acme: ['b_pipeline', 'b_cut'] } },
+          ],
+          choices: { b_pipeline: 'v_renamed' },
+        },
+      })
+      .expect(200);
+    expect(res.body.lost).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'entry', id: 'exp_gone' }),
+        expect.objectContaining({ kind: 'bullet', id: 'b_cut' }),
+        expect.objectContaining({ kind: 'wording', id: 'b_pipeline' }),
+      ]),
+    );
+    // Each one word for word as the warning beside it, which is how the
+    // editor shows one row per problem rather than two.
+    for (const l of res.body.lost) expect(res.body.warnings).toContain(l.says);
+  });
+
+  it('says nothing lost about a resume that asks only for what exists', async () => {
+    const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    expect(res.body.lost).toEqual([]);
+  });
+
   it('compiles the master document', async () => {
     const res = await request(app).post('/api/render').send({ master: true }).expect(200);
     expect(res.body.pdfUrl).toMatch(/^\/pdf\/\.previews\/master-[0-9a-f]{8}\.pdf$/);

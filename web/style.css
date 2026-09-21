@@ -433,6 +433,24 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
   border-radius: var(--radius-sm);
   margin-bottom: 4px;
 }
+/*
+ * A warning you can do something about, which is the only kind with a button.
+ * The sentence takes the room it needs and the button keeps its width, so a
+ * long id does not squeeze "Remove from this resume" onto three lines.
+ */
+.warnings .orphan {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.warnings .orphan .what { flex: 1; min-width: 0; }
+.warnings .orphan button.drop-orphan {
+  flex: none;
+  color: var(--warn);
+  background: transparent;
+  border-color: rgba(0, 0, 0, .12);
+}
+.warnings .orphan button.drop-orphan:hover { background: rgba(0, 0, 0, .05); }
 
 /* ---- The mix-and-match editor ---- */
 

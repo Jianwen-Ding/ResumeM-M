@@ -1517,6 +1517,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         warnings: result.warnings,
+        /*
+         * The same problems again, as things the editor can offer to remove.
+         *
+         * `warnings` are sentences, and a sentence about an id that names
+         * nothing is a dead end: the thing it points at is not in any picker,
+         * because it does not exist, so there is nowhere to go and untick it.
+         * This is what the warnings panel hangs its "Remove from this resume"
+         * button off. See `LostReference`.
+         */
+        lost: resolved.lost ?? [],
         pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
       });
     }),
