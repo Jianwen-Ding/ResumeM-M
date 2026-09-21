@@ -115,6 +115,71 @@ describe('tailoring from a space', () => {
     const res = await tailor('no-such-space').expect(400);
     expect(res.body.error).toMatch(/no-such-space/);
   });
+
+  /*
+   * Two postings whose names a slug cannot tell apart.
+   *
+   * `applicationId` was taught this lesson already — a slug is ASCII-only and
+   * truncates at sixty, so a company written in Chinese reduces to nothing and
+   * two long titles sharing a prefix reduce to the same thing. `fingerprint`
+   * and `faithful` exist for exactly that, and the tracker row, the bundle
+   * folder and the upload file have all been keyed through them since.
+   *
+   * The tailored resume's own id was not: it was `job-<slug>-<slug>` and
+   * nothing else, and `store.saveResume` writes `resumes/<id>.yaml` over
+   * whatever is there. So two spaces that slug alike shared one file. The
+   * second tailoring overwrote the first, in silence, and the first space —
+   * still showing its own posting, its own letter, its own diff — would have
+   * sent the other job's resume.
+   *
+   * "C++ Engineer" and "C# Engineer" is the everyday shape of it: punctuation
+   * is all that separates them and a slug keeps none of it.
+   */
+  it('gives two postings a slug cannot tell apart two resumes', async () => {
+    serve();
+    const plus = await openSpace('Acme', 'C++ Engineer');
+    const sharp = await openSpace('Acme', 'C# Engineer');
+
+    const first = await tailor(plus.id).expect(200);
+    const second = await tailor(sharp.id).expect(200);
+
+    expect(second.body.spec.id).not.toBe(first.body.spec.id);
+
+    // And the first one is still on disk, still saying which job it is for.
+    const resumes = t.store.load().resumes;
+    const kept = resumes.find((r) => r.id === first.body.spec.id);
+    expect(kept?.label).toBe('C++ Engineer — Acme');
+    expect(resumes.find((r) => r.id === second.body.spec.id)?.label).toBe('C# Engineer — Acme');
+  });
+
+  /*
+   * The same collision with no ASCII at all, which is where `slug` gives up
+   * entirely rather than merely blurring: both halves reduce to the empty
+   * string, so every such posting minted `job--` and they all shared one file.
+   */
+  it('gives two postings with no ASCII in them two resumes', async () => {
+    serve();
+    const one = await openSpace('字节跳动', '软件工程师');
+    const two = await openSpace('阿里巴巴', '后端工程师');
+
+    const first = await tailor(one.id).expect(200);
+    const second = await tailor(two.id).expect(200);
+
+    expect(first.body.spec.id).not.toBe(second.body.spec.id);
+    expect(t.store.load().resumes.find((r) => r.id === first.body.spec.id)?.label).toBe('软件工程师 — 字节跳动');
+  });
+
+  /*
+   * And the ordinary case is untouched: a name a slug represents faithfully
+   * still gets the readable id, because an id is meant to be recognisable in
+   * a folder listing. A fix that hashed everything would have cost that.
+   */
+  it('leaves a readable name readable', async () => {
+    serve();
+    const draft = await openSpace('Streamly', 'Data Platform Intern');
+    const res = await tailor(draft.id).expect(200);
+    expect(res.body.spec.id).toBe('job-streamly-data-platform-intern');
+  });
 });
 
 describe('when the AI is in the loop', () => {

@@ -81,6 +81,19 @@ async function openSave(store: Store, repo: Repo): Promise<void> {
     );
   }
 
+  /*
+   * Before the sweep, and before anything is served: a space still pointing
+   * at the old name would tailor from its own last copy. See
+   * `migrateTailoredIds`.
+   */
+  const { renamed } = store.migrateTailoredIds();
+  if (renamed.length > 0) {
+    console.log(
+      `ResumeM-M: renamed ${renamed.length} tailored resume(s) so two postings cannot share one — ` +
+        `${renamed.map((r) => `${r.from} → ${r.to}`).join(', ')}.`,
+    );
+  }
+
   const { swept, held } = await sweepTemporary(store, repo);
   if (swept.length > 0) {
     console.log(

@@ -181,6 +181,46 @@ export function applicationId(company: string, role: string, at = new Date()): s
   return faithful(company, role) ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
 }
 
+/** The shape a tailored copy's id had before `tailoredResumeId`. */
+export function legacyTailoredResumeId(company: string, role: string): string {
+  return `job-${slug(company)}-${slug(role ?? 'role')}`.slice(0, 60);
+}
+
+/**
+ * The id of the resume copy tailored for one posting.
+ *
+ * The same lesson as `applicationId`, learned separately and late. This was
+ * `job-${slug(company)}-${slug(role)}` and nothing else, and `saveResume`
+ * writes `resumes/<id>.yaml` over whatever is already there — so two postings
+ * a slug cannot tell apart shared one file, and the second tailoring
+ * overwrote the first in silence. The first space carried on showing its own
+ * posting, its own letter and its own list of changes, and would have sent
+ * the other job's resume.
+ *
+ * Three ways two postings collide, all of them ordinary:
+ *
+ *   - Nothing for `slug` to keep. A company and a role written in Chinese
+ *     both reduce to the empty string, so every such posting minted `job--`.
+ *   - Punctuation is the whole difference. "C++ Engineer" and "C# Engineer"
+ *     are both `c-engineer`; `MEANT_IT` is what knows the characters a slug
+ *     throws away are part of these names rather than spacing between words.
+ *   - The id was cut to sixty characters. Two long titles sharing a prefix cut
+ *     to the same thing — and this one has to be asked of the *joined* id,
+ *     not of each name, because `faithful` measures the halves and the
+ *     truncation happens after they are put together.
+ *
+ * Readable names keep reading readably, which is the point of a slug at all:
+ * an id is meant to be recognisable in a folder listing, and hashing every
+ * one of them to be safe would have cost that for nothing.
+ */
+export function tailoredResumeId(company: string, role: string): string {
+  const full = `job-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
+  const readable = full.slice(0, 60).replace(/-+$/, '');
+  return readable === full && faithful(company, role)
+    ? readable
+    : `${readable}-${fingerprint(company, role)}`;
+}
+
 /**
  * Does the slug still say which application this is?
  *

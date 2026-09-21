@@ -40,7 +40,7 @@ import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiP
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats } from '../model/applications.js';
+import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -2378,7 +2378,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * never had the guard the Workspace's tailor already had.
        */
       const employer = job.company ?? employerFallback(url);
-      const specId = `job-${slug(employer)}-${slug(job.title ?? 'role')}`.slice(0, 60);
+      const specId = tailoredResumeId(employer, job.title ?? 'role');
 
       const baseId = baseForCopy(data.resumes, baseResumeId, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
@@ -3630,7 +3630,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!html.trim()) throw new Error('This draft has no link and no posting text to work from');
 
       const job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
-      const specId = `job-${slug(draft.company)}-${slug(draft.role)}`.slice(0, 60);
+      const specId = tailoredResumeId(draft.company, draft.role);
 
       /*
        * Tailoring twice must not make a resume that inherits from itself. The
