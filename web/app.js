@@ -843,14 +843,40 @@ function scheduleAutoSave() {
   }, AUTOSAVE_DELAY_MS);
 }
 
-/** Write the current selection to the store, without making a commit. */
+/**
+ * Write the current selection to the store, without making a commit.
+ *
+ * One at a time, behind whatever is already in the air — the same rule
+ * `inEntryLane` states for entries, and for the same reason. This had none:
+ * it overwrote the promise it was holding and left two PUTs of one file
+ * racing. A tick, and another tick a moment later while the first write is
+ * still out — ordinary on a store that is also compiling a PDF — and either
+ * of them could be the one the server finished last.
+ *
+ * Both halves of the loss are silent. On disk the older selection can win.
+ * In the editor each reply ends by folding its own `spec` into the cached
+ * resume, so a slow first reply landing after a fast second one writes the
+ * *older* selection back over the newer one, under a status chip reading
+ * "All changes saved". Nothing is wrong until you switch resumes and come
+ * back, or reload, and find the edit undone.
+ *
+ * The spec is read inside the lane rather than before it, so the write that
+ * finally goes carries everything ticked while it was waiting: one write for
+ * the lot, rather than a queue of them.
+ */
 async function autoSave() {
   if (!state.dirty || !state.resumeId) return;
-  const spec = currentSpec();
-  state.dirty = false; // further edits re-dirty it; this one is in flight
   setSaveState('saving');
 
-  autoSaving = (async () => {
+  const ahead = autoSaving;
+  const mine = (async () => {
+    // Never rejects, so one failed write does not wedge the ones behind it.
+    if (ahead) await ahead.catch(() => undefined);
+    // The write ahead may have carried this edit already.
+    if (!state.dirty || !state.resumeId) return;
+
+    const spec = currentSpec();
+    state.dirty = false; // further edits re-dirty it; this one is in flight
     try {
       await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0`, {
         method: 'PUT',
@@ -865,11 +891,17 @@ async function autoSave() {
     } catch (err) {
       state.dirty = true; // it did not land; try again on the next edit
       setSaveState('failed', err.message);
-    } finally {
-      autoSaving = null;
     }
   })();
-  return autoSaving;
+
+  autoSaving = mine;
+  try {
+    await mine;
+  } finally {
+    // Only the last one queued clears the slot, or a save queued behind this
+    // one would be dropped from the chain.
+    if (autoSaving === mine) autoSaving = null;
+  }
 }
 
 /**
