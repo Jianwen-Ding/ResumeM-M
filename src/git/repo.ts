@@ -513,7 +513,39 @@ export class Repo {
         };
       });
 
-    const diff = await this.git(['show', '--pretty=format:', '--unified=3', hash]);
+    /*
+     * The patch, when there is any prospect of showing it.
+     *
+     * The cap below is applied to what git handed back, which is too late:
+     * `this.git` reads through an 8 MB buffer, and a commit whose patch is
+     * larger than that does not come back truncated, it rejects with
+     * `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`. Nothing caught it. The first save
+     * of an imported store is one commit holding the whole of it — a corpus
+     * of years of writing included — so `rmm save` threw *after* making that
+     * commit, reporting failure for a save that had worked, and
+     * `GET /api/history/:hash` answered 500 for that commit from then on.
+     *
+     * `--numstat` above already says how much changed, without parsing
+     * anything, so the size is known before the patch is asked for. The line
+     * below is drawn against the *buffer*, not against the 200,000-character
+     * display cap: a patch between those two is fetched and truncated as it
+     * always was, because the first 200,000 characters of a large diff are
+     * worth more than a sentence saying there was one. Two hundred thousand
+     * changed lines is 8 MB at forty bytes a line, which is longer than any
+     * line in a store of YAML and prose.
+     *
+     * Caught as well as counted, because bytes per line is not fixed and a
+     * commit of very long lines can clear the count and still overflow. A
+     * history entry that says it is too large to show is a working panel; one
+     * that throws is not.
+     */
+    const lines = files.reduce((n, f) => n + (f.added ?? 0) + (f.removed ?? 0), 0);
+    const TOO_MUCH_TO_SHOW = 200_000;
+    const enormous = `This commit changes ${lines.toLocaleString()} lines, which is too much to show here.`;
+    const diff =
+      lines > TOO_MUCH_TO_SHOW
+        ? enormous
+        : await this.git(['show', '--pretty=format:', '--unified=3', hash]).catch(() => enormous);
 
     return {
       hash: full.trim(),
