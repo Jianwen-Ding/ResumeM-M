@@ -1545,8 +1545,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         } else {
           prompt = entryFeedbackPrompt(data, entry);
           const titleField = entry.title;
-          const title = typeof titleField === 'string' ? titleField
+          const title = titleField === undefined ? undefined
+            : typeof titleField === 'string' ? titleField
             : titleField.variants.find(v => v.id === titleField.default)?.text ?? titleField.variants[0]?.text;
+          // Named by its id when it has no title, which is what this line is
+          // for: a nameless entry is the one you most need pointing at.
           about = `Entry: ${title || entry.id}`;
         }
       } else {

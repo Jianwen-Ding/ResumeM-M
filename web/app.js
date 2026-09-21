@@ -3188,6 +3188,21 @@ async function editEntry(entry) {
   ], 'Fields that have alternates are edited through their own dropdown.');
   if (!answer) return;
 
+  /*
+   * The same refusal the alternates dropdown gives, on the form that was the
+   * other way in.
+   *
+   * Deleting the last alternate of a title says "An entry needs a title —
+   * rewrite it rather than deleting it"; emptying the box here simply did
+   * `delete next.title` and saved. Nothing downstream asks for one, so the
+   * entry went to the renderer nameless and printed a blank where the
+   * employer's name belongs.
+   */
+  if (!isVariantField(entry.title) && !answer.title?.trim()) {
+    setStatus('An entry needs a title — rewrite it rather than clearing it', true);
+    return;
+  }
+
   const next = { ...entry };
   for (const f of ['title', 'subtitle', 'dates', 'location']) {
     if (isVariantField(entry[f])) continue;

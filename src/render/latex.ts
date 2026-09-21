@@ -171,6 +171,30 @@ export function unrenderableReason(text: string, what: 'resume' | 'cover letter'
  * stray `)` printed after the link text. Wikipedia, Jira, Confluence and MSDN
  * all mint URLs like that. One level is enough for every one of them, and
  * keeps the rule a regex.
+ *
+ * **An italic marker is not next to a bracket either, and may end at any
+ * punctuation.** The non-space rule above stops `Cleaned up *.log and *.tmp
+ * files`, and stopped nothing when the same globs were written in
+ * parentheses: `(` is not a space, so it was a legal place for a span to end,
+ * and `.` was a legal place for one to start. Measured, through `markup`:
+ *
+ *     Wrote cleanup jobs for (*.log) and (*.tmp) archives
+ *       → Wrote cleanup jobs for (\textit{.log) and (}.tmp) archives
+ *     Supports globs (*) and wildcards (*)
+ *       → Supports globs (\textit{) and wildcards (})
+ *
+ * Both asterisks gone and the clause between them in italics — the same
+ * silent change of meaning the non-space rule was written to end. So a span
+ * may not open on closing punctuation and may not close on opening
+ * punctuation, which costs real emphasis nothing: `(*really*)` still works,
+ * because it opens on `r` and closes on `y`.
+ *
+ * The other half of the same asymmetry: the closing marker had to be followed
+ * by one of `\s).,;:` or the end of the line, so `Ranked top 5% *nationally*!`
+ * and `*pre*-launch QA` printed their asterisks. Bold has no such list and
+ * `**pre**-launch` was therefore right while `*pre*-launch` was not, against a
+ * README that promises `*italic*` in any text field. `!`, `?`, quotes,
+ * brackets and a hyphen join the list.
  */
 /*
  * **Three asterisks are bold *and* italic, and have to be tried first.**
@@ -184,7 +208,7 @@ export function unrenderableReason(text: string, what: 'resume' | 'cover letter'
  * that renders it, it looks right.
  */
 const MARKUP =
-  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s(])\*(?=\S)([^*]+)(?<=\S)\*(?=[\s).,;:]|$)|`(.+?)`/g;
+  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s([{'"])\*(?=[^\s*.,;:!?)\]}])([^*]+)(?<=[^\s*([{])\*(?=[\s).,;:!?\]}'"-]|$)|`(.+?)`/g;
 
 /** Enough for bold inside a link inside italics; a guard, not a limit anyone meets. */
 const MAX_NESTING = 4;
@@ -534,8 +558,20 @@ ${lines}
         const left = e.subtitle
           ? `\\textbf{${lineTex(e.title)}} $|$ \\emph{${lineTex(e.subtitle)}}`
           : `\\textbf{${lineTex(e.title)}}`;
+        /*
+         * And the location, which this branch used to drop on the floor.
+         *
+         * The form offers a Location field for a project, the entry list
+         * shows it, and it is written to `projects.yaml` — it was resolved
+         * and carried all the way into `ResolvedEntry` and then simply never
+         * reached the page, here and in the master document both, with no
+         * warning that it had gone. Every other kind prints it, four lines
+         * down. The heading is one row of two cells, so it shares the right
+         * one with the dates, on the same separator the left cell uses.
+         */
+        const right = [e.dates, e.location].filter((v): v is string => Boolean(v)).map(lineTex).join(' $|$ ');
         return `    \\resumeProjectHeading
-      {${left}}{${e.dates ? lineTex(e.dates) : ''}}${bullets}`;
+      {${left}}{${right}}${bullets}`;
       }
 
       return `    \\resumeSubheading

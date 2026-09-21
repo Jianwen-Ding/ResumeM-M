@@ -103,9 +103,39 @@ export function normalizeEntry(entry: Entry): Entry {
     if (field === undefined) delete out[name];
     else out[name] = field;
   }
-  // A title is the one field that must print something.
-  if (out.title === undefined) out.title = out.id;
-  out.bullets = Array.isArray(entry.bullets) ? entry.bullets.map(normalizeBullet) : [];
+  /*
+   * A title that is missing stays missing, and one that is the entry's own id
+   * is treated as missing too.
+   *
+   * This line used to read `if (out.title === undefined) out.title = out.id`,
+   * under the comment "a title is the one field that must print something".
+   * What it printed was the slug. `resolveEntry` is written to catch exactly
+   * that — "It used to fall back to `entry.id`, so a resume went out with
+   * `exp_example_co` typeset in bold" — but every entry reaches the resolver
+   * through here, so by the time it looked, `title.trim()` was non-empty and
+   * the warning was unreachable. Clear the Company field in the editor and
+   * `\textbf{exp\_helios}` went out on the PDF, with `build`, `check`, `apply`
+   * and the editor all silent.
+   *
+   * The second half is the migration for saves that already have it on disk:
+   * the substitution was written into the YAML by `saveEntry`, so removing the
+   * fallback alone would leave those entries printing the slug for ever. Only
+   * a plain string is undone — the bug could not produce a set of alternates —
+   * and nobody names an entry after its own identifier.
+   */
+  if (typeof out.title === 'string' && out.title === out.id) delete out.title;
+  /*
+   * Filtered, like every other list in this file.
+   *
+   * `normalizeBullet` reads `bullet.variants` on its first line. A stray `-`
+   * left behind after deleting a bullet's text is `null` to the YAML parser,
+   * and the whole save became unopenable — "Cannot read properties of null
+   * (reading 'variants')" on every screen, from a `Store.load()` that threw
+   * before the machinery that says which file the problem is in could run.
+   */
+  out.bullets = Array.isArray(entry.bullets)
+    ? entry.bullets.filter((b) => b && typeof b === 'object').map(normalizeBullet)
+    : [];
 
   /*
    * A date the program can compare, read out of the words if the file does not

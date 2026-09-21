@@ -41,6 +41,23 @@ describe('loading', () => {
     expect(t.store.load().entries.map((e) => e.id)).not.toContain('exp_acme');
   });
 
+  /*
+   * A stray `-` left where a bullet's body used to be. YAML reads it as a
+   * `null` item in the list, and `normalizeBullet` dereferenced it on its
+   * first line: "Cannot read properties of null (reading 'variants')" — every
+   * screen, every resume, the master document and the tracker, out of a
+   * `Store.load()` that threw before the machinery that names the offending
+   * file could run. One blank line made the whole save unopenable.
+   */
+  it('survives a blank bullet left behind in a file', () => {
+    t.write(
+      'experience.yaml',
+      ['- id: exp_blank', '  kind: experience', '  title: Helios', '  bullets:', '    -', '    - id: b_one', '      variants:', '        - id: v1', '          label: Only', '          text: Shipped it', ''].join('\n'),
+    );
+    const entry = t.store.load().entries.find((e) => e.id === 'exp_blank');
+    expect(entry?.bullets?.map((b) => b.id)).toEqual(['b_one']);
+  });
+
   it('takes the resume id from the filename, so the two cannot diverge', () => {
     /*
      * The title was always the rule; the body asserted the opposite, and so did

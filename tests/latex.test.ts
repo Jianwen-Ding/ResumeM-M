@@ -77,6 +77,44 @@ describe('inline markup', () => {
     expect(inlineTex('* Led the team * Shipped the thing')).toBe('* Led the team * Shipped the thing');
   });
 
+  /*
+   * The same globs, in brackets. The non-space rule above saw nothing wrong
+   * with these: `(` is not a space, so it was a legal place for a span to
+   * close, and `.` was a legal place for one to open. Measured before the
+   * fix — `Wrote cleanup jobs for (\textit{.log) and (}.tmp) archives` — which
+   * prints as "(.log) and (.tmp)", with the clause between them in italics and
+   * the patterns no longer saying what the work was.
+   */
+  it('leaves two asterisks alone when they are bracketed globs', () => {
+    expect(inlineTex('Wrote cleanup jobs for (*.log) and (*.tmp) archives')).toBe(
+      'Wrote cleanup jobs for (*.log) and (*.tmp) archives',
+    );
+    expect(inlineTex('Supports globs (*) and wildcards (*)')).toBe('Supports globs (*) and wildcards (*)');
+    expect(inlineTex('Matched [*.yml] and [*.yaml]')).toBe('Matched [*.yml] and [*.yaml]');
+  });
+
+  /*
+   * And still emphasises inside brackets, which is the thing that rule must
+   * not cost: it opens on a letter and closes on a letter either way.
+   */
+  it('still emphasises a word inside brackets or quotes', () => {
+    expect(inlineTex('A (*really*) good idea')).toBe('A (\\textit{really}) good idea');
+    expect(inlineTex('He said "*never*" to that')).toBe('He said "\\textit{never}" to that');
+  });
+
+  /*
+   * Italics used to have to end on whitespace or one of `).,;:` — so
+   * `*pre*-launch` printed its asterisks while `**pre**-launch` did not, and
+   * the README promises `*italic*` in any text field with no such footnote.
+   */
+  it('closes italics on the punctuation people actually write', () => {
+    expect(inlineTex('Ranked top 5 *nationally*!')).toBe('Ranked top 5 \\textit{nationally}!');
+    expect(inlineTex('*pre*-launch QA')).toBe('\\textit{pre}-launch QA');
+    expect(inlineTex('Why *this*?')).toBe('Why \\textit{this}?');
+    // As bold already did, which is what made the difference visible.
+    expect(inlineTex('**pre**-launch QA')).toBe('\\textbf{pre}-launch QA');
+  });
+
   it('does the same for a pair of double asterisks', () => {
     expect(inlineTex('Globbed ** across the tree and ** again later')).toBe(
       'Globbed ** across the tree and ** again later',
@@ -250,6 +288,35 @@ describe('document generation', () => {
       }),
     );
     expect(out).toContain('\\resumeProjectHeading');
+  });
+
+  /*
+   * The form offers a project a Location, the entry list shows it, and it is
+   * written to `projects.yaml` — and the project branch of `section()` had no
+   * cell for it, so it was resolved, carried into `ResolvedEntry`, and then
+   * dropped with no warning. Every other kind prints it.
+   */
+  it('prints a project’s location, which used to be dropped', () => {
+    const withLocation = (dates?: string) =>
+      renderLatex(
+        resume({
+          sections: [
+            {
+              kind: 'project',
+              heading: 'Projects',
+              skillGroups: [],
+              entries: [
+                { id: 'p', kind: 'project', title: 'Thing', subtitle: 'Go, Redis', dates, location: 'Boston, MA', bullets: [] },
+              ],
+            },
+          ],
+        }),
+      );
+
+    expect(withLocation('2026')).toContain('{2026 $|$ Boston, MA}');
+    // And with no dates it is the whole of the right-hand cell, rather than
+    // sitting behind a stray separator.
+    expect(withLocation()).toContain('{Boston, MA}');
   });
 
   it('omits a section that resolved to nothing rather than printing an empty heading', () => {
