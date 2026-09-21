@@ -3007,3 +3007,72 @@ describe('which letters and answers count as your writing', () => {
     expect(res.body.error).toMatch(/letter|answer/);
   });
 });
+
+/*
+ * An entry write says what it says, and nothing about what it leaves out.
+ *
+ * The rule is stated twice elsewhere in `api.ts` — "a caller that does not
+ * mention a field is not asking for it to be cleared" — and this was the one
+ * write that did not follow it. It matters more than it used to: a line that
+ * goes now goes out of every resume that was showing it, so an entry saved
+ * without its lines would have taken the whole save's selections with it.
+ */
+describe('saving an entry without mentioning its lines', () => {
+  const lines = async () => (await request(app).get('/api/store').expect(200)).body.entries.find(
+    (e: { id: string }) => e.id === 'exp_acme',
+  ).bullets;
+
+  it('keeps the lines it did not mention', async () => {
+    const before = await lines();
+    expect(before.length).toBeGreaterThan(0);
+
+    await request(app)
+      .put('/api/entries/exp_acme')
+      .send({ id: 'exp_acme', kind: 'experience', title: 'Acme Co.' })
+      .expect(200);
+
+    expect(await lines()).toEqual(before);
+  });
+
+  it('and leaves the resumes that had chosen them alone', async () => {
+    // A resume that has actually chosen some of this entry's lines, because a
+    // resume that has chosen none has nothing for the cascade to take and
+    // would pass whatever happened.
+    const spec = (await request(app).get('/api/store').expect(200)).body.resumes.find(
+      (r: { id: string }) => r.id === 'base',
+    );
+    const lineIds = (await lines()).map((b: { id: string }) => b.id);
+    expect(lineIds.length).toBeGreaterThan(0);
+    await request(app)
+      .put('/api/resumes/base')
+      .send({
+        ...spec,
+        sections: spec.sections.map((sec: { kind: string }) =>
+          sec.kind === 'experience' ? { ...sec, bullets: { exp_acme: lineIds } } : sec,
+        ),
+      })
+      .expect(200);
+
+    // Read off disk, because the question is what the save says: a resume
+    // that still lists the lines is one the cascade did not reach.
+    const file = path.join(t.dir, 'resumes', 'base.yaml');
+    const before = fs.readFileSync(file, 'utf8');
+    expect(before).toContain(lineIds[0]);
+
+    await request(app)
+      .put('/api/entries/exp_acme')
+      .send({ id: 'exp_acme', kind: 'experience', title: 'Acme Co.' })
+      .expect(200);
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+  });
+
+  it('but an empty list still means there are none', async () => {
+    await request(app)
+      .put('/api/entries/exp_acme')
+      .send({ id: 'exp_acme', kind: 'experience', title: 'Acme Co.', bullets: [] })
+      .expect(200);
+
+    expect(await lines()).toEqual([]);
+  });
+});

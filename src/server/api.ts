@@ -696,7 +696,44 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.put(
     '/entries/:id',
     handler(async (req, res) => {
-      const entry = withDatesFrom({ ...(req.body as Entry), id: String(req.params.id) }, store);
+      const id = String(req.params.id);
+      const body = req.body as Partial<Entry>;
+
+      /*
+       * What the caller did not mention stays as the store had it.
+       *
+       * `normalizeEntry` reads an absent `bullets` as an empty list, which is
+       * the right reading of a *file* — an entry written by hand with no
+       * bullets has none — and the wrong reading of a request. Every field
+       * here except this one survives being left out, because leaving one out
+       * is what a caller does when it has nothing to say about it, and the
+       * two sibling writes in this file already say so in as many words:
+       * "a caller that does not mention a field is not asking for it to be
+       * cleared" (`POST /applications`, and `buildBundle` for the same five
+       * fields it once cleared).
+       *
+       * The editor always sends the whole entry, so this was not costing
+       * anybody anything yet — and the moment it did it would have cost them
+       * quietly, and now more than quietly: a delete cascades into the
+       * resumes, so an entry PUT without its lines would take every
+       * resume's selection of those lines with it, on every resume in the
+       * save, in one commit. A rule the rest of the file follows is worth
+       * following here before that happens rather than after.
+       *
+       * `[]` still clears them. Absent means "I have nothing to say about
+       * the lines"; an empty list means "there are none", and an entry whose
+       * lines have all been deleted has to remain sayable.
+       */
+      const stored = store.load().entries.find((e) => e.id === id);
+      const entry = withDatesFrom(
+        {
+          ...body,
+          id,
+          bullets: body.bullets ?? stored?.bullets,
+        } as Entry,
+        store,
+      );
+
       await withCommit(repo, autoCommit(), `Update entry "${entry.id}"`, () => store.saveEntry(entry));
       res.json(entry);
     }),
