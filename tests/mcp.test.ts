@@ -67,6 +67,42 @@ describe('a tailoring move that is checked when it is made', () => {
     expect(s.choose('edu_nowhere.dates', 'v_dec2026').text).toContain('There is no entry');
   });
 
+  /*
+   * A field that is not one of the four with wordings. `.gpa` exists on no
+   * entry and was told it "has only one wording"; `.bullets` and `.period`
+   * are objects with no variants and threw, failing the whole tool call.
+   */
+  it('names the real fields when the one asked for has no wordings to choose', () => {
+    const s = session();
+    for (const field of ['gpa', 'bullets', 'period', 'id']) {
+      const r = s.choose(`edu_neu.${field}`, 'v_anything');
+      expect(r.ok, field).toBe(false);
+      expect(r.text, field).toContain('title, dates, subtitle, location');
+      expect(r.text, field).not.toContain('has only one wording');
+    }
+  });
+
+  it('still says a real field with one wording has nothing to choose between', () => {
+    expect(session().choose('edu_neu.title', 'v_anything').text).toContain('has only one wording');
+  });
+
+  /*
+   * Named back, as reordering bullets and choosing skills name theirs. A typo
+   * or an entry from another section was dropped with a success and no word
+   * of it.
+   */
+  it('says which entries it ignored when putting a section in order', () => {
+    const r = session().orderEntries('experience', ['exp_acme', 'proj_thing', 'exp_typo']);
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain('Ignored, because they are not experience entries');
+    expect(r.text).toContain('proj_thing');
+    expect(r.text).toContain('exp_typo');
+  });
+
+  it('says nothing about ignoring when nothing was', () => {
+    expect(session().orderEntries('experience', ['exp_acme']).text).not.toContain('Ignored');
+  });
+
   it('never lets a wrong move leave anything behind', () => {
     const s = session();
     s.choose('b_pipeline', 'v_invented');

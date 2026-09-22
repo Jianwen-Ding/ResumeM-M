@@ -36,6 +36,10 @@ import type { AiPlan } from '../jobs/aiPlan.js';
 import { pickBullet } from '../model/resolve.js';
 import type { Bullet, Entry, MaybeVariant, ResolvedResume, SkillGroup, StoreData } from '../model/types.js';
 
+/** The entry fields that can carry alternate wordings — see `choose`. */
+const WORDED_FIELDS = ['title', 'dates', 'subtitle', 'location'] as const;
+type WordedField = (typeof WORDED_FIELDS)[number];
+
 export interface TailorPosting {
   company?: string;
   jobTitle?: string;
@@ -274,9 +278,22 @@ export class TailorSession {
     const dot = target.indexOf('.');
     if (dot > 0) {
       const entry = this.entries.get(target.slice(0, dot));
-      const name = target.slice(dot + 1) as 'title' | 'dates' | 'subtitle' | 'location';
-      const field = entry?.[name];
       if (!entry) return no(`There is no entry "${target.slice(0, dot)}". Entries: ${some([...this.entries.keys()])}.`);
+      /*
+       * Only the four fields that can have wordings.
+       *
+       * The name after the dot was cast and trusted, so `edu_neu.gpa` — a
+       * field no entry has — was told it "has only one wording", which sent a
+       * model looking for a second wording of a field that does not exist
+       * rather than for the right name. And `edu_neu.bullets` or `.period`,
+       * which are objects with no `variants`, reached `.variants.find` and
+       * threw: the whole tool call failed on a typo.
+       */
+      const name = target.slice(dot + 1);
+      if (!WORDED_FIELDS.includes(name as WordedField)) {
+        return no(`"${name}" is not a field with wordings to choose between. The fields are: ${WORDED_FIELDS.join(', ')}.`);
+      }
+      const field = entry[name as WordedField];
       if (!field || typeof field === 'string') {
         return no(`${target} has only one wording, so there is nothing to choose between.`);
       }
@@ -352,10 +369,17 @@ export class TailorSession {
       return no(`There is no "${kind}" section. The sections are: ${some(kinds)}.`);
     }
     const named = [...new Set(entryIds.filter((id) => mine.includes(id)))];
+    // Named back, as `order` and `skills` name theirs: a typo, or an entry
+    // from another section, was dropped with a success and no word of it, so
+    // the model had no reason to think any of its order had been ignored.
+    const strangers = entryIds.filter((id) => !mine.includes(id));
     if (named.length === 0) return no(`None of those are ${kind} entries. They are: ${some(mine)}.`);
     this.state.plan.entryOrder[kind] = named;
     const rest = mine.filter((id) => !named.includes(id));
-    return ok(`${kind} will read: ${[...named, ...rest].join(', ')}.`);
+    return ok(
+      `${kind} will read: ${[...named, ...rest].join(', ')}.` +
+        (strangers.length ? ` Ignored, because they are not ${kind} entries: ${some(strangers)}.` : ''),
+    );
   }
 
   /** Choose which items of a skills group to print. */
