@@ -1124,6 +1124,61 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
    * One hand edit or one bad merge, in a file that sits in a folder the user
    * is invited to open.
    */
+  /*
+   * A file of your own, left alone — and then taken on the sync after.
+   *
+   * The refusal above it says so in as many words, and names the exact way it
+   * used to go wrong: "the name then went into the manifest, so the *next*
+   * sync would have deleted it as ours." The refusal itself put it there.
+   * Every failure was recorded under one `FAILED` sentinel, which is right
+   * for an EBUSY or a full disk — those are ours to retry — and exactly wrong
+   * for "this belongs to the user", which is never ours to retry. On the next
+   * sync the name is in `from`, so it is in `claimed`, so the guard is
+   * skipped.
+   *
+   * Two ways it ends, both silent: the bundle still wants the name and
+   * overwrites it, or the application has moved on and the delete loop takes
+   * it as a stale file of ours.
+   */
+  it('leaves a file of your own alone on every sync, not just the first', async () => {
+    // A folder with a manifest that claims nothing — an application filed and
+    // since moved on, which is the ordinary way to arrive here.
+    const current = syncCurrent(t.store);
+    expect(fs.existsSync(path.join(current.dir, '.rmm-current.json'))).toBe(true);
+
+    const mine = path.join(current.dir, 'Test-Person-Resume.pdf');
+    fs.writeFileSync(mine, 'the one I polished by hand');
+
+    await bundleFor('Streamly');
+    const first = syncCurrent(t.store);
+    expect(first.problems?.join(' ')).toMatch(/a file of your own/);
+    expect(fs.readFileSync(mine, 'utf8')).toBe('the one I polished by hand');
+
+    // Nothing has changed since. Saying it again is the only honest answer.
+    const second = syncCurrent(t.store);
+    expect(fs.readFileSync(mine, 'utf8')).toBe('the one I polished by hand');
+    expect(second.problems?.join(' ')).toMatch(/a file of your own/);
+  });
+
+  /*
+   * And the other ending: the application moves on, so nothing wants the name
+   * any more, and the delete loop finds it listed as ours.
+   */
+  it('does not sweep away a file of your own once the application moves on', async () => {
+    const current = syncCurrent(t.store);
+    const mine = path.join(current.dir, 'Test-Person-Resume.pdf');
+    fs.writeFileSync(mine, 'the one I polished by hand');
+
+    await bundleFor('Streamly');
+    expect(syncCurrent(t.store).problems?.join(' ')).toMatch(/a file of your own/);
+
+    // Filed and gone to interview: the flat folder should hold nothing of its.
+    await bundleFor('Streamly', 'interview');
+    syncCurrent(t.store);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(fs.readFileSync(mine, 'utf8')).toBe('the one I polished by hand');
+  });
+
   it('will not delete the output folder on a source entry of "." or ".."', async () => {
     await bundleFor('Streamly');
     const current = syncCurrent(t.store);

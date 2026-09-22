@@ -44,6 +44,30 @@ export const STANDING = '\u0000standing';
 const FAILED = '\u0000failed';
 
 /**
+ * A name in this folder that is not ours to write, as opposed to one we could
+ * not write this time.
+ *
+ * The difference decides what the manifest records, and getting it wrong cost
+ * the user a file. Every failure went down under `FAILED`, which is right for
+ * an `EBUSY` or a full disk — those are ours, and the point of recording them
+ * is that the next sync retries. It is exactly wrong for "this belongs to the
+ * user": recording that name put it in `from`, so on the next sync it was in
+ * `claimed`, so the guard that had just refused to touch it was skipped.
+ *
+ * Measured: build an application over a file of your own, and the folder
+ * correctly says it was left alone — then reload the Applications tab, and it
+ * is overwritten with nothing reported. Which is the very failure the guard's
+ * own comment says it was written to stop: "the name then went into the
+ * manifest, so the *next* sync would have deleted it as ours."
+ *
+ * So a name refused for this reason is recorded nowhere. Untracked, it is not
+ * in `owned`, so the delete loop leaves it; and `cameFrom[name]` stays
+ * `undefined`, so the guard fires again and says so again. Saying the same
+ * true thing on every sync is the honest answer while nothing has changed.
+ */
+class NotOurs extends Error {}
+
+/**
  * What this folder put here last time.
  *
  * Without it, "rebuilt from the tracker" meant deleting every name that is not
@@ -379,6 +403,8 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
 
   const problems: string[] = [];
   const landed: string[] = [];
+  /** Names this folder refused because they are the user's. See `NotOurs`. */
+  const notOurs = new Set<string>();
   for (const [name, from] of wanted) {
     const to = path.join(dir, name);
     try {
@@ -394,6 +420,14 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
        */
       const at = fs.statSync(to, { throwIfNoEntry: false });
       if (at && !at.isFile()) {
+        /*
+         * A plain failure, not a `NotOurs`. A directory with the wanted name
+         * reads as the user's, and the comment above says so — but it is also
+         * what a copy interrupted halfway can leave behind, and `documents`
+         * pins the retry deliberately ("a directory is only the device for
+         * making the copy throw on demand"). Ambiguous, so it stays ours to
+         * retry. The *file* case below is the unambiguous one.
+         */
         throw new Error('something that is not a file already has that name here');
       }
       /*
@@ -413,7 +447,7 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
        * missing file into a folder that has stopped working.
        */
       if (at && tracked && !claimed.has(name) && cameFrom[name] === undefined) {
-        throw new Error('a file of your own already has that name here, so it was left alone');
+        throw new NotOurs('a file of your own already has that name here, so it was left alone');
       }
       /*
        * Copy when it is a different bundle, or when the same bundle has been
@@ -452,6 +486,7 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
        * resume.
        */
       const said = err instanceof Error ? err.message : String(err);
+      if (err instanceof NotOurs) notOurs.add(name);
       problems.push(`"${name}" could not be put in ${dir}: ${said}`);
     }
   }
@@ -476,8 +511,12 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
    * Recorded under `FAILED`, so the next sync always re-copies it: it is not
    * a path any bundle can have produced, and it is not `undefined`, which is
    * what the guard reads as "somebody else's".
+   *
+   * Every failure except the one that is not a failure of ours. A name held
+   * by a file of the user's is left out of both halves, so it stays
+   * unattributed and the guard refuses it again next time — see `NotOurs`.
    */
-  const failed = [...wanted.keys()].filter((name) => !landed.includes(name));
+  const failed = [...wanted.keys()].filter((name) => !landed.includes(name) && !notOurs.has(name));
   const from = Object.fromEntries([
     ...files.map((name) => [name, wanted.get(name)!]),
     ...failed.map((name) => [name, FAILED]),
