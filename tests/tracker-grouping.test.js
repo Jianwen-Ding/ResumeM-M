@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
 
@@ -20,14 +20,13 @@ afterEach(() => {
 });
 
 /*
- * What is still moving, and what is only a record.
+ * The tracker in the order the stages matter.
  *
  * Sorted by date alone, the application you are halfway through filling in
- * sits wherever its start date puts it — which after a busy week is below a
- * screenful of jobs that are sent, closed, or were never started. Those are
- * two different questions asked of the same table: "what am I in the middle
- * of" is a to-do list and "what have I sent" is a record, and a list that
- * interleaves them answers neither.
+ * sits wherever its start date puts it — after a busy week, below a screenful
+ * of jobs that are sent, closed, or were never started. The tracker is opened
+ * to ask "what needs me"; a list in date order answers "what happened
+ * recently" instead.
  */
 const app = (over) => ({
   role: 'Platform Engineer',
@@ -36,17 +35,21 @@ const app = (over) => ({
   ...over,
 });
 
-// Deliberately oldest, so date order alone would put them last. Anything that
-// sorts these to the top by accident is sorting by something else.
+/*
+ * Dates chosen against the grouping on purpose: the stages that must come
+ * first carry the *oldest* rows, so nothing here can pass by date order.
+ */
 const OLD = '2026-01-01T09:00:00Z';
+const MID = '2026-05-01T09:00:00Z';
 const NEW = '2026-08-01T09:00:00Z';
 
 const APPS = [
-  app({ id: 'a-applied-new', company: 'Zenith', status: 'applied', appliedAt: NEW }),
-  app({ id: 'b-applying-old', company: 'Helios', status: 'applying', appliedAt: OLD }),
-  app({ id: 'c-closed-new', company: 'Vega', status: 'closed', appliedAt: NEW }),
-  app({ id: 'd-interview-old', company: 'Altair', status: 'interview', appliedAt: OLD }),
-  app({ id: 'e-interested-new', company: 'Nova', status: 'interested', appliedAt: NEW }),
+  app({ id: 'a', company: 'AppliedCo', status: 'applied', appliedAt: NEW }),
+  app({ id: 'b', company: 'ClosedCo', status: 'closed', appliedAt: NEW }),
+  app({ id: 'c', company: 'ApplyingCo', status: 'applying', appliedAt: OLD }),
+  app({ id: 'd', company: 'NotStartedCo', status: 'interested', appliedAt: NEW }),
+  app({ id: 'e', company: 'OfferCo', status: 'offer', appliedAt: MID }),
+  app({ id: 'f', company: 'InterviewCo', status: 'interview', appliedAt: OLD }),
 ];
 
 async function draw(applications) {
@@ -86,72 +89,99 @@ function readOut() {
   );
 }
 
-describe('the tracker puts what is still moving at the top', () => {
-  it('lifts applying and interviewing above everything else, whatever their dates', async () => {
+describe('the tracker is ordered by what needs the reader', () => {
+  it('puts the stages in the order they matter, not the order they happen', async () => {
     await draw(APPS);
-    const out = readOut();
 
-    // The two in flux are the two *oldest* rows in the fixture, so this
-    // cannot pass by date order.
-    expect(out).toEqual([
-      '— Still going —',
-      'Helios',
-      'Altair',
-      '— Sent, finished, or not started —',
-      'Zenith',
-      'Vega',
-      'Nova',
+    expect(readOut()).toEqual([
+      '— Interviewing —',
+      'InterviewCo',
+      '— Applying —',
+      'ApplyingCo',
+      '— Got it! —',
+      'OfferCo',
+      '— Applied —',
+      'AppliedCo',
+      '— Not applied —',
+      'NotStartedCo',
+      '— Closed —',
+      'ClosedCo',
     ]);
-  });
-
-  it('keeps each group in date order within itself', async () => {
-    await draw([
-      app({ id: 'x', company: 'Older', status: 'applying', appliedAt: OLD }),
-      app({ id: 'y', company: 'Newer', status: 'applying', appliedAt: NEW }),
-      app({ id: 'z', company: 'Done', status: 'closed', appliedAt: NEW }),
-    ]);
-
-    expect(readOut()).toEqual(['— Still going —', 'Newer', 'Older', '— Sent, finished, or not started —', 'Done']);
-  });
-
-  it('counts each group beside its name', async () => {
-    await draw(APPS);
-    const counts = [...document.querySelectorAll('#apps-wrap tbody tr.group .group-count')].map((s) => s.textContent);
-    expect(counts).toEqual(['2 applications', '3 applications']);
   });
 
   /*
-   * A heading over the whole list says nothing, and an empty half says less
-   * than nothing. Both of these would look like a bug to somebody with three
-   * applications, all of them at the same stage.
+   * The two that must lead are the two oldest rows in the fixture, so this is
+   * the same fact as the check above said a different way: an ordering that
+   * fell back to dates would put AppliedCo and ClosedCo on top.
    */
-  it('says nothing when everything is in flux', async () => {
+  it('does not fall back to date order', async () => {
+    await draw(APPS);
+    const out = readOut().filter((r) => !r.startsWith('—'));
+
+    expect(out.slice(0, 2)).toEqual(['InterviewCo', 'ApplyingCo']);
+    expect(out.indexOf('AppliedCo')).toBeGreaterThan(out.indexOf('OfferCo'));
+  });
+
+  it('keeps each stage in date order within itself', async () => {
+    await draw([
+      app({ id: 'x', company: 'Older', status: 'applying', appliedAt: OLD }),
+      app({ id: 'y', company: 'Newer', status: 'applying', appliedAt: NEW }),
+      app({ id: 'z', company: 'Middle', status: 'applying', appliedAt: MID }),
+    ]);
+
+    // One stage only, so no headings — see below.
+    expect(readOut()).toEqual(['Newer', 'Middle', 'Older']);
+  });
+
+  it('counts each stage beside its name', async () => {
+    await draw([
+      app({ id: 'x', company: 'One', status: 'applying' }),
+      app({ id: 'y', company: 'Two', status: 'applying' }),
+      app({ id: 'z', company: 'Three', status: 'applied' }),
+    ]);
+
+    const counts = [...document.querySelectorAll('#apps-wrap tbody tr.group .group-count')].map((s) => s.textContent);
+    expect(counts).toEqual(['2 applications', '1 application']);
+  });
+
+  /*
+   * A single heading over the whole list repeats what the status filter
+   * already says, and on a tracker where everything is at one stage it is
+   * furniture.
+   */
+  it('says nothing when there is only one stage on screen', async () => {
     await draw([
       app({ id: 'x', company: 'Helios', status: 'applying' }),
-      app({ id: 'y', company: 'Altair', status: 'interview' }),
+      app({ id: 'y', company: 'Altair', status: 'applying' }),
     ]);
 
     expect(document.querySelectorAll('#apps-wrap tbody tr.group')).toHaveLength(0);
     expect(readOut()).toEqual(['Helios', 'Altair']);
   });
 
-  it('says nothing when nothing is', async () => {
+  /*
+   * `applications.yaml` is hand-editable, so a status this does not know
+   * about is a thing that happens. Dropping such a row would hide an
+   * application; putting it last is merely untidy.
+   */
+  it('shows a stage it has never heard of rather than losing it', async () => {
     await draw([
-      app({ id: 'x', company: 'Zenith', status: 'applied' }),
-      app({ id: 'y', company: 'Vega', status: 'closed' }),
+      app({ id: 'x', company: 'Known', status: 'applying' }),
+      app({ id: 'y', company: 'Strange', status: 'ghosted' }),
     ]);
 
-    expect(document.querySelectorAll('#apps-wrap tbody tr.group')).toHaveLength(0);
-    expect(readOut()).toEqual(['Zenith', 'Vega']);
+    const out = readOut();
+    expect(out).toContain('Strange');
+    expect(out.indexOf('Strange')).toBeGreaterThan(out.indexOf('Known'));
   });
 
   /*
    * The heading is not a row you can open, and the table's rows are. Leaving
    * it clickable means a click on the divider opens whichever application the
-   * event happens to reach, which is the kind of thing nobody reports and
-   * everybody notices.
+   * event happens to reach — the kind of thing nobody reports and everybody
+   * notices.
    */
-  it('does not make the divider look like something you can open', async () => {
+  it('does not make a heading look like something you can open', async () => {
     await draw(APPS);
     const heading = document.querySelector('#apps-wrap tbody tr.group');
 
@@ -161,9 +191,8 @@ describe('the tracker puts what is still moving at the top', () => {
   });
 
   /*
-   * Filtering narrows the table, and the grouping has to survive it: a filter
-   * that leaves only sent applications must not leave a "Still going" heading
-   * standing over them.
+   * Filtering narrows the table, and the grouping has to follow it down: a
+   * filter that leaves one stage must not leave headings standing over it.
    */
   it('regroups what a filter leaves behind', async () => {
     await draw(APPS);
@@ -172,7 +201,7 @@ describe('the tracker puts what is still moving at the top', () => {
     filter.value = 'applied';
     filter.dispatchEvent(new Event('change', { bubbles: true }));
 
-    await vi.waitFor(() => expect(readOut()).toEqual(['Zenith']));
+    await vi.waitFor(() => expect(readOut()).toEqual(['AppliedCo']));
     expect(document.querySelectorAll('#apps-wrap tbody tr.group')).toHaveLength(0);
   });
 });

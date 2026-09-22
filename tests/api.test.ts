@@ -1810,17 +1810,87 @@ describe('workspace', () => {
         ...patch,
       });
 
+  const trackedNow = async () => {
+    const { body } = await request(app).get('/api/applications').expect(200);
+    return {
+      row: body.applications.find((a: { company: string }) => a.company === 'Streamly'),
+      stats: body.stats,
+    };
+  };
+
   it('tracks the application as "applying" the moment a workspace opens', async () => {
     await open().expect(200);
 
-    const { body } = await request(app).get('/api/applications').expect(200);
-    const tracked = body.applications.find((a: { company: string }) => a.company === 'Streamly');
-    expect(tracked.status).toBe('applying');
-    expect(tracked.history[0].note).toBe('Workspace opened');
+    const { row, stats } = await trackedNow();
+    expect(row.status).toBe('applying');
+    expect(row.history[0].note).toBe('Workspace opened');
 
     // Not sent, so it cannot drag the response rate down.
-    expect(body.stats.responseRate).toBe(0);
-    expect(body.stats.byStatus.applying).toBe(1);
+    expect(stats.responseRate).toBe(0);
+    expect(stats.byStatus.applying).toBe(1);
+  });
+
+  /*
+   * Unless nobody asked for it.
+   *
+   * The extension opens a workspace as soon as a resume is built, and it
+   * builds one on anything job-shaped you open. Every one of those rows read
+   * `applying`, so the list that is supposed to say what is in flight said
+   * everything was: `Indeed — Now Hiring: 300 Software Intern Jobs`, a
+   * `preview.redd.it` image url, one row for `NVIDIA Corporation` and another
+   * for `2100 NVIDIA USA`.
+   *
+   * The place to write still opens — the letter is drafted before the form is
+   * ever seen. It is the stage that waits.
+   */
+  it('opens an unasked-for row at "not applied", not at "applying"', async () => {
+    const opened = await open({ auto: true, actedOnForm: false }).expect(200);
+
+    // The draft is there regardless: that is the whole point of the split.
+    expect(opened.body.draft?.id).toBeTruthy();
+
+    const { row } = await trackedNow();
+    expect(row.status).toBe('interested');
+    expect(row.history[0].note).toBe('Workspace opened, nothing sent yet');
+  });
+
+  it('moves it on when something is actually put into the form', async () => {
+    await open({ auto: true, actedOnForm: false }).expect(200);
+    expect((await trackedNow()).row.status).toBe('interested');
+
+    await open({ auto: true, actedOnForm: true }).expect(200);
+
+    const { row } = await trackedNow();
+    expect(row.status).toBe('applying');
+    expect(row.history.map((h: { note: string }) => h.note)).toContain('Started filling in the form');
+  });
+
+  /*
+   * Forwards only. A keeper tick on a tab left open behind an application
+   * that has since gone out must not drag it back to `applying` — that is the
+   * failure that gets a job applied for twice.
+   */
+  it('never drags a row that has gone out back to applying', async () => {
+    await open({ auto: true, actedOnForm: false }).expect(200);
+    const { row } = await trackedNow();
+    await request(app)
+      .post(`/api/applications/${encodeURIComponent(row.id)}/status`)
+      .send({ status: 'applied' })
+      .expect(200);
+
+    await open({ auto: true, actedOnForm: true }).expect(200);
+
+    expect((await trackedNow()).row.status).toBe('applied');
+  });
+
+  /*
+   * And somebody pressing "Write these in ResumeM-M" is applying, whatever
+   * the form has had put in it. That press carries no `auto`.
+   */
+  it('still opens at applying when a person asked for it', async () => {
+    await open({ actedOnForm: false }).expect(200);
+
+    expect((await trackedNow()).row.status).toBe('applying');
   });
 
   it('does not overwrite an application that is already being tracked', async () => {

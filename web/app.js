@@ -5797,31 +5797,41 @@ async function loadApplications() {
   }
 
   /*
-   * The ones still moving, first and apart from the rest.
+   * Grouped by stage, in the order the stages matter rather than the order
+   * they happen in.
    *
    * Sorted by date alone, the row you are in the middle of filling in sits
    * wherever its start date puts it — which after a busy week is halfway down
    * a screen of jobs that are finished, waiting, or were never applied to.
-   * Those are the two questions the tracker is opened to answer and they are
-   * not the same question: "what am I in the middle of" is a to-do list, and
-   * "what have I sent" is a record.
+   * The tracker is opened to ask "what needs me", and a list in date order
+   * answers "what happened recently" instead.
    *
-   * `applying` and `interview` are the two where the next move is the
-   * reader's. `applied` is waiting on somebody else, `interested` was never
-   * started, and `offer` and `closed` are over — none of those are in flux
-   * however recent they are.
+   * The order is not the ladder `STATUSES` prints in the dropdown, and is not
+   * meant to be. An interview is a date in the diary and outranks everything;
+   * an application being filled in is the next thing to finish; an offer is a
+   * decision owed to somebody. Below those three, `applied` is the pile you
+   * are waiting on — most of the list, most of the time, and none of it
+   * actionable. `interested` was never started and `closed` is over.
    */
-  const IN_FLUX = ['applying', 'interview'];
+  const STAGE_ORDER = ['interview', 'applying', 'offer', 'applied', 'interested', 'closed'];
   const byDate = (a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
-  const moving = showing.filter((a) => IN_FLUX.includes(a.status)).sort(byDate);
-  const settled = showing.filter((a) => !IN_FLUX.includes(a.status)).sort(byDate);
+
+  /*
+   * A stage this does not know about goes to the bottom rather than vanishing
+   * — a hand-edited `applications.yaml` can hold anything, and a row the
+   * reader cannot see is worse than one in the wrong place.
+   */
+  const stages = [...STAGE_ORDER, ...new Set(showing.map((a) => a.status).filter((s) => !STAGE_ORDER.includes(s)))];
+  const groups = stages
+    .map((stage) => ({ stage, rows: showing.filter((a) => a.status === stage).sort(byDate) }))
+    .filter((g) => g.rows.length > 0);
 
   /**
-   * A heading row inside the table, rather than two tables.
+   * A heading row inside the table, rather than one table per stage.
    *
-   * Two tables means two sets of column widths, and the columns drifting
-   * against each other across the split is exactly the thing that makes a
-   * grouped list harder to read than an ungrouped one.
+   * Several tables means several sets of column widths, and the columns
+   * drifting against each other across the splits is exactly the thing that
+   * makes a grouped list harder to read than an ungrouped one.
    */
   const heading = (text, count) =>
     el('tr', { className: 'group' }, [
@@ -5832,17 +5842,15 @@ async function loadApplications() {
     ]);
 
   /*
-   * Only when there is something on both sides of it. A heading over the
-   * whole list says nothing, and "Still going (0)" over an empty half says
-   * less than that.
+   * Headings only when there is more than one stage on screen. A single
+   * heading over the whole list repeats what the filter already says, and
+   * on a tracker where everything is at one stage it is pure furniture.
    */
-  const split = moving.length > 0 && settled.length > 0;
-  const rows = [
-    ...(split ? [heading('Still going', moving.length)] : []),
-    ...moving.map(rowFor),
-    ...(split ? [heading('Sent, finished, or not started', settled.length)] : []),
-    ...settled.map(rowFor),
-  ];
+  const named = groups.length > 1;
+  const rows = groups.flatMap((g) => [
+    ...(named ? [heading(statusLabel(g.stage), g.rows.length)] : []),
+    ...g.rows.map(rowFor),
+  ]);
 
   wrap.replaceChildren(
     el('table', {}, [
