@@ -159,7 +159,11 @@ describe('linking straight to one tracked application', () => {
  * scrolling.
  */
 describe('narrowing the tracker', () => {
-  const rows = () => [...document.querySelectorAll('#apps-wrap tbody tr')];
+  // The application rows, not the headings the list is grouped under — see
+  // tests/tracker-grouping.test.js. A heading is not something that was found
+  // or filtered, so counting one here would make every count below wrong by
+  // however many groups happen to be on screen.
+  const rows = () => [...document.querySelectorAll('#apps-wrap tbody tr:not(.group)')];
   const companies = () => rows().map((r) => r.children[1]?.textContent);
 
   const listing = [

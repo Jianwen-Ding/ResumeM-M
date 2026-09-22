@@ -5729,65 +5729,63 @@ async function loadApplications() {
         : `${showing.length} of ${plural(applications.length, 'application')}`;
   }
 
-  const rows = [...showing]
-    .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))
-    .map((a) => {
-      const sel = el('select');
-      for (const [s, label] of STATUSES) {
-        sel.append(el('option', { value: s, textContent: label, selected: s === a.status }));
-      }
-      sel.onchange = async () => {
-        const moved = sel.value;
-        await api(`/applications/${encodeURIComponent(a.id)}/status`, {
-          method: 'POST',
-          body: JSON.stringify({ status: moved }),
-        });
-        setStatus('Status updated');
-        // Once, on the way in — not every time the list repaints with an
-        // offer already on it.
-        if (moved === 'offer' && a.status !== 'offer') celebrate(a.company);
-        loadApplications();
-      };
-      const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
-        // Both dates get the same treatment: "2026-09-" over "17" is not a
-        // date, and wrapping the narrowest column steals two lines of height
-        // from every row to save nothing.
-        el('td', { className: 'when', textContent: a.appliedAt?.slice(0, 10) ?? '' }),
-        el('td', { textContent: a.company }),
-        el('td', { textContent: a.role }),
-        el('td', {}, [sel]),
-        // Blank, not a dash: an em-dash in a date column reads as a date that
-        // failed to load rather than as one that has not happened.
-        el('td', { className: 'when', textContent: sentOn(a) }),
-        el('td', {}, [
-          a.coverLetter ? el('span', { className: 'chip count', textContent: 'letter' }) : null,
-          a.answers?.length
-            ? el('span', { className: 'chip count', textContent: plural(a.answers.length, 'answer') })
-            : null,
-        ].filter(Boolean)),
-        el('td', {}, [
-          el('button', {
-            className: 'tiny danger',
-            textContent: 'Remove',
-            onclick: async (ev) => {
-              ev.stopPropagation();
-              if (!(await confirmModal(`Remove ${a.company}?`, 'The tracker row goes; the files on disk stay.'))) return;
-              await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
-              if (openApplicationId === a.id) openApplicationId = null;
-              loadApplications();
-            },
-          }),
-        ]),
-      ]);
+  const rowFor = (a) => {
+    const sel = el('select');
+    for (const [s, label] of STATUSES) {
+      sel.append(el('option', { value: s, textContent: label, selected: s === a.status }));
+    }
+    sel.onchange = async () => {
+      const moved = sel.value;
+      await api(`/applications/${encodeURIComponent(a.id)}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status: moved }),
+      });
+      setStatus('Status updated');
+      // Once, on the way in — not every time the list repaints with an
+      // offer already on it.
+      if (moved === 'offer' && a.status !== 'offer') celebrate(a.company);
+      loadApplications();
+    };
+    const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
+      // Both dates get the same treatment: "2026-09-" over "17" is not a
+      // date, and wrapping the narrowest column steals two lines of height
+      // from every row to save nothing.
+      el('td', { className: 'when', textContent: a.appliedAt?.slice(0, 10) ?? '' }),
+      el('td', { textContent: a.company }),
+      el('td', { textContent: a.role }),
+      el('td', {}, [sel]),
+      // Blank, not a dash: an em-dash in a date column reads as a date that
+      // failed to load rather than as one that has not happened.
+      el('td', { className: 'when', textContent: sentOn(a) }),
+      el('td', {}, [
+        a.coverLetter ? el('span', { className: 'chip count', textContent: 'letter' }) : null,
+        a.answers?.length
+          ? el('span', { className: 'chip count', textContent: plural(a.answers.length, 'answer') })
+          : null,
+      ].filter(Boolean)),
+      el('td', {}, [
+        el('button', {
+          className: 'tiny danger',
+          textContent: 'Remove',
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            if (!(await confirmModal(`Remove ${a.company}?`, 'The tracker row goes; the files on disk stay.'))) return;
+            await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            if (openApplicationId === a.id) openApplicationId = null;
+            loadApplications();
+          },
+        }),
+      ]),
+    ]);
 
-      // Clicking the row opens the full record; the status dropdown and the
-      // remove button stop the event so they still work on their own.
-      row.onclick = () => openApplication(a.id);
-      sel.onclick = (ev) => ev.stopPropagation();
-      return row;
-    });
+    // Clicking the row opens the full record; the status dropdown and the
+    // remove button stop the event so they still work on their own.
+    row.onclick = () => openApplication(a.id);
+    sel.onclick = (ev) => ev.stopPropagation();
+    return row;
+  };
 
-  if (rows.length === 0) {
+  if (showing.length === 0) {
     // Not the same fact as an empty tracker, and not worth confusing with it.
     wrap.replaceChildren(
       el('div', { className: 'empty' }, [
@@ -5797,6 +5795,54 @@ async function loadApplications() {
     );
     return;
   }
+
+  /*
+   * The ones still moving, first and apart from the rest.
+   *
+   * Sorted by date alone, the row you are in the middle of filling in sits
+   * wherever its start date puts it — which after a busy week is halfway down
+   * a screen of jobs that are finished, waiting, or were never applied to.
+   * Those are the two questions the tracker is opened to answer and they are
+   * not the same question: "what am I in the middle of" is a to-do list, and
+   * "what have I sent" is a record.
+   *
+   * `applying` and `interview` are the two where the next move is the
+   * reader's. `applied` is waiting on somebody else, `interested` was never
+   * started, and `offer` and `closed` are over — none of those are in flux
+   * however recent they are.
+   */
+  const IN_FLUX = ['applying', 'interview'];
+  const byDate = (a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
+  const moving = showing.filter((a) => IN_FLUX.includes(a.status)).sort(byDate);
+  const settled = showing.filter((a) => !IN_FLUX.includes(a.status)).sort(byDate);
+
+  /**
+   * A heading row inside the table, rather than two tables.
+   *
+   * Two tables means two sets of column widths, and the columns drifting
+   * against each other across the split is exactly the thing that makes a
+   * grouped list harder to read than an ungrouped one.
+   */
+  const heading = (text, count) =>
+    el('tr', { className: 'group' }, [
+      el('td', { colSpan: 7 }, [
+        el('b', { textContent: text }),
+        el('span', { className: 'group-count', textContent: plural(count, 'application') }),
+      ]),
+    ]);
+
+  /*
+   * Only when there is something on both sides of it. A heading over the
+   * whole list says nothing, and "Still going (0)" over an empty half says
+   * less than that.
+   */
+  const split = moving.length > 0 && settled.length > 0;
+  const rows = [
+    ...(split ? [heading('Still going', moving.length)] : []),
+    ...moving.map(rowFor),
+    ...(split ? [heading('Sent, finished, or not started', settled.length)] : []),
+    ...settled.map(rowFor),
+  ];
 
   wrap.replaceChildren(
     el('table', {}, [
