@@ -7,7 +7,7 @@
  * submitted application is neither.
  */
 import { describe, expect, it } from 'vitest';
-import { derivedAutofill, readGpa, splitDegree, splitLocation, splitName } from '../src/model/autofill.js';
+import { derivedAutofill, graduation, readGpa, splitDegree, splitLocation, splitName } from '../src/model/autofill.js';
 import type { Entry } from '../src/model/types.js';
 
 describe('splitting a name into the two boxes a form has', () => {
@@ -293,5 +293,96 @@ describe('what the education entries imply', () => {
   it('keys them the way the extension keys its own patterns', () => {
     const entry = edu({ subtitle: 'Bachelor of Science in Computer Science, GPA 3.8/4.0' });
     expect(Object.keys(derivedAutofill({}, [entry])).sort()).toEqual(['degree', 'gpa', 'major', 'school']);
+  });
+});
+
+describe('when the degree ends, as the boxes forms ask for it in', () => {
+  it('reads the month and year off the end of the range', () => {
+    expect(graduation('Sep. 2022 -- May 2026')).toEqual({
+      graduation_year: '2026',
+      graduation_month: 'May',
+      graduation_date: 'May 2026',
+    });
+    expect(graduation('Sep. 2022 -- Dec. 2026').graduation_month).toBe('December');
+  });
+
+  /*
+   * A guessed month on a graduation date is a claim about when somebody can
+   * start work. An end with only a year reports only the year.
+   */
+  it('reports only the year when only the year is written', () => {
+    expect(graduation('2022 -- 2026')).toEqual({ graduation_year: '2026', graduation_date: '2026' });
+  });
+
+  it('reports nothing for a degree still in progress, or dates it cannot read', () => {
+    expect(graduation('Sep. 2022 -- Present')).toEqual({});
+    expect(graduation('Two semesters')).toEqual({});
+    expect(graduation('')).toEqual({});
+  });
+});
+
+/*
+ * The graduation date is why the resume's own choices come into this at all.
+ * Somebody applying to internships and new-grad roles keeps two, and picks
+ * between them per posting; read from the default, every internship form was
+ * told May 2026 while the resume attached to it said December.
+ */
+describe('the form agrees with the resume being sent', () => {
+  const twoDates = (): Entry =>
+    edu({
+      dates: {
+        default: 'v_may2026',
+        variants: [
+          { id: 'v_may2026', label: 'May 2026', text: 'Sep. 2022 -- May 2026', tags: ['newgrad'] },
+          { id: 'v_dec2026', label: 'Dec 2026', text: 'Sep. 2022 -- Dec. 2026', tags: ['intern'] },
+        ],
+      },
+    });
+
+  it('uses the default when no resume is named', () => {
+    expect(derivedAutofill({}, [twoDates()]).graduation_date).toBe('May 2026');
+  });
+
+  it("uses the date the resume chose when one is", () => {
+    const out = derivedAutofill({}, [twoDates()], { 'edu_neu.dates': 'v_dec2026' });
+    expect(out.graduation_date).toBe('December 2026');
+    expect(out.graduation_month).toBe('December');
+  });
+
+  /*
+   * To the *default*, not to whichever wording is listed first. Here the two
+   * are different on purpose — the intern date is listed first and the
+   * default is May — because with the default first, falling back to the
+   * first wording passes this for the wrong reason.
+   */
+  it('falls back to the default for a choice that names no wording', () => {
+    const entry = edu({
+      dates: {
+        default: 'v_may2026',
+        variants: [
+          { id: 'v_dec2026', label: 'Dec 2026', text: 'Sep. 2022 -- Dec. 2026' },
+          { id: 'v_may2026', label: 'May 2026', text: 'Sep. 2022 -- May 2026' },
+        ],
+      },
+    });
+    expect(derivedAutofill({}, [entry], { 'edu_neu.dates': 'v_gone' }).graduation_date).toBe('May 2026');
+  });
+
+  it('only listens to choices about the school it is reading', () => {
+    const out = derivedAutofill({}, [twoDates()], { 'edu_other.dates': 'v_dec2026' });
+    expect(out.graduation_date).toBe('May 2026');
+  });
+
+  it('reads the degree the resume chose, too', () => {
+    const entry = edu({
+      subtitle: {
+        default: 'v_cs',
+        variants: [
+          { id: 'v_cs', label: 'CS', text: 'Bachelor of Science in Computer Science' },
+          { id: 'v_ce', label: 'CE', text: 'Bachelor of Science in Computer Engineering' },
+        ],
+      },
+    });
+    expect(derivedAutofill({}, [entry], { 'edu_neu.subtitle': 'v_ce' }).major).toBe('Computer Engineering');
   });
 });

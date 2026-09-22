@@ -899,6 +899,36 @@ describe('autofill', () => {
     expect(fields.address_city).toBeUndefined();
   });
 
+  /*
+   * Which of two graduation dates goes in the box depends on the resume being
+   * sent, and the extension says which by passing that resume's `choices`.
+   */
+  it('answers with the graduation date of the resume it is told about', async () => {
+    const plain = (await request(app).get('/api/autofill').expect(200)).body.fields;
+    expect(plain.graduation_date).toBe('May 2026');
+
+    const intern = (
+      await request(app)
+        .get('/api/autofill')
+        .query({ choices: JSON.stringify({ 'edu_neu.dates': 'v_dec2026' }) })
+        .expect(200)
+    ).body.fields;
+    expect(intern.graduation_date).toBe('December 2026');
+    expect(intern.graduation_month).toBe('December');
+    expect(intern.graduation_year).toBe('2026');
+  });
+
+  /*
+   * Ignored rather than refused: the defaults answer perfectly well, and a
+   * form half-filled from them beats one not filled at all.
+   */
+  it('ignores choices it cannot read, and answers from the defaults', async () => {
+    for (const choices of ['{not json', '[1,2]', JSON.stringify({ 'edu_neu.dates': 7 }), '']) {
+      const { fields } = (await request(app).get('/api/autofill').query({ choices }).expect(200)).body;
+      expect(fields.graduation_date, choices).toBe('May 2026');
+    }
+  });
+
   it('returns profile fields and the answer bank', async () => {
     const res = await request(app).get('/api/autofill').expect(200);
     expect(res.body.fields.full_name).toBe('Test Person');

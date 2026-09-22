@@ -2840,10 +2840,35 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   );
 
   /** Everything the extension needs to fill a form without asking again. */
+  /**
+   * Which wordings the resume being sent uses, read off `?choices=`.
+   *
+   * JSON, because a resume's `choices` is a map and a query string is not.
+   * Anything that is not a plain map of strings to strings is ignored rather
+   * than refused: the fields answer perfectly well from the defaults, and a
+   * form half-filled from defaults beats one not filled at all because the
+   * extension sent something odd.
+   */
+  const choicesFrom = (raw: unknown): Record<string, string> => {
+    if (typeof raw !== 'string' || !raw) return {};
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      return Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>).filter(
+          (kv): kv is [string, string] => typeof kv[1] === 'string',
+        ),
+      );
+    } catch {
+      return {};
+    }
+  };
+
   api.get(
     '/autofill',
-    handler(async (_req, res) => {
+    handler(async (req, res) => {
       const data = store.load();
+      const choices = choicesFrom(req.query.choices);
       // Resolved: a form field takes a name, not a set of them.
       const p = resolveProfile(data.profile, {}, []);
       res.json({
@@ -2872,7 +2897,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
            * `derivedAutofill`, which yields nothing at all where the reading
            * is not plain.
            */
-          ...derivedAutofill({ name: p.name, location: p.location }, data.entries),
+          ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
           ...(p.autofill ?? {}),
         },
         answers: data.answers.map((a) => ({

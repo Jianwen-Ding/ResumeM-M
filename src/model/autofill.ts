@@ -24,6 +24,7 @@
  * leaves the field blank exactly as before. An empty required field is
  * annoying and visible; a wrong name on a submitted application is neither.
  */
+import { parsePeriod } from './period.js';
 import { isVariantField } from './types.js';
 import type { Entry, MaybeVariant, Profile } from './types.js';
 
@@ -151,18 +152,41 @@ export function splitLocation(
 }
 
 /**
- * Everything the profile implies, for a form to be filled from.
- *
- * Keyed the way the extension's own patterns are keyed, so the two sides name
- * the same things. Hand-entered extras are laid over the top by the caller,
- * which is what makes every one of these a default rather than a decision.
+ * The wording a field is set to: the one this resume chose, if it chose one
+ * that exists, and the field's own default otherwise.
  */
-/** The wording a field is set to when nothing has chosen between its variants. */
-function asWritten(field: MaybeVariant | undefined): string {
+function asWritten(field: MaybeVariant | undefined, wanted?: string): string {
   if (field === undefined) return '';
   if (!isVariantField(field)) return tidy(field);
-  const chosen = field.variants.find((v) => v.id === field.default) ?? field.variants[0];
+  const chosen =
+    (wanted ? field.variants.find((v) => v.id === wanted) : undefined) ??
+    field.variants.find((v) => v.id === field.default) ??
+    field.variants[0];
   return tidy(chosen?.text);
+}
+
+const MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/**
+ * When the degree ends, as the three boxes forms ask for it in.
+ *
+ * Read off the printed dates rather than `period`, because the printed dates
+ * are what varies per resume and `period` is derived from the default wording
+ * alone. An entry in progress has no end to report, and an end with no month
+ * reports only its year: a guessed month on a graduation date is a claim
+ * about when somebody is available to start work.
+ */
+export function graduation(dates: string): Record<string, string> {
+  const period = parsePeriod(dates);
+  const end = period?.ongoing ? undefined : period?.end;
+  if (!end?.year) return {};
+  const year = String(end.year);
+  if (!end.month) return { graduation_year: year, graduation_date: year };
+  const month = MONTHS[end.month - 1]!;
+  return { graduation_year: year, graduation_month: month, graduation_date: `${month} ${year}` };
 }
 
 /**
@@ -279,6 +303,19 @@ export function derivedAutofill(
    * extras.
    */
   entries: Entry[] = [],
+  /*
+   * Which wordings the resume being sent uses, keyed as a resume's own
+   * `choices` are: `edu_neu.dates` and so on.
+   *
+   * The graduation date is the reason this exists. A store for somebody who
+   * applies to both internships and new-grad roles holds two — "May 2026" and
+   * a later one that keeps them eligible for a summer internship — and picks
+   * between them per posting. Read from the default, every internship form was
+   * told May 2026 while the resume attached to it said December: the exact
+   * mismatch that switching the date was built to prevent, reintroduced one
+   * box lower down the same form.
+   */
+  choices: Record<string, string> = {},
 ): Record<string, string> {
   const out: Record<string, string> = {};
 
@@ -296,15 +333,18 @@ export function derivedAutofill(
   const school = newestEducation(entries);
   if (school) {
     /*
-     * The wording as it stands with nothing chosen. A resume picks between the
-     * variants per posting — the GPA line for a GPA-screened one, the later
-     * graduation date for an internship — and this has no posting in front of
-     * it, so the default is the person's standing answer.
+     * The wording the resume being sent chose, where one is being sent, and
+     * the default where not. A resume picks between the variants per posting —
+     * the GPA line for a GPA-screened one, the later graduation date for an
+     * internship — and the form has to agree with the document attached to it.
      */
-    const named = asWritten(school.title);
+    const pick = (field: string) => choices[`${school.id}.${field}`];
+    const named = asWritten(school.title, pick('title'));
     if (named) out.school = named;
 
-    const line = asWritten(school.subtitle);
+    Object.assign(out, graduation(asWritten(school.dates, pick('dates'))));
+
+    const line = asWritten(school.subtitle, pick('subtitle'));
     const split = splitDegree(line);
     if (split) {
       out.degree = split.degree;
