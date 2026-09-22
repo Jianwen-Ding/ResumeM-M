@@ -246,6 +246,48 @@ function narrow() {
   return new TailorSession(data, resolveResume('narrow', data), POSTING);
 }
 
+/*
+ * An entry has to have somewhere to go. `show` took any real id and said "will
+ * be shown"; on a resume with no section of that entry's kind the plan carried
+ * it and `applyInclusion` found nowhere to put it — the reasoning claimed an
+ * entry the resume never got, and nothing anywhere said so.
+ */
+describe('showing an entry the resume has no section for', () => {
+  const withoutProjects = () => {
+    const data = store();
+    data.resumes = [
+      ...data.resumes,
+      { id: 'noproj', label: 'No projects', tier: 'base', sections: [{ kind: 'experience', entries: ['exp_acme'] }] } as never,
+    ];
+    return { data, s: new TailorSession(data, resolveResume('noproj', data), POSTING) };
+  };
+  const aProject = (data: StoreData) => data.entries.find((e) => e.kind === 'project')!;
+
+  it('is refused by name, saying which sections there are', () => {
+    const { data, s } = withoutProjects();
+    const project = aProject(data);
+    const r = s.show(project.id);
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('no');
+    expect(r.text).toContain('experience');
+    expect(s.state.plan.enable).not.toContain(project.id);
+  });
+
+  it('and so is one of its bullets', () => {
+    const { data, s } = withoutProjects();
+    const bullet = aProject(data).bullets![0]!;
+    expect(s.show(bullet.id).ok).toBe(false);
+  });
+
+  it('but hiding one is still fine, and an empty section of its kind is somewhere to go', () => {
+    const { data, s } = withoutProjects();
+    expect(s.hide(aProject(data).id).ok).toBe(true);
+    // `narrow` has a project section with nothing in it.
+    const project = aProject(data);
+    expect(narrow().show(project.id).ok).toBe(true);
+  });
+});
+
 describe('reading the page back', () => {
   it('shows the resume with the ids the tools take', () => {
     const text = session().describeResume();

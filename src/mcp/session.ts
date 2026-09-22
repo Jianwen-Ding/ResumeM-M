@@ -332,6 +332,19 @@ export class TailorSession {
           `Bullets: ${some([...this.bullets.keys()])}.`,
       );
     }
+    /*
+     * Somewhere to put it. An entry goes into the section of its kind, and a
+     * resume without one had nowhere: `show` said "will be shown", the plan
+     * carried it, and `applyInclusion` quietly found no section — so the
+     * reasoning claimed an entry the resume never got.
+     */
+    const kind = what === 'entry' ? this.entries.get(id)!.kind : this.bullets.get(id)!.entry.kind;
+    if (on && !this.resume.sections.some((s) => s.kind === kind)) {
+      return no(
+        `${id} belongs in a ${kind} section, and this resume has none to put it in. Its sections are: ` +
+          `${some(this.resume.sections.map((s) => s.kind))}.`,
+      );
+    }
     const [into, outOf] = on
       ? ([this.state.plan.enable, this.state.plan.disable] as const)
       : ([this.state.plan.disable, this.state.plan.enable] as const);

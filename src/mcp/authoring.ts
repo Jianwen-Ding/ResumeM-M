@@ -123,6 +123,10 @@ function flatten(text: string): string {
     .trim();
 }
 
+/** A word a date range is written with, and nothing a date could not say. */
+const DATE_WORD =
+  /^(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sept?(ember)?|oct(ober)?|nov(ember)?|dec(ember)?|present|current|now|ongoing|expected|anticipated|spring|summer|fall|autumn|winter|to|until|since|\d{1,4})$/i;
+
 export class AuthoringSession {
   readonly state: AuthoringState = emptyAuthoring();
 
@@ -280,6 +284,21 @@ export class AuthoringSession {
      * it, and demanding the exact string would refuse every honest proposal.
      * The year is the part that can be invented, and the part that matters.
      */
+    /*
+     * And nothing but a date. Only the years were read, so "Jan. 2015 --
+     * Present, promoted to Director" went through on its year and printed a
+     * promotion nobody wrote down — on the line a reader checks for a range
+     * and not for prose.
+     */
+    const words = (entry.dates ?? '').split(/[^a-z0-9]+/i).filter(Boolean);
+    const notDates = words.filter((w) => !DATE_WORD.test(w));
+    if (notDates.length > 0) {
+      return no(
+        `The dates "${entry.dates}" say more than a date: ${some(notDates)}. Dates are months, years, a season ` +
+          `and "Present" — anything else belongs in a bullet quoted from the material.`,
+      );
+    }
+
     const flat = flatten(this.docs.get(entry.documentId)?.text ?? '');
     const invented = [...(entry.dates ?? '').matchAll(/\b(19|20)\d{2}\b/g)]
       .map((m) => m[0])

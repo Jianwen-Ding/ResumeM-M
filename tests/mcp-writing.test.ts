@@ -481,6 +481,29 @@ describe('reading material into a proposal', () => {
     expect(r.text).toContain('2015');
   });
 
+  it('refuses dates that carry anything but a date', () => {
+    const r = authoring().proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      dates: '2023 -- 2024, promoted to Director',
+      documentId: 'd1',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('promoted');
+  });
+
+  it('takes a date range written with months, a season and Present', () => {
+    const r = authoring().proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      dates: 'Sept. 2023 – Summer 2024 (expected), to Present',
+      documentId: 'd1',
+    });
+    expect(r.ok, r.text).toBe(true);
+  });
+
   /*
    * Without refusing the honest version: the dates are checked by their
    * years, not verbatim, because "2023 -- 2024" is a formatting of what the
