@@ -53,7 +53,7 @@ const READABLE_BUT_RESPELT = [
   ['2021-2024', { start: { year: 2021 }, end: { year: 2024 } }],
   ['May 2026 (expected)', { start: { year: 2026, month: 5 }, expected: true }],
   ['Anticipated: May 2027', { start: { year: 2027, month: 5 }, expected: true }],
-  ['Autumn 2023', { start: { year: 2023, month: 9 }, season: 'fall' }],
+  ['Autumn 2023', { start: { year: 2023, month: 9, season: 'fall' } }],
   ['2024, July', { start: { year: 2024, month: 7 } }],
 ] as const;
 
@@ -88,8 +88,48 @@ describe('reading a date out of the words someone wrote', () => {
 
   it('keeps a season as a season, and still knows when it is', () => {
     const summer = parsePeriod('Summer 2024');
-    expect(summer).toMatchObject({ season: 'summer', start: { year: 2024, month: 6 } });
+    expect(summer).toMatchObject({ start: { year: 2024, month: 6, season: 'summer' } });
     expect(formatPeriod(summer, DEFAULT_STYLE)).toBe('Summer 2024');
+  });
+
+  /*
+   * And on whichever end named it, which is the half that used to be thrown
+   * away. The season lived on the period and was read off the start, so a
+   * season on the right was destroyed by any edit that went through a parse
+   * and a format — "Sep. 2022 -- Expected Spring 2026", which is how a degree
+   * in progress is written, came back "Sep. 2022 -- Expected Mar. 2026". That
+   * is a graduation month this program made up, on a document somebody sends
+   * to an employer, produced by touching an unrelated field.
+   */
+  it('keeps a season on the right of a range too', () => {
+    const degree = parsePeriod('Sep. 2022 -- Expected Spring 2026');
+    expect(degree).toMatchObject({
+      start: { year: 2022, month: 9 },
+      end: { year: 2026, month: 3, season: 'spring' },
+      expected: true,
+    });
+    expect(degree?.start?.season).toBeUndefined();
+    expect(formatPeriod(degree, DEFAULT_STYLE)).toBe('Sep. 2022 -- Expected Spring 2026');
+  });
+
+  /*
+   * Both ends can name one, which the old shape could not hold at all: one
+   * `season` for the whole period meant the left end's word or nothing.
+   * "Summer 2024 -- Spring 2025" is an academic year.
+   */
+  it('keeps a season at both ends', () => {
+    const year = parsePeriod('Summer 2024 -- Spring 2025');
+    expect(year).toMatchObject({
+      start: { year: 2024, month: 6, season: 'summer' },
+      end: { year: 2025, month: 3, season: 'spring' },
+    });
+    expect(formatPeriod(year, DEFAULT_STYLE)).toBe('Summer 2024 -- Spring 2025');
+  });
+
+  /* And a range with a season on one side keeps the month on the other. */
+  it('does not turn the other end into a season', () => {
+    const half = parsePeriod('Jan. 2024 -- Summer 2024');
+    expect(formatPeriod(half, DEFAULT_STYLE)).toBe('Jan. 2024 -- Summer 2024');
   });
 });
 
@@ -253,10 +293,11 @@ describe('noticing a date that runs backwards', () => {
    * not. It is how a pair of academic terms is written, and the only reason
    * it looked wrong is that this file decides winter means December.
    *
-   * Nor can the ambiguity be resolved after the fact: `parsePeriod` keeps
-   * the start's season and drops the end's, so by the time anything asks,
-   * "Dec. 2024 -- Spring 2024" is a March with no sign it was ever a season.
-   * A co-op running into the next year and a typo look identical.
+   * The parse can tell you a season was involved now — each end keeps its own
+   * — but that does not settle it either. "Dec. 2024 -- Spring 2024" is a
+   * co-op running into the next year written by somebody who means March
+   * 2025, and it is also a typo, and the text says the same thing in both
+   * cases. Knowing the word was "Spring" does not say which.
    */
   it('says nothing about a month that moves backwards inside one year', () => {
     for (const text of [

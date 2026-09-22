@@ -339,13 +339,15 @@ export function withDatesFrom(entry: Entry, store: Store): Entry {
 
 /** Two periods meaning the same thing, ignoring how they were spelt. */
 function samePeriod(a: Period, b: Period): boolean {
-  const point = (p?: { year: number; month?: number }) => (p ? `${p.year}-${p.month ?? ''}` : '');
+  // The season is part of a point now — either end can name one — so it is
+  // compared per end rather than once for the whole range. See `DatePoint`.
+  const point = (p?: { year: number; month?: number; season?: string }) =>
+    p ? `${p.year}-${p.month ?? ''}-${p.season ?? ''}` : '';
   return (
     point(a.start) === point(b.start) &&
     point(a.end) === point(b.end) &&
     Boolean(a.ongoing) === Boolean(b.ongoing) &&
-    Boolean(a.expected) === Boolean(b.expected) &&
-    (a.season ?? '') === (b.season ?? '')
+    Boolean(a.expected) === Boolean(b.expected)
   );
 }
 

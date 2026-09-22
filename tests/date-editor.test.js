@@ -87,6 +87,7 @@ describe('editing the date on an entry', () => {
   const PROJECT = { id: 'p1', kind: 'experience', title: 'Side project', dates: '2024' };
   const ONGOING = { id: 'j2', kind: 'experience', title: 'Current', dates: 'Jan. 2025 -- Present' };
   const VAGUE = { id: 'v1', kind: 'experience', title: 'Unclear', dates: 'Two semesters' };
+  const SEASON = { id: 's1', kind: 'experience', title: 'Seasonal', dates: 'Summer 2024 -- Dec. 2024' };
 
   it('shows two ends and their months, not a line of text', async () => {
     await open([JOB]);
@@ -134,6 +135,57 @@ describe('editing the date on an entry', () => {
 
     await vi.waitFor(() => expect(lastSave()).toBeDefined());
     expect(lastSave().period.start).toEqual({ year: 2024, month: 6 });
+  });
+
+  /*
+   * Picking a month on an end that reads as a season.
+   *
+   * A season prints as itself whatever month is underneath it — the month is
+   * only there to sort by — so on "Summer 2024" this dropdown showed Jun,
+   * took a change to Jul, saved it, and the text came back "Summer 2024"
+   * unchanged. The control did nothing and said nothing about doing nothing,
+   * and the next redraw put it back to Jun. Picking a month is saying the
+   * month; it does not leave the old word standing.
+   */
+  it('a month chosen over a season replaces the season', async () => {
+    await open([SEASON]);
+    const from = [...dates('Seasonal').querySelectorAll('.date-end')][0];
+    expect(from.querySelector('.date-month').value).toBe('6');
+    const month = from.querySelector('.date-month');
+    month.value = '7';
+    month.dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(lastSave()).toBeDefined());
+    expect(lastSave().period.start).toEqual({ year: 2024, month: 7 });
+    expect(lastSave().period.start.season).toBeUndefined();
+  });
+
+  /* And blanking it says the year, which is not a season either. */
+  it('blanking the month over a season drops the season too', async () => {
+    await open([SEASON]);
+    const from = [...dates('Seasonal').querySelectorAll('.date-end')][0];
+    const month = from.querySelector('.date-month');
+    month.value = '';
+    month.dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(lastSave()).toBeDefined());
+    expect(lastSave().period.start).toEqual({ year: 2024 });
+  });
+
+  /*
+   * And an end nobody touched keeps its season. The save is a whole period,
+   * so a fix that cleared the season everywhere would pass the two above and
+   * destroy the word on the end the person was not editing.
+   */
+  it('and the end nobody touched keeps its own season', async () => {
+    await open([SEASON]);
+    const to = [...dates('Seasonal').querySelectorAll('.date-end')][1];
+    const year = to.querySelector('.date-year');
+    year.value = '2025';
+    year.dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(lastSave()).toBeDefined());
+    expect(lastSave().period.start).toEqual({ year: 2024, month: 6, season: 'summer' });
   });
 
   /*

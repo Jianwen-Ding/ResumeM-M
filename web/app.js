@@ -3718,6 +3718,19 @@ function datesControl(from, onChange) {
       const now = { ...value() };
       if (n) now.month = n;
       else delete now.month;
+      /*
+       * And the season goes, because a month has just been named instead.
+       *
+       * A season prints as itself whatever month is underneath it — the month
+       * is only there to sort by — so on an entry reading "Summer 2024" this
+       * dropdown showed Jun, took a change to Jul, saved it, and the text came
+       * back "Summer 2024" unchanged. The control did nothing and said nothing,
+       * and the next redraw put it back to Jun.
+       *
+       * Picking a month is saying the month. Blanking it is saying the year,
+       * which is not a season either. Neither leaves the old word standing.
+       */
+      delete now.season;
       period[which] = now;
       commit();
     };
