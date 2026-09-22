@@ -120,13 +120,31 @@ const RANGE_SEPARATORS = [
 /** The `(expected)` that people write after the date instead of before it. */
 const TRAILING_EXPECTED = /\s*\((expected|anticipated|projected)\)\s*$/i;
 
-function monthFromWord(word: string): { month: number; how: DateStyle['month']; season?: Season } | null {
+function monthFromWord(
+  word: string,
+): { month: number; how: DateStyle['month']; season?: Season; ambiguous?: true } | null {
   const clean = word.replace(/\.$/, '').toLowerCase();
   const season = SEASON_WORDS[clean];
   if (season) return { month: SEASON_MONTH[season], how: 'long', season };
 
   const long = LONG.findIndex((m) => m.toLowerCase() === clean);
-  if (long >= 0) return { month: long + 1, how: 'long' };
+  /*
+   * "May" is its own abbreviation, so it says nothing about which style this
+   * store writes — the same way a season says nothing, a line below.
+   *
+   * The long names are tried first, so every May reported `long`.
+   * `formatMonth` already refuses to write "May." for the symmetric reason;
+   * reading had no such guard. On one string that respells the other end —
+   * "May 2023 -- Aug. 2023" came back "May 2023 -- August 2023" — and
+   * store-wide it is worse, because `inferStyle` counts votes: three summer
+   * internships and a degree is the most ordinary new-grad save there is, and
+   * three Mays outvoted two `Sep.`/`Jan.`, so every entry touched afterwards
+   * was rewritten into full month names one at a time.
+   */
+  if (long >= 0) {
+    const same = LONG[long] === ABBR[long];
+    return { month: long + 1, how: 'long', ...(same ? { ambiguous: true as const } : {}) };
+  }
 
   const abbr = ABBR.findIndex((m) => m.toLowerCase() === clean);
   if (abbr >= 0) return { month: abbr + 1, how: word.endsWith('.') ? 'abbrDot' : 'abbr' };
@@ -268,14 +286,25 @@ export function styleOf(raw: string): Partial<DateStyle> {
     if (PRESENT.test(split.right)) found.present = split.right;
   }
 
-  const month = /([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/.exec(text);
-  if (month) {
-    if (month[1]) {
-      const how = monthFromWord(month[1]);
-      // A season tells you nothing about how months are abbreviated.
-      if (how && !how.season) found.month = how.how;
-    } else {
+  /*
+   * Every date in the string, not the first one, because the first may be the
+   * one that cannot answer. "May 2023 -- Aug. 2023" is the ordinary summer
+   * internship: May abstains — it is its own abbreviation, see
+   * `monthFromWord` — and `Aug.` is right there saying `abbrDot`. Stopping at
+   * the first match threw that away and reported nothing at all, which sends
+   * the date back in the store's habit rather than the way it was written.
+   */
+  for (const month of text.matchAll(/([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/g)) {
+    if (!month[1]) {
       found.month = 'numeric';
+      break;
+    }
+    const how = monthFromWord(month[1]);
+    // A season tells you nothing about how months are abbreviated, and
+    // neither does a month whose abbreviation is the whole word.
+    if (how && !how.season && !how.ambiguous) {
+      found.month = how.how;
+      break;
     }
   }
 
