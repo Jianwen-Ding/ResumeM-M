@@ -165,3 +165,64 @@ describe('renaming the tailored copies a save already holds', () => {
     }
   });
 });
+
+/**
+ * The id and the record of what it was made from have to agree.
+ *
+ * `generatedFor` is the only thing that can say, later, which posting a
+ * tailored copy belongs to — it is what `migrateTailoredIds` reads to work
+ * out whether an id is one the old scheme produced, and the only reason a
+ * rename can be done safely at all. So a copy whose id was built from one
+ * pair of names and whose record holds another is a copy nothing downstream
+ * can reason about.
+ *
+ * The extension's route did exactly that. The id came from
+ * `job.company ?? employerFallback(url)` and `job.title ?? 'Role'`; the record
+ * came from the raw `job.company` and `job.title`. A posting whose page never
+ * names the employer — an ATS board serving a form under the company's own
+ * hostname is the ordinary case — got an id saying `job-acmecorp-…`, taken
+ * from that hostname, over a record saying nothing at all. Which is not an
+ * id `migrateTailoredIds` can recognise as its own, so those copies would
+ * have been left behind by the very rename they most need.
+ */
+describe('what a tailored copy records about the posting it was made for', () => {
+  it('records the names its own id was built from', async () => {
+    const { default: express } = await import('express');
+    const { default: request } = await import('supertest');
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+
+    t = makeTempStore({ config: { git: { autoCommit: false }, output: { dir: 'out' } } });
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+
+    // A posting page that names neither the employer nor the title: both come
+    // from the fallbacks, which is the case the two paths disagreed on.
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({
+        html: `<html><head><title>Data Platform Intern</title>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"JobPosting","title":"Data Platform Intern",
+"description":"<p>Kafka streaming infrastructure in Go and Python, Kubernetes on AWS. Distributed systems. Minimum qualifications: BS in Computer Science.</p>"}
+</script></head><body>Apply now</body></html>`,
+        url: 'https://boards.acmecorp.com/careers/12345',
+        baseResumeId: 'base',
+        tailor: 'match',
+      })
+      .expect(200);
+    /*
+     * Asserted on the spec rather than on disk: `/extension/analyze` hands the
+     * copy to the card and the card carries it back to be saved, so this is
+     * the spec that ends up in `resumes/`, id and record together.
+     */
+    const spec = res.body.spec;
+    expect(spec?.id).toBe('job-acmecorp-data-platform-intern');
+    const { company, role } = spec.generatedFor ?? {};
+    expect(company).toBeTruthy();
+    expect(role).toBeTruthy();
+    // The whole invariant in one line: the record reproduces the id.
+    expect(tailoredResumeId(company!, role!)).toBe(spec.id);
+  });
+});
