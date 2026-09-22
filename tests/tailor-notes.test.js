@@ -26,6 +26,8 @@ afterEach(() => {
 
 describe('what the Workspace says a tailoring run did', () => {
   let tailorReply;
+  let holdTailor;
+  let holdGenerate;
   const draftId = 'streamly-intern';
 
   beforeEach(async () => {
@@ -42,10 +44,23 @@ describe('what the Workspace says a tailoring run did', () => {
       company: 'Streamly',
       role: 'Data Platform Intern',
       resumeId: 'intern',
+      // Required, so the letter block and its ✦Draft button are on the panel.
+      coverLetter: { required: true, body: '', edited: false },
+      questions: [],
+      notes: '',
+    };
+    // A second application to move on to while the first one's model reads.
+    const other = {
+      id: 'northwind-engineer',
+      company: 'Northwind',
+      role: 'Engineer',
+      resumeId: 'intern',
       coverLetter: { required: false, body: '', edited: false },
       questions: [],
       notes: '',
     };
+    holdTailor = null;
+    holdGenerate = null;
 
     // One real change, and however many refusals the test asks for.
     tailorReply = {
@@ -62,9 +77,16 @@ describe('what the Workspace says a tailoring run did', () => {
       if (url === '/api/store') result = data;
       else if (url === '/api/ai/jobs') result = { jobs: [] };
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
-      else if (url === '/api/workspace') result = { drafts: [draft] };
-      else if (url.endsWith('/tailor')) result = tailorReply;
-      else if (url.startsWith('/api/workspace/')) result = draft;
+      else if (url === '/api/workspace') result = { drafts: [draft, other] };
+      else if (url.endsWith('/tailor')) {
+        if (holdTailor) await new Promise((r) => { holdTailor.release = r; holdTailor.started = true; });
+        result = tailorReply;
+      } else if (url.endsWith('/generate')) {
+        if (holdGenerate) await new Promise((r) => { holdGenerate.release = r; holdGenerate.started = true; });
+        result = { draft, notes: ['Wrote a letter of 240 words.'] };
+      } else if (url.startsWith('/api/workspace/')) {
+        result = decodeURIComponent(url.split('/').pop()) === other.id ? other : draft;
+      }
       return { ok: true, json: async () => structuredClone(result) };
     }));
 
@@ -73,7 +95,7 @@ describe('what the Workspace says a tailoring run did', () => {
     for (const b of document.querySelectorAll('#tabs button')) b.disabled = false;
     document.querySelector('button[data-tab="workspace"]').click();
     await vi.waitFor(() => expect(document.querySelectorAll('.draft-card').length).toBeGreaterThan(0));
-    document.querySelector('.draft-card').click();
+    [...document.querySelectorAll('.draft-card')].find((c) => c.textContent.includes('Streamly')).click();
     await vi.waitFor(() =>
       expect([...document.querySelectorAll('#draft-editor button')].some((b) => /Tailor one/.test(b.textContent)))
         .toBe(true),
@@ -106,6 +128,74 @@ describe('what the Workspace says a tailoring run did', () => {
     expect(said).toMatch(/1 change from the resume it started from, chosen by the AI/);
     // Including the changes themselves, which are the reason to read it.
     expect(said).toMatch(/Built a Kafka pipeline/);
+  });
+
+  /*
+   * And it does not drag you back to the application you walked away from.
+   *
+   * An AI tailoring run is minutes. Moving to another application while it
+   * thinks is the ordinary thing to do — this editor is built around that
+   * everywhere else, which is why an AI run holds no other control. But
+   * `tailorDraft` ended in an unconditional `openDraft(draft.id)`, and
+   * `openDraft` sets `openDraftId` and the location hash before it checks
+   * anything. So the run finishing tore down whatever was on screen and put
+   * the finished one back in its place, mid-sentence.
+   *
+   * `openDraft`'s own guard does not cover this: it protects two `openDraft`
+   * calls racing each other, not one fired for an application the person has
+   * already left.
+   */
+  it('does not pull you back from the application you moved on to', async () => {
+    holdTailor = { started: false, release: null };
+    [...document.querySelectorAll('#draft-editor button')]
+      .find((b) => /Tailor one for this posting/.test(b.textContent))
+      .click();
+    await vi.waitFor(() => expect(holdTailor.started).toBe(true));
+
+    // Off to the other application while the model reads.
+    [...document.querySelectorAll('.draft-card')].find((c) => c.textContent.includes('Northwind')).click();
+    await vi.waitFor(() => expect(document.querySelector('#draft-editor').textContent).toMatch(/Northwind/));
+
+    holdTailor.release();
+    await vi.advanceTimersByTimeAsync(500);
+
+    // Still on Northwind, in the panel and in the address.
+    expect(document.querySelector('#draft-editor').textContent).toMatch(/Northwind/);
+    expect(document.querySelector('#draft-editor').textContent).not.toMatch(/Streamly/);
+    expect(location.hash).toContain('northwind-engineer');
+    /*
+     * And the account of the Streamly run is not written into Northwind's
+     * panel either. Re-reading `.gen-notes` after the repaint is what makes
+     * the message survive at all — but once the person has moved on, the node
+     * that selector finds belongs to somebody else's application.
+     */
+    expect(document.querySelector('#draft-editor').textContent).not.toMatch(/from the resume it started from/);
+  });
+
+  /*
+   * The same for drafting, which is the other minutes-long run.
+   *
+   * `generate` repainted the panel from its own draft when the model landed.
+   * No hash change on that path, so it is worse than being moved: the panel
+   * would show one application while `openDraftId` named another, and the
+   * autosave writes against `openDraftId`.
+   */
+  it('a letter that lands late does not repaint over the application you moved to', async () => {
+    holdGenerate = { started: false, release: null };
+    [...document.querySelectorAll('#draft-editor button')]
+      .find((b) => /Draft it/.test(b.textContent))
+      .click();
+    await vi.waitFor(() => expect(holdGenerate.started).toBe(true));
+
+    [...document.querySelectorAll('.draft-card')].find((c) => c.textContent.includes('Northwind')).click();
+    await vi.waitFor(() => expect(document.querySelector('#draft-editor').textContent).toMatch(/Northwind/));
+
+    holdGenerate.release();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(document.querySelector('#draft-editor').textContent).toMatch(/Northwind/);
+    expect(document.querySelector('#draft-editor').textContent).not.toMatch(/Streamly/);
+    expect(document.querySelector('#draft-editor').textContent).not.toMatch(/Wrote a letter of 240 words/);
   });
 
   it('says how much of what the AI asked for is not in the save', async () => {

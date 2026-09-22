@@ -6739,34 +6739,51 @@ async function tailorDraft(draft, notes, useAi) {
     ];
 
     await loadStore();
-    await openDraft(draft.id);
-
     /*
-     * Said after the repaint, into the panel the repaint built.
+     * Said after the repaint, into the panel the repaint built — and only
+     * while this is still the application on screen.
      *
-     * This wrote into `notes` first and reloaded second, and `openDraft` ends
-     * in `renderDraft`, which builds a whole new panel — `notes` among it. So
-     * every word of the only account anybody gets of a tailoring run was put
-     * into a node that was detached a few milliseconds later: what was made,
-     * how many changes came from the base, which ones they were, and whether
-     * the AI chose them. Measured in the Workspace: at the moment the reload
-     * went out the notes panel was already empty, and it stayed empty. The
-     * run worked, the resume was there, and the screen said nothing at all
-     * about it — which reads as a button that did nothing.
+     * Two things went wrong here, and they pull in opposite directions.
      *
-     * `generate` had already met this and solved it the same way: repaint,
-     * then re-read `.gen-notes` rather than reusing the one closed over. Done
-     * here too rather than inventing a second mechanism.
+     * The message was written into `notes` first and the reload came second,
+     * and `openDraft` ends in `renderDraft`, which builds a whole new panel
+     * with a new `notes` in it. So every word of the only account anybody
+     * gets of a tailoring run went into a node detached a few milliseconds
+     * later: what was made, how many changes came from the base, which ones
+     * they were, whether the AI chose them. Measured: at the moment the
+     * reload went out the notes panel was already empty, and it stayed empty.
+     * The run worked, the resume was there, and the screen said nothing —
+     * which reads as a button that does nothing. `generate` had already met
+     * this and solved it by repainting and then re-reading `.gen-notes`, so
+     * that is what is done here rather than a second mechanism.
      *
-     * `notes` is the fallback for the one case the re-read misses — another
-     * application opened while the model was reading, so this one's panel is
-     * not on screen to write into. Then this lands on a detached node again,
-     * which is the correct place for it: the person is looking at something
-     * else, and it is their old panel that holds it.
+     * But an AI run is minutes, and moving to another application while it
+     * thinks is the ordinary thing to do — this editor is built around that
+     * everywhere else, which is why an AI run holds no other control. The
+     * reopen was unconditional, and `openDraft` sets `openDraftId` and the
+     * location hash before it checks anything, so the run finishing tore down
+     * whatever was on screen and put the finished application back in its
+     * place, mid-sentence. `openDraft`'s own guard does not cover this: it
+     * protects two `openDraft` calls racing each other, not one fired for an
+     * application the person has already left.
+     *
+     * Which makes re-reading `.gen-notes` wrong in exactly that case — the
+     * node it finds then belongs to somebody else's application, and this
+     * would write the Streamly run's changes under Northwind's heading. So
+     * the re-read happens only where the repaint does. Otherwise the message
+     * goes to the detached `notes`, which is the right place for it: it is
+     * this application's panel, and the way back to it is the chip in the
+     * toolbar, which has been there for the whole run.
      */
-    setChildren($('#draft-editor .gen-notes') ?? notes, ...said);
+    if (openDraftId === draft.id) {
+      await openDraft(draft.id);
+      setChildren($('#draft-editor .gen-notes') ?? notes, ...said);
+    } else {
+      setChildren(notes, ...said);
+    }
   } catch (err) {
-    setChildren($('#draft-editor .gen-notes') ?? notes, el('div', { className: 'err', textContent: err.message }));
+    const box = openDraftId === draft.id ? ($('#draft-editor .gen-notes') ?? notes) : notes;
+    setChildren(box, el('div', { className: 'err', textContent: err.message }));
   } finally {
     stopChip();
   }
@@ -6969,9 +6986,20 @@ async function generate(draft, what, notes, extra = {}) {
      * cannot show a version of the draft that is nobody's.
      */
     await flushDraftEdits();
-    renderDraft(await api(`/workspace/${encodeURIComponent(draft.id)}`));
-    const panel = $('#draft-editor .gen-notes');
-    if (panel) setChildren(panel, ...res.notes.map((n) => el('div', { textContent: n })));
+    const fresh = await api(`/workspace/${encodeURIComponent(draft.id)}`);
+    /*
+     * And only while this is still the application on screen. Drafting a
+     * letter is minutes, and repainting the panel from *this* draft once it
+     * lands would replace whatever the person moved on to — the same seizure
+     * `tailorDraft` had, by a different route: no hash change here, so the
+     * panel and `openDraftId` would simply disagree about which application
+     * is open, which is worse than being moved.
+     */
+    if (openDraftId === draft.id) {
+      renderDraft(fresh);
+      const panel = $('#draft-editor .gen-notes');
+      if (panel) setChildren(panel, ...res.notes.map((n) => el('div', { textContent: n })));
+    }
     setStatus('Draft updated');
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
