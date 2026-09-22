@@ -1116,6 +1116,26 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 tbody tr.selected { background: var(--accent-soft); }
 tbody tr { cursor: pointer; }
 
+/*
+ * The divider between the applications still moving and the rest.
+ *
+ * Not a clickable row: it opens nothing, so it must not offer the pointer or
+ * the hover the rows around it use to say that they do.
+ */
+#apps-wrap tbody tr.group { cursor: default; }
+#apps-wrap tbody tr.group:hover { background: transparent; }
+#apps-wrap tbody tr.group td {
+  padding-top: 18px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+/* The first heading sits at the top of the table and needs no room above it. */
+#apps-wrap tbody tr.group:first-child td { padding-top: 0; }
+#apps-wrap tbody tr.group .group-count { margin-left: 8px; text-transform: none; letter-spacing: 0; }
+
 .app-detail {
   background: var(--panel);
   border: 1px solid var(--line);

@@ -94,6 +94,81 @@ function stripTags(html: string): string {
     .trim();
 }
 
+/*
+ * The parts of a page that are the site rather than the posting.
+ *
+ * When a posting has no usable JSON-LD, its description is the page's text, and
+ * the page's text is the posting plus everything around it: the site's
+ * navigation, its footer, a sidebar of other jobs, a cookie banner, and every
+ * option of every dropdown — a "Location" filter lists hundreds of cities, and
+ * an application form's country list lists every country. All of it went to
+ * the AI as though it were the job, up to forty thousand characters a page.
+ *
+ * Removed by element, with the element's real closing tag found by counting
+ * nesting, because the chrome is made of the same `<div>`s as everything else
+ * and a pattern cannot tell where one ends. What is removed is only what says
+ * it is not content: the landmark tags and roles, option lists, drawings, and
+ * containers named for cookies and consent. Not `aria-hidden` and not dialogs,
+ * because plenty of boards show the posting itself in a modal and hide the page
+ * behind it.
+ */
+const CHROME_TAGS = /<(nav|footer|aside|select|svg|template|iframe|noscript)\b[^>]*>/gi;
+const CHROME_ROLES = /<([a-z][a-z0-9]*)\b[^>]*\brole\s*=\s*["'](?:navigation|banner|contentinfo|complementary|search)["'][^>]*>/gi;
+const CHROME_NAMES =
+  /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*\b(?:cookie|cookies|consent|gdpr|onetrust)\b[^"']*["'][^>]*>/gi;
+
+/** Cut every element whose opening tag matches, through its own closing tag. */
+function removeElements(html: string, opening: RegExp): string {
+  let out = html;
+  let from = 0;
+  for (;;) {
+    opening.lastIndex = from;
+    const open = opening.exec(out);
+    if (!open) return out;
+    const tag = (open[1] ?? '').toLowerCase();
+    const scan = new RegExp(`<(/?)${tag}\\b[^>]*?(/?)>`, 'gi');
+    scan.lastIndex = open.index + open[0].length;
+    let depth = open[0].endsWith('/>') ? 0 : 1;
+    let end = depth === 0 ? scan.lastIndex : -1;
+    for (let m = depth ? scan.exec(out) : null; m; m = scan.exec(out)) {
+      if (m[2]) continue; // self-closing
+      depth += m[1] ? -1 : 1;
+      if (depth === 0) {
+        end = scan.lastIndex;
+        break;
+      }
+    }
+    // Never closed: leave it, rather than cut to the end of the page.
+    if (end === -1) {
+      from = open.index + open[0].length;
+      continue;
+    }
+    out = `${out.slice(0, open.index)} ${out.slice(end)}`;
+    from = open.index;
+  }
+}
+
+/**
+ * The page with its chrome taken out — unless that leaves almost nothing.
+ *
+ * A layout that puts the posting in an `<aside>`, or a board whose whole page
+ * is one element with a landmark role, would lose the posting with the chrome.
+ * Losing a description is far worse than sending a long one, so where what is
+ * left is too little to be a posting, the page goes untrimmed.
+ *
+ * Judged on what is left, not on how much went. Cutting a page to a tenth of
+ * its text is the ordinary success here — a 200-city filter dwarfs the job it
+ * sits beside — and a ratio threw away exactly the trims worth making.
+ */
+const TOO_LITTLE_TO_BE_A_POSTING = 200;
+
+export function withoutChrome(html: string): string {
+  const trimmed = removeElements(removeElements(removeElements(html, CHROME_TAGS), CHROME_ROLES), CHROME_NAMES);
+  const left = stripTags(trimmed).length;
+  if (left < TOO_LITTLE_TO_BE_A_POSTING && stripTags(html).length >= TOO_LITTLE_TO_BE_A_POSTING) return html;
+  return trimmed;
+}
+
 /** Walk JSON-LD, which is the only structured source most boards agree on. */
 function fromJsonLd(html: string): Partial<ExtractedJob> | undefined {
   const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
@@ -509,7 +584,8 @@ function headingRole(html: string): string | undefined {
 
 export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
   const ld = fromJsonLd(html);
-  const text = stripTags(html);
+  // The page's own text, without the site around it. See `withoutChrome`.
+  const text = stripTags(withoutChrome(html));
   const parts = titleParts(pageTitle);
 
   /*

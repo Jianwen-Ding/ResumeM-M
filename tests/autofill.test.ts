@@ -7,7 +7,8 @@
  * submitted application is neither.
  */
 import { describe, expect, it } from 'vitest';
-import { derivedAutofill, splitLocation, splitName } from '../src/model/autofill.js';
+import { derivedAutofill, graduation, readGpa, splitDegree, splitLocation, splitName } from '../src/model/autofill.js';
+import type { Entry } from '../src/model/types.js';
 
 describe('splitting a name into the two boxes a form has', () => {
   it('takes the first and last word', () => {
@@ -133,5 +134,335 @@ describe('what the profile implies altogether', () => {
   it('keys them the way the extension keys its own patterns', () => {
     const keys = Object.keys(derivedAutofill({ name: 'Ada Lovelace', location: 'London, United Kingdom' }));
     expect(keys.sort()).toEqual(['address_city', 'address_country', 'first_name', 'last_name']);
+  });
+});
+
+/*
+ * And the other half of the same problem this file opens with.
+ *
+ * The extension's `FIELD_PATTERNS` has recognised `school`, `degree`, `major`
+ * and `gpa` from the start, exactly as it recognised the name and address
+ * parts, and the store answered none of them — so the Education section of a
+ * Greenhouse form came out empty on a store holding a university, a degree and
+ * a grade. Hidden the same way the names were: every test store had them typed
+ * in by hand as extras.
+ */
+const edu = (over: Partial<Entry> = {}): Entry => ({
+  id: 'edu_neu',
+  kind: 'education',
+  title: 'Northeastern University',
+  subtitle: 'Bachelor of Science in Computer Science',
+  period: { start: { year: 2022 }, end: { year: 2026 } },
+  ...over,
+});
+
+describe('splitting a degree line into the two boxes a form has', () => {
+  it('splits on "in", which is how a resume writes it', () => {
+    expect(splitDegree('Bachelor of Science in Computer Science')).toEqual({
+      degree: 'Bachelor of Science',
+      major: 'Computer Science',
+    });
+  });
+
+  it('reads the abbreviated forms too', () => {
+    expect(splitDegree('BS in Computer Science')).toEqual({ degree: 'BS', major: 'Computer Science' });
+    expect(splitDegree('M.Eng in Robotics')).toEqual({ degree: 'M.Eng', major: 'Robotics' });
+  });
+
+  /*
+   * The last "in", not the first: "Bachelor of Science in Engineering in
+   * Computer Science" is a real degree name and the discipline is the tail.
+   */
+  it('takes the last join when the degree name has one in it', () => {
+    expect(splitDegree('Bachelor of Science in Engineering in Computer Science')).toEqual({
+      degree: 'Bachelor of Science in Engineering',
+      major: 'Computer Science',
+    });
+  });
+
+  it('drops a GPA clause rather than filing it as the discipline', () => {
+    expect(splitDegree('Bachelor of Science in Computer Science, GPA 3.8/4.0')).toEqual({
+      degree: 'Bachelor of Science',
+      major: 'Computer Science',
+    });
+  });
+
+  /*
+   * A comma is not the join. "Bachelor of Science, Computer Science" and
+   * "Bachelor of Science, Summa Cum Laude" are the same shape and only one of
+   * them has a discipline after it, so neither is split.
+   */
+  it('offers nothing where the split is not plain', () => {
+    expect(splitDegree('Bachelor of Science, Computer Science')).toBeUndefined();
+    expect(splitDegree('Bachelor of Science, Summa Cum Laude')).toBeUndefined();
+    // No degree word on the left, so the "in" is part of a subject.
+    expect(splitDegree('Studies in Computer Science')).toBeUndefined();
+    expect(splitDegree('Computer Science')).toBeUndefined();
+    expect(splitDegree('')).toBeUndefined();
+  });
+});
+
+describe('reading a grade out of the line it is printed on', () => {
+  it('takes the number a box wants, without the scale beside it', () => {
+    expect(readGpa('Bachelor of Science in Computer Science, GPA 3.8/4.0')).toBe('3.8');
+    expect(readGpa('GPA: 3.95')).toBe('3.95');
+  });
+
+  it('refuses a score that cannot be one', () => {
+    // Above its own scale, so one of the two was misread.
+    expect(readGpa('GPA 5.0/4.0')).toBeUndefined();
+    expect(readGpa('GPA pending')).toBeUndefined();
+    expect(readGpa('Computer Science')).toBeUndefined();
+  });
+});
+
+describe('what the education entries imply', () => {
+  it('fills the four boxes a Greenhouse education section asks for', () => {
+    expect(derivedAutofill({}, [edu()])).toEqual({
+      school: 'Northeastern University',
+      degree: 'Bachelor of Science',
+      major: 'Computer Science',
+    });
+  });
+
+  it('reads the wording that is set when nothing has chosen between them', () => {
+    const entry = edu({
+      subtitle: {
+        default: 'v_plain',
+        variants: [
+          { id: 'v_gpa', label: 'With GPA', text: 'Bachelor of Science in Computer Science, GPA 3.8/4.0' },
+          { id: 'v_plain', label: 'Plain', text: 'Bachelor of Science in Computer Science' },
+        ],
+      },
+    });
+
+    const out = derivedAutofill({}, [entry]);
+    expect(out.degree).toBe('Bachelor of Science');
+    expect(out.major).toBe('Computer Science');
+    /*
+     * And the grade from whichever wording carries it. Whether the GPA is on
+     * the resume is a decision about the resume; a box marked "GPA" is asking
+     * a different question, and the answer is the same either way.
+     */
+    expect(out.gpa).toBe('3.8');
+  });
+
+  it('takes the most recent school when there are several', () => {
+    const out = derivedAutofill({}, [
+      edu({ id: 'edu_old', title: 'Boston Latin', subtitle: 'BA in History', period: { end: { year: 2022 } } }),
+      edu({ id: 'edu_new', title: 'Northeastern University', period: { end: { year: 2026 } } }),
+    ]);
+
+    expect(out.school).toBe('Northeastern University');
+    expect(out.major).toBe('Computer Science');
+  });
+
+  /*
+   * The refusals matter as much as the readings, for the reason this file
+   * opens with: an empty required box is visible and gets fixed; a wrong
+   * university on a submitted application is neither.
+   */
+  it('offers nothing where the newest is not plain', () => {
+    // Two finishing the same year cannot be told apart this way.
+    expect(
+      derivedAutofill({}, [
+        edu({ id: 'a', title: 'One', period: { end: { year: 2026 } } }),
+        edu({ id: 'b', title: 'Two', period: { end: { year: 2026 } } }),
+      ]),
+    ).toEqual({});
+
+    // Neither can two with no readable end date at all.
+    expect(
+      derivedAutofill({}, [
+        edu({ id: 'a', title: 'One', period: undefined }),
+        edu({ id: 'b', title: 'Two', period: undefined }),
+      ]),
+    ).toEqual({});
+  });
+
+  it('ignores entries that are not education, and ones put away', () => {
+    expect(derivedAutofill({}, [edu({ kind: 'experience', title: 'Helios' })])).toEqual({});
+    expect(derivedAutofill({}, [edu({ archived: true })])).toEqual({});
+  });
+
+  it('fills the school even when the degree line cannot be split', () => {
+    const out = derivedAutofill({}, [edu({ subtitle: 'Computer Science' })]);
+    expect(out).toEqual({ school: 'Northeastern University' });
+  });
+
+  it('keys them the way the extension keys its own patterns', () => {
+    const entry = edu({ subtitle: 'Bachelor of Science in Computer Science, GPA 3.8/4.0' });
+    expect(Object.keys(derivedAutofill({}, [entry])).sort()).toEqual(['degree', 'gpa', 'major', 'school']);
+  });
+});
+
+describe('when the degree ends, as the boxes forms ask for it in', () => {
+  it('reads the month and year off the end of the range', () => {
+    expect(graduation('Sep. 2022 -- May 2026')).toEqual({
+      education_start_year: '2022',
+      education_start_month: 'September',
+      education_start_date: 'September 2022',
+      graduation_year: '2026',
+      graduation_month: 'May',
+      graduation_date: 'May 2026',
+    });
+    expect(graduation('Sep. 2022 -- Dec. 2026').graduation_month).toBe('December');
+  });
+
+  /*
+   * A guessed month on a graduation date is a claim about when somebody can
+   * start work. An end with only a year reports only the year.
+   */
+  it('reports only the year when only the year is written', () => {
+    expect(graduation('2022 -- 2026')).toEqual({
+      education_start_year: '2022',
+      education_start_date: '2022',
+      graduation_year: '2026',
+      graduation_date: '2026',
+    });
+  });
+
+  /*
+   * A degree in progress still began when it began: the start is reported and
+   * the end is not, because there is no end yet to report.
+   */
+  it('reports no end for a degree still in progress, and nothing for dates it cannot read', () => {
+    expect(graduation('Sep. 2022 -- Present')).toEqual({
+      education_start_year: '2022',
+      education_start_month: 'September',
+      education_start_date: 'September 2022',
+    });
+    expect(graduation('Two semesters')).toEqual({});
+    expect(graduation('')).toEqual({});
+  });
+});
+
+/*
+ * The graduation date is why the resume's own choices come into this at all.
+ * Somebody applying to internships and new-grad roles keeps two, and picks
+ * between them per posting; read from the default, every internship form was
+ * told May 2026 while the resume attached to it said December.
+ */
+describe('the form agrees with the resume being sent', () => {
+  const twoDates = (): Entry =>
+    edu({
+      dates: {
+        default: 'v_may2026',
+        variants: [
+          { id: 'v_may2026', label: 'May 2026', text: 'Sep. 2022 -- May 2026', tags: ['newgrad'] },
+          { id: 'v_dec2026', label: 'Dec 2026', text: 'Sep. 2022 -- Dec. 2026', tags: ['intern'] },
+        ],
+      },
+    });
+
+  it('uses the default when no resume is named', () => {
+    expect(derivedAutofill({}, [twoDates()]).graduation_date).toBe('May 2026');
+  });
+
+  it("uses the date the resume chose when one is", () => {
+    const out = derivedAutofill({}, [twoDates()], { 'edu_neu.dates': 'v_dec2026' });
+    expect(out.graduation_date).toBe('December 2026');
+    expect(out.graduation_month).toBe('December');
+  });
+
+  /*
+   * To the *default*, not to whichever wording is listed first. Here the two
+   * are different on purpose — the intern date is listed first and the
+   * default is May — because with the default first, falling back to the
+   * first wording passes this for the wrong reason.
+   */
+  it('falls back to the default for a choice that names no wording', () => {
+    const entry = edu({
+      dates: {
+        default: 'v_may2026',
+        variants: [
+          { id: 'v_dec2026', label: 'Dec 2026', text: 'Sep. 2022 -- Dec. 2026' },
+          { id: 'v_may2026', label: 'May 2026', text: 'Sep. 2022 -- May 2026' },
+        ],
+      },
+    });
+    expect(derivedAutofill({}, [entry], { 'edu_neu.dates': 'v_gone' }).graduation_date).toBe('May 2026');
+  });
+
+  it('only listens to choices about the school it is reading', () => {
+    const out = derivedAutofill({}, [twoDates()], { 'edu_other.dates': 'v_dec2026' });
+    expect(out.graduation_date).toBe('May 2026');
+  });
+
+  it('reads the degree the resume chose, too', () => {
+    const entry = edu({
+      subtitle: {
+        default: 'v_cs',
+        variants: [
+          { id: 'v_cs', label: 'CS', text: 'Bachelor of Science in Computer Science' },
+          { id: 'v_ce', label: 'CE', text: 'Bachelor of Science in Computer Engineering' },
+        ],
+      },
+    });
+    expect(derivedAutofill({}, [entry], { 'edu_neu.subtitle': 'v_ce' }).major).toBe('Computer Engineering');
+  });
+});
+
+/*
+ * "Current company", which Lever asks on every form and the store never
+ * answered. Only from a role that runs to the present: the last place somebody
+ * worked is not where they work, and saying so to a prospective employer is a
+ * false statement made on their behalf.
+ */
+describe('the job somebody holds now', () => {
+  const job = (over: Partial<Entry> = {}): Entry => ({
+    id: 'exp_helios',
+    kind: 'experience',
+    title: 'Helios',
+    subtitle: 'Software Engineer Intern',
+    dates: 'Jan. 2026 -- Present',
+    ...over,
+  });
+
+  it('answers from a role that runs to the present', () => {
+    expect(derivedAutofill({}, [job()])).toEqual({
+      current_company: 'Helios',
+      current_title: 'Software Engineer Intern',
+    });
+  });
+
+  it('says nothing about a role that has ended', () => {
+    expect(derivedAutofill({}, [job({ dates: 'Jul. 2024 -- Dec. 2024' })])).toEqual({});
+  });
+
+  it('takes the more recent of two current roles', () => {
+    const out = derivedAutofill({}, [
+      job({ id: 'exp_ta', title: 'Northeastern University', subtitle: 'Teaching Assistant', dates: 'Sep. 2024 -- Present' }),
+      job({ id: 'exp_helios', dates: 'Jan. 2026 -- Present' }),
+    ]);
+    expect(out.current_company).toBe('Helios');
+  });
+
+  it('offers nothing when two current roles started together', () => {
+    expect(
+      derivedAutofill({}, [
+        job({ id: 'a', title: 'One', dates: 'Jan. 2026 -- Present' }),
+        job({ id: 'b', title: 'Two', dates: 'Jan. 2026 -- Present' }),
+      ]),
+    ).toEqual({});
+  });
+
+  it('reads the dates the resume chose, which decide whether the role is current', () => {
+    const entry = job({
+      dates: {
+        default: 'v_ended',
+        variants: [
+          { id: 'v_ended', label: 'Ended', text: 'Jan. 2026 -- Apr. 2026' },
+          { id: 'v_now', label: 'Ongoing', text: 'Jan. 2026 -- Present' },
+        ],
+      },
+    });
+    expect(derivedAutofill({}, [entry])).toEqual({});
+    expect(derivedAutofill({}, [entry], { 'exp_helios.dates': 'v_now' }).current_company).toBe('Helios');
+  });
+
+  it('ignores ongoing entries that are not jobs, and ones put away', () => {
+    expect(derivedAutofill({}, [job({ archived: true })])).toEqual({});
+    expect(derivedAutofill({}, [job({ kind: 'project' })])).toEqual({});
   });
 });

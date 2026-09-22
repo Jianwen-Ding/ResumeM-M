@@ -2840,10 +2840,35 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   );
 
   /** Everything the extension needs to fill a form without asking again. */
+  /**
+   * Which wordings the resume being sent uses, read off `?choices=`.
+   *
+   * JSON, because a resume's `choices` is a map and a query string is not.
+   * Anything that is not a plain map of strings to strings is ignored rather
+   * than refused: the fields answer perfectly well from the defaults, and a
+   * form half-filled from defaults beats one not filled at all because the
+   * extension sent something odd.
+   */
+  const choicesFrom = (raw: unknown): Record<string, string> => {
+    if (typeof raw !== 'string' || !raw) return {};
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      return Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>).filter(
+          (kv): kv is [string, string] => typeof kv[1] === 'string',
+        ),
+      );
+    } catch {
+      return {};
+    }
+  };
+
   api.get(
     '/autofill',
-    handler(async (_req, res) => {
+    handler(async (req, res) => {
       const data = store.load();
+      const choices = choicesFrom(req.query.choices);
       // Resolved: a form field takes a name, not a set of them.
       const p = resolveProfile(data.profile, {}, []);
       res.json({
@@ -2872,7 +2897,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
            * `derivedAutofill`, which yields nothing at all where the reading
            * is not plain.
            */
-          ...derivedAutofill({ name: p.name, location: p.location }),
+          ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
           ...(p.autofill ?? {}),
         },
         answers: data.answers.map((a) => ({
@@ -3311,6 +3336,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * has been done and holding a place for it. See `holdASpace`.
          */
         auto?: boolean;
+        /**
+         * Whether anything has been put into the employer's own form yet.
+         *
+         * Only meaningful beside `auto`. See the status below: an automatic
+         * row is a place to write, and a place to write is not a claim that
+         * somebody is applying.
+         */
+        actedOnForm?: boolean;
       };
       if (!body.company || !body.role) throw new Error('company and role are required');
       /*
@@ -3525,6 +3558,30 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * send on a different day — and matching on the id alone meant writing
        * a second row for a job that already had one.
        */
+      /*
+       * What stage a row opened this way starts at.
+       *
+       * "Applying" is a claim about what somebody is doing, and merely having
+       * a workspace is not that claim. The extension opens one as soon as a
+       * resume is built, which it does on anything job-shaped you open — so
+       * the tracker filled with rows nobody had started: `Indeed — Now Hiring:
+       * 300 Software Intern Jobs`, a `preview.redd.it` image url, one row for
+       * `NVIDIA Corporation` and another for `2100 NVIDIA USA`, every one of
+       * them reading `applying` for ever. The list that is supposed to say
+       * what is in flight said everything was.
+       *
+       * The place to write still opens at the first sign of work, because the
+       * letter is drafted before the form is ever seen and putting the writing
+       * surface behind the form would be backwards. It is the *stage* that
+       * waits: `interested` — "Not applied" — until the extension reports
+       * something actually put into the employer's boxes.
+       *
+       * Only on the automatic route. Pressing "Write these in ResumeM-M"
+       * carries no `auto`, and somebody pressing it is applying.
+       */
+      const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
+      const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
+
       const tracked = findApplication(store.load().applications, draft.company, draft.role);
       if (!tracked) {
         store.upsertApplication({
@@ -3532,7 +3589,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           company: draft.company,
           role: draft.role,
           url: draft.url,
-          status: 'applying',
+          status: started,
           resumeId: draft.resumeId,
           source: draft.source,
           /*
@@ -3543,8 +3600,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
            * It is the date it started; `trackStatus` records when it was sent.
            */
           appliedAt: now,
-          history: [{ at: now, status: 'applying', note: 'Workspace opened' }],
+          history: [{ at: now, status: started, note }],
         });
+      } else if (body.actedOnForm && tracked.status === 'interested') {
+        /*
+         * And the moment it stops being a bookmark, it is moved on.
+         *
+         * Only out of `interested`, and only ever forwards: a row that has
+         * been sent, answered, or closed is past this and must not be dragged
+         * back by a keeper tick on a tab somebody left open.
+         */
+        advance(store, tracked.id, 'applying', 'Started filling in the form');
       }
 
       res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });

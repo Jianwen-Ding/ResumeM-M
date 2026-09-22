@@ -5729,65 +5729,63 @@ async function loadApplications() {
         : `${showing.length} of ${plural(applications.length, 'application')}`;
   }
 
-  const rows = [...showing]
-    .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))
-    .map((a) => {
-      const sel = el('select');
-      for (const [s, label] of STATUSES) {
-        sel.append(el('option', { value: s, textContent: label, selected: s === a.status }));
-      }
-      sel.onchange = async () => {
-        const moved = sel.value;
-        await api(`/applications/${encodeURIComponent(a.id)}/status`, {
-          method: 'POST',
-          body: JSON.stringify({ status: moved }),
-        });
-        setStatus('Status updated');
-        // Once, on the way in — not every time the list repaints with an
-        // offer already on it.
-        if (moved === 'offer' && a.status !== 'offer') celebrate(a.company);
-        loadApplications();
-      };
-      const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
-        // Both dates get the same treatment: "2026-09-" over "17" is not a
-        // date, and wrapping the narrowest column steals two lines of height
-        // from every row to save nothing.
-        el('td', { className: 'when', textContent: a.appliedAt?.slice(0, 10) ?? '' }),
-        el('td', { textContent: a.company }),
-        el('td', { textContent: a.role }),
-        el('td', {}, [sel]),
-        // Blank, not a dash: an em-dash in a date column reads as a date that
-        // failed to load rather than as one that has not happened.
-        el('td', { className: 'when', textContent: sentOn(a) }),
-        el('td', {}, [
-          a.coverLetter ? el('span', { className: 'chip count', textContent: 'letter' }) : null,
-          a.answers?.length
-            ? el('span', { className: 'chip count', textContent: plural(a.answers.length, 'answer') })
-            : null,
-        ].filter(Boolean)),
-        el('td', {}, [
-          el('button', {
-            className: 'tiny danger',
-            textContent: 'Remove',
-            onclick: async (ev) => {
-              ev.stopPropagation();
-              if (!(await confirmModal(`Remove ${a.company}?`, 'The tracker row goes; the files on disk stay.'))) return;
-              await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
-              if (openApplicationId === a.id) openApplicationId = null;
-              loadApplications();
-            },
-          }),
-        ]),
-      ]);
+  const rowFor = (a) => {
+    const sel = el('select');
+    for (const [s, label] of STATUSES) {
+      sel.append(el('option', { value: s, textContent: label, selected: s === a.status }));
+    }
+    sel.onchange = async () => {
+      const moved = sel.value;
+      await api(`/applications/${encodeURIComponent(a.id)}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status: moved }),
+      });
+      setStatus('Status updated');
+      // Once, on the way in — not every time the list repaints with an
+      // offer already on it.
+      if (moved === 'offer' && a.status !== 'offer') celebrate(a.company);
+      loadApplications();
+    };
+    const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
+      // Both dates get the same treatment: "2026-09-" over "17" is not a
+      // date, and wrapping the narrowest column steals two lines of height
+      // from every row to save nothing.
+      el('td', { className: 'when', textContent: a.appliedAt?.slice(0, 10) ?? '' }),
+      el('td', { textContent: a.company }),
+      el('td', { textContent: a.role }),
+      el('td', {}, [sel]),
+      // Blank, not a dash: an em-dash in a date column reads as a date that
+      // failed to load rather than as one that has not happened.
+      el('td', { className: 'when', textContent: sentOn(a) }),
+      el('td', {}, [
+        a.coverLetter ? el('span', { className: 'chip count', textContent: 'letter' }) : null,
+        a.answers?.length
+          ? el('span', { className: 'chip count', textContent: plural(a.answers.length, 'answer') })
+          : null,
+      ].filter(Boolean)),
+      el('td', {}, [
+        el('button', {
+          className: 'tiny danger',
+          textContent: 'Remove',
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            if (!(await confirmModal(`Remove ${a.company}?`, 'The tracker row goes; the files on disk stay.'))) return;
+            await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            if (openApplicationId === a.id) openApplicationId = null;
+            loadApplications();
+          },
+        }),
+      ]),
+    ]);
 
-      // Clicking the row opens the full record; the status dropdown and the
-      // remove button stop the event so they still work on their own.
-      row.onclick = () => openApplication(a.id);
-      sel.onclick = (ev) => ev.stopPropagation();
-      return row;
-    });
+    // Clicking the row opens the full record; the status dropdown and the
+    // remove button stop the event so they still work on their own.
+    row.onclick = () => openApplication(a.id);
+    sel.onclick = (ev) => ev.stopPropagation();
+    return row;
+  };
 
-  if (rows.length === 0) {
+  if (showing.length === 0) {
     // Not the same fact as an empty tracker, and not worth confusing with it.
     wrap.replaceChildren(
       el('div', { className: 'empty' }, [
@@ -5797,6 +5795,62 @@ async function loadApplications() {
     );
     return;
   }
+
+  /*
+   * Grouped by stage, in the order the stages matter rather than the order
+   * they happen in.
+   *
+   * Sorted by date alone, the row you are in the middle of filling in sits
+   * wherever its start date puts it — which after a busy week is halfway down
+   * a screen of jobs that are finished, waiting, or were never applied to.
+   * The tracker is opened to ask "what needs me", and a list in date order
+   * answers "what happened recently" instead.
+   *
+   * The order is not the ladder `STATUSES` prints in the dropdown, and is not
+   * meant to be. An interview is a date in the diary and outranks everything;
+   * an application being filled in is the next thing to finish; an offer is a
+   * decision owed to somebody. Below those three, `applied` is the pile you
+   * are waiting on — most of the list, most of the time, and none of it
+   * actionable. `interested` was never started and `closed` is over.
+   */
+  const STAGE_ORDER = ['interview', 'applying', 'offer', 'applied', 'interested', 'closed'];
+  const byDate = (a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
+
+  /*
+   * A stage this does not know about goes to the bottom rather than vanishing
+   * — a hand-edited `applications.yaml` can hold anything, and a row the
+   * reader cannot see is worse than one in the wrong place.
+   */
+  const stages = [...STAGE_ORDER, ...new Set(showing.map((a) => a.status).filter((s) => !STAGE_ORDER.includes(s)))];
+  const groups = stages
+    .map((stage) => ({ stage, rows: showing.filter((a) => a.status === stage).sort(byDate) }))
+    .filter((g) => g.rows.length > 0);
+
+  /**
+   * A heading row inside the table, rather than one table per stage.
+   *
+   * Several tables means several sets of column widths, and the columns
+   * drifting against each other across the splits is exactly the thing that
+   * makes a grouped list harder to read than an ungrouped one.
+   */
+  const heading = (text, count) =>
+    el('tr', { className: 'group' }, [
+      el('td', { colSpan: 7 }, [
+        el('b', { textContent: text }),
+        el('span', { className: 'group-count', textContent: plural(count, 'application') }),
+      ]),
+    ]);
+
+  /*
+   * Headings only when there is more than one stage on screen. A single
+   * heading over the whole list repeats what the filter already says, and
+   * on a tracker where everything is at one stage it is pure furniture.
+   */
+  const named = groups.length > 1;
+  const rows = groups.flatMap((g) => [
+    ...(named ? [heading(statusLabel(g.stage), g.rows.length)] : []),
+    ...g.rows.map(rowFor),
+  ]);
 
   wrap.replaceChildren(
     el('table', {}, [
