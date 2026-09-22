@@ -40,7 +40,7 @@ import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiP
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats } from '../model/applications.js';
+import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -2378,7 +2378,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * never had the guard the Workspace's tailor already had.
        */
       const employer = job.company ?? employerFallback(url);
-      const specId = `job-${slug(employer)}-${slug(job.title ?? 'role')}`.slice(0, 60);
+      /*
+       * One pair of names, used for all three things that depend on them.
+       *
+       * The id was built from these fallbacks and `generatedFor` was written
+       * from the raw `job.company` and `job.title` a few lines later, so a
+       * posting whose page never names the employer — an ATS board serving a
+       * form under the company's own hostname, which is the ordinary case —
+       * got an id reading `job-acmecorp-…`, taken from that hostname, over a
+       * record saying nothing at all.
+       *
+       * `generatedFor` is the only thing that can say later which posting a
+       * copy belongs to. It is what `migrateTailoredIds` reads to decide
+       * whether an id is one this code minted and may safely rename, and what
+       * would answer the same question for anything else that has to. A
+       * record that does not reproduce its own id answers nothing, and those
+       * copies would have been left behind by the very rename they most need.
+       */
+      const role = job.title ?? 'Role';
+      const specId = tailoredResumeId(employer, role);
 
       const baseId = baseForCopy(data.resumes, baseResumeId, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
@@ -2556,10 +2574,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       /* What the base asks for on skills, which is what undoing a swap restores. */
       const baseSkillItems = base.sections?.find((s) => s.kind === 'skills')?.items;
 
-      const spec = deriveSpec(base, specId, `${job.title ?? 'Role'} — ${employer}`, finalMatch, {
+      const spec = deriveSpec(base, specId, `${role} — ${employer}`, finalMatch, {
         url,
-        company: job.company,
-        role: job.title,
+        company: employer,
+        role,
       }, data.resumes);
 
       // Showing and hiding entries or bullets, the other half of what the AI
@@ -2757,6 +2775,23 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           data.entries.flatMap((e) => (e.bullets ?? []).map((b) => [b.id, e.id])),
         ),
         suggestions: sanitizeSuggestions(aiParsed, data),
+        /*
+         * What the sanitiser threw out of the model's plan.
+         *
+         * `sanitizeAiPlan` checks every id a model names against the save and
+         * drops the ones that are not there — that is the whole of the rule
+         * that the AI chooses between wordings and never writes one. It
+         * already collected what it dropped, and the workspace route has said
+         * so since it was written; this one computed exactly the same list and
+         * did not send it. So a run where the model invented most of its plan
+         * came back indistinguishable from a run where it chose three things,
+         * and the card said "chosen by the AI" over both.
+         *
+         * The same fault `tailor: mode === 'ai' && !aiParsed ? 'match' : mode`
+         * exists to prevent, one level down. A card cannot say what happened
+         * if it is not told what happened.
+         */
+        rejected: plan?.rejected ?? [],
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
         // Which of the two ways the AI answered, so a run that went through
@@ -3630,7 +3665,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!html.trim()) throw new Error('This draft has no link and no posting text to work from');
 
       const job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
-      const specId = `job-${slug(draft.company)}-${slug(draft.role)}`.slice(0, 60);
+      const specId = tailoredResumeId(draft.company, draft.role);
 
       /*
        * Tailoring twice must not make a resume that inherits from itself. The

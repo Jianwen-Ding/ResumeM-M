@@ -66,6 +66,31 @@ function serve(reply: string) {
 
 const draft = (body: unknown) => request(app).post('/api/ai/draft-entry').send(body as object);
 
+/**
+ * Every byte of the save, so "it was not written" can be asked of the whole
+ * thing rather than of the one field a test happened to think of.
+ *
+ * `not.toContain(entry.id)` is the check that was here, and it only rules out
+ * the shape of the mistake somebody already imagined: an entry appearing
+ * under the id the reply carried. A variant appended to an existing bullet, a
+ * skills group touched, a config key written — all of those pass it.
+ */
+function everyByte(dir: string): string {
+  const out: string[] = [];
+  const walk = (at: string) => {
+    for (const name of fs.readdirSync(at).sort()) {
+      // `.git` moves on its own — the repo is a witness to this, not part of
+      // what is being watched.
+      if (name === '.git') continue;
+      const full = path.join(at, name);
+      if (fs.statSync(full).isDirectory()) walk(full);
+      else out.push(`${path.relative(dir, full)}\u0000${fs.readFileSync(full, 'utf8')}`);
+    }
+  };
+  walk(dir);
+  return out.join('\u0001');
+}
+
 afterEach(() => t?.cleanup());
 
 describe('an entry drafted by a model', () => {
@@ -90,6 +115,29 @@ describe('an entry drafted by a model', () => {
     expect(res.body.entry.bullets).toHaveLength(2);
     // Proposed, not stored: the save still holds what it held.
     expect(t.store.load().entries.map((e) => e.id)).not.toContain(res.body.entry.id);
+  });
+
+  /*
+   * The rule this whole file exists for, asked of the whole save.
+   *
+   * "The AI may not write resume text" is the line the product is built
+   * around, and these two endpoints are the only places a model's own words
+   * take the shape of resume content at all. Both say so in their own
+   * comments — `draft-phrasing` is annotated "Proposed, never saved" — and
+   * neither was held to it by anything: the check above rules out one entry
+   * id appearing, and `draft-phrasing` had no such check at all.
+   *
+   * A wording appended to an existing bullet, a skills group touched, a line
+   * of config written — every one of those passes an id check and none of
+   * them passes this. It costs one directory walk, and what it protects is
+   * the sentence somebody chose this tool for.
+   */
+  it('leaves the save byte for byte as it found it', async () => {
+    serve(ORDINARY);
+    const before = everyByte(t.dir);
+    const res = await draft({ notes: 'A queue I wrote.' }).expect(200);
+    expect(res.body.executed).toBe(true);
+    expect(everyByte(t.dir)).toBe(before);
   });
 
   it('marks every wording unreviewed, and pins one', async () => {
@@ -234,6 +282,15 @@ describe('another wording for a line', () => {
   });
 
   const phrasing = (body: unknown) => request(app).post('/api/ai/draft-phrasing').send(body as object);
+
+  it('leaves the save byte for byte as it found it', async () => {
+    serve(FIVE_BACK);
+    const before = everyByte(t.dir);
+    const res = await phrasing({ entryId: 'exp_acme', bulletId: 'b_pipeline' }).expect(200);
+    expect(res.body.executed).toBe(true);
+    expect(res.body.variants.length).toBeGreaterThan(0);
+    expect(everyByte(t.dir)).toBe(before);
+  });
 
   it('rephrases a bullet that exists', async () => {
     serve(FIVE_BACK);

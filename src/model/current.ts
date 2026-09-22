@@ -44,6 +44,30 @@ export const STANDING = '\u0000standing';
 const FAILED = '\u0000failed';
 
 /**
+ * A name in this folder that is not ours to write, as opposed to one we could
+ * not write this time.
+ *
+ * The difference decides what the manifest records, and getting it wrong cost
+ * the user a file. Every failure went down under `FAILED`, which is right for
+ * an `EBUSY` or a full disk — those are ours, and the point of recording them
+ * is that the next sync retries. It is exactly wrong for "this belongs to the
+ * user": recording that name put it in `from`, so on the next sync it was in
+ * `claimed`, so the guard that had just refused to touch it was skipped.
+ *
+ * Measured: build an application over a file of your own, and the folder
+ * correctly says it was left alone — then reload the Applications tab, and it
+ * is overwritten with nothing reported. Which is the very failure the guard's
+ * own comment says it was written to stop: "the name then went into the
+ * manifest, so the *next* sync would have deleted it as ours."
+ *
+ * So a name refused for this reason is recorded nowhere. Untracked, it is not
+ * in `owned`, so the delete loop leaves it; and `cameFrom[name]` stays
+ * `undefined`, so the guard fires again and says so again. Saying the same
+ * true thing on every sync is the honest answer while nothing has changed.
+ */
+class NotOurs extends Error {}
+
+/**
  * What this folder put here last time.
  *
  * Without it, "rebuilt from the tracker" meant deleting every name that is not
@@ -104,6 +128,22 @@ function forFilename(s: string | undefined): string {
     .replace(/^-+|-+$/g, '');
 }
 
+/**
+ * A manifest entry that names a file in this folder, and nothing else.
+ *
+ * Every entry on either side of the manifest ends up in `owned`, and `owned`
+ * is handed to a recursive delete. The file is ours, and it also sits in a
+ * folder the user is invited to open, next to files they are told to keep
+ * there; `"../../Documents"` is one hand edit or one bad merge away from
+ * `rm -r` on a folder nobody meant.
+ *
+ * `.` has to be refused beside `..`, and it is the worse of the two:
+ * `path.basename('.')` is `'.'`, so it passes a plain-name test, and
+ * `path.join(dir, '.')` is the folder itself.
+ */
+const plainName = (f: unknown): f is string =>
+  typeof f === 'string' && f !== '' && f === path.basename(f) && f !== '..' && f !== '.';
+
 function readManifest(dir: string): string[] {
   try {
     const raw = fs.readFileSync(path.join(dir, MANIFEST), 'utf8');
@@ -116,18 +156,7 @@ function readManifest(dir: string): string[] {
      * from `rm -r` on a folder nobody meant. A manifest entry that is not a
      * name in this folder describes nothing this sync put here.
      */
-    return Array.isArray(parsed?.files)
-      /*
-       * `.` has to go in the list beside `..`, and it is the worse of the two.
-       * `path.basename('.')` is `'.'`, so it passed the "plain name" test, and
-       * `path.join(dir, '.')` is `dir` — so the recursive delete below was
-       * handed the whole folder, including the transcript the folder's own
-       * documentation invites the user to keep there.
-       */
-      ? parsed.files.filter(
-          (f: unknown) => typeof f === 'string' && f !== '' && f === path.basename(f) && f !== '..' && f !== '.',
-        )
-      : [];
+    return Array.isArray(parsed?.files) ? parsed.files.filter(plainName) : [];
   } catch {
     // No manifest, or an unreadable one. Owning nothing is the safe reading:
     // it means the next sync deletes nothing it cannot account for.
@@ -148,10 +177,17 @@ function readManifest(dir: string): string[] {
  * copied, nothing was reported, and the upload folder held Acme's tailored
  * resume under the name that now belonged to Beta.
  *
- * Only ever compared, never opened and never deleted — unlike `files`, which
- * is handed to a recursive delete and so has to be names in this folder. A
- * path here that means nothing simply forces a copy, which is the safe way to
- * be wrong.
+ * Filtered by `plainName`, the same as `files`, and for the same reason.
+ *
+ * This said the filter was not needed here because these are "only ever
+ * compared, never opened and never deleted". That stopped being true when
+ * `owned` grew to `[...ours, ...Object.keys(cameFrom)]`: the keys reach the
+ * very same recursive delete. Measured on a store with one archived bundle, a
+ * manifest hand-edited to `"from": {"..": "x"}` took `out/` itself — the
+ * archive and the upload folder both — and reported no problem.
+ *
+ * A path here that means nothing now simply forces a copy, which is the safe
+ * way to be wrong, and was the intent all along.
  *
  * A manifest written before this existed has no `from` at all, so every name
  * reads as "came from somewhere else" and is copied once on the next sync.
@@ -164,7 +200,7 @@ function readSources(dir: string): Record<string, string> {
     if (!from || typeof from !== 'object' || Array.isArray(from)) return {};
     const out: Record<string, string> = {};
     for (const [name, source] of Object.entries(from)) {
-      if (typeof source === 'string' && source) out[name] = source;
+      if (plainName(name) && typeof source === 'string' && source) out[name] = source;
     }
     return out;
   } catch {
@@ -367,6 +403,8 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
 
   const problems: string[] = [];
   const landed: string[] = [];
+  /** Names this folder refused because they are the user's. See `NotOurs`. */
+  const notOurs = new Set<string>();
   for (const [name, from] of wanted) {
     const to = path.join(dir, name);
     try {
@@ -382,6 +420,14 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
        */
       const at = fs.statSync(to, { throwIfNoEntry: false });
       if (at && !at.isFile()) {
+        /*
+         * A plain failure, not a `NotOurs`. A directory with the wanted name
+         * reads as the user's, and the comment above says so — but it is also
+         * what a copy interrupted halfway can leave behind, and `documents`
+         * pins the retry deliberately ("a directory is only the device for
+         * making the copy throw on demand"). Ambiguous, so it stays ours to
+         * retry. The *file* case below is the unambiguous one.
+         */
         throw new Error('something that is not a file already has that name here');
       }
       /*
@@ -401,7 +447,7 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
        * missing file into a folder that has stopped working.
        */
       if (at && tracked && !claimed.has(name) && cameFrom[name] === undefined) {
-        throw new Error('a file of your own already has that name here, so it was left alone');
+        throw new NotOurs('a file of your own already has that name here, so it was left alone');
       }
       /*
        * Copy when it is a different bundle, or when the same bundle has been
@@ -440,6 +486,7 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
        * resume.
        */
       const said = err instanceof Error ? err.message : String(err);
+      if (err instanceof NotOurs) notOurs.add(name);
       problems.push(`"${name}" could not be put in ${dir}: ${said}`);
     }
   }
@@ -464,8 +511,12 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
    * Recorded under `FAILED`, so the next sync always re-copies it: it is not
    * a path any bundle can have produced, and it is not `undefined`, which is
    * what the guard reads as "somebody else's".
+   *
+   * Every failure except the one that is not a failure of ours. A name held
+   * by a file of the user's is left out of both halves, so it stays
+   * unattributed and the guard refuses it again next time — see `NotOurs`.
    */
-  const failed = [...wanted.keys()].filter((name) => !landed.includes(name));
+  const failed = [...wanted.keys()].filter((name) => !landed.includes(name) && !notOurs.has(name));
   const from = Object.fromEntries([
     ...files.map((name) => [name, wanted.get(name)!]),
     ...failed.map((name) => [name, FAILED]),

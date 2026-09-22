@@ -20,10 +20,29 @@ export const ENTRY_FILES = ['education.yaml', 'experience.yaml', 'projects.yaml'
 /** Enough of a store to resolve a resume: everything else is irrelevant here. */
 export type StoreSnapshot = Pick<StoreData, 'profile' | 'entries' | 'skillGroups' | 'resumes'>;
 
-function parse<T>(text: string | undefined, fallback: T): T {
+/**
+ * One file out of a commit, or the fallback — for any reason at all.
+ *
+ * The `catch` was the whole of it, which covers YAML that *throws* and
+ * nothing else. Valid YAML of the wrong shape sailed through: a file
+ * hand-edited into a mapping — wrapping the list under an `entries:` key is
+ * the natural mistake, and this store is advertised as hand-editable — parses
+ * perfectly well, and then `push(...it)` is a TypeError.
+ *
+ * That is worse than a gap in the timeline, because the throw escapes.
+ * `readSnapshot` is called one line outside the `try` that exists to absorb
+ * exactly this, so the whole of Version history fails — and keeps failing
+ * after the file is put right, because the bad blob is still in a commit
+ * inside the scan window. One save, and the history is gone for good.
+ *
+ * So the shape is checked as well as the parse. A commit holding something
+ * this cannot read is a gap, whichever way it cannot read it.
+ */
+function parse<T>(text: string | undefined, fallback: T, shaped?: (v: unknown) => boolean): T {
   if (!text?.trim()) return fallback;
   try {
-    return (YAML.parse(text) ?? fallback) as T;
+    const value = YAML.parse(text) ?? fallback;
+    return (shaped && !shaped(value) ? fallback : value) as T;
   } catch {
     // A commit mid-edit can hold unparseable YAML. That is a gap in the
     // history, not a reason to fail the whole timeline.
@@ -31,18 +50,21 @@ function parse<T>(text: string | undefined, fallback: T): T {
   }
 }
 
+const isList = (v: unknown): boolean => Array.isArray(v);
+const isRecord = (v: unknown): boolean => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+
 /**
  * Build a snapshot from store-relative paths to file contents. Mirrors
  * `Store.load()`'s file layout — the one place the two must agree.
  */
 export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
   const entries: Entry[] = [];
-  for (const name of ENTRY_FILES) entries.push(...parse<Entry[]>(files.get(name), []));
+  for (const name of ENTRY_FILES) entries.push(...parse<Entry[]>(files.get(name), [], isList));
 
   const resumes: ResumeSpec[] = [];
   for (const [file, text] of files) {
     if (!/^resumes\/[^/]+\.ya?ml$/.test(file)) continue;
-    const spec = parse<ResumeSpec | undefined>(text, undefined);
+    const spec = parse<ResumeSpec | undefined>(text, undefined, isRecord);
     if (!spec) continue;
     // Filename is the source of truth for the id, exactly as on disk — where
     // it now actually is. Both places said this and then preferred the id
@@ -61,7 +83,7 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
      * the timeline then described a real regression (the name gone from the
      * PDF) as the name having been changed to that.
      */
-    profile: normalizeProfile(parse<Profile>(files.get('profile.yaml'), { name: PLACEHOLDER_NAME })),
+    profile: normalizeProfile(parse<Profile>(files.get('profile.yaml'), { name: PLACEHOLDER_NAME }, isRecord)),
     entries: normalizeEntries(entries),
     /*
      * And the skill groups, for the same reason the profile is. A group with
@@ -70,7 +92,7 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
      * would turn one bad revision into a timeline that cannot be opened at all
      * rather than one entry in it that cannot be resolved.
      */
-    skillGroups: normalizeSkillGroups(parse<SkillGroup[]>(files.get('skills.yaml'), [])),
+    skillGroups: normalizeSkillGroups(parse<SkillGroup[]>(files.get('skills.yaml'), [], isList)),
     resumes,
   };
 }

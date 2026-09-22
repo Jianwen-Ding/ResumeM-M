@@ -76,6 +76,39 @@ describe('splitting a location into the boxes a form has', () => {
     expect(splitLocation('')).toBeUndefined();
   });
 
+  /*
+   * A state is a state however it was typed.
+   *
+   * The rule this function documents is "with two parts, a two-letter second
+   * part is a state or province and anything longer is a country" — but the
+   * shape test was `^[A-Z]{2}$`, so a profile reading "boston, ma" fell
+   * through to the country branch and put **ma** in the Country box of a job
+   * application. Worse than filling nothing, which is what every other thing
+   * this cannot read does: nothing is a blank the person completes, and "ma"
+   * is a wrong answer they have to notice first.
+   *
+   * Nobody types their own address in a validated field, and the profile is
+   * hand-written YAML.
+   */
+  it('reads a state whatever case it was typed in', () => {
+    expect(splitLocation('boston, ma')).toEqual({ city: 'boston', state: 'MA' });
+    expect(splitLocation('Boston, Ma')).toEqual({ city: 'Boston', state: 'MA' });
+    expect(splitLocation('Toronto, on')).toEqual({ city: 'Toronto', state: 'ON' });
+    expect(splitLocation('Seattle, wa, USA')).toEqual({ city: 'Seattle', state: 'WA', country: 'USA' });
+  });
+
+  /*
+   * Only where it is a postal code. A province written out is a name, and a
+   * name is not shouted back at the person who wrote it.
+   */
+  it('leaves a written-out province exactly as written', () => {
+    expect(splitLocation('Vancouver, British Columbia, Canada')).toEqual({
+      city: 'Vancouver',
+      state: 'British Columbia',
+      country: 'Canada',
+    });
+  });
+
   it('offers nothing rather than guessing at something it cannot read', () => {
     expect(splitLocation('Boston, 02115')).toBeUndefined();
     expect(splitLocation('a, b, c, d')).toBeUndefined();

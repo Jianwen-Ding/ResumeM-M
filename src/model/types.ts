@@ -523,6 +523,19 @@ export interface Application {
   /** Id of the letter in `letters/`, when one was filed there too. */
   letterId?: string;
   history?: { at: string; status: ApplicationStatus; note?: string }[];
+  /**
+   * What this application calls its documents, where the store's default is
+   * not what this portal or this posting wants.
+   *
+   * On the application rather than in the settings, because the settings are
+   * about every application there will ever be. "This one will only take
+   * `resume.pdf`" and "put the title in this one's name" are both about one
+   * posting, and neither is a reason to rename the next fifty.
+   */
+  naming?: {
+    shape?: 'type' | 'title' | 'title-type';
+    custom?: Partial<Record<'Resume' | 'Cover Letter' | 'Answers', string>>;
+  };
 }
 
 /**

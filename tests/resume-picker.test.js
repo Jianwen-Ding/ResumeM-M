@@ -94,6 +94,7 @@ describe('picking a resume out of a store that has been used', () => {
    */
   describe('deleting the resume that is open', () => {
     let asked;
+    let whenDeleted;
 
     async function openAndDelete(resumes, id, { fails = false } = {}) {
       vi.resetModules();
@@ -104,6 +105,7 @@ describe('picking a resume out of a store that has been used', () => {
       const data = { ...fixture.store.load(), resumes: structuredClone(resumes) };
       fixture.cleanup();
       asked = [];
+      whenDeleted = null;
 
       vi.stubGlobal('confirm', () => true);
       vi.stubGlobal(
@@ -116,6 +118,13 @@ describe('picking a resume out of a store that has been used', () => {
           else if (url === '/api/ai/jobs') result = { jobs: [] };
           else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
           else if (method === 'DELETE' && String(url).startsWith('/api/resumes/')) {
+            // Where the editor was standing at the moment the request went
+            // out, which is the thing "before the delete goes out" is about.
+            // Read here rather than after `openAndDelete` returns, because
+            // the move is no longer synchronous with the click: the delete
+            // waits for any save of this resume that is still in the air
+            // first. See `deleteVariation`.
+            whenDeleted = document.querySelector('#resume-select')?.value ?? null;
             if (fails) {
               return { ok: false, status: 400, statusText: 'Bad Request', json: async () => ({ error: 'the save folder is not writable' }) };
             }
@@ -132,6 +141,13 @@ describe('picking a resume out of a store that has been used', () => {
       document.querySelector('#btn-delete-resume').click();
       await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
       document.querySelector('#modal-ok').click();
+      /*
+       * Settled before the caller looks. The move used to be synchronous with
+       * the press; it is not any more, because the delete waits for a save of
+       * this resume that is still in the air first — one landing after the
+       * delete writes the file straight back. See `deleteVariation`.
+       */
+      await vi.waitFor(() => expect(asked.some((a) => a.startsWith('DELETE'))).toBe(true));
     }
 
     const three = [
@@ -145,9 +161,8 @@ describe('picking a resume out of a store that has been used', () => {
 
       // The editor is on the next resume by the time the request is made,
       // rather than on the one being removed or on nothing at all.
-      const moved = document.querySelector('#resume-select').value;
-      expect(moved).toBe('job-helios');
       await vi.waitFor(() => expect(asked.some((a) => a.startsWith('DELETE'))).toBe(true));
+      expect(whenDeleted, 'where the editor stood when the delete went out').toBe('job-helios');
       expect(document.querySelector('#resume-select').value).toBe('job-helios');
     });
 

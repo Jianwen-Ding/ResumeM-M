@@ -93,8 +93,24 @@ export function splitName(full: string): { first: string; last: string } | undef
  * Two US states share their postal code with an ordinary word, and nothing
  * else here is ambiguous: the check below is on shape, not on a list of
  * places, so it holds for Ontario and Bavaria as well as Massachusetts.
+ *
+ * Case-insensitive, because a profile is hand-written YAML and nobody types
+ * their own address into a validated field. This was `^[A-Z]{2}$`, so
+ * "boston, ma" fell past the state branch into the country one and put **ma**
+ * in the Country box of a job application — which the rule right below says
+ * it should not, and which is worse than filling nothing. Everything else
+ * here that cannot be read offers nothing, and nothing is a blank the person
+ * completes; "ma" is a wrong answer they have to spot first.
  */
-const POSTAL_CODE = /^[A-Z]{2}$/;
+const POSTAL_CODE = /^[A-Za-z]{2}$/i;
+
+/**
+ * A two-letter code is an abbreviation, and its written form is capitals.
+ *
+ * Applied only where the shape says code — a province written out is a name,
+ * and a name is not shouted back at the person who wrote it.
+ */
+const asCode = (s: string) => (POSTAL_CODE.test(s) ? s.toUpperCase() : s);
 
 /** A country, rather than a state, when a location names three things. */
 const COUNTRYISH = /^[A-Za-z][A-Za-z .'-]*$/;
@@ -122,13 +138,13 @@ export function splitLocation(
   const parts = said.split(',').map(tidy).filter(Boolean);
   if (parts.length === 2) {
     const [city, second] = parts as [string, string];
-    if (POSTAL_CODE.test(second)) return { city, state: second };
+    if (POSTAL_CODE.test(second)) return { city, state: asCode(second) };
     if (COUNTRYISH.test(second)) return { city, country: second };
     return undefined;
   }
   if (parts.length === 3) {
     const [city, state, country] = parts as [string, string, string];
-    return COUNTRYISH.test(country) ? { city, state, country } : undefined;
+    return COUNTRYISH.test(country) ? { city, state: asCode(state), country } : undefined;
   }
   return undefined;
 }

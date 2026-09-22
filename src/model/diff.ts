@@ -286,7 +286,90 @@ export function diffResumes(
     out.push({ kind: 'changed', from: wasNamed, to: nowNamed, text: `Name changed to ${nowNamed}` });
   }
 
+  diffContact(before, after, out);
+  diffHeadings(before, after, out);
+  diffSectionMoves(bEntries, aEntries, out);
+
   return out;
+}
+
+/**
+ * The rest of the profile, which `strip` ships and only the name was read
+ * from.
+ *
+ * `sameDocument` decides whether a version exists and this decides what it
+ * says; wherever they disagree the card falls back to the raw commit message,
+ * so the timeline grows an entry with an empty change list and a blank
+ * before/after. Adding a GitHub link did that on *every* resume at once,
+ * which is the highest-traffic version this store makes.
+ */
+function diffContact(before: ResolvedResume, after: ResolvedResume, out: DocChange[]): void {
+  const both = new Set([...Object.keys(before.profile ?? {}), ...Object.keys(after.profile ?? {})]);
+  for (const key of [...both].sort()) {
+    // The name has already been compared as it is pinned, a few lines up.
+    if (key === 'name' || key === 'autofill') continue;
+    const was = before.profile?.[key as keyof typeof before.profile];
+    const now = after.profile?.[key as keyof typeof after.profile];
+    if (typeof was === 'object' || typeof now === 'object') continue;
+    const from = String(was ?? '');
+    const to = String(now ?? '');
+    if (from === to) continue;
+    out.push({
+      kind: 'changed',
+      from,
+      to,
+      text: to && from ? `Your ${key} changed` : to ? `Added your ${key}` : `Removed your ${key}`,
+    });
+  }
+}
+
+/**
+ * A section renamed. `heading` is a per-resume override, so this is a change
+ * to *this* document, and nothing read it except to quote it as `where`.
+ */
+function diffHeadings(before: ResolvedResume, after: ResolvedResume, out: DocChange[]): void {
+  const was = new Map(before.sections.map((s) => [s.kind, s.heading]));
+  for (const section of after.sections) {
+    const had = was.get(section.kind);
+    if (had === undefined || had === section.heading) continue;
+    out.push({
+      kind: 'changed',
+      from: had,
+      to: section.heading,
+      text: `Renamed the "${had}" section to "${section.heading}"`,
+    });
+  }
+}
+
+/**
+ * An entry that moved from one section to another.
+ *
+ * `entriesOf` flattens across sections so it can find an entry wherever it
+ * went — which is right, and meant the id was present in both maps and the
+ * reorder filter above still matched. The job prints under "Projects" now and
+ * the history said the document had not changed at all.
+ */
+function diffSectionMoves(
+  before: Map<string, { entry: ResolvedEntry; section: ResolvedSection }>,
+  after: Map<string, { entry: ResolvedEntry; section: ResolvedSection }>,
+  out: DocChange[],
+): void {
+  for (const [id, { entry, section }] of after) {
+    const was = before.get(id);
+    /*
+     * On `kind`, not on the heading. A section renamed is not an entry moved,
+     * and keying on the heading said it was — which also hid the rename
+     * itself, because the move it invented matched the same words.
+     */
+    if (!was || was.section.kind === section.kind) continue;
+    out.push({
+      kind: 'moved',
+      where: plain(entry.title ?? id),
+      from: was.section.heading,
+      to: section.heading,
+      text: `Moved "${plain(entry.title ?? id)}" from ${was.section.heading} to ${section.heading}`,
+    });
+  }
 }
 
 /** True when two versions produce the same document, so one can be skipped. */

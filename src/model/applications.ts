@@ -67,11 +67,43 @@ export type FileNameShape = 'type' | 'title' | 'title-type';
  * only, so an application with just a resume still gets the short name that
  * was asked for.
  */
+/**
+ * What one application calls its documents, when the shape is not enough.
+ *
+ * The shape is a setting, and a setting is about every application there will
+ * ever be. This is the other thing: *this* portal will only accept
+ * `resume.pdf`, or *this* posting wants the title in the name — neither of
+ * which is a reason to rename the next fifty. Per document, because that is
+ * how it is asked for, and per application, because that is how far it should
+ * reach.
+ */
+export type CustomFileNames = Partial<Record<DocumentKind, string>>;
+
+/**
+ * A name somebody typed, made into a filename.
+ *
+ * It arrives from a text box on a page this program does not control and
+ * becomes a path on disk, so it goes through exactly the rules every other
+ * part of a name goes through — `namePart` keeps letters and digits in any
+ * alphabet and turns everything else into a separator. A separator, a `..`
+ * and a leading dot all stop being any of those things on the way through.
+ *
+ * The extension is not the typist's either. A portal checks it, the answers
+ * file is markdown and the rest are PDFs, and a resume called `resume.docx`
+ * that is a PDF inside is a file rejected at the far end for a reason nobody
+ * can see.
+ */
+function typedName(said: string, extension: string): string | undefined {
+  const stem = namePart(said);
+  return stem ? stem + extension : undefined;
+}
+
 export function bundleFileNames(
   name: string,
   role: string | undefined,
   documents: { kind: DocumentKind; extension?: string }[],
   shape: FileNameShape = 'type',
+  custom: CustomFileNames = {},
 ): string[] {
   const titled = shape === 'type' ? undefined : role;
   const wanted = (withType: boolean) =>
@@ -82,9 +114,39 @@ export function bundleFileNames(
     );
 
   const short = wanted(false);
+  const byHand = documents.map((d) =>
+    custom[d.kind] ? typedName(custom[d.kind]!, d.extension ?? '.pdf') : undefined,
+  );
+
+  /*
+   * A typed name that clashes is refused, and says with what.
+   *
+   * A folder holds one file per name, so the alternative is one document
+   * quietly replacing another in the very folder somebody is about to upload
+   * from — the wrong-file-attached failure everything else here exists to
+   * refuse. Quietly mangling what was typed is no better: it is the one name
+   * this person asked for by hand, and changing it without saying so means
+   * the chip and the file disagree.
+   */
+  if (byHand.some(Boolean)) {
+    const settled = short.map((n, i) => byHand[i] ?? n);
+    for (let i = 0; i < settled.length; i++) {
+      if (!byHand[i]) continue;
+      const clash = settled.findIndex((n, j) => j !== i && n === settled[i]);
+      if (clash >= 0) {
+        throw new Error(
+          `"${documents[clash]!.kind}" is already called ${settled[i]}. Two files in one folder cannot ` +
+            'share a name — give one of them something else.',
+        );
+      }
+    }
+    return settled;
+  }
+
   if (new Set(short).size === short.length) return short;
 
-  // Two documents claimed one name. Only the clashing ones grow.
+  // Two documents claimed one name. Only the clashing ones grow — and nobody
+  // typed these, so there is nothing here to refuse.
   const counts = new Map<string, number>();
   for (const n of short) counts.set(n, (counts.get(n) ?? 0) + 1);
   const full = wanted(true);
@@ -117,6 +179,46 @@ export function applicationId(company: string, role: string, at = new Date()): s
   const readable = `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
 
   return faithful(company, role) ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
+}
+
+/** The shape a tailored copy's id had before `tailoredResumeId`. */
+export function legacyTailoredResumeId(company: string, role: string): string {
+  return `job-${slug(company)}-${slug(role ?? 'role')}`.slice(0, 60);
+}
+
+/**
+ * The id of the resume copy tailored for one posting.
+ *
+ * The same lesson as `applicationId`, learned separately and late. This was
+ * `job-${slug(company)}-${slug(role)}` and nothing else, and `saveResume`
+ * writes `resumes/<id>.yaml` over whatever is already there — so two postings
+ * a slug cannot tell apart shared one file, and the second tailoring
+ * overwrote the first in silence. The first space carried on showing its own
+ * posting, its own letter and its own list of changes, and would have sent
+ * the other job's resume.
+ *
+ * Three ways two postings collide, all of them ordinary:
+ *
+ *   - Nothing for `slug` to keep. A company and a role written in Chinese
+ *     both reduce to the empty string, so every such posting minted `job--`.
+ *   - Punctuation is the whole difference. "C++ Engineer" and "C# Engineer"
+ *     are both `c-engineer`; `MEANT_IT` is what knows the characters a slug
+ *     throws away are part of these names rather than spacing between words.
+ *   - The id was cut to sixty characters. Two long titles sharing a prefix cut
+ *     to the same thing — and this one has to be asked of the *joined* id,
+ *     not of each name, because `faithful` measures the halves and the
+ *     truncation happens after they are put together.
+ *
+ * Readable names keep reading readably, which is the point of a slug at all:
+ * an id is meant to be recognisable in a folder listing, and hashing every
+ * one of them to be safe would have cost that for nothing.
+ */
+export function tailoredResumeId(company: string, role: string): string {
+  const full = `job-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
+  const readable = full.slice(0, 60).replace(/-+$/, '');
+  return readable === full && faithful(company, role)
+    ? readable
+    : `${readable}-${fingerprint(company, role)}`;
 }
 
 /**
@@ -353,6 +455,11 @@ export interface BundleRequest {
   answers?: { question: string; answer: string }[];
   source?: string;
   status?: ApplicationStatus;
+  /**
+   * What this application calls its documents, when it does not want the
+   * store's default. Remembered on the application, so a rebuild keeps it.
+   */
+  naming?: { shape?: FileNameShape; custom?: CustomFileNames };
 }
 
 export interface BundleResult {
@@ -515,11 +622,20 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * Every document this bundle might hold is listed here whether or not it is
    * written, so a name does not change depending on what else was included.
    */
+  /*
+   * This application's own naming if it has one, and the store's default
+   * otherwise. A request that says nothing keeps whatever the application was
+   * already using, so rebuilding does not quietly rename the files somebody
+   * has been dragging into a form.
+   */
+  const already = findApplication(data.applications, req.company, req.role);
+  const naming = req.naming ?? already?.naming;
   const [resumeName, letterName, answersName] = bundleFileNames(
     resolved.profile.name,
     req.role,
     [{ kind: 'Resume' }, { kind: 'Cover Letter' }, { kind: 'Answers', extension: '.md' }],
-    data.config.output.fileNames ?? 'type',
+    naming?.shape ?? data.config.output.fileNames ?? 'type',
+    naming?.custom ?? {},
   ) as [string, string, string];
 
   /*
@@ -528,9 +644,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * application was opened lands in that application's folder rather than in
    * a second one beside it.
    */
-  const id =
-    findApplication(data.applications, req.company, req.role)?.id ??
-    freshApplicationId(data.applications, req.company, req.role);
+  const id = already?.id ?? freshApplicationId(data.applications, req.company, req.role);
   /*
    * Through the store, so an id that is a path cannot choose the folder. The
    * id here is often not one this code made — `findApplication` takes it from
@@ -778,6 +892,10 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       snapshotDir: path.relative(store.outDir(), dir),
       source: req.source ?? settled?.source,
       notes: req.notes ?? settled?.notes,
+      // The same rule as the rest of these: a build that was not told stays
+      // as the tracker had it, so a rebuild does not silently rename files
+      // somebody has been dragging into a form.
+      naming: req.naming ?? settled?.naming,
       answers,
       coverLetter: letter,
       history: [

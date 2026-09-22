@@ -106,6 +106,48 @@ describe('the way a store already writes dates', () => {
     expect(style.present).toBe('Present');
   });
 
+  /*
+   * May is its own abbreviation, so it is evidence of nothing.
+   *
+   * `monthFromWord` tried the long names first, and "May" matches there, so
+   * every May reported the *long* style. `formatMonth` already had the
+   * symmetric guard on the writing side — "May." is not a thing anyone
+   * writes — and the reading side had none.
+   *
+   * On one string it respells the other end: "May 2023 -- Aug. 2023" came
+   * back "May 2023 -- August 2023", which is the invariant this module is
+   * written around broken on a summer internship.
+   *
+   * Store-wide it is worse, because the style is a vote. Three internships
+   * and a degree — the most ordinary new-grad save there is — carried three
+   * Mays against two `Sep.`/`Jan.`, so the whole save inferred long months,
+   * and every entry touched afterwards was rewritten into them one at a time.
+   */
+  it('takes no vote from a month that is its own abbreviation', () => {
+    expect(styleOf('May 2023 -- Aug. 2023').month).toBe('abbrDot');
+    const asTyped = 'May 2023 -- Aug. 2023';
+    // The way a real caller reads a style: the store's habit, with whatever
+    // this particular string is able to say laid over it.
+    expect(formatPeriod(parsePeriod(asTyped), { ...DEFAULT_STYLE, ...styleOf(asTyped) })).toBe(asTyped);
+
+    const ordinary = [
+      'Sep. 2022 -- May 2026',
+      'May 2024 -- Aug. 2024',
+      'May 2023 -- Aug. 2023',
+      'May 2022 -- Aug. 2022',
+      'Jan. 2025 -- Present',
+    ];
+    expect(inferStyle(ordinary).month).toBe('abbrDot');
+  });
+
+  /*
+   * And a store that really does write long months still says so — the point
+   * is that May abstains, not that it votes the other way.
+   */
+  it('still hears a store that writes months out in full', () => {
+    expect(inferStyle(['January 2020 -- May 2024', 'September 2021 -- December 2023']).month).toBe('long');
+  });
+
   it('falls back to the bundled store’s own habit when there is nothing to go on', () => {
     expect(inferStyle([])).toEqual(DEFAULT_STYLE);
     expect(inferStyle(['Various', '2024'])).toEqual(DEFAULT_STYLE);
@@ -118,6 +160,30 @@ describe('the way a store already writes dates', () => {
 
 describe('putting entries in order', () => {
   const key = (text: string) => sortKey(parsePeriod(text));
+
+  /*
+   * Two jobs you are still in are not the same age.
+   *
+   * Every ongoing period returned `Number.MAX_SAFE_INTEGER`, so any two of
+   * them compared equal and `orderedEntries` left them in whatever order the
+   * file happened to list. A job started this year and a volunteer role
+   * started in 2019 print in insertion order, on a section the editor calls
+   * date-ordered.
+   *
+   * It compounds: because the two compare equal, `adoptDateOrder` finds the
+   * listed order already equal to the sorted order for *any* arrangement of
+   * them, stamps the section "newest", and the editor then says the section
+   * is in date order. And `startKey` does tell them apart, so the oldest-first
+   * ordering and the newest-first ordering disagreed about the same pair.
+   *
+   * Still above everything finished, which is the rule this function is
+   * written around — only now ordered among themselves by when they began.
+   */
+  it('puts the newer of two current roles first', () => {
+    expect(key('Mar. 2024 -- Present')).toBeGreaterThan(key('Jan. 2019 -- Present')!);
+    // And both still outrank anything that has ended, however recently.
+    expect(key('Jan. 2019 -- Present')).toBeGreaterThan(key('Dec. 2025 -- Jan. 2026')!);
+  });
 
   it('sorts by when a thing ended, because that is what recent means', () => {
     expect(key('Sep. 2022 -- May 2026')).toBeGreaterThan(key('Jul. 2024 -- Dec. 2024') as number);

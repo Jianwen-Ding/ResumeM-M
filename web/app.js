@@ -843,14 +843,40 @@ function scheduleAutoSave() {
   }, AUTOSAVE_DELAY_MS);
 }
 
-/** Write the current selection to the store, without making a commit. */
+/**
+ * Write the current selection to the store, without making a commit.
+ *
+ * One at a time, behind whatever is already in the air — the same rule
+ * `inEntryLane` states for entries, and for the same reason. This had none:
+ * it overwrote the promise it was holding and left two PUTs of one file
+ * racing. A tick, and another tick a moment later while the first write is
+ * still out — ordinary on a store that is also compiling a PDF — and either
+ * of them could be the one the server finished last.
+ *
+ * Both halves of the loss are silent. On disk the older selection can win.
+ * In the editor each reply ends by folding its own `spec` into the cached
+ * resume, so a slow first reply landing after a fast second one writes the
+ * *older* selection back over the newer one, under a status chip reading
+ * "All changes saved". Nothing is wrong until you switch resumes and come
+ * back, or reload, and find the edit undone.
+ *
+ * The spec is read inside the lane rather than before it, so the write that
+ * finally goes carries everything ticked while it was waiting: one write for
+ * the lot, rather than a queue of them.
+ */
 async function autoSave() {
   if (!state.dirty || !state.resumeId) return;
-  const spec = currentSpec();
-  state.dirty = false; // further edits re-dirty it; this one is in flight
   setSaveState('saving');
 
-  autoSaving = (async () => {
+  const ahead = autoSaving;
+  const mine = (async () => {
+    // Never rejects, so one failed write does not wedge the ones behind it.
+    if (ahead) await ahead.catch(() => undefined);
+    // The write ahead may have carried this edit already.
+    if (!state.dirty || !state.resumeId) return;
+
+    const spec = currentSpec();
+    state.dirty = false; // further edits re-dirty it; this one is in flight
     try {
       await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0`, {
         method: 'PUT',
@@ -865,11 +891,17 @@ async function autoSave() {
     } catch (err) {
       state.dirty = true; // it did not land; try again on the next edit
       setSaveState('failed', err.message);
-    } finally {
-      autoSaving = null;
     }
   })();
-  return autoSaving;
+
+  autoSaving = mine;
+  try {
+    await mine;
+  } finally {
+    // Only the last one queued clears the slot, or a save queued behind this
+    // one would be dropped from the chain.
+    if (autoSaving === mine) autoSaving = null;
+  }
 }
 
 /**
@@ -5181,6 +5213,22 @@ async function deleteVariation() {
   const at = order.findIndex((r) => r.id === mine.id);
   const landing = order[at + 1] ?? order[at - 1];
 
+  /*
+   * Any save of this resume that is still out, first.
+   *
+   * `leaveResume` flushes before it moves and `restoreResumeVersion` does the
+   * same; this did neither. Clearing the overlays below takes care of a save
+   * still on its timer — it un-dirties it, so the timer fires into nothing —
+   * and does nothing at all about one already in the air.
+   *
+   * `PUT /resumes/:id` has no existence check; it writes the file. So a save
+   * that left before the delete and landed after it put the resume straight
+   * back, and it turned up in the list on the next load looking like a
+   * deletion that had not taken. There is no second chance to remove it
+   * either, because as far as the editor is concerned it already did.
+   */
+  await flushAutoSave().catch(() => undefined);
+
   clearEdits();
   state.masterView = false;
   state.resumeId = landing?.id ?? null;
@@ -5257,6 +5305,25 @@ async function saveAsVariation() {
   delete spec.base;
   delete spec.generatedFor;
   delete spec.extends;
+
+  /*
+   * The edit stays on the resume it was made on, as well as going into the
+   * copy.
+   *
+   * `currentSpec()` above folds the unsaved overlays into the variation, so
+   * the copy was always right. Then `clearEdits()` threw those overlays away
+   * — and the save that would have written them to the *original* had not
+   * necessarily happened yet, because clearing them un-dirties them and the
+   * timer fires into nothing.
+   *
+   * So which resume kept the edit depended on how fast somebody typed. Take
+   * longer than the debounce over the name, which is the usual way, and the
+   * original keeps it; accept the two pre-filled boxes straight away and it
+   * does not. The same action, two answers, neither of them announced. The
+   * common one is also the right one: the edit was made before the fork, so
+   * it belongs to both.
+   */
+  await flushAutoSave().catch(() => undefined);
 
   await saveResumeSpec(spec, `Saved ${spec.id}`);
   clearEdits();
@@ -6632,8 +6699,7 @@ async function tailorDraft(draft, notes, useAi) {
     });
 
     const changed = (res.diff ?? []).filter((c) => c.kind !== 'none');
-    setChildren(
-      notes,
+    const said = [
       el('div', {
         textContent: res.fetched
           ? `Read the posting and made "${res.spec.label}".`
@@ -6644,13 +6710,80 @@ async function tailorDraft(draft, notes, useAi) {
           ? `${plural(changed.length, 'change')} from the resume it started from${res.usedAi ? ', chosen by the AI' : ''}.`
           : 'Nothing needed changing — the resume already suited it.',
       }),
+      /*
+       * And what the model asked for that is not in this save.
+       *
+       * The server has always sent this — `sanitizeAiPlan` drops every id it
+       * cannot find and collects what it dropped — and nothing here read it.
+       * A model that invents twelve of its fifteen choices produces a
+       * perfectly ordinary-looking "3 changes … chosen by the AI", with no
+       * sign that most of what it decided was thrown away. That is the run
+       * worth knowing about: it is the one where asking again is likely to
+       * do better, and the one where a smaller model is not earning its
+       * place.
+       *
+       * The count, not the list. Each entry names a bullet or a variant by
+       * its internal id, and those are exactly what the UI does not show.
+       */
+      ...(res.rejected?.length
+        ? [
+            el('div', {
+              className: 'hint warn',
+              textContent:
+                `${plural(res.rejected.length, 'thing')} the AI asked for ${res.rejected.length === 1 ? 'is' : 'are'} ` +
+                'not in this save, so what is above is the rest of what it chose.',
+            }),
+          ]
+        : []),
       ...changed.slice(0, 6).map((c) => el('div', { className: 'hint', textContent: c.text })),
-    );
+    ];
 
     await loadStore();
-    await openDraft(draft.id);
+    /*
+     * Said after the repaint, into the panel the repaint built — and only
+     * while this is still the application on screen.
+     *
+     * Two things went wrong here, and they pull in opposite directions.
+     *
+     * The message was written into `notes` first and the reload came second,
+     * and `openDraft` ends in `renderDraft`, which builds a whole new panel
+     * with a new `notes` in it. So every word of the only account anybody
+     * gets of a tailoring run went into a node detached a few milliseconds
+     * later: what was made, how many changes came from the base, which ones
+     * they were, whether the AI chose them. Measured: at the moment the
+     * reload went out the notes panel was already empty, and it stayed empty.
+     * The run worked, the resume was there, and the screen said nothing —
+     * which reads as a button that does nothing. `generate` had already met
+     * this and solved it by repainting and then re-reading `.gen-notes`, so
+     * that is what is done here rather than a second mechanism.
+     *
+     * But an AI run is minutes, and moving to another application while it
+     * thinks is the ordinary thing to do — this editor is built around that
+     * everywhere else, which is why an AI run holds no other control. The
+     * reopen was unconditional, and `openDraft` sets `openDraftId` and the
+     * location hash before it checks anything, so the run finishing tore down
+     * whatever was on screen and put the finished application back in its
+     * place, mid-sentence. `openDraft`'s own guard does not cover this: it
+     * protects two `openDraft` calls racing each other, not one fired for an
+     * application the person has already left.
+     *
+     * Which makes re-reading `.gen-notes` wrong in exactly that case — the
+     * node it finds then belongs to somebody else's application, and this
+     * would write the Streamly run's changes under Northwind's heading. So
+     * the re-read happens only where the repaint does. Otherwise the message
+     * goes to the detached `notes`, which is the right place for it: it is
+     * this application's panel, and the way back to it is the chip in the
+     * toolbar, which has been there for the whole run.
+     */
+    if (openDraftId === draft.id) {
+      await openDraft(draft.id);
+      setChildren($('#draft-editor .gen-notes') ?? notes, ...said);
+    } else {
+      setChildren(notes, ...said);
+    }
   } catch (err) {
-    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+    const box = openDraftId === draft.id ? ($('#draft-editor .gen-notes') ?? notes) : notes;
+    setChildren(box, el('div', { className: 'err', textContent: err.message }));
   } finally {
     stopChip();
   }
@@ -6853,9 +6986,20 @@ async function generate(draft, what, notes, extra = {}) {
      * cannot show a version of the draft that is nobody's.
      */
     await flushDraftEdits();
-    renderDraft(await api(`/workspace/${encodeURIComponent(draft.id)}`));
-    const panel = $('#draft-editor .gen-notes');
-    if (panel) setChildren(panel, ...res.notes.map((n) => el('div', { textContent: n })));
+    const fresh = await api(`/workspace/${encodeURIComponent(draft.id)}`);
+    /*
+     * And only while this is still the application on screen. Drafting a
+     * letter is minutes, and repainting the panel from *this* draft once it
+     * lands would replace whatever the person moved on to — the same seizure
+     * `tailorDraft` had, by a different route: no hash change here, so the
+     * panel and `openDraftId` would simply disagree about which application
+     * is open, which is worse than being moved.
+     */
+    if (openDraftId === draft.id) {
+      renderDraft(fresh);
+      const panel = $('#draft-editor .gen-notes');
+      if (panel) setChildren(panel, ...res.notes.map((n) => el('div', { textContent: n })));
+    }
     setStatus('Draft updated');
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));

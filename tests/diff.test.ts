@@ -25,6 +25,9 @@ function doc(overrides: Partial<ResolvedResume> = {}): ResolvedResume {
           },
         ],
       },
+      // Empty, so it does not change the section count above — it is here so
+      // an entry has somewhere to move to.
+      { kind: 'project', heading: 'Projects', skillGroups: [], entries: [] },
     ],
     layout: DEFAULT_LAYOUT,
     warnings: [],
@@ -45,6 +48,59 @@ describe('diffing two versions of a resume', () => {
     expect(changes).toHaveLength(1);
     expect(changes[0]?.kind).toBe('created');
     expect(changes[0]?.text).toBe('First version — 1 sections, 1 bullet points');
+  });
+
+  /*
+   * Whatever counts as a new version has to be describable as one.
+   *
+   * `sameDocument` decides *whether* a version exists and `diffResumes`
+   * decides what it says, and wherever the two disagree the card falls back
+   * to the raw commit message — a version in the timeline with an empty
+   * change list and a blank before/after. Worse on the restore path, which
+   * fires "Some of that version is in things this resume shares with
+   * others…" off `sameDocument` and then lists nothing underneath it.
+   *
+   * Three ordinary edits landed in that gap, all of them plainly visible to a
+   * reader:
+   *
+   *   - any contact detail but the name — `diffResumes` compared only
+   *     `resolveProfile(...).name` while `strip` shipped the whole profile, so
+   *     adding a GitHub link made an empty version on *every* resume at once;
+   *   - a section heading renamed, which nothing read except to quote it;
+   *   - an entry moved from one section to another, which `entriesOf`
+   *     flattens across sections, so the id was present in both and the order
+   *     filter still matched. The job now prints under "Projects" and the
+   *     history said the document had not changed.
+   */
+  const says = (after: ResolvedResume) => diffResumes(doc(), after).map((c) => c.text).join(' | ');
+
+  it('describes a contact detail changing, rather than making a blank version', () => {
+    const after = edited((d) => {
+      (d.profile as Record<string, unknown>).email = 'new@b.com';
+    });
+    expect(sameDocument(doc(), after)).toBe(false);
+    expect(says(after)).toMatch(/email/i);
+  });
+
+  it('describes a section heading being renamed', () => {
+    const after = edited((d) => {
+      d.sections[0]!.heading = 'Work';
+    });
+    expect(sameDocument(doc(), after)).toBe(false);
+    // The rename itself, not an entry reported as having moved into it: the
+    // entry did not go anywhere, and saying it did hides what actually
+    // happened behind a sentence that reads almost right.
+    expect(says(after)).toMatch(/Renamed the "Experience" section to "Work"/);
+    expect(says(after)).not.toMatch(/Moved/);
+  });
+
+  it('describes an entry moving from one section to another', () => {
+    const after = edited((d) => {
+      d.sections[1]!.entries.push(d.sections[0]!.entries.pop()!);
+    });
+    expect(sameDocument(doc(), after)).toBe(false);
+    expect(says(after)).toMatch(/Acme Co\./);
+    expect(says(after)).toMatch(/Projects/);
   });
 
   it('reports a reworded bullet with both sentences in full', () => {

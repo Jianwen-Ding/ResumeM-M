@@ -120,13 +120,31 @@ const RANGE_SEPARATORS = [
 /** The `(expected)` that people write after the date instead of before it. */
 const TRAILING_EXPECTED = /\s*\((expected|anticipated|projected)\)\s*$/i;
 
-function monthFromWord(word: string): { month: number; how: DateStyle['month']; season?: Season } | null {
+function monthFromWord(
+  word: string,
+): { month: number; how: DateStyle['month']; season?: Season; ambiguous?: true } | null {
   const clean = word.replace(/\.$/, '').toLowerCase();
   const season = SEASON_WORDS[clean];
   if (season) return { month: SEASON_MONTH[season], how: 'long', season };
 
   const long = LONG.findIndex((m) => m.toLowerCase() === clean);
-  if (long >= 0) return { month: long + 1, how: 'long' };
+  /*
+   * "May" is its own abbreviation, so it says nothing about which style this
+   * store writes — the same way a season says nothing, a line below.
+   *
+   * The long names are tried first, so every May reported `long`.
+   * `formatMonth` already refuses to write "May." for the symmetric reason;
+   * reading had no such guard. On one string that respells the other end —
+   * "May 2023 -- Aug. 2023" came back "May 2023 -- August 2023" — and
+   * store-wide it is worse, because `inferStyle` counts votes: three summer
+   * internships and a degree is the most ordinary new-grad save there is, and
+   * three Mays outvoted two `Sep.`/`Jan.`, so every entry touched afterwards
+   * was rewritten into full month names one at a time.
+   */
+  if (long >= 0) {
+    const same = LONG[long] === ABBR[long];
+    return { month: long + 1, how: 'long', ...(same ? { ambiguous: true as const } : {}) };
+  }
 
   const abbr = ABBR.findIndex((m) => m.toLowerCase() === clean);
   if (abbr >= 0) return { month: abbr + 1, how: word.endsWith('.') ? 'abbrDot' : 'abbr' };
@@ -268,14 +286,25 @@ export function styleOf(raw: string): Partial<DateStyle> {
     if (PRESENT.test(split.right)) found.present = split.right;
   }
 
-  const month = /([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/.exec(text);
-  if (month) {
-    if (month[1]) {
-      const how = monthFromWord(month[1]);
-      // A season tells you nothing about how months are abbreviated.
-      if (how && !how.season) found.month = how.how;
-    } else {
+  /*
+   * Every date in the string, not the first one, because the first may be the
+   * one that cannot answer. "May 2023 -- Aug. 2023" is the ordinary summer
+   * internship: May abstains — it is its own abbreviation, see
+   * `monthFromWord` — and `Aug.` is right there saying `abbrDot`. Stopping at
+   * the first match threw that away and reported nothing at all, which sends
+   * the date back in the store's habit rather than the way it was written.
+   */
+  for (const month of text.matchAll(/([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/g)) {
+    if (!month[1]) {
       found.month = 'numeric';
+      break;
+    }
+    const how = monthFromWord(month[1]);
+    // A season tells you nothing about how months are abbreviated, and
+    // neither does a month whose abbreviation is the whole word.
+    if (how && !how.season && !how.ambiguous) {
+      found.month = how.how;
+      break;
     }
   }
 
@@ -378,10 +407,35 @@ export function formatPeriod(period: Period | undefined, style: DateStyle = DEFA
  */
 export function sortKey(period: Period | undefined): number | undefined {
   if (!period?.start) return undefined;
-  if (period.ongoing) return Number.MAX_SAFE_INTEGER;
+  /*
+   * Still above everything finished — but ordered among themselves by when
+   * they began, which every other ongoing period also has.
+   *
+   * This was a flat `Number.MAX_SAFE_INTEGER`, so any two current roles
+   * compared equal and `orderedEntries` left them in whatever order the file
+   * happened to list: a job started this year printing under a volunteer role
+   * started in 2019, in a section the editor calls date-ordered.
+   *
+   * It compounds. Because the two compare equal, `adoptDateOrder` finds the
+   * listed order already equal to the sorted order for *any* arrangement of
+   * them and stamps the section "newest", so the editor then says out loud
+   * that it is in date order. And `startKey` does tell them apart, so the
+   * oldest-first and newest-first orderings disagreed about the same pair.
+   *
+   * `ONGOING` is past any real `year * 100 + month`, so the two groups cannot
+   * interleave however far in the future a date is.
+   */
+  if (period.ongoing) return ONGOING + (startKey(period) ?? 0);
   const point = period.end ?? period.start;
   return point.year * 100 + (point.month ?? 12);
 }
+
+/**
+ * The floor for anything still running. A year would have to reach 10^11 for
+ * a finished period to reach it, and `Number.MAX_SAFE_INTEGER` is four orders
+ * of magnitude above the largest key it can carry.
+ */
+const ONGOING = 1e12;
 
 /** The earlier edge, for sorting oldest-first without reversing the other key. */
 export function startKey(period: Period | undefined): number | undefined {

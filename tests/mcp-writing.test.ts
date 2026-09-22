@@ -96,6 +96,68 @@ describe('writing a letter as moves', () => {
   });
 
   /*
+   * And not on code, which is what an answer about engineering is made of.
+   *
+   * Both rules asked only "is there a letter between the brackets", so
+   * `buffer[i]`, `items[key]`, `List<String>` and `Promise<void>` were all
+   * refused as gaps the writer meant to come back to — and the model was told
+   * to fill in a placeholder that is not one. There is no way to comply
+   * except to take the real detail out, so the guard quietly made every
+   * technical answer worse, on the one question ("describe something you
+   * built") where the detail is the whole point.
+   *
+   * What separates them is position, not content: a slot sits where a word
+   * would sit, and an index or a type parameter is glued to the name before
+   * it. `[Company Name]` follows a space; the `[` of `buffer[i]` follows `r`.
+   */
+  it('does not call an index or a type parameter a placeholder', () => {
+    const body = 'x'.repeat(300);
+    for (const real of [
+      'I rewrote the loop so buffer[i] was read once instead of twice.',
+      'I cached items[key] and the p99 dropped from 900ms to 180ms.',
+      'The signature is List<String> and the caller passes an ArrayList.',
+      'It returns Promise<void>, so nothing was awaiting it.',
+      'A Map<String, Integer> counted them in one pass.',
+    ]) {
+      expect(writing().saveLetter(`${body} ${real}`).ok, real).toBe(true);
+      expect(writing().saveAnswer('q1', real).ok, real).toBe(true);
+    }
+  });
+
+  /*
+   * The rule has to stay strict where it matters: being glued to a word is
+   * what makes an index an index, and a placeholder never is.
+   */
+  it('still refuses a gap that sits where a word would', () => {
+    const body = 'x'.repeat(300);
+    for (const bad of [
+      'I would bring that to [Company Name] from day one.',
+      'I want to work on <Product> because it is the hard part.',
+      'Your team\u2019s work on {{area}} is why I am writing.',
+    ]) {
+      expect(writing().saveLetter(`${body} ${bad}`).ok, bad).toBe(false);
+      expect(writing().saveAnswer('q1', bad).ok, bad).toBe(false);
+    }
+  });
+
+  /*
+   * Including where a word would sit and nothing precedes it at all.
+   *
+   * "Not glued to the word before it" is the rule, and at the start of the
+   * text or of a line there is no word before it — which is exactly where a
+   * salutation's placeholder lands. Written down because the obvious
+   * over-correction, "must follow a space", passes every case above and
+   * lets `[Company Name],` through as the first thing in the letter.
+   */
+  it('refuses a gap with nothing before it, which is where a salutation puts one', () => {
+    const body = 'x'.repeat(300);
+    expect(writing().saveLetter(`[Company Name],\n\n${body}`).ok).toBe(false);
+    expect(writing().saveLetter(`Dear hiring team,\n\n<Product> is why I am writing. ${body}`).ok).toBe(false);
+    expect(writing().saveAnswer('q1', '<Product> is the reason I applied.').ok).toBe(false);
+    expect(writing().saveAnswer('q1', '[Company Name] is the reason I applied.').ok).toBe(false);
+  });
+
+  /*
    * `saveAnswer` had no angle-bracket rule at all, not even the lowercase one,
    * so the same gap reached a saved application answer.
    */

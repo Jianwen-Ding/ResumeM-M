@@ -99,7 +99,12 @@ function monthFromWord(word) {
   if (season) return { month: SEASON_MONTH[season], how: 'long', season };
 
   const long = LONG.findIndex((m) => m.toLowerCase() === clean);
-  if (long >= 0) return { month: long + 1, how: 'long' };
+  // "May" is its own abbreviation, so it is evidence of no style at all. See
+  // `monthFromWord` in period.ts, which this mirrors and is pinned against.
+  if (long >= 0) {
+    const same = LONG[long] === ABBR[long];
+    return { month: long + 1, how: 'long', ...(same ? { ambiguous: true } : {}) };
+  }
 
   const abbr = ABBR.findIndex((m) => m.toLowerCase() === clean);
   if (abbr >= 0) return { month: abbr + 1, how: word.endsWith('.') ? 'abbrDot' : 'abbr' };
@@ -241,14 +246,18 @@ export function styleOf(raw) {
     if (PRESENT.test(split.right)) found.present = split.right;
   }
 
-  const month = /([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/.exec(text);
-  if (month) {
-    if (month[1]) {
-      const how = monthFromWord(month[1]);
-      // A season tells you nothing about how months are abbreviated.
-      if (how && !how.season) found.month = how.how;
-    } else {
+  // Every date in the string, not the first: the first may be a season or a
+  // May, neither of which can say. See `styleOf` in period.ts, which this
+  // mirrors and is pinned against by date-agreement.test.js.
+  for (const month of text.matchAll(/([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/g)) {
+    if (!month[1]) {
       found.month = 'numeric';
+      break;
+    }
+    const how = monthFromWord(month[1]);
+    if (how && !how.season && !how.ambiguous) {
+      found.month = how.how;
+      break;
     }
   }
 
@@ -351,10 +360,16 @@ export function formatPeriod(period, style = DEFAULT_STYLE) {
  */
 export function sortKey(period) {
   if (!period?.start) return undefined;
-  if (period.ongoing) return Number.MAX_SAFE_INTEGER;
+  // Above everything finished, and ordered among themselves by when they
+  // began. See `sortKey` in period.ts, which this mirrors and is pinned
+  // against by order-agreement.test.js.
+  if (period.ongoing) return ONGOING + (startKey(period) ?? 0);
   const point = period.end ?? period.start;
   return point.year * 100 + (point.month ?? 12);
 }
+
+/** The floor for anything still running. See period.ts. */
+const ONGOING = 1e12;
 
 /** The earlier edge, for sorting oldest-first without reversing the other key. */
 export function startKey(period) {

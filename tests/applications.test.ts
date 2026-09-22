@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { advance, alreadySent, applicationId, buildBundle, bundleFileName, describeLost, findApplication, freshApplicationId, slug, stats } from '../src/model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, freshApplicationId, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
@@ -58,6 +58,97 @@ describe('file naming', () => {
     expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Resume', { disambiguator: 'Acme Co.' })).toBe(
       'Jianwen-Ding-Software-Engineer-Resume-Acme-Co.pdf',
     );
+  });
+});
+
+/*
+ * Naming one application's documents, without renaming everybody else's.
+ *
+ * The store has a default shape and it is a setting: change it and every
+ * application from then on is called something different. What was missing is
+ * the other thing — this posting wants the job title in the name, or this
+ * portal will only take `resume.pdf`, and neither is a reason to change what
+ * the next fifty applications are called.
+ *
+ * So the override lives on the application, is set per document, and three
+ * things can be asked for: the title added, a name typed by hand, or back to
+ * the default.
+ */
+describe('naming one application\'s documents', () => {
+  const three = [{ kind: 'Resume' as const }, { kind: 'Cover Letter' as const }, { kind: 'Answers' as const, extension: '.md' }];
+
+  it('adds the job title when that is what was asked for', () => {
+    expect(bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'title-type')).toEqual([
+      'Jianwen-Ding-Software-Engineer-Resume.pdf',
+      'Jianwen-Ding-Software-Engineer-Cover-Letter.pdf',
+      'Jianwen-Ding-Software-Engineer-Answers.md',
+    ]);
+  });
+
+  it('and leaves it out again', () => {
+    expect(bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'type')).toEqual([
+      'Jianwen-Ding-Resume.pdf',
+      'Jianwen-Ding-Cover-Letter.pdf',
+      'Jianwen-Ding-Answers.md',
+    ]);
+  });
+
+  it('takes a name typed by hand, for one document and not the rest', () => {
+    expect(
+      bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'type', { Resume: 'resume' }),
+    ).toEqual(['resume.pdf', 'Jianwen-Ding-Cover-Letter.pdf', 'Jianwen-Ding-Answers.md']);
+  });
+
+  /*
+   * The extension is not the typist's to choose. A portal checks it, the
+   * answers file is markdown and the rest are PDFs, and a resume called
+   * `resume.docx` that is a PDF inside is a file that gets rejected at the
+   * far end for a reason nobody can see.
+   */
+  it('keeps the extension the document actually has', () => {
+    expect(bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Resume: 'resume.docx' })[0]).toBe('resume-docx.pdf');
+    expect(bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Answers: 'notes' })[2]).toBe('notes.md');
+  });
+
+  /*
+   * And a typed name is a name, not a path. This one arrives from a text box
+   * on somebody else's page and ends up as a filename on disk, so it goes
+   * through the same rules every other part of a name does.
+   */
+  it('cannot be talked into leaving the folder', () => {
+    const out = bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Resume: '../../.ssh/authorized_keys' })[0]!;
+    expect(out).not.toMatch(/[/\\]/);
+    expect(out).not.toMatch(/\.\./);
+    expect(out.endsWith('.pdf')).toBe(true);
+  });
+
+  it('falls back to the shape when what was typed sanitises away to nothing', () => {
+    expect(bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Resume: '///' })[0]).toBe('Jianwen-Ding-Resume.pdf');
+  });
+
+  /*
+   * Two documents, one name, and one of them typed: refused rather than
+   * quietly mangled. A folder holds one file per name, so the alternative is
+   * a document silently replacing another — which is the wrong-file-attached
+   * failure the rest of this refuses to make. Named, so the message says
+   * which other document is in the way.
+   */
+  it('refuses a typed name that another document in the same application already has', () => {
+    expect(() =>
+      bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { 'Cover Letter': 'Jianwen-Ding-Resume' }),
+    ).toThrow(/Jianwen-Ding-Resume\.pdf/);
+  });
+
+  /*
+   * But the default shape goes on sorting itself out. `'title'` cannot tell a
+   * resume from a cover letter, and adding the type back to the two that
+   * clash is the store's own business — nobody typed those, so there is
+   * nothing to refuse.
+   */
+  it('and still disambiguates the shapes, which nobody typed', () => {
+    const [resume, letter] = bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'title');
+    expect(resume).not.toBe(letter);
+    expect(resume).toBe('Jianwen-Ding-Software-Engineer-Resume.pdf');
   });
 });
 
@@ -1019,6 +1110,102 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
   });
 
   /*
+   * And the same again through the other half of the manifest.
+   *
+   * `files` has been filtered since the day it was written, and its comment
+   * says why: every entry is handed to a recursive delete. `from` was exempt
+   * on the stated grounds that it is "only ever compared, never opened and
+   * never deleted" — which stopped being true when `owned` grew to
+   * `[...ours, ...Object.keys(cameFrom)]`. Its keys reach the same
+   * `fs.rmSync(..., { recursive: true, force: true })`, unfiltered, and
+   * `out/current`'s parent is `out/` — every archived bundle, which is the
+   * six-weeks-later "what did I actually send" record.
+   *
+   * One hand edit or one bad merge, in a file that sits in a folder the user
+   * is invited to open.
+   */
+  /*
+   * A file of your own, left alone — and then taken on the sync after.
+   *
+   * The refusal above it says so in as many words, and names the exact way it
+   * used to go wrong: "the name then went into the manifest, so the *next*
+   * sync would have deleted it as ours." The refusal itself put it there.
+   * Every failure was recorded under one `FAILED` sentinel, which is right
+   * for an EBUSY or a full disk — those are ours to retry — and exactly wrong
+   * for "this belongs to the user", which is never ours to retry. On the next
+   * sync the name is in `from`, so it is in `claimed`, so the guard is
+   * skipped.
+   *
+   * Two ways it ends, both silent: the bundle still wants the name and
+   * overwrites it, or the application has moved on and the delete loop takes
+   * it as a stale file of ours.
+   */
+  it('leaves a file of your own alone on every sync, not just the first', async () => {
+    // A folder with a manifest that claims nothing — an application filed and
+    // since moved on, which is the ordinary way to arrive here.
+    const current = syncCurrent(t.store);
+    expect(fs.existsSync(path.join(current.dir, '.rmm-current.json'))).toBe(true);
+
+    const mine = path.join(current.dir, 'Test-Person-Resume.pdf');
+    fs.writeFileSync(mine, 'the one I polished by hand');
+
+    await bundleFor('Streamly');
+    const first = syncCurrent(t.store);
+    expect(first.problems?.join(' ')).toMatch(/a file of your own/);
+    expect(fs.readFileSync(mine, 'utf8')).toBe('the one I polished by hand');
+
+    // Nothing has changed since. Saying it again is the only honest answer.
+    const second = syncCurrent(t.store);
+    expect(fs.readFileSync(mine, 'utf8')).toBe('the one I polished by hand');
+    expect(second.problems?.join(' ')).toMatch(/a file of your own/);
+  });
+
+  /*
+   * And the other ending: the application moves on, so nothing wants the name
+   * any more, and the delete loop finds it listed as ours.
+   */
+  it('does not sweep away a file of your own once the application moves on', async () => {
+    const current = syncCurrent(t.store);
+    const mine = path.join(current.dir, 'Test-Person-Resume.pdf');
+    fs.writeFileSync(mine, 'the one I polished by hand');
+
+    await bundleFor('Streamly');
+    expect(syncCurrent(t.store).problems?.join(' ')).toMatch(/a file of your own/);
+
+    // Filed and gone to interview: the flat folder should hold nothing of its.
+    await bundleFor('Streamly', 'interview');
+    syncCurrent(t.store);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(fs.readFileSync(mine, 'utf8')).toBe('the one I polished by hand');
+  });
+
+  it('will not delete the output folder on a source entry of "." or ".."', async () => {
+    await bundleFor('Streamly');
+    const current = syncCurrent(t.store);
+    const out = path.dirname(current.dir);
+    const mine = path.join(current.dir, 'Transcript.pdf');
+    fs.writeFileSync(mine, 'my transcript');
+    // An archived bundle, which is what lives beside `current` under `out/`.
+    const archive = path.join(out, 'applications');
+    expect(fs.existsSync(archive)).toBe(true);
+
+    const manifest = path.join(current.dir, '.rmm-current.json');
+    const held = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({ ...held, from: { ...held.from, '.': 'x', '..': 'x' } }),
+      'utf8',
+    );
+
+    const after = syncCurrent(t.store);
+    expect(fs.existsSync(out)).toBe(true);
+    expect(fs.existsSync(archive)).toBe(true);
+    expect(fs.existsSync(current.dir)).toBe(true);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(after.files).toContain('Test-Person-Resume.pdf');
+  });
+
+  /*
    * Two roles at one company, both in flight. bundleFileName puts the person
    * and the company in the name but not the role, and the answers file is
    * called `application-answers.md` flat — fine inside a per-application
@@ -1241,6 +1428,34 @@ describe('saying what the store no longer has', () => {
    * what is under test and a page of invented bullets would only be a slower
    * way of reaching it.
    */
+  /*
+   * And the name survives a rebuild.
+   *
+   * A build that is not told what to call things keeps what the application
+   * was already using. Without that, pressing Recompile after renaming a file
+   * puts the old name back — on the file in the folder somebody has been
+   * dragging into a form, which is the one place a name changing underneath
+   * you costs an attachment.
+   */
+  it.skipIf(!latex)('keeps a name it was given on the next build', { timeout: 180_000 }, async () => {
+    const named = await buildBundle(t.store, {
+      company: 'Meridian',
+      role: 'Platform Engineer',
+      resumeId: 'intern',
+      naming: { custom: { Resume: 'resume' } },
+    });
+    expect(named.files).toContain('resume.pdf');
+
+    // Built again, saying nothing about names — as Recompile does.
+    const again = await buildBundle(t.store, {
+      company: 'Meridian',
+      role: 'Platform Engineer',
+      resumeId: 'intern',
+    });
+    expect(again.files).toContain('resume.pdf');
+    expect(again.application.naming?.custom?.Resume).toBe('resume');
+  });
+
   it.skipIf(!latex)('says when the resume had to be squeezed to fit', { timeout: 180_000 }, async () => {
     const tight = makeTempStore({
       config: {

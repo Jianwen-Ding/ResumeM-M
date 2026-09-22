@@ -5,6 +5,7 @@ import YAML from 'yaml';
 import { andList, newlyRepeated, type Option } from './duplicates.js';
 import { flattenResumes, needsFlattening } from './flatten.js';
 import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
+import { legacyTailoredResumeId, tailoredResumeId } from './applications.js';
 import { liftLayout } from './lift-layout.js';
 import { needsTiering, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
@@ -903,6 +904,85 @@ export class Store {
       if (JSON.stringify(before) !== JSON.stringify(spec)) this.saveResume(spec);
     }
     return { flattened, tiered, lifted, problems };
+  }
+
+  /**
+   * Give tailored copies ids that tell two postings apart.
+   *
+   * `tailoredResumeId` explains what went wrong and why the new shape is what
+   * it is. This is the other half: a save written before it holds copies
+   * under the old ids, and leaving them there is not harmless even though
+   * nothing further would overwrite them.
+   *
+   * What it costs to skip: re-tailoring one of those spaces computes the new
+   * id, and `baseForCopy` only defends against building a copy from itself —
+   * it compares the id asked for against the id being written. The space
+   * still points at the *old* id, which is now a different string, so the
+   * copy would be built from the previous copy. Its skills are already
+   * narrowed to this posting and its wordings already chosen for it, so the
+   * second pass narrows what was narrowed and hands back less than was asked
+   * for. See `baseForCopy` for the longer version of that.
+   *
+   * Only ids the old scheme would itself have produced are touched. A resume
+   * somebody named by hand is theirs, whatever it happens to be called, and
+   * a rename it never asked for is the sort of thing that makes a save feel
+   * unsafe to keep anything in.
+   *
+   * Nothing is recovered for two postings that *already* collided — the
+   * second tailoring overwrote the first and there is no first left to name.
+   * Only the version history has it.
+   */
+  migrateTailoredIds(): { renamed: Array<{ from: string; to: string }> } {
+    const resumes = this.loadResumesAsWritten();
+    const taken = new Set(resumes.map((r) => r.id));
+    const renames = new Map<string, string>();
+    for (const spec of resumes) {
+      const { company, role } = spec.generatedFor ?? {};
+      if (!company || !role) continue;
+      if (spec.id !== legacyTailoredResumeId(company, role)) continue;
+      const want = tailoredResumeId(company, role);
+      // `taken` rather than the original list, so two renames cannot be
+      // pointed at one file either.
+      if (want === spec.id || taken.has(want)) continue;
+      renames.set(spec.id, want);
+      taken.add(want);
+    }
+    if (renames.size === 0) return { renamed: [] };
+
+    const moved = (id: string | undefined) => (id && renames.get(id)) || id;
+
+    /*
+     * Written under the new name before the old one is unlinked, so a process
+     * that dies in the middle leaves the save with two copies of a resume
+     * rather than none. A duplicate is a thing somebody can delete; a resume
+     * every space points at and nothing holds is not.
+     */
+    for (const spec of resumes) {
+      const to = renames.get(spec.id);
+      const copiedFrom = moved(spec.copiedFrom);
+      if (!to && copiedFrom === spec.copiedFrom) continue;
+      this.saveResume({ ...spec, id: to ?? spec.id, ...(copiedFrom ? { copiedFrom } : {}) });
+    }
+    for (const from of renames.keys()) {
+      for (const ext of Store.RESUME_SPELLINGS) {
+        const f = this.file('resumes', `${from}.${ext}`);
+        if (fs.existsSync(f)) fs.rmSync(f);
+      }
+    }
+
+    // And everything that names a resume follows it, or the space that was
+    // sending one is now sending nothing.
+    const apps = normalizeApplications(this.readYaml<Application[]>('applications.yaml', []));
+    if (apps.some((a) => a.resumeId !== moved(a.resumeId))) {
+      this.saveApplications(apps.map((a) => ({ ...a, resumeId: moved(a.resumeId) })));
+    }
+    for (const draft of this.loadDrafts()) {
+      if (draft.resumeId !== moved(draft.resumeId)) {
+        this.saveDraft({ ...draft, resumeId: moved(draft.resumeId) });
+      }
+    }
+
+    return { renamed: [...renames].map(([from, to]) => ({ from, to })) };
   }
 
   /**

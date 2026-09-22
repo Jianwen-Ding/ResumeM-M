@@ -55,13 +55,22 @@ export function moveBy(list, id, delta) {
  * failure rather than as a document that does not match its editor.
  */
 
-/** How recent something is: what is still running beats everything finished. */
+/**
+ * How recent something is: what is still running beats everything finished,
+ * and two things still running are ordered by when they began.
+ *
+ * See `sortKey` in period.ts, which this mirrors and which
+ * `order-agreement.test.js` pins it against.
+ */
 export function sortKeyOf(period) {
   if (!period?.start) return undefined;
-  if (period.ongoing) return Number.MAX_SAFE_INTEGER;
+  if (period.ongoing) return ONGOING + (startKeyOf(period) ?? 0);
   const point = period.end ?? period.start;
   return point.year * 100 + (point.month ?? 12);
 }
+
+/** The floor for anything still running. See period.ts. */
+const ONGOING = 1e12;
 
 /** When something began, for reading a career forwards. */
 export function startKeyOf(period) {
