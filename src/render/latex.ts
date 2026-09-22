@@ -264,7 +264,13 @@ export function lineTex(input: string): string {
 export function texHref(url: string): string {
   return url
     .replace(/[\\{}]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
-    .replace(/([%#])/g, '\\$1');
+    /*
+     * `&` too: hyperref reads `\&` as a plain ampersand in the target, and a
+     * bare one is an alignment tab wherever the link was already read as a
+     * macro argument — an entry title always is, inside the subheading's
+     * table — so one query string in a linked title produced no PDF at all.
+     */
+    .replace(/([%#&])/g, '\\$1');
 }
 
 function markup(s: string, depth: number): string {
