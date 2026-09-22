@@ -446,6 +446,44 @@ describe('matching on the posting’s level', () => {
   });
 
   /*
+   * And marks it as an instruction rather than a suggestion, which is the
+   * difference between arriving switched on and arriving switched off.
+   *
+   * The card lists every row and starts them all off, because the keyword
+   * match is the posting's vocabulary being guessed at and agreeing with a
+   * guess should be a decision. This row is not that: it is a tag the
+   * applicant wrote on their own variant, naming the kind of posting it
+   * belongs on, and there is nothing left for them to decide. Without the
+   * mark an internship posting produced a resume carrying the new grad date
+   * unless somebody spotted a line in a list and ticked it — which is exactly
+   * the "nobody remembers to switch the ending before hitting submit" this
+   * whole path exists to stop.
+   */
+  it('marks the swap as an instruction, not a suggestion', () => {
+    const result = matchVariants(data, base, { keywords: [], level: intern });
+    expect(result.rationale.find((r) => r.key === 'edu.dates')?.instruction).toBe(true);
+  });
+
+  it('and marks the fall back off a level the same way', () => {
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu.dates': 'v_dec' } };
+    const result = matchVariants(data, onIntern, { keywords: [], level: newgrad });
+    expect(result.rationale.find((r) => r.key === 'edu.dates')?.instruction).toBe(true);
+  });
+
+  /*
+   * A keyword swap is not one. Nothing here reads a tag the applicant left for
+   * this moment — it is the matcher deciding that a posting saying "kafka"
+   * probably wants the Kafka wording, which is a suggestion and has to stay
+   * one. If this ever came back `true` the card would start applying keyword
+   * guesses without being asked.
+   */
+  it('a keyword swap is not an instruction', () => {
+    const result = matchVariants(data, base, { keywords: ['kafka', 'streaming'] });
+    expect(result.rationale.length).toBeGreaterThan(0);
+    expect(result.rationale.every((r) => r.instruction === undefined)).toBe(true);
+  });
+
+  /*
    * The setup most people will actually have: one plain wording and one marked
    * for internships, with the intern one left selected from the last
    * application. Nothing is marked `newgrad`, so the only honest move is back
