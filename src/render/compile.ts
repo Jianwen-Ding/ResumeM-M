@@ -161,14 +161,97 @@ function toolStamp(engine: Engine): Promise<string> {
  * the directory away; a build someone is going to send to an employer should
  * pay for the certainty.
  */
-async function cacheKey(tex: string, engine: Engine): Promise<string> {
+async function cacheKey(tex: string, engine: Engine, via = 'engine'): Promise<string> {
   return createHash('sha256')
     .update(await toolStamp(engine))
     .update('\0')
     .update(engine)
     .update('\0')
+    /*
+     * Which road produced it. The shortcut and the trusted engine are given
+     * the same document and do not have to answer identically — that is the
+     * whole reason the shortcut is checked against itself before it is
+     * believed — so one must never be handed back under the other's name.
+     */
+    .update(via)
+    .update('\0')
     .update(tex)
     .digest('hex');
+}
+
+/**
+ * The same three artifacts, held in this process and nowhere else.
+ *
+ * The disk cache above is opt-in for a reason that is about time rather than
+ * about the key: the key cannot see a TeX distribution whose packages moved
+ * underneath a binary still calling itself the same thing, and a directory
+ * that outlives the upgrade would answer with the old PDF for ever. A build
+ * somebody sends to an employer should pay for that certainty.
+ *
+ * Held in memory that reason mostly goes away. The entries die with the
+ * process, so the upgrade's own restart clears them, and "restart the server"
+ * is a thing a person can be told. What is left is an upgrade performed while
+ * this server keeps running and somebody keeps editing through it, which is
+ * not a case worth charging every preview for.
+ *
+ * And the charge is the whole point. Measured on a resume of ordinary length:
+ * one compile is 413ms, and re-rendering the identical document cost 413ms
+ * again — the live preview recompiles on every change, and a great many
+ * changes do not reach the document at all (a wording switched off and back
+ * on, a drag undone, a resume reopened, the card rendering on arrival and
+ * again after each tick). One that no longer fits is worse: the fit loop
+ * compiles about five times, and that was 2059ms every time it was asked.
+ *
+ * Bounded by bytes rather than by count, because a PDF's size is what this
+ * costs and it varies by an order of magnitude between a one-page resume and
+ * a document that has run away. Oldest out first — `Map` keeps insertion
+ * order, and a re-read moves an entry back to the end, so what survives is
+ * what is being worked on.
+ */
+const HELD_BYTES = 48 * 1024 * 1024;
+const held = new Map<string, RawCompile>();
+let heldBytes = 0;
+
+function heldIn(key: string): RawCompile | undefined {
+  const hit = held.get(key);
+  if (!hit) return undefined;
+  // To the end, so the least recently wanted is the one evicted.
+  held.delete(key);
+  held.set(key, hit);
+  return hit;
+}
+
+function hold(key: string, got: RawCompile): void {
+  const size = got.pdf.length + got.aux.length + got.log.length;
+  // One document bigger than the whole allowance would evict everything and
+  // then sit there alone. Not worth holding at all.
+  if (size > HELD_BYTES) return;
+  if (held.has(key)) heldBytes -= sizeOf(held.get(key)!);
+  held.set(key, got);
+  heldBytes += size;
+  for (const [oldest, entry] of held) {
+    if (heldBytes <= HELD_BYTES) break;
+    if (oldest === key) break;
+    held.delete(oldest);
+    heldBytes -= sizeOf(entry);
+  }
+}
+
+const sizeOf = (r: RawCompile): number => r.pdf.length + r.aux.length + r.log.length;
+
+/**
+ * Forget everything this process is holding.
+ *
+ * For the tests that are about the *directory* cache. Those give each test a
+ * directory of its own and then assert what was filed in it — and with an
+ * in-memory cache in front, a document an earlier test compiled is answered
+ * without the directory ever being written to, so the assertions were about
+ * the wrong layer. Nothing in the product calls this: the entries are meant
+ * to live as long as the process does.
+ */
+export function forgetCompiled(): void {
+  held.clear();
+  heldBytes = 0;
 }
 
 /** The three artifacts under one key, or nothing if any of them is missing. */
@@ -240,10 +323,17 @@ function sweepCache(dir: string): void {
 /** Compile one .tex to a PDF in a scratch directory, returning the artifacts. */
 async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
   const store = cacheDir();
-  const key = store ? await cacheKey(tex, engine) : '';
+  // Always computed now: the in-memory cache wants it whether or not the disk
+  // one is switched on, and it is one hash of a few kilobytes.
+  const key = await cacheKey(tex, engine);
+  const inHand = heldIn(key);
+  if (inHand) return inHand;
   if (store) {
     const hit = cached(store, key);
-    if (hit) return hit;
+    if (hit) {
+      hold(key, hit);
+      return hit;
+    }
   }
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-'));
@@ -295,6 +385,7 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
   fs.rmSync(dir, { recursive: true, force: true });
   // Only what compiled: a failure throws above, so nothing that went wrong is
   // ever answered from here.
+  hold(key, result);
   if (store) remember(store, key, result);
   return result;
 }
@@ -550,7 +641,16 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
      */
     if (wantFast && t === 0) {
       try {
-        const raw = await compileFast(resume, layout);
+        /*
+         * Held too, under a key of its own.
+         *
+         * This is the path a live preview takes, so it is the one that
+         * repeats most: every change recompiles, and a great many changes do
+         * not reach the document. Measured before this, an unchanged resume
+         * re-rendered cost the same 413ms as the first time.
+         */
+        const fastKey = await cacheKey(tex, engine, 'fast');
+        const raw = heldIn(fastKey) ?? (await compileFast(resume, layout));
         const m = measure(raw.aux, layout, 1);
 
         // Self-consistency guard: the reported page count and the measured
@@ -563,6 +663,9 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
         // distrust the shortcut for this one attempt rather than ship a
         // number nothing else confirms.
         if (plausiblePageCount(m.pages, m.usedPt, layout)) {
+          // Only once it has been believed: an answer the guard below refuses
+          // must not be sitting in hand to be refused again for free.
+          hold(fastKey, raw);
           return { layout, raw, m, tex, fast: true };
         }
         // Falls through to the trusted engine below.

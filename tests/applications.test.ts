@@ -5,6 +5,7 @@ import YAML from 'yaml';
 import { advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, freshApplicationId, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
+import { forgetCompiled } from '../src/render/compile.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
 
 const latex = await hasLatex();
@@ -448,6 +449,14 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
        */
       const cache = process.env.RMM_COMPILE_CACHE;
       delete process.env.RMM_COMPILE_CACHE;
+      /*
+       * And out of this process's hands, which is the other cache and the one
+       * that is not opt-in. It holds what it compiled for as long as the
+       * process lives, so an earlier test in this file is enough to make the
+       * build here instant — the same green-for-nothing this paragraph is
+       * about, one layer down.
+       */
+      forgetCompiled();
 
       const req = { company: 'Streamly', role: 'Race', resumeId: 'intern', status: 'applying' as const };
       const id = applicationId(req.company, req.role);

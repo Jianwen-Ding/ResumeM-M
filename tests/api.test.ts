@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createApi, createPdfRouter, createCurrentRouter } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
 import type { Entry } from '../src/model/types.js';
+import { forgetCompiled } from '../src/render/compile.js';
 import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
 
 const latex = await hasLatex();
@@ -2319,6 +2320,13 @@ describe.skipIf(!latex)('workspace completion', { timeout: 180_000 }, () => {
      */
     const cache = process.env.RMM_COMPILE_CACHE;
     delete process.env.RMM_COMPILE_CACHE;
+    /*
+     * And what this process is holding, which is the other cache and the one
+     * that is not opt-in — it keeps what it compiled for as long as the
+     * process lives, so an earlier test in this file closes the window just
+     * as effectively as the directory does.
+     */
+    forgetCompiled();
     onTestFinished(() => {
       if (cache === undefined) delete process.env.RMM_COMPILE_CACHE;
       else process.env.RMM_COMPILE_CACHE = cache;

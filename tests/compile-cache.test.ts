@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { compileResume, detectEngine } from '../src/render/compile.js';
+import { compileResume, detectEngine, forgetCompiled } from '../src/render/compile.js';
 import { DEFAULT_LAYOUT, type ResolvedResume } from '../src/model/types.js';
 
 const usable = await detectEngine()
@@ -56,6 +56,14 @@ describe.skipIf(!usable)('the compiled-document cache', { timeout: 120_000 }, ()
   let saved: string | undefined;
 
   beforeEach(() => {
+    /*
+     * A directory of its own *and* an empty memory, because there are two
+     * caches now and these tests are about the first one. Without this, a
+     * document an earlier test compiled is answered from memory and the
+     * directory is never written to — so "nothing new was filed" passes for
+     * the wrong reason.
+     */
+    forgetCompiled();
     saved = process.env.RMM_COMPILE_CACHE;
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-cache-test-'));
     out = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-cache-out-'));
@@ -103,20 +111,59 @@ describe.skipIf(!usable)('the compiled-document cache', { timeout: 120_000 }, ()
     expect(filed()).toHaveLength(2);
   });
 
-  it('compiles every time when it is switched off, and files nothing', async () => {
+  it('files nothing when the directory is switched off', async () => {
     delete process.env.RMM_COMPILE_CACHE;
     const once = await build('Helios', 'uncached-one');
-    const twice = await build('Helios', 'uncached-two');
-
     expect(once.subarray(0, 4).toString()).toBe('%PDF');
     expect(fs.readdirSync(dir)).toEqual([]);
-    /*
-     * The engine stamps each run, so two compiles of one document are never
-     * byte-identical — which is what makes "the cache was not consulted"
-     * something this can see rather than assume. Equal bytes here would mean
-     * the second was answered from somewhere, whatever the directory shows.
-     */
-    expect(twice.equals(once)).toBe(false);
+  });
+
+  /*
+   * And is still answered from this process, which is the half that is not
+   * opt-in.
+   *
+   * The directory stays opt-in for a reason about time: its key cannot see a
+   * TeX distribution whose packages moved underneath a binary still calling
+   * itself the same thing, and a directory that outlives that upgrade answers
+   * with the old PDF for ever. Held in memory the entries die with the
+   * process, so the upgrade's own restart clears them.
+   *
+   * What it buys is not small. Measured on a resume of ordinary length: one
+   * compile 413ms, and re-rendering the identical document cost 413ms again —
+   * on a live preview that recompiles at every change, most of which do not
+   * reach the document. A resume that no longer fits was worse, because the
+   * fit loop compiles about five times: 2059ms, every time it was asked. With
+   * this, 10ms and 11ms.
+   *
+   * The engine stamps each run, so two compiles of one document are never
+   * byte-identical. That is what makes "it was not recompiled" something this
+   * can see rather than assume.
+   */
+  it('hands back what this process already compiled, with no directory at all', async () => {
+    delete process.env.RMM_COMPILE_CACHE;
+    const once = await build('Ganymede Systems', 'held-one');
+    const twice = await build('Ganymede Systems', 'held-two');
+    expect(twice.equals(once)).toBe(true);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  /*
+   * And not for a document that is not the one asked for — the same claim as
+   * the directory's, and the dangerous one. A cache that answers too eagerly
+   * does not fail a test; it passes one, against a resume nobody is looking
+   * at any more.
+   */
+  it('and not for a different document, with no directory at all', async () => {
+    delete process.env.RMM_COMPILE_CACHE;
+    const callisto = await build('Callisto Labs', 'callisto');
+    const europa = await build('Europa Freight', 'europa');
+    expect(europa.equals(callisto)).toBe(false);
+
+    // And asking for the first one again gets that one, not whichever was
+    // compiled last.
+    const again = await build('Callisto Labs', 'callisto-again');
+    expect(again.equals(callisto)).toBe(true);
+    expect(again.equals(europa)).toBe(false);
   });
 
   it('compiles again rather than handing back an entry with no PDF in it', async () => {
@@ -126,6 +173,13 @@ describe.skipIf(!usable)('the compiled-document cache', { timeout: 120_000 }, ()
     // itself produces this for a document with nothing in it, and waving one
     // through hands the caller a file it will attach to an application.
     fs.writeFileSync(path.join(dir, pdf!), Buffer.alloc(0));
+    /*
+     * And out of this process's hands as well, because the question is what
+     * the *directory* does with a truncated entry. Held in memory the answer
+     * never reaches the directory at all — which is safe, the caller still
+     * gets the real PDF, but it is not what this test is about.
+     */
+    forgetCompiled();
 
     const again = await build('Helios', 'again');
     expect(again.subarray(0, 4).toString()).toBe('%PDF');
