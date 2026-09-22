@@ -9592,6 +9592,37 @@ function renderDiff(diff) {
  * Modals                                                              *
  * ------------------------------------------------------------------ */
 
+/**
+ * Every element inside the open dialog a keyboard user could land on, in the
+ * order Tab visits them. Used both to choose where focus goes when the
+ * dialog opens and to keep it from leaving while the dialog is up — so it
+ * has to match what a browser would actually stop on: not a disabled button,
+ * and not Cancel when a caller asked for none.
+ */
+function modalFocusable() {
+  return [...$('#modal').querySelectorAll('button, [href], input, select, textarea')].filter(
+    (node) => !node.disabled && node.tabIndex !== -1 && node.style.display !== 'none',
+  );
+}
+
+/**
+ * Land the keyboard somewhere inside the dialog that was just opened, rather
+ * than leaving it wherever it already was.
+ *
+ * That "wherever" is the button that opened the dialog — still focused,
+ * still reachable by Tab, and now hidden under the overlay. `form` used to
+ * reach for the first text field and stop there, which left every dialog of
+ * plain selects and checkboxes (start a draft, add an entry) not doing this
+ * at all; `showModal` did not do it in any case, so a confirmation asking to
+ * delete something opened with the delete button behind it still focused.
+ * A text field wins when there is one, because that is where typing starts;
+ * failing that, the first focusable thing in the dialog.
+ */
+function focusModal() {
+  const typed = $('#modal-content').querySelector('input[type=text], textarea');
+  setTimeout(() => (typed ?? modalFocusable()[0])?.focus(), 0);
+}
+
 function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false, cancelLabel = 'Cancel' } = {}) {
   $('#modal-title').textContent = title;
   $('#modal-content').replaceChildren(content);
@@ -9602,6 +9633,7 @@ function showModal(title, content, { note = '', okLabel = 'Close', showCancel = 
   $('#modal-cancel').textContent = cancelLabel;
   $('#modal-ok').textContent = okLabel;
   $('#modal').classList.remove('hidden');
+  focusModal();
   return new Promise((resolve) => {
     $('#modal-ok').onclick = () => {
       $('#modal').classList.add('hidden');
@@ -9673,10 +9705,7 @@ function form(title, fields, note) {
     $('#modal-cancel').style.display = '';
     $('#modal-ok').textContent = 'Save';
     $('#modal').classList.remove('hidden');
-
-    // Focus the first editable field so the form is usable from the keyboard.
-    const first = content.querySelector('input[type=text], textarea');
-    if (first) setTimeout(() => first.focus(), 0);
+    focusModal();
 
     const close = (value) => {
       $('#modal').classList.add('hidden');
@@ -10282,6 +10311,33 @@ async function boot() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) {
       $('#modal-cancel').click();
+      return;
+    }
+
+    /*
+     * Keep Tab inside the dialog while one is open.
+     *
+     * Nothing had ever stopped it leaving: the overlay blocks a click on the
+     * page behind it, but Tab and Shift+Tab just follow document order, which
+     * runs straight past the dialog into the toolbar and tabs it is sitting
+     * on top of. Landing there is not a visible mistake — the overlay is
+     * still up, so it looks like nothing happened — until whatever key comes
+     * next reaches a button nobody can see, in a part of the editor the
+     * dialog was supposed to be the only way to touch.
+     *
+     * Cycled explicitly rather than left to the browser: the browser's own
+     * tab order is exactly the thing being overridden here, so it cannot also
+     * be what re-enters the loop once the edge is reached.
+     */
+    if (e.key === 'Tab' && !$('#modal').classList.contains('hidden')) {
+      const focusable = modalFocusable();
+      if (focusable.length === 0) return;
+      const at = focusable.indexOf(document.activeElement);
+      const next = e.shiftKey
+        ? focusable[at > 0 ? at - 1 : focusable.length - 1]
+        : focusable[at >= 0 && at < focusable.length - 1 ? at + 1 : 0];
+      e.preventDefault();
+      next.focus();
       return;
     }
 
