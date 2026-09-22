@@ -1,6 +1,6 @@
 import YAML from 'yaml';
 import { normalizeEntries, normalizeProfile, normalizeSkillGroups } from './normalize.js';
-import { PLACEHOLDER_NAME } from './resolve.js';
+import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
 import type { Entry, Profile, ResumeSpec, SkillGroup, StoreData } from './types.js';
 
 /**
@@ -73,6 +73,8 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
     resumes.push({ ...spec, id: file.replace(/^resumes\//, '').replace(/\.ya?ml$/, '') });
   }
 
+  const entriesNow = normalizeEntries(entries);
+
   return {
     /*
      * Normalised, like the live read a few lines from here in store.ts.
@@ -84,7 +86,7 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
      * PDF) as the name having been changed to that.
      */
     profile: normalizeProfile(parse<Profile>(files.get('profile.yaml'), { name: PLACEHOLDER_NAME }, isRecord)),
-    entries: normalizeEntries(entries),
+    entries: entriesNow,
     /*
      * And the skill groups, for the same reason the profile is. A group with
      * no `items:` key crashes the renderer on `g.items.length`, and an old
@@ -93,7 +95,37 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
      * rather than one entry in it that cannot be resolved.
      */
     skillGroups: normalizeSkillGroups(parse<SkillGroup[]>(files.get('skills.yaml'), [], isList)),
-    resumes,
+    /*
+     * And asked the same one-time questions `Store.load()` asks, because this
+     * has to resolve to the same document as the live read or it is not a
+     * record of anything.
+     *
+     * `adoptBulletOrder` is the one that shows. A resume whose lines were
+     * dragged out of the master's order carries no record of having been
+     * arranged — nothing could write one before it existed — so the live read
+     * marks those entries `manual`, and `resolveResume` then leaves them
+     * exactly as they are. Without the mark it sorts them back into the
+     * master's order.
+     *
+     * Version history did not ask. Measured on a resume whose section lists
+     * `[b2, b1]` against a master ordering them `b1, b2`: the live read
+     * resolves `["b2","b1"]` and the snapshot resolved `["b1","b2"]`. So the
+     * preview showed a document that was never sent, the diff between two
+     * versions showed bullet moves nobody made, and restoring one wrote the
+     * master's order back over the arrangement somebody had proofread — which
+     * is the exact silent restacking `adoptBulletOrder` exists to refuse.
+     *
+     * Nothing is written here either; the mark rides on the rebuilt spec and
+     * the commit it came from is not touched.
+     */
+    resumes: resumes.map((resume) =>
+      resume.sections
+        ? {
+            ...resume,
+            sections: adoptBulletOrder(adoptDateOrder(resume.sections, entriesNow).adopted, entriesNow),
+          }
+        : resume,
+    ),
   };
 }
 
