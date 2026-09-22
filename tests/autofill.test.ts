@@ -386,3 +386,67 @@ describe('the form agrees with the resume being sent', () => {
     expect(derivedAutofill({}, [entry], { 'edu_neu.subtitle': 'v_ce' }).major).toBe('Computer Engineering');
   });
 });
+
+/*
+ * "Current company", which Lever asks on every form and the store never
+ * answered. Only from a role that runs to the present: the last place somebody
+ * worked is not where they work, and saying so to a prospective employer is a
+ * false statement made on their behalf.
+ */
+describe('the job somebody holds now', () => {
+  const job = (over: Partial<Entry> = {}): Entry => ({
+    id: 'exp_helios',
+    kind: 'experience',
+    title: 'Helios',
+    subtitle: 'Software Engineer Intern',
+    dates: 'Jan. 2026 -- Present',
+    ...over,
+  });
+
+  it('answers from a role that runs to the present', () => {
+    expect(derivedAutofill({}, [job()])).toEqual({
+      current_company: 'Helios',
+      current_title: 'Software Engineer Intern',
+    });
+  });
+
+  it('says nothing about a role that has ended', () => {
+    expect(derivedAutofill({}, [job({ dates: 'Jul. 2024 -- Dec. 2024' })])).toEqual({});
+  });
+
+  it('takes the more recent of two current roles', () => {
+    const out = derivedAutofill({}, [
+      job({ id: 'exp_ta', title: 'Northeastern University', subtitle: 'Teaching Assistant', dates: 'Sep. 2024 -- Present' }),
+      job({ id: 'exp_helios', dates: 'Jan. 2026 -- Present' }),
+    ]);
+    expect(out.current_company).toBe('Helios');
+  });
+
+  it('offers nothing when two current roles started together', () => {
+    expect(
+      derivedAutofill({}, [
+        job({ id: 'a', title: 'One', dates: 'Jan. 2026 -- Present' }),
+        job({ id: 'b', title: 'Two', dates: 'Jan. 2026 -- Present' }),
+      ]),
+    ).toEqual({});
+  });
+
+  it('reads the dates the resume chose, which decide whether the role is current', () => {
+    const entry = job({
+      dates: {
+        default: 'v_ended',
+        variants: [
+          { id: 'v_ended', label: 'Ended', text: 'Jan. 2026 -- Apr. 2026' },
+          { id: 'v_now', label: 'Ongoing', text: 'Jan. 2026 -- Present' },
+        ],
+      },
+    });
+    expect(derivedAutofill({}, [entry])).toEqual({});
+    expect(derivedAutofill({}, [entry], { 'exp_helios.dates': 'v_now' }).current_company).toBe('Helios');
+  });
+
+  it('ignores ongoing entries that are not jobs, and ones put away', () => {
+    expect(derivedAutofill({}, [job({ archived: true })])).toEqual({});
+    expect(derivedAutofill({}, [job({ kind: 'project' })])).toEqual({});
+  });
+});

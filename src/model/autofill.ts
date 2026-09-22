@@ -282,6 +282,37 @@ function newestEducation(entries: Entry[]): Entry | undefined {
 }
 
 /**
+ * The job somebody holds now, if they hold exactly one.
+ *
+ * Only an entry whose dates run to the present. "Current company" answered
+ * with the last place somebody worked is a statement that they work there
+ * now, made on their behalf to a prospective employer — and for a student
+ * between internships, which is who this is mostly for, it is false. The box
+ * is better left for them to fill with nothing, or with their school.
+ *
+ * Several ongoing roles — a teaching assistantship beside an internship — are
+ * ranked by when they started, and two that started together are not ranked
+ * at all.
+ */
+function currentJob(entries: Entry[], choices: Record<string, string>): Entry | undefined {
+  const ongoing = entries.filter((e) => {
+    if (e.kind !== 'experience' || e.archived) return false;
+    return parsePeriod(asWritten(e.dates, choices[`${e.id}.dates`]))?.ongoing === true;
+  });
+  if (ongoing.length <= 1) return ongoing[0];
+  const started = (e: Entry) => {
+    const start = parsePeriod(asWritten(e.dates, choices[`${e.id}.dates`]))?.start;
+    return start ? start.year * 12 + (start.month ?? 1) : undefined;
+  };
+  const ranked = ongoing
+    .map((e) => ({ e, from: started(e) }))
+    .filter((r) => r.from !== undefined)
+    .sort((a, b) => b.from! - a.from!);
+  if (ranked.length === 0 || ranked[0]!.from === ranked[1]?.from) return undefined;
+  return ranked[0]!.e;
+}
+
+/**
  * Everything the profile implies, for a form to be filled from.
  *
  * Keyed the way the extension's own patterns are keyed, so the two sides name
@@ -329,6 +360,20 @@ export function derivedAutofill(
   if (where?.city) out.address_city = where.city;
   if (where?.state) out.address_state = where.state;
   if (where?.country) out.address_country = where.country;
+
+  /*
+   * The employer and the job title, which Lever asks for on every form as
+   * "Current company" and SmartRecruiters and Workday as the job you hold now.
+   * An experience entry's left heading is the company and its second line the
+   * role, the same way an education entry's are the school and the degree.
+   */
+  const job = currentJob(entries, choices);
+  if (job) {
+    const company = asWritten(job.title, choices[`${job.id}.title`]);
+    const title = asWritten(job.subtitle, choices[`${job.id}.subtitle`]);
+    if (company) out.current_company = company;
+    if (title) out.current_title = title;
+  }
 
   const school = newestEducation(entries);
   if (school) {
