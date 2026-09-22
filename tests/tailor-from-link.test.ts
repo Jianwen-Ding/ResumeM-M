@@ -280,6 +280,37 @@ describe('analysing a posting with the AI switched on', () => {
   });
 
   /*
+   * What the sanitiser threw out, on the route the extension actually calls.
+   *
+   * `sanitizeAiPlan` checks every id a model names against the save and drops
+   * the ones that are not there — which is the whole of the rule that the AI
+   * chooses between wordings and never writes one. The workspace route has
+   * said what it dropped since it was written; this one computed exactly the
+   * same list and did not send it, so a run where the model invented most of
+   * its plan came back looking like a run where it chose three things. Same
+   * shape as the fault `tailor: mode === 'ai' && !aiParsed ? 'match' : mode`
+   * exists to prevent, one level down: the card cannot say what happened if it
+   * is not told.
+   */
+  it('says what it threw out of the model’s plan', async () => {
+    serve(JSON.stringify({ choices: { b_testing: 'v_base', b_pipeline: 'v_invented', b_ghost: 'v_base' } }));
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+
+    expect(res.body.aiUsed).toBe(true);
+    // The one real choice was kept, and the invented ones are named.
+    expect(res.body.spec.choices.b_pipeline).not.toBe('v_invented');
+    expect(res.body.rejected).toEqual(
+      expect.arrayContaining([expect.stringContaining('b_pipeline'), expect.stringContaining('b_ghost')]),
+    );
+  });
+
+  it('sends an empty list when there was nothing to throw out', async () => {
+    serve(JSON.stringify({ choices: { b_testing: 'v_base' } }));
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'base', tailor: 'ai' }).expect(200);
+    expect(res.body.rejected).toEqual([]);
+  });
+
+  /*
    * And falls back to the keyword match when it cannot.
    *
    * This is the one that matters. The match is deterministic and runs with the

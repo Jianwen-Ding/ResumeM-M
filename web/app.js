@@ -6699,8 +6699,7 @@ async function tailorDraft(draft, notes, useAi) {
     });
 
     const changed = (res.diff ?? []).filter((c) => c.kind !== 'none');
-    setChildren(
-      notes,
+    const said = [
       el('div', {
         textContent: res.fetched
           ? `Read the posting and made "${res.spec.label}".`
@@ -6711,13 +6710,63 @@ async function tailorDraft(draft, notes, useAi) {
           ? `${plural(changed.length, 'change')} from the resume it started from${res.usedAi ? ', chosen by the AI' : ''}.`
           : 'Nothing needed changing — the resume already suited it.',
       }),
+      /*
+       * And what the model asked for that is not in this save.
+       *
+       * The server has always sent this — `sanitizeAiPlan` drops every id it
+       * cannot find and collects what it dropped — and nothing here read it.
+       * A model that invents twelve of its fifteen choices produces a
+       * perfectly ordinary-looking "3 changes … chosen by the AI", with no
+       * sign that most of what it decided was thrown away. That is the run
+       * worth knowing about: it is the one where asking again is likely to
+       * do better, and the one where a smaller model is not earning its
+       * place.
+       *
+       * The count, not the list. Each entry names a bullet or a variant by
+       * its internal id, and those are exactly what the UI does not show.
+       */
+      ...(res.rejected?.length
+        ? [
+            el('div', {
+              className: 'hint warn',
+              textContent:
+                `${plural(res.rejected.length, 'thing')} the AI asked for ${res.rejected.length === 1 ? 'is' : 'are'} ` +
+                'not in this save, so what is above is the rest of what it chose.',
+            }),
+          ]
+        : []),
       ...changed.slice(0, 6).map((c) => el('div', { className: 'hint', textContent: c.text })),
-    );
+    ];
 
     await loadStore();
     await openDraft(draft.id);
+
+    /*
+     * Said after the repaint, into the panel the repaint built.
+     *
+     * This wrote into `notes` first and reloaded second, and `openDraft` ends
+     * in `renderDraft`, which builds a whole new panel — `notes` among it. So
+     * every word of the only account anybody gets of a tailoring run was put
+     * into a node that was detached a few milliseconds later: what was made,
+     * how many changes came from the base, which ones they were, and whether
+     * the AI chose them. Measured in the Workspace: at the moment the reload
+     * went out the notes panel was already empty, and it stayed empty. The
+     * run worked, the resume was there, and the screen said nothing at all
+     * about it — which reads as a button that did nothing.
+     *
+     * `generate` had already met this and solved it the same way: repaint,
+     * then re-read `.gen-notes` rather than reusing the one closed over. Done
+     * here too rather than inventing a second mechanism.
+     *
+     * `notes` is the fallback for the one case the re-read misses — another
+     * application opened while the model was reading, so this one's panel is
+     * not on screen to write into. Then this lands on a detached node again,
+     * which is the correct place for it: the person is looking at something
+     * else, and it is their old panel that holds it.
+     */
+    setChildren($('#draft-editor .gen-notes') ?? notes, ...said);
   } catch (err) {
-    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+    setChildren($('#draft-editor .gen-notes') ?? notes, el('div', { className: 'err', textContent: err.message }));
   } finally {
     stopChip();
   }

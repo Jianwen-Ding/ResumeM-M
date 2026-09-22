@@ -2757,6 +2757,23 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           data.entries.flatMap((e) => (e.bullets ?? []).map((b) => [b.id, e.id])),
         ),
         suggestions: sanitizeSuggestions(aiParsed, data),
+        /*
+         * What the sanitiser threw out of the model's plan.
+         *
+         * `sanitizeAiPlan` checks every id a model names against the save and
+         * drops the ones that are not there — that is the whole of the rule
+         * that the AI chooses between wordings and never writes one. It
+         * already collected what it dropped, and the workspace route has said
+         * so since it was written; this one computed exactly the same list and
+         * did not send it. So a run where the model invented most of its plan
+         * came back indistinguishable from a run where it chose three things,
+         * and the card said "chosen by the AI" over both.
+         *
+         * The same fault `tailor: mode === 'ai' && !aiParsed ? 'match' : mode`
+         * exists to prevent, one level down. A card cannot say what happened
+         * if it is not told what happened.
+         */
+        rejected: plan?.rejected ?? [],
         aiReasoning: (aiParsed as { reasoning?: string } | null)?.reasoning,
         aiUsed: Boolean(aiParsed),
         // Which of the two ways the AI answered, so a run that went through
