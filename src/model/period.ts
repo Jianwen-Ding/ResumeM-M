@@ -407,10 +407,35 @@ export function formatPeriod(period: Period | undefined, style: DateStyle = DEFA
  */
 export function sortKey(period: Period | undefined): number | undefined {
   if (!period?.start) return undefined;
-  if (period.ongoing) return Number.MAX_SAFE_INTEGER;
+  /*
+   * Still above everything finished — but ordered among themselves by when
+   * they began, which every other ongoing period also has.
+   *
+   * This was a flat `Number.MAX_SAFE_INTEGER`, so any two current roles
+   * compared equal and `orderedEntries` left them in whatever order the file
+   * happened to list: a job started this year printing under a volunteer role
+   * started in 2019, in a section the editor calls date-ordered.
+   *
+   * It compounds. Because the two compare equal, `adoptDateOrder` finds the
+   * listed order already equal to the sorted order for *any* arrangement of
+   * them and stamps the section "newest", so the editor then says out loud
+   * that it is in date order. And `startKey` does tell them apart, so the
+   * oldest-first and newest-first orderings disagreed about the same pair.
+   *
+   * `ONGOING` is past any real `year * 100 + month`, so the two groups cannot
+   * interleave however far in the future a date is.
+   */
+  if (period.ongoing) return ONGOING + (startKey(period) ?? 0);
   const point = period.end ?? period.start;
   return point.year * 100 + (point.month ?? 12);
 }
+
+/**
+ * The floor for anything still running. A year would have to reach 10^11 for
+ * a finished period to reach it, and `Number.MAX_SAFE_INTEGER` is four orders
+ * of magnitude above the largest key it can carry.
+ */
+const ONGOING = 1e12;
 
 /** The earlier edge, for sorting oldest-first without reversing the other key. */
 export function startKey(period: Period | undefined): number | undefined {

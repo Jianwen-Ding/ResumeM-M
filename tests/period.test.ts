@@ -161,6 +161,30 @@ describe('the way a store already writes dates', () => {
 describe('putting entries in order', () => {
   const key = (text: string) => sortKey(parsePeriod(text));
 
+  /*
+   * Two jobs you are still in are not the same age.
+   *
+   * Every ongoing period returned `Number.MAX_SAFE_INTEGER`, so any two of
+   * them compared equal and `orderedEntries` left them in whatever order the
+   * file happened to list. A job started this year and a volunteer role
+   * started in 2019 print in insertion order, on a section the editor calls
+   * date-ordered.
+   *
+   * It compounds: because the two compare equal, `adoptDateOrder` finds the
+   * listed order already equal to the sorted order for *any* arrangement of
+   * them, stamps the section "newest", and the editor then says the section
+   * is in date order. And `startKey` does tell them apart, so the oldest-first
+   * ordering and the newest-first ordering disagreed about the same pair.
+   *
+   * Still above everything finished, which is the rule this function is
+   * written around — only now ordered among themselves by when they began.
+   */
+  it('puts the newer of two current roles first', () => {
+    expect(key('Mar. 2024 -- Present')).toBeGreaterThan(key('Jan. 2019 -- Present')!);
+    // And both still outrank anything that has ended, however recently.
+    expect(key('Jan. 2019 -- Present')).toBeGreaterThan(key('Dec. 2025 -- Jan. 2026')!);
+  });
+
   it('sorts by when a thing ended, because that is what recent means', () => {
     expect(key('Sep. 2022 -- May 2026')).toBeGreaterThan(key('Jul. 2024 -- Dec. 2024') as number);
   });

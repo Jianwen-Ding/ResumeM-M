@@ -76,6 +76,28 @@ describe('parseSnapshot', () => {
     expect(snapshot.resumes).toHaveLength(2);
   });
 
+  /*
+   * And valid YAML of the wrong shape, which is the half that got through.
+   *
+   * The guard above only catches YAML that *throws*. A file the person
+   * hand-edited into a mapping — wrapping the list under an `entries:` key is
+   * the natural mistake, and this store is advertised as hand-editable —
+   * parses perfectly well and then `push(...it)` is a TypeError.
+   *
+   * That is worse than a gap in the timeline, because the throw escapes:
+   * `readSnapshot` is called one line *outside* the try that exists to absorb
+   * exactly this, so the whole of Version history 500s. And it keeps doing so
+   * after the file is put right, because the bad blob is still in a commit
+   * inside the scan window. One save, and the history is gone for good.
+   */
+  it('survives a commit holding YAML of the wrong shape, not just unparseable YAML', () => {
+    for (const wrong of ['entries:\n  - id: e1\n    kind: experience\n    title: X\n', 'just a string', '42']) {
+      const snapshot = parseSnapshot(files({ 'experience.yaml': wrong }));
+      expect(snapshot.entries.map((e) => e.id)).toEqual(['edu_neu', 'proj_thing']);
+      expect(snapshot.resumes).toHaveLength(2);
+    }
+  });
+
   it('falls back to empty content for files a commit did not have yet', () => {
     const snapshot = parseSnapshot(new Map([['resumes/base.yaml', y(SAMPLE_BASE)]]));
     expect(snapshot.entries).toEqual([]);

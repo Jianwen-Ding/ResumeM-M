@@ -360,10 +360,16 @@ export function formatPeriod(period, style = DEFAULT_STYLE) {
  */
 export function sortKey(period) {
   if (!period?.start) return undefined;
-  if (period.ongoing) return Number.MAX_SAFE_INTEGER;
+  // Above everything finished, and ordered among themselves by when they
+  // began. See `sortKey` in period.ts, which this mirrors and is pinned
+  // against by order-agreement.test.js.
+  if (period.ongoing) return ONGOING + (startKey(period) ?? 0);
   const point = period.end ?? period.start;
   return point.year * 100 + (point.month ?? 12);
 }
+
+/** The floor for anything still running. See period.ts. */
+const ONGOING = 1e12;
 
 /** The earlier edge, for sorting oldest-first without reversing the other key. */
 export function startKey(period) {
