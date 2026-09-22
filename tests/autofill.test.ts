@@ -7,7 +7,8 @@
  * submitted application is neither.
  */
 import { describe, expect, it } from 'vitest';
-import { derivedAutofill, splitLocation, splitName } from '../src/model/autofill.js';
+import { derivedAutofill, readGpa, splitDegree, splitLocation, splitName } from '../src/model/autofill.js';
+import type { Entry } from '../src/model/types.js';
 
 describe('splitting a name into the two boxes a form has', () => {
   it('takes the first and last word', () => {
@@ -133,5 +134,164 @@ describe('what the profile implies altogether', () => {
   it('keys them the way the extension keys its own patterns', () => {
     const keys = Object.keys(derivedAutofill({ name: 'Ada Lovelace', location: 'London, United Kingdom' }));
     expect(keys.sort()).toEqual(['address_city', 'address_country', 'first_name', 'last_name']);
+  });
+});
+
+/*
+ * And the other half of the same problem this file opens with.
+ *
+ * The extension's `FIELD_PATTERNS` has recognised `school`, `degree`, `major`
+ * and `gpa` from the start, exactly as it recognised the name and address
+ * parts, and the store answered none of them — so the Education section of a
+ * Greenhouse form came out empty on a store holding a university, a degree and
+ * a grade. Hidden the same way the names were: every test store had them typed
+ * in by hand as extras.
+ */
+const edu = (over: Partial<Entry> = {}): Entry => ({
+  id: 'edu_neu',
+  kind: 'education',
+  title: 'Northeastern University',
+  subtitle: 'Bachelor of Science in Computer Science',
+  period: { start: { year: 2022 }, end: { year: 2026 } },
+  ...over,
+});
+
+describe('splitting a degree line into the two boxes a form has', () => {
+  it('splits on "in", which is how a resume writes it', () => {
+    expect(splitDegree('Bachelor of Science in Computer Science')).toEqual({
+      degree: 'Bachelor of Science',
+      major: 'Computer Science',
+    });
+  });
+
+  it('reads the abbreviated forms too', () => {
+    expect(splitDegree('BS in Computer Science')).toEqual({ degree: 'BS', major: 'Computer Science' });
+    expect(splitDegree('M.Eng in Robotics')).toEqual({ degree: 'M.Eng', major: 'Robotics' });
+  });
+
+  /*
+   * The last "in", not the first: "Bachelor of Science in Engineering in
+   * Computer Science" is a real degree name and the discipline is the tail.
+   */
+  it('takes the last join when the degree name has one in it', () => {
+    expect(splitDegree('Bachelor of Science in Engineering in Computer Science')).toEqual({
+      degree: 'Bachelor of Science in Engineering',
+      major: 'Computer Science',
+    });
+  });
+
+  it('drops a GPA clause rather than filing it as the discipline', () => {
+    expect(splitDegree('Bachelor of Science in Computer Science, GPA 3.8/4.0')).toEqual({
+      degree: 'Bachelor of Science',
+      major: 'Computer Science',
+    });
+  });
+
+  /*
+   * A comma is not the join. "Bachelor of Science, Computer Science" and
+   * "Bachelor of Science, Summa Cum Laude" are the same shape and only one of
+   * them has a discipline after it, so neither is split.
+   */
+  it('offers nothing where the split is not plain', () => {
+    expect(splitDegree('Bachelor of Science, Computer Science')).toBeUndefined();
+    expect(splitDegree('Bachelor of Science, Summa Cum Laude')).toBeUndefined();
+    // No degree word on the left, so the "in" is part of a subject.
+    expect(splitDegree('Studies in Computer Science')).toBeUndefined();
+    expect(splitDegree('Computer Science')).toBeUndefined();
+    expect(splitDegree('')).toBeUndefined();
+  });
+});
+
+describe('reading a grade out of the line it is printed on', () => {
+  it('takes the number a box wants, without the scale beside it', () => {
+    expect(readGpa('Bachelor of Science in Computer Science, GPA 3.8/4.0')).toBe('3.8');
+    expect(readGpa('GPA: 3.95')).toBe('3.95');
+  });
+
+  it('refuses a score that cannot be one', () => {
+    // Above its own scale, so one of the two was misread.
+    expect(readGpa('GPA 5.0/4.0')).toBeUndefined();
+    expect(readGpa('GPA pending')).toBeUndefined();
+    expect(readGpa('Computer Science')).toBeUndefined();
+  });
+});
+
+describe('what the education entries imply', () => {
+  it('fills the four boxes a Greenhouse education section asks for', () => {
+    expect(derivedAutofill({}, [edu()])).toEqual({
+      school: 'Northeastern University',
+      degree: 'Bachelor of Science',
+      major: 'Computer Science',
+    });
+  });
+
+  it('reads the wording that is set when nothing has chosen between them', () => {
+    const entry = edu({
+      subtitle: {
+        default: 'v_plain',
+        variants: [
+          { id: 'v_gpa', label: 'With GPA', text: 'Bachelor of Science in Computer Science, GPA 3.8/4.0' },
+          { id: 'v_plain', label: 'Plain', text: 'Bachelor of Science in Computer Science' },
+        ],
+      },
+    });
+
+    const out = derivedAutofill({}, [entry]);
+    expect(out.degree).toBe('Bachelor of Science');
+    expect(out.major).toBe('Computer Science');
+    /*
+     * And the grade from whichever wording carries it. Whether the GPA is on
+     * the resume is a decision about the resume; a box marked "GPA" is asking
+     * a different question, and the answer is the same either way.
+     */
+    expect(out.gpa).toBe('3.8');
+  });
+
+  it('takes the most recent school when there are several', () => {
+    const out = derivedAutofill({}, [
+      edu({ id: 'edu_old', title: 'Boston Latin', subtitle: 'BA in History', period: { end: { year: 2022 } } }),
+      edu({ id: 'edu_new', title: 'Northeastern University', period: { end: { year: 2026 } } }),
+    ]);
+
+    expect(out.school).toBe('Northeastern University');
+    expect(out.major).toBe('Computer Science');
+  });
+
+  /*
+   * The refusals matter as much as the readings, for the reason this file
+   * opens with: an empty required box is visible and gets fixed; a wrong
+   * university on a submitted application is neither.
+   */
+  it('offers nothing where the newest is not plain', () => {
+    // Two finishing the same year cannot be told apart this way.
+    expect(
+      derivedAutofill({}, [
+        edu({ id: 'a', title: 'One', period: { end: { year: 2026 } } }),
+        edu({ id: 'b', title: 'Two', period: { end: { year: 2026 } } }),
+      ]),
+    ).toEqual({});
+
+    // Neither can two with no readable end date at all.
+    expect(
+      derivedAutofill({}, [
+        edu({ id: 'a', title: 'One', period: undefined }),
+        edu({ id: 'b', title: 'Two', period: undefined }),
+      ]),
+    ).toEqual({});
+  });
+
+  it('ignores entries that are not education, and ones put away', () => {
+    expect(derivedAutofill({}, [edu({ kind: 'experience', title: 'Helios' })])).toEqual({});
+    expect(derivedAutofill({}, [edu({ archived: true })])).toEqual({});
+  });
+
+  it('fills the school even when the degree line cannot be split', () => {
+    const out = derivedAutofill({}, [edu({ subtitle: 'Computer Science' })]);
+    expect(out).toEqual({ school: 'Northeastern University' });
+  });
+
+  it('keys them the way the extension keys its own patterns', () => {
+    const entry = edu({ subtitle: 'Bachelor of Science in Computer Science, GPA 3.8/4.0' });
+    expect(Object.keys(derivedAutofill({}, [entry])).sort()).toEqual(['degree', 'gpa', 'major', 'school']);
   });
 });

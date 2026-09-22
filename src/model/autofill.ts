@@ -24,7 +24,8 @@
  * leaves the field blank exactly as before. An empty required field is
  * annoying and visible; a wrong name on a submitted application is neither.
  */
-import type { Profile } from './types.js';
+import { isVariantField } from './types.js';
+import type { Entry, MaybeVariant, Profile } from './types.js';
 
 /**
  * Words that belong to the surname rather than being one.
@@ -156,7 +157,129 @@ export function splitLocation(
  * the same things. Hand-entered extras are laid over the top by the caller,
  * which is what makes every one of these a default rather than a decision.
  */
-export function derivedAutofill(profile: Pick<Profile, 'location'> & { name?: string }): Record<string, string> {
+/** The wording a field is set to when nothing has chosen between its variants. */
+function asWritten(field: MaybeVariant | undefined): string {
+  if (field === undefined) return '';
+  if (!isVariantField(field)) return tidy(field);
+  const chosen = field.variants.find((v) => v.id === field.default) ?? field.variants[0];
+  return tidy(chosen?.text);
+}
+
+/**
+ * A degree line split into the two boxes a form has.
+ *
+ * Every ATS asks for these apart — Greenhouse has "Degree" and "Discipline",
+ * Workday "Degree" and "Field of Study" — and a resume writes them as one
+ * line, because that is how a resume reads. The join is almost always " in ":
+ *
+ *   "Bachelor of Science in Computer Science"  -> BS line / Computer Science
+ *   "BS in Computer Science"                   -> BS in  / Computer Science
+ *   "Master of Engineering, Robotics"          -> nothing; see below
+ *   "Computer Science"                         -> nothing; no degree in it
+ *
+ * Returns nothing rather than a guess wherever the split is not plain. A comma
+ * is not read as the join: "Bachelor of Science, Computer Science" and
+ * "Bachelor of Science, Summa Cum Laude" are the same shape and only one of
+ * them has a discipline after the comma.
+ */
+export function splitDegree(line: string): { degree: string; major: string } | undefined {
+  // Whatever a GPA clause contributes, it is not part of either box.
+  const said = tidy(String(line ?? '').replace(GPA_CLAUSE, ''))
+    .replace(/[,;]\s*$/, '')
+    .trim();
+  if (!said) return undefined;
+
+  /*
+   * The last " in ", not the first. "Bachelor of Science in Engineering in
+   * Computer Science" is a real degree name and the discipline is the tail.
+   */
+  const at = said.toLowerCase().lastIndexOf(' in ');
+  if (at <= 0) return undefined;
+
+  const degree = tidy(said.slice(0, at));
+  const major = tidy(said.slice(at + 4));
+  if (!degree || !major) return undefined;
+  // "in" as a word inside the discipline rather than as the join: whatever is
+  // on the left has to read like a degree.
+  if (!DEGREE_WORD.test(degree)) return undefined;
+  return { degree, major };
+}
+
+/** The words that make a phrase a qualification rather than a subject. */
+const DEGREE_WORD =
+  /\b(bachelor'?s?|master'?s?|doctor(ate)?|associate'?s?|b\.?s\.?c?|b\.?a\.?|b\.?eng|m\.?s\.?c?|m\.?a\.?|m\.?eng|m\.?b\.?a|ph\.?d|j\.?d|m\.?d|diploma|certificate)\b/i;
+
+/**
+ * A grade point average, as a form wants it: the number alone.
+ *
+ * The resume writes "GPA 3.8/4.0" because the scale is worth printing beside
+ * it; the box asks for one number and validates it. Only a plausible one — a
+ * "GPA" followed by something that is not a grade is a sentence, not a score.
+ */
+const GPA_CLAUSE = /[,;]?\s*\bGPA[:\s]+\d(?:\.\d+)?(?:\s*\/\s*\d(?:\.\d+)?)?/i;
+
+export function readGpa(line: string): string | undefined {
+  const hit = /\bGPA[:\s]+(\d(?:\.\d+)?)(?:\s*\/\s*(\d(?:\.\d+)?))?/i.exec(String(line ?? ''));
+  if (!hit) return undefined;
+  const score = Number(hit[1]);
+  const scale = hit[2] === undefined ? undefined : Number(hit[2]);
+  // A score above its own scale is a misreading, not a grade.
+  if (!Number.isFinite(score) || score <= 0) return undefined;
+  if (scale !== undefined && (!Number.isFinite(scale) || score > scale)) return undefined;
+  return hit[1];
+}
+
+/**
+ * Which education entry a form is asking about.
+ *
+ * One box each for school, degree and discipline means the most recent one —
+ * a form with room for a whole history has several sets of boxes, and filling
+ * the first set with the oldest degree is the wrong answer to both questions.
+ *
+ * `period.end` rather than the printed dates: the text is "Sep. 2022 -- May
+ * 2026" and the structured field is the same information already parsed. An
+ * entry with no readable end date cannot be compared, so where the newest is
+ * not plain this yields nothing at all rather than picking arbitrarily.
+ */
+function newestEducation(entries: Entry[]): Entry | undefined {
+  const schools = entries.filter((e) => e.kind === 'education' && !e.archived);
+  if (schools.length === 0) return undefined;
+  if (schools.length === 1) return schools[0];
+
+  const ranked = schools
+    .map((e) => ({ e, ends: e.period?.end?.year ?? undefined }))
+    .filter((r) => r.ends !== undefined)
+    .sort((a, b) => b.ends! - a.ends!);
+
+  // Two that finished in the same year cannot be told apart this way, and a
+  // wrong school on a submitted application is worse than an empty box.
+  if (ranked.length === 0 || ranked[0]!.ends === ranked[1]?.ends) return undefined;
+  return ranked[0]!.e;
+}
+
+/**
+ * Everything the profile implies, for a form to be filled from.
+ *
+ * Keyed the way the extension's own patterns are keyed, so the two sides name
+ * the same things. Hand-entered extras are laid over the top by the caller,
+ * which is what makes every one of these a default rather than a decision.
+ */
+export function derivedAutofill(
+  profile: Pick<Profile, 'location'> & { name?: string },
+  /*
+   * And the education entries, which are the other half of the same problem
+   * this file opens with.
+   *
+   * `FIELD_PATTERNS` in the extension has recognised `school`, `degree`,
+   * `major` and `gpa` from the start, exactly as it recognised the name and
+   * address parts, and the store answered none of them — so the Education
+   * section of a Greenhouse form came out empty on a store that plainly holds
+   * a university, a degree and a grade. The same bug as the names, found the
+   * same way, and hidden the same way: every test store had them typed in as
+   * extras.
+   */
+  entries: Entry[] = [],
+): Record<string, string> {
   const out: Record<string, string> = {};
 
   const name = splitName(profile.name ?? '');
@@ -169,6 +292,41 @@ export function derivedAutofill(profile: Pick<Profile, 'location'> & { name?: st
   if (where?.city) out.address_city = where.city;
   if (where?.state) out.address_state = where.state;
   if (where?.country) out.address_country = where.country;
+
+  const school = newestEducation(entries);
+  if (school) {
+    /*
+     * The wording as it stands with nothing chosen. A resume picks between the
+     * variants per posting — the GPA line for a GPA-screened one, the later
+     * graduation date for an internship — and this has no posting in front of
+     * it, so the default is the person's standing answer.
+     */
+    const named = asWritten(school.title);
+    if (named) out.school = named;
+
+    const line = asWritten(school.subtitle);
+    const split = splitDegree(line);
+    if (split) {
+      out.degree = split.degree;
+      out.major = split.major;
+    }
+
+    /*
+     * Read from every wording, not only the default. Whether the GPA is on the
+     * resume is a decision about the resume; whether a form is told it is a
+     * different decision, and a box marked "GPA" is asking.
+     */
+    const anywhere = isVariantField(school.subtitle)
+      ? school.subtitle.variants.map((v) => String(v.text))
+      : [line];
+    for (const said of anywhere) {
+      const gpa = readGpa(said);
+      if (gpa) {
+        out.gpa = gpa;
+        break;
+      }
+    }
+  }
 
   return out;
 }

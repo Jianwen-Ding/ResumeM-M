@@ -2872,7 +2872,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
            * `derivedAutofill`, which yields nothing at all where the reading
            * is not plain.
            */
-          ...derivedAutofill({ name: p.name, location: p.location }),
+          ...derivedAutofill({ name: p.name, location: p.location }, data.entries),
           ...(p.autofill ?? {}),
         },
         answers: data.answers.map((a) => ({
