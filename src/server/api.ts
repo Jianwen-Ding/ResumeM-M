@@ -724,7 +724,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/attachments',
     handler(async (req, res) => {
       const wanted = String(req.query.application ?? '').trim();
-      const folder = syncCurrent(store);
+      /*
+       * Named as the one being worked on, so it keeps the plain filename
+       * where two in-flight applications would clash — this endpoint exists
+       * to hand files to a form that is open in front of somebody. See
+       * `uniqueNames`.
+       */
+      const folder = syncCurrent(store, undefined, wanted || undefined);
       const attachments = folder.files
         .filter((name) => {
           const whose = folder.belongsTo[name] ?? '';
@@ -3122,8 +3128,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       // The same files also go to the flat folder, which is the one a portal's
-      // file picker should be pointed at — the archive is for later.
-      const current = syncCurrent(store);
+      // file picker should be pointed at — the archive is for later. This one
+      // keeps the plain name; see `uniqueNames`.
+      const current = syncCurrent(store, undefined, result.application.id);
       if (autoCommit()) {
         await commitQuietly(repo, `Apply: ${result.application.company} — ${result.application.role}`);
       }
@@ -4129,7 +4136,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         warnings,
         application: app,
         dir: result.dir,
-        currentDir: syncCurrent(store).dir,
+        currentDir: syncCurrent(store, undefined, app.id).dir,
         files: result.files,
         fits: result.fits,
         pages: result.pages,

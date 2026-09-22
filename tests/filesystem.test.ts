@@ -724,3 +724,88 @@ describe('an application whose files are not where the tracker says', () => {
     expect((folder.problems ?? []).join(' ')).toMatch(/Acme — Engineer[\s\S]*outside the output folder/);
   });
 });
+
+/*
+ * The name on the file somebody is about to upload.
+ *
+ * One flat folder holds every application in flight, and under the default
+ * naming they all want to be called `First-Last-Resume.pdf`. So where two
+ * clash, something that tells them apart is added — the role, the company,
+ * both, or the id. That part is not optional: the alternative is one
+ * application's resume quietly replacing another's in the very folder a
+ * portal's file picker is pointed at.
+ *
+ * What was wrong is that it was added to *all* of them, including the one
+ * being uploaded. Reported from a real portal, with two jobs open:
+ * `Jianwen-Ding-Resume-2027-Intern-Software-Engineer.pdf`, by somebody whose
+ * setting says `type` and who had asked for `Jianwen-Ding-Resume.pdf`. The
+ * other application in the folder is not that person's problem at the moment
+ * they press upload, and the rule already said as much in its own words —
+ * "the person uploading knows what they are applying to, and a longer name is
+ * a worse one".
+ */
+describe('two applications in flight, one upload dialog', () => {
+  /** A built bundle for one application, holding one resume. */
+  const bundleFor = (id: string, company: string, role: string, name: string) => {
+    const dir = path.join(t.store.outDir(), 'applications', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, name), `%PDF ${id}\n`, 'utf8');
+    return { id, company, role, status: 'applying' as const, snapshotDir: `applications/${id}` };
+  };
+
+  const two = () => {
+    t.write('applications.yaml', [
+      bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'),
+      bundleFor('a2', 'Beta', 'Platform Engineer', 'Test-Person-Resume.pdf'),
+    ]);
+  };
+
+  it('gives the plain name to the one being worked on', () => {
+    two();
+    const folder = syncCurrent(t.store, undefined, 'a1');
+    expect(folder.files).toContain('Test-Person-Resume.pdf');
+    // And the file under that name is that application's, not the other one's.
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a1\n');
+  });
+
+  it('and the other one still gets a name of its own', () => {
+    two();
+    const folder = syncCurrent(t.store, undefined, 'a1');
+    const others = folder.files.filter((f) => f !== 'Test-Person-Resume.pdf' && f.endsWith('.pdf'));
+    expect(others).toEqual(['Test-Person-Resume-Platform-Engineer.pdf']);
+    expect(fs.readFileSync(path.join(folder.dir, others[0]!), 'utf8')).toBe('%PDF a2\n');
+  });
+
+  it('the other way round when the other one is the one in hand', () => {
+    two();
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
+    expect(folder.files).toContain('Test-Person-Resume-2027-Intern-Software-Engineer.pdf');
+  });
+
+  /*
+   * With nothing in hand — a listing of the tracker, no upload in progress —
+   * every one of them is suffixed, as before. Nothing may take the plain name
+   * by default: which of them got it would be whichever the tracker happened
+   * to list first.
+   */
+  it('suffixes all of them when no application is named', () => {
+    two();
+    const folder = syncCurrent(t.store);
+    expect(folder.files).not.toContain('Test-Person-Resume.pdf');
+    expect(folder.files.filter((f) => f.endsWith('.pdf')).sort()).toEqual([
+      'Test-Person-Resume-2027-Intern-Software-Engineer.pdf',
+      'Test-Person-Resume-Platform-Engineer.pdf',
+    ]);
+  });
+
+  /*
+   * And one application on its own is never suffixed, whether or not it is
+   * named — which is the ordinary case and the one the short name is for.
+   */
+  it('one application keeps the short name either way', () => {
+    t.write('applications.yaml', [bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf')]);
+    expect(syncCurrent(t.store).files).toContain('Test-Person-Resume.pdf');
+    expect(syncCurrent(t.store, undefined, 'a1').files).toContain('Test-Person-Resume.pdf');
+  });
+});

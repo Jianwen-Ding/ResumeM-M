@@ -904,9 +904,13 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       ],
     };
     store.upsertApplication(application);
-    // The files also land in the flat folder, ready for the upload dialog that
-    // is probably already open.
-    syncCurrent(store);
+    /*
+     * The files also land in the flat folder, ready for the upload dialog that
+     * is probably already open — and this one keeps the plain name where two
+     * in-flight applications would otherwise clash, because this is the one
+     * being uploaded. See `uniqueNames`.
+     */
+    syncCurrent(store, undefined, application.id);
 
     return {
       application,
