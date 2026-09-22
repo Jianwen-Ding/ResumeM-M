@@ -299,6 +299,9 @@ describe('what the education entries imply', () => {
 describe('when the degree ends, as the boxes forms ask for it in', () => {
   it('reads the month and year off the end of the range', () => {
     expect(graduation('Sep. 2022 -- May 2026')).toEqual({
+      education_start_year: '2022',
+      education_start_month: 'September',
+      education_start_date: 'September 2022',
       graduation_year: '2026',
       graduation_month: 'May',
       graduation_date: 'May 2026',
@@ -311,11 +314,24 @@ describe('when the degree ends, as the boxes forms ask for it in', () => {
    * start work. An end with only a year reports only the year.
    */
   it('reports only the year when only the year is written', () => {
-    expect(graduation('2022 -- 2026')).toEqual({ graduation_year: '2026', graduation_date: '2026' });
+    expect(graduation('2022 -- 2026')).toEqual({
+      education_start_year: '2022',
+      education_start_date: '2022',
+      graduation_year: '2026',
+      graduation_date: '2026',
+    });
   });
 
-  it('reports nothing for a degree still in progress, or dates it cannot read', () => {
-    expect(graduation('Sep. 2022 -- Present')).toEqual({});
+  /*
+   * A degree in progress still began when it began: the start is reported and
+   * the end is not, because there is no end yet to report.
+   */
+  it('reports no end for a degree still in progress, and nothing for dates it cannot read', () => {
+    expect(graduation('Sep. 2022 -- Present')).toEqual({
+      education_start_year: '2022',
+      education_start_month: 'September',
+      education_start_date: 'September 2022',
+    });
     expect(graduation('Two semesters')).toEqual({});
     expect(graduation('')).toEqual({});
   });

@@ -181,12 +181,30 @@ const MONTHS = [
  */
 export function graduation(dates: string): Record<string, string> {
   const period = parsePeriod(dates);
+  const out: Record<string, string> = {};
+
+  /*
+   * And when it began, for the forms whose Education block asks for both ends
+   * — Greenhouse's has "Start date month" and "Start date year" beside the end.
+   * Same rule: the month only where it is written.
+   */
+  const start = period?.start;
+  if (start?.year) {
+    out.education_start_year = String(start.year);
+    if (start.month) {
+      out.education_start_month = MONTHS[start.month - 1]!;
+      out.education_start_date = `${out.education_start_month} ${start.year}`;
+    } else {
+      out.education_start_date = String(start.year);
+    }
+  }
+
   const end = period?.ongoing ? undefined : period?.end;
-  if (!end?.year) return {};
+  if (!end?.year) return out;
   const year = String(end.year);
-  if (!end.month) return { graduation_year: year, graduation_date: year };
+  if (!end.month) return { ...out, graduation_year: year, graduation_date: year };
   const month = MONTHS[end.month - 1]!;
-  return { graduation_year: year, graduation_month: month, graduation_date: `${month} ${year}` };
+  return { ...out, graduation_year: year, graduation_month: month, graduation_date: `${month} ${year}` };
 }
 
 /**
