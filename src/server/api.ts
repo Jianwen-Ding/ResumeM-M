@@ -2462,7 +2462,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * is the same moment this reply arrives. It resolves each resume once,
        * which is the same work the editor's own list does.
        */
-      const fit = fitResumes(data, job.keywords);
+      const fit = fitResumes(data, job.keywords, undefined, store);
 
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
