@@ -12,8 +12,18 @@ import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
 export interface MatchResult {
   choices: Record<string, string>;
   skills: Record<string, string[]>;
-  /** Per-change explanation, so nothing is swapped invisibly. */
-  rationale: { key: string; from: string; to: string; because: string[] }[];
+  /**
+   * Per-change explanation, so nothing is swapped invisibly.
+   *
+   * `instruction` marks a row that came from a tag the applicant wrote on
+   * their own variant rather than from anything read out of the posting — see
+   * `considerLevel`. Both kinds are listed and both can be switched off; the
+   * difference is which one arrives switched on, and the card reads this to
+   * decide. Everything the keyword match infers starts off, because it is a
+   * guess about words; an instruction starts on, because it is an answer the
+   * applicant already gave to this exact question.
+   */
+  rationale: { key: string; from: string; to: string; because: string[]; instruction?: true }[];
 }
 
 /** Normalise a tag or keyword so "front-end" and "frontend" compare equal. */
@@ -129,7 +139,7 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
         .map((v) => ({ v, ...scoreVariant(v, keywords) }))
         .reduce((a, b) => (b.score > a.score ? b : a)).v;
       choices[key] = pick.id;
-      rationale.push({ key, from: currentId, to: pick.id, because: levelWhy });
+      rationale.push({ key, from: currentId, to: pick.id, because: levelWhy, instruction: true });
       return true;
     }
 
@@ -149,7 +159,7 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
     const fallback = selectable.find((v) => v.id === defaultId);
     if (!fallback || fallback.id === currentId || tagged(fallback, ALL_LEVEL_TAGS)) return false;
     choices[key] = fallback.id;
-    rationale.push({ key, from: currentId, to: fallback.id, because: levelWhy });
+    rationale.push({ key, from: currentId, to: fallback.id, because: levelWhy, instruction: true });
     return true;
   };
 
