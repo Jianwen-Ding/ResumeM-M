@@ -95,10 +95,27 @@ const plural = (n: number, word: string) => `${n} ${n === 1 ? word : `${word}s`}
  * an address and `[1]` is not a placeholder, so a match needs a letter, has
  * to stay on one line, and has to be short: this is looking for a word or two
  * in a slot, not for punctuation.
+ *
+ * And deliberately not code. Asking only "is there a letter between the
+ * brackets" refused `buffer[i]`, `items[key]`, `List<String>` and
+ * `Promise<void>`, then told the model to fill in a placeholder that is not
+ * one — which it can only comply with by taking the real detail out. On
+ * "describe something you built", where the detail is the whole point, the
+ * guard was quietly making every answer worse.
+ *
+ * What separates them is position rather than content. A slot sits where a
+ * *word* would sit, so something else always comes first: a space, a newline,
+ * the start of the text, an opening quote. An index or a type parameter is
+ * glued to the name it belongs to — the `[` of `buffer[i]` follows `r`, and
+ * the `<` of `List<String>` follows `t`. `\B` will not do the job here: it is
+ * about the boundary between the two characters, and `[` is a non-word
+ * character either way, so it is true for both. The lookbehind names the
+ * thing directly.
  */
+const NOT_GLUED = String.raw`(?<![\w)\]])`;
 const PLACEHOLDER = [
-  /\[[^\]\n]{0,40}[A-Za-z][^\]\n]{0,40}\]/,
-  /<[A-Za-z][A-Za-z ._'-]{0,40}>/,
+  new RegExp(String.raw`${NOT_GLUED}\[[^\]\n]{0,40}[A-Za-z][^\]\n]{0,40}\]`),
+  new RegExp(String.raw`${NOT_GLUED}<[A-Za-z][A-Za-z ._'-]{0,40}>`),
   /\{\{[^}\n]{0,60}\}\}/,
   /\bTODO\b/,
 ];
