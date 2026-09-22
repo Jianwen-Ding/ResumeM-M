@@ -54,9 +54,23 @@ describe('every prompt', () => {
     answerFeedback: answerFeedbackPrompt(data, makeDraft(), makeDraft().questions[0]!),
   };
 
-  it('carries the voice notes, so they are never retyped into a chat', () => {
-    for (const [name, p] of Object.entries(prompts)) {
-      expect(p, name).toContain('Plain and direct');
+  /*
+   * The voice section goes to the prompts that write prose and no further —
+   * see `preamble` and tests/voice-where-needed.test.ts. `feedback` and
+   * `tailor` are the two here that cannot produce a word of it: one says "do
+   * not rewrite", the other "You are selecting, not writing".
+   */
+  const writesProse = ['cover', 'answer', 'shorten', 'letterFeedback', 'answerFeedback'];
+
+  it('carries the voice notes to the prompts that write, so they are never retyped into a chat', () => {
+    for (const name of writesProse) {
+      expect(prompts[name as keyof typeof prompts], name).toContain('Plain and direct');
+    }
+  });
+
+  it('spends nothing on the voice where no prose can come out', () => {
+    for (const name of ['feedback', 'tailor']) {
+      expect(prompts[name as keyof typeof prompts], name).not.toContain('Plain and direct');
     }
   });
 
@@ -67,16 +81,22 @@ describe('every prompt', () => {
     }
   });
 
+  /*
+   * Asked of a prompt that is shown the voice at all. These used to go through
+   * `feedbackPrompt`, which no longer carries it — and against that prompt
+   * they would pass for the wrong reason, by finding nothing because there is
+   * nothing to find rather than because the fallback works.
+   */
   it('falls back to generic guidance when there is no writing to learn from', () => {
     const bare = { ...data, voice: '', coverLetters: [], answers: [], samples: [], entries: [] };
-    expect(feedbackPrompt(bare, resolved)).toContain('No samples of their writing are stored yet');
+    expect(answerPrompt(bare, 'Why this role?')).toContain('No samples of their writing are stored yet');
   });
 
   it('shows the person’s own writing instead of a self-description', () => {
     // The point of the change: voice comes from what they actually wrote —
     // a sent letter, here — not from a note describing their style.
-    expect(feedbackPrompt(data, resolved)).toContain('Dear Acme, here is a letter I wrote before');
-    expect(feedbackPrompt(data, resolved)).toContain('Match its register, sentence length');
+    expect(answerPrompt(data, 'Why this role?')).toContain('Dear Acme, here is a letter I wrote before');
+    expect(answerPrompt(data, 'Why this role?')).toContain('Match its register, sentence length');
   });
 });
 
@@ -453,7 +473,12 @@ describe('feedback sees the whole picture', () => {
       expect(prompt).toContain('Other resumes they keep');
       expect(prompt).toContain('Summer intern'); // a sibling resume
       expect(prompt).toContain('Recent cover letters');
-      expect(prompt).toContain('Dear Acme'); // the letter in the fixture
+      // Named, not quoted: a critique can use that the letter exists and who
+      // it was for. Its paragraphs were the voice section's job, and the
+      // voice section is deliberately not in this prompt. See `preamble`.
+      expect(prompt).toContain('SWE Co-op — Acme Co.');
+      expect(prompt).toContain('Software Engineer Co-op at Acme Co.');
+      expect(prompt).not.toContain('Dear Acme');
       expect(prompt).toContain('Questions they have answered');
       expect(prompt).toContain('Why are you interested in this role?');
     } finally {

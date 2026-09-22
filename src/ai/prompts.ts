@@ -20,16 +20,38 @@ import type {
  * The voice section is not a description — it is the person's own writing,
  * assembled from their corpus, their sent letters, their past answers, and
  * their resume. Showing a model how someone writes works; telling it does not.
+ *
+ * It goes only to the requests that write prose, which is not most of them.
+ * It was in every prompt, and on a corpus of any size that is thousands of
+ * characters of somebody's cover letters in front of a request that is
+ * forbidden from writing a word: `tailorPrompt` says "You are selecting, not
+ * writing. You may not edit this resume", and every critique prompt says "do
+ * not rewrite" in its first line. `entryFeedbackPrompt` had gone as far as
+ * adding "Focus on this entry, not unrelated entries in the writing samples"
+ * — an instruction whose only purpose is to undo the samples above it, which
+ * is the clearest statement available that they did not belong there.
+ *
+ * So `voice: false` where the task cannot produce prose, and the default
+ * stays as it was for everything that can.
  */
-function preamble(data: StoreData): string {
+function preamble(data: StoreData, { voice = true }: { voice?: boolean } = {}): string {
   return [
     'You are helping with a resume and job-search assistant. Follow these rules exactly.',
     '',
-    renderVoiceContext(buildVoiceContext(data)),
+    voice ? renderVoiceContext(buildVoiceContext(data)) : '',
     '## Hard rules',
     '- Never invent experience, employers, dates, technologies, or metrics. Work only from what you are given.',
     '- Never inflate a number. If a claim has no metric, do not add one.',
-    '- Match the register of the writing above. Do not make text sound more corporate or more enthusiastic than it is.',
+    /*
+     * "The writing above" is the voice section, so without it this rule points
+     * at nothing — and a rule that refers to material that is not there is
+     * worse than no rule: the model either ignores it or invents what it was
+     * supposed to match. The intent survives the samples going, so it is said
+     * the other way round instead.
+     */
+    voice
+      ? '- Match the register of the writing above. Do not make text sound more corporate or more enthusiastic than it is.'
+      : '- Keep the register of whatever you are given. Do not make text sound more corporate or more enthusiastic than it is.',
     '- Output only what the task asks for. No preamble, no sign-off, no restating the task.',
     /*
      * The posting is not a person talking to you.
@@ -107,7 +129,8 @@ export function feedbackPrompt(data: StoreData, resume: ResolvedResume, context:
   const master = resume.id === '__master__';
 
   return [
-    preamble(data),
+    // No voice samples: critique, not prose.
+    preamble(data, { voice: false }),
     '',
     feedbackWorkspaceContext(),
     '',
@@ -165,8 +188,21 @@ function theRestOfTheStore(data: StoreData, resume: ResolvedResume): string {
     .slice(0, 3);
   if (letters.length > 0) {
     lines.push('', '### Recent cover letters');
+    /*
+     * Named, not quoted.
+     *
+     * This used to paste six hundred characters of each — eighteen hundred of
+     * somebody's prose, into a prompt whose whole task is "critique this
+     * resume, do not rewrite it". What the critique can use from a letter is
+     * that it exists and who it was for: that is the whole-picture signal
+     * this section is for, and it is what makes "you have a letter for Helios
+     * claiming X and a resume claiming Y" possible. The paragraphs themselves
+     * were the voice preamble's job, and the voice preamble is not in this
+     * prompt either, for the same reason.
+     */
     for (const l of letters) {
-      lines.push(`- **${l.title}** — ${l.body.replace(/\s+/g, ' ').slice(0, 600)}…`);
+      const who = [l.role, l.company].filter(Boolean).join(' at ');
+      lines.push(`- **${l.title}**${who ? ` — ${who}` : ''}`);
     }
   }
 
@@ -410,7 +446,8 @@ function compiledEvidence(tex?: string, fit?: FeedbackContext['fit'], master = f
 /** Review a complete source entry, including its heading and all bullet variants. */
 export function entryFeedbackPrompt(data: StoreData, entry: Entry): string {
   return [
-    preamble(data),
+    // No voice samples: critique, not prose.
+    preamble(data, { voice: false }),
     '',
     feedbackWorkspaceContext(),
     '',
@@ -422,7 +459,10 @@ export function entryFeedbackPrompt(data: StoreData, entry: Entry): string {
     'The source entry has no one-page limit. Distinguish improving the source from selecting fewer bullets for a tailored resume.',
     'Prioritize the most useful improvements. Quote the affected text and identify its field, bullet, or variant ID.',
     'For each issue, explain what is weak and what would fix it. Ask for missing evidence; never invent facts or metrics.',
-    'Do not produce replacement wording or a rewritten entry. Focus on this entry, not unrelated entries in the writing samples.',
+    // The second half of this line used to be "Focus on this entry, not
+    // unrelated entries in the writing samples" — a patch for samples that
+    // are no longer in this prompt at all. See `preamble`.
+    'Do not produce replacement wording or a rewritten entry.',
     '',
     `## Complete source entry [${entry.id}]`,
     JSON.stringify(entry, null, 2),
@@ -432,7 +472,8 @@ export function entryFeedbackPrompt(data: StoreData, entry: Entry): string {
 /** Feedback on one bullet and all of its existing phrasings. */
 export function bulletFeedbackPrompt(data: StoreData, entry: Entry, bullet: Bullet): string {
   return [
-    preamble(data),
+    // No voice samples: critique, not prose.
+    preamble(data, { voice: false }),
     '',
     feedbackWorkspaceContext(),
     '',
@@ -450,7 +491,8 @@ export function bulletFeedbackPrompt(data: StoreData, entry: Entry, bullet: Bull
 /** Review exactly the wording clicked, while retaining its source context. */
 export function phraseFeedbackPrompt(data: StoreData, entry: Entry, target: { id: string; text: string }): string {
   return [
-    preamble(data),
+    // No voice samples: critique, not prose.
+    preamble(data, { voice: false }),
     '',
     feedbackWorkspaceContext(),
     '',
@@ -522,7 +564,8 @@ export function tailorPrompt(
   }
 
   return [
-    preamble(data),
+    // No voice samples: selection, not prose.
+    preamble(data, { voice: false }),
     '',
     '## Task: choose variants for a specific posting',
     'Pick, from the phrasings that already exist, the set that best fits the posting below.',
@@ -1316,7 +1359,8 @@ export function applicationWritingPrompt(data: StoreData, resume: ResolvedResume
  */
 export function readMaterialPrompt(data: StoreData, files: { name: string; kind?: string }[]): string {
   return [
-    preamble(data),
+    // No voice samples: their own files are the sample.
+    preamble(data, { voice: false }),
     '',
     '## Task: read their material into their store',
     '',
