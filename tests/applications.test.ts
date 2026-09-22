@@ -1110,6 +1110,47 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
   });
 
   /*
+   * And the same again through the other half of the manifest.
+   *
+   * `files` has been filtered since the day it was written, and its comment
+   * says why: every entry is handed to a recursive delete. `from` was exempt
+   * on the stated grounds that it is "only ever compared, never opened and
+   * never deleted" — which stopped being true when `owned` grew to
+   * `[...ours, ...Object.keys(cameFrom)]`. Its keys reach the same
+   * `fs.rmSync(..., { recursive: true, force: true })`, unfiltered, and
+   * `out/current`'s parent is `out/` — every archived bundle, which is the
+   * six-weeks-later "what did I actually send" record.
+   *
+   * One hand edit or one bad merge, in a file that sits in a folder the user
+   * is invited to open.
+   */
+  it('will not delete the output folder on a source entry of "." or ".."', async () => {
+    await bundleFor('Streamly');
+    const current = syncCurrent(t.store);
+    const out = path.dirname(current.dir);
+    const mine = path.join(current.dir, 'Transcript.pdf');
+    fs.writeFileSync(mine, 'my transcript');
+    // An archived bundle, which is what lives beside `current` under `out/`.
+    const archive = path.join(out, 'applications');
+    expect(fs.existsSync(archive)).toBe(true);
+
+    const manifest = path.join(current.dir, '.rmm-current.json');
+    const held = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({ ...held, from: { ...held.from, '.': 'x', '..': 'x' } }),
+      'utf8',
+    );
+
+    const after = syncCurrent(t.store);
+    expect(fs.existsSync(out)).toBe(true);
+    expect(fs.existsSync(archive)).toBe(true);
+    expect(fs.existsSync(current.dir)).toBe(true);
+    expect(fs.existsSync(mine)).toBe(true);
+    expect(after.files).toContain('Test-Person-Resume.pdf');
+  });
+
+  /*
    * Two roles at one company, both in flight. bundleFileName puts the person
    * and the company in the name but not the role, and the answers file is
    * called `application-answers.md` flat — fine inside a per-application
