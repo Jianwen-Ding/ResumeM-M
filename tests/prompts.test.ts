@@ -692,3 +692,11 @@ describe('telling the AI it may rearrange', () => {
     expect(p).toContain('"entryOrder":');
   });
 });
+
+describe('an answer box with a limit', () => {
+  it('is named in the prompt when the form gives one, and not otherwise', () => {
+    expect(answerPrompt(data, 'Why this role?', undefined, 500)).toContain('at most 500 characters');
+    expect(answerPrompt(data, 'Why this role?')).not.toContain('characters, spaces included');
+    expect(answerPrompt(data, 'Why this role?', undefined, 0)).not.toContain('characters, spaces included');
+  });
+});

@@ -3,7 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createApi, createPdfRouter, createCurrentRouter } from '../src/server/api.js';
+import { createApi, createPdfRouter, createCurrentRouter, questionsToWrite } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
 import type { Entry } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -510,6 +510,24 @@ describe('job analysis', () => {
       expect(res.body.application.history.at(-1).note).toMatch(/submitted/i);
     });
 
+    it('keeps each question box’s limit on the draft, and drops one that is not a limit', async () => {
+      await request(app)
+        .post('/api/workspace')
+        .send({
+          company: 'Limitless',
+          role: 'Data Engineer',
+          questions: [
+            { question: 'Why do you want to work here?', limit: 300 },
+            { question: 'Tell us about a hard bug you fixed', limit: -5 },
+          ],
+        })
+        .expect(200);
+      const drafts = await request(app).get('/api/workspace').expect(200);
+      const draft = drafts.body.drafts.find((d: { company: string }) => d.company === 'Limitless');
+      const qs = t.store.load().drafts.find((d) => d.id === draft.id)!.questions;
+      expect(qs.map((q) => q.limit)).toEqual([300, undefined]);
+    });
+
     it('moves one that was being worked on, and its draft with it', async () => {
       await request(app)
         .post('/api/workspace')
@@ -981,6 +999,14 @@ describe('answers', () => {
     expect(res.body.source).toBe('prompt');
     expect(res.body.output).toBe('');
     expect(res.body.prompt).toContain('answer an application question');
+  });
+
+  it('tells the model the box’s own limit when the form gave one', async () => {
+    const res = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true, limit: 400 })
+      .expect(200);
+    expect(res.body.prompt).toContain('at most 400 characters');
   });
 
   it('saves a new question and a new phrasing of an existing one', async () => {
@@ -3519,5 +3545,18 @@ describe('saving an entry without mentioning its lines', () => {
       .expect(200);
 
     expect(await lines()).toEqual([]);
+  });
+});
+
+describe('the questions a writing run is handed', () => {
+  it('carry the box limit when it is a real one, and not otherwise', () => {
+    const out = questionsToWrite([
+      { id: 'q1', question: 'Why us?', limit: 500 },
+      { id: 'q2', question: 'Why now?', limit: 0 },
+      { id: 'q3', question: 'Why you?', limit: 2.5 },
+      { id: 'q4', question: 'Anything else?' },
+    ]);
+    expect(out.map((q) => q.limit)).toEqual([500, undefined, undefined, undefined]);
+    expect(out[3]).toEqual({ id: 'q4', question: 'Anything else?', answer: '' });
   });
 });

@@ -28,7 +28,10 @@ function writing(draft?: Parameters<typeof makeWriting>[0]) {
 }
 
 function makeWriting(
-  draft: { coverLetter: { required: boolean; body: string }; questions: { id: string; question: string; answer?: string; source?: string }[] } = {
+  draft: {
+    coverLetter: { required: boolean; body: string };
+    questions: { id: string; question: string; answer?: string; source?: string; limit?: number }[];
+  } = {
     coverLetter: { required: true, body: '' },
     questions: [{ id: 'q1', question: 'Why this role?' }],
   },
@@ -1319,5 +1322,30 @@ describe('proposing a different order for lines already in the store', () => {
       bulletsByEntry: { exp_bare: [] },
     });
     expect(s.proposeOrder('exp_bare', ['b_x'], 'why').ok).toBe(false);
+  });
+});
+
+/*
+ * The box's own limit. A script assigning a value is not held to `maxlength`,
+ * so an answer over it went into the employer's box whole and the form
+ * refused it on submit — after the run had finished and nobody was looking.
+ */
+describe('an answer box with a limit', () => {
+  const limited = () =>
+    makeWriting({ coverLetter: { required: false, body: '' }, questions: [{ id: 'q1', question: 'Why this role?', limit: 120 }] });
+
+  it('is told to the model with the question', () => {
+    expect(limited().describeWork()).toContain('at most 120 characters');
+    expect(writing().describeWork()).not.toContain('at most');
+  });
+
+  it('refuses an answer over it, saying by how much', () => {
+    const r = limited().saveAnswer('q1', 'I want to build the ingest path. '.repeat(5));
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('at most 120');
+  });
+
+  it('and takes one inside it', () => {
+    expect(limited().saveAnswer('q1', 'The ingest path is the part I know best, and the part you are hiring for.').ok).toBe(true);
   });
 });

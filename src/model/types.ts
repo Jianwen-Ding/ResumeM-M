@@ -574,6 +574,12 @@ export interface DraftQuestion {
   id: string;
   question: string;
   required?: boolean;
+  /**
+   * The most characters the form's box takes, when it says (its `maxlength`).
+   * A script assigning a value is not held to it, so an answer over it went
+   * into the box whole and was refused when the form was sent.
+   */
+  limit?: number;
   answer: string;
   /** Which answer-bank item this came from, when it came from one. */
   fromAnswerId?: string;

@@ -318,6 +318,22 @@ function plainText(field: MaybeVariant | undefined): string {
  * rewriting one of several phrasings from it would be picking a winner nobody
  * asked for.
  */
+
+/** A form's `maxlength` as sent, or nothing: a positive whole number of characters. */
+function validLimit(limit: unknown): number | undefined {
+  return typeof limit === 'number' && Number.isInteger(limit) && limit > 0 && limit < 1_000_000 ? limit : undefined;
+}
+
+/** The questions a writing run is handed, each with its box's limit when the form gave one. */
+export function questionsToWrite(
+  questions: { id: string; question: string; answer?: string; limit?: number }[] | undefined,
+): Draft['questions'] {
+  return (questions ?? []).map((q) => {
+    const limit = validLimit(q.limit);
+    return { id: q.id, question: q.question, answer: q.answer ?? '', ...(limit ? { limit } : {}) };
+  });
+}
+
 export function withDatesFrom(entry: Entry, store: Store): Entry {
   if (!entry.period?.start) return entry;
   if (entry.dates !== undefined && typeof entry.dates !== 'string') return entry;
@@ -2149,7 +2165,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         resumeId: string;
         job: TailorContext;
         letter?: { required?: boolean; body?: string };
-        questions?: { id: string; question: string; answer?: string }[];
+        questions?: { id: string; question: string; answer?: string; limit?: number }[];
       };
       if (!resumeId) throw new Error('resumeId is required');
       if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to write against');
@@ -2158,11 +2174,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const resolved = resolveResume(resumeId, data);
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
       const wantsLetter = Boolean(letter?.required);
-      const pending: Draft['questions'] = (questions ?? []).map((q) => ({
-        id: q.id,
-        question: q.question,
-        answer: q.answer ?? '',
-      }));
+      const pending = questionsToWrite(questions);
 
       if (!wantsLetter && pending.length === 0) {
         res.json({ letter: null, answers: {}, priorLetters: prior, aiUsed: false });
@@ -2233,10 +2245,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/answer',
     handler(async (req, res) => {
-      const { question, job, force } = req.body as {
+      const { question, job, force, limit } = req.body as {
         question: string;
         job?: TailorContext;
         force?: boolean;
+        limit?: number;
       };
       const data = store.load();
       /*
@@ -2260,7 +2273,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return;
       }
 
-      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job));
+      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job, limit));
 
       /*
        * `output` means "text you may use". When the AI did not run, `runAgent`
@@ -3330,7 +3343,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         coverLetterRequired?: boolean;
         /** What the extension has already been written into, if anything. */
         coverLetter?: string;
-        questions?: { question: string; required?: boolean; answer?: string }[];
+        questions?: { question: string; required?: boolean; answer?: string; limit?: number }[];
         /**
          * Nobody pressed anything: this is the extension noticing that work
          * has been done and holding a place for it. See `holdASpace`.
@@ -3469,6 +3482,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           fromAnswerId: match.confident ? match.item?.id : undefined,
           source: match.confident ? 'bank' : 'empty',
         };
+      });
+      // The box's limit travels with its question, whichever branch made it.
+      questions.forEach((d, i) => {
+        const limit = validLimit((incoming[i] as { limit?: number }).limit) ?? d.limit;
+        if (limit) d.limit = limit;
+        else delete d.limit;
       });
 
       const now = new Date().toISOString();
@@ -4000,7 +4019,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.needsReview = undefined;
             continue;
           }
-          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job));
+          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job, q.limit));
           if (agent.executed && agent.output.trim()) {
             q.answer = agent.output.trim();
             q.source = 'ai';
