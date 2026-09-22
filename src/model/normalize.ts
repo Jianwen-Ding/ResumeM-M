@@ -1,4 +1,5 @@
 import { parsePeriod } from './period.js';
+import type { Period, Season } from './period.js';
 import type {
   AnswerBankItem,
   Application,
@@ -154,6 +155,38 @@ export function normalizeEntry(entry: Entry): Entry {
   if (out.period === undefined) {
     const read = parsePeriod(defaultText(out.dates));
     if (read) out.period = read;
+  }
+  /*
+   * And the season, which used to live one level up.
+   *
+   * A `Period` carried a single `season` beside `start` and `end`; it now
+   * belongs to the `DatePoint` that named it, because a range can name one at
+   * either end and one field could only ever hold the start's. Every store
+   * written before that change has the old shape cached, and the branch above
+   * does not touch it — it only fills a period in where there is none, which
+   * is exactly not this case.
+   *
+   * Left alone, the old key is simply unread: `formatPoint` looks for
+   * `point.season`, finds nothing, and prints the month. So an entry whose
+   * file says "Summer 2024 -- Dec. 2024" renders as "Jun. 2024 -- Dec. 2024",
+   * and the next edit of any field on that entry — the server re-renders
+   * `dates` from the period on every save — writes that back to disk and into
+   * git. Silently: nothing on screen says the date changed. It is the same
+   * corruption the move was made to stop, brought back for everybody who had
+   * the old build.
+   *
+   * Lossless, because the old field was only ever the start's: `parsePeriod`
+   * set it from `start.season` (or from the lone point, which is the start),
+   * and `formatPeriod` passed it only to `formatPoint(period.start, …)`.
+   * Anything already on the point wins — a store half-written by the new
+   * build has the real answer there.
+   */
+  const period = out.period as (Period & { season?: Season }) | undefined;
+  if (period?.season) {
+    const { season, ...rest } = period;
+    // A period with no start is a shape `formatPeriod` already refuses; there
+    // is nowhere to put the season, so the stale key just goes.
+    out.period = rest.start && !rest.start.season ? { ...rest, start: { ...rest.start, season } } : rest;
   }
   return out;
 }
