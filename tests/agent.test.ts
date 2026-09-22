@@ -152,6 +152,57 @@ const DRAINS_STDIN = [
   'let n=0;process.stdin.on("data",(d)=>{n+=d.length});process.stdin.on("end",()=>process.stdout.write(`read ${n} bytes of stdin, argv=${process.argv[1]??""}`))',
 ];
 
+/**
+ * A CLI that ignores SIGTERM — a trivial thing for one to do on purpose, and
+ * an easy thing for a wrapper script to do by accident.
+ *
+ * `execFile`'s own `timeout` sends the signal once and then waits for the
+ * child like any other, so this run never ended: measured at twelve seconds
+ * against a two-second timeout, promise unsettled, process still alive. And
+ * because `runAgent`'s `finally` is never reached, the sandbox directory
+ * stays on disk and the run shows as still going for ever — a background job
+ * that never finishes, or a request that never answers.
+ */
+const IGNORES_SIGTERM = [
+  '-e',
+  'process.on("SIGTERM",()=>{});process.on("SIGINT",()=>{});setInterval(()=>{},1000)',
+];
+
+describe('a command that will not stop when it is asked', () => {
+  it('is killed outright rather than waited on for ever', async () => {
+    const started = Date.now();
+    await expect(
+      runAgent(config({ enabled: true, command: process.execPath, args: IGNORES_SIGTERM, timeoutMs: 1000 }), 'x'),
+    ).rejects.toThrow();
+    const took = Date.now() - started;
+    // The polite signal at 1s, the one it cannot refuse 5s later, and room
+    // for a loaded machine — but nowhere near "never".
+    expect(took).toBeGreaterThan(1000);
+    expect(took).toBeLessThan(20_000);
+  }, 30_000);
+
+  it('and says it ran out of time, not something new', async () => {
+    await expect(
+      runAgent(config({ enabled: true, command: process.execPath, args: IGNORES_SIGTERM, timeoutMs: 1000 }), 'x'),
+    ).rejects.toThrow(/time|timeout|took/i);
+  }, 30_000);
+
+  /*
+   * And the scratch directory goes with it. That cleanup lives in the
+   * `finally` the hung run never reached, so "it ends" and "it tidies up"
+   * are the same fix and only one of them is obvious.
+   */
+  it('and the scratch directory does not outlive it', async () => {
+    const before = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('rmm-ai-')).length;
+    await runAgent(
+      config({ enabled: true, command: process.execPath, args: IGNORES_SIGTERM, timeoutMs: 1000 }),
+      'x',
+    ).catch(() => undefined);
+    const after = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('rmm-ai-')).length;
+    expect(after).toBeLessThanOrEqual(before);
+  }, 30_000);
+});
+
 describe('stdin handling', () => {
   it('does not hang on a CLI that reads stdin when the prompt was an argument', async () => {
     const started = Date.now();

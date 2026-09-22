@@ -65,6 +65,60 @@ describe('parseSnapshot', () => {
     }
   });
 
+  /*
+   * And to the same document when the lines were dragged, which is the case
+   * the one above cannot see.
+   *
+   * A resume whose bullets are out of the master's order carries no record of
+   * having been arranged — nothing could write one before the mark existed —
+   * so `Store.load()` asks `adoptBulletOrder` the one-time question, marks
+   * those entries `manual`, and `resolveResume` then leaves them exactly as
+   * they are. This did not ask, so it sorted them back.
+   *
+   * Which means version history showed a document that was never sent, the
+   * diff between two versions showed bullet moves nobody made, and restoring
+   * a version wrote the master's order over an arrangement somebody had
+   * proofread. Measured before the fix: the live read `["b_testing",
+   * "b_pipeline"]`, the snapshot `["b_pipeline","b_testing"]`.
+   *
+   * The test above uses the sample resumes, where nothing is dragged, so it
+   * passed the whole time this was wrong.
+   */
+  it('resolves to the same document when the lines were dragged', () => {
+    const t = makeTempStore();
+    try {
+      // The master orders these `b_pipeline, b_testing`; this resume does not.
+      const dragged = {
+        ...SAMPLE_BASE,
+        sections: (SAMPLE_BASE.sections ?? []).map((section) =>
+          section.kind === 'experience'
+            ? { ...section, bullets: { exp_acme: ['b_testing', 'b_pipeline'] } }
+            : section,
+        ),
+      };
+      t.store.saveResume({ ...dragged, id: 'dragged', label: 'Dragged' });
+
+      const live = resolveResume('dragged', t.store.load());
+      const fromGit = resolveResume('dragged', {
+        ...t.store.load(),
+        ...parseSnapshot(files({ 'resumes/dragged.yaml': y({ ...dragged, id: 'dragged', label: 'Dragged' }) })),
+      });
+
+      // The entry that was dragged, not every line in the document.
+      const lines = (doc: ReturnType<typeof resolveResume>) =>
+        doc.sections
+          .flatMap((sec) => sec.entries)
+          .find((e) => e.id === 'exp_acme')
+          ?.bullets.map((b) => b.id) ?? [];
+      // The arrangement as written, on both sides.
+      expect(lines(live)).toEqual(['b_testing', 'b_pipeline']);
+      expect(lines(fromGit)).toEqual(lines(live));
+      expect(fromGit.sections).toEqual(live.sections);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   it('takes the id from the filename, as the store does', () => {
     const snapshot = parseSnapshot(files({ 'resumes/older.yaml': y({ label: 'No id inside' }) }));
     expect(snapshot.resumes.find((r) => r.id === 'older')?.label).toBe('No id inside');

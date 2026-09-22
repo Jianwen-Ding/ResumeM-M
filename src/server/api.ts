@@ -339,13 +339,15 @@ export function withDatesFrom(entry: Entry, store: Store): Entry {
 
 /** Two periods meaning the same thing, ignoring how they were spelt. */
 function samePeriod(a: Period, b: Period): boolean {
-  const point = (p?: { year: number; month?: number }) => (p ? `${p.year}-${p.month ?? ''}` : '');
+  // The season is part of a point now — either end can name one — so it is
+  // compared per end rather than once for the whole range. See `DatePoint`.
+  const point = (p?: { year: number; month?: number; season?: string }) =>
+    p ? `${p.year}-${p.month ?? ''}-${p.season ?? ''}` : '';
   return (
     point(a.start) === point(b.start) &&
     point(a.end) === point(b.end) &&
     Boolean(a.ongoing) === Boolean(b.ongoing) &&
-    Boolean(a.expected) === Boolean(b.expected) &&
-    (a.season ?? '') === (b.season ?? '')
+    Boolean(a.expected) === Boolean(b.expected)
   );
 }
 
@@ -724,7 +726,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/attachments',
     handler(async (req, res) => {
       const wanted = String(req.query.application ?? '').trim();
-      const folder = syncCurrent(store);
+      /*
+       * Named as the one being worked on, so it keeps the plain filename
+       * where two in-flight applications would clash — this endpoint exists
+       * to hand files to a form that is open in front of somebody. See
+       * `uniqueNames`.
+       */
+      const folder = syncCurrent(store, undefined, wanted || undefined);
       const attachments = folder.files
         .filter((name) => {
           const whose = folder.belongsTo[name] ?? '';
@@ -1188,8 +1196,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           { ...config, ai: { ...config.ai, timeoutMs: Math.min(config.ai.timeoutMs, 60_000) } },
           'Reply with exactly the word: ready',
         );
+        /*
+         * Whether it answered the question, which is not the same as having
+         * answered at all.
+         *
+         * `ok` is "the command ran, exited cleanly and printed something" —
+         * and a CLI that exits 0 while printing "I can't do that: this
+         * action needs approval" satisfies every part of that. The panel
+         * painted it green and told somebody their AI was configured, over
+         * the refusal that says it is not.
+         *
+         * The prompt asks for one word, so the check is whether that word
+         * came back. Reported separately rather than folded into `ok`: a
+         * model that says "Ready!" or pads it with a sentence is working,
+         * and calling a working setup broken is its own kind of wrong. What
+         * this buys is that the colour stops claiming more than the reply
+         * supports — see the panel, which says what it saw either way.
+         */
         res.json({
           ok: true,
+          saidReady: /\bready\b/i.test(result.output),
           ms: Date.now() - started,
           output: result.output.slice(0, 500),
           command: config.ai.command,
@@ -3122,8 +3148,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       // The same files also go to the flat folder, which is the one a portal's
-      // file picker should be pointed at — the archive is for later.
-      const current = syncCurrent(store);
+      // file picker should be pointed at — the archive is for later. This one
+      // keeps the plain name; see `uniqueNames`.
+      const current = syncCurrent(store, undefined, result.application.id);
       if (autoCommit()) {
         await commitQuietly(repo, `Apply: ${result.application.company} — ${result.application.role}`);
       }
@@ -4129,7 +4156,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         warnings,
         application: app,
         dir: result.dir,
-        currentDir: syncCurrent(store).dir,
+        currentDir: syncCurrent(store, undefined, app.id).dir,
         files: result.files,
         fits: result.fits,
         pages: result.pages,
@@ -4406,7 +4433,28 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             return filed === fs.readFileSync(path.join(store.root, rel), 'utf8');
           }),
         );
-        if (!kept.some(Boolean)) {
+        /*
+         * The one being replaced, not any one of them.
+         *
+         * This was `kept.some(Boolean)` — "at least one file by this name is
+         * filed" — and `resumeFiles` gives *both* spellings. A store holding
+         * an untouched old `resumes/x.yml` beside a freshly edited
+         * `resumes/x.yaml` satisfies `some` on the strength of the file
+         * nobody is about to replace. So when the filing commit above fails
+         * for one of the reasons it is allowed to (a concurrent commit, an
+         * `index.lock`, a full disk — see `repo.ts`), the guard passed and
+         * the edit in the `.yaml` was overwritten with no error and a 200,
+         * under a button whose whole promise is that it refuses rather than
+         * doing this quietly.
+         *
+         * `here` is in `RESUME_SPELLINGS` order and `loadResumesAsWritten`
+         * takes the first that exists in that same order, so `here[0]` is
+         * both the file the resolved document came from and the file
+         * `saveResume` is about to write. The paragraph above already said
+         * the question is whether the one being replaced is among them;
+         * `some` asked a different question.
+         */
+        if (!kept[0]) {
           throw new Error(
             `"${id}" as it stands is not in the version history, so replacing it could not be undone. ` +
               'Save the store — Save History, under the save panel — and then restore.',

@@ -155,7 +155,7 @@ function parsePoint(raw) {
       const month = monthFromWord(word);
       if (month) {
         return {
-          point: { year: Number(year), month: month.month },
+          point: { year: Number(year), month: month.month, ...(month.season ? { season: month.season } : {}) },
           how: month.how,
           ...(month.season ? { season: month.season } : {}),
         };
@@ -209,7 +209,6 @@ export function parsePeriod(raw) {
     return {
       start: only.point,
       ...(expected ? { expected: true } : {}),
-      ...(only.season ? { season: only.season } : {}),
     };
   }
 
@@ -221,7 +220,6 @@ export function parsePeriod(raw) {
       start: start.point,
       ongoing: true,
       ...(expected ? { expected: true } : {}),
-      ...(start.season ? { season: start.season } : {}),
     };
   }
 
@@ -231,7 +229,6 @@ export function parsePeriod(raw) {
     start: start.point,
     end: end.point,
     ...(expected ? { expected: true } : {}),
-    ...(start.season ? { season: start.season } : {}),
   };
 }
 
@@ -322,7 +319,10 @@ function formatMonth(month, how) {
   return how === 'abbrDot' && short !== name ? `${short}.` : short;
 }
 
-function formatPoint(point, style, season) {
+function formatPoint(point, style) {
+  // The season belongs to the end that named it. See `DatePoint` in period.ts,
+  // which this mirrors and is pinned against by date-agreement.test.js.
+  const season = point.season;
   if (season) return `${season[0]?.toUpperCase()}${season.slice(1)} ${point.year}`;
   if (point.month === undefined) return String(point.year);
   if (style.month === 'numeric') return `${String(point.month).padStart(2, '0')}/${point.year}`;
@@ -340,13 +340,12 @@ function formatPoint(point, style, season) {
 export function formatPeriod(period, style = DEFAULT_STYLE) {
   if (!period?.start) return '';
   const soon = period.expected ? `${style.expected} ` : '';
-  const start = formatPoint(period.start, style, period.season);
+  const start = formatPoint(period.start, style);
 
   if (period.ongoing) return `${soon}${start}${style.range}${style.present}`;
   if (!period.end) return `${soon}${start}`;
-  // The season belongs to whichever end named one, and only one end can, so a
-  // range with a season in it prints that season on the left and a date on the
-  // right — which is what "Summer 2024 -- Dec. 2024" already looks like.
+  // Each end prints the season it named, or a month if it named none. Both
+  // ends can: "Summer 2024 -- Spring 2025" is an academic year.
   return `${start}${style.range}${soon}${formatPoint(period.end, style)}`;
 }
 

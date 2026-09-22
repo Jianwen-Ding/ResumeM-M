@@ -9,6 +9,16 @@ import type { StoreConfig } from '../model/types.js';
 
 const run = promisify(execFile);
 
+/**
+ * How long a child gets to honour SIGTERM before it is killed outright.
+ *
+ * Long enough that a CLI shutting down cleanly — flushing a log, closing a
+ * session, tearing down its own tool server — finishes and reports properly,
+ * and short enough that nobody is left looking at a spinner for it. A run has
+ * already had its whole `ai.timeoutMs` by the time this matters.
+ */
+const STUBBORN_GRACE_MS = 5_000;
+
 export interface AgentResult {
   /** Raw stdout from the CLI, or the prompt itself when the agent is disabled. */
   output: string;
@@ -174,6 +184,8 @@ export async function runAgent(
    * a command is not a run to show.
    */
   let watching: RunHandle | null = null;
+  /** Cancels the forced kill; set once the child exists. See below. */
+  let stopForcing: (() => void) | null = null;
 
   try {
     const pending = run(config.ai.command, args, {
@@ -191,6 +203,38 @@ export async function runAgent(
         ...(wiring?.env ?? {}),
       },
     });
+
+    /*
+     * And a second kill, for a child that ignores the first.
+     *
+     * `execFile`'s `timeout` sends `killSignal` — SIGTERM by default — once,
+     * when the timer fires, and then waits for the child's `exit` like any
+     * other. It never escalates. A CLI that traps SIGTERM, or is launched
+     * through a wrapper script that does, simply carries on, and the `await`
+     * below never settles.
+     *
+     * Measured with a child that ignores SIGTERM and a two-second timeout:
+     * twelve seconds later the promise had not settled and the process was
+     * still alive. What that costs is not one slow run — the `finally` at the
+     * bottom is never reached, so the sandbox directory is never removed and
+     * `watching.ended` is never called, which leaves the run showing as
+     * still going for ever. A background job never finishes and the card
+     * spins; a foreground request never answers at all.
+     *
+     * So: a grace period after the polite signal, then one it cannot refuse.
+     * `killed` is set either way, so this arrives at the same "it ran out of
+     * time" sentence below rather than at a new kind of failure. `unref` so a
+     * pending timer cannot be the thing that keeps the process up.
+     */
+    const forceAfter = setTimeout(() => {
+      try {
+        pending.child.kill('SIGKILL');
+      } catch {
+        // Already gone, which is the outcome this wanted.
+      }
+    }, config.ai.timeoutMs + STUBBORN_GRACE_MS);
+    forceAfter.unref?.();
+    stopForcing = () => clearTimeout(forceAfter);
 
     /*
      * Close the child's stdin — always, and explicitly.
@@ -371,6 +415,7 @@ export async function runAgent(
     watching?.ended('failed', why);
     throw new AgentError(why, e.stdout);
   } finally {
+    stopForcing?.();
     // Whatever left the try another way still closes the record; `ended` keeps
     // the first outcome, so this only catches what nothing else named.
     watching?.ended('failed', 'The run ended without saying why.');

@@ -197,6 +197,30 @@ function setStatus(text, isError = false) {
   }
 }
 
+/**
+ * A write that did not land: say so, and draw what the save actually holds.
+ *
+ * Both halves matter, and the second is the one that keeps getting left out.
+ * Several controls here put the change on screen before it is on disk —
+ * `saveEntryPeriod` says why, and the alternative is a control that flickers
+ * back to the old value on every save. The price is that a *failed* write
+ * leaves the new value showing over a save that never took it.
+ *
+ * The store underneath is already right by then: `inEntryLane` reloads it in
+ * a `finally`, so it happens on the failing path too. What was missing was
+ * anything to redraw from it — `saveEntry`'s own `render()` is after the
+ * await and never runs. So the screen and the model disagreed until some
+ * unrelated action forced a repaint, at which point the value changed back on
+ * its own with nothing to explain it.
+ *
+ * Reporting without redrawing is the shape that looks fixed and is not: an
+ * error goes up and the wrong value stays under it.
+ */
+function writeFailed(err) {
+  setStatus(err.message, true);
+  render();
+}
+
 async function api(path, options = {}) {
   /*
    * Undo is recorded here, and only here.
@@ -2396,7 +2420,7 @@ function dropMasterBullet(entry, moved, onto, side) {
   if (!list.includes(moved)) return;
   const at = list.indexOf(onto);
   const before = side === 'after' ? (list[at + 1] ?? null) : onto;
-  setMasterBulletOrder(entry, moveBefore(list, moved, before)).catch((err) => setStatus(err.message, true));
+  setMasterBulletOrder(entry, moveBefore(list, moved, before)).catch(writeFailed);
 }
 
 function masterBulletGrip(entry, bullet) {
@@ -2407,9 +2431,7 @@ function masterBulletGrip(entry, bullet) {
     id: bullet.id,
     label: 'this line, for every resume',
     onStep: (delta) =>
-      setMasterBulletOrder(entry, moveBy(masterBulletIds(entry), bullet.id, delta)).catch((err) =>
-        setStatus(err.message, true),
-      ),
+      setMasterBulletOrder(entry, moveBy(masterBulletIds(entry), bullet.id, delta)).catch(writeFailed),
   });
 }
 
@@ -3702,7 +3724,13 @@ function datesControl(from, onChange) {
     if (!next.start?.year) return;
     if (next.ongoing) delete next.end;
     if (!next.end?.year) delete next.end;
-    onChange(next);
+    /*
+     * Here rather than at each caller: there are two of them today and the
+     * failure is the same for both, and a third written later would be
+     * silent again. `Promise.resolve` because one of the two returns nothing
+     * when there is no text to save.
+     */
+    Promise.resolve(onChange(next)).catch(writeFailed);
   };
 
   /** One end of the range: a month that may be blank, and a year. */
@@ -3718,6 +3746,19 @@ function datesControl(from, onChange) {
       const now = { ...value() };
       if (n) now.month = n;
       else delete now.month;
+      /*
+       * And the season goes, because a month has just been named instead.
+       *
+       * A season prints as itself whatever month is underneath it — the month
+       * is only there to sort by — so on an entry reading "Summer 2024" this
+       * dropdown showed Jun, took a change to Jul, saved it, and the text came
+       * back "Summer 2024" unchanged. The control did nothing and said nothing,
+       * and the next redraw put it back to Jun.
+       *
+       * Picking a month is saying the month. Blanking it is saying the year,
+       * which is not a season either. Neither leaves the old word standing.
+       */
+      delete now.season;
       period[which] = now;
       commit();
     };
@@ -8979,8 +9020,18 @@ async function loadSettings() {
       result.textContent = 'Running…';
       const test = await api('/config/test-ai', { method: 'POST' });
       if (test.ok) {
-        result.className = 'result ok';
-        result.textContent = `${test.command} replied in ${(test.ms / 1000).toFixed(1)}s: ${test.output.slice(0, 160)}`;
+        /*
+         * Green only when it answered the question. The prompt asks for one
+         * word; a CLI that exits 0 having printed a refusal instead — "this
+         * action needs approval" — used to come back in the same green box
+         * as a working one, which is the panel telling somebody their AI is
+         * set up over the sentence saying it is not.
+         */
+        result.className = test.saidReady ? 'result ok' : 'result warn';
+        const said = `${test.command} replied in ${(test.ms / 1000).toFixed(1)}s: ${test.output.slice(0, 160)}`;
+        result.textContent = test.saidReady
+          ? said
+          : `${said}\n\nThat is not the word it was asked for. Read what it said — a command that exits cleanly having refused looks exactly like one that worked.`;
       } else {
         result.className = 'result bad';
         result.textContent = test.message;
@@ -9299,7 +9350,26 @@ async function restoreResumeVersion(hash) {
      * when there are selections on screen, and discarding them silently is
      * the opposite of what the version history is for.
      */
-    if (wanted === state.resumeId) await flushEdits();
+    /*
+     * And it has to have landed, which this did not check.
+     *
+     * `flushEdits` returns whether the writes it was waiting on settled,
+     * exactly so a caller about to do something irreversible can stop.
+     * `leaveResume` uses it that way and says why. Here the answer was
+     * dropped, and a few lines below `clearEdits()` runs unconditionally —
+     * so an edit whose save had quietly failed was neither on disk nor in
+     * memory any more, under the word "Restored." and no warning. The
+     * paragraph above is about not discarding what is on screen; this is
+     * what makes it true rather than intended.
+     */
+    if (wanted === state.resumeId) {
+      const landed = await flushEdits();
+      if (state.dirty) await autoSave().catch(() => {});
+      if (state.dirty || !landed) {
+        setStatus('That change has not saved yet, so nothing is restored until it does.', true);
+        return;
+      }
+    }
     const back = await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });

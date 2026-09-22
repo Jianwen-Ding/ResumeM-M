@@ -40,7 +40,7 @@ afterEach(() => {
  * has no second position to move anything to. Written out here so the order
  * under test is the order in this file.
  */
-function serve() {
+function serve({ refuse, master = false } = {}) {
   const bullet = (id, text) => ({ id, default: 'v', variants: [{ id: 'v', label: 'Neutral', text }] });
   /*
    * Through the same normaliser the server runs on the way out of `/api/store`,
@@ -63,19 +63,31 @@ function serve() {
     ...loaded,
     entries,
     skillGroups: [],
-    resumes: [
-      {
-        id: 'base',
-        label: 'Base',
-        base: true,
-        sections: [{ kind: 'experience', entries: ['j1', 'j2', 'j3'] }],
-      },
-    ],
+    /*
+     * No resumes means the master view, which is where the lines inside an
+     * entry are arranged once for every resume — see `masterBulletGrip`.
+     */
+    resumes: master
+      ? []
+      : [
+          {
+            id: 'base',
+            label: 'Base',
+            base: true,
+            sections: [{ kind: 'experience', entries: ['j1', 'j2', 'j3'] }],
+          },
+        ],
   };
 
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url) => {
+    vi.fn(async (url, init) => {
+      /*
+       * A server that will not take the write. Nothing is recorded, so the
+       * next `/api/store` still says what it said — the editor is the only
+       * thing that can put the screen back.
+       */
+      if (refuse && init?.method === 'PUT') return { ok: false, json: async () => ({ error: refuse }) };
       let result = {};
       if (url === '/api/store') result = data;
       else if (url === '/api/ai/jobs') result = { jobs: [] };
@@ -99,7 +111,9 @@ function dragOnto(fromRow, ontoRow, { after = false } = {}) {
     effectAllowed: '',
     dropEffect: '',
   };
-  fromRow.querySelector(':scope > .entry-head > .grip, :scope > .bullet-head > .grip').dispatchEvent(
+  // `:scope > .grip` is the master view's shape: a row with the handle as a
+  // direct child rather than inside a head.
+  fromRow.querySelector(':scope > .entry-head > .grip, :scope > .bullet-head > .grip, :scope > .grip').dispatchEvent(
     Object.assign(new window.Event('dragstart', { bubbles: true }), { dataTransfer }),
   );
 
@@ -115,6 +129,64 @@ function dragOnto(fromRow, ontoRow, { after = false } = {}) {
   );
   ontoRow.dispatchEvent(Object.assign(new window.Event('drop', { bubbles: true, cancelable: true }), { dataTransfer }));
 }
+
+/*
+ * A rearrangement the server will not take.
+ *
+ * The new order goes on screen first and is written after — `setMasterBulletOrder`
+ * mutates the held store and renders before it awaits — because the alternative
+ * is a list that jumps back under the pointer on every drag. What that costs
+ * is a *failed* write leaving the new order sitting there looking saved.
+ *
+ * The error was already reported; nothing redrew. `inEntryLane` reloads the
+ * store in a `finally`, so by then the model had quietly gone back to the real
+ * order while the screen still showed the new one — and it stayed that way
+ * until some unrelated action forced a repaint, at which point the lines
+ * jumped back on their own with nothing to explain it.
+ */
+describe('a rearrangement the save refuses', () => {
+  const bullets = () => [...document.querySelectorAll('.master-source-bullet')];
+  const lines = () => bullets().map((b) => b.querySelector('.editable')?.textContent);
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#resumes';
+    serve({ refuse: 'The save folder is read-only.', master: true });
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(bullets().length).toBeGreaterThan(1));
+  });
+
+  it('says so, and puts the lines back where the save still has them', async () => {
+    const before = lines();
+    const grip = bullets()[0].querySelector('.grip');
+    expect(grip).not.toBeNull();
+    grip.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+
+    // Moved on screen first, which is the behaviour being protected.
+    await vi.waitFor(() => expect(lines()).not.toEqual(before));
+
+    const status = () => document.querySelector('#status');
+    await vi.waitFor(() => expect(status().textContent).toContain('The save folder is read-only.'));
+    expect(status().className).toContain('err');
+    // And back, once the refusal has landed and the store has been re-read.
+    await vi.waitFor(() => expect(lines()).toEqual(before));
+  });
+
+  /*
+   * And the same dragged, because it is a second call site and a second
+   * chance to pass a handler that only reports. That is what it had.
+   */
+  it('and the same when the line was dragged rather than nudged', async () => {
+    const before = lines();
+    dragOnto(bullets()[1], bullets()[0]);
+    await vi.waitFor(() => expect(lines()).not.toEqual(before));
+
+    const status = () => document.querySelector('#status');
+    await vi.waitFor(() => expect(status().textContent).toContain('The save folder is read-only.'));
+    await vi.waitFor(() => expect(lines()).toEqual(before));
+  });
+});
 
 describe('putting the entries of a resume in the order you want them', () => {
   const entries = () => [...document.querySelectorAll('#editor .entry:not(.off):not(.profile-entry)')];

@@ -31,6 +31,19 @@ export interface DatePoint {
   year: number;
   /** 1-12. Absent means the year as a whole. */
   month?: number;
+  /**
+   * The season this end named, kept so "Summer 2024" prints back as itself.
+   * The month carries the sort order; this carries the words.
+   *
+   * On the point rather than on the period, because either end can name one
+   * and they are not the same season. Held on the period it was read off the
+   * left end only, so a season on the right was destroyed by any edit that
+   * went through a parse and a format — "Sep. 2022 -- Expected Spring 2026",
+   * which is how a degree in progress is written, came back as "Sep. 2022 --
+   * Expected Mar. 2026". A graduation month this program made up, on a
+   * document somebody sends to an employer.
+   */
+  season?: Season;
 }
 
 /**
@@ -47,11 +60,6 @@ export interface Period {
   ongoing?: boolean;
   /** Not yet reached: a graduation date, printed with "Expected" in front. */
   expected?: boolean;
-  /**
-   * The season the text named, kept so "Summer 2024" can be printed back as
-   * itself. The month carries the sort order; this carries the words.
-   */
-  season?: Season;
 }
 
 export type Season = 'spring' | 'summer' | 'fall' | 'winter';
@@ -195,7 +203,7 @@ function parsePoint(raw: string): { point: DatePoint; how?: DateStyle['month']; 
       const month = monthFromWord(word);
       if (month) {
         return {
-          point: { year: Number(year), month: month.month },
+          point: { year: Number(year), month: month.month, ...(month.season ? { season: month.season } : {}) },
           how: month.how,
           ...(month.season ? { season: month.season } : {}),
         };
@@ -249,7 +257,6 @@ export function parsePeriod(raw: string): Period | undefined {
     return {
       start: only.point,
       ...(expected ? { expected: true } : {}),
-      ...(only.season ? { season: only.season } : {}),
     };
   }
 
@@ -261,7 +268,6 @@ export function parsePeriod(raw: string): Period | undefined {
       start: start.point,
       ongoing: true,
       ...(expected ? { expected: true } : {}),
-      ...(start.season ? { season: start.season } : {}),
     };
   }
 
@@ -271,7 +277,6 @@ export function parsePeriod(raw: string): Period | undefined {
     start: start.point,
     end: end.point,
     ...(expected ? { expected: true } : {}),
-    ...(start.season ? { season: start.season } : {}),
   };
 }
 
@@ -369,7 +374,8 @@ function formatMonth(month: number, how: DateStyle['month']): string {
   return how === 'abbrDot' && short !== name ? `${short}.` : short;
 }
 
-function formatPoint(point: DatePoint, style: DateStyle, season?: Season): string {
+function formatPoint(point: DatePoint, style: DateStyle): string {
+  const season = point.season;
   if (season) return `${season[0]?.toUpperCase()}${season.slice(1)} ${point.year}`;
   if (point.month === undefined) return String(point.year);
   if (style.month === 'numeric') return `${String(point.month).padStart(2, '0')}/${point.year}`;
@@ -387,13 +393,13 @@ function formatPoint(point: DatePoint, style: DateStyle, season?: Season): strin
 export function formatPeriod(period: Period | undefined, style: DateStyle = DEFAULT_STYLE): string {
   if (!period?.start) return '';
   const soon = period.expected ? `${style.expected} ` : '';
-  const start = formatPoint(period.start, style, period.season);
+  const start = formatPoint(period.start, style);
 
   if (period.ongoing) return `${soon}${start}${style.range}${style.present}`;
   if (!period.end) return `${soon}${start}`;
-  // The season belongs to whichever end named one, and only one end can, so a
-  // range with a season in it prints that season on the left and a date on the
-  // right — which is what "Summer 2024 -- Dec. 2024" already looks like.
+  // Each end prints the season it named, or a month if it named none. Both
+  // ends can: "Summer 2024 -- Spring 2025" is an academic year, and reading
+  // the season off the left end alone turned the right one into a month.
   return `${start}${style.range}${soon}${formatPoint(period.end, style)}`;
 }
 
@@ -465,9 +471,10 @@ export function startKey(period: Period | undefined): number | undefined {
  * ordinary way to write an academic term, and the month for a season is one
  * this file made up — winter is December here — so the finer check called
  * that date wrong. It is not wrong. Nor is "Dec. 2024 -- Spring 2024", a
- * co-op running into the next year, and the parse cannot even tell you a
- * season was involved: only the start's season is kept, so by the time this
- * sees the period the end is an ordinary March.
+ * co-op running into the next year. Each end keeps its own season now, so the
+ * parse can say one was involved — and that still does not settle it: the
+ * same text is the co-op and the typo, and knowing the word was "Spring" does
+ * not say which.
  *
  * So the rule is the one no reading rescues: the end year is before the start
  * year. "Jul. 2026 -- Dec. 2024" is wrong however you read it. A month-level

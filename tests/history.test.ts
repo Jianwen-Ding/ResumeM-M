@@ -435,6 +435,45 @@ describe('restoring a version', () => {
     expect(t.store.getResume('newgrad')?.choices?.['edu_neu.dates']).toBe('v_dec2026');
   });
 
+  /*
+   * The same refusal, on a store that holds both spellings of one resume.
+   *
+   * `Store.resumeFiles` gives `.yaml` and `.yml`, because a hand-made `.yml`
+   * beside the `.yaml` the app writes is a real shape the store has to cope
+   * with — and `.yaml` is the one in effect and the one `saveResume`
+   * replaces. The guard asked whether *any* file by this name was filed, so
+   * an untouched old `.yml` vouched for a `.yaml` that had never been
+   * committed: the refusal was skipped and the edit overwritten, 200 OK.
+   */
+  it('and is not talked out of it by an old .yml beside the file it would replace', async () => {
+    const first = await history();
+    const originalHash = first[0]!.hash;
+
+    // An old second spelling, filed and then left alone — so it matches HEAD
+    // however the .yaml changes after it.
+    fs.writeFileSync(
+      path.join(t.dir, 'resumes/newgrad.yml'),
+      'id: newgrad\nlabel: New grad (old spelling)\n',
+    );
+    await repo.commitAll('An old second spelling', ['resumes/newgrad.yml']);
+
+    t.write('resumes/newgrad.yaml', {
+      id: 'newgrad',
+      label: 'New grad',
+      choices: { 'edu_neu.dates': 'v_dec2026' },
+    });
+    fs.writeFileSync(path.join(t.dir, '.git/index.lock'), '');
+
+    const res = await request(app).post(`/api/resumes/newgrad/history/${originalHash}/restore`);
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.body.error).toMatch(/not in the version history/i);
+    expect(t.store.getResume('newgrad')?.choices?.['edu_neu.dates']).toBe('v_dec2026');
+
+    fs.rmSync(path.join(t.dir, '.git/index.lock'), { force: true });
+    fs.rmSync(path.join(t.dir, 'resumes/newgrad.yml'), { force: true });
+  });
+
   it('rejects a hash the resume never had', async () => {
     const res = await request(app).post('/api/resumes/newgrad/history/0000000000000000/restore');
     expect(res.status).toBeGreaterThanOrEqual(400);

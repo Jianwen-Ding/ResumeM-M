@@ -220,12 +220,29 @@ function readSources(dir: string): Record<string, string> {
  * in front of you got the other job's resume and the other job's answers.
  *
  * So where names clash, the first thing that actually tells the clashing
- * applications apart is added to all of them: the role, the company, both, or
- * failing everything the application id. Nothing is added otherwise — the
- * person uploading knows what they are applying to, and a longer name is a
- * worse one.
+ * applications apart is added: the role, the company, both, or failing
+ * everything the application id. Nothing is added otherwise — the person
+ * uploading knows what they are applying to, and a longer name is a worse one.
+ *
+ * `working` is the one exception, and it is the case that matters most. Added
+ * to *all* of them, the suffix reached the application you are uploading right
+ * now: with two jobs open, the file the portal showed was
+ * `Jianwen-Ding-Resume-2027-Intern-Software-Engineer.pdf` — reported as
+ * exactly that, by somebody who had asked for `Jianwen-Ding-Resume.pdf` and
+ * whose setting says `type`. Nothing about the other application in the folder
+ * is that person's problem at the moment they press upload, and the rule above
+ * says so in its own words.
+ *
+ * The one being worked on keeps the plain name and the rest take the suffix.
+ * Every name is still unique: the suffixes are chosen over the whole group, so
+ * they tell each other apart, and none of them is empty, so none is the plain
+ * name. Without a `working` application — a plain listing of the tracker, with
+ * no upload in progress — every one of them is suffixed, as before.
  */
-function uniqueNames(claims: { name: string; app: Application }[]): Map<string, string> {
+function uniqueNames(
+  claims: { name: string; app: Application }[],
+  working?: string,
+): Map<string, string> {
   const groups = new Map<string, { name: string; app: Application }[]>();
   for (const claim of claims) {
     const group = groups.get(claim.name) ?? [];
@@ -258,7 +275,11 @@ function uniqueNames(claims: { name: string; app: Application }[]): Map<string, 
       }) ?? ((a: Application) => forFilename(a.id));
 
     for (const claim of group) {
-      out.set(`${claim.app.id} ${name}`, `${stem}-${suffix(claim.app)}${ext}`);
+      // The plain name goes to the one in hand. See `working` above.
+      out.set(
+        `${claim.app.id} ${name}`,
+        claim.app.id === working ? name : `${stem}-${suffix(claim.app)}${ext}`,
+      );
     }
   }
   return out;
@@ -287,7 +308,15 @@ export function currentDir(store: Store): string {
   return dir;
 }
 
-export function syncCurrent(store: Store, applications?: Application[]): CurrentFolder {
+export function syncCurrent(
+  store: Store,
+  applications?: Application[],
+  /*
+   * The application being worked on, which keeps the plain filename where two
+   * would otherwise clash. See `uniqueNames`.
+   */
+  working?: string,
+): CurrentFolder {
   const apps = applications ?? store.load().applications;
   const dir = path.join(store.outDir(), CURRENT_DIR);
   fs.mkdirSync(dir, { recursive: true });
@@ -335,7 +364,7 @@ export function syncCurrent(store: Store, applications?: Application[]): Current
     }
   }
 
-  const renamed = uniqueNames(claims);
+  const renamed = uniqueNames(claims, working);
   const wanted = new Map<string, string>(); // final name → where to copy it from
   // And whose it is, so the count at the bottom can be what actually landed
   // rather than what the tracker hoped for.
