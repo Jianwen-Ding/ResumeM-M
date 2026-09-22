@@ -36,7 +36,7 @@ describe('editing the date on an entry', () => {
   const dates = (title) => rowFor(title)?.querySelector('.dates');
   const lastSave = () => saved.at(-1);
 
-  async function open(entryList) {
+  async function open(entryList, { refuse } = {}) {
     vi.resetModules();
     saved = [];
     document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
@@ -59,6 +59,12 @@ describe('editing the date on an entry', () => {
         if (String(url).startsWith('/api/entries/') && init?.method === 'PUT') {
           const body = JSON.parse(init.body);
           saved.push(body);
+          /*
+           * A server that will not take it. Nothing is written down, which is
+           * the point: the next `/api/store` still says what it said before,
+           * so the editor has to be the thing that puts the date back.
+           */
+          if (refuse) return { ok: false, json: async () => ({ error: refuse }) };
           /*
            * Persisted, as a server would. Without this the store handed back
            * by the next `/api/store` still holds the old date, and the editor
@@ -263,6 +269,61 @@ describe('editing the date on an entry', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(saved).toHaveLength(0);
   });
+  /*
+   * And the write the server will not take.
+   *
+   * The date is put on screen before it is put on disk, deliberately —
+   * `saveEntryPeriod` says why: redrawing from a store that has not heard
+   * about the change yet snaps the control back to the old date, and ticking
+   * "Still going" left the far end sitting there on an entry that no longer
+   * had one. The cost of that is that a *failed* write leaves the new date
+   * showing over a save that never took it.
+   *
+   * Nothing caught it. `datesControl`'s `commit` calls `onChange` and drops
+   * the promise, so the rejection went nowhere: no message, and the wrong
+   * year still in the box. The store underneath was already right —
+   * `inEntryLane` reloads it either way — so the screen and the model
+   * disagreed until something unrelated forced a redraw, at which point the
+   * date changed back on its own with nothing to explain it.
+   */
+  const status = () => document.querySelector('#status');
+
+  it('says so when the save is refused, rather than showing the new date', async () => {
+    await open([JOB], { refuse: 'The save folder is read-only.' });
+    const from = [...dates('Everclear').querySelectorAll('.date-end')][0];
+    from.querySelector('.date-year').value = '2023';
+    from.querySelector('.date-year').dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(status().textContent).toContain('The save folder is read-only.'));
+    expect(status().className).toContain('err');
+  });
+
+  it('and puts the date back to what the save still says', async () => {
+    await open([JOB], { refuse: 'The save folder is read-only.' });
+    const year = () => [...dates('Everclear').querySelectorAll('.date-end')][0].querySelector('.date-year');
+    year().value = '2023';
+    year().dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(status().textContent).toContain('read-only'));
+    // Redrawn from the store, which never took the change.
+    await vi.waitFor(() => expect(year().value).toBe('2024'));
+  });
+
+  /*
+   * And the ordinary case, which must not start reporting anything: a write
+   * that lands says what it did and leaves the new date alone. A "fix" that
+   * reported every save as a failure would pass both checks above.
+   */
+  it('while a save that lands says nothing about failing', async () => {
+    await open([JOB]);
+    const year = () => [...dates('Everclear').querySelectorAll('.date-end')][0].querySelector('.date-year');
+    year().value = '2023';
+    year().dispatchEvent(new window.Event('change'));
+
+    await vi.waitFor(() => expect(saved.length).toBeGreaterThan(0));
+    expect(status().className).not.toContain('err');
+    await vi.waitFor(() => expect(year().value).toBe('2023'));
+  });
 });
 
 /*
@@ -380,4 +441,5 @@ describe('editing a graduation date that has alternates', () => {
     const chosen = saved.at(-1).dates.variants.find((v) => v.id === 'v_may');
     expect(chosen.text).toBe('Sep. 2022 -- Expected May 2026');
   });
+
 });

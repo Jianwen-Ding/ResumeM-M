@@ -197,6 +197,30 @@ function setStatus(text, isError = false) {
   }
 }
 
+/**
+ * A write that did not land: say so, and draw what the save actually holds.
+ *
+ * Both halves matter, and the second is the one that keeps getting left out.
+ * Several controls here put the change on screen before it is on disk —
+ * `saveEntryPeriod` says why, and the alternative is a control that flickers
+ * back to the old value on every save. The price is that a *failed* write
+ * leaves the new value showing over a save that never took it.
+ *
+ * The store underneath is already right by then: `inEntryLane` reloads it in
+ * a `finally`, so it happens on the failing path too. What was missing was
+ * anything to redraw from it — `saveEntry`'s own `render()` is after the
+ * await and never runs. So the screen and the model disagreed until some
+ * unrelated action forced a repaint, at which point the value changed back on
+ * its own with nothing to explain it.
+ *
+ * Reporting without redrawing is the shape that looks fixed and is not: an
+ * error goes up and the wrong value stays under it.
+ */
+function writeFailed(err) {
+  setStatus(err.message, true);
+  render();
+}
+
 async function api(path, options = {}) {
   /*
    * Undo is recorded here, and only here.
@@ -2396,7 +2420,7 @@ function dropMasterBullet(entry, moved, onto, side) {
   if (!list.includes(moved)) return;
   const at = list.indexOf(onto);
   const before = side === 'after' ? (list[at + 1] ?? null) : onto;
-  setMasterBulletOrder(entry, moveBefore(list, moved, before)).catch((err) => setStatus(err.message, true));
+  setMasterBulletOrder(entry, moveBefore(list, moved, before)).catch(writeFailed);
 }
 
 function masterBulletGrip(entry, bullet) {
@@ -2407,9 +2431,7 @@ function masterBulletGrip(entry, bullet) {
     id: bullet.id,
     label: 'this line, for every resume',
     onStep: (delta) =>
-      setMasterBulletOrder(entry, moveBy(masterBulletIds(entry), bullet.id, delta)).catch((err) =>
-        setStatus(err.message, true),
-      ),
+      setMasterBulletOrder(entry, moveBy(masterBulletIds(entry), bullet.id, delta)).catch(writeFailed),
   });
 }
 
@@ -3702,7 +3724,13 @@ function datesControl(from, onChange) {
     if (!next.start?.year) return;
     if (next.ongoing) delete next.end;
     if (!next.end?.year) delete next.end;
-    onChange(next);
+    /*
+     * Here rather than at each caller: there are two of them today and the
+     * failure is the same for both, and a third written later would be
+     * silent again. `Promise.resolve` because one of the two returns nothing
+     * when there is no text to save.
+     */
+    Promise.resolve(onChange(next)).catch(writeFailed);
   };
 
   /** One end of the range: a month that may be blank, and a year. */
