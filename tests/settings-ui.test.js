@@ -23,11 +23,14 @@ afterEach(() => {
  */
 describe('the settings panel', () => {
   let config;
+  /** Set by the test that wants a command that runs and refuses. */
+  let aiRefuses;
   let liveModels;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.useFakeTimers();
+    aiRefuses = false;
     document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
     location.hash = '';
     const fixture = makeTempStore();
@@ -58,7 +61,13 @@ describe('the settings panel', () => {
         const command = new URL(url, 'http://local').searchParams.get('command');
         result = { models: liveModels[command] ?? [], from: 'cli' };
       }
-      else if (url === '/api/config/test-ai') result = { ok: true, command: config.ai.command, ms: 1200, output: 'ok' };
+      // A working AI, which is one that answers the question the test asks:
+      // the prompt is "reply with exactly the word: ready".
+      else if (url === '/api/config/test-ai') {
+        result = aiRefuses
+          ? { ok: true, saidReady: false, command: config.ai.command, ms: 1200, output: 'I cannot do that: this action requires approval.' }
+          : { ok: true, saidReady: true, command: config.ai.command, ms: 1200, output: 'ready' };
+      }
       else if (url === '/api/config' && options.method === 'PUT') {
         config = { ...config, ...body, ai: { ...config.ai, ...(body.ai ?? {}) } };
         result = config;
@@ -255,6 +264,34 @@ describe('the settings panel', () => {
    * choosing from a list of known-good configurations — did nothing at all
    * until you found it, and the next AI run failed naming the old command.
    */
+  /*
+   * A command that runs, exits cleanly, and refuses.
+   *
+   * That is what a permission-blocked agent looks like from here: the
+   * command was found, it ran, it printed something. The panel painted that
+   * green and told somebody their AI was configured, over the sentence
+   * saying it is not — which is the one thing this panel exists to get
+   * right.
+   *
+   * Still not red: the command really did run, and calling a setup broken
+   * when it is only unusual is its own kind of wrong. What changes is that
+   * the green stops claiming more than the reply supports.
+   */
+  it('does not call it working when the reply was a refusal', async () => {
+    aiRefuses = true;
+    const select = [...document.querySelectorAll('#settings select')][0];
+    const claude = AI_PRESETS.find((p) => p.command === 'claude');
+    select.value = claude.label;
+    select.dispatchEvent(new Event('change'));
+
+    await vi.waitFor(() => expect(document.querySelector('#settings .result.warn')).not.toBeNull());
+    expect(document.querySelector('#settings .result.ok')).toBeNull();
+    const said = document.querySelector('#settings .result').textContent;
+    // What it actually said is still there, because that is the thing to read.
+    expect(said).toMatch(/requires approval/);
+    expect(said).toMatch(/not the word it was asked for/i);
+  });
+
   it('saves a preset the moment it is picked, and tries it', async () => {
     const select = [...document.querySelectorAll('#settings select')][0];
     const claude = AI_PRESETS.find((p) => p.command === 'claude');

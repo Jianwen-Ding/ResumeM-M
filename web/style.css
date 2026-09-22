@@ -949,6 +949,11 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 .settings .result { font-size: 12px; padding: 7px 9px; border-radius: 6px; margin-top: 10px; }
 .settings .result.ok { background: var(--good-bg); border: 1px solid var(--good-line); color: var(--good); }
 .settings .result.bad { background: var(--bad-bg); border: 1px solid var(--bad-line); color: var(--bad); }
+/* It ran and answered, but not with what it was asked for — see `test-ai`. */
+.settings .result.warn {
+  background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn);
+  white-space: pre-wrap;
+}
 .settings .result.idle { background: #fafafb; border: 1px solid var(--line-soft); color: var(--muted); }
 .settings .override { color: var(--warn); font-size: var(--t-xs); margin-top: 4px; }
 .settings .sandbox-note {

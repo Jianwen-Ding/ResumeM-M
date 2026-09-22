@@ -9020,8 +9020,18 @@ async function loadSettings() {
       result.textContent = 'Running…';
       const test = await api('/config/test-ai', { method: 'POST' });
       if (test.ok) {
-        result.className = 'result ok';
-        result.textContent = `${test.command} replied in ${(test.ms / 1000).toFixed(1)}s: ${test.output.slice(0, 160)}`;
+        /*
+         * Green only when it answered the question. The prompt asks for one
+         * word; a CLI that exits 0 having printed a refusal instead — "this
+         * action needs approval" — used to come back in the same green box
+         * as a working one, which is the panel telling somebody their AI is
+         * set up over the sentence saying it is not.
+         */
+        result.className = test.saidReady ? 'result ok' : 'result warn';
+        const said = `${test.command} replied in ${(test.ms / 1000).toFixed(1)}s: ${test.output.slice(0, 160)}`;
+        result.textContent = test.saidReady
+          ? said
+          : `${said}\n\nThat is not the word it was asked for. Read what it said — a command that exits cleanly having refused looks exactly like one that worked.`;
       } else {
         result.className = 'result bad';
         result.textContent = test.message;
@@ -9340,7 +9350,26 @@ async function restoreResumeVersion(hash) {
      * when there are selections on screen, and discarding them silently is
      * the opposite of what the version history is for.
      */
-    if (wanted === state.resumeId) await flushEdits();
+    /*
+     * And it has to have landed, which this did not check.
+     *
+     * `flushEdits` returns whether the writes it was waiting on settled,
+     * exactly so a caller about to do something irreversible can stop.
+     * `leaveResume` uses it that way and says why. Here the answer was
+     * dropped, and a few lines below `clearEdits()` runs unconditionally —
+     * so an edit whose save had quietly failed was neither on disk nor in
+     * memory any more, under the word "Restored." and no warning. The
+     * paragraph above is about not discarding what is on screen; this is
+     * what makes it true rather than intended.
+     */
+    if (wanted === state.resumeId) {
+      const landed = await flushEdits();
+      if (state.dirty) await autoSave().catch(() => {});
+      if (state.dirty || !landed) {
+        setStatus('That change has not saved yet, so nothing is restored until it does.', true);
+        return;
+      }
+    }
     const back = await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
       method: 'POST',
     });

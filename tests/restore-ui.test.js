@@ -28,6 +28,11 @@ describe('restoring a version', () => {
   let releaseSave;
   /** What the server says it could not put back, set by the test that cares. */
   let warnings;
+  /**
+   * Set by the test that wants a line edit still in flight when the restore
+   * asks — held open, then released as a refusal.
+   */
+  let holdLineSave;
 
   const versions = [
     { hash: 'now000', date: '2026-09-18T10:00:00Z', message: 'Edited', changes: [] },
@@ -57,6 +62,7 @@ describe('restoring a version', () => {
     requests = [];
     releaseSave = null;
     warnings = [];
+    holdLineSave = null;
     vi.stubGlobal('confirm', () => true);
 
     vi.stubGlobal(
@@ -72,7 +78,20 @@ describe('restoring a version', () => {
         else if (String(url).includes('/history/') && String(url).endsWith('/restore')) {
           result = { id: 'newgrad', label: 'New grad', warnings };
         } else if (String(url).includes('/history')) result = { versions };
-        else if (String(url).startsWith('/api/resumes/') && method === 'PUT') {
+        else if (
+          holdLineSave &&
+          method === 'PUT' &&
+          (String(url).startsWith('/api/entries/') || String(url).startsWith('/api/profile'))
+        ) {
+          /*
+           * Held, then refused. Still in flight is the whole point: once a
+           * save has settled it is out of `inlineSaves`, so the only moment
+           * a flush can see it fail is while it is still running — which is
+           * exactly the moment somebody reaches for the version history.
+           */
+          await holdLineSave;
+          return { ok: false, json: async () => ({ error: 'The save folder is read-only.' }) };
+        } else if (String(url).startsWith('/api/resumes/') && method === 'PUT') {
           // The write the flush waits on, held open when a test asks.
           if (releaseSave) await releaseSave;
           const id = decodeURIComponent(String(url).split('?')[0].split('/').pop());
@@ -201,5 +220,54 @@ describe('restoring a version', () => {
     await vi.waitFor(() => expect(restored()).toHaveLength(1));
     await new Promise((settle) => setTimeout(settle, 30));
     expect(document.querySelector('#restore-note').hidden).toBe(true);
+  });
+
+  /*
+   * A restore asked for while an edit has failed to save.
+   *
+   * Flushing first is deliberate and the comment in `restoreResumeVersion`
+   * says why: you reach for an old version precisely when there are
+   * selections on screen. But the flush's answer was dropped. `flushEdits`
+   * returns whether the writes it waited on settled — `leaveResume` uses it
+   * that way and refuses to move — and here it went straight on to the
+   * destructive POST and then `clearEdits()`.
+   *
+   * A line whose commit was refused is left in edit mode holding what was
+   * typed, on purpose, so Enter is another attempt; the restore's own
+   * `render()` rebuilt that line from the store and the wording was gone.
+   * Not on disk, because it never saved; not on screen, because the restore
+   * wiped it; and "Restored." in the status line over the top.
+   */
+  it('refuses while a line edit has not saved, rather than throwing it away', async () => {
+    let release;
+    holdLineSave = new Promise((go) => (release = go));
+
+    const line = document.querySelector('#editor .editable');
+    expect(line).not.toBeNull();
+    line.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
+    line.textContent = 'A sentence that will not save';
+    line.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    await openHistory('newgrad');
+    restoreButton().click();
+    // The flush is now waiting on that save. Let it fail underneath.
+    release();
+    await new Promise((settle) => setTimeout(settle, 150));
+
+    expect(restored()).toHaveLength(0);
+    expect(document.querySelector('#status').textContent).toMatch(/has not saved yet/i);
+    expect(document.body.textContent).toContain('A sentence that will not save');
+  });
+
+  /*
+   * And the ordinary case, which must still work: nothing unsaved, so the
+   * restore goes through. A guard that refused every restore would pass the
+   * check above.
+   */
+  it('while a restore with nothing unsaved still goes through', async () => {
+    await openHistory('newgrad');
+    restoreButton().click();
+    await vi.waitFor(() => expect(restored()).toHaveLength(1));
+    expect(document.querySelector('#status').textContent).not.toMatch(/has not saved yet/i);
   });
 });

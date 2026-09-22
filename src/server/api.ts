@@ -1196,8 +1196,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           { ...config, ai: { ...config.ai, timeoutMs: Math.min(config.ai.timeoutMs, 60_000) } },
           'Reply with exactly the word: ready',
         );
+        /*
+         * Whether it answered the question, which is not the same as having
+         * answered at all.
+         *
+         * `ok` is "the command ran, exited cleanly and printed something" —
+         * and a CLI that exits 0 while printing "I can't do that: this
+         * action needs approval" satisfies every part of that. The panel
+         * painted it green and told somebody their AI was configured, over
+         * the refusal that says it is not.
+         *
+         * The prompt asks for one word, so the check is whether that word
+         * came back. Reported separately rather than folded into `ok`: a
+         * model that says "Ready!" or pads it with a sentence is working,
+         * and calling a working setup broken is its own kind of wrong. What
+         * this buys is that the colour stops claiming more than the reply
+         * supports — see the panel, which says what it saw either way.
+         */
         res.json({
           ok: true,
+          saidReady: /\bready\b/i.test(result.output),
           ms: Date.now() - started,
           output: result.output.slice(0, 500),
           command: config.ai.command,
@@ -4415,7 +4433,28 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             return filed === fs.readFileSync(path.join(store.root, rel), 'utf8');
           }),
         );
-        if (!kept.some(Boolean)) {
+        /*
+         * The one being replaced, not any one of them.
+         *
+         * This was `kept.some(Boolean)` — "at least one file by this name is
+         * filed" — and `resumeFiles` gives *both* spellings. A store holding
+         * an untouched old `resumes/x.yml` beside a freshly edited
+         * `resumes/x.yaml` satisfies `some` on the strength of the file
+         * nobody is about to replace. So when the filing commit above fails
+         * for one of the reasons it is allowed to (a concurrent commit, an
+         * `index.lock`, a full disk — see `repo.ts`), the guard passed and
+         * the edit in the `.yaml` was overwritten with no error and a 200,
+         * under a button whose whole promise is that it refuses rather than
+         * doing this quietly.
+         *
+         * `here` is in `RESUME_SPELLINGS` order and `loadResumesAsWritten`
+         * takes the first that exists in that same order, so `here[0]` is
+         * both the file the resolved document came from and the file
+         * `saveResume` is about to write. The paragraph above already said
+         * the question is whether the one being replaced is among them;
+         * `some` asked a different question.
+         */
+        if (!kept[0]) {
           throw new Error(
             `"${id}" as it stands is not in the version history, so replacing it could not be undone. ` +
               'Save the store — Save History, under the save panel — and then restore.',

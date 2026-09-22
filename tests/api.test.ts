@@ -1652,6 +1652,57 @@ describe('settings', () => {
     const res = await request(app).post('/api/config/test-ai').expect(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.output).toBe('ready');
+    expect(res.body.saidReady).toBe(true);
+  });
+
+  /*
+   * A CLI that runs, exits 0, and refuses.
+   *
+   * This is what a permission-blocked agent does — "this action needs
+   * approval" on stdout, status zero — and it is indistinguishable from a
+   * working one at this endpoint: the command was found, it ran, it printed
+   * something. The panel painted that green and told somebody their AI was
+   * configured, over the sentence saying it is not.
+   *
+   * `ok` stays true, because the command really did run and that is what
+   * `ok` means; a model that pads the word or says "Ready!" is working and
+   * must not be called broken. What is reported separately is whether the
+   * one word the prompt asked for came back.
+   */
+  it('says when the reply was not the word it asked for, even on a clean exit', async () => {
+    await request(app)
+      .put('/api/config')
+      .send({
+        ai: {
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stdout.write("I cannot do that: this action requires approval.")', '{prompt}'],
+        },
+      })
+      .expect(200);
+
+    const res = await request(app).post('/api/config/test-ai').expect(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.saidReady).toBe(false);
+    // And what it actually said is still handed over, because that is the
+    // thing worth reading.
+    expect(res.body.output).toMatch(/requires approval/);
+  });
+
+  it('and is not fussy about how the word arrives', async () => {
+    await request(app)
+      .put('/api/config')
+      .send({
+        ai: {
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'process.stdout.write("Sure — Ready!")', '{prompt}'],
+        },
+      })
+      .expect(200);
+
+    const res = await request(app).post('/api/config/test-ai').expect(200);
+    expect(res.body.saidReady).toBe(true);
   });
 
   it('reports a command that fails, rather than throwing', async () => {
