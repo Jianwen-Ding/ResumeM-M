@@ -241,10 +241,22 @@ export class TailorSession {
         }
       }
     }
+    /*
+     * Skills marked the way entries and bullets are. Without it every item of
+     * every group read as equally available, so the model had no way to see
+     * that the applicant had taken a skill off this resume — and choosing a
+     * group's items is how one comes back.
+     */
+    const printed = new Map(this.resume.sections.flatMap((sec) => sec.skillGroups).map((g) => [g.id, g.items]));
     for (const group of this.groups.values()) {
-      lines.push(`### skills group [${group.id}] ${group.name}`);
+      const shown = printed.get(group.id);
+      lines.push(`### skills group [${group.id}] ${group.name}${shown ? '' : '  (not on this resume)'}`);
       for (const item of group.items) {
-        lines.push(`    [${item.id}] ${item.text}${item.tags?.length ? `  tags: ${item.tags.join(', ')}` : ''}`);
+        const off = shown && !shown.includes(item.text);
+        lines.push(
+          `    [${item.id}] ${item.text}${off ? '  (not on this resume)' : ''}` +
+            `${item.tags?.length ? `  tags: ${item.tags.join(', ')}` : ''}`,
+        );
       }
     }
     return lines.join('\n');

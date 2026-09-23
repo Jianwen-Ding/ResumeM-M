@@ -366,6 +366,28 @@ describe('reading the page back', () => {
     expect(text).toMatch(/\[proj_thing\][^\n]*\(not on this resume\)/);
   });
 
+  /*
+   * A skill taken off this resume is marked, as an entry or a bullet is, so
+   * the model can see the applicant's choice before it picks a group's items.
+   */
+  it('marks the skills this resume leaves off', () => {
+    const data = store();
+    const base = data.resumes.find((r) => r.id === 'base')!;
+    const group = data.skillGroups.find((g) => g.id === 'sk_lang')!;
+    const [kept, dropped] = group.items;
+    const trimmed = {
+      ...base,
+      id: 'trimmed',
+      sections: base.sections?.map((x) =>
+        x.kind === 'skills' ? { ...x, items: { ...(x.items ?? {}), sk_lang: group.items.filter((i) => i.id !== dropped!.id).map((i) => i.id) } } : x,
+      ),
+    };
+    const s = new TailorSession(data, resolveResume(trimmed, { ...data, resumes: [...data.resumes, trimmed] }), POSTING);
+    const text = s.describeInventory();
+    expect(text).toMatch(new RegExp(`\\[${dropped!.id}\\][^\\n]*\\(not on this resume\\)`));
+    expect(text).not.toMatch(new RegExp(`\\[${kept!.id}\\][^\\n]*\\(not on this resume\\)`));
+  });
+
   it('labels the posting as source material rather than instructions', () => {
     expect(session().describePosting()).toMatch(/not\s+instructions to you/);
   });

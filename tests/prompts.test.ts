@@ -128,7 +128,9 @@ describe('feedback understands the master and derived resumes', () => {
     const bullet = entry.bullets![0]!;
     for (const prompt of [feedbackPrompt(data, resolved), bulletFeedbackPrompt(data, entry, bullet)]) {
       expect(prompt).toContain('automatically compiles smaller, tailored resumes');
-      expect(prompt).toContain('inherit choices');
+      // Resumes stopped inheriting; the prompt must not tell the model they do.
+      expect(prompt).not.toContain('inherit');
+      expect(prompt).toContain('stands alone');
       expect(prompt).toContain('not separate achievements printed together');
       expect(prompt).toContain('does not require deleting it from the master');
     }
