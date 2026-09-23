@@ -230,7 +230,12 @@ const SENSITIVE_QUESTION = [
   /\b(birth\s*date|birthday)\b/i,
   /\bnational\s*(id|identity|insurance)(\s*(number|no\.?|#))?\b/i,
   /\b(tax\s*(id|identification)|tin|itin)\b/i,
-  /\bdriver'?s?\s*licen[cs]e\b/i,
+  // The same families `redactIdentifiers` takes out: a Canadian SIN (in
+  // capitals, because "sin" is a word), a UK NI number, a driving licence.
+  /\bsocial\s*insurance(\s*(number|no\.?|#))?\b/i,
+  /\bSIN\b/,
+  /\bNI\s*(number|no\.?|#)/i,
+  /\bdriv(er'?s?|ing)\s*licen[cs]e\b/i,
   /\b(bank\s*account|routing\s*number|iban|sort\s*code)\b/i,
   /\b(credit|debit)\s*card\b/i,
 ];
@@ -245,6 +250,8 @@ const SENSITIVE_QUESTION = [
 const SENSITIVE_ANSWER = [
   /\b\d{3}[- ]\d{2}[- ]\d{4}\b/,
   /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}\b/,
+  // A UK National Insurance number, by the shape `redactIdentifiers` uses.
+  /\b[A-CEGHJ-PR-TW-Z]{2} ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b/,
 ];
 
 /**

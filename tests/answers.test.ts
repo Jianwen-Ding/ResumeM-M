@@ -736,3 +736,26 @@ describe('identifiers taken out before anything reaches the AI', () => {
     expect(redactIdentifiers(text).text).toBe(text);
   });
 });
+
+describe('identifier questions the bank never answers', () => {
+  /*
+   * The redaction learned these; the bank's own list did not, so an answer
+   * given to "What is your SIN?" or "Driving licence number" was kept and
+   * offered on the next form that asked.
+   */
+  it.each(['What is your SIN?', 'Social Insurance Number', 'NI number', 'Driving licence number'])(
+    'treats "%s" as an identifier',
+    (q) => {
+      expect(isSensitiveQuestion(q)).toBe(true);
+    },
+  );
+  it('and an NI number as an identifier whatever the question called it', () => {
+    expect(isSensitiveAnswer('AB 12 34 56 C')).toBe(true);
+  });
+  it.each(['Is there anything you would change about your last role?', 'Do you have a single point of contact?'])(
+    'while "%s" is an ordinary question',
+    (q) => {
+      expect(isSensitiveQuestion(q)).toBe(false);
+    },
+  );
+});
