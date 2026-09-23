@@ -42,7 +42,7 @@ import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill } from '../model/autofill.js';
-import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
+import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
@@ -485,6 +485,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.use(express.json({ limit: '32mb' }));
 
   const autoCommit = () => store.loadConfig().git.autoCommit;
+
+  /**
+   * A tailored copy the extension posts, kept off any resume somebody kept.
+   * The copy's id is derived from the posting, so a copy promoted and edited
+   * earlier holds it; a temporary copy takes the next free id instead of
+   * writing over it. See `copyIdFor`.
+   */
+  const keptSafe = (spec: ResumeSpec): ResumeSpec =>
+    spec.tier === 'temporary' ? { ...spec, id: copyIdFor(store.load().resumes, spec.id) } : spec;
   // Work the user started and walked away from.
 
   /**
@@ -2475,7 +2484,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * copies would have been left behind by the very rename they most need.
        */
       const role = job.title ?? 'Role';
-      const specId = tailoredResumeId(employer, role);
+      const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
       const baseId = baseForCopy(data.resumes, baseResumeId, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
@@ -3205,10 +3214,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // A posting-specific spec from the extension is saved first so the
       // snapshot refers to something that still exists later.
       if (body.spec) {
-        await withCommit(repo, autoCommit(), `Add tailored resume "${body.spec.id}"`, () =>
-          store.saveResume(body.spec as ResumeSpec),
-        );
-        body.resumeId = body.spec.id;
+        // Never over a kept resume: see `copyIdFor`.
+        const spec = keptSafe(body.spec as ResumeSpec);
+        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
+        body.spec = spec;
+        body.resumeId = spec.id;
       }
 
       const result = await buildBundle(store, body);
@@ -3470,7 +3480,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
       if (body.spec) {
-        const spec = body.spec;
+        const spec = keptSafe(body.spec);
+        body.spec = spec;
         await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
       }
 
@@ -3867,7 +3878,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (fetched && !job.description.trim() && draft.jobDescription?.trim()) {
         job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
       }
-      const specId = tailoredResumeId(draft.company, draft.role);
+      const specId = copyIdFor(data.resumes, tailoredResumeId(draft.company, draft.role));
 
       /*
        * Tailoring twice must not make a resume that inherits from itself. The

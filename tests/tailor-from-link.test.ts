@@ -515,3 +515,55 @@ describe('a link that answers with an empty shell', () => {
     expect(read?.jobDescription).toContain('Kafka streaming in Go.');
   });
 });
+
+/*
+ * A tailored copy somebody has kept is theirs.
+ *
+ * The copy's id is derived from the company and the role, so the same posting
+ * — a repost, a second go — derives the same id. Once the first copy had been
+ * promoted to a kept resume and edited, tailoring again wrote a fresh
+ * temporary copy over it: the edits gone, and the resume marked for the
+ * sweep a week later. A kept resume is never overwritten by a copy; the new
+ * one takes the next free id.
+ */
+describe('tailoring again never overwrites a copy that was kept', () => {
+  it('leaves a promoted copy as it was and files the new one beside it', async () => {
+    serve();
+    const draft = await openSpace();
+    const first = await tailor(draft.id).expect(200);
+    const id = first.body.spec.id as string;
+
+    const kept = t.store.load().resumes.find((r) => r.id === id)!;
+    t.store.saveResume({ ...kept, tier: 'extended', label: 'My Streamly resume, hand-tuned' });
+
+    const second = await tailor(first.body.draft.id).expect(200);
+    expect(second.body.spec.id).not.toBe(id);
+    const after = t.store.load().resumes.find((r) => r.id === id);
+    expect(after?.tier).toBe('extended');
+    expect(after?.label).toBe('My Streamly resume, hand-tuned');
+  });
+
+  it('still replaces its own temporary copy on a second run', async () => {
+    serve();
+    const draft = await openSpace();
+    const first = await tailor(draft.id).expect(200);
+    const second = await tailor(first.body.draft.id).expect(200);
+    expect(second.body.spec.id).toBe(first.body.spec.id);
+  });
+
+  it('never lets a posted temporary copy overwrite a kept resume when filing', async () => {
+    serve();
+    t.store.saveResume({ id: 'job-streamly', label: 'Kept Streamly resume', tier: 'base' });
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({
+        company: 'Streamly',
+        role: 'Data Platform Intern',
+        spec: { id: 'job-streamly', label: 'Streamly', tier: 'temporary', copiedFrom: 'intern' },
+      })
+      .expect(200);
+    expect(t.store.getResume('job-streamly')?.label).toBe('Kept Streamly resume');
+    expect(t.store.getResume('job-streamly')?.tier).toBe('base');
+    expect(res.body.application.resumeId).not.toBe('job-streamly');
+  });
+});

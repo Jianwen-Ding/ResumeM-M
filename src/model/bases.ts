@@ -110,3 +110,27 @@ export function baseForCopy(resumes: ResumeSpec[], wanted: string | undefined, c
   const usable = at && at !== copyId && resumes.some((r) => r.id === at);
   return usable ? at : defaultBaseId(resumes.filter((r) => r.id !== copyId));
 }
+
+/**
+ * The id a new tailored copy may take without writing over a resume that was
+ * kept.
+ *
+ * A copy's id is derived from the company and the role, so the same posting
+ * derives the same id every time — which is right for a second run, whose
+ * temporary copy replaces the first. It is not right once that first copy was
+ * promoted to a kept resume and edited: tailoring again wrote a fresh
+ * temporary copy over it, the edits went, and the resume was marked for the
+ * sweep. So an id held by anything but a temporary copy is skipped, and the
+ * new copy takes the next one that is free.
+ */
+export function copyIdFor(resumes: ResumeSpec[], id: string): string {
+  const free = (candidate: string) => {
+    const held = resumes.find((r) => r.id === candidate);
+    return !held || held.tier === 'temporary';
+  };
+  if (free(id)) return id;
+  for (let n = 2; ; n++) {
+    const next = `${id}-${n}`;
+    if (free(next)) return next;
+  }
+}
