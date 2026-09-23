@@ -936,13 +936,54 @@ export function companyFromUrl(url: string | undefined): string | undefined {
   return undefined;
 }
 
+/*
+ * Technologies whose names are ordinary words.
+ *
+ * "Go above and beyond", "react quickly", "the spring semester", "express
+ * interest", "rest assured": a posting with no technology in it came out
+ * asking for Go, React, Spring, Express and REST, and the keyword match
+ * steered the resume toward them. Each of these counts only where the posting
+ * is plainly talking about the technology — a qualified form ("Node.js",
+ * "Spring Boot"), or the word written as the name it is, next to another
+ * technology or after "experience with" and its kind.
+ */
+const ORDINARY_WORDS = new Set(['go', 'swift', 'react', 'node', 'spring', 'express', 'rest', 'rails', 'spark', 'rust', 'ruby']);
+const QUALIFIED = /^(?:\.?js|js|\s+boot|\s+framework|\s+native|ui|\s+on\s+rails|lang|ful\b|\s+apis?)\b/i;
+const NAMED_AFTER = /(?:experience (?:with|in|using)|proficien\w* (?:with|in)|knowledge of|expertise (?:with|in)|written in|familiar\w* with|programming in|develop\w* in|coding in)\s+$/i;
+
+function meansTheTechnology(text: string, term: string, at: number): boolean {
+  const said = text.slice(at, at + term.length);
+  const after = text.slice(at + term.length, at + term.length + 16);
+  if (QUALIFIED.test(after)) return true;
+  // Written as a name: "Go", "React", "REST" — not "go" or "react".
+  if (!/^[A-Z]/.test(said)) return false;
+  const before = text.slice(Math.max(0, at - 40), at);
+  if (NAMED_AFTER.test(before)) return true;
+  const around = `${before} ${text.slice(at + term.length, at + term.length + 40)}`.toLowerCase();
+  return KEYWORD_VOCAB.some(
+    (other) => !ORDINARY_WORDS.has(other) && other !== term && new RegExp(`(^|[^a-z0-9+#])${escapeTerm(other)}([^a-z0-9+#]|$)`).test(around),
+  );
+}
+
+const escapeTerm = (term: string) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 export function extractKeywords(text: string): string[] {
   const lower = text.toLowerCase();
   const found = new Set<string>();
   for (const term of KEYWORD_VOCAB) {
     // Word-boundary match so "go" does not fire on "going" or "category".
-    const re = new RegExp(`(^|[^a-z0-9+#])${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9+#]|$)`, 'i');
-    if (re.test(lower)) found.add(term);
+    const re = new RegExp(`(^|[^a-z0-9+#])${escapeTerm(term)}([^a-z0-9+#]|$)`, 'gi');
+    if (!ORDINARY_WORDS.has(term)) {
+      if (re.test(lower)) found.add(term);
+      continue;
+    }
+    for (const hit of lower.matchAll(re)) {
+      const at = (hit.index ?? 0) + (hit[1]?.length ?? 0);
+      if (meansTheTechnology(text, term, at)) {
+        found.add(term);
+        break;
+      }
+    }
   }
   return [...found];
 }

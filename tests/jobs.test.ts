@@ -1178,3 +1178,32 @@ describe('whether a pair is worth filing a row for on its own', () => {
     expect(looksLikeAnApplication('Vega', 'Quantitative Trading')).toBe(true);
   });
 });
+
+/*
+ * Words that are technologies only sometimes.
+ *
+ * "Go above and beyond", "react quickly", "the spring semester", "express
+ * interest": a posting with no technology in it came out asking for Go,
+ * React, Spring and Express, and the keyword match steered the resume to
+ * them. These words now count only where the posting is plainly talking about
+ * the technology.
+ */
+describe('keywords that are ordinary words too', () => {
+  it('finds none of them in ordinary prose', () => {
+    const prose = 'We want someone who will go above and beyond, own our go-to-market plan, react quickly to feedback, and express interest early. Start in the spring semester. Swift decisions matter. Let\'s go! Rest assured we move fast.';
+    const kw = extractKeywords(prose);
+    for (const word of ['go', 'react', 'spring', 'express', 'swift', 'node', 'rest']) expect(kw, word).not.toContain(word);
+  });
+
+  it('still finds them where they are the technology', () => {
+    expect(extractKeywords('We write services in Python, Go and Java.')).toContain('go');
+    expect(extractKeywords('Strong experience with Go.')).toContain('go');
+    expect(extractKeywords('Our frontend is React and TypeScript.')).toContain('react');
+    expect(extractKeywords('Backend on Node.js with Postgres.')).toContain('node');
+    expect(extractKeywords('Services built on Spring Boot.')).toContain('spring');
+    expect(extractKeywords('An Express.js API layer.')).toContain('express');
+    expect(extractKeywords('Design REST APIs.')).toContain('rest');
+    expect(extractKeywords('iOS apps in Swift and SwiftUI.')).toContain('swift');
+    expect(extractKeywords('Golang microservices.')).toContain('golang');
+  });
+});
