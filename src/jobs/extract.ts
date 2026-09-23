@@ -577,8 +577,25 @@ const OTHER_POSTINGS_MARKER = '<p>[Other openings listed on this site — not th
  * Never more than half the page, so a wrapper around the whole posting that
  * happens to start with a rail is not mistaken for one.
  */
+const OTHER_POSTINGS_ANYWHERE =
+  /\b(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?|opportunities)\b|\byou may also like\b|\bpeople also viewed\b/gi;
+/** How far into an element its heading can sit, markup included. */
+const HEADING_WINDOW = 1500;
+
 function labelOtherPostings(html: string): string {
-  const pageText = plainText(html).length;
+  /*
+   * Only the elements that could be one are measured. Flattening every
+   * wrapper on the page to text made this quadratic in its nesting — 1.3s on
+   * a 1.9MB page against 110ms without it — so the headings are found once,
+   * and an element is looked at only when one starts within reach of its
+   * opening tag, or when it is a side region. Most pages have neither and
+   * are returned untouched.
+   */
+  const headingsIn = (text: string) => [...text.matchAll(OTHER_POSTINGS_ANYWHERE)].map((m) => m.index ?? 0);
+  let headings = headingsIn(html);
+  if (headings.length === 0 && !/<aside\b|\brole\s*=\s*["']complementary["']/i.test(html)) return html;
+
+  let pageText = -1;
   const opening = /<(aside|section|div|ul|ol)\b[^>]*>/gi;
   let out = html;
   let from = 0;
@@ -586,6 +603,13 @@ function labelOtherPostings(html: string): string {
     opening.lastIndex = from;
     const open = opening.exec(out);
     if (!open) return out;
+    const inside = open.index + open[0].length;
+    const nearHeading = headings.some((at) => at >= inside && at < inside + HEADING_WINDOW);
+    if (!nearHeading && !SIDE_REGION.test(open[0])) {
+      from = inside;
+      continue;
+    }
+    if (pageText < 0) pageText = plainText(html).length;
     const end = elementEnd(out, open);
     if (end === -1) {
       from = open.index + open[0].length;
@@ -602,6 +626,7 @@ function labelOtherPostings(html: string): string {
       const at = open.index + open[0].length;
       out = `${out.slice(0, at)}${OTHER_POSTINGS_MARKER}${out.slice(at)}`;
       from = end + OTHER_POSTINGS_MARKER.length;
+      headings = headingsIn(out);
       continue;
     }
     from = open.index + open[0].length;
