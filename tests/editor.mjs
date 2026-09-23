@@ -695,6 +695,78 @@ async function main() {
      * sat through, so the thing worth asserting is how long it takes.
      * -------------------------------------------------------------- */
 
+    /* -------------------------------------------------------------- *
+     * Adding a skill to the resume you are on                          *
+     *                                                                  *
+     * "+ Add skill" sits under a group on the resume being edited, and *
+     * it added the skill to the save's group and nowhere else. On a    *
+     * resume that names its own list for that group — every tailored   *
+     * one does — the new skill arrived unticked: added, and not on the *
+     * page you were looking at. A new entry has always been switched   *
+     * on in the open resume; a new skill now is too, and only there.   *
+     * -------------------------------------------------------------- */
+
+    console.log('\nAdding a skill to the resume you are on');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const group = store.skillGroups?.[0];
+      const scratch = 'editor-skills';
+      if (!group || group.items.length < 2) {
+        check('there is a skills group to add to', false, 'none in the starter save');
+      } else {
+        const keep = group.items.slice(0, group.items.length - 1).map((i) => i.id);
+        await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Skills scratch',
+            sections: [{ kind: 'skills', entries: [], groups: [group.id], items: { [group.id]: keep } }],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          await page.locator('.skill-chip').first().waitFor({ timeout: 30_000 });
+
+          await page.getByRole('button', { name: '+ Add skill' }).first().click();
+          await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+          await page.locator('#f_text').fill('Zig');
+          await page.locator('#modal-ok').click();
+
+          const chip = page.locator('.skill-chip', { hasText: 'Zig' });
+          await chip.waitFor({ timeout: 30_000 });
+          check('the new skill is ticked on the resume it was added from', await chip.locator('input').isChecked());
+
+          const listsZig = async () => {
+            const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+            const now = await (await fetch(`${server.url}/api/store`)).json();
+            const zig = now.skillGroups.find((g) => g.id === group.id)?.items.find((i) => i.text === 'Zig')?.id;
+            const mine = resumes.find((r) => r.id === scratch);
+            return Boolean(zig && mine?.sections?.find((x) => x.kind === 'skills')?.items?.[group.id]?.includes(zig));
+          };
+          let savedOn = false;
+          for (let waited = 0; waited < 20_000 && !savedOn; waited += 500) {
+            savedOn = await listsZig();
+            if (!savedOn) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and the saved resume lists it, after the save settles', savedOn);
+        } finally {
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+          const now = await (await fetch(`${server.url}/api/store`)).json();
+          const groups = now.skillGroups.map((g) =>
+            g.id === group.id ? { ...g, items: g.items.filter((i) => i.text !== 'Zig') } : g,
+          );
+          await fetch(`${server.url}/api/skills?commit=0`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(groups),
+          }).catch(() => undefined);
+        }
+      }
+    }
+
     console.log('\nGoing over one page');
     {
       /*

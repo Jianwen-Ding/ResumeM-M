@@ -4373,29 +4373,55 @@ async function addSkill(group) {
   ], 'Tags are what the extension matches against a job posting.');
   if (!answer?.text?.trim()) return;
 
+  let added;
   await inSkillsLane((groups) =>
-    groups.map((g) =>
-      g.id !== group.id
-        ? g
-        : {
-            ...g,
-            items: [
-              ...g.items,
-              {
-                // Against `g`, the group as it now stands, not the copy this
-                // button was drawn from: a skill added a moment ago is in one
-                // and not the other.
-                id: freeSkillItemId(g, `s_${slug(answer.text)}`),
-                text: answer.text.trim(),
-                ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
-              },
-            ],
+    groups.map((g) => {
+      if (g.id !== group.id) return g;
+      // Against `g`, the group as it now stands, not the copy this button
+      // was drawn from: a skill added a moment ago is in one and not the
+      // other.
+      added = freeSkillItemId(g, `s_${slug(answer.text)}`);
+      return {
+        ...g,
+        items: [
+          ...g.items,
+          {
+            id: added,
+            text: answer.text.trim(),
+            ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
           },
-    ),
+        ],
+      };
+    }),
   );
+  if (added && !state.masterView) await tickSkillHere(group.id, added, answer.text.trim());
   setStatus('Skill added');
   render();
   scheduleRender();
+}
+
+/**
+ * A new skill, switched on in the resume being edited — that one and no other.
+ *
+ * The same rule a new entry follows (see `addEntry`), for the same reason: the
+ * button sits under a group on this resume, and on a resume that names its own
+ * list for the group — every tailored one does — the skill arrived unticked,
+ * added and not on the page you were looking at. A resume with no list for the
+ * group already prints every item, this one included, so it is left alone.
+ * The overlay is updated too, or the next auto-save writes it back without
+ * the new skill.
+ */
+async function tickSkillHere(gid, id, text) {
+  const root = resumeById(state.resumeId);
+  const skills = (root?.sections ?? []).find((s) => s.kind === 'skills' && (s.groups ?? []).includes(gid));
+  if (!skills) return;
+  if (state.skillEdits?.[gid] && !state.skillEdits[gid].includes(id)) {
+    state.skillEdits = { ...state.skillEdits, [gid]: [...state.skillEdits[gid], id] };
+  }
+  const listed = skills.items?.[gid];
+  if (!Array.isArray(listed) || listed.includes(id)) return;
+  const sections = root.sections.map((s) => (s === skills ? { ...s, items: { ...s.items, [gid]: [...listed, id] } } : s));
+  await saveResumeSpec({ ...root, sections }, `Added ${text}`);
 }
 
 async function removeSkill(group, item) {
