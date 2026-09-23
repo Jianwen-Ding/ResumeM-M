@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { letterId, matchAnswer, matchAnswers, questionSimilarity, relevantLetters } from '../src/jobs/answers.js';
+import {
+  isSensitiveAnswer,
+  isSensitiveQuestion,
+  letterId,
+  matchAnswer,
+  matchAnswers,
+  questionSimilarity,
+  relevantLetters,
+  sameQuestion,
+} from '../src/jobs/answers.js';
 import type { AnswerBankItem, CoverLetter } from '../src/model/types.js';
 import { SAMPLE_ANSWERS } from './helpers.js';
 
@@ -475,5 +484,103 @@ describe('an answer written for somebody else', () => {
     expect(matchAnswer(loose, SAMPLE_ANSWERS).item?.id).toBe('ans_why');
     expect(matchAnswer(loose, SAMPLE_ANSWERS, 0.99).item).toBeUndefined();
     expect(matchAnswers([loose], SAMPLE_ANSWERS, 0.99)[0]?.item).toBeUndefined();
+  });
+});
+
+/*
+ * Some things are not this tool's to remember at all.
+ *
+ * Every other guard in `matchAnswer` withholds `confident` from a match that
+ * is still offered — a wrong company, a narrower question, a negation — so a
+ * person can read it and decide. There is no reading of an SSN, a date of
+ * birth, a passport number, or a home address that makes handing it back
+ * safe, so a question asking for one gets no match at all, not even a loose
+ * one: an item stored under that wording could only ever have been put there
+ * by something that should not have, and finding it again is the failure.
+ */
+describe('a question asking for something the bank must never hold', () => {
+  const sensitiveQuestions = [
+    'What is your Social Security Number?',
+    'Please provide your SSN.',
+    'What is your date of birth?',
+    'DOB (mm/dd/yyyy)',
+    'What is your passport number?',
+    'What is your home address?',
+    'Please give your mailing address.',
+  ];
+
+  it('recognises the questions this must refuse', () => {
+    for (const q of sensitiveQuestions) expect(isSensitiveQuestion(q), q).toBe(true);
+  });
+
+  it('leaves an ordinary question alone', () => {
+    for (const q of ['Why do you want to work here?', 'What is your email address for this application?']) {
+      expect(isSensitiveQuestion(q), q).toBe(false);
+    }
+  });
+
+  it('never returns a stored answer to one of these, even if the bank holds it', () => {
+    for (const q of sensitiveQuestions) {
+      const bank: never = [
+        { id: 'a1', question: q, default: 'v', variants: [{ id: 'v', text: 'Something that should not travel.' }] },
+      ] as never;
+      const m = matchAnswer(q, bank);
+      expect(m.item, q).toBeUndefined();
+      expect(m.answer, q).toBeUndefined();
+      expect(m.confident, q).toBe(false);
+      expect(m.score, q).toBe(0);
+    }
+  });
+});
+
+/*
+ * The question list cannot know every wording, so the value is checked too:
+ * an SSN's shape, a card-length run of digits, an IBAN — under whatever the
+ * question called it.
+ */
+describe('identifiers, however the question is worded', () => {
+  it('recognises more ways a form asks for one', () => {
+    for (const q of [
+      'National ID number',
+      'Tax ID (TIN)',
+      "Driver's license number",
+      'Birthday',
+      'Bank account for direct deposit',
+      'Credit card on file',
+    ]) {
+      expect(isSensitiveQuestion(q), q).toBe(true);
+    }
+  });
+
+  it('recognises the values themselves', () => {
+    for (const a of ['123-45-6789', '123 45 6789', '4111 1111 1111 1111', 'GB82 WEST 1234 5698 7654 32']) {
+      expect(isSensitiveAnswer(a), a).toBe(true);
+    }
+  });
+
+  it('leaves ordinary answers alone: phones, years, a ZIP code, prose', () => {
+    for (const a of ['617-555-0100', '+44 20 7946 0958', '2019-2023', '02115-1234', 'I have led three teams since 2019.']) {
+      expect(isSensitiveAnswer(a), a).toBe(false);
+    }
+  });
+
+  it('never hands back a stored identifier under an innocent question', () => {
+    const bank = [
+      { id: 'a1', question: 'Government reference', default: 'v', variants: [{ id: 'v', text: '123-45-6789' }] },
+    ] as never;
+    const m = matchAnswer('Government reference', bank);
+    expect(m.item).toBeUndefined();
+    expect(m.answer).toBeUndefined();
+  });
+});
+
+describe('sameQuestion', () => {
+  it('treats retyping — spacing and case — as the same question', () => {
+    expect(sameQuestion('Why do you want to work here?', '  why do you want to work here?  ')).toBe(true);
+    expect(sameQuestion('Why  do you want to work here?', 'Why do you want to work here?')).toBe(true);
+  });
+
+  it('treats an actual change in wording as a different question', () => {
+    expect(sameQuestion('Why do you want to work here?', 'Why do you want to leave your current job?')).toBe(false);
   });
 });

@@ -34,7 +34,7 @@ import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
-import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
@@ -2310,16 +2310,56 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         itemId?: string;
       };
       if (!question?.trim() || !answer?.trim()) throw new Error('question and answer are required');
+      /*
+       * An SSN, a date of birth, a passport number, a home address: never
+       * remembered, so never reused. See `isSensitiveQuestion`. Refused here
+       * rather than silently dropped, because a silent drop reads to the
+       * caller as saved — the box the person just typed into still holds it
+       * for *this* application, which is untouched; only the reusable bank
+       * declines it.
+       */
+      if (isSensitiveQuestion(question) || isSensitiveAnswer(answer)) {
+        throw new Error(
+          'This looks like a request for personal identifying information (an SSN, a date of ' +
+            'birth, a passport number, a home address). The answer bank does not keep those, so ' +
+            'it was not saved.',
+        );
+      }
 
       const answers = store.load().answers;
-      const existing = itemId ? answers.find((a) => a.id === itemId) : undefined;
+      /*
+       * Found by id when the caller has one, and otherwise by the question
+       * itself — not only by id. Without this, saving a question the bank
+       * already holds, from a caller that never learned its id, added a
+       * second item with the same question rather than a variant of the
+       * first: two competing answers to "Why do you want to work here?",
+       * with `matchAnswer` seeing only whichever came first and the second
+       * unreachable by anything but a fresh save. `sameQuestion` allows for
+       * the whitespace and case a retyped question differs by; a real
+       * change in wording is a new question and gets a new item, same as
+       * always.
+       */
+      const existing = itemId
+        ? answers.find((a) => a.id === itemId)
+        : answers.find((a) => sameQuestion(a.question, question));
 
       if (existing) {
-        // A new phrasing of a question already in the bank, not a new question.
-        const id = `v_${slug(label ?? new Date().toISOString().slice(0, 10))}` || `v_${Date.now()}`;
-        const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
-        existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
-        existing.default = unique;
+        /*
+         * The same wording saved twice is not a second variant — it is the
+         * same click landing twice, from a retry or a double submit — so it
+         * is not piled on as one. It is made the default, since saving it
+         * again is the caller saying this is the one to use now.
+         */
+        const already = existing.variants.find((v) => v.text.trim() === answer.trim());
+        if (already) {
+          existing.default = already.id;
+        } else {
+          // A new phrasing of a question already in the bank, not a new question.
+          const id = `v_${slug(label ?? new Date().toISOString().slice(0, 10))}` || `v_${Date.now()}`;
+          const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
+          existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
+          existing.default = unique;
+        }
       } else {
         answers.push({
           id: answerId(question, answers),
@@ -4225,11 +4265,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const answers = store.load().answers;
         for (const q of answered) {
           if (q.source === 'bank' && !q.edited) continue;
-          const existing = answers.find((a) => a.id === q.fromAnswerId || a.question === q.question);
+          // An SSN, a date of birth, a passport number, a home address: never
+          // remembered, so never reused. See `isSensitiveQuestion`. The
+          // application record above still keeps what was actually sent —
+          // that is the history of this one application — but it does not
+          // go into the bank other applications draw from.
+          if (isSensitiveQuestion(q.question) || isSensitiveAnswer(q.answer)) continue;
+          const existing = answers.find((a) => a.id === q.fromAnswerId || sameQuestion(a.question, q.question));
           if (existing) {
-            const vid = `v_${Date.now().toString(36)}`;
-            existing.variants.push({ id: vid, label: draft.company, text: q.answer });
-            existing.default = vid;
+            // The same wording saved twice — a form resubmitted, a workspace
+            // completed twice — is not a second variant. See `/answers/save`.
+            const already = existing.variants.find((v) => v.text.trim() === q.answer.trim());
+            if (already) {
+              existing.default = already.id;
+            } else {
+              const vid = `v_${Date.now().toString(36)}`;
+              existing.variants.push({ id: vid, label: draft.company, text: q.answer });
+              existing.default = vid;
+            }
           } else {
             answers.push({
               id: answerId(q.question, answers),

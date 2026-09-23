@@ -4,6 +4,7 @@ import request from 'supertest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createApi, createPdfRouter, createCurrentRouter, questionsToWrite } from '../src/server/api.js';
+import { sameQuestion } from '../src/jobs/answers.js';
 import { Repo } from '../src/git/repo.js';
 import type { Entry } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -1072,6 +1073,46 @@ describe('answers', () => {
   it('rejects an incomplete save', async () => {
     await request(app).post('/api/answers/save').send({ question: 'Q' }).expect(400);
     await request(app).post('/api/answers/save').send({ answer: 'A' }).expect(400);
+  });
+
+  it('refuses to save a Social Security Number, a date of birth, a passport number, a home address', async () => {
+    for (const question of [
+      'What is your Social Security Number?',
+      'What is your date of birth?',
+      'What is your passport number?',
+      'What is your home address?',
+    ]) {
+      const res = await request(app).post('/api/answers/save').send({ question, answer: 'Something private.' }).expect(400);
+      expect(res.body.error, question).toMatch(/personal identifying information/);
+    }
+    // Nothing was written.
+    expect(t.store.load().answers).toHaveLength(2);
+  });
+
+  it('refuses an identifier typed under a question worded past the list', async () => {
+    const res = await request(app)
+      .post('/api/answers/save')
+      .send({ question: 'Government reference', answer: '123-45-6789' })
+      .expect(400);
+    expect(res.body.error).toMatch(/personal identifying information/);
+    expect(t.store.load().answers).toHaveLength(2);
+  });
+
+  it('does not duplicate an item when the same question is saved again without its id', async () => {
+    await request(app).post('/api/answers/save').send({ question: 'Brand new question?', answer: 'My answer.' }).expect(200);
+    // Retyped with different case and spacing, and without the id the first
+    // save returned — the ordinary case for a caller that only has the
+    // question text, not the bank's internal id.
+    await request(app)
+      .post('/api/answers/save')
+      .send({ question: '  brand new  question?  ', answer: 'My answer.' })
+      .expect(200);
+
+    const answers = t.store.load().answers;
+    const matches = answers.filter((a) => sameQuestion(a.question, 'Brand new question?'));
+    expect(matches).toHaveLength(1);
+    // And the identical text was not piled on as a second variant either.
+    expect(matches[0]?.variants).toHaveLength(1);
   });
 });
 

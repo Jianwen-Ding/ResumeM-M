@@ -205,6 +205,71 @@ function unanswered(asked: string, stored: string, company?: string): string[] {
   );
 }
 
+/**
+ * A question asking for something the bank must never hold at all: a Social
+ * Security Number, a date of birth, a passport number, a home address.
+ *
+ * Every other guard in this file takes confidence away from a match that is
+ * still offered for a person to read — a company mismatch, a negation, a
+ * narrower question. There is no reading of an SSN or a date of birth that
+ * makes handing it back safe: it is not this employer's business whether the
+ * bank has ever seen one, and a stored answer that happens to look right is
+ * still somebody's identifier, sitting in a file that gets copied, committed
+ * and read by whatever this store is shared with next. So this is checked
+ * before anything else runs, and it does not merely withhold `confident` —
+ * it withholds the match entirely, the one guard here that can.
+ */
+const SENSITIVE_QUESTION = [
+  /\bsocial\s*security(\s*number)?\b/i,
+  /\bssn\b/i,
+  /\bdate\s*of\s*birth\b/i,
+  /\bdob\b/i,
+  /\bpassport(\s*(number|no\.?|#))?\b/i,
+  /\b(home|mailing|residential|street)\s*address\b/i,
+  /\b(birth\s*date|birthday)\b/i,
+  /\bnational\s*(id|identity|insurance)(\s*(number|no\.?|#))?\b/i,
+  /\b(tax\s*(id|identification)|tin|itin)\b/i,
+  /\bdriver'?s?\s*licen[cs]e\b/i,
+  /\b(bank\s*account|routing\s*number|iban|sort\s*code)\b/i,
+  /\b(credit|debit)\s*card\b/i,
+];
+
+/**
+ * An answer that is itself an identifier, whatever the question called it.
+ *
+ * The question list above cannot know every way a form words it ("Tax
+ * reference", "Govt. ID #"), so the value is looked at too: an SSN's
+ * 3-2-4 shape, a run of 13 to 19 digits (a card), an IBAN.
+ */
+const SENSITIVE_ANSWER = [
+  /\b\d{3}[- ]\d{2}[- ]\d{4}\b/,
+  /\b(?:\d[ -]?){13,19}\b/,
+  /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}\b/,
+];
+
+export function isSensitiveAnswer(answer: string): boolean {
+  return SENSITIVE_ANSWER.some((re) => re.test(answer));
+}
+
+export function isSensitiveQuestion(question: string): boolean {
+  return SENSITIVE_QUESTION.some((re) => re.test(question));
+}
+
+/**
+ * Whether two stored questions are the same question, allowing for the kind
+ * of difference a person retyping it introduces rather than a difference in
+ * what is being asked: leading and trailing space, doubled interior spaces,
+ * and case. Anything past that — a real wording change — is a new question,
+ * because that is what `questionSimilarity` is for; this exists only to stop
+ * "Why do you want to work here?" and "why do you want to work here? " from
+ * living in the bank as two separate items with nobody ever finding the
+ * second one.
+ */
+export function sameQuestion(a: string, b: string): boolean {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  return norm(a) === norm(b);
+}
+
 export interface AnswerMatch {
   question: string;
   /** The stored item that best covers it, if any cleared the threshold. */
@@ -257,6 +322,15 @@ export function matchAnswer(
 ): AnswerMatch {
   // The threshold used to be the third argument, and callers pass it that way.
   const { threshold = 0.45, company } = typeof options === 'number' ? { threshold: options } : options;
+
+  // See `isSensitiveQuestion`: an SSN, a date of birth, a passport number, a
+  // home address never come back from the bank, not even as a loose read-first
+  // suggestion. Checked before the bank is even searched, so nothing about
+  // what is stored — or whether anything is stored — leaks through the score.
+  if (isSensitiveQuestion(question)) return { question, score: 0, confident: false };
+  // And never hand back a stored value that is itself an identifier — one
+  // banked before these checks existed, or under a question worded past them.
+  bank = bank.filter((item) => !item.variants.some((v) => isSensitiveAnswer(v.text)));
 
   let best: { item: AnswerBankItem; score: number } | undefined;
   for (const item of bank) {
