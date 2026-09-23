@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { redactIdentifiers } from '../jobs/answers.js';
 import { startRun, type RunHandle } from './activity.js';
 import { AI_PRESETS } from './presets.js';
 import type { StoreConfig } from '../model/types.js';
@@ -113,6 +114,15 @@ export async function runAgent(
    */
   without?: { approval?: boolean },
 ): Promise<AgentResult> {
+  /*
+   * The last door every prompt goes through, so the last place an identifier
+   * can be stopped. A prompt is assembled from the corpus, the drafts, the
+   * posting and more, and whatever reached the store before the answer bank
+   * and the file reader learned to refuse identifiers is still in it. Taken
+   * out here whatever the prompt was built from, AI on or off. See
+   * `redactIdentifiers`.
+   */
+  prompt = redactIdentifiers(prompt).text;
   if (!config.ai.enabled) {
     return { output: prompt, executed: false };
   }
