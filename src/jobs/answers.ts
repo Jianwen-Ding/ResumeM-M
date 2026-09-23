@@ -271,6 +271,46 @@ function containsCardNumber(answer: string): boolean {
   return false;
 }
 
+/**
+ * The same identifiers, taken out of a longer text rather than refused.
+ *
+ * A file dropped into the corpus is somebody's old paperwork as often as their
+ * writing — an offer letter with a social security number, an application
+ * with a date of birth, a form with a card number — and the whole of it went
+ * to the AI to be sorted and into the corpus every later prompt reads. A
+ * letter with an identifier in it is still a letter worth keeping, so the
+ * identifier is replaced, not the file refused. Dates of birth and passport
+ * numbers only where they are labelled: a bare date is a date, and "passport
+ * holder" is a phrase. Returns how many were taken out, so it can be said.
+ */
+export function redactIdentifiers(text: string): { text: string; redacted: number } {
+  let redacted = 0;
+  const hide = (s: string, re: RegExp, keep?: (m: string, ...g: string[]) => string) =>
+    s.replace(re, (m: string, ...g: string[]) => {
+      redacted++;
+      return keep ? keep(m, ...g) : '[redacted]';
+    });
+  let out = String(text ?? '');
+  out = hide(out, /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g);
+  out = hide(out, /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}(?:\s?[A-Z0-9]{1,3})?\b/g);
+  out = out.replace(/\b(?:\d[ -]?){12,18}\d\b/g, (run) => {
+    if (!containsCardNumber(run)) return run;
+    redacted++;
+    return '[redacted]';
+  });
+  out = hide(
+    out,
+    /\b(date of birth|birth ?date|d\.?o\.?b\.?)(\s*[:\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+ \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})/gi,
+    (_m, label, gap) => `${label}${gap}[redacted]`,
+  );
+  out = hide(
+    out,
+    /\b(passport(?:\s+(?:no\.?|number|#))?)(\s*[:\-#]?\s*)([A-Z]{0,2}\d[A-Z0-9]{5,8})\b/gi,
+    (_m, label, gap) => `${label}${gap}[redacted]`,
+  );
+  return { text: out, redacted };
+}
+
 export function isSensitiveAnswer(answer: string): boolean {
   return SENSITIVE_ANSWER.some((re) => re.test(answer)) || containsCardNumber(answer);
 }

@@ -1,6 +1,7 @@
 import { runAgent } from '../ai/agent.js';
 import type { StoreConfig } from '../model/types.js';
 import { extractText, READABLE } from './text.js';
+import { redactIdentifiers } from '../jobs/answers.js';
 import { ingestPrompt, MAX_BLOCKS, readIngestPlan, segment, sortByRules, type Proposal } from './sort.js';
 
 /**
@@ -20,6 +21,8 @@ export interface Ingested {
   usedAi: boolean;
   /** Set when the AI was asked and could not answer; the rules stood in. */
   aiError?: string;
+  /** How many identifiers were taken out before anything else saw the file. */
+  redacted: number;
 }
 
 export async function ingestFile(
@@ -30,7 +33,10 @@ export async function ingestFile(
 ): Promise<Ingested> {
   if (bytes.length === 0) throw new Error(`There is nothing in ${name || 'that file'}`);
 
-  const { text, via } = await extractText(name, bytes);
+  const read = await extractText(name, bytes);
+  const via = read.via;
+  // Before anything is sorted, stored or shown to the AI: see `redactIdentifiers`.
+  const { text, redacted } = redactIdentifiers(read.text);
   const blocks = segment(text);
   if (blocks.length === 0) {
     throw new Error(`${name || 'That file'} has no readable text in it. Readable: ${READABLE.join(', ')}`);
@@ -53,7 +59,7 @@ export async function ingestFile(
     }
   }
 
-  return { name, text, via, chars: text.length, blocks: blocks.length, items, usedAi: wantsAi && !aiError, aiError };
+  return { name, text, via, chars: text.length, blocks: blocks.length, items, usedAi: wantsAi && !aiError, aiError, redacted };
 }
 
 export { READABLE } from './text.js';
