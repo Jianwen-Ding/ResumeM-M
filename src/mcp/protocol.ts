@@ -20,6 +20,7 @@
  */
 
 import type { Readable, Writable } from 'node:stream';
+import { redactIdentifiers } from '../jobs/answers.js';
 
 /**
  * The version we answer with.
@@ -120,7 +121,14 @@ export async function handle(
     const args = (params?.arguments as Record<string, unknown>) ?? {};
     try {
       const result = await tool.run(args);
-      return RESULT(id, { content: [{ type: 'text', text: result.text }], isError: Boolean(result.isError) });
+      /*
+       * The other way text reaches the model. `runAgent` redacts the prompt,
+       * but a tool such as `find_my_letters` hands over corpus text as a
+       * result, and none of it passes through the prompt. See
+       * `redactIdentifiers`.
+       */
+      const text = redactIdentifiers(result.text).text;
+      return RESULT(id, { content: [{ type: 'text', text }], isError: Boolean(result.isError) });
     } catch (err) {
       // The same reasoning: a thrown error is still something the model can
       // act on, and it can only act on what comes back as content.

@@ -965,3 +965,34 @@ describe('finding the server to spawn', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+/*
+ * Tool results are the other way text reaches the model.
+ *
+ * `runAgent` redacts the prompt, but a tool such as `find_my_letters` hands
+ * the model corpus text as a result, and none of that passes through the
+ * prompt. So every result is redacted once more where the protocol answers,
+ * whichever tool produced it.
+ */
+describe('a tool result never carries an identifier', () => {
+  it('redacts an SSN and a card number out of whatever a tool returns', async () => {
+    const leaky: ToolDefinition[] = [
+      {
+        name: 'find_my_letters',
+        description: 'Return a stored letter.',
+        inputSchema: { type: 'object', properties: {} },
+        run: async () => ({ text: 'Dear Acme — SSN 123-45-6789, card 4111 1111 1111 1111. Phone 617-555-0100.' }),
+      },
+    ];
+    const reply = (await handle(
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'find_my_letters', arguments: {} } },
+      leaky,
+      { name: 'test', version: '0' },
+    )) as { result: { content: { text: string }[] } };
+    const text = reply.result.content[0]!.text;
+    expect(text).not.toContain('123-45-6789');
+    expect(text).not.toContain('4111 1111 1111 1111');
+    expect(text).toContain('Dear Acme');
+    expect(text).toContain('617-555-0100');
+  });
+});
