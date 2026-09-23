@@ -3138,9 +3138,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       // And the draft, if there is one, stops looking like something to finish
       // — found the same way, for the same reason.
+      //
+      // Its own commit, not folded into the application's above: that commit
+      // has already happened by the time this write reaches disk, so leaving
+      // it bare left the draft's own move to "submitted" out of the version
+      // history — present in every read, absent from `git log`, and lost the
+      // moment the store was ever restored from history rather than disk.
       const draft = findDraft(store.loadDrafts(), body.company, body.role);
       if (draft && draft.status !== 'submitted') {
-        store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
+        await withCommit(repo, autoCommit(), `Mark workspace for ${body.company} submitted`, () =>
+          store.saveDraft({ ...draft, status: 'submitted', updatedAt: now }),
+        );
       }
 
       res.json({ application, changed: true });
@@ -3602,25 +3610,38 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
 
       const tracked = findApplication(store.load().applications, draft.company, draft.role);
+      /*
+       * Its own commit, not folded into the draft's above.
+       *
+       * The draft was already saved and committed by the time this row is
+       * written, so a write here that only touched disk left the tracker
+       * permanently out of the version history — on disk, in every read this
+       * process makes, and gone the moment something restores the store from
+       * git rather than the working tree. `withCommit` with auto-commit off
+       * costs nothing extra; with it on, the row gets the history entry every
+       * other write here gets.
+       */
       if (!tracked) {
-        store.upsertApplication({
-          id,
-          company: draft.company,
-          role: draft.role,
-          url: draft.url,
-          status: started,
-          resumeId: draft.resumeId,
-          source: draft.source,
-          /*
-           * Dated, like one made by hand. The tracker sorts on `appliedAt` and
-           * prints it as the date column, so an application started from the
-           * extension — the one you are working on right now — had a blank date
-           * and sat at the bottom of the list, under everything already sent.
-           * It is the date it started; `trackStatus` records when it was sent.
-           */
-          appliedAt: now,
-          history: [{ at: now, status: started, note }],
-        });
+        await withCommit(repo, autoCommit(), `Track application to ${draft.company}`, () =>
+          store.upsertApplication({
+            id,
+            company: draft.company,
+            role: draft.role,
+            url: draft.url,
+            status: started,
+            resumeId: draft.resumeId,
+            source: draft.source,
+            /*
+             * Dated, like one made by hand. The tracker sorts on `appliedAt` and
+             * prints it as the date column, so an application started from the
+             * extension — the one you are working on right now — had a blank date
+             * and sat at the bottom of the list, under everything already sent.
+             * It is the date it started; `trackStatus` records when it was sent.
+             */
+            appliedAt: now,
+            history: [{ at: now, status: started, note }],
+          }),
+        );
       } else if (body.actedOnForm && tracked.status === 'interested') {
         /*
          * And the moment it stops being a bookmark, it is moved on.
@@ -3629,7 +3650,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * been sent, answered, or closed is past this and must not be dragged
          * back by a keeper tick on a tab somebody left open.
          */
-        advance(store, tracked.id, 'applying', 'Started filling in the form');
+        await withCommit(repo, autoCommit(), `${tracked.id}: applying`, () =>
+          advance(store, tracked.id, 'applying', 'Started filling in the form'),
+        );
       }
 
       res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });

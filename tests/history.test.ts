@@ -356,6 +356,37 @@ describe('POST /store/save', () => {
   });
 });
 
+describe('workspace and application writes stay in the version history', () => {
+  /*
+   * Opening a workspace commits the draft, then — a moment later, once the
+   * tracker row is read back off disk — writes the application it starts or
+   * advances. That second write used to happen bare: on disk immediately, and
+   * never committed on its own, so a save left running is a save whose
+   * tracker has quietly stopped being recoverable.
+   */
+  it('commits the application row a new workspace opens, not only the draft', async () => {
+    await request(app).post('/api/workspace').send({ company: 'Acme', role: 'Engineer' }).expect(200);
+
+    const after = (await request(app).get('/api/config/store').expect(200)).body;
+    expect(after.pending).toEqual([]);
+
+    const log = (await request(app).get('/api/history').expect(200)).body.commits;
+    expect(log.map((c: { message: string }) => c.message)).toContain('Track application to Acme');
+  });
+
+  /*
+   * The other half of the same bug: marking a workspace submitted, once the
+   * application it belongs to has already gone out and been committed.
+   */
+  it('commits a workspace being marked submitted when the application is sent', async () => {
+    await request(app).post('/api/workspace').send({ company: 'Globex', role: 'Analyst' }).expect(200);
+    await request(app).post('/api/extension/sent').send({ company: 'Globex', role: 'Analyst' }).expect(200);
+
+    const after = (await request(app).get('/api/config/store').expect(200)).body;
+    expect(after.pending).toEqual([]);
+  });
+});
+
 describe('restoring a version', () => {
   it('rolls the resume back to what that version said', async () => {
     const first = await history();
