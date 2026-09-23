@@ -3305,6 +3305,27 @@ describe('pinning', () => {
     expect(again.body.spec.copiedFrom).toBe(res.body.spec.copiedFrom);
   });
 
+  /*
+   * The draft's resume can have been copied from a temporary one the sweep
+   * has since taken. The walk back to a base ended on that missing id and the
+   * route refused with "The store has no resume to start from", in a store
+   * full of them.
+   */
+  it('starts from the default base when the draft\'s resume came from one since swept', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Kestrel', role: 'Data Engineer', source: 'by hand' })
+      .expect(200);
+    const draftId = made.body.draft.id;
+    const first = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
+    const copy = t.store.load().resumes.find((r) => r.id === first.body.spec.id)!;
+    t.store.saveResume({ ...copy, copiedFrom: 'swept-last-week' });
+
+    const again = await request(app).post(`/api/workspace/${draftId}/variation`).send({});
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    expect(again.body.spec.copiedFrom).toBe(first.body.spec.copiedFrom);
+  });
+
   it('refuses to start a variation for a draft that is not there', async () => {
     const res = await request(app).post('/api/workspace/no-such-draft/variation').send({}).expect(400);
     expect(res.body.error).toMatch(/No draft/);

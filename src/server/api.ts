@@ -3827,6 +3827,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         seen.add(baseId);
         baseId = data.resumes.find((r) => r.id === baseId)?.copiedFrom ?? defaultBaseId(data.resumes);
       }
+      /*
+       * And somewhere that is still there. A copy made from a temporary
+       * resume the sweep has since taken walks back to an id with nothing
+       * behind it, and "The store has no resume to start from" is not true of
+       * a store full of them; the default is the answer `baseForCopy` gives.
+       */
+      if (!data.resumes.some((r) => r.id === baseId)) baseId = defaultBaseId(data.resumes);
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');
 
