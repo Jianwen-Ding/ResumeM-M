@@ -1171,3 +1171,52 @@ describe('a page the trail already holds is not read twice', () => {
     expect(merged.description).toContain('Only on the about page.');
   });
 });
+
+/*
+ * Somebody's messages are not the posting.
+ *
+ * A logged-in job board carries its messaging overlay on every page — the
+ * applicant's own conversations, other people's words — and a support chat
+ * widget sits on most careers sites. Both are real sentences, so the shape
+ * rule kept them, and the AI was handed "Priya Raman: Are you free Tuesday".
+ */
+describe('messaging overlays and chat widgets never reach the AI', () => {
+  const posting = '<main><h1>Platform Engineer</h1><p>You will own our Kafka pipeline end to end. Salary: $150,000.</p></main>';
+  const overlay = `<aside id="msg-overlay" class="msg-overlay-container"><h2>Messaging</h2><ul>
+    <li><p>Priya Raman: Are you free Tuesday for coffee? Let me know about the offer.</p></li>
+    <li><p>Sam Lee: Thanks for the referral last week, it went well.</p></li></ul></aside>`;
+  const widgets = [
+    '<div id="intercom-container"><div class="intercom-messenger"><p>Hi there! How can we help you today? Our team usually replies within an hour.</p></div></div>',
+    '<div id="drift-widget-container"><p>Hi there! How can we help you today? Our team usually replies within an hour.</p></div>',
+    '<div class="crisp-client"><p>Hi there! How can we help you today? Our team usually replies within an hour.</p></div>',
+  ];
+
+  it('drops a job board\'s messaging overlay, keeping the posting', () => {
+    const out = extractJob(`<html><body>${posting}${overlay}</body></html>`, 'https://www.linkedin.com/jobs/view/4411').description;
+    expect(out).not.toContain('Priya Raman');
+    expect(out).not.toContain('Thanks for the referral');
+    expect(out).toContain('You will own our Kafka pipeline end to end.');
+    expect(out).toContain('$150,000');
+  });
+
+  for (const widget of widgets) {
+    it(`drops a support chat widget (${/(?:id|class)="([^"]+)"/.exec(widget)![1]})`, () => {
+      const out = extractJob(`<html><body>${posting}${widget}</body></html>`, 'https://acme.example/careers/42').description;
+      expect(out).not.toContain('How can we help you today');
+      expect(out).toContain('You will own our Kafka pipeline end to end.');
+    });
+  }
+
+  it('keeps a posting for a live chat role, whatever its markup is called', () => {
+    const html = `<html><body><main class="job-livechat posting-chat-support"><h1>Live Chat Support Agent</h1>
+      <p>You will answer customers over live chat and messaging. Salary: $52,000.</p></main></body></html>`;
+    const out = extractJob(html, 'https://acme.example/careers/43').description;
+    expect(out).toContain('You will answer customers over live chat and messaging.');
+    expect(out).toContain('$52,000');
+  });
+
+  it('drops it even when the rest of the page is too thin to trim', () => {
+    const out = extractJob(`<html><body><p>Platform Engineer.</p>${overlay}</body></html>`, 'https://www.linkedin.com/jobs/view/4411').description;
+    expect(out).not.toContain('Priya Raman');
+  });
+});

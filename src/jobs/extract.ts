@@ -138,6 +138,16 @@ const CHROME_ROLES = /<([a-z][a-z0-9]*)\b[^>]*\brole\s*=\s*["'](?:navigation|ban
 const CHROME_NAMES =
   /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*\b(?:cookie|cookies|consent|gdpr|onetrust)\b[^"']*["'][^>]*>/gi;
 /*
+ * Messaging and support chat, by the names the widgets give themselves: a
+ * job board's messaging overlay (the applicant's own conversations, other
+ * people's words) and the chat bubble on a careers site. Real sentences, so
+ * the shape rule kept them — and nothing in either is ever about the posting.
+ * Removed outright, before anything else, so no fallback puts them back.
+ */
+const CHAT_NAMES =
+  /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*\b(?:msg-overlay\w*|msg-conversation\w*|intercom-(?:container|messenger|lightweight-app|launcher)|drift-(?:widget|frame)\w*|crisp-client|tawk-(?:min-container|bubble-container|chat-widget)|livechat-(?:widget|compact-container|eye-catcher)|chat-widget-(?:container|minimized)|hubspot-messages-iframe-container|zEWidget-launcher)\b[^"']*["'][^>]*>/gi;
+
+/*
  * Widgets that are not a landmark and not named for cookies, but are just as
  * clearly not the posting: the rail of other roles beside this one, and the
  * row of share-this-job icons. Named narrowly on purpose — "similar jobs" and
@@ -677,7 +687,8 @@ export function withoutChrome(html: string): string {
   return labelOtherPostings(trimChrome(html));
 }
 
-function trimChrome(html: string): string {
+function trimChrome(page: string): string {
+  const html = removeElements(page, CHAT_NAMES);
   let removedProseChars = 0;
   const track = (outerHtml: string) => {
     // A long `<select>` option list is never counted: it is always correct
