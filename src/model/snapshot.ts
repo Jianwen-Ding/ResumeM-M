@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import { withoutBom } from './bom.js';
 import { normalizeEntries, normalizeProfile, normalizeSkillGroups } from './normalize.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
 import type { Entry, Profile, ResumeSpec, SkillGroup, StoreData } from './types.js';
@@ -41,7 +42,7 @@ export type StoreSnapshot = Pick<StoreData, 'profile' | 'entries' | 'skillGroups
 function parse<T>(text: string | undefined, fallback: T, shaped?: (v: unknown) => boolean): T {
   if (!text?.trim()) return fallback;
   try {
-    const value = YAML.parse(text) ?? fallback;
+    const value = YAML.parse(withoutBom(text)) ?? fallback;
     return (shaped && !shaped(value) ? fallback : value) as T;
   } catch {
     // A commit mid-edit can hold unparseable YAML. That is a gap in the

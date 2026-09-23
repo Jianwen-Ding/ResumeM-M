@@ -52,7 +52,7 @@ import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/per
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
-import { Store } from '../model/store.js';
+import { Store, withoutBom } from '../model/store.js';
 import { isVariantField, layoutFor, RESUME_TIERS, type ResumeTier } from '../model/types.js';
 import type {
   AnswerBankItem,
@@ -4704,7 +4704,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       };
 
       const text = await readAt(path.posix.join('resumes', `${id}.yaml`));
-      const restored = text === undefined ? undefined : (YAML.parse(text) as ResumeSpec | null);
+      const restored = text === undefined ? undefined : (YAML.parse(withoutBom(text)) as ResumeSpec | null);
       if (!restored) {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }

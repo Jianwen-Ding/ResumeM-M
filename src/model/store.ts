@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
+import { withoutBom } from './bom.js';
 import { andList, newlyRepeated, type Option } from './duplicates.js';
 import { flattenResumes, needsFlattening } from './flatten.js';
 import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
@@ -134,7 +135,16 @@ export function removeFile(full: string, what: string): void {
  * file somebody made and has not filled in yet, and they stay the empty thing
  * they are.
  */
+export { withoutBom } from './bom.js';
+
 export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
+  /*
+   * A byte-order mark is how Notepad and a good many Windows tools start a
+   * UTF-8 file, and it made a hand-edited `skills.yaml` "not valid YAML" —
+   * one edit on Windows and the save would not open. It says nothing about
+   * the content, so it goes.
+   */
+  raw = withoutBom(raw);
   if (!raw.trim()) return fallback;
 
   let parsed: unknown;
