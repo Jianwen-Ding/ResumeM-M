@@ -643,6 +643,24 @@ describe('framing', () => {
     const replies = await exchange([`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`]);
     expect(replies).toEqual([]);
   });
+
+  /*
+   * A batch (`[{...}, {...}]`) is valid JSON on its own line, and destructuring
+   * an array gives `id: undefined` — the same shape as a notification, which
+   * gets no reply on purpose. That made a batch and a notification
+   * indistinguishable here, so a client that sent one and was waiting on a
+   * reply for the request inside it got nothing at all, forever.
+   */
+  it('answers a batch rather than waiting on it forever', async () => {
+    const replies = await exchange([`${JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'ping' }])}\n`]);
+    expect(replies).toHaveLength(1);
+    expect((replies[0]?.error as { code: number }).code).toBe(-32600);
+  });
+
+  it('still answers CRLF-terminated lines', async () => {
+    const replies = await exchange([`${JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' })}\r\n`]);
+    expect(replies).toEqual([{ jsonrpc: '2.0', id: 4, result: {} }]);
+  });
 });
 
 /* ------------------------------------------------------------------ *

@@ -67,6 +67,20 @@ export async function handle(
   tools: ToolDefinition[],
   serverInfo: { name: string; version: string },
 ): Promise<unknown | null> {
+  /*
+   * A batch — `[{...}, {...}]` rather than one object — is valid JSON-RPC and
+   * answered with silence here, because destructuring an array gives `id`
+   * `undefined` the same as a notification does, and a notification gets no
+   * reply by design. The difference matters: a notification is silence the
+   * client asked for, and this is silence for a request it is still waiting
+   * on. None of the five methods above batch anyone sends over this stdio
+   * transport, so rather than implement it, this says so — which is still an
+   * answer, and the one thing a hung client cannot get from saying nothing.
+   */
+  if (Array.isArray(request)) {
+    return ERROR(null, -32600, 'Batch requests are not supported; send one request per line.');
+  }
+
   const { id, method, params } = request;
 
   if (method === 'initialize') {

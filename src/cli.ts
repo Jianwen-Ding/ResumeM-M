@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
+import { ignoreBrokenPipe } from './cli-io.js';
 import { Repo, cloneRepo } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
@@ -15,6 +16,11 @@ import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
+
+// Every command here prints as it goes rather than buffering everything up
+// front, so every command can meet a reader that stops early. See cli-io.ts.
+ignoreBrokenPipe(process.stdout);
+ignoreBrokenPipe(process.stderr);
 
 const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
 /*
