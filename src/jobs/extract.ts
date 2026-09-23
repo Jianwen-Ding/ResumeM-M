@@ -646,8 +646,79 @@ export function withoutChrome(html: string): string {
   return trimmed;
 }
 
+/**
+ * The facts a JobPosting states in its own fields rather than in its prose.
+ *
+ * The description used to be the only field read past the title, company and
+ * city, so a board that states its salary, deadline, employment type or
+ * remote policy the structured way — `baseSalary`, `validThrough`,
+ * `employmentType`, `jobLocationType` — handed the AI a posting with none of
+ * them. On a page rendered by JavaScript those fields are often the only place
+ * the facts appear at all. Each becomes one plain line.
+ */
+function jsonLdFacts(obj: Record<string, unknown>): string[] {
+  const facts: string[] = [];
+  const text = (v: unknown): string => {
+    if (v == null) return '';
+    if (typeof v === 'string' || typeof v === 'number') return stripTags(String(v)).trim();
+    if (Array.isArray(v)) return v.map(text).filter(Boolean).join('; ');
+    if (typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      return text(o.name ?? o.description ?? o.value ?? o.credentialCategory ?? '');
+    }
+    return '';
+  };
+  const add = (label: string, value: string) => {
+    if (value) facts.push(`${label}: ${value}`);
+  };
+
+  const places = (Array.isArray(obj.jobLocation) ? obj.jobLocation : obj.jobLocation ? [obj.jobLocation] : [])
+    .map((place) => {
+      const a = ((place as Record<string, unknown>)?.address ?? {}) as Record<string, unknown>;
+      return [a.streetAddress, a.addressLocality, a.addressRegion, a.postalCode, a.addressCountry]
+        .map(text)
+        .filter(Boolean)
+        .join(', ');
+    })
+    .filter(Boolean);
+  add('Location', [...new Set(places)].join(' | '));
+  if (/telecommute/i.test(text(obj.jobLocationType))) add('Remote', 'yes (telecommute)');
+  add('Applicants must be located in', text(obj.applicantLocationRequirements));
+
+  const salary = obj.baseSalary as Record<string, unknown> | undefined;
+  if (salary && typeof salary === 'object') {
+    const v = (salary.value ?? {}) as Record<string, unknown>;
+    const amount =
+      v.minValue != null || v.maxValue != null
+        ? [v.minValue, v.maxValue].filter((x) => x != null).join('–')
+        : text(typeof salary.value === 'object' ? v.value : salary.value);
+    const unit = text(v.unitText ?? salary.unitText);
+    add('Salary', [text(salary.currency), amount, unit ? `per ${unit.toLowerCase()}` : ''].filter(Boolean).join(' '));
+  } else {
+    add('Salary', text(salary));
+  }
+  add('Employment type', text(obj.employmentType));
+  add('Apply by', text(obj.validThrough));
+  add('Posted', text(obj.datePosted));
+  add('Hours', text(obj.workHours));
+  add('Education', text(obj.educationRequirements));
+  add('Experience', text(obj.experienceRequirements));
+  add('Qualifications', text(obj.qualifications));
+  add('Responsibilities', text(obj.responsibilities));
+  add('Skills', text(obj.skills));
+  add('Benefits', text(obj.jobBenefits));
+  add('Other compensation', text(obj.incentiveCompensation));
+  return facts;
+}
+
+/**
+ * Letters and digits only, for asking "is this already said" across two
+ * renderings of the same text that break their lines differently.
+ */
+const bare = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
 /** Walk JSON-LD, which is the only structured source most boards agree on. */
-function fromJsonLd(html: string): Partial<ExtractedJob> | undefined {
+function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] }) | undefined {
   const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
   for (const block of blocks) {
     let parsed: unknown;
@@ -676,6 +747,7 @@ function fromJsonLd(html: string): Partial<ExtractedJob> | undefined {
           company: typeof org?.name === 'string' ? org.name : undefined,
           location: [addr?.addressLocality, addr?.addressRegion].filter(Boolean).join(', ') || undefined,
           description: typeof obj.description === 'string' ? stripTags(obj.description) : '',
+          facts: jsonLdFacts(obj),
           source: 'json-ld',
         };
       }
@@ -1142,7 +1214,32 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
   // substantially richer page.
   const ldText = ld?.description ?? '';
   const ldIsUsable = ldText.length >= 200 || ldText.length * 2 >= text.length;
-  const description = ldText.length > 0 && ldIsUsable ? ldText : text;
+
+  /*
+   * And never at the cost of what the rest of the page says.
+   *
+   * Taking the structured description *instead of* the page dropped every
+   * fact that only the page carried — a salary box beside the posting, a
+   * deadline, a visa line — whenever the structured text was long enough to
+   * win. So the structured fields come first, then its description, then
+   * each line of the page (already without its chrome) that neither of those
+   * already says. Compared on letters and digits only, so the same paragraph
+   * broken differently in the two places is not said twice.
+   */
+  let description = text;
+  if (ld && (ldText.length > 0 || ld.facts.length > 0)) {
+    const said = bare(ldText);
+    const facts = ld.facts.filter((fact) => !said.includes(bare(fact.slice(fact.indexOf(':') + 1))));
+    const known = said + bare(facts.join(' '));
+    const rest = text
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => bare(line) && !known.includes(bare(line)));
+    description =
+      ldText.length > 0 && ldIsUsable
+        ? [facts.join('\n'), ldText, rest.join('\n')].filter(Boolean).join('\n\n')
+        : [facts.join('\n'), text].filter(Boolean).join('\n\n');
+  }
 
   return {
     title,

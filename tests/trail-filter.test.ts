@@ -958,3 +958,74 @@ describe('links with ids that are not other postings', () => {
     }
   });
 });
+
+/*
+ * A posting that states its facts the structured way.
+ *
+ * `extractJob` read the JSON-LD description and nothing else past the title,
+ * company and city, and when that description was long enough it replaced
+ * the page outright. So the salary, the deadline, the employment type and the
+ * remote policy — fields, not prose, on most boards — never reached the AI,
+ * and neither did anything the page said beside the posting.
+ */
+describe('a JobPosting that states facts in its fields, and a page that says more', () => {
+  const LONG = 'You will own our Kafka pipeline end to end, from ingestion to the warehouse. '.repeat(4);
+  const ld = (fields: Record<string, unknown>) =>
+    `<script type="application/ld+json">${JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'JobPosting',
+      title: 'Platform Engineer',
+      hiringOrganization: { '@type': 'Organization', name: 'Acme' },
+      description: `<p>${LONG}</p>`,
+      ...fields,
+    })}</script>`;
+  const nav = `<nav>${['Home', 'About', 'Press', 'Blog', 'Contact', 'Login', 'Investors', 'Sign up']
+    .map((t) => `<a href="/${t.toLowerCase()}">${t}</a>`)
+    .join('')}</nav>`;
+
+  it('keeps the salary, deadline, employment type, remote policy and places from the fields', () => {
+    const html = `<html><head>${ld({
+      baseSalary: { '@type': 'MonetaryAmount', currency: 'USD', value: { '@type': 'QuantitativeValue', minValue: 140000, maxValue: 170000, unitText: 'YEAR' } },
+      validThrough: '2026-10-31',
+      employmentType: 'FULL_TIME',
+      jobLocationType: 'TELECOMMUTE',
+      applicantLocationRequirements: { '@type': 'Country', name: 'USA' },
+      jobLocation: [
+        { '@type': 'Place', address: { addressLocality: 'Boston', addressRegion: 'MA' } },
+        { '@type': 'Place', address: { addressLocality: 'Austin', addressRegion: 'TX' } },
+      ],
+    })}</head><body>${nav}<div id="root">Loading…</div></body></html>`;
+    const out = extractJob(html, 'https://boards.greenhouse.io/acme/jobs/1').description;
+    expect(out).toContain('140000–170000');
+    expect(out).toContain('USD');
+    expect(out).toContain('2026-10-31');
+    expect(out).toContain('FULL_TIME');
+    expect(out).toMatch(/telecommute/i);
+    expect(out).toContain('USA');
+    expect(out).toContain('Boston, MA');
+    expect(out).toContain('Austin, TX');
+    expect(out).toContain('Kafka pipeline');
+  });
+
+  it('keeps what only the page says beside a long structured description', () => {
+    const html = `<html><head>${ld({})}</head><body>${nav}<main><h1>Platform Engineer</h1><p>${LONG}</p></main>
+      <aside><h3>At a glance</h3><p>Salary: $140,000 – $170,000</p><p>Visa sponsorship is not available for this role.</p><p>Applications close October 31.</p></aside></body></html>`;
+    const out = extractJob(html, 'https://acme.example/careers/platform-engineer').description;
+    expect(out).toContain('$140,000 – $170,000');
+    expect(out).toContain('Visa sponsorship is not available for this role.');
+    expect(out).toContain('Applications close October 31.');
+  });
+
+  it('does not say the description twice when the page repeats it', () => {
+    const html = `<html><head>${ld({ employmentType: 'FULL_TIME' })}</head><body>${nav}<main><p>${LONG}</p></main></body></html>`;
+    const out = extractJob(html, 'https://acme.example/careers/platform-engineer').description;
+    expect(out.split('You will own our Kafka pipeline end to end').length - 1).toBe(4);
+  });
+
+  it('adds none of the site navigation', () => {
+    const html = `<html><head>${ld({})}</head><body>${nav}<main><p>${LONG}</p></main></body></html>`;
+    const out = extractJob(html, 'https://acme.example/careers/platform-engineer').description;
+    expect(out).not.toContain('Investors');
+    expect(out).not.toContain('Press');
+  });
+});
