@@ -6,6 +6,7 @@ import {
   matchAnswer,
   matchAnswers,
   questionSimilarity,
+  redactIdentifiers,
   relevantLetters,
   sameQuestion,
 } from '../src/jobs/answers.js';
@@ -700,5 +701,38 @@ describe('a label that is not an employer', () => {
     const why = matchAnswer('Why do you want to work here?', withAcme, { company: 'Helios' });
     expect(why.namesAnother).toBe('Acme');
     expect(why.confident).toBe(false);
+  });
+});
+
+describe('identifiers taken out before anything reaches the AI', () => {
+  /*
+   * Only an SSN written with its dashes was caught. Labelled and without them,
+   * or a Canadian SIN, a UK National Insurance number, a driver's licence or a
+   * tax id, went to the model as written.
+   */
+  it.each([
+    ['SSN: 123456789', '123456789'],
+    ['Social Security Number 123456789', '123456789'],
+    ['SIN: 123 456 789', '123 456 789'],
+    ['National Insurance number: AB 12 34 56 C', 'AB 12 34 56 C'],
+    ['NI: JK 98 76 54 A', 'JK 98 76 54 A'],
+    ['my NI number is QQ123456C', 'QQ123456C'],
+    ["Driver's license: D1234567", 'D1234567'],
+    ['Driving licence number MORGA753116SM9IJ', 'MORGA753116SM9IJ'],
+    ['Tax ID: 912-34-5678', '912-34-5678'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'Call me at 617-555-0142',
+    'Order 123456789 shipped',
+    'Built a SIN wave generator',
+    'I hold a driver’s license and a car',
+    'Improved throughput by 123456 requests a day',
+  ])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
   });
 });

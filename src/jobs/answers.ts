@@ -308,6 +308,23 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
     /\b(passport(?:\s+(?:no\.?|number|#))?)(\s*[:\-#]?\s*)([A-Z]{0,2}\d[A-Z0-9]{5,8})\b/gi,
     (_m, label, gap) => `${label}${gap}[redacted]`,
   );
+  /*
+   * The other national numbers, where they are named. An SSN without its
+   * dashes, a Canadian SIN, a driver's licence, a tax id: a bare nine digits
+   * is an order number as often as anything, so only a number that follows
+   * its own label, and only one with five digits or more in it — "SIN wave",
+   * "a driver's license and a car" are words, and are left.
+   */
+  out = out.replace(
+    /\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin)(\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ \-][A-Z]?\d[A-Z0-9]*)*)/gi,
+    (m, label: string, gap: string, value: string) => {
+      if ((value.match(/\d/g) ?? []).length < 5) return m;
+      redacted++;
+      return `${label}${gap}[redacted]`;
+    },
+  );
+  // A UK National Insurance number has a shape nothing else shares.
+  out = hide(out, /\b[A-CEGHJ-PR-TW-Z]{2} ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b/g);
   return { text: out, redacted };
 }
 
