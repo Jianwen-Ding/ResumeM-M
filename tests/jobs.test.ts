@@ -287,7 +287,16 @@ const data: StoreData = {
   config: DEFAULT_CONFIG,
 };
 
-const base: ResumeSpec = { id: 'base', label: 'Base' };
+/*
+ * A base that prints its entries. Resumes stand alone now, and one with no
+ * sections prints nothing — so matching was only ever answering for lines on
+ * the page because it read the whole store. See `printed` in match.ts.
+ */
+const PRINTED = [
+  { kind: 'experience' as const, heading: 'Experience', entries: ['exp'] },
+  { kind: 'education' as const, heading: 'Education', entries: ['edu', 'edu2'] },
+];
+const base: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED };
 
 /**
  * A tailored resume is a copy of the base with the posting's decisions laid
@@ -446,6 +455,65 @@ describe('variant matching', () => {
  * The one signal allowed to reach a date: a tag the applicant wrote on their
  * own variant, naming the kind of posting it belongs on.
  */
+describe('matching only what the resume prints', () => {
+  /*
+   * The match read every entry in the store, so the card offered a Kafka
+   * wording for a job this resume does not list, and for a line it had turned
+   * off — boxes that changed nothing on the page when ticked.
+   */
+  const other: Entry = {
+    id: 'exp_other',
+    kind: 'experience',
+    title: 'Other Co.',
+    bullets: [
+      {
+        id: 'b_other',
+        default: 'v_plain',
+        variants: [
+          { id: 'v_plain', label: 'Plain', text: 'Moved data around' },
+          { id: 'v_kafka2', label: 'Kafka', text: 'Ran Kafka streaming jobs', tags: ['kafka', 'streaming'] },
+        ],
+      },
+    ],
+  };
+  const twoLines: Entry = {
+    ...entry,
+    bullets: [
+      ...(entry.bullets ?? []),
+      {
+        id: 'b_hidden',
+        default: 'v_plain',
+        variants: [
+          { id: 'v_plain', label: 'Plain', text: 'Wrote tests' },
+          { id: 'v_kafka3', label: 'Kafka', text: 'Tested Kafka streaming consumers', tags: ['kafka', 'streaming'] },
+        ],
+      },
+    ],
+  };
+  const store: StoreData = { ...data, entries: [twoLines, eduEntry, other] };
+
+  it('offers no wording for an entry the resume does not list', () => {
+    const result = matchVariants(store, base, { keywords: ['kafka', 'streaming'] });
+    expect(result.choices.b_pipeline).toBe('v_kafka');
+    expect(result.choices.b_other).toBeUndefined();
+  });
+
+  it('nor for a line the resume has switched off', () => {
+    const oneLine: ResumeSpec = {
+      ...base,
+      sections: [{ kind: 'experience', entries: ['exp'], bullets: { exp: ['b_pipeline'] } }],
+    };
+    const result = matchVariants(store, oneLine, { keywords: ['kafka', 'streaming'] });
+    expect(result.choices.b_pipeline).toBe('v_kafka');
+    expect(result.choices.b_hidden).toBeUndefined();
+  });
+
+  it('while an entry with no list of its own offers every line it prints', () => {
+    const result = matchVariants(store, base, { keywords: ['kafka', 'streaming'] });
+    expect(result.choices.b_hidden).toBe('v_kafka3');
+  });
+});
+
 describe('matching on the posting’s level', () => {
   const intern = detectLevel({ title: 'Software Engineer Intern' });
   const newgrad = detectLevel({ title: 'Software Engineer, New Grad' });
@@ -456,7 +524,7 @@ describe('matching on the posting’s level', () => {
   });
 
   it('switches back off it when the next posting is a new grad role', () => {
-    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu.dates': 'v_dec' } };
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED, choices: { 'edu.dates': 'v_dec' } };
     const result = matchVariants(data, onIntern, { keywords: [], level: newgrad });
     expect(result.choices['edu.dates']).toBe('v_may');
   });
@@ -498,7 +566,7 @@ describe('matching on the posting’s level', () => {
   });
 
   it('and marks the fall back off a level the same way', () => {
-    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu.dates': 'v_dec' } };
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED, choices: { 'edu.dates': 'v_dec' } };
     const result = matchVariants(data, onIntern, { keywords: [], level: newgrad });
     expect(result.rationale.find((r) => r.key === 'edu.dates')?.instruction).toBe(true);
   });
@@ -541,7 +609,7 @@ describe('matching on the posting’s level', () => {
         },
       ],
     };
-    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu2.dates': 'v_intern' } };
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED, choices: { 'edu2.dates': 'v_intern' } };
     expect(matchVariants(oneSided, onIntern, { keywords: [], level: newgrad }).choices['edu2.dates']).toBe('v_plain');
     // And it stays put on the posting it was written for.
     expect(matchVariants(oneSided, onIntern, { keywords: [], level: intern }).choices['edu2.dates']).toBeUndefined();

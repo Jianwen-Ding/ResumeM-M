@@ -181,8 +181,28 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
     }
   };
 
+  /*
+   * Only what this resume prints.
+   *
+   * This walked every entry in the store, so a wording swap was proposed for
+   * a job the resume does not list and for a line it has switched off — rows
+   * on the card whose box, ticked, changed nothing on the page. The same rule
+   * the resolver prints by: an entry a section lists, and in it the lines that
+   * section names for it, or every line it holds when the section names none.
+   */
+  const printed = new Map<string, Set<string> | null>();
+  for (const section of base.sections ?? []) {
+    for (const id of section.entries ?? []) {
+      const listed = section.bullets?.[id];
+      const prior = printed.get(id);
+      if (!listed || prior === null) printed.set(id, null);
+      else printed.set(id, new Set([...(prior ?? []), ...listed]));
+    }
+  }
+
   for (const entry of data.entries) {
-    if (entry.archived) continue;
+    if (entry.archived || !printed.has(entry.id)) continue;
+    const lines = printed.get(entry.id);
     for (const f of ['title', 'dates', 'subtitle', 'location'] as const) {
       const field = entry[f];
       if (!isVariantField(field)) continue;
@@ -193,7 +213,7 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
       consider(`${entry.id}.${f}`, field.variants, field.default, f !== 'dates');
     }
     for (const b of entry.bullets ?? []) {
-      if (b.archived) continue;
+      if (b.archived || (lines && !lines.has(b.id))) continue;
       consider(b.id, b.variants, b.default);
     }
   }
