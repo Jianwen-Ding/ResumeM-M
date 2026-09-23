@@ -534,6 +534,81 @@ function removeElements(
 }
 
 /**
+ * Where an element opened at `open` closes, counting nested elements of the
+ * same tag — the same walk `removeElements` makes — or -1 if it never does.
+ */
+function elementEnd(html: string, open: RegExpExecArray): number {
+  const tag = (open[1] ?? '').toLowerCase();
+  if (open[0].endsWith('/>')) return open.index + open[0].length;
+  const scan = new RegExp(`<(/?)${tag}\\b[^>]*?(/?)>`, 'gi');
+  scan.lastIndex = open.index + open[0].length;
+  let depth = 1;
+  for (let m = scan.exec(html); m; m = scan.exec(html)) {
+    if (m[2]) continue;
+    depth += m[1] ? -1 : 1;
+    if (depth === 0) return scan.lastIndex;
+  }
+  return -1;
+}
+
+/*
+ * A block that opens by saying it lists other openings: "Similar jobs",
+ * "More roles at Acme". Read off the start of the block's own text only, so a
+ * posting that mentions "other roles" in passing is never taken for one.
+ */
+const OTHER_POSTINGS_HEADING =
+  /^\W*(?:(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?|opportunities)\b|you may also like\b|people also viewed\b)/i;
+const SIDE_REGION = /^<(?:aside\b|[a-z][a-z0-9]*\b[^>]*\brole\s*=\s*["']complementary["'])/i;
+const OTHER_POSTINGS_MARKER = '<p>[Other openings listed on this site — not this job:]</p>';
+
+/**
+ * Say which parts of the page are about other jobs, rather than cut them.
+ *
+ * A "Similar jobs" rail that carries its own salaries and cities is kept by
+ * `keepAmbiguousElement` — digits and places are what facts look like, and
+ * losing one is the failure that matters — and a card list under "More roles
+ * at Acme" in a plain `<section>` is not a chrome candidate at all. Either way
+ * the AI was handed "$90,000–$110,000, Boston" beside this job's own range,
+ * with nothing saying it belonged to a different posting. Cutting it risks
+ * the real fact that a wrong call would take with it; labelling it costs
+ * nothing, so every such block keeps its text and gains a line saying what it
+ * is.
+ *
+ * Never more than half the page, so a wrapper around the whole posting that
+ * happens to start with a rail is not mistaken for one.
+ */
+function labelOtherPostings(html: string): string {
+  const pageText = plainText(html).length;
+  const opening = /<(aside|section|div|ul|ol)\b[^>]*>/gi;
+  let out = html;
+  let from = 0;
+  for (;;) {
+    opening.lastIndex = from;
+    const open = opening.exec(out);
+    if (!open) return out;
+    const end = elementEnd(out, open);
+    if (end === -1) {
+      from = open.index + open[0].length;
+      continue;
+    }
+    const outer = out.slice(open.index, end);
+    const text = plainText(outer);
+    const listsOthers =
+      text.length < pageText * 0.5 &&
+      !FACTS_BOX_HEADING.test(text.slice(0, 60)) &&
+      ((OTHER_POSTINGS_HEADING.test(text.slice(0, 120)) && hrefsIn(outer).length >= 2) ||
+        (SIDE_REGION.test(open[0]) && linksToOtherPostings(outer)));
+    if (listsOthers) {
+      const at = open.index + open[0].length;
+      out = `${out.slice(0, at)}${OTHER_POSTINGS_MARKER}${out.slice(at)}`;
+      from = end + OTHER_POSTINGS_MARKER.length;
+      continue;
+    }
+    from = open.index + open[0].length;
+  }
+}
+
+/**
  * Below this, restoring the whole page is cheaper than trusting the trim: a
  * page this short was never going to be dominated by chrome in the first
  * place, so there is nothing to gain by cutting it further and something
@@ -574,6 +649,10 @@ const PROSE_SAFETY_NET_CHARS = 120;
  * is not one.
  */
 export function withoutChrome(html: string): string {
+  return labelOtherPostings(trimChrome(html));
+}
+
+function trimChrome(html: string): string {
   let removedProseChars = 0;
   const track = (outerHtml: string) => {
     // A long `<select>` option list is never counted: it is always correct

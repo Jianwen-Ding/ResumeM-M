@@ -1029,3 +1029,61 @@ describe('a JobPosting that states facts in its fields, and a page that says mor
     expect(out).not.toContain('Press');
   });
 });
+
+/*
+ * Other jobs' salaries and cities, kept but never passed off as this job's.
+ *
+ * A "Similar jobs" rail that carries its own figures is kept — digits are
+ * what a fact looks like — and a card list under "More roles at Acme" in a
+ * plain <section> is not a chrome candidate at all. Both reached the AI as
+ * "$90,000–$110,000, Boston" beside this job's own range, unmarked.
+ */
+describe('a list of other openings is labelled, not cut and not passed off as this job', () => {
+  const MARK = '[Other openings listed on this site — not this job:]';
+  const main = '<main><h1>Platform Engineer</h1><p>You will own our Kafka pipeline. Requires 3+ years of Go. Salary: $150,000–$180,000.</p></main>';
+  const filler = `<p>${'We build tools for teams that ship software every day and care about craft. '.repeat(6)}</p>`;
+  const url = 'https://acme.example/careers/jobs/platform-engineer-4410';
+
+  it('labels a similar-jobs rail that carries salaries, and keeps its text', () => {
+    const html = `<html><body>${main}<aside><h3>Similar jobs</h3><ul>
+      <li><a href="/jobs/4411">Data Engineer</a> Boston · $90,000–$110,000</li>
+      <li><a href="/jobs/4412">Backend Engineer</a> Remote · $95,000–$120,000</li></ul></aside>${filler}</body></html>`;
+    const out = extractJob(html, url).description;
+    expect(out).toContain(MARK);
+    expect(out).toContain('$90,000–$110,000');
+    expect(out.indexOf(MARK)).toBeLessThan(out.indexOf('$90,000–$110,000'));
+    expect(out.indexOf('$150,000–$180,000')).toBeLessThan(out.indexOf(MARK));
+  });
+
+  it('labels a card list under "More roles at Acme" in a plain section', () => {
+    const html = `<html><body>${main}<section class="related"><h2>More roles at Acme</h2>
+      <div class="card"><a href="/careers/jobs/data-engineer-4411"><h4>Data Engineer</h4><p>Boston, MA</p><p>$90,000–$110,000</p></a></div>
+      <div class="card"><a href="/careers/jobs/site-reliability-engineer-4413"><h4>Site Reliability Engineer</h4><p>$100,000–$130,000</p></a></div>
+      </section>${filler}</body></html>`;
+    const out = extractJob(html, url).description;
+    expect(out).toContain(MARK);
+    expect(out.indexOf(MARK)).toBeLessThan(out.indexOf('$90,000–$110,000'));
+  });
+
+  it('labels a side region whose links are all other postings, even with no heading', () => {
+    const html = `<html><body>${main}<aside>
+      <a href="/jobs/4411">Data Engineer</a><p>$90,000–$110,000</p>
+      <a href="/jobs/4412">Backend Engineer</a><p>$95,000–$120,000</p></aside>${filler}</body></html>`;
+    expect(extractJob(html, url).description).toContain(MARK);
+  });
+
+  it('does not label a posting that mentions other roles in passing', () => {
+    const html = `<html><body><main><h1>Platform Engineer</h1><div><p>You will own our Kafka pipeline.</p>
+      <p>More roles like this one will open next year; see <a href="/jobs/4411">Data Engineer</a> and <a href="/jobs/4412">SRE</a>.</p></div></main>${filler}</body></html>`;
+    // The block that starts with "More roles…" is a <p>, not a list; the div around it starts with the posting.
+    expect(extractJob(html, url).description).not.toContain(MARK);
+  });
+
+  it('labels only the rail, not a wrapper around the posting and the rail together', () => {
+    const html = `<html><body><div id="app">${main}<aside><h3>Similar jobs</h3>
+      <a href="/jobs/4411">Data Engineer</a> $90,000–$110,000 <a href="/jobs/4412">SRE</a> $100,000</aside></div>${filler}</body></html>`;
+    const out = extractJob(html, url).description;
+    expect(out.split(MARK).length - 1).toBe(1);
+    expect(out.indexOf('$150,000–$180,000')).toBeLessThan(out.indexOf(MARK));
+  });
+});
