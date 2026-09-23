@@ -631,3 +631,74 @@ describe('earlier letters to the same employer, however it is written', () => {
     expect(relevantLetters(letters as never, { company: 'Acme Labs', role: 'Engineer' })[0]?.id).toBe('l1');
   });
 });
+
+describe('a label that is not an employer', () => {
+  /*
+   * Every variant's label was taken for a company, so the seed bank's own
+   * "May 2026" answer, labelled "May 2026", named an employer called "May
+   * 2026" — and the graduation date, the sponsorship "Yes", and anything
+   * saved from a form under "Chosen on a form" or "Saved" came back never
+   * confident, with the card warning that they named somebody else.
+   */
+  const bank: AnswerBankItem[] = [
+    {
+      id: 'ans_grad',
+      question: 'What is your expected graduation date?',
+      default: 'v_may',
+      variants: [
+        { id: 'v_may', label: 'May 2026', text: 'May 2026' },
+        { id: 'v_dec', label: 'December 2026', text: 'December 2026' },
+      ],
+    },
+    {
+      id: 'ans_sponsor',
+      question: 'Will you now or in the future require sponsorship?',
+      default: 'v_yes',
+      variants: [
+        { id: 'v_no', label: 'No', text: 'No' },
+        { id: 'v_yes', label: 'Yes', text: 'Yes' },
+      ],
+    },
+    {
+      id: 'ans_hear',
+      question: 'How did you hear about us?',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'A friend saved the posting for me' }],
+    },
+    {
+      id: 'ans_relocate',
+      question: 'Are you willing to relocate?',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Saved', text: 'Yes, anywhere on the east coast' }],
+    },
+  ];
+
+  it('does not treat an answer that repeats its own label as naming an employer', () => {
+    const grad = matchAnswer('What is your expected graduation date?', bank, { company: 'Helios' });
+    expect(grad.namesAnother).toBeUndefined();
+    expect(grad.confident).toBe(true);
+    const sponsor = matchAnswer('Will you now or in the future require sponsorship?', bank, { company: 'Helios' });
+    expect(sponsor.namesAnother).toBeUndefined();
+    expect(sponsor.confident).toBe(true);
+  });
+
+  it('nor the labels the tools themselves give saved answers', () => {
+    const heard = matchAnswer('How did you hear about us?', bank, { company: 'Helios' });
+    expect(heard.namesAnother).toBeUndefined();
+  });
+
+  it('while a company label still vetoes an answer that names that company', () => {
+    const withAcme: AnswerBankItem[] = [
+      ...bank,
+      {
+        id: 'ans_why',
+        question: 'Why do you want to work here?',
+        default: 'v_acme',
+        variants: [{ id: 'v_acme', label: 'Acme', text: 'Acme builds the rockets I grew up watching.' }],
+      },
+    ];
+    const why = matchAnswer('Why do you want to work here?', withAcme, { company: 'Helios' });
+    expect(why.namesAnother).toBe('Acme');
+    expect(why.confident).toBe(false);
+  });
+});

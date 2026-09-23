@@ -367,13 +367,31 @@ function mentions(text: string, name: string): boolean {
   return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu').test(text);
 }
 
-/** Every employer the bank has written an answer for. */
+/*
+ * Labels the tools give an answer themselves, which name no one: the server's
+ * "Saved", the extension's "Chosen on a form", the seed bank's "Generic (edit
+ * per company)".
+ */
+const TOOL_LABEL = /^(saved|chosen on a form|generic\b.*|default|base)$/i;
+
+/**
+ * Every employer the bank has written an answer for.
+ *
+ * A label is taken for one only when it could be one. Every label used to be,
+ * so the seed bank's "May 2026" — the label of the answer "May 2026" — named
+ * an employer called "May 2026", and the graduation date, the sponsorship
+ * "Yes" and anything saved from a form came back never confident, the card
+ * warning that each named somebody else. A label that only repeats its own
+ * answer names the answer; the tools' own labels name nobody.
+ */
 function employersInBank(bank: AnswerBankItem[]): string[] {
   const names = new Set<string>();
   for (const item of bank) {
     for (const v of item.variants) {
       const label = (v.label ?? '').trim();
-      if (label.length >= 3) names.add(label);
+      if (label.length < 3 || TOOL_LABEL.test(label)) continue;
+      if (label.toLowerCase() === (v.text ?? '').trim().toLowerCase()) continue;
+      names.add(label);
     }
   }
   return [...names];
