@@ -841,6 +841,82 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * Coming back to the tab after the extension changed the resume    *
+     * -------------------------------------------------------------- */
+
+    /*
+     * The extension writes the same tailored copy this tab edits. The tab
+     * kept its own copy and its edit overlays, and wrote them whole with the
+     * next edit — one tick after coming back threw the extension's change
+     * away.
+     */
+    console.log('\nComing back after the resume was changed in another tab');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const group = store.skillGroups?.find((g) => g.items.length >= 4);
+      const scratch = 'editor-other-tab';
+      if (!group) {
+        check('there is a skills group with four skills', false, 'none in the starter save');
+      } else {
+        const [a, b, c, d] = group.items.map((i) => i.id);
+        const put = (items) =>
+          fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              label: 'Other tab scratch',
+              sections: [{ kind: 'skills', entries: [], groups: [group.id], items: { [group.id]: items } }],
+            }),
+          });
+        const saved = async () => {
+          const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+          return resumes.find((r) => r.id === scratch)?.sections?.[0]?.items?.[group.id];
+        };
+        const settle = async (want) => {
+          let got;
+          for (let waited = 0; waited < 20_000; waited += 400) {
+            got = await saved();
+            if (JSON.stringify(got) === JSON.stringify(want)) break;
+            await new Promise((r) => setTimeout(r, 400));
+          }
+          return got;
+        };
+        const chip = (text) => page.locator('.skill-chip', { hasText: text }).first();
+        await put([a, b]);
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          await chip(group.items[2].text).waitFor({ timeout: 30_000 });
+          // Here: tick the third.
+          await chip(group.items[2].text).click();
+          await settle([a, b, c]);
+          // Away: the extension files the copy with all four on it.
+          const flip = (visible) =>
+            page.evaluate((v) => {
+              Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (v ? 'visible' : 'hidden') });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }, visible);
+          await flip(false);
+          await new Promise((r) => setTimeout(r, 600));
+          await put([a, b, c, d]);
+          await flip(true);
+          await page.locator('.skill-chip.on', { hasText: group.items[3].text }).first().waitFor({ timeout: 10_000 }).catch(() => undefined);
+          // Back here: untick the first.
+          await chip(group.items[0].text).click();
+          const got = await settle([b, c, d]);
+          check('an edit after coming back keeps what the other tab did', JSON.stringify(got) === JSON.stringify([b, c, d]), JSON.stringify(got));
+        } finally {
+          await page.evaluate(() => {
+            delete document.visibilityState;
+          });
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
+      }
+    }
+
+    /* -------------------------------------------------------------- *
      * Adding a line to an entry on the resume you are on               *
      *                                                                  *
      * The same gap as the skill above, one level down: "+ Add bullet"  *

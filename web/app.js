@@ -187,6 +187,33 @@ function draftedFrom(kind) {
   return `Written in your voice, from ${from} — not from nothing.`;
 }
 
+/**
+ * Coming back to this tab, take up what was changed while it was away.
+ *
+ * "Edit in ResumeM-M" sends people here from the extension and back again,
+ * and the extension writes the same tailored copy — ticking a suggestion,
+ * filing the application. This tab kept its copy of the store and its edit
+ * overlays, and those are what the next auto-save writes whole: one tick
+ * here after coming back wrote the extension's changes away. Leaving the tab
+ * already writes everything pending, so on return there is nothing of this
+ * tab's to lose — and where something is still pending, nothing is done.
+ */
+async function refreshOnReturn() {
+  if (!state.store || state.masterView || state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  const before = JSON.stringify(resumeById(state.resumeId) ?? null);
+  const had = state.resumeId;
+  await loadStore();
+  // Something started while the store was being read: that edit is newer.
+  if (state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  if (state.resumeId !== had || JSON.stringify(resumeById(state.resumeId) ?? null) === before) return;
+  // Everything the overlays held was written on the way out; what is stored
+  // now is newer than they are.
+  clearEdits();
+  render();
+  scheduleRender();
+  setStatus('Updated with changes made in another tab.');
+}
+
 /** Forget every unsaved edit — used when switching resumes. */
 function clearEdits() {
   state.choices = {};
@@ -10344,6 +10371,7 @@ async function boot() {
   // does not, reliably.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushEdits().catch(() => {});
+    else refreshOnReturn().catch(() => {});
   });
   // The preview keeps itself current; this is only for the rare "recompile it
   // anyway" — after changing the LaTeX engine, say.
