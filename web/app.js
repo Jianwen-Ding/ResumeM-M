@@ -2499,9 +2499,15 @@ function skillsBlock(section) {
          * In the group's order, not the order the boxes were clicked. The
          * list is what prints, in its own order, so unticking Python and
          * ticking it again moved it to the end of the line on the page while
-         * the chips here stayed where they were.
+         * the chips here stayed where they were. An id the group no longer
+         * has rides along behind them: dropping it is the "no longer in your
+         * store" warning's decision, not a side effect of another box.
          */
-        state.skillEdits = { ...(state.skillEdits ?? {}), [gid]: group.items.map((i) => i.id).filter((id) => cur.has(id)) };
+        const known = group.items.map((i) => i.id);
+        state.skillEdits = {
+          ...(state.skillEdits ?? {}),
+          [gid]: [...known.filter((id) => cur.has(id)), ...[...cur].filter((id) => !known.includes(id))],
+        };
         markDirty();
         render();
       };
