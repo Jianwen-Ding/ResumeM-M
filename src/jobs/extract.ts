@@ -1707,6 +1707,43 @@ export interface MergedJob extends ExtractedJob {
  * repeating what the model would have wanted twice, which costs a little
  * budget and confuses nothing.
  */
+/** The most of a trail the AI is handed at once. */
+const MERGED_CAP = 60_000;
+const TRIMMED = '\n[… the rest of this page was trimmed to fit]';
+
+/**
+ * Every page of the trail within `MERGED_CAP`, each keeping as much of itself
+ * as a fair share allows.
+ *
+ * Cut from the end, the cap fell on whatever came last — and the last page is
+ * nearly always the application form, the one whose questions the answers are
+ * written for, while a careers listing earlier in the trail can be tens of
+ * thousands of characters on its own. So the space is shared out instead: a
+ * page shorter than its share keeps all of itself and hands the rest on, and
+ * only the pages longer than what is left are cut, all to the same length.
+ */
+function fitTrail(parts: { head: string; text: string }[]): string[] {
+  const joined = parts.map((p) => p.head + p.text);
+  const total = joined.reduce((n, s) => n + s.length + 2, 0);
+  if (total <= MERGED_CAP) return joined;
+
+  let budget = MERGED_CAP - parts.reduce((n, p) => n + p.head.length + 2, 0);
+  const lengths = parts.map((p) => p.text.length).sort((a, b) => a - b);
+  let cap = Infinity;
+  for (let i = 0; i < lengths.length; i++) {
+    const share = budget / (lengths.length - i);
+    if (lengths[i]! <= share) {
+      budget -= lengths[i]!;
+      continue;
+    }
+    cap = Math.max(0, Math.floor(share));
+    break;
+  }
+  return parts.map(({ head, text }) =>
+    head + (text.length > cap ? `${text.slice(0, Math.max(0, cap - TRIMMED.length))}${TRIMMED}` : text),
+  );
+}
+
 export function mergeJobPages(pages: PageSource[]): MergedJob {
   const read = pages
     .filter((p) => p?.html?.trim())
@@ -1728,15 +1765,20 @@ export function mergeJobPages(pages: PageSource[]): MergedJob {
   });
   const best = describing[0]!;
 
-  const sections: string[] = [];
+  const parts: { head: string; text: string }[] = [];
   for (const { page, verdict, job } of read) {
     const text = job.description.trim();
     if (!text) continue;
     const where = page.title?.trim() || page.url || 'A page';
-    sections.push(`## ${where} (${verdict.kind})\n${page.url ?? ''}\n\n${text}`);
+    parts.push({ head: `## ${where} (${verdict.kind})\n${page.url ?? ''}\n\n`, text });
   }
 
-  const description = (sections.length > 1 ? sections.join('\n\n') : (read[0]?.job.description ?? '')).slice(0, 60_000);
+  /*
+   * One page with anything to say is read as that page — not as the first
+   * page of the trail, which may be the one with nothing on it, and was.
+   */
+  const description =
+    parts.length === 1 ? parts[0]!.text.slice(0, MERGED_CAP) : fitTrail(parts).join('\n\n');
 
   return {
     // Fields come from whichever page actually knew them, not from the last one.

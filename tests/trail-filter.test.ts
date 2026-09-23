@@ -1087,3 +1087,44 @@ describe('a list of other openings is labelled, not cut and not passed off as th
     expect(out.indexOf('$150,000–$180,000')).toBeLessThan(out.indexOf(MARK));
   });
 });
+
+/*
+ * The whole trail within the size cap, without losing the page that asks the
+ * questions.
+ *
+ * The pages were joined in trail order and cut at the cap from the end, so a
+ * careers listing earlier in the trail pushed the application form — nearly
+ * always the last page, and the one whose questions the answers are written
+ * for — out of what the AI read. And a trail whose only readable page was not
+ * the first came back empty: the one-page case read the first page's text,
+ * not the one page that had any.
+ */
+describe('the merged trail keeps every page\'s share and never reads the wrong page', () => {
+  const para = (word: string, n: number) =>
+    `<p>${Array.from({ length: n }, (_, i) => `${word} line ${i} describes one more thing about the company and its many teams.`).join('</p><p>')}</p>`;
+
+  it('keeps the application form whole when an earlier page is enormous', () => {
+    const posting = `<html><body><main><h1>Platform Engineer</h1>${para('Posting', 250)}</main></body></html>`;
+    const listing = `<html><body><main><h2>All openings</h2>${para('Listing', 700)}</main></body></html>`;
+    const form = `<html><body><form><label for="q">Why do you want to work at Acme, specifically on the platform team?</label><textarea id="q"></textarea></form></body></html>`;
+    const merged = mergeJobPages([
+      { url: 'https://acme.example/careers/platform-engineer', title: 'Platform Engineer', html: posting },
+      { url: 'https://acme.example/careers', title: 'Careers', html: listing },
+      { url: 'https://acme.example/apply/42', title: 'Apply', html: form },
+    ]);
+    expect(merged.description.length).toBeLessThanOrEqual(60_000);
+    expect(merged.description).toContain('Why do you want to work at Acme, specifically on the platform team?');
+    expect(merged.description).toContain('Posting line 0');
+    expect(merged.description).toContain('Listing line 0');
+  });
+
+  it('reads the one page that has text, wherever it is in the trail', () => {
+    const empty = '<html><body><nav><a href="/a">A</a><a href="/b">B</a><a href="/c">C</a><a href="/d">D</a><a href="/e">E</a><a href="/f">F</a></nav></body></html>';
+    const posting = `<html><body><main><h1>Platform Engineer</h1><p>You will own our Kafka pipeline end to end. Salary: $150,000.</p></main></body></html>`;
+    const merged = mergeJobPages([
+      { url: 'https://acme.example/', title: 'Acme', html: empty },
+      { url: 'https://acme.example/careers/platform-engineer', title: 'Platform Engineer', html: posting },
+    ]);
+    expect(merged.description).toContain('You will own our Kafka pipeline end to end.');
+  });
+});
