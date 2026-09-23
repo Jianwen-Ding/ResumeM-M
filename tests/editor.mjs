@@ -837,6 +837,15 @@ async function main() {
             if (!saved) await new Promise((r) => setTimeout(r, 500));
           }
           check('and the saved resume lists it, after the save settles', saved);
+
+          // One addition, one undo — as for the skill above.
+          await page.locator('#btn-undo').click();
+          let gone = false;
+          for (let waited = 0; waited < 15_000 && !gone; waited += 500) {
+            gone = (await box.locator('.bullet', { hasText: line }).count()) === 0;
+            if (!gone) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and one undo takes the whole line back', gone);
         } finally {
           await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
           const now = await (await fetch(`${server.url}/api/store`)).json();
