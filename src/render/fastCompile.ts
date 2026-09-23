@@ -10,6 +10,61 @@ import { renderLatexFastBody, runtimeSetup, stablePreamble } from './latex.js';
 const run = promisify(execFile);
 
 /**
+ * How much longer a process gets after its own `timeout` before it is killed
+ * outright, rather than waited on for ever.
+ *
+ * `execFile`'s `timeout` option sends `killSignal` — SIGTERM by default —
+ * once, when the timer fires, and then waits for the child's `exit` like any
+ * other call. It never escalates. `ai/agent.ts` found this against a
+ * coding-agent CLI that trapped SIGTERM: measured, twelve seconds past a
+ * two-second timeout, promise still unsettled, process still alive — and this
+ * is the path a live preview takes on every keystroke, so a `pdftex` gone
+ * stubborn in this way would jam the preview rather than merely slow it down.
+ *
+ * So: the polite signal at `timeout`, and the one it cannot refuse
+ * `STUBBORN_GRACE_MS` after that. `unref` so the timer itself is never the
+ * thing keeping the process alive.
+ */
+const STUBBORN_GRACE_MS = 5_000;
+
+/** Test-only: how long `runTimedForTest` waits past its own `timeout` before forcing the kill. */
+export const RUN_TIMED_TEST_GRACE_MS = STUBBORN_GRACE_MS;
+
+async function runTimed(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeout: number; maxBuffer?: number },
+): Promise<{ stdout: string; stderr: string }> {
+  const pending = run(cmd, args, opts);
+  const forceKill = setTimeout(() => {
+    try {
+      pending.child.kill('SIGKILL');
+    } catch {
+      // Already gone, which is the outcome this wanted.
+    }
+  }, opts.timeout + STUBBORN_GRACE_MS);
+  forceKill.unref?.();
+  try {
+    return await pending;
+  } finally {
+    clearTimeout(forceKill);
+  }
+}
+
+/**
+ * Test-only: exercise `runTimed` directly, with whatever `timeout` the test
+ * wants, rather than through a real preview compile — which is where the
+ * escalation actually runs, at timeouts too long for a test to wait out.
+ */
+export function runTimedForTest(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeout: number; maxBuffer?: number },
+): Promise<{ stdout: string; stderr: string }> {
+  return runTimed(cmd, args, opts);
+}
+
+/**
  * The live-preview path: a precompiled LaTeX format.
  *
  * `pdftex` can dump everything a preamble loaded — the document class,
@@ -53,8 +108,8 @@ let available: boolean | undefined;
 export async function hasFastPath(): Promise<boolean> {
   if (available !== undefined) return available;
   try {
-    await run('pdftex', ['--version'], { timeout: 10_000 });
-    await run('kpsewhich', ['mylatexformat.ltx'], { timeout: 10_000 });
+    await runTimed('pdftex', ['--version'], { timeout: 10_000 });
+    await runTimed('kpsewhich', ['mylatexformat.ltx'], { timeout: 10_000 });
     available = true;
   } catch {
     available = false;
@@ -135,7 +190,7 @@ async function buildFormat(
     const seedFile = path.join(buildDir, 'seed.tex');
     fs.writeFileSync(seedFile, `${preambleText}\n\\begin{document}\n`, 'utf8');
 
-    await run(
+    await runTimed(
       'pdftex',
       ['-ini', '-interaction=nonstopmode', '-halt-on-error', `-jobname=${jobname}`, '&pdflatex', 'mylatexformat.ltx', seedFile],
       { cwd: buildDir, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 },
@@ -239,7 +294,7 @@ ${body}`, 'utf8');
 
   try {
     for (let pass = 0; pass < 2; pass++) {
-      await run('pdftex', ['-interaction=nonstopmode', '-halt-on-error', `-fmt=${fmt.path}`, texFile], {
+      await runTimed('pdftex', ['-interaction=nonstopmode', '-halt-on-error', `-fmt=${fmt.path}`, texFile], {
         cwd: dir,
         timeout: 30_000,
         maxBuffer: 16 * 1024 * 1024,

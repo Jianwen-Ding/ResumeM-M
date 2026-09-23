@@ -50,6 +50,66 @@ export interface CompileResult extends FitReport {
 
 let resolvedEngine: Engine | undefined;
 
+/**
+ * How much longer a process gets after its own `timeout` before it is killed
+ * outright, rather than waited on for ever.
+ *
+ * `execFile`'s `timeout` option sends `killSignal` — SIGTERM by default —
+ * once, when the timer fires, and then waits for the child's `exit` like any
+ * other call. It never escalates. `ai/agent.ts` found this against a
+ * coding-agent CLI that trapped SIGTERM: measured, twelve seconds past a
+ * two-second timeout, promise still unsettled, process still alive — and
+ * because nothing downstream of the `await` ever runs, the caller hangs with
+ * it. `latexmk` wraps `pdflatex` in a Perl script and `tectonic` is a
+ * self-contained binary; neither is known to ignore SIGTERM, but nothing
+ * here controls what a TeX install actually is on someone's machine, and a
+ * compile that quietly never returns is the same failure whether the engine
+ * traps the signal on purpose or a wrapper around it does by accident.
+ *
+ * So: the polite signal at `timeout`, and the one it cannot refuse
+ * `STUBBORN_GRACE_MS` after that. `unref` so the timer itself is never the
+ * thing keeping the process alive.
+ */
+const STUBBORN_GRACE_MS = 5_000;
+
+/** Test-only: how long `runTimedForTest` waits past its own `timeout` before forcing the kill. */
+export const RUN_TIMED_TEST_GRACE_MS = STUBBORN_GRACE_MS;
+
+async function runTimed(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeout: number; maxBuffer?: number },
+): Promise<{ stdout: string; stderr: string }> {
+  const pending = run(cmd, args, opts);
+  const forceKill = setTimeout(() => {
+    try {
+      pending.child.kill('SIGKILL');
+    } catch {
+      // Already gone, which is the outcome this wanted.
+    }
+  }, opts.timeout + STUBBORN_GRACE_MS);
+  forceKill.unref?.();
+  try {
+    return await pending;
+  } finally {
+    clearTimeout(forceKill);
+  }
+}
+
+/**
+ * Test-only: exercise `runTimed` directly, with whatever `timeout` the test
+ * wants, rather than through a real compile — which is where the escalation
+ * actually runs, but at a 120-second `timeout` nothing that waits it out
+ * belongs in a test suite.
+ */
+export function runTimedForTest(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeout: number; maxBuffer?: number },
+): Promise<{ stdout: string; stderr: string }> {
+  return runTimed(cmd, args, opts);
+}
+
 /** Find an installed LaTeX engine once per process. */
 export async function detectEngine(preferred?: Engine): Promise<Engine> {
   if (preferred) {
@@ -85,7 +145,7 @@ export async function detectEngine(preferred?: Engine): Promise<Engine> {
 
 async function hasBinary(name: string): Promise<boolean> {
   try {
-    await run(name, ['--version'], { timeout: 15_000 });
+    await runTimed(name, ['--version'], { timeout: 15_000 });
     return true;
   } catch {
     return false;
@@ -134,7 +194,7 @@ const stamps = new Map<Engine, Promise<string>>();
 function toolStamp(engine: Engine): Promise<string> {
   let asked = stamps.get(engine);
   if (!asked) {
-    asked = run(engine, ['--version'], { timeout: 10_000 })
+    asked = runTimed(engine, ['--version'], { timeout: 10_000 })
       .then(({ stdout }) => stdout.split('\n')[0]?.trim() || engine)
       // A binary that will not say what it is still compiles; the key just
       // stops distinguishing versions of it, which is what the opt-in is for.
@@ -346,7 +406,7 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
   let log = '';
   try {
     for (let i = 0; i < passes; i++) {
-      const { stdout, stderr } = await run(engine, argsFor(engine, texFile, dir), {
+      const { stdout, stderr } = await runTimed(engine, argsFor(engine, texFile, dir), {
         cwd: dir,
         timeout: 120_000,
         maxBuffer: 16 * 1024 * 1024,
