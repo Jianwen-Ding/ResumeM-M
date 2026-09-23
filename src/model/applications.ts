@@ -290,11 +290,34 @@ function faithful(company: string, role: string): boolean {
  * leniency survives where it can: trailing whitespace and letter case still do
  * not make a second application.
  */
+/*
+ * A trailing legal form, which names how a company is incorporated rather
+ * than which company it is. The same list the extension compares employers
+ * by, so the two sides agree on what one employer is.
+ */
+const LEGAL_FORM =
+  /[\s,]+(inc|incorporated|llc|l\.l\.c|ltd|limited|corp|corporation|co|plc|gmbh|ag|sa|nv|bv|pty|oy|ab|lp|llp)\.?$/i;
+
+/**
+ * The employer's name without its legal form: "Acme, Inc." and "Acme" are one
+ * employer. A posting that names the company in full and a form that names it
+ * short were two tracker rows and two workspaces for one job.
+ */
+export function employerName(company: string): string {
+  let n = String(company ?? '').trim().replace(/\s+/g, ' ');
+  for (;;) {
+    const next = n.replace(LEGAL_FORM, '').trim();
+    if (next === n || !next) return n;
+    n = next;
+  }
+}
+
 export function identity(company: string, role: string): string {
-  const key = `${slug(company)}\u0000${slug(role)}`;
-  if (faithful(company, role)) return key;
+  const employer = employerName(company);
+  const key = `${slug(employer)}\u0000${slug(role)}`;
+  if (faithful(employer, role)) return key;
   const tidy = (s: string) => s.normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
-  return `${key}\u0000${fingerprint(tidy(company), tidy(role))}`;
+  return `${key}\u0000${fingerprint(tidy(employer), tidy(role))}`;
 }
 
 /**
