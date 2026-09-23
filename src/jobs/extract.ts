@@ -79,7 +79,26 @@ function stripTags(html: string): string {
   return html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' ')
+    /*
+     * `<noscript>` is not stripped here, deliberately — see `withoutChrome`
+     * and `keepAmbiguousElement`. A page rendered entirely by JavaScript
+     * sometimes carries the whole posting in its `<noscript>` fallback and
+     * nothing readable anywhere else; deleting it unconditionally at this
+     * layer would have made that decision before the rest of the page could
+     * even be looked at. What survives past `withoutChrome` is what is left
+     * to read as plain text either way.
+     */
+    /*
+     * A line break in the *source* is not a paragraph break — real HTML is
+     * pretty-printed across lines for people editing it, and a browser reads
+     * every one of those as ordinary whitespace. Left alone, a sentence that
+     * happened to wrap where the posting was written came out split, which
+     * is invisible to a person reading the result but breaks anything doing
+     * an exact match against it — a keyword that is two words, or a test
+     * checking the real content survived. The structure worth keeping is
+     * rebuilt right after this, from the tags themselves.
+     */
+    .replace(/\r?\n+/g, ' ')
     .replace(/<\/(p|div|li|br|h[1-6]|tr)>/gi, '\n')
     .replace(/<li\b[^>]*>/gi, '\n- ')
     .replace(/<[^>]+>/g, ' ')
@@ -113,12 +132,372 @@ function stripTags(html: string): string {
  * behind it.
  */
 const CHROME_TAGS = /<(nav|footer|aside|select|svg|template|iframe|noscript)\b[^>]*>/gi;
+/** `<select>` alone, for measuring the safety net's baseline. See `withoutChrome`. */
+const SELECT_TAG = /<select\b[^>]*>/gi;
 const CHROME_ROLES = /<([a-z][a-z0-9]*)\b[^>]*\brole\s*=\s*["'](?:navigation|banner|contentinfo|complementary|search)["'][^>]*>/gi;
 const CHROME_NAMES =
   /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*\b(?:cookie|cookies|consent|gdpr|onetrust)\b[^"']*["'][^>]*>/gi;
+/*
+ * Widgets that are not a landmark and not named for cookies, but are just as
+ * clearly not the posting: the rail of other roles beside this one, and the
+ * row of share-this-job icons. Named narrowly on purpose — "similar jobs" and
+ * "social share" are what boards actually call these, and a class name that
+ * merely contains "job" (`job-requirements`, `job-description`) is nowhere
+ * near this list.
+ */
+const CHROME_WIDGETS =
+  /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*\b(?:similar-?jobs|related-?jobs|recommended-?jobs|other-?jobs|more-?jobs|jobs?-you-might|you-may-also-like|social-?share|share-?buttons|share-?this|sharethis|addthis)\b[^"']*["'][^>]*>/gi;
 
-/** Cut every element whose opening tag matches, through its own closing tag. */
-function removeElements(html: string, opening: RegExp): string {
+/*
+ * A heading that names the rail rather than the job: what a "similar jobs" or
+ * "share this" box is actually called, on the boards that were checked. This
+ * is not a fact-vocabulary check — it names the *box*, not the posting, and
+ * is only ever used to help remove something, never to keep it.
+ */
+const WIDGET_HEADING =
+  /\b(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?)\b|\byou may also like\b|\bpeople also viewed\b|\bshare this\s*(?:job)?\b/i;
+
+/**
+ * A heading that names a facts box rather than a rail — "Job Details",
+ * "Overview", "About the role". A board that lays these facts out as bare
+ * linked labels ("Boston", "Engineering") gives the shape-based check nothing
+ * to go on — no sentence, no digit, no colon — so this is checked first and
+ * overrides it: a box introduced this way is read as facts regardless of
+ * what its links look like.
+ */
+const FACTS_BOX_HEADING = /\b(?:job\s*details?|role\s*details?|details|overview|about\s+the\s+role)\b/i;
+
+/** Every `href` an element's markup carries, in the order they appear. */
+function hrefsIn(outerHtml: string): string[] {
+  return [...outerHtml.matchAll(/\bhref\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1] ?? '');
+}
+
+/**
+ * Does this address name *another* posting — a job id or a long role-naming
+ * slug — rather than a value of this one?
+ *
+ * Judged on the last path segment alone, because that is where every board
+ * checked puts the part that varies: `/jobs/482913`, `/req/2024-118`,
+ * `/acme/senior-platform-engineer-8f21`. A facet link varies there too —
+ * `/locations/boston`, `/employment-type/full-time` — but its last segment
+ * is a plain word, not an id: no digit in it anywhere, and not enough
+ * hyphenated words to be a role's own slug. That is the entire test; nothing
+ * here reads the word before the id (`jobs`, `careers`, `req`, `positions`
+ * all look the same to it), because a facet path uses exactly those words
+ * too and a rule keyed on them cannot tell the two apart.
+ */
+/** A path segment that says the address is about jobs. */
+const POSTING_SEGMENT = /^(?:jobs?|careers?|positions?|openings?|vacanc(?:y|ies)|roles?|postings?|opportunit(?:y|ies)|req(?:uisitions?)?)$/i;
+/** Hosts that only serve job postings. */
+const JOB_BOARD_HOST = /(?:^|\.)(?:jobs\.|careers\.)|lever\.co$|greenhouse\.io$|ashbyhq\.com$|myworkdayjobs\.com$|smartrecruiters\.com$|workable\.com$|bamboohr\.com$|icims\.com$/i;
+
+function looksLikeOtherPostingHref(href: string): boolean {
+  if (/[?&](?:gh_jid|job[_-]?id|req(?:uisition)?[_-]?id)=/i.test(href)) return true;
+  const path = href.split(/[?#]/)[0] ?? href;
+  const segments = path.split('/').filter(Boolean);
+  const last = segments.at(-1) ?? '';
+  if (!last) return false;
+  /*
+   * An id or a long slug only means "another posting" where the address says
+   * it is about jobs. Without this, `/b/1`, `/t/42` and
+   * `/benefits/health-dental-vision` — a benefits list, filter tags — read as
+   * a rail of other jobs, and the facts in them were cut as clutter.
+   */
+  const host = /^[a-z]+:\/\/([^/]+)/i.exec(href)?.[1] ?? '';
+  const aboutJobs =
+    segments.some((segment) => POSTING_SEGMENT.test(segment)) || JOB_BOARD_HOST.test(host);
+  if (!aboutJobs) return false;
+  // A bare or lightly-prefixed id: "482913", "2024-118", "R-2024-118".
+  if (/\d/.test(last) && /^[a-z]{0,3}-?\d[\d-]*$/i.test(last)) return true;
+  // A long, several-word slug — the ordinary shape of a posting's own
+  // address on the boards that name the role right in the URL.
+  const words = last.split('-').filter(Boolean);
+  if (words.length >= 3 && last.replace(/-/g, '').length >= 12) return true;
+  return false;
+}
+
+/**
+ * Do this element's links point at other job postings specifically, rather
+ * than merely elsewhere? Requires at least two links and every one of them
+ * shaped like a posting's own address — a single stray "Apply" or "Learn
+ * more" link is not what tells a rail of other roles apart from a box of
+ * facts about this one, and a box that mixes facet links with one
+ * requisition link is not a rail either: `.every` fails on the first facet
+ * link and the whole box reads as facts.
+ */
+function linksToOtherPostings(outerHtml: string): boolean {
+  const links = hrefsIn(outerHtml);
+  if (links.length < 2) return false;
+  return links.every(looksLikeOtherPostingHref);
+}
+
+/**
+ * Tags gone, nothing added back — unlike `stripTags`, which inserts a "- "
+ * for every `<li>` regardless of what, if anything, is left inside it. That
+ * is right for reading the page as prose but wrong here: a link list whose
+ * items were just emptied out would otherwise report several characters of
+ * "prose" per bullet it never had.
+ */
+function plainText(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Ordinary words a site's own navigation and footer are built from — not a
+ * fact vocabulary, and never used to keep anything. Used the other way
+ * round, only inside `isSiteNavigationBlock`: a handful of links whose
+ * labels mostly read like this are a menu, whatever tag carries them.
+ */
+const GENERIC_SITE_WORDS =
+  /\b(home|about(?:\s+us)?|careers?|jobs?|blog|contact(?:\s+us)?|press|investors?|log[ -]?in|sign[ -]?(?:in|up)|privacy(?:\s+policy)?|terms(?:\s+of\s+(?:use|service))?|help|support|faq|pricing|team|company|events?|news|resources?|docs?|documentation|status|security|sitemap|accessibility|legal|cookie(?:s|\s*(?:policy|settings))?)\b/i;
+
+/**
+ * Is this candidate a block of ordinary site navigation — furniture every
+ * page on the site carries, rather than anything about this posting?
+ *
+ * Judged on size first: six or fewer links is a handful of chips, a
+ * breadcrumb, a row of benefit links, an actions toolbar — exactly the
+ * things a real "Job details" box or a filter-tag list looks like, and
+ * losing one of those is the failure that matters. Six or more, sitting in
+ * a `<nav>`, a `<footer>`, or a `role="navigation"`/`"banner"`/`"contentinfo"`
+ * region, is a menu or a sitemap almost every time regardless of what the
+ * labels say; that many anywhere else still has to actually read like site
+ * furniture — mostly words like "About", "Careers", "Privacy Policy" — to
+ * count as one.
+ */
+function isSiteNavigationBlock(outerHtml: string, tag: string): boolean {
+  const labels = [...outerHtml.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)].map((m) => plainText(m[1] ?? ''));
+  if (labels.length < 6) return false;
+  const isChromeRegion =
+    tag === 'nav' || tag === 'footer' || /\brole\s*=\s*["'](?:navigation|banner|contentinfo)["']/i.test(outerHtml);
+  if (isChromeRegion) return true;
+  const generic = labels.filter((label) => GENERIC_SITE_WORDS.test(label)).length;
+  return generic / labels.length >= 0.5;
+}
+
+/**
+ * Whether this element's own links stand for something other than this
+ * element's own words — because it proves itself a rail of other postings,
+ * or because it is ordinary site navigation — and, if so, the markup with
+ * those links' text set aside. Everything else about the element, notably a
+ * `<button>`'s own label, is never discounted this way: "Apply by Friday,
+ * Oct 3" is what the button says, not an address it points at, and a
+ * dropdown's own options are handled entirely separately, in
+ * `isLongOptionList`.
+ *
+ * A "Job details" heading forecloses both readings before either is even
+ * asked: a board that introduces a box this way means its links as facts,
+ * whatever they otherwise look like — bare labels naming a location and a
+ * department read exactly like a two-link "rail" by shape alone, and the
+ * heading is what tells them apart.
+ */
+function discountedView(outerHtml: string, tag: string): { discount: boolean; html: string } {
+  if (FACTS_BOX_HEADING.test(plainText(outerHtml))) return { discount: false, html: outerHtml };
+  const discount =
+    WIDGET_HEADING.test(plainText(outerHtml)) || linksToOtherPostings(outerHtml) || isSiteNavigationBlock(outerHtml, tag);
+  const html = discount ? outerHtml.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, ' ') : outerHtml;
+  return { discount, html };
+}
+
+/*
+ * Shape, not vocabulary: what makes a stretch of non-link text read as a
+ * real sentence rather than a fragment of layout, regardless of which
+ * language it is written in or which words this file happens to know.
+ *
+ *   - a run of several words long enough to be a sentence, not a label;
+ *   - any digit, currency symbol or percent sign — a salary, a headcount, a
+ *     percentage bonus, a date, all look like this before they look like
+ *     any particular word;
+ *   - a short label followed by a colon and something after it — "Pay:",
+ *     "Gehalt:", "Location:" — the shape a form or a spec sheet states a
+ *     fact in, whatever the label says.
+ *
+ * Deliberately not a list of currencies or salary words: a footer closing
+ * the posting with "CHF 120,000" or "65.000 € brutto" is caught by the
+ * digit sitting right there, not by recognising Swiss francs or German
+ * grammar. The one shape this file still keys on a fixed list for is a
+ * bare location — see `LOCATION_SHAPE` — because "a capital letter, a
+ * comma, and two more letters" is not a shape, it is a coincidence waiting
+ * to happen, and "cookies, ok?" proved it.
+ */
+const SEVERAL_WORDS = /(?:[\p{L}][\p{L}'-]*\s+){4,}[\p{L}][\p{L}'-]*/u;
+const DIGIT_CURRENCY_OR_PERCENT = /\d|%|\p{Sc}/u;
+const COLON_LABEL = /\b[\p{L}][\p{L} ]{1,25}:\s*\S/u;
+const US_CA_CODES =
+  'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC|AB|BC|MB|NB|NL|NS|ON|PE|QC|SK|YT|NT|NU';
+const COMMON_COUNTRIES =
+  'United States|United Kingdom|Canada|Germany|France|Spain|Ireland|Australia|India|Netherlands|Switzerland|Singapore|Japan|Mexico|Brazil|Poland|Sweden|Italy';
+const LOCATION_SHAPE = new RegExp(
+  String.raw`\b[A-Z][\p{L}]+(?:[ -][A-Z][\p{L}]+)*,\s*(?:${US_CA_CODES})\b|\b(?:${COMMON_COUNTRIES})\b`,
+  'u',
+);
+
+/**
+ * Is this element's own non-link text a real sentence worth keeping it for?
+ *
+ * `lenient` is only ever true inside the safety net's second pass, where the
+ * bar drops to "any non-trivial amount of its own text at all" — restoring
+ * whatever the strict shapes above missed, without touching the parts of
+ * this file that do not depend on them (a long `<select>` is still cut, a
+ * cookie banner is still judged on its own rule).
+ */
+function hasRealProse(nonLinkProse: string, lenient = false): boolean {
+  const text = nonLinkProse.trim();
+  if (text.length === 0) return false;
+  if (lenient) return text.length >= 15;
+  if (text.length >= 35 && SEVERAL_WORDS.test(text)) return true;
+  if (DIGIT_CURRENCY_OR_PERCENT.test(text)) return true;
+  if (COLON_LABEL.test(text)) return true;
+  if (LOCATION_SHAPE.test(text)) return true;
+  if (SHORT_SENTENCE_RUN.test(text)) return true;
+  return false;
+}
+
+/**
+ * A short, complete-looking line, even nowhere near the 35-character
+ * sentence bar above — "US only.", "No visa sponsorship.", "Remote (EU)." —
+ * a real fact for exactly as long as a footer line ever is, and gone the
+ * moment a "sentence" is required to be one. Two or more words ending the
+ * way a sentence ends is enough on its own.
+ */
+const SHORT_SENTENCE_RUN = /[\p{L}][\p{L}'-]*(?:\s+[\p{L}()][\p{L}()'-]*)+[.!?]/u;
+
+/**
+ * A `<p>`, `<li>`, `<dd>` or `<dt>` whose own text is short enough to be one
+ * fact stated on its own line, the way a spec sheet or a bullet list states
+ * one, whether or not it ends in any punctuation at all: "Contract role",
+ * "Remote OK", "Visa sponsored". Checked on markup rather than on flattened
+ * text, because "a whole element on its own" is a structural fact — nothing
+ * about length or punctuation tells a stray fragment of layout apart from a
+ * genuine one-line fact otherwise.
+ */
+function hasShortStandaloneLine(html: string): boolean {
+  for (const m of html.matchAll(/<(p|li|dd|dt)\b[^>]*>([\s\S]*?)<\/\1>/gi)) {
+    const words = plainText(m[2] ?? '').split(/\s+/).filter(Boolean);
+    if (words.length >= 1 && words.length <= 3) return true;
+  }
+  return false;
+}
+
+/**
+ * The short, narrow vocabulary a cookie banner is allowed to override itself
+ * with — see the `isCookieNamed` branch of `keepAmbiguousElement`. Kept
+ * separate from `hasRealProse` deliberately: an element named for cookies is
+ * removed by default even when it reads as an ordinary sentence ("We use
+ * cookies to improve your experience" is four words and thirty-some
+ * characters, which `hasRealProse` alone would keep), and is spared only if
+ * it also says one of these, or has a figure in it.
+ */
+const COOKIE_UNSAFE_WORDS =
+  /\bsalary\b|\bcompensation\b|\bvisa\b|\bsponsor\w*\b|\bremote\b|\bhybrid\b|\bbenefit\w*\b|\brequirements?\b|\bqualifications?\b|\bdeadline\b|\bclos(?:e|es|ing) (?:date|on)\b/i;
+
+/**
+ * Is this `<select>` a real dropdown question, or a list that stands for
+ * every value of something (every country, every US state)?
+ *
+ * A visa or an EEO question is a handful of options — Yes/No, four or five
+ * categories — and the question along with its options has to survive
+ * exactly as `<label>`-and-`<select>` normally does. A country picker is
+ * two hundred of them, dwarfing the posting it sits beside, and none of the
+ * two hundred are information about this application. Counted on the
+ * element itself rather than by name, because boards do not agree on what
+ * to call either kind.
+ *
+ * Judged before anything shape-based gets a say: an "Office" dropdown
+ * listing forty branch names is forty short lines of real-looking text, and
+ * a shape check would keep the whole thing. The question survives
+ * regardless, in its own `<label>`, which this never touches.
+ */
+function isLongOptionList(outerHtml: string): boolean {
+  const options = outerHtml.match(/<option\b/gi)?.length ?? 0;
+  if (options > 15) return true;
+  return stripTags(outerHtml).length > 600;
+}
+
+/**
+ * Whether a matched chrome-shaped element should be spared, given its own
+ * markup and, for `<noscript>` alone, the page it came from.
+ *
+ * `<select>` is judged solely on its option count, before anything else gets
+ * a say. A cookie/consent-named element is judged on its own narrower rule —
+ * see `COOKIE_UNSAFE_WORDS` — because "reads as a sentence" is true of every
+ * cookie banner ever written and would keep all of them, and `<noscript>` is
+ * judged on the page around it rather than its own shape — see the comment
+ * on that branch below.
+ *
+ * Everything else is spared the moment its own words — a real sentence, a
+ * short standalone line, a figure, a colon-labelled line — say so, where
+ * "its own words" excludes a proven rail's or a big site-navigation block's
+ * *link* text and nothing else: a `<button>`'s label always counts, and a
+ * small group of links or buttons that is neither of those two things is
+ * kept outright, whatever it does or does not say — see `discountedView`
+ * and `isSiteNavigationBlock`. Only past all of that is anything chrome by
+ * definition: a proven rail or a large block of site navigation with
+ * nothing real left once its own links are set aside.
+ */
+function keepAmbiguousElement(
+  outerHtml: string,
+  fullHtml: string,
+  opts: { isCookieNamed?: boolean; lenient?: boolean } = {},
+): boolean {
+  const tag = (/^<([a-z][a-z0-9]*)\b/i.exec(outerHtml)?.[1] ?? '').toLowerCase();
+  if (tag === 'select') return !isLongOptionList(outerHtml);
+
+  if (opts.isCookieNamed) {
+    const withoutLinksOrButtons = plainText(
+      outerHtml.replace(/<(a|button)\b[^>]*>[\s\S]*?<\/\1>/gi, ' '),
+    );
+    const safe = !DIGIT_CURRENCY_OR_PERCENT.test(withoutLinksOrButtons) && !COOKIE_UNSAFE_WORDS.test(withoutLinksOrButtons);
+    return !safe;
+  }
+
+  /*
+   * `<noscript>` is judged on the page around it, not on its own shape. A
+   * real hidden fact and a plain "enable JavaScript to continue" notice read
+   * as the same shape — both are a real, grammatical sentence — so shape
+   * cannot tell them apart, and only context can: kept when the rest of the
+   * page has too little to say without it, removed when it plainly does not
+   * need it.
+   */
+  if (tag === 'noscript') {
+    const rest = stripTags(fullHtml.replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ' '));
+    return rest.length < TOO_LITTLE_TO_BE_A_POSTING;
+  }
+
+  const { discount, html } = discountedView(outerHtml, tag);
+  if (hasRealProse(plainText(html), opts.lenient)) return true;
+  if (hasShortStandaloneLine(html)) return true;
+
+  // A small group of links or buttons that proved itself neither a rail nor
+  // ordinary site navigation is content, whatever it says: a filter-chip
+  // list, a breadcrumb, an actions toolbar. `discount` is false for exactly
+  // this case, by construction — see `discountedView`.
+  return !discount;
+}
+
+/**
+ * Cut every element whose opening tag matches, through its own closing tag —
+ * unless `keep` says this particular one is not chrome after all, in which
+ * case it is left exactly as it was and the search resumes after it.
+ * `onRemove`, when given, hears the outer markup of everything actually cut —
+ * see `withoutChrome`'s safety net, which measures the prose lost this way
+ * rather than trusting any one word list to notice.
+ */
+function removeElements(
+  html: string,
+  opening: RegExp,
+  keep?: (outerHtml: string) => boolean,
+  onRemove?: (outerHtml: string) => void,
+): string {
   let out = html;
   let from = 0;
   for (;;) {
@@ -143,29 +522,127 @@ function removeElements(html: string, opening: RegExp): string {
       from = open.index + open[0].length;
       continue;
     }
+    const outerHtml = out.slice(open.index, end);
+    if (keep?.(outerHtml)) {
+      from = end;
+      continue;
+    }
+    onRemove?.(outerHtml);
     out = `${out.slice(0, open.index)} ${out.slice(end)}`;
     from = open.index;
   }
 }
 
 /**
- * The page with its chrome taken out — unless that leaves almost nothing.
- *
- * A layout that puts the posting in an `<aside>`, or a board whose whole page
- * is one element with a landmark role, would lose the posting with the chrome.
- * Losing a description is far worse than sending a long one, so where what is
- * left is too little to be a posting, the page goes untrimmed.
- *
- * Judged on what is left, not on how much went. Cutting a page to a tenth of
- * its text is the ordinary success here — a 200-city filter dwarfs the job it
- * sits beside — and a ratio threw away exactly the trims worth making.
+ * Below this, restoring the whole page is cheaper than trusting the trim: a
+ * page this short was never going to be dominated by chrome in the first
+ * place, so there is nothing to gain by cutting it further and something
+ * real to lose if the cut was wrong.
  */
 const TOO_LITTLE_TO_BE_A_POSTING = 200;
 
+/**
+ * How much non-link prose the safety net tolerates losing before it stops
+ * trusting the per-element check and falls back to a more lenient pass. Not
+ * measured in fact-words found or lost — a vocabulary list can always be
+ * missing one — but in plain characters of an element's own text that were
+ * actually cut, which needs no list to be right about.
+ */
+const PROSE_SAFETY_NET_CHARS = 120;
+
+/**
+ * The page with its chrome taken out.
+ *
+ * Every element this removes is spared, first, by what its own text looks
+ * like rather than what it says — see `keepAmbiguousElement` and
+ * `hasRealProse` — which is what lets a fact survive in a language, a
+ * currency, or a phrasing this file has never seen a single word of: a
+ * salary sits in the same shape ("digits near a currency mark") in "$90,000"
+ * and in "65.000 €", and neither needs to be read to be kept.
+ *
+ * That per-element check is still checked one element at a time, and a page
+ * whose real content is spread thin across several small elements — or
+ * phrased in a way even the shapes above miss — could still come out
+ * hollowed regardless. So the whole page is checked once more afterwards,
+ * independently of any regex: if trimming actually cut more than a little of
+ * an element's own non-link text (`PROSE_SAFETY_NET_CHARS`), or left
+ * suspiciously little of a page that had a good deal more, the pass runs
+ * again with the bar for "real text" dropped to almost nothing — restoring
+ * whatever was cut, rather than reverting to the untouched page and bringing
+ * a two-hundred-option dropdown back with it. Losing the posting is the only
+ * failure that matters here; a page that came out longer than it needed to
+ * is not one.
+ */
 export function withoutChrome(html: string): string {
-  const trimmed = removeElements(removeElements(removeElements(html, CHROME_TAGS), CHROME_ROLES), CHROME_NAMES);
-  const left = stripTags(trimmed).length;
-  if (left < TOO_LITTLE_TO_BE_A_POSTING && stripTags(html).length >= TOO_LITTLE_TO_BE_A_POSTING) return html;
+  let removedProseChars = 0;
+  const track = (outerHtml: string) => {
+    // A long `<select>` option list is never counted: it is always correct
+    // to cut, whatever `discountedView` would make of the digit-free branch
+    // names or country names sitting inside its options.
+    const tag = (/^<([a-z][a-z0-9]*)\b/i.exec(outerHtml)?.[1] ?? '').toLowerCase();
+    if (tag === 'select') return;
+    // The same discount `keepAmbiguousElement` itself applies — a proven
+    // rail's or a big site-navigation block's own link text is not counted
+    // as lost prose, because it never was any; everything else that gets
+    // removed, including a small filter-chip or breadcrumb's link text
+    // (which this file no longer removes at all — see `keepAmbiguousElement`
+    // — but would need to count in full if some future change did), counts
+    // in full.
+    removedProseChars += plainText(discountedView(outerHtml, tag).html).length;
+  };
+  const keep = (outerHtml: string) => keepAmbiguousElement(outerHtml, html);
+  const keepNames = (outerHtml: string) => keepAmbiguousElement(outerHtml, html, { isCookieNamed: true });
+
+  const afterTags = removeElements(html, CHROME_TAGS, keep, track);
+  const afterRoles = removeElements(afterTags, CHROME_ROLES, keep, track);
+  // Cookie/consent-named removals are not tracked: they are governed by
+  // their own rule, not by how much of their own text they carried.
+  const afterNames = removeElements(afterRoles, CHROME_NAMES, keepNames);
+  const trimmed = removeElements(afterNames, CHROME_WIDGETS, keep, track);
+
+  /*
+   * What "how much the page really had" means for the length half of the
+   * safety net — already without its own long dropdown option lists.
+   * Cutting a two-hundred-option country list is always correct, however
+   * little of the form is left once it is gone; measuring against the fully
+   * untouched page would read that correct cut as a loss and undo it,
+   * options and all. This is also the floor the whole function can never
+   * fall below: whatever else goes wrong further down, a page that had at
+   * least this much never goes out with less than the guarantee below.
+   */
+  const reference = removeElements(html, SELECT_TAG, (outerHtml) => !isLongOptionList(outerHtml));
+  const referenceText = stripTags(reference);
+  const trimmedText = stripTags(trimmed);
+  const leftTooLittle =
+    trimmedText.length < TOO_LITTLE_TO_BE_A_POSTING && referenceText.length >= TOO_LITTLE_TO_BE_A_POSTING;
+
+  if (removedProseChars > PROSE_SAFETY_NET_CHARS || leftTooLittle) {
+    const lenientKeep = (outerHtml: string) => keepAmbiguousElement(outerHtml, html, { lenient: true });
+    const lenient = removeElements(
+      removeElements(
+        removeElements(removeElements(html, CHROME_TAGS, lenientKeep), CHROME_ROLES, lenientKeep),
+        CHROME_NAMES,
+        keepNames,
+      ),
+      CHROME_WIDGETS,
+      lenientKeep,
+    );
+    /*
+     * The one guarantee this function makes, regardless of anything above:
+     * a page is never handed back shorter than `reference` would have been,
+     * once it had at least `TOO_LITTLE_TO_BE_A_POSTING` characters to give.
+     * The lenient pass restores prose the strict one missed, but it can
+     * still come up short — its own facts may be spread across elements
+     * this pass still had reason to cut — and reverting one step further,
+     * to `reference` itself, is cheaper than losing the posting to a page
+     * whose facts turned out to live somewhere neither pass thought to look.
+     */
+    const lenientText = stripTags(lenient);
+    if (lenientText.length < TOO_LITTLE_TO_BE_A_POSTING && referenceText.length >= TOO_LITTLE_TO_BE_A_POSTING) {
+      return reference;
+    }
+    return lenient;
+  }
   return trimmed;
 }
 
