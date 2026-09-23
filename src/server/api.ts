@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type Router } from 'express';
+import { extractText } from '../ingest/text.js';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -186,12 +187,45 @@ async function fetchPosting(url: string): Promise<string> {
     });
     if (!res.ok) throw new Error(`the site replied ${res.status}`);
 
-    const text = await res.text();
-    return text.slice(0, 2_000_000);
+    /*
+     * Read up to the cap and no further. `res.text()` read the whole body
+     * before it was cut, so a link that streamed without end held the request
+     * until the abort, and a large one was held in memory entire.
+     */
+    const reader = res.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (reader && total < POSTING_CAP) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    await reader?.cancel().catch(() => undefined);
+    const bytes = Buffer.concat(chunks).subarray(0, POSTING_CAP);
+
+    /*
+     * A posting is often a PDF or a Word file, and decoding one as text sent
+     * its bytes into extraction and on to the AI as noise. Read as the file it
+     * is — the same reader that takes files dropped into the corpus — and
+     * handed on as paragraphs, which is what extraction reads.
+     */
+    const type = res.headers.get('content-type') ?? '';
+    const document = /pdf|officedocument|msword/i.test(type) || /^(%PDF|PK)/.test(bytes.subarray(0, 4).toString('latin1'));
+    if (document) {
+      const name = decodeURIComponent(target.pathname.split('/').pop() || 'posting') || 'posting';
+      const { text } = await extractText(/\.(pdf|docx)$/i.test(name) ? name : `${name}${/pdf/i.test(type) ? '.pdf' : ''}`, bytes);
+      const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<html><body>${text.split(/\n{2,}/).map((para) => `<p>${escape(para.trim())}</p>`).join('')}</body></html>`;
+    }
+    return bytes.toString('utf8');
   } finally {
     clearTimeout(timer);
   }
 }
+
+/** The most of a fetched posting read before the rest is left unread. */
+const POSTING_CAP = 2_000_000;
 
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
 function handler(fn: (req: Request, res: Response) => Promise<unknown>) {

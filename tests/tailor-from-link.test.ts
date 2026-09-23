@@ -15,7 +15,7 @@ import path from 'node:path';
 import { createApi } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
 import { DEFAULT_CONFIG } from '../src/model/types.js';
-import { makeTempStore, tempDir, type TempStore } from './helpers.js';
+import { hasLatex, makeTempStore, tempDir, type TempStore } from './helpers.js';
 
 const scripts = tempDir('rmm-tailor-stub-');
 
@@ -566,4 +566,82 @@ describe('tailoring again never overwrites a copy that was kept', () => {
     expect(t.store.getResume('job-streamly')?.tier).toBe('base');
     expect(res.body.application.resumeId).not.toBe('job-streamly');
   });
+});
+
+/*
+ * A link that is not a web page, or never stops being one.
+ *
+ * Postings are often PDFs. The fetch decoded whatever came back as text, so a
+ * PDF's bytes went into extraction and on to the AI as binary noise. And the
+ * whole body was read before being cut to size, so a link that streamed
+ * without end held the request until the fifteen-second abort.
+ */
+describe('a posting link that is a PDF, or that never ends', () => {
+  const serveOnce = async (reply: (res: import('node:http').ServerResponse) => void) => {
+    const http = await import('node:http');
+    const server = http.createServer((_req, res) => reply(res));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    return { server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/posting` };
+  };
+  const spaceFor = async (url: string) => {
+    const opened = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Streamly', role: 'Data Platform Intern', url, jobDescription: 'Pasted text.' })
+      .expect(200);
+    return opened.body.draft ?? opened.body;
+  };
+
+  it.skipIf(!hasLatex())('reads a PDF posting as its text', async () => {
+    const fsMod = await import('node:fs');
+    const os = await import('node:os');
+    const pathMod = await import('node:path');
+    const { execFileSync } = await import('node:child_process');
+    const dir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), 'rmm-pdf-posting-'));
+    fsMod.writeFileSync(pathMod.join(dir, 's.tex'), '\\documentclass{article}\\begin{document}Platform Engineer. You will own our Kafka streaming pipeline.\\end{document}');
+    let pdf: Buffer | undefined;
+    for (const [cmd, args] of [['tectonic', ['s.tex']], ['pdflatex', ['-interaction=nonstopmode', 's.tex']]] as const) {
+      try {
+        execFileSync(cmd, [...args], { cwd: dir, stdio: 'ignore' });
+        if (fsMod.existsSync(pathMod.join(dir, 's.pdf'))) { pdf = fsMod.readFileSync(pathMod.join(dir, 's.pdf')); break; }
+      } catch { /* next engine */ }
+    }
+    expect(pdf, 'a PDF to serve').toBeTruthy();
+    const { server, url } = await serveOnce((res) => {
+      res.writeHead(200, { 'content-type': 'application/pdf' });
+      res.end(pdf);
+    });
+    try {
+      serve();
+      const draft = await spaceFor(url);
+      const res = await tailor(draft.id).expect(200);
+      const saved = t.store.getDraft(res.body.draft.id);
+      expect(saved?.jobDescription).toContain('Kafka streaming pipeline');
+      expect(saved?.jobDescription).not.toMatch(/%PDF|endobj|endstream/);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stops reading a page that never ends, rather than waiting it out', async () => {
+    const { server, url } = await serveOnce((res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.write('<html><body><h1>Platform Engineer</h1><p>You will own our Kafka pipeline.</p>');
+      const filler = `<p>${'more text about the team '.repeat(200)}</p>`;
+      const pump = setInterval(() => {
+        if (!res.write(filler)) return;
+      }, 1);
+      res.on('close', () => clearInterval(pump));
+    });
+    try {
+      serve();
+      const draft = await spaceFor(url);
+      const began = Date.now();
+      const res = await tailor(draft.id).expect(200);
+      expect(Date.now() - began).toBeLessThan(10_000);
+      expect(res.body.fetched).toBe(true);
+    } finally {
+      server.closeAllConnections?.();
+      server.close();
+    }
+  }, 30_000);
 });
