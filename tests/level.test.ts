@@ -117,3 +117,31 @@ describe('reading the level off a posting', () => {
     expect(detectLevel({ title: 'Software Engineer Intern' })?.why).toEqual(['intern']);
   });
 });
+
+/*
+ * A posting that says what the role is not.
+ *
+ * "This is not an internship" counted as an internship — and with "3+ years
+ * experience" not recognised for want of an "of", it was the only evidence
+ * there, so a full-time posting swapped the graduation date to the one kept
+ * for internships. A negated mention says nothing about the role.
+ */
+describe('a level the posting says the role is not', () => {
+  it('does not read "not an internship" as an internship', () => {
+    const v = detectLevel({ title: 'Data Scientist', description: 'This is not an internship. Full-time, 3+ years experience.' });
+    expect(v?.level).not.toBe('intern');
+  });
+
+  it('reads "3+ years experience" without the "of"', () => {
+    expect(detectLevel({ title: 'Data Scientist', description: 'Full-time role requiring 5+ years experience in ML.' })?.level).toBe('experienced');
+  });
+
+  it('still reads an internship that says so', () => {
+    expect(detectLevel({ title: 'Data Scientist', description: 'A 12-week summer internship on the ML team.' })?.level).toBe('intern');
+    expect(detectLevel({ title: 'Analyst', description: 'Not a remote role. This internship is based in Boston.' })?.level).toBe('intern');
+  });
+
+  it('does not read "no new grads" as a new grad role', () => {
+    expect(detectLevel({ title: 'Engineer', description: 'Please note: no new grads for this position.' })?.level).not.toBe('newgrad');
+  });
+});
