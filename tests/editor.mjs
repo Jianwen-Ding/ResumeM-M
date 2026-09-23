@@ -1281,6 +1281,89 @@ async function main() {
       check('there is a way to finish the application', false, 'no button');
     }
 
+    /* -------------------------------------------------------------- *
+     * When the tracker cannot save                                     *
+     * -------------------------------------------------------------- *
+     * The status dropdown and the Remove button both wrote optimistically
+     * and had no catch on the write: a request that failed — the server
+     * gone, the network down mid-save — left the browser with an unhandled
+     * rejection, nothing said on screen, and (for the dropdown) a status
+     * showing that was never written anywhere. Simulated here by aborting
+     * just the one route, which is the same shape of failure as the server
+     * stopping mid-save without needing to actually stop it out from under
+     * the rest of this run.
+     * -------------------------------------------------------------- */
+    console.log('\nWhen the tracker cannot save');
+    {
+      // As below in the overlap check: the apply flow just finished on a
+      // dialog, and a tab button under a modal is not a tab button.
+      const open = await page.evaluate(() => {
+        const m = document.querySelector('#modal');
+        if (!m || m.classList.contains('hidden')) return null;
+        const said = document.querySelector('#modal-title')?.textContent ?? '';
+        m.classList.add('hidden');
+        return said;
+      });
+      if (open !== null) console.log(`    (a dialog was open and was closed: ${JSON.stringify(open)})`);
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      const row = page.locator('tr', { hasText: 'Halcyon' });
+      await row.waitFor({ timeout: 20_000 });
+      const sel = row.locator('select');
+      const before = await sel.inputValue();
+
+      await page.route('**/api/applications/**/status', (route) => route.abort('connectionrefused'));
+      const nextIndex = (await sel.locator('option').evaluateAll((opts, cur) =>
+        Math.max(0, opts.findIndex((o) => o.value !== cur)), before));
+      await sel.selectOption({ index: nextIndex });
+      await page.waitForFunction(
+        () => /./.test(document.querySelector('#status')?.textContent ?? ''),
+        null,
+        { timeout: 10_000, polling: 100 },
+      ).catch(() => {});
+      await page.waitForTimeout(500);
+
+      check('a status change that fails to save says so',
+        (await page.locator('#status.err').count()) > 0,
+        await page.locator('#status').innerText().catch(() => '(nothing shown)'));
+      check('and the dropdown is repainted from what was actually saved, not left on the guess',
+        (await sel.inputValue()) === before,
+        `stayed on screen as ${await sel.inputValue()}, saved value is ${before}`);
+      await page.unroute('**/api/applications/**/status');
+
+      // And when the server is gone altogether, so the repaint fails too: the
+      // saved status still has to be what the dropdown shows.
+      const gone = (route) => route.abort('connectionrefused');
+      await page.route('**/api/applications**', gone);
+      await sel.selectOption({ index: nextIndex });
+      await page.waitForTimeout(800);
+      check('and with the server gone entirely, it still shows the saved status',
+        (await sel.inputValue()) === before,
+        `stayed on screen as ${await sel.inputValue()}, saved value is ${before}`);
+      await page.unroute('**/api/applications**', gone);
+
+      await page.route('**/api/applications/**', (route) => {
+        if (route.request().method() === 'DELETE') return route.abort('connectionrefused');
+        return route.continue();
+      });
+      await row.locator('button', { hasText: 'Remove' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 5_000 });
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(1500);
+
+      check('a delete that fails to save says so, too',
+        (await page.locator('#status.err').count()) > 0,
+        await page.locator('#status').innerText().catch(() => '(nothing shown)'));
+      check('and the row it could not remove is still there',
+        (await row.count()) === 1);
+      await page.unroute('**/api/applications/**');
+
+      // The two aborted requests above are the failures being tested for,
+      // already asserted on by name — not a stray error to fail the run over.
+      for (let i = errors.length - 1; i >= 0; i--) {
+        if (/ERR_CONNECTION_REFUSED/.test(errors[i])) errors.splice(i, 1);
+      }
+    }
+
     /* ---- The tracker stays inside its half of the screen ---- */
     /*
      * A grid item's default `min-width` is `auto` — "as wide as my content

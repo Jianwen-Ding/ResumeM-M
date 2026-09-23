@@ -5736,10 +5736,34 @@ async function loadApplications() {
     }
     sel.onchange = async () => {
       const moved = sel.value;
-      await api(`/applications/${encodeURIComponent(a.id)}/status`, {
-        method: 'POST',
-        body: JSON.stringify({ status: moved }),
-      });
+      /*
+       * The select already shows `moved` — the browser painted that the
+       * instant the option was picked — so a write that fails here leaves a
+       * status on screen that was never saved anywhere. With no catch below,
+       * that is exactly what happened: the request rejected, nothing told
+       * you, and the dropdown quietly disagreed with the tracker until some
+       * unrelated reload put the true status back with no explanation for
+       * why it had "changed itself".
+       *
+       * So a failure is said out loud, the same way a draft's save failure
+       * is, and the row is repainted from what the server actually holds —
+       * which is the same repaint the success path already does, just also
+       * on the way out.
+       */
+      try {
+        await api(`/applications/${encodeURIComponent(a.id)}/status`, {
+          method: 'POST',
+          body: JSON.stringify({ status: moved }),
+        });
+      } catch (err) {
+        setStatus(err.message, true);
+        // Put the saved status back now, not only after the repaint: a server
+        // that just refused the write may refuse the reload too, and then the
+        // unsaved status would still be sitting in the dropdown.
+        sel.value = a.status;
+        loadApplications().catch(() => undefined);
+        return;
+      }
       setStatus('Status updated');
       // Once, on the way in — not every time the list repaints with an
       // offer already on it.
@@ -5770,7 +5794,16 @@ async function loadApplications() {
           onclick: async (ev) => {
             ev.stopPropagation();
             if (!(await confirmModal(`Remove ${a.company}?`, 'The tracker row goes; the files on disk stay.'))) return;
-            await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            // Same reasoning as the status dropdown just above: a request
+            // that fails here used to leave the button pressed and nothing
+            // said, which reads as "did that do anything?" rather than as
+            // the clear failure it was.
+            try {
+              await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            } catch (err) {
+              setStatus(err.message, true);
+              return;
+            }
             if (openApplicationId === a.id) openApplicationId = null;
             loadApplications();
           },
