@@ -712,6 +712,33 @@ describe('wiring a CLI up to it', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  /*
+   * The session file sits in the directory the CLI runs in, and a coding CLI
+   * reads files there without asking. The prompt and every tool result are
+   * redacted; this file was not, so an SSN pasted into a posting or typed into
+   * a draft reached the model through it anyway.
+   */
+  it('writes the session with identifiers already taken out', () => {
+    const dir = sandbox();
+    const base = payload();
+    wireUp(
+      dir,
+      'claude',
+      {
+        ...base,
+        posting: { ...POSTING, description: `${POSTING.description}\nSSN: 123-45-6789, card 4111 1111 1111 1111` },
+        draft: { coverLetter: { required: true, body: 'My SSN is 123-45-6789.' }, questions: [] },
+      },
+      '/somewhere/bin.js',
+    );
+    const raw = fs.readFileSync(path.join(dir, 'tailor-session.json'), 'utf8');
+    expect(raw).not.toContain('123-45-6789');
+    expect(raw).not.toContain('4111 1111 1111 1111');
+    // And nothing else is disturbed: the posting is still the posting.
+    expect(JSON.parse(raw).posting.company).toBe('Helios Robotics');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('puts the config where Gemini looks, since Gemini takes no flag', () => {
     const dir = sandbox();
     const wiring = wireUp(dir, 'gemini', payload(), '/somewhere/bin.js');

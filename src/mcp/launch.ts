@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AI_PRESETS } from '../ai/presets.js';
 import type { SessionFile } from './main.js';
+import { redactDeep } from '../jobs/answers.js';
 
 /**
  * The MCP entry point, in whichever form this install has.
@@ -204,7 +205,13 @@ export function wireUp(
 
   const sessionPath = path.join(sandbox, 'tailor-session.json');
   const out = path.join(sandbox, 'tailor-decisions.json');
-  fs.writeFileSync(sessionPath, JSON.stringify({ ...session, out }), 'utf8');
+  /*
+   * Redacted on the way to disk. This file is in the CLI's working directory,
+   * where a coding CLI reads files without asking, so it is text the model
+   * sees — past `runAgent`'s redaction of the prompt and the protocol's of
+   * every tool result. See `redactDeep`.
+   */
+  fs.writeFileSync(sessionPath, JSON.stringify({ ...redactDeep(session), out }), 'utf8');
 
   /*
    * One server, named for what it is rather than for this application: the

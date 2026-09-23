@@ -311,6 +311,26 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
   return { text: out, redacted };
 }
 
+/**
+ * `redactIdentifiers` over every string in a value, keys left alone.
+ *
+ * For what is handed to the model as a file rather than as text: the MCP
+ * session sits in the directory the CLI runs in, and a coding CLI reads it
+ * with its own file tools, past the redaction the prompt and the tool results
+ * get. Ids, numbers and the shape of the data are untouched.
+ */
+export function redactDeep<T>(value: T): T {
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') return redactIdentifiers(v).text;
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x)]));
+    }
+    return v;
+  };
+  return walk(value) as T;
+}
+
 export function isSensitiveAnswer(answer: string): boolean {
   return SENSITIVE_ANSWER.some((re) => re.test(answer)) || containsCardNumber(answer);
 }
