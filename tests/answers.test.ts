@@ -553,13 +553,22 @@ describe('identifiers, however the question is worded', () => {
   });
 
   it('recognises the values themselves', () => {
-    for (const a of ['123-45-6789', '123 45 6789', '4111 1111 1111 1111', 'GB82 WEST 1234 5698 7654 32']) {
+    for (const a of ['123-45-6789', '123 45 6789', '4111 1111 1111 1111', '4111111111111111', '3782-822463-10005', 'GB82 WEST 1234 5698 7654 32']) {
       expect(isSensitiveAnswer(a), a).toBe(true);
     }
   });
 
   it('leaves ordinary answers alone: phones, years, a ZIP code, prose', () => {
-    for (const a of ['617-555-0100', '+44 20 7946 0958', '2019-2023', '02115-1234', 'I have led three teams since 2019.']) {
+    for (const a of [
+      '617-555-0100',
+      '+44 20 7946 0958',
+      '2019-2023',
+      '02115-1234',
+      'I have led three teams since 2019.',
+      // A long number that is not a card: a timestamp, an order number.
+      'Because of the pipelines you publish — 1790131234567',
+      'Order 4000123456789 shipped late.',
+    ]) {
       expect(isSensitiveAnswer(a), a).toBe(false);
     }
   });

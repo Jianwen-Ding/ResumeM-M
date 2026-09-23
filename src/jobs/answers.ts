@@ -243,12 +243,35 @@ const SENSITIVE_QUESTION = [
  */
 const SENSITIVE_ANSWER = [
   /\b\d{3}[- ]\d{2}[- ]\d{4}\b/,
-  /\b(?:\d[ -]?){13,19}\b/,
   /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}\b/,
 ];
 
+/**
+ * A card number, not any long number: a card issuer's prefix and a valid
+ * Luhn check digit. A plain 13-to-19 digit rule refused ordinary answers —
+ * a timestamp, an order number — which is a save that silently fails.
+ */
+function containsCardNumber(answer: string): boolean {
+  for (const run of answer.match(/\b(?:\d[ -]?){12,18}\d\b/g) ?? []) {
+    const digits = run.replace(/\D/g, '');
+    if (digits.length < 13 || digits.length > 19) continue;
+    if (!/^(?:4|5[1-5]|2[2-7]|3[47]|6(?:011|5))/.test(digits)) continue;
+    let sum = 0;
+    for (let i = 0; i < digits.length; i++) {
+      let d = Number(digits[digits.length - 1 - i]);
+      if (i % 2 === 1) {
+        d *= 2;
+        if (d > 9) d -= 9;
+      }
+      sum += d;
+    }
+    if (sum % 10 === 0) return true;
+  }
+  return false;
+}
+
 export function isSensitiveAnswer(answer: string): boolean {
-  return SENSITIVE_ANSWER.some((re) => re.test(answer));
+  return SENSITIVE_ANSWER.some((re) => re.test(answer)) || containsCardNumber(answer);
 }
 
 export function isSensitiveQuestion(question: string): boolean {
