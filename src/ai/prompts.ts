@@ -1,6 +1,7 @@
 import { buildVoiceContext, renderVoiceContext } from './voice.js';
 import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
 import { looksLikeCompanyName } from '../jobs/extract.js';
+import { employerName } from '../model/applications.js';
 import { effortInstruction } from './presets.js';
 import type {
   Bullet,
@@ -268,13 +269,15 @@ function priorWorkIndex(data: StoreData, { question, job }: PriorWork): string {
   const lines = ['## What they have written before', ''];
 
   if (letters.length > 0) {
-    const here = (job?.company ?? '').toLowerCase();
+    // One employer however it is written — see `employerName`.
+    const who = (name?: string) => employerName(name ?? '').toLowerCase();
+    const here = who(job?.company);
     // The same employer first, for the same reason the picker does it: the
     // most useful letter to start from is the one they sent these people.
     const ranked = here
       ? [...letters].sort(
           (a, b) =>
-            Number((b.company ?? '').toLowerCase() === here) - Number((a.company ?? '').toLowerCase() === here),
+            Number(who(b.company) === here) - Number(who(a.company) === here),
         )
       : letters;
     lines.push(`${plural(letters.length, 'cover letter')}, most recent first:`);

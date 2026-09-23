@@ -620,3 +620,14 @@ describe('sameQuestion', () => {
     expect(sameQuestion('Why do you want to work here?', 'Why do you want to leave your current job?')).toBe(false);
   });
 });
+
+describe('earlier letters to the same employer, however it is written', () => {
+  it('ranks a letter sent to "Acme, Inc." first for a form that says "Acme"', () => {
+    const letters = [
+      { id: 'l1', title: 'Globex letter', company: 'Globex', role: 'Engineer', body: '', createdAt: new Date().toISOString() },
+      { id: 'l2', title: 'Acme letter', company: 'Acme, Inc.', role: 'Designer', body: '', createdAt: '2025-01-01T00:00:00Z' },
+    ];
+    expect(relevantLetters(letters as never, { company: 'Acme', role: 'Engineer' })[0]?.id).toBe('l2');
+    expect(relevantLetters(letters as never, { company: 'Acme Labs', role: 'Engineer' })[0]?.id).toBe('l1');
+  });
+});

@@ -152,3 +152,21 @@ describe('what the corpus costs a prompt', () => {
     expect(bullets[0]).toContain('The one I sent Helios');
   });
 });
+
+/*
+ * The same employer first in the index, however its name is written: a
+ * letter sent to "Acme, Inc." is the one to start from for a form that says
+ * "Acme", and compared as written it was ranked with everybody else.
+ */
+describe('the index puts the same employer first, with or without its legal form', () => {
+  it('lists the letter sent to "Acme, Inc." first for "Acme"', () => {
+    const { data, resume } = storeWith(3);
+    // The oldest of the three, so "most recent first" alone would list it last.
+    const acme = { ...data.coverLetters[2]!, id: 'acme', title: 'The Acme letter', company: 'Acme, Inc.', createdAt: '2020-01-01T00:00:00Z' };
+    const withAcme = { ...data, coverLetters: [data.coverLetters[0]!, data.coverLetters[1]!, acme] };
+    const job = { jobTitle: 'Platform Engineer', company: 'Acme', jobDescription: 'Build pipelines.' };
+    const section = corpusSection(coverLetterPrompt(withAcme, resume, job, [], { tools: true }));
+    const firstListed = section.split('\n').find((line) => line.startsWith('- '));
+    expect(firstListed).toContain('The Acme letter');
+  });
+});

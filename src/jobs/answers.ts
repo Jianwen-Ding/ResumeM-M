@@ -435,7 +435,8 @@ export function matchAnswers(
 export function relevantLetters(letters: CoverLetter[], job: { company?: string; role?: string }, limit = 3): CoverLetter[] {
   const score = (l: CoverLetter): number => {
     let s = 0;
-    if (job.company && l.company && l.company.toLowerCase() === job.company.toLowerCase()) s += 10;
+    // One employer however it is written — see `employerName`.
+    if (job.company && l.company && employerName(l.company).toLowerCase() === employerName(job.company).toLowerCase()) s += 10;
     if (job.role && l.role && overlapWords(l.role, job.role) > 0.5) s += 4;
     // Recency as a tiebreak, in days-ago descending.
     const age = l.createdAt ? (Date.now() - Date.parse(l.createdAt)) / 86_400_000 : 9999;
