@@ -3491,8 +3491,11 @@ async function addBullet(entry) {
       },
     ],
   };
-  await saveEntry(next, `Added bullet ${id}`);
-  if (!state.masterView) await tickBulletHere(entry.id, id);
+  // One addition, one undo step — see `addSkill`.
+  await undoGroup(`add a line to ${entryName(entry)}`, [], async () => {
+    await saveEntry(next, `Added bullet ${id}`);
+    if (!state.masterView) await tickBulletHere(entry.id, id);
+  });
   scheduleRender();
 }
 
@@ -4399,27 +4402,34 @@ async function addSkill(group) {
   if (!answer?.text?.trim()) return;
 
   let added;
-  await inSkillsLane((groups) =>
-    groups.map((g) => {
-      if (g.id !== group.id) return g;
-      // Against `g`, the group as it now stands, not the copy this button
-      // was drawn from: a skill added a moment ago is in one and not the
-      // other.
-      added = freeSkillItemId(g, `s_${slug(answer.text)}`);
-      return {
-        ...g,
-        items: [
-          ...g.items,
-          {
-            id: added,
-            text: answer.text.trim(),
-            ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
-          },
-        ],
-      };
-    }),
-  );
-  if (added && !state.masterView) await tickSkillHere(group.id, added, answer.text.trim());
+  /*
+   * One addition, one undo step: the skill and the tick that puts it on this
+   * resume are two writes, and as two steps the first Ctrl+Z only unticked it.
+   * The same grouping `addEntry` has always had.
+   */
+  await undoGroup(`add ${answer.text.trim()}`, [], async () => {
+    await inSkillsLane((groups) =>
+      groups.map((g) => {
+        if (g.id !== group.id) return g;
+        // Against `g`, the group as it now stands, not the copy this button
+        // was drawn from: a skill added a moment ago is in one and not the
+        // other.
+        added = freeSkillItemId(g, `s_${slug(answer.text)}`);
+        return {
+          ...g,
+          items: [
+            ...g.items,
+            {
+              id: added,
+              text: answer.text.trim(),
+              ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
+            },
+          ],
+        };
+      }),
+    );
+    if (added && !state.masterView) await tickSkillHere(group.id, added, answer.text.trim());
+  });
   setStatus('Skill added');
   render();
   scheduleRender();

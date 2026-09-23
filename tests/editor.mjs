@@ -752,6 +752,19 @@ async function main() {
             if (!savedOn) await new Promise((r) => setTimeout(r, 500));
           }
           check('and the saved resume lists it, after the save settles', savedOn);
+
+          /*
+           * One addition, one undo. The skill and the tick that puts it on
+           * this resume are two writes, and as two undo steps the first
+           * Ctrl+Z only unticked it — the skill stayed in the group.
+           */
+          await page.locator('#btn-undo').click();
+          let gone = false;
+          for (let waited = 0; waited < 15_000 && !gone; waited += 500) {
+            gone = (await page.locator('.skill-chip', { hasText: 'Zig' }).count()) === 0;
+            if (!gone) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and one undo takes the whole addition back', gone);
         } finally {
           await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
           const now = await (await fetch(`${server.url}/api/store`)).json();
