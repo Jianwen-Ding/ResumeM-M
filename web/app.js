@@ -37,6 +37,26 @@ const el = (tag, props = {}, children = []) => {
 };
 
 /**
+ * A link to a posting, or `null` when the address is not a web page.
+ *
+ * Posting addresses come from pages, from a store cloned from somebody's git
+ * link, from a restored bundle — none of it written by the person clicking.
+ * A `javascript:` address set as an `href` runs in this editor, which can
+ * change the AI command, so anything other than http(s) is left off.
+ */
+const postingLink = (url) => {
+  try {
+    const { protocol } = new URL(url);
+    if (protocol === 'http:' || protocol === 'https:') {
+      return el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', textContent: 'posting' });
+    }
+  } catch {
+    /* not an address at all */
+  }
+  return null;
+};
+
+/**
  * A text field that waits for a Save button, and survives its panel being
  * rebuilt around it.
  *
@@ -6082,8 +6102,8 @@ async function openApplication(id) {
       el('h3', { textContent: a.role }),
       el('div', { className: 'sub' }, [
         document.createTextNode(a.company),
-        a.url ? document.createTextNode(' · ') : null,
-        a.url ? el('a', { href: a.url, target: '_blank', textContent: 'posting' }) : null,
+        a.url && postingLink(a.url) ? document.createTextNode(' · ') : null,
+        a.url ? postingLink(a.url) : null,
       ]),
       ...sections,
     );
@@ -6753,8 +6773,8 @@ function renderDraft(draft) {
     ]),
     el('div', { className: 'where' }, [
       document.createTextNode(draft.company),
-      draft.url ? document.createTextNode(' · ') : null,
-      draft.url ? el('a', { href: draft.url, target: '_blank', textContent: 'posting' }) : null,
+      draft.url && postingLink(draft.url) ? document.createTextNode(' · ') : null,
+      draft.url ? postingLink(draft.url) : null,
     ]),
     ...blocks,
     el('div', { className: 'block' }, [
@@ -10060,7 +10080,24 @@ async function applyHash() {
   const draft = /^#workspace\/(.+)$/.exec(location.hash);
   if (draft) {
     showTab('workspace');
-    await openDraft(decodeURIComponent(draft[1]));
+    const id = decodeURIComponent(draft[1]);
+    /*
+     * The address outlives the draft: a link from the extension, or a reload,
+     * can name one that has since been discarded or swept. Opened anyway, that
+     * printed `No draft "2026-09-23-…"` and left the panel empty, holding the
+     * slot the list would otherwise have filled with something to work on.
+     */
+    const { drafts } = await api('/workspace');
+    if (!drafts.some((d) => d.id === id)) {
+      // Unless the list has already moved the address on to what it opened.
+      // `window.` because `history` in this file is the undo stack.
+      if (location.hash === draft[0]) window.history.replaceState(null, '', '#workspace');
+      setStatus('That application is no longer in the workspace.');
+      if (openDraftId === id) openDraftId = null;
+      await loadDrafts();
+      return true;
+    }
+    await openDraft(id);
     return true;
   }
 

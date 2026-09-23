@@ -1276,6 +1276,80 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * A posting address that is not a web page                        *
+     * -------------------------------------------------------------- */
+
+    /*
+     * A store cloned from a git link or restored from a bundle carries
+     * addresses nobody here typed. A `javascript:` one set as a link would run
+     * in the editor on a click — and the editor can change the AI command.
+     */
+    console.log('\nA posting address that is not a web page');
+    {
+      const open = (body) =>
+        page.evaluate(
+          async ([base, b]) => {
+            const res = await fetch(`${base}/api/workspace`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(b),
+            });
+            return (await res.json()).draft;
+          },
+          [server.url, body],
+        );
+      const hostile = await open({
+        company: 'Mallory Systems',
+        role: 'Data Engineer',
+        url: 'javascript:window.__ran=1',
+        source: 'by hand',
+      });
+      const honest = await open({
+        company: 'Trent Works',
+        role: 'Data Engineer',
+        url: 'https://trent.example/jobs/7',
+        source: 'by hand',
+      });
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.locator('.draft-card', { hasText: 'Mallory Systems' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Mallory Systems' }).waitFor({ timeout: 20_000 });
+        const hrefs = await page.locator('#draft-editor .where a').evaluateAll((as) => as.map((a) => a.href));
+        check('a javascript: address is not made a link', hrefs.length === 0, hrefs.join(', '));
+
+        await page.locator('.draft-card', { hasText: 'Trent Works' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Trent Works' }).waitFor({ timeout: 20_000 });
+        const kept = await page.locator('#draft-editor .where a').evaluateAll((as) => as.map((a) => a.href));
+        check('and a web address still is', kept.includes('https://trent.example/jobs/7'), kept.join(', '));
+      } finally {
+        for (const d of [hostile, honest]) {
+          if (d?.id) {
+            await fetch(`${server.url}/api/workspace/${encodeURIComponent(d.id)}`, { method: 'DELETE' }).catch(
+              () => undefined,
+            );
+          }
+        }
+      }
+
+      /*
+       * The address still names the one just discarded. Reloaded on it, the
+       * editor says so in words and gets on with the list — not a raw id in
+       * red over an empty panel, which is also the "nothing threw" check.
+       */
+      check('the address still names a discarded application', page.url().includes('#workspace/'), page.url());
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      const said = await page
+        .locator('#status', { hasText: 'no longer in the workspace' })
+        .waitFor({ timeout: 15_000 })
+        .then(
+          () => true,
+          () => false,
+        );
+      check('reopening it says it is gone, in words', said, await page.locator('#status').textContent());
+    }
+
+    /* -------------------------------------------------------------- *
      * Writing an application                                          *
      * -------------------------------------------------------------- */
 
