@@ -1774,6 +1774,20 @@ export function mergeJobPages(pages: PageSource[]): MergedJob {
   }
 
   /*
+   * A page another page already says in full is read once, as the fuller
+   * copy. The same posting captured under a tracking parameter, or again once
+   * "Read more" had opened it, went to the AI twice and took a share of the
+   * cap the form's questions needed. Compared on letters and digits, so the
+   * two captures need not break their lines alike.
+   */
+  const bares = parts.map((p) => bare(p.text));
+  const kept = parts.filter((_, i) => {
+    const mine = bares[i]!;
+    return !bares.some((other, j) => j !== i && other.includes(mine) && (other.length > mine.length || j < i));
+  });
+  parts.splice(0, parts.length, ...kept);
+
+  /*
    * One page with anything to say is read as that page — not as the first
    * page of the trail, which may be the one with nothing on it, and was.
    */

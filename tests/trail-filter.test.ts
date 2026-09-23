@@ -1128,3 +1128,46 @@ describe('the merged trail keeps every page\'s share and never reads the wrong p
     expect(merged.description).toContain('You will own our Kafka pipeline end to end.');
   });
 });
+
+/*
+ * The same page twice, read once.
+ *
+ * A posting captured again under a tracking parameter, or again once "Read
+ * more" had opened it, went to the AI twice — the second copy taking a share
+ * of the cap that the form's questions needed. A page whose text another page
+ * already contains in full is left out, and the fuller copy is the one kept.
+ */
+describe('a page the trail already holds is not read twice', () => {
+  const posting = (extra = '') =>
+    `<html><body><main><h1>Platform Engineer</h1><p>You will own our Kafka pipeline end to end, from ingestion to the warehouse.</p>${extra}</main></body></html>`;
+  const form = '<html><body><form><label for="q">Why do you want to work at Acme?</label><textarea id="q"></textarea></form></body></html>';
+  const count = (text: string, needle: string) => text.split(needle).length - 1;
+
+  it('reads a posting captured twice under two addresses once', () => {
+    const merged = mergeJobPages([
+      { url: 'https://acme.example/careers/42', title: 'Platform Engineer', html: posting() },
+      { url: 'https://acme.example/careers/42?gh_src=linkedin', title: 'Platform Engineer', html: posting() },
+      { url: 'https://acme.example/apply/42', title: 'Apply', html: form },
+    ]);
+    expect(count(merged.description, 'You will own our Kafka pipeline')).toBe(1);
+    expect(merged.description).toContain('Why do you want to work at Acme?');
+  });
+
+  it('keeps the fuller copy when the second capture opened "Read more"', () => {
+    const merged = mergeJobPages([
+      { url: 'https://acme.example/careers/42', title: 'Platform Engineer', html: posting() },
+      { url: 'https://acme.example/careers/42#more', title: 'Platform Engineer', html: posting('<p>Salary: $150,000 to $180,000. Visa sponsorship available.</p>') },
+    ]);
+    expect(count(merged.description, 'You will own our Kafka pipeline')).toBe(1);
+    expect(merged.description).toContain('Salary: $150,000 to $180,000.');
+  });
+
+  it('still reads two different pages that share a sentence', () => {
+    const merged = mergeJobPages([
+      { url: 'https://acme.example/careers/42', title: 'Platform Engineer', html: posting('<p>Only on the posting.</p>') },
+      { url: 'https://acme.example/about', title: 'About', html: '<html><body><main><p>You will own our Kafka pipeline end to end, from ingestion to the warehouse.</p><p>Only on the about page.</p></main></body></html>' },
+    ]);
+    expect(merged.description).toContain('Only on the posting.');
+    expect(merged.description).toContain('Only on the about page.');
+  });
+});
