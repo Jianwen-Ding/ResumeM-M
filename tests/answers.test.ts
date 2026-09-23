@@ -300,6 +300,33 @@ describe('the same question, asked by another system', () => {
   });
 
   /*
+   * And the same employer written another way: the posting says "Helios,
+   * Inc.", the form says "Helios". Compared as written, the answer written
+   * for them was called somebody else's and only offered.
+   */
+  it('knows an employer with or without its legal form', () => {
+    const bank = [
+      {
+        id: 'a1',
+        question: 'Why do you want to work here?',
+        default: 'v0',
+        variants: [
+          { id: 'v0', label: 'Globex', text: 'Globex is why I applied — the Globex data team is the reason.' },
+          { id: 'v1', label: 'Helios, Inc.', text: 'Helios is why I applied — I have followed the Helios platform for years.' },
+        ],
+      },
+    ];
+    const asked = 'Why do you want to work here?';
+    const mine = matchAnswer(asked, bank as never, { company: 'Helios' });
+    expect(mine.namesAnother).toBeUndefined();
+    expect(mine.variant?.id).toBe('v1');
+    const again = matchAnswer(asked, bank as never, { company: 'HELIOS LLC' });
+    expect(again.variant?.id).toBe('v1');
+    // A different employer is still somebody else.
+    expect(matchAnswer(asked, bank as never, { company: 'Helios Labs' }).variant?.id).not.toBe('v1');
+  });
+
+  /*
    * A word the page added can reverse the question, and every added word
    * scores as shared vocabulary.
    *

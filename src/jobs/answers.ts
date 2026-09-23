@@ -1,4 +1,5 @@
 import type { AnswerBankItem, CoverLetter, Variant } from '../model/types.js';
+import { employerName } from '../model/applications.js';
 
 /**
  * Reusing what you already wrote, without an AI call.
@@ -373,16 +374,23 @@ export function matchAnswer(
    * you have applied before should hand back what you said to *them*, not
    * the default, which is whatever was written last.
    */
+  /*
+   * One employer, however it is written: "Acme, Inc." on the posting and
+   * "Acme" on the form are the same people, and the answer written for one
+   * was being called somebody else's on the other — vetoed, and the variant
+   * written for them passed over. See `employerName`.
+   */
+  const who = (name: string) => employerName(name).toLowerCase();
   const forThisCompany = company
-    ? best.item.variants.find((v) => (v.label ?? '').trim().toLowerCase() === company.trim().toLowerCase())
+    ? best.item.variants.find((v) => who(v.label ?? '') === who(company))
     : undefined;
   const variant = forThisCompany ?? best.item.variants.find((v) => v.id === best!.item.default) ?? best.item.variants[0];
 
   const text = variant?.text ?? '';
-  const ours = (company ?? '').trim().toLowerCase();
+  const ours = who(company ?? '');
   const namesAnother = forThisCompany
     ? undefined
-    : employersInBank(bank).find((name) => name.trim().toLowerCase() !== ours && mentions(text, name));
+    : employersInBank(bank).find((name) => who(name) !== ours && mentions(text, name));
 
   return {
     question,
