@@ -1276,6 +1276,41 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * The flat folder's page, under the script policy                 *
+     * -------------------------------------------------------------- */
+
+    /*
+     * Every reply carries a policy allowing only the editor's own inline
+     * script. This page has one of its own — the Copy button — and a policy
+     * that forgot it leaves a button that does nothing, with the only word of
+     * it in a console nobody opens.
+     */
+    console.log('\nThe flat folder page, under the script policy');
+    {
+      const tab = await browser.newPage();
+      const blocked = [];
+      tab.on('console', (m) => {
+        if (/Content Security Policy/i.test(m.text())) blocked.push(m.text());
+      });
+      await tab.addInitScript(() => {
+        // Headless has no clipboard to write to; what matters is that the
+        // button's script ran at all.
+        Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => undefined } });
+      });
+      await tab.goto(`${server.url}/current`, { waitUntil: 'domcontentloaded' });
+      await tab.locator('#copy').click();
+      const said = await tab
+        .locator('#copy', { hasText: 'Copied' })
+        .waitFor({ timeout: 5_000 })
+        .then(
+          () => true,
+          () => false,
+        );
+      check('its Copy button still works', said && blocked.length === 0, blocked.join(' | '));
+      await tab.close();
+    }
+
+    /* -------------------------------------------------------------- *
      * A posting address that is not a web page                        *
      * -------------------------------------------------------------- */
 

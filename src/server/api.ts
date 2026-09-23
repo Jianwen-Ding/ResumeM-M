@@ -1,6 +1,6 @@
 import express, { type Request, type Response, type Router } from 'express';
 import { extractText } from '../ingest/text.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -4785,6 +4785,16 @@ function answerId(question: string, taken: AnswerBankItem[]): string {
   return taken.some((a) => a.id === base) ? `${base}-${fingerprint(question)}` : base;
 }
 
+
+/** The "Copy the path" button on the flat folder's page, allowed by its hash. */
+const COPY_PATH_SCRIPT = `
+  document.getElementById('copy').onclick = async (ev) => {
+    await navigator.clipboard.writeText(document.getElementById('path').textContent);
+    ev.target.textContent = 'Copied';
+  };
+`;
+const COPY_PATH_POLICY = `script-src 'sha256-${createHash('sha256').update(COPY_PATH_SCRIPT).digest('base64')}'; base-uri 'none'`;
+
 /**
  * The flat folder, as a page you can open.
  *
@@ -4831,6 +4841,9 @@ export function createCurrentRouter(store: Store): Router {
         ? 'Nothing built yet. Build an application and its files land here.'
         : 'Nothing is mid-application, so there is nothing to upload.';
 
+    // Its own policy: the server's allows only the editor's inline script, and
+    // this page's one button is an inline script of its own.
+    res.setHeader('Content-Security-Policy', COPY_PATH_POLICY);
     res.type('html').send(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Ready to upload</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4857,12 +4870,7 @@ export function createCurrentRouter(store: Store): Router {
   <div class="strip"><code id="path">${escape(folder.dir)}</code><button id="copy">Copy the path</button></div>
   ${rows ? `<ul>${rows}</ul>` : `<div class="empty">${empty}</div>`}
 </main>
-<script>
-  document.getElementById('copy').onclick = async (ev) => {
-    await navigator.clipboard.writeText(document.getElementById('path').textContent);
-    ev.target.textContent = 'Copied';
-  };
-</script>
+<script>${COPY_PATH_SCRIPT}</script>
 </body></html>`);
   });
 

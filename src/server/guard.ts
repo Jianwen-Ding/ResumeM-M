@@ -86,3 +86,27 @@ export function localOnly({ host, allowHosts = [] }: GuardOptions = {}): Request
     next();
   };
 }
+
+/**
+ * The script policy every reply carries.
+ *
+ * Nearly everything this server shows was written somewhere else: postings
+ * scraped off job boards, a store cloned from somebody's git link, a restored
+ * bundle, files dropped into the inbox and served back as assets. The editor
+ * builds its DOM from text rather than markup, but a policy is what holds when
+ * one place gets that wrong — an SVG asset with a `<script>` in it, a
+ * `javascript:` address, an attribute nobody thought of. And a script running
+ * here can set `ai.command`, the command this application runs.
+ *
+ * Scripts only, and only our own: the one inline script in the editor, its
+ * import map, is allowed by its hash, read from the page itself so editing it
+ * cannot silently break the editor. Styles, images and fetches are left alone.
+ */
+export function scriptPolicy(indexHtml: string, hash: (text: string) => string): string {
+  const inline = [...indexHtml.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map(
+    (m) => `'sha256-${hash(m[1] ?? '')}'`,
+  );
+  // No `object-src`: the PDFs served here open in Chrome's own viewer, which
+  // is an embed, and a policy that stopped it would stop the files opening.
+  return [`script-src 'self' ${inline.join(' ')}`.trim(), "base-uri 'none'"].join('; ');
+}
