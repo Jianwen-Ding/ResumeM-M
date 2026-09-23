@@ -198,14 +198,36 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
     }
   }
 
-  // Skills: keep any item the posting mentions, plus the ones already chosen,
-  // and never drop a group to nothing.
+  /*
+   * Skills: narrow each group to the items the posting mentions, out of the
+   * ones the base already prints — never switch on one the base left off.
+   *
+   * This read the whole group, so a skill somebody had deliberately turned
+   * off on their base came back on the moment a posting named it. The
+   * Workspace's keyword tailor applies the match outright, and an AI run that
+   * says nothing about a group takes the match's list for it, so neither
+   * offered a box to untick: the resume simply came out with skills the
+   * applicant had removed. Choosing among what is already there is narrowing;
+   * reaching past it is adding, and adding is the applicant's call (or the
+   * AI's, which the card shows as its own box).
+   *
+   * A group the base's skills section does not list is not printed, so there
+   * is nothing to narrow. A base with no skills section at all is answered as
+   * before — `deriveSpec` has nowhere to write it, so it changes nothing.
+   * Kept in the base's own order, and never narrowed to fewer than two.
+   */
   const skills: Record<string, string[]> = {};
+  const skillsSection = base.sections?.find((s) => s.kind === 'skills');
   for (const g of data.skillGroups) {
-    const relevant = g.items.filter(
+    if (skillsSection && !(skillsSection.groups ?? []).includes(g.id)) continue;
+    const shown = skillsSection?.items?.[g.id];
+    const pool = shown
+      ? shown.map((id) => g.items.find((i) => i.id === id)).filter((i): i is (typeof g.items)[number] => Boolean(i))
+      : g.items;
+    const relevant = pool.filter(
       (i) => (i.tags ?? []).some((t) => keywords.has(norm(t))) || keywords.has(norm(i.text)),
     );
-    if (relevant.length >= 2 && relevant.length < g.items.length) {
+    if (relevant.length >= 2 && relevant.length < pool.length) {
       skills[g.id] = relevant.map((i) => i.id);
     }
   }

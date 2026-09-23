@@ -437,3 +437,27 @@ describe('analysing a posting with the AI switched on', () => {
     expect(res.body.aiFailed).toBeTruthy();
   });
 });
+
+/*
+ * The keyword tailor saves its result outright — there is no box to untick —
+ * so the skills it writes have to be ones the base already prints. It used
+ * to narrow each group from the whole group, and a language somebody had
+ * turned off on their base came back the moment a posting named it.
+ */
+describe('tailoring by keyword never switches on a skill the base turned off', () => {
+  it('keeps the base\'s own skills when the posting names one the base hides', async () => {
+    serve();
+    // Go is in the group and the posting names it; this base leaves it off.
+    t.store.saveResume({
+      id: 'no-go',
+      label: 'No Go',
+      sections: [{ kind: 'skills', entries: [], groups: ['sk_lang'], items: { sk_lang: ['s_py', 's_ts', 's_php'] } }],
+    });
+    const draft = await openSpace();
+    const res = await tailor(draft.id, { baseResumeId: 'no-go' }).expect(200);
+    const saved = t.store.load().resumes.find((r) => r.id === res.body.spec.id);
+    const items = saved?.sections?.find((s) => s.kind === 'skills')?.items?.sk_lang;
+    expect(items).not.toContain('s_go');
+    expect(items).toEqual(['s_py', 's_ts', 's_php']);
+  });
+});

@@ -400,6 +400,39 @@ describe('variant matching', () => {
     expect(result.skills.sk).toBeUndefined();
   });
 
+  /*
+   * Narrowing chooses among what the base prints; it never switches on a
+   * skill the base left off. The Workspace's keyword tailor applies the match
+   * outright, so a skill somebody had removed from their base came back the
+   * moment a posting named it, with nothing to untick.
+   */
+  const trimmedBase = (items: string[], groups = ['sk']): ResumeSpec => ({
+    id: 'trimmed',
+    label: 'Trimmed',
+    sections: [{ kind: 'skills', entries: [], groups, items: { sk: items } }],
+  });
+
+  const withFour: StoreData = {
+    ...data,
+    skillGroups: [{ ...data.skillGroups[0]!, items: [...data.skillGroups[0]!.items, { id: 's_rs', text: 'Rust', tags: ['rust'] }] }],
+  };
+
+  it('never switches on a skill the base turned off', () => {
+    // The base prints Python, Go and Rust, not PHP; the posting names PHP.
+    const result = matchVariants(withFour, trimmedBase(['s_py', 's_go', 's_rs']), { keywords: ['python', 'go', 'php'] });
+    expect(result.skills.sk).toEqual(['s_py', 's_go']);
+  });
+
+  it('still narrows within what the base prints, in the base\'s own order', () => {
+    const result = matchVariants(withFour, trimmedBase(['s_go', 's_rs', 's_py']), { keywords: ['python', 'go', 'php'] });
+    expect(result.skills.sk).toEqual(['s_go', 's_py']);
+  });
+
+  it('leaves alone a group the base does not print', () => {
+    const result = matchVariants(data, trimmedBase(['s_py', 's_go'], []), { keywords: ['python', 'go'] });
+    expect(result.skills.sk).toBeUndefined();
+  });
+
   it('respects a higher threshold by making fewer changes', () => {
     const loose = matchVariants(data, base, { keywords: ['kafka'] });
     const strict = matchVariants(data, base, { keywords: ['kafka'], threshold: 99 });

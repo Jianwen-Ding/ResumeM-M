@@ -296,7 +296,9 @@ describe('job analysis', () => {
         id: 'narrowed',
         label: 'Narrowed',
         extends: 'base',
-        sections: [{ kind: 'skills', entries: [], items: { sk_lang: ['s_py', 's_ts', 's_php'] } }],
+        // Two of the posting's languages among three, so there is something
+        // to narrow: the match only chooses among what the base prints.
+        sections: [{ kind: 'skills', entries: [], items: { sk_lang: ['s_py', 's_go', 's_php'] } }],
       });
       t.store.saveResume({ id: 'inherits', label: 'Inherits', extends: 'narrowed' });
 
@@ -307,7 +309,7 @@ describe('job analysis', () => {
 
       const change = (res.body.skillChanges as { groupId: string; from: string[] | null }[])
         .find((c) => c.groupId === 'sk_lang');
-      expect(change?.from).toEqual(['s_py', 's_ts', 's_php']);
+      expect(change?.from).toEqual(['s_py', 's_go', 's_php']);
     });
 
     it('says nothing about skills when nothing was narrowed', async () => {
