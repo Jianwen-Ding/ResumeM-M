@@ -817,12 +817,38 @@ async function main() {
           await box.getByRole('button', { name: '+ Add bullet' }).first().click();
           await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
           await page.locator('#f_text').fill(line);
+          /*
+           * Watched from before the press, not sampled once it appears: the
+           * line used to be drawn switched off for a round trip and then on,
+           * and a single look caught that only now and then.
+           */
+          await page.evaluate((text) => {
+            window.__drawnOff = false;
+            const look = () => {
+              for (const b of document.querySelectorAll('#editor .bullet.off')) {
+                if (b.textContent.includes(text)) window.__drawnOff = true;
+              }
+            };
+            window.__offWatch = new MutationObserver(look);
+            window.__offWatch.observe(document.getElementById('editor'), {
+              subtree: true,
+              childList: true,
+              attributes: true,
+              attributeFilter: ['class'],
+            });
+          }, line);
           await page.locator('#modal-ok').click();
 
           const added = box.locator('.bullet', { hasText: line });
           await added.first().waitFor({ timeout: 30_000 });
+          await page.waitForTimeout(500);
           const off = await added.first().evaluate((n) => n.classList.contains('off'));
+          const flashed = await page.evaluate(() => {
+            window.__offWatch.disconnect();
+            return window.__drawnOff;
+          });
           check('the new line is switched on in the resume it was added from', !off);
+          check('and is never drawn switched off on the way', !flashed);
 
           const listsIt = async () => {
             const resumes = await (await fetch(`${server.url}/api/resumes`)).json();

@@ -1086,7 +1086,7 @@ async function inEntryLane(id, run) {
   }
 }
 
-async function saveEntry(entry, message) {
+async function saveEntry(entry, message, { paint = true } = {}) {
   describeNext(message ?? 'the change');
   const id = entry.id;
   // What this edit was derived from: the store as the client last saw it.
@@ -1101,7 +1101,7 @@ async function saveEntry(entry, message) {
   });
 
   setStatus(message ?? `Saved ${id}`);
-  render();
+  if (paint) render();
 }
 
 async function saveResumeSpec(spec, message) {
@@ -3513,9 +3513,15 @@ async function addBullet(entry) {
   };
   // One addition, one undo step — see `addSkill`.
   await undoGroup(`add a line to ${entryName(entry)}`, [], async () => {
-    await saveEntry(next, `Added bullet ${id}`);
+    /*
+     * Not painted between the two writes. Drawn after the first, the new line
+     * showed switched off for a round trip, and the preview compiled the
+     * resume without it — then again with it once the tick landed.
+     */
+    await saveEntry(next, `Added bullet ${id}`, { paint: false });
     if (!state.masterView) await tickBulletHere(entry.id, id);
   });
+  render();
   scheduleRender();
 }
 
@@ -3540,7 +3546,6 @@ async function tickBulletHere(entryId, id) {
     s === section ? { ...s, bullets: { ...s.bullets, [entryId]: [...listed, id] } } : s,
   );
   await saveResumeSpec({ ...root, sections }, `Added ${id}`);
-  render();
 }
 
 async function removeBullet(entry, bullet) {
