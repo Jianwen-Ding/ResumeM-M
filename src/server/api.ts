@@ -3652,6 +3652,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       };
 
       const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () => {
+        /*
+         * Sent already? Asked again here, from a fresh read, in the same
+         * synchronous step as the save.
+         *
+         * `data` was loaded at the top of the handler, before its awaits, so a
+         * send landing in between was invisible to it: the draft opened as
+         * `drafting`, and the send — which had already looked for a draft and
+         * found none — never came back to mark it. Measured on the parallel
+         * send walk: a fast Submit left the workspace reading `drafting` under
+         * an application already `applied`. The send marks its draft inside
+         * its own commit callback, synchronously too, so one of the two always
+         * sees the other.
+         */
+        if (draft.status !== 'submitted' && alreadySent(store.load().applications, draft.company, draft.role)) {
+          draft.status = 'submitted';
+        }
         const written = store.saveDraft(draft);
         track();
         return written;

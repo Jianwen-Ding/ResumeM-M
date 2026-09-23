@@ -613,6 +613,50 @@ describe('job analysis', () => {
     });
 
     /*
+     * The other half of the same window: a send landing while the workspace
+     * route is still committing the tailored resume the extension sent with
+     * it — after the route took its snapshot, before the draft exists. The
+     * send finds no draft to mark; the draft, built from the stale snapshot,
+     * opened as `drafting` under an application already `applied`, and
+     * nothing ever came back to it. Measured on the parallel send walk.
+     */
+    it('opens the draft as submitted when the send lands while the resume commits', async () => {
+      const config = t.store.loadConfig();
+      t.store.saveConfig({ ...config, git: { ...config.git, autoCommit: true } });
+      let arrived: () => void;
+      const atTheCommit = new Promise<void>((r) => (arrived = r));
+      let release: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      const commits = vi.spyOn(repo, 'commitAll').mockImplementation(async (message: string) => {
+        if (/Add tailored resume/.test(message)) {
+          arrived();
+          await held;
+        }
+        return { committed: false } as never;
+      });
+
+      const job = { company: 'Meridian', role: 'Data Engineer' };
+      const base = t.store.load().resumes[0]!;
+      const spec = { ...base, id: 'job-meridian', label: 'Meridian — Data Engineer', tier: 'temporary' };
+      const opening = request(app).post('/api/workspace').send({ ...job, spec, coverLetterRequired: false }).then((r) => r);
+      await Promise.race([
+        atTheCommit,
+        new Promise((_, no) => setTimeout(() => no(new Error('the workspace route never reached the resume commit')), 10_000)),
+      ]);
+
+      const send = await sent(job).expect(200);
+      expect(send.body.application.status).toBe('applied');
+
+      release!();
+      expect((await opening).status).toBe(200);
+      commits.mockRestore();
+
+      const drafts = await request(app).get('/api/workspace').expect(200);
+      const draft = (drafts.body.drafts as { company: string; status: string }[]).find((d) => d.company === job.company);
+      expect(draft?.status).toBe('submitted');
+    });
+
+    /*
      * Only forwards. A form resubmitted after a reply came back must not drag
      * an application at `interview` back to `applied`, and one already sent
      * must not collect a second identical line of history.
