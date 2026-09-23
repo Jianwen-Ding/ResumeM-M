@@ -781,6 +781,66 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * A skill switched off and on again keeps its place                *
+     * -------------------------------------------------------------- */
+
+    /*
+     * The list a resume saves for a group is printed in its own order. The
+     * editor wrote it in the order the boxes were clicked, so unticking the
+     * first skill and ticking it again moved it to the end of the printed
+     * line, while the chips on screen stayed in the group's order.
+     */
+    console.log('\nA skill switched off and on again keeps its place');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const group = store.skillGroups?.find((g) => g.items.length >= 3);
+      const scratch = 'editor-skill-order';
+      if (!group) {
+        check('there is a skills group with three skills', false, 'none in the starter save');
+      } else {
+        await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Skill order scratch',
+            sections: [{ kind: 'skills', entries: [], groups: [group.id] }],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          const first = page.locator('.skill-chip', { hasText: group.items[0].text }).first();
+          await first.waitFor({ timeout: 30_000 });
+          // The chip is the control; its box is styled away.
+          await first.click();
+          await page.locator('.skill-chip:not(.on)', { hasText: group.items[0].text }).first().waitFor({ timeout: 10_000 });
+          await page.locator('.skill-chip', { hasText: group.items[0].text }).first().click();
+          await page.locator('.skill-chip.on', { hasText: group.items[0].text }).first().waitFor({ timeout: 10_000 });
+
+          const saved = async () => {
+            const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+            return resumes.find((r) => r.id === scratch)?.sections?.find((x) => x.kind === 'skills')?.items?.[group.id];
+          };
+          let list;
+          for (let waited = 0; waited < 20_000 && !list; waited += 500) {
+            list = await saved();
+            if (!list) await new Promise((r) => setTimeout(r, 500));
+          }
+          const want = group.items.map((i) => i.id);
+          check(
+            'the saved list keeps the group\'s order',
+            JSON.stringify(list) === JSON.stringify(want),
+            JSON.stringify(list),
+          );
+        } finally {
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
+      }
+    }
+
+    /* -------------------------------------------------------------- *
      * Adding a line to an entry on the resume you are on               *
      *                                                                  *
      * The same gap as the skill above, one level down: "+ Add bullet"  *

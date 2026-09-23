@@ -2495,7 +2495,13 @@ function skillsBlock(section) {
         const cur = new Set(state.skillEdits?.[gid] ?? picked);
         if (cb.checked) cur.add(item.id);
         else cur.delete(item.id);
-        state.skillEdits = { ...(state.skillEdits ?? {}), [gid]: [...cur] };
+        /*
+         * In the group's order, not the order the boxes were clicked. The
+         * list is what prints, in its own order, so unticking Python and
+         * ticking it again moved it to the end of the line on the page while
+         * the chips here stayed where they were.
+         */
+        state.skillEdits = { ...(state.skillEdits ?? {}), [gid]: group.items.map((i) => i.id).filter((id) => cur.has(id)) };
         markDirty();
         render();
       };
