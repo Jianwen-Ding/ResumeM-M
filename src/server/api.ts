@@ -3117,39 +3117,37 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       const application = await withCommit(repo, autoCommit(), `${id}: applied`, () => {
-        if (tracked) return advance(store, id, 'applied', note);
+        const recorded = ((): Application => {
+          if (tracked) return advance(store, id, 'applied', note);
+          /*
+           * Submitted without ever opening a workspace — a form filled straight
+           * from the card, which is the quick path and the one most likely to
+           * leave no trace. Recording it is the whole point.
+           */
+          const made: Application = {
+            id,
+            company: body.company!,
+            role: body.role!,
+            url: body.url,
+            status: 'applied',
+            appliedAt: now,
+            history: [{ at: now, status: 'applied', note }],
+          };
+          store.upsertApplication(made);
+          return made;
+        })();
         /*
-         * Submitted without ever opening a workspace — a form filled straight
-         * from the card, which is the quick path and the one most likely to
-         * leave no trace. Recording it is the whole point.
+         * And the draft, if there is one, stops looking like something to
+         * finish — found the same way, for the same reason, and in this same
+         * commit. Written after it, the move to "submitted" reached disk but
+         * not the version history; given a commit of its own, every send cost
+         * a second git run.
          */
-        const made: Application = {
-          id,
-          company: body.company!,
-          role: body.role!,
-          url: body.url,
-          status: 'applied',
-          appliedAt: now,
-          history: [{ at: now, status: 'applied', note }],
-        };
-        store.upsertApplication(made);
-        return made;
+        const draft = findDraft(store.loadDrafts(), body.company!, body.role!);
+        if (draft && draft.status !== 'submitted') store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
+        return recorded;
       });
 
-      // And the draft, if there is one, stops looking like something to finish
-      // — found the same way, for the same reason.
-      //
-      // Its own commit, not folded into the application's above: that commit
-      // has already happened by the time this write reaches disk, so leaving
-      // it bare left the draft's own move to "submitted" out of the version
-      // history — present in every read, absent from `git log`, and lost the
-      // moment the store was ever restored from history rather than disk.
-      const draft = findDraft(store.loadDrafts(), body.company, body.role);
-      if (draft && draft.status !== 'submitted') {
-        await withCommit(repo, autoCommit(), `Mark workspace for ${body.company} submitted`, () =>
-          store.saveDraft({ ...draft, status: 'submitted', updatedAt: now }),
-        );
-      }
 
       res.json({ application, changed: true });
     }),
@@ -3553,107 +3551,111 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         draft.coverLetter = { required: true, body: body.coverLetter, edited: true };
       }
 
-      const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
-        store.saveDraft(draft),
-      );
+      /** The tracker's side of opening a workspace. Runs inside the draft's commit. */
+      const track = (): void => {
 
-      /*
-       * An application being written is already an application. Track it as
-       * "applying" so the tracker shows what is in flight, not only what has
-       * been sent — completing the draft moves it to "applied".
-       *
-       * Read here, not from `data` at the top of the handler. `data` was
-       * loaded before the save above, and that save awaits a git commit — a
-       * process, tens to hundreds of milliseconds under load. Anything that
-       * writes this row in that window is invisible to a snapshot taken
-       * before it, and what followed was not a stale read but a destroyed
-       * one: the row was found missing, so a *new* one was written over the
-       * top, with `applying` for a status and a one-line history.
-       *
-       * Measured, on a store being driven by the extension: an application
-       * that had been staged and then submitted came back out of this handler
-       * reading `applying`, with the "Bundle created" and "applied" entries
-       * gone. The tracker said an application that had gone out had not, which
-       * is the failure that gets a job applied for twice.
-       *
-       * Nothing awaits between this read and the write below, so the two are
-       * one step as far as anything else on this server is concerned.
-       */
-      /*
-       * By identity, not by id. A draft can legitimately carry an id the
-       * tracker row does not — the row may have been made by hand, or by a
-       * send on a different day — and matching on the id alone meant writing
-       * a second row for a job that already had one.
-       */
-      /*
-       * What stage a row opened this way starts at.
-       *
-       * "Applying" is a claim about what somebody is doing, and merely having
-       * a workspace is not that claim. The extension opens one as soon as a
-       * resume is built, which it does on anything job-shaped you open — so
-       * the tracker filled with rows nobody had started: `Indeed — Now Hiring:
-       * 300 Software Intern Jobs`, a `preview.redd.it` image url, one row for
-       * `NVIDIA Corporation` and another for `2100 NVIDIA USA`, every one of
-       * them reading `applying` for ever. The list that is supposed to say
-       * what is in flight said everything was.
-       *
-       * The place to write still opens at the first sign of work, because the
-       * letter is drafted before the form is ever seen and putting the writing
-       * surface behind the form would be backwards. It is the *stage* that
-       * waits: `interested` — "Not applied" — until the extension reports
-       * something actually put into the employer's boxes.
-       *
-       * Only on the automatic route. Pressing "Write these in ResumeM-M"
-       * carries no `auto`, and somebody pressing it is applying.
-       */
-      const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
-      const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
-
-      const tracked = findApplication(store.load().applications, draft.company, draft.role);
-      /*
-       * Its own commit, not folded into the draft's above.
-       *
-       * The draft was already saved and committed by the time this row is
-       * written, so a write here that only touched disk left the tracker
-       * permanently out of the version history — on disk, in every read this
-       * process makes, and gone the moment something restores the store from
-       * git rather than the working tree. `withCommit` with auto-commit off
-       * costs nothing extra; with it on, the row gets the history entry every
-       * other write here gets.
-       */
-      if (!tracked) {
-        await withCommit(repo, autoCommit(), `Track application to ${draft.company}`, () =>
-          store.upsertApplication({
-            id,
-            company: draft.company,
-            role: draft.role,
-            url: draft.url,
-            status: started,
-            resumeId: draft.resumeId,
-            source: draft.source,
-            /*
-             * Dated, like one made by hand. The tracker sorts on `appliedAt` and
-             * prints it as the date column, so an application started from the
-             * extension — the one you are working on right now — had a blank date
-             * and sat at the bottom of the list, under everything already sent.
-             * It is the date it started; `trackStatus` records when it was sent.
-             */
-            appliedAt: now,
-            history: [{ at: now, status: started, note }],
-          }),
-        );
-      } else if (body.actedOnForm && tracked.status === 'interested') {
         /*
-         * And the moment it stops being a bookmark, it is moved on.
+         * An application being written is already an application. Track it as
+         * "applying" so the tracker shows what is in flight, not only what has
+         * been sent — completing the draft moves it to "applied".
          *
-         * Only out of `interested`, and only ever forwards: a row that has
-         * been sent, answered, or closed is past this and must not be dragged
-         * back by a keeper tick on a tab somebody left open.
+         * Read here, not from `data` at the top of the handler. `data` was
+         * loaded before this handler's first await, and every await here —
+         * the commit above all — is a process, tens to hundreds of
+         * milliseconds under load. Anything that
+         * writes this row in that window is invisible to a snapshot taken
+         * before it, and what followed was not a stale read but a destroyed
+         * one: the row was found missing, so a *new* one was written over the
+         * top, with `applying` for a status and a one-line history.
+         *
+         * Measured, on a store being driven by the extension: an application
+         * that had been staged and then submitted came back out of this handler
+         * reading `applying`, with the "Bundle created" and "applied" entries
+         * gone. The tracker said an application that had gone out had not, which
+         * is the failure that gets a job applied for twice.
+         *
+         * Nothing awaits between this read and the write below, so the two are
+         * one step as far as anything else on this server is concerned.
          */
-        await withCommit(repo, autoCommit(), `${tracked.id}: applying`, () =>
-          advance(store, tracked.id, 'applying', 'Started filling in the form'),
-        );
-      }
+        /*
+         * By identity, not by id. A draft can legitimately carry an id the
+         * tracker row does not — the row may have been made by hand, or by a
+         * send on a different day — and matching on the id alone meant writing
+         * a second row for a job that already had one.
+         */
+        /*
+         * What stage a row opened this way starts at.
+         *
+         * "Applying" is a claim about what somebody is doing, and merely having
+         * a workspace is not that claim. The extension opens one as soon as a
+         * resume is built, which it does on anything job-shaped you open — so
+         * the tracker filled with rows nobody had started: `Indeed — Now Hiring:
+         * 300 Software Intern Jobs`, a `preview.redd.it` image url, one row for
+         * `NVIDIA Corporation` and another for `2100 NVIDIA USA`, every one of
+         * them reading `applying` for ever. The list that is supposed to say
+         * what is in flight said everything was.
+         *
+         * The place to write still opens at the first sign of work, because the
+         * letter is drafted before the form is ever seen and putting the writing
+         * surface behind the form would be backwards. It is the *stage* that
+         * waits: `interested` — "Not applied" — until the extension reports
+         * something actually put into the employer's boxes.
+         *
+         * Only on the automatic route. Pressing "Write these in ResumeM-M"
+         * carries no `auto`, and somebody pressing it is applying.
+         */
+        const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
+        const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
+
+        const tracked = findApplication(store.load().applications, draft.company, draft.role);
+        /*
+         * In the draft's commit, not after it.
+         *
+         * Written after that commit, a bare write here reached disk and never
+         * the version history — present in every read, absent from `git log`,
+         * and gone the moment the store was restored from history. Given a
+         * commit of its own, every workspace opened cost two git runs, which
+         * under load delayed the draft it exists to open. Called from inside
+         * the draft's `withCommit`, the read above and this write happen in
+         * the same synchronous step as the draft save, and one commit holds all
+         * three.
+         */
+        if (!tracked) {
+          store.upsertApplication({
+              id,
+              company: draft.company,
+              role: draft.role,
+              url: draft.url,
+              status: started,
+              resumeId: draft.resumeId,
+              source: draft.source,
+              /*
+               * Dated, like one made by hand. The tracker sorts on `appliedAt` and
+               * prints it as the date column, so an application started from the
+               * extension — the one you are working on right now — had a blank date
+               * and sat at the bottom of the list, under everything already sent.
+               * It is the date it started; `trackStatus` records when it was sent.
+               */
+              appliedAt: now,
+              history: [{ at: now, status: started, note }],
+            });
+        } else if (body.actedOnForm && tracked.status === 'interested') {
+          /*
+           * And the moment it stops being a bookmark, it is moved on.
+           *
+           * Only out of `interested`, and only ever forwards: a row that has
+           * been sent, answered, or closed is past this and must not be dragged
+           * back by a keeper tick on a tab somebody left open.
+           */
+          advance(store, tracked.id, 'applying', 'Started filling in the form');
+        }
+      };
+
+      const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () => {
+        const written = store.saveDraft(draft);
+        track();
+        return written;
+      });
 
       res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });
     }),

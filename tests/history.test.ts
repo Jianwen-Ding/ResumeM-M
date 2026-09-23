@@ -364,14 +364,20 @@ describe('workspace and application writes stay in the version history', () => {
    * never committed on its own, so a save left running is a save whose
    * tracker has quietly stopped being recoverable.
    */
-  it('commits the application row a new workspace opens, not only the draft', async () => {
+  /*
+   * In one commit, not two. A commit of its own kept the row in the history
+   * but made every workspace opened cost a second git run, which under load
+   * delayed the very draft it opens.
+   */
+  const commitCount = async () => (await request(app).get('/api/history').expect(200)).body.commits.length as number;
+
+  it('commits the application row a new workspace opens, with the draft, in one commit', async () => {
+    const before = await commitCount();
     await request(app).post('/api/workspace').send({ company: 'Acme', role: 'Engineer' }).expect(200);
 
     const after = (await request(app).get('/api/config/store').expect(200)).body;
     expect(after.pending).toEqual([]);
-
-    const log = (await request(app).get('/api/history').expect(200)).body.commits;
-    expect(log.map((c: { message: string }) => c.message)).toContain('Track application to Acme');
+    expect(await commitCount()).toBe(before + 1);
   });
 
   /*
@@ -380,10 +386,12 @@ describe('workspace and application writes stay in the version history', () => {
    */
   it('commits a workspace being marked submitted when the application is sent', async () => {
     await request(app).post('/api/workspace').send({ company: 'Globex', role: 'Analyst' }).expect(200);
+    const before = await commitCount();
     await request(app).post('/api/extension/sent').send({ company: 'Globex', role: 'Analyst' }).expect(200);
 
     const after = (await request(app).get('/api/config/store').expect(200)).body;
     expect(after.pending).toEqual([]);
+    expect(await commitCount()).toBe(before + 1);
   });
 });
 
