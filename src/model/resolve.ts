@@ -443,7 +443,8 @@ export function adoptBulletOrder(sections: SectionSpec[], entries: Entry[]): Sec
 }
 
 export function orderedEntries(section: SectionSpec, entries: Entry[]): string[] {
-  const ids = section.entries ?? [];
+  // Each entry once, as with lines and skills: see `listed` in `resolveEntry`.
+  const ids = [...new Set(section.entries ?? [])];
   if (section.order !== 'newest' && section.order !== 'oldest') return ids;
 
   const keyOf = (id: string) => {
@@ -517,7 +518,8 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
     const skillGroups: ResolvedSection['skillGroups'] = [];
 
     if (section.kind === 'skills') {
-      for (const gid of section.groups ?? []) {
+      // Each group once, like everything else a list names.
+      for (const gid of new Set(section.groups ?? [])) {
         const group = data.skillGroups.find((g) => g.id === gid);
         if (!group) {
           /*

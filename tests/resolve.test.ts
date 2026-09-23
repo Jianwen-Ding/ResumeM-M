@@ -591,6 +591,26 @@ describe('a list that names the same thing twice', () => {
     expect(r.sections[0]?.skillGroups?.[0]?.items).toEqual(['Python', 'TypeScript']);
   });
 
+  it('and a skills group once', () => {
+    const twice: ResumeSpec = {
+      id: 'twice',
+      label: 'Twice',
+      sections: [{ kind: 'skills', entries: [], groups: ['sk', 'sk'] }],
+    };
+    const r = resolveResume('twice', store([twice]));
+    expect(r.sections[0]?.skillGroups).toHaveLength(1);
+  });
+
+  it('and an entry once', () => {
+    const twice: ResumeSpec = {
+      id: 'twice',
+      label: 'Twice',
+      sections: [{ kind: 'experience', entries: ['exp', 'exp'] }],
+    };
+    const r = resolveResume('twice', store([twice]));
+    expect(r.sections[0]?.entries).toHaveLength(1);
+  });
+
   it('and a line once', () => {
     const twice: ResumeSpec = {
       id: 'twice',

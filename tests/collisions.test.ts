@@ -290,13 +290,15 @@ describe('two skills groups with the same id', () => {
     };
   };
 
-  it('prints the first one twice and the second one never — which is why it is worth saying', () => {
+  // Once now, since a list that names a group twice prints it once — but the
+  // second group is still never printed, which is why it is worth saying.
+  it('prints the first one and the second one never — which is why it is worth saying', () => {
     const { spec, data } = skills([
       { id: 'sk_languages', name: 'Languages', items: [{ id: 's_python', text: 'Python' }] },
       { id: 'sk_languages', name: 'Languages', items: [{ id: 's_rust', text: 'Rust' }] },
     ]);
     const out = resolveResume(spec, data);
-    expect(out.sections[0]?.skillGroups?.flatMap((g) => g.items)).toEqual(['Python', 'Python']);
+    expect(out.sections[0]?.skillGroups?.flatMap((g) => g.items)).toEqual(['Python']);
     expect(out.warnings.join(' ')).toContain('sk_languages');
   });
 
