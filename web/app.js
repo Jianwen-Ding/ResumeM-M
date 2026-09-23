@@ -3492,7 +3492,32 @@ async function addBullet(entry) {
     ],
   };
   await saveEntry(next, `Added bullet ${id}`);
+  if (!state.masterView) await tickBulletHere(entry.id, id);
   scheduleRender();
+}
+
+/**
+ * A new line, switched on in the resume being edited — that one and no other.
+ *
+ * `tickSkillHere` one level down: on a resume that lists its own lines for
+ * this entry, the new one was saved into the entry and drawn switched off.
+ * An entry with no list of its own prints every line, this one included, so
+ * it is left alone; the overlay is updated too, for the same reason as there.
+ */
+async function tickBulletHere(entryId, id) {
+  const root = resumeById(state.resumeId);
+  const section = (root?.sections ?? []).find((s) => (s.entries ?? []).includes(entryId));
+  if (!section) return;
+  if (state.bulletEdits?.[entryId] && !state.bulletEdits[entryId].includes(id)) {
+    state.bulletEdits = { ...state.bulletEdits, [entryId]: [...state.bulletEdits[entryId], id] };
+  }
+  const listed = section.bullets?.[entryId];
+  if (!Array.isArray(listed) || listed.includes(id)) return;
+  const sections = root.sections.map((s) =>
+    s === section ? { ...s, bullets: { ...s.bullets, [entryId]: [...listed, id] } } : s,
+  );
+  await saveResumeSpec({ ...root, sections }, `Added ${id}`);
+  render();
 }
 
 async function removeBullet(entry, bullet) {

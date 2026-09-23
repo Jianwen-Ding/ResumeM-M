@@ -767,6 +767,78 @@ async function main() {
       }
     }
 
+    /* -------------------------------------------------------------- *
+     * Adding a line to an entry on the resume you are on               *
+     *                                                                  *
+     * The same gap as the skill above, one level down: "+ Add bullet"  *
+     * saved the line into the entry and nowhere else, so on a resume   *
+     * that lists its own lines for that entry the new one arrived      *
+     * switched off.                                                    *
+     * -------------------------------------------------------------- */
+
+    console.log('\nAdding a line to an entry on the resume you are on');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const entry = store.entries.find((e) => e.kind === 'experience' && !e.archived && (e.bullets ?? []).length >= 1);
+      const scratch = 'editor-bullets';
+      const line = 'Shipped a Zig rewrite of the ingest path';
+      if (!entry) {
+        check('there is an entry with a line to add to', false, 'none in the starter save');
+      } else {
+        await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Bullets scratch',
+            sections: [{ kind: 'experience', entries: [entry.id], bullets: { [entry.id]: [entry.bullets[0].id] } }],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          const box = page.locator(`#editor .entry[data-drag-id="${entry.id}"]`);
+          await box.first().waitFor({ timeout: 30_000 });
+
+          await box.getByRole('button', { name: '+ Add bullet' }).first().click();
+          await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+          await page.locator('#f_text').fill(line);
+          await page.locator('#modal-ok').click();
+
+          const added = box.locator('.bullet', { hasText: line });
+          await added.first().waitFor({ timeout: 30_000 });
+          const off = await added.first().evaluate((n) => n.classList.contains('off'));
+          check('the new line is switched on in the resume it was added from', !off);
+
+          const listsIt = async () => {
+            const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+            const now = await (await fetch(`${server.url}/api/store`)).json();
+            const id = now.entries.find((e) => e.id === entry.id)?.bullets?.find((b) => b.variants.some((v) => v.text === line))?.id;
+            const mine = resumes.find((r) => r.id === scratch);
+            return Boolean(id && mine?.sections?.find((x) => x.kind === 'experience')?.bullets?.[entry.id]?.includes(id));
+          };
+          let saved = false;
+          for (let waited = 0; waited < 20_000 && !saved; waited += 500) {
+            saved = await listsIt();
+            if (!saved) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and the saved resume lists it, after the save settles', saved);
+        } finally {
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+          const now = await (await fetch(`${server.url}/api/store`)).json();
+          const current = now.entries.find((e) => e.id === entry.id);
+          if (current) {
+            await fetch(`${server.url}/api/entries/${encodeURIComponent(entry.id)}?commit=0`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...current, bullets: current.bullets.filter((b) => !b.variants.some((v) => v.text === line)) }),
+            }).catch(() => undefined);
+          }
+        }
+      }
+    }
+
     console.log('\nGoing over one page');
     {
       /*
