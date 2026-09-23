@@ -29,6 +29,7 @@ import {
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
 import { applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
+import { extractJob } from '../jobs/extract.js';
 import {
   normalizeAnswers,
   normalizeApplications,
@@ -1693,7 +1694,20 @@ export class Store {
         // renaming one left `deleteDraft` unlinking a path that is not there —
         // so discarding it failed and completing it silently left it on the
         // list forever.
-        return { ...draft, id: path.basename(f, '.yaml').normalize('NFC') };
+        /*
+         * Posting text that is a whole page of markup, read as the page's
+         * text. The Workspace's tailor used to save `html.slice(0, 20_000)`
+         * when a link answered with a JavaScript shell, and every letter and
+         * answer written from that draft read the scripts and styles. Repaired
+         * here, on the way in, so a draft saved by that version is read as
+         * text without anyone having to find it.
+         */
+        const posting = draft.jobDescription;
+        const repaired =
+          typeof posting === 'string' && /^\s*<(?:!doctype|html)\b/i.test(posting)
+            ? { jobDescription: extractJob(posting).description }
+            : {};
+        return { ...draft, ...repaired, id: path.basename(f, '.yaml').normalize('NFC') };
       })
       .filter((d): d is Draft => Boolean(d && d.id))
       .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));

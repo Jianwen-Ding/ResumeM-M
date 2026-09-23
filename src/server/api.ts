@@ -3857,7 +3857,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
       if (!html.trim()) throw new Error('This draft has no link and no posting text to work from');
 
-      const job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
+      /*
+       * A page with nothing readable in it is not the posting. A careers site
+       * rendered by JavaScript sends an empty shell to anything that does not
+       * run it, and its extraction is empty; the text the draft already
+       * carries — what the applicant pasted — is the posting then.
+       */
+      let job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
+      if (fetched && !job.description.trim() && draft.jobDescription?.trim()) {
+        job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
+      }
       const specId = tailoredResumeId(draft.company, draft.role);
 
       /*
@@ -3884,7 +3893,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             tailorPrompt(data, resolveResume(baseId!, data), {
               jobTitle: draft.role,
               company: draft.company,
-              jobDescription: job.description ?? html,
+              jobDescription: job.description,
               url: draft.url,
             }),
           );
@@ -3922,7 +3931,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // letter and the answers to draw on. Those two fields, and nothing else:
       // fetching the posting and running the AI take long enough that the
       // letter and the answers on disk have moved on.
-      const description = job.description || html.slice(0, 20_000);
+      // Never the raw markup: scripts and styles are not a posting, and every
+      // letter and answer written from this draft reads what is saved here.
+      const description = job.description || draft.jobDescription || '';
       const saved = await reviseDraft(draft.id, `Attach a tailored resume to ${draft.company}`, (fresh) => {
         fresh.resumeId = spec.id;
         fresh.jobDescription = description;

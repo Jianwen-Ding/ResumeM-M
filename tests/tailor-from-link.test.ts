@@ -461,3 +461,57 @@ describe('tailoring by keyword never switches on a skill the base turned off', (
     expect(items).toEqual(['s_py', 's_ts', 's_php']);
   });
 });
+
+/*
+ * A link that answers with a page and no posting in it.
+ *
+ * A careers site rendered by JavaScript sends an empty shell to anything that
+ * does not run it. The extraction of that shell is empty, and the draft's
+ * posting text was replaced with `html.slice(0, 20_000)` — the raw markup,
+ * scripts and all — which every letter and answer after it then read, while
+ * the posting text the applicant had pasted was gone.
+ */
+describe('a link that answers with an empty shell', () => {
+  it('keeps the pasted posting text rather than saving the raw markup over it', async () => {
+    const http = await import('node:http');
+    const shell = `<!doctype html><html><head><script>window.__APP__={"flags":"x".repeat(1)}</script><style>.a{color:red}</style></head><body><div id="root"></div><script src="/bundle.js"></script></body></html>`;
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(shell);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      serve();
+      const port = (server.address() as { port: number }).port;
+      const opened = await request(app)
+        .post('/api/workspace')
+        .send({
+          company: 'Streamly',
+          role: 'Data Platform Intern',
+          url: `http://127.0.0.1:${port}/careers/42`,
+          jobDescription: 'Kafka streaming infrastructure in Go and Python. Distributed systems, Kubernetes on AWS.',
+        })
+        .expect(200);
+      const draft = opened.body.draft ?? opened.body;
+      const res = await tailor(draft.id).expect(200);
+      const saved = t.store.getDraft(res.body.draft.id);
+      expect(saved?.jobDescription).not.toMatch(/<script|<style|<div id="root">/);
+      expect(saved?.jobDescription).toContain('Kafka streaming infrastructure in Go and Python.');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads posting text an older version saved as raw markup as text', async () => {
+    serve();
+    const draft = await openSpace();
+    const saved = t.store.getDraft(draft.id)!;
+    t.store.saveDraft({
+      ...saved,
+      jobDescription: '<!doctype html><html><head><script>var a=1</script><style>.a{}</style></head><body><p>Kafka streaming in Go.</p></body></html>',
+    });
+    const read = t.store.getDraft(draft.id);
+    expect(read?.jobDescription).not.toMatch(/<script|<style|<p>|var a=1/);
+    expect(read?.jobDescription).toContain('Kafka streaming in Go.');
+  });
+});
