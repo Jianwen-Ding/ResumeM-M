@@ -835,6 +835,37 @@ describe('job analysis', () => {
    * the list handed back the store's order, so "Go, Python" came out
    * "Python, Go" on a resume nobody had asked to rearrange.
    */
+  /*
+   * Reported: the posting asked for x86_64, which the applicant has, and
+   * nothing switched — the posting's keywords came from a fixed vocabulary
+   * that has no x86 in it.
+   */
+  it('reads the posting for the terms the applicant has, and offers the skill it names', async () => {
+    const data = t.store.load();
+    const group = data.skillGroups[0]!;
+    t.store.saveSkillGroups([
+      { ...group, items: [...group.items, { id: 's_x86', text: 'x86_64', tags: [] }] },
+      ...data.skillGroups.slice(1),
+    ]);
+    const intern = data.resumes.find((r) => r.id === 'intern')!;
+    t.store.saveResume({
+      ...intern,
+      id: 'no-x86',
+      label: 'No x86',
+      sections: [
+        ...(intern.sections ?? []).filter((x) => x.kind !== 'skills'),
+        { kind: 'skills', entries: [], groups: [group.id], items: { [group.id]: group.items.map((i) => i.id) } },
+      ],
+    });
+    const html = JOB_HTML.replace('</body>', '<p>You will write x86-64 assembly for our runtime.</p></body>');
+
+    const res = await request(app).post('/api/extension/analyze').send({ html, baseResumeId: 'no-x86' }).expect(200);
+    expect(res.body.job.keywords).toContain('x86_64');
+    const change = (res.body.skillChanges ?? []).find((c: { groupId: string }) => c.groupId === group.id);
+    expect(change?.to).toContain('s_x86');
+    expect(change?.from).not.toContain('s_x86');
+  });
+
   it('narrows skills the AI picks without reordering the base', async () => {
     const fake = path.join(t.dir, 'codex');
     fs.writeFileSync(

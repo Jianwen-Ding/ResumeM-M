@@ -14,7 +14,7 @@ import {
   roleFromUrl,
 } from '../src/jobs/extract.js';
 import { detectLevel } from '../src/jobs/level.js';
-import { deriveSpec, matchVariants } from '../src/jobs/match.js';
+import { deriveSpec, matchVariants, withYourTerms } from '../src/jobs/match.js';
 import { resolveResume } from '../src/model/resolve.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
 
@@ -440,6 +440,67 @@ describe('variant matching', () => {
   it('leaves alone a group the base does not print', () => {
     const result = matchVariants(data, trimmedBase(['s_py', 's_go'], []), { keywords: ['python', 'go'] });
     expect(result.skills.sk).toBeUndefined();
+  });
+
+  /*
+   * Reported: the posting asked for x86_64, which the applicant has, and
+   * nothing switched. The posting's keywords came from a fixed vocabulary
+   * with no x86 in it, so nothing of theirs could be matched to it.
+   */
+  describe('terms the applicant has, named by the posting', () => {
+    const withX86: StoreData = {
+      ...data,
+      skillGroups: [
+        { ...data.skillGroups[0]!, items: [...data.skillGroups[0]!.items, { id: 's_x86', text: 'x86_64', tags: [] }] },
+      ],
+    };
+    const posting = (description: string) => ({ keywords: ['python'], description });
+
+    it('counts as a keyword however the posting separates it', () => {
+      for (const said of ['Experience with x86_64 assembly', 'x86-64 and ARM', 'Low-level x86 64 work']) {
+        expect(withYourTerms(posting(said), withX86).keywords).toContain('x86_64');
+      }
+    });
+
+    it('but not a short or everyday word, which the vocabulary reads in context', () => {
+      const plain: StoreData = {
+        ...data,
+        skillGroups: [{ ...data.skillGroups[0]!, items: [{ id: 's_c', text: 'C', tags: [] }, { id: 's_react', text: 'React', tags: [] }] }],
+      };
+      const job = withYourTerms(posting('Grade C or better; you react quickly under pressure.'), plain);
+      expect(job.keywords).toEqual(['python']);
+    });
+
+    it('offers a skill the base left off when the posting names it — where it is offered as its own box', () => {
+      const job = withYourTerms(posting('Python, Go, and x86-64 assembly'), withX86);
+      const offered = matchVariants(withX86, trimmedBase(['s_py', 's_go']), { keywords: job.keywords, offerAdditions: true });
+      // Beside its neighbour in the group, after what the base prints.
+      expect(offered.skills.sk).toEqual(['s_py', 's_go', 's_x86']);
+      // The Workspace applies a match outright, with nothing to untick: never there.
+      const applied = matchVariants(withX86, trimmedBase(['s_py', 's_go']), { keywords: job.keywords });
+      expect(applied.skills.sk).toBeUndefined();
+    });
+
+    it('switches a phrasing tagged with it', () => {
+      const tagged: StoreData = {
+        ...data,
+        entries: data.entries.map((e) =>
+          e.id === 'exp'
+            ? {
+                ...e,
+                bullets: e.bullets!.map((b, i) =>
+                  i === 0
+                    ? { ...b, variants: [...b.variants, { id: 'v_x86', label: 'Low level', text: 'Hand-tuned the hot loop in assembly', tags: ['x86_64'] }] }
+                    : b,
+                ),
+              }
+            : e,
+        ),
+      };
+      const job = withYourTerms(posting('We write x86-64 assembly by hand.'), tagged);
+      const result = matchVariants(tagged, base, { keywords: job.keywords });
+      expect(result.choices.b_pipeline).toBe('v_x86');
+    });
   });
 
   it('respects a higher threshold by making fewer changes', () => {

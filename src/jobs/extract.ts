@@ -947,7 +947,7 @@ export function companyFromUrl(url: string | undefined): string | undefined {
  * "Spring Boot"), or the word written as the name it is, next to another
  * technology or after "experience with" and its kind.
  */
-const ORDINARY_WORDS = new Set(['go', 'swift', 'react', 'node', 'spring', 'express', 'rest', 'rails', 'spark', 'rust', 'ruby']);
+export const ORDINARY_WORDS = new Set(['go', 'swift', 'react', 'node', 'spring', 'express', 'rest', 'rails', 'spark', 'rust', 'ruby']);
 const QUALIFIED = /^(?:\.?js|js|\s+boot|\s+framework|\s+native|ui|\s+on\s+rails|lang|ful\b|\s+apis?)\b/i;
 const NAMED_AFTER = /(?:experience (?:with|in|using)|proficien\w* (?:with|in)|knowledge of|expertise (?:with|in)|written in|familiar\w* with|programming in|develop\w* in|coding in)\s+$/i;
 

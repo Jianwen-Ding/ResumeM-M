@@ -40,7 +40,7 @@ import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mer
 import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
-import { deriveSpec, matchVariants } from '../jobs/match.js';
+import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
@@ -2506,7 +2506,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const data = store.load();
       const current = trail[trail.length - 1]!;
-      const job = mergeJobPages(trail);
+      // With the applicant's own terms the posting names: see `withYourTerms`.
+      const job = withYourTerms(mergeJobPages(trail), data);
       // The verdict is about the page you are on; the description is about all
       // of them. A form page is worth offering on even though it describes
       // nothing, which is exactly the case a single score could not express.
@@ -2583,7 +2584,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const match =
         mode === 'none'
           ? { choices: {}, skills: {}, rationale: [] }
-          : matchVariants(data, base, { keywords: job.keywords, level: detectLevel(job) });
+          : matchVariants(data, base, {
+              keywords: job.keywords,
+              level: detectLevel(job),
+              // The card shows each change as a box to tick, so a skill the base
+              // left off can be offered here. Not in the Workspace, which applies.
+              offerAdditions: true,
+            });
 
       /*
        * And how well each of the others would have suited it.
@@ -3967,6 +3974,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (fetched && !job.description.trim() && draft.jobDescription?.trim()) {
         job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
       }
+      job = withYourTerms(job, data);
       const specId = copyIdFor(data.resumes, tailoredResumeId(draft.company, draft.role));
 
       /*

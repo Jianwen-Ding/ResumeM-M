@@ -1,6 +1,8 @@
 import type { ResumeSpec, StoreData, Variant } from '../model/types.js';
 import { isVariantField } from '../model/types.js';
 import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
+import { inListOrder } from './aiPlan.js';
+import { ORDINARY_WORDS } from './extract.js';
 
 /**
  * Deterministic variant matching on tags and keyword overlap. This runs with
@@ -98,6 +100,67 @@ export interface MatchOptions {
    * different and much narrower rule than keywords — see `considerLevel`.
    */
   level?: LevelVerdict | null;
+  /**
+   * Offer a skill the base left off when the posting names it. Only where the
+   * match is shown as boxes to tick — the card — and never where it is applied
+   * outright, which is the Workspace's keyword tailor: there, a skill somebody
+   * removed from their base came back with nothing to untick.
+   */
+  offerAdditions?: boolean;
+}
+
+/**
+ * The words somebody has put in their own store to be matched on: every skill,
+ * and every tag on a skill or a phrasing.
+ */
+function termsYouHave(data: StoreData): string[] {
+  const terms = new Set<string>();
+  const add = (term?: string) => {
+    const said = (term ?? '').trim();
+    if (said) terms.add(said);
+  };
+  for (const group of data.skillGroups ?? []) {
+    for (const item of group.items ?? []) {
+      add(item.text);
+      for (const tag of item.tags ?? []) add(tag);
+    }
+  }
+  for (const entry of data.entries ?? []) {
+    for (const bullet of entry.bullets ?? []) {
+      for (const variant of bullet.variants ?? []) for (const tag of variant.tags ?? []) add(tag);
+    }
+  }
+  return [...terms];
+}
+
+/**
+ * The posting's keywords, and every term of the applicant's own that it names.
+ *
+ * `extractKeywords` reads the posting against a fixed vocabulary, which is the
+ * right way to find what a posting is about and the wrong way to find what it
+ * shares with *you*: a posting asking for x86_64 named nothing the vocabulary
+ * knew, so the skill "x86_64" in the store, and the phrasing tagged with it,
+ * were never matched — the posting asked for it by name and nothing switched.
+ * What somebody put in their store is exactly the vocabulary worth matching
+ * them on, so it is read here too, as whole words and however the separators
+ * are written ("x86_64", "x86-64", "x86 64").
+ *
+ * Short terms and everyday words are left to the vocabulary, which reads them
+ * in context: "C" is a grade and "React" a verb far more often than either is
+ * a language in a posting that does not otherwise say so.
+ */
+export function withYourTerms<J extends { keywords: string[]; description: string }>(job: J, data: StoreData): J {
+  const have = new Set(job.keywords.map(norm));
+  const text = spaced(job.description ?? '');
+  const added: string[] = [];
+  for (const term of termsYouHave(data)) {
+    const glued = norm(term);
+    if (glued.length < 3 || /^\d+$/.test(glued) || have.has(glued) || ORDINARY_WORDS.has(glued)) continue;
+    if (!mentions(text, term)) continue;
+    have.add(glued);
+    added.push(term);
+  }
+  return added.length > 0 ? { ...job, keywords: [...job.keywords, ...added] } : job;
 }
 
 export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOptions): MatchResult {
@@ -244,11 +307,21 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
     const pool = shown
       ? shown.map((id) => g.items.find((i) => i.id === id)).filter((i): i is (typeof g.items)[number] => Boolean(i))
       : g.items;
-    const relevant = pool.filter(
-      (i) => (i.tags ?? []).some((t) => keywords.has(norm(t))) || keywords.has(norm(i.text)),
-    );
-    if (relevant.length >= 2 && relevant.length < pool.length) {
-      skills[g.id] = relevant.map((i) => i.id);
+    const named = (i: (typeof g.items)[number]) =>
+      (i.tags ?? []).some((t) => keywords.has(norm(t))) || keywords.has(norm(i.text));
+    const relevant = pool.filter(named);
+    const narrowed = relevant.length >= 2 && relevant.length < pool.length ? relevant.map((i) => i.id) : null;
+    /*
+     * And, where it is offered rather than applied, one the base left off that
+     * the posting asks for by name — beside its neighbour in the group, after
+     * what the base prints. The card shows it as an addition with its own box,
+     * off until ticked. See `offerAdditions`.
+     */
+    const missing =
+      opts.offerAdditions && shown ? g.items.filter((i) => !shown.includes(i.id) && named(i)).map((i) => i.id) : [];
+    if (narrowed || missing.length > 0) {
+      const kept = narrowed ?? pool.map((i) => i.id);
+      skills[g.id] = inListOrder([...kept, ...missing], shown ?? kept, g.items.map((i) => i.id));
     }
   }
 
