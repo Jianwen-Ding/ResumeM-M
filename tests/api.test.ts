@@ -3407,6 +3407,23 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
   });
 
   /*
+   * A file taken out of the folder between the look and the read — the sync
+   * replaces these whenever the tracker changes — was answered by Express's
+   * own error page and logged as an unhandled ENOENT, twice on one test
+   * server in a sweep. It is the same answer as a file that was never there.
+   */
+  it('answers a file removed while it was being served as one not there', async () => {
+    const real = fs.existsSync;
+    const seen = vi.spyOn(fs, 'existsSync').mockImplementation((p) => String(p).endsWith('Gone-Resume.pdf') || real(p));
+    try {
+      const res = await request(app).get('/current/Gone-Resume.pdf').expect(404);
+      expect(res.text).toContain('That file is not in the folder any more.');
+    } finally {
+      seen.mockRestore();
+    }
+  });
+
+  /*
    * Preparing the files is what files the application now — so the space it
    * was written in stops asking to be finished, without being taken away.
    */

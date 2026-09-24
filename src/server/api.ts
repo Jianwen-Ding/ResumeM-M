@@ -5060,7 +5060,16 @@ export function createCurrentRouter(store: Store): Router {
     // and a .txt cover letter opens as text, both in the tab.
     if (name.toLowerCase().endsWith('.pdf')) res.type('application/pdf');
     else if (name.toLowerCase().endsWith('.txt')) res.type('text/plain; charset=utf-8');
-    res.sendFile(file);
+    /*
+     * Gone between the look above and the read, which the sync makes ordinary
+     * — it replaces these files whenever the tracker changes. Left to Express,
+     * that was its own error page naming the file's full path on this machine,
+     * and an unhandled ENOENT in the log.
+     */
+    res.sendFile(file, (err) => {
+      if (!err || res.headersSent) return;
+      res.status(404).type('html').send('<p>That file is not in the folder any more.</p>');
+    });
   });
 
   return router;
