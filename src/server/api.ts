@@ -37,7 +37,7 @@ import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
-import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
@@ -2732,7 +2732,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         ? {
             ...match,
             choices: { ...match.choices, ...plan.choices },
-            skills: { ...match.skills, ...plan.skills },
+            skills: { ...match.skills, ...skillsInBaseOrder(plan.skills, base, data) },
           }
         : match;
 
@@ -4014,7 +4014,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       const finalMatch = plan
-        ? { ...match, choices: { ...match.choices, ...plan.choices }, skills: { ...match.skills, ...plan.skills } }
+        ? { ...match, choices: { ...match.choices, ...plan.choices }, skills: { ...match.skills, ...skillsInBaseOrder(plan.skills, base, data) } }
         : match;
 
       const spec = deriveSpec(base, specId, `${draft.role} — ${draft.company}`, finalMatch, {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../src/jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder } from '../src/jobs/aiPlan.js';
 import { resolveResume } from '../src/model/resolve.js';
 import type { StoreData } from '../src/model/types.js';
 import {
@@ -223,6 +223,33 @@ describe('showing and hiding', () => {
     const before = JSON.stringify(d.entries);
     applyInclusion(SAMPLE_BASE, d, sanitizeAiPlan({ disable: ['b_testing'], enable: ['proj_thing'] }, d));
     expect(JSON.stringify(d.entries)).toBe(before);
+  });
+});
+
+/*
+ * A resume's skills print in its own list's order, since resumes stopped
+ * inheriting — the keyword match keeps that order, and the AI's picks came
+ * back in the store's, so a base listing Go before Python lost that the
+ * moment an AI run narrowed it.
+ */
+describe('skills the AI picks', () => {
+  const base = {
+    ...SAMPLE_BASE,
+    sections: [...(SAMPLE_BASE.sections ?? []).filter((s) => s.kind !== 'skills'), { kind: 'skills' as const, entries: [], groups: ['sk_lang'], items: { sk_lang: ['s_go', 's_py', 's_ts'] } }],
+  };
+
+  it('keeps the base\'s own order', () => {
+    expect(skillsInBaseOrder({ sk_lang: ['s_py', 's_go'] }, base, data())).toEqual({ sk_lang: ['s_go', 's_py'] });
+  });
+
+  it('puts one the base left off next to its neighbour in the store', () => {
+    // Store: Python, Go, TypeScript, PHP. PHP follows TypeScript, which is
+    // not kept, and then Go, which is.
+    expect(skillsInBaseOrder({ sk_lang: ['s_py', 's_go', 's_php'] }, base, data())).toEqual({ sk_lang: ['s_go', 's_php', 's_py'] });
+  });
+
+  it('leaves a group the base has no list for in the store\'s order', () => {
+    expect(skillsInBaseOrder({ sk_lang: ['s_py', 's_go'] }, SAMPLE_BASE, data())).toEqual({ sk_lang: ['s_py', 's_go'] });
   });
 });
 

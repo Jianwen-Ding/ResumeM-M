@@ -271,6 +271,43 @@ function inPlace(list: string[], id: string, master: string[]): string[] {
   return [id, ...list];
 }
 
+/**
+ * The AI's skill picks in the order the base prints them.
+ *
+ * `sanitizeAiPlan` and the session's skills tool both take the store's order,
+ * which was the person's arrangement while resumes inherited. It is not any
+ * more: a resume's list is printed as written, the keyword match keeps it,
+ * and a run that narrowed a base listing Go before Python handed back
+ * "Python, Go". The ones the base lists keep its order; one it left off goes
+ * next to its neighbour in the store. A group the base has no list for
+ * prints in the store's order anyway, and is left as it is.
+ */
+export function skillsInBaseOrder(
+  skills: Record<string, string[]>,
+  base: ResumeSpec,
+  data: StoreData,
+): Record<string, string[]> {
+  const listed = base.sections?.find((s) => s.kind === 'skills')?.items ?? {};
+  const out: Record<string, string[]> = {};
+  for (const [groupId, ids] of Object.entries(skills)) {
+    const own = listed[groupId];
+    if (!own) {
+      out[groupId] = ids;
+      continue;
+    }
+    const store = data.skillGroups.find((g) => g.id === groupId)?.items.map((i) => i.id) ?? [];
+    out[groupId] = inListOrder(ids, own, store);
+  }
+  return out;
+}
+
+/** `ids` in `own`'s order, and any `own` lacks beside their neighbour in `store`. */
+export function inListOrder(ids: string[], own: string[], store: string[]): string[] {
+  let list = own.filter((id) => ids.includes(id));
+  for (const id of ids) list = inPlace(list, id, store);
+  return list;
+}
+
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
   const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
   if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;

@@ -831,6 +831,48 @@ describe('job analysis', () => {
   }, 60_000);
 
   /*
+   * The base's skills print in its own list's order. An AI run that narrowed
+   * the list handed back the store's order, so "Go, Python" came out
+   * "Python, Go" on a resume nobody had asked to rearrange.
+   */
+  it('narrows skills the AI picks without reordering the base', async () => {
+    const fake = path.join(t.dir, 'codex');
+    fs.writeFileSync(
+      fake,
+      [
+        '#!/usr/bin/env node',
+        'const prompt = process.argv.slice(2).join(" ");',
+        'if (/tools under/.test(prompt)) process.stdout.write("I do not have any tools named resume.");',
+        'else process.stdout.write(JSON.stringify({ skills: { sk_lang: ["s_py", "s_go"] }, reasoning: "narrowed" }));',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    fs.chmodSync(fake, 0o755);
+    const config = t.store.loadConfig();
+    t.store.saveConfig({ ...config, ai: { ...config.ai, enabled: true, command: fake, args: ['{promptText}'], timeoutMs: 60_000 } });
+
+    const intern = t.store.load().resumes.find((r) => r.id === 'intern')!;
+    t.store.saveResume({
+      ...intern,
+      id: 'go-first',
+      label: 'Go first',
+      sections: [
+        ...(intern.sections ?? []).filter((s) => s.kind !== 'skills'),
+        { kind: 'skills', entries: [], groups: ['sk_lang'], items: { sk_lang: ['s_go', 's_py', 's_ts'] } },
+      ],
+    });
+
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'go-first', tailor: 'ai' })
+      .expect(200);
+    expect(res.body.aiUsed).toBe(true);
+    const skills = res.body.spec.sections.find((s: { kind: string }) => s.kind === 'skills');
+    expect(skills.items.sk_lang).toEqual(['s_go', 's_py']);
+  }, 60_000);
+
+  /*
    * Which settings are not the file's to decide, said by the one thing that
    * knows. "Let it look up the company online" writes a tool list, and only
    * one of the CLIs takes one — so for the rest the switch reaches nothing,
