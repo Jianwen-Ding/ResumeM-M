@@ -1317,6 +1317,42 @@ describe('feedback', () => {
     expect(res.body.parsed).toBeNull();
   });
 
+  /*
+   * The card merges `parsed.choices` straight into the resume it sends. Every
+   * other way a tailoring reply reaches a resume goes through `sanitizeAiPlan`;
+   * this route handed the model's JSON back as it came, invented wordings and
+   * repeated skills included.
+   */
+  it('answers a tailor run with only what the store can honour', async () => {
+    const fake = path.join(t.dir, 'codex');
+    fs.writeFileSync(
+      fake,
+      [
+        '#!/usr/bin/env node',
+        'process.stdout.write(JSON.stringify({',
+        '  choices: { b_pipeline: "v_kafka", b_testing: "v_invented", "edu_neu.nope": "x" },',
+        '  skills: { sk_lang: ["s_go", "s_py", "s_py", "s_nope"] },',
+        '  reasoning: "because",',
+        '}));',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    fs.chmodSync(fake, 0o755);
+    const config = t.store.loadConfig();
+    t.store.saveConfig({ ...config, ai: { ...config.ai, enabled: true, command: fake, args: ['{promptText}'], timeoutMs: 60_000 } });
+
+    const res = await request(app)
+      .post('/api/ai/tailor')
+      .send({ resumeId: 'newgrad', job: { jobDescription: 'Kafka' } })
+      .expect(200);
+    expect(res.body.parsed.choices).toEqual({ b_pipeline: 'v_kafka' });
+    // The store's order and each once.
+    expect(res.body.parsed.skills).toEqual({ sk_lang: ['s_py', 's_go'] });
+    expect(res.body.parsed.reasoning).toBe('because');
+    expect(res.body.parsed.rejected.length).toBeGreaterThan(0);
+  }, 60_000);
+
   it('returns a shortening prompt naming the bullets', async () => {
     const res = await request(app).post('/api/ai/shorten').send({ resumeId: 'newgrad', linesToCut: 2 }).expect(200);
     expect(res.body.output).toContain('2 line(s) too long');

@@ -2090,12 +2090,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const result = await runAgent(configForTask(data.config, 'tailor'), tailorPrompt(data, resolved, job));
       if (!result.executed) return res.json({ ...result, parsed: null });
 
-      const parsed = extractJson<{
-        choices?: Record<string, string>;
-        skills?: Record<string, string[]>;
-        suggestions?: { bulletId: string; label: string; text: string; why: string }[];
-        reasoning?: string;
-      }>(result.output);
+      const raw = extractJson<{ reasoning?: unknown }>(result.output);
+      if (!raw) return res.json({ ...result, parsed: null });
+      /*
+       * Only what the store can honour, as every other way a tailoring reply
+       * reaches a resume. The extension merges `choices` straight into the
+       * resume it sends, and this handed the model's JSON back as it came —
+       * an invented wording id, a skill named twice.
+       */
+      const plan = sanitizeAiPlan(raw, data);
+      const parsed = {
+        choices: plan.choices,
+        skills: plan.skills,
+        suggestions: sanitizeSuggestions(raw, data),
+        reasoning: typeof raw.reasoning === 'string' ? raw.reasoning : undefined,
+        rejected: plan.rejected,
+      };
       res.json({ ...result, parsed });
     }),
   );
