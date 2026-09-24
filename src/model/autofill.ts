@@ -276,7 +276,15 @@ const DEGREE_WORD =
 const GPA_CLAUSE = /[,;]?\s*\bGPA[:\s]+\d(?:\.\d+)?(?:\s*\/\s*\d(?:\.\d+)?)?/i;
 
 export function readGpa(line: string): string | undefined {
-  const hit = /\bGPA[:\s]+(\d(?:\.\d+)?)(?:\s*\/\s*(\d(?:\.\d+)?))?/i.exec(String(line ?? ''));
+  /*
+   * Said either way round. "GPA 3.8/4.0" is one habit and "3.97 GPA" the
+   * other, and the second is how a school line carries it — "University of
+   * Virginia, 3.97 GPA" — which was read as no grade at all.
+   */
+  const said = String(line ?? '');
+  const hit =
+    /\bGPA[:\s]+(\d(?:\.\d+)?)(?:\s*\/\s*(\d(?:\.\d+)?))?/i.exec(said) ??
+    /\b(\d\.\d{1,2})(?:\s*\/\s*(\d(?:\.\d+)?))?\s+(?:cumulative\s+|overall\s+)?GPA\b/i.exec(said);
   if (!hit) return undefined;
   const score = Number(hit[1]);
   const scale = hit[2] === undefined ? undefined : Number(hit[2]);
@@ -284,6 +292,40 @@ export function readGpa(line: string): string | undefined {
   if (!Number.isFinite(score) || score <= 0) return undefined;
   if (scale !== undefined && (!Number.isFinite(scale) || score > scale)) return undefined;
   return hit[1];
+}
+
+/**
+ * A school as a form's school box wants it: the name, and nothing the resume
+ * wrote after it.
+ *
+ * A resume puts the grade on the school line as often as on the degree line —
+ * "University of Virginia, 3.97 GPA" — and the whole line went to the form.
+ * Greenhouse's School is a search over its own list of schools, and a search
+ * for "Northeastern University, 4.0 GPA" finds nothing: measured on Twitch's
+ * live board, both School boxes were left on "Select..." while everything
+ * else in both education blocks filled. The grade is read separately (see
+ * `readGpa`); here it only comes off.
+ */
+const SCHOOL_TAIL = /\s*[,;|–—-]\s*(?:(?:\d(?:\.\d+)?\s*(?:\/\s*\d(?:\.\d+)?\s*)?(?:cumulative\s+|overall\s+)?GPA)|(?:GPA[:\s]*\d(?:\.\d+)?(?:\s*\/\s*\d(?:\.\d+)?)?))\s*$/i;
+
+export function schoolName(title: string): string {
+  const said = tidy(String(title ?? ''));
+  return tidy(said.replace(SCHOOL_TAIL, '')) || said;
+}
+
+/**
+ * A degree as a form's degree box wants it: the qualification, without what
+ * the resume said about the applicant's standing in it.
+ *
+ * "Candidate for Bachelor of Science" and "Former Candidate for Bachelor of
+ * Science" are true on a resume and nothing on a form's list of degrees,
+ * which says "Bachelor's Degree". The qualification is what the list matches.
+ */
+const DEGREE_STANDING = /^(?:(?:former|current)\s+)?(?:candidate\s+for(?:\s+(?:a|an|the))?|expected|pursuing(?:\s+(?:a|an))?|in\s+progress:?)\s+/i;
+
+export function degreeName(degree: string): string {
+  const said = tidy(String(degree ?? ''));
+  return tidy(said.replace(DEGREE_STANDING, '')) || said;
 }
 
 /**
@@ -418,25 +460,27 @@ export function derivedAutofill(
      */
     const pick = (field: string) => choices[`${school.id}.${field}`];
     const named = asWritten(school.title, pick('title'));
-    if (named) out.school = named;
+    if (named) out.school = schoolName(named);
 
     Object.assign(out, graduation(asWritten(school.dates, pick('dates'))));
 
     const line = asWritten(school.subtitle, pick('subtitle'));
     const split = splitDegree(line);
     if (split) {
-      out.degree = split.degree;
+      out.degree = degreeName(split.degree);
       out.major = split.major;
     }
 
     /*
      * Read from every wording, not only the default. Whether the GPA is on the
      * resume is a decision about the resume; whether a form is told it is a
-     * different decision, and a box marked "GPA" is asking.
+     * different decision, and a box marked "GPA" is asking. The school line
+     * first, where "University of Virginia, 3.97 GPA" carries it.
      */
-    const anywhere = isVariantField(school.subtitle)
-      ? school.subtitle.variants.map((v) => String(v.text))
-      : [line];
+    const anywhere = [
+      named,
+      ...(isVariantField(school.subtitle) ? school.subtitle.variants.map((v) => String(v.text)) : [line]),
+    ];
     for (const said of anywhere) {
       const gpa = readGpa(said);
       if (gpa) {
@@ -570,7 +614,8 @@ export function educationHistory(resume: ResolvedResume, entries: Entry[] = []):
   for (const section of resume.sections) {
     for (const entry of section.entries) {
       if (entry.kind !== 'education') continue;
-      const school = plainLine(entry.title);
+      const titled = plainLine(entry.title);
+      const school = schoolName(titled);
       if (!school) continue;
 
       const period = parsePeriod(entry.dates ?? '');
@@ -587,12 +632,12 @@ export function educationHistory(resume: ResolvedResume, entries: Entry[] = []):
           : stored?.subtitle !== undefined
             ? [String(stored.subtitle)]
             : [];
-      const gpa = [line, ...wordings].map(readGpa).find(Boolean);
+      const gpa = [titled, line, ...wordings].map(readGpa).find(Boolean);
       const location = plainLine(entry.location);
 
       out.push({
         school,
-        ...(split ? { degree: split.degree, major: split.major } : {}),
+        ...(split ? { degree: degreeName(split.degree), major: split.major } : {}),
         ...(location ? { location } : {}),
         ...(start ? { start } : {}),
         ...(end ? { end } : {}),
