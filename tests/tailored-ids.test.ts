@@ -226,3 +226,32 @@ describe('what a tailored copy records about the posting it was made for', () =>
     expect(tailoredResumeId(company!, role!)).toBe(spec.id);
   });
 });
+
+describe('a posting that names no job', () => {
+  it('is filed as an unknown role, in the words the extension uses', async () => {
+    const { default: express } = await import('express');
+    const { default: request } = await import('supertest');
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+
+    t = makeTempStore({ config: { git: { autoCommit: false }, output: { dir: 'out' } } });
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+
+    // Phenom's apply step as Activision serves it: titled "Apply", naming no one.
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({
+        html: `<html><head><title>Apply</title></head><body><form>
+<label for="fn">First Name</label><input id="fn"><label for="ln">Last Name</label><input id="ln">
+<label for="em">Email</label><input id="em" type="email"><label for="rs">Resume</label><input id="rs" type="file">
+</form></body></html>`,
+        url: 'https://careers.activision.com/apply?jobSeqNo=ACPUUSR027559EXTERNAL&step=1&stepname=personalInformation',
+        baseResumeId: 'base',
+        tailor: 'none',
+      })
+      .expect(200);
+    expect(res.body.spec?.generatedFor).toMatchObject({ company: 'Activision', role: 'Unknown role' });
+  });
+});

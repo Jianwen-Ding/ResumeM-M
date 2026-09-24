@@ -2593,7 +2593,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * record that does not reproduce its own id answers nothing, and those
        * copies would have been left behind by the very rename they most need.
        */
-      const role = job.title ?? 'Role';
+      // Said the way the extension says it, so the tracker has one wording
+      // for a page that names no job — and it says so, where "Role" read as
+      // if it were one.
+      const role = job.title ?? 'Unknown role';
       const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
       const baseId = baseForCopy(data.resumes, baseResumeId, specId);
