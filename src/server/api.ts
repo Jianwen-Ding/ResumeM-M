@@ -514,6 +514,28 @@ function writingTools(
 /** Where the compiled MCP entry point sits relative to this file. */
 const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
 
+/**
+ * The resume a letter or an answer is written against: the one the caller is
+ * holding, where it sent it, and the stored one it names otherwise.
+ *
+ * The extension holds a proposal the store has not been given — it is saved
+ * when the folder is built, not before — and used to name the resume under it
+ * with `spec.extends`. Resumes stopped inheriting, a proposal carries
+ * `copiedFrom` instead, and the proposal's own id went in its place: every
+ * letter, every one-run write and every "AI feedback" asked from the card
+ * came back `No resume named "job-acme-…"`, and the card showed no previous
+ * letter to start from. Sending the proposal itself is also the better answer
+ * than the base ever was, because it is what the letter goes out beside.
+ */
+function resumeToWriteFrom(body: { resumeId?: unknown; spec?: unknown }, data: StoreData): ResolvedResume {
+  const spec = body.spec as ResumeSpec | undefined;
+  if (spec && typeof spec === 'object' && typeof spec.id === 'string' && spec.id && (spec.sections === undefined || Array.isArray(spec.sections))) {
+    return resolveResume(spec, { ...data, resumes: [...data.resumes.filter((r) => r.id !== spec.id), spec] });
+  }
+  if (typeof body.resumeId !== 'string' || !body.resumeId) throw new Error('resumeId is required');
+  return resolveResume(body.resumeId, data);
+}
+
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
@@ -1633,6 +1655,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         letterId?: string;
         draftId?: string;
         resumeId?: string;
+        spec?: ResumeSpec;
       };
       const data = store.load();
 
@@ -1657,7 +1680,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       let sentWith;
       try {
-        sentWith = body.resumeId ? resolveResume(String(body.resumeId), data) : undefined;
+        sentWith = body.spec || body.resumeId ? resumeToWriteFrom(body, data) : undefined;
       } catch {
         sentWith = undefined;
       }
@@ -2057,13 +2080,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/tailor',
     handler(async (req, res) => {
-      const { resumeId, job } = req.body as { resumeId: string; job: TailorContext };
+      const { job } = req.body as { resumeId?: string; spec?: ResumeSpec; job: TailorContext };
       // Without this, a missing `job` surfaced as "Cannot read properties of
       // undefined (reading 'company')", which names nothing a caller can fix.
       if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to tailor against');
 
       const data = store.load();
-      const resolved = resolveResume(resumeId, data);
+      const resolved = resumeToWriteFrom(req.body, data);
       const result = await runAgent(configForTask(data.config, 'tailor'), tailorPrompt(data, resolved, job));
       if (!result.executed) return res.json({ ...result, parsed: null });
 
@@ -2099,13 +2122,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/cover-letter',
     handler(async (req, res) => {
-      const { resumeId, job, save } = req.body as {
-        resumeId: string;
+      const { job, save } = req.body as {
+        resumeId?: string;
+        spec?: ResumeSpec;
         job: TailorContext;
         save?: boolean;
       };
       const data = store.load();
-      const resolved = resolveResume(resumeId, data);
+      const resolved = resumeToWriteFrom(req.body, data);
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
 
       const result = await runAgent(
@@ -2204,17 +2228,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/extension/write',
     handler(async (req, res) => {
-      const { resumeId, job, letter, questions } = req.body as {
-        resumeId: string;
+      const { job, letter, questions } = req.body as {
+        resumeId?: string;
+        spec?: ResumeSpec;
         job: TailorContext;
         letter?: { required?: boolean; body?: string };
         questions?: { id: string; question: string; answer?: string; limit?: number }[];
       };
-      if (!resumeId) throw new Error('resumeId is required');
       if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to write against');
 
       const data = store.load();
-      const resolved = resolveResume(resumeId, data);
+      const resolved = resumeToWriteFrom(req.body, data);
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
       const wantsLetter = Boolean(letter?.required);
       const pending = questionsToWrite(questions);

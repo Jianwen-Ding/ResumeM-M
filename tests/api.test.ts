@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createApi, createPdfRouter, createCurrentRouter, questionsToWrite } from '../src/server/api.js';
 import { sameQuestion } from '../src/jobs/answers.js';
+import { resolveResume } from '../src/model/resolve.js';
 import { Repo } from '../src/git/repo.js';
 import type { Entry } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -1146,6 +1147,52 @@ describe('cover letters', () => {
     expect(res.body.body).toBe('');
     expect(res.body.priorLetters).toHaveLength(1);
     expect(res.body.priorLetters[0].company).toBe('Acme Co.');
+  });
+
+  /*
+   * The extension writes from a proposal the store has not been given yet —
+   * it is saved with the folder — and asked for this with the proposal's own
+   * id once `extends` stopped existing, which came back "No resume named".
+   * It sends the proposal now, and the letter is written against that.
+   */
+  it('writes from a proposal the caller is holding, which the store has not seen', async () => {
+    const data = t.store.load();
+    const newgrad = data.resumes.find((r) => r.id === 'newgrad')!;
+    const stored = resolveResume('newgrad', data);
+    const dropped = stored.sections.flatMap((s) => s.entries).find((e) => e.bullets.length > 0)!;
+    const line = dropped.bullets[0]!.text;
+    const proposal = {
+      ...newgrad,
+      id: 'job-acme-co-intern',
+      tier: 'temporary',
+      copiedFrom: 'newgrad',
+      sections: newgrad.sections?.map((s) => ({ ...s, entries: s.entries?.filter((id) => id !== dropped.id) })),
+    };
+    const job = { company: 'Acme Co.', jobTitle: 'Intern', jobDescription: 'work' };
+
+    const res = await request(app).post('/api/ai/cover-letter').send({ resumeId: 'newgrad', spec: proposal, job }).expect(200);
+    expect(res.body.priorLetters).toHaveLength(1);
+    // The resume the prompt sets out, not the voice samples above it, which
+    // draw on every line in the store whatever is chosen.
+    const resumePart = (out: string) => out.slice(out.lastIndexOf('\n## Resume\n'));
+    expect(resumePart(res.body.output)).not.toContain(line);
+
+    const fromStored = await request(app).post('/api/ai/cover-letter').send({ resumeId: 'newgrad', job }).expect(200);
+    expect(resumePart(fromStored.body.output)).toContain(line);
+
+    // The one-run writer and the feedback route take it the same way, with
+    // no stored id at all.
+    await request(app)
+      .post('/api/extension/write')
+      .send({ spec: proposal, job, letter: { required: true }, questions: [] })
+      .expect(200);
+    const tailored = await request(app)
+      .post('/api/ai/tailor')
+      .send({ spec: proposal, job })
+      .expect(200);
+    expect(tailored.body.error).toBeUndefined();
+    // Nothing was saved by asking.
+    expect(t.store.load().resumes.some((r) => r.id === proposal.id)).toBe(false);
   });
 
   it('does not save an empty draft', async () => {
