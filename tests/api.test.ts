@@ -217,6 +217,22 @@ describe('adding a phrasing', () => {
 });
 
 describe('job analysis', () => {
+  /*
+   * The resume the extension builds from is a setting, and it outlives the
+   * resume: delete it, or pick a tailored copy the sweep later takes, and
+   * every card failed with `No resume "job-helios-platform-engineer"` — an id
+   * nobody typed, on every posting, with nothing saying what to do.
+   */
+  it('says in words that the resume it builds from is gone', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'job-gone-last-week' })
+      .expect(400);
+    expect(res.body.kind).toBe('no-base');
+    expect(res.body.error).not.toContain('job-gone-last-week');
+    expect(res.body.error).toMatch(/no longer in this save/i);
+  });
+
   it('extracts the posting and proposes a tailored spec', async () => {
     const res = await request(app)
       .post('/api/extension/analyze')
@@ -395,12 +411,13 @@ describe('job analysis', () => {
     expect(res.body.error).toMatch(/No page HTML/);
   });
 
-  it('reports an unknown base resume', async () => {
+  it('refuses an unknown base resume rather than building from another', async () => {
     const res = await request(app)
       .post('/api/extension/analyze')
       .send({ html: JOB_HTML, baseResumeId: 'ghost' })
       .expect(400);
-    expect(res.body.error).toMatch(/ghost/);
+    // Refused, in words; see "says in words that the resume it builds from is gone".
+    expect(res.body.kind).toBe('no-base');
   });
 
   it('marks an ordinary page as not a posting', async () => {

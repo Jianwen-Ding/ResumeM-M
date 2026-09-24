@@ -2523,7 +2523,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const baseId = baseForCopy(data.resumes, baseResumeId, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
       const base = data.resumes.find((r) => r.id === baseId);
-      if (!base) throw new Error(`No resume "${baseId}"`);
+      if (!base) {
+        /*
+         * Said, and named as a kind the extension can act on. The resume the
+         * extension builds from is a setting, and it outlives the resume:
+         * deleted, or a tailored copy the sweep took, and every card failed
+         * with `No resume "job-…"` — an id nobody typed, on every posting.
+         */
+        res.status(400).json({
+          kind: 'no-base',
+          error:
+            'The resume JobHelper builds from is no longer in this save. Choose another in JobHelper’s ' +
+            'settings, or pin one as your base in ResumeM-M.',
+        });
+        return;
+      }
 
       /*
        * `none` still produces a spec, and deliberately: the application wants
