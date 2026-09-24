@@ -447,12 +447,19 @@ export function freshApplicationId(apps: Application[], company: string, role: s
  * are in the middle of would be a lie told confidently. Everything past
  * sending counts, `closed` included — a job you were turned down for is the
  * one you would most like to be reminded about before writing another letter.
+ *
+ * Except a close the tracker made itself (see `closedAsStale`), which is
+ * `applying` left alone for a fortnight: nothing was sent, and it is the same
+ * application carrying on when somebody comes back to it. Counted, the card
+ * met the person coming back to finish it with "You applied to this on 4
+ * September — and it closed. See what you sent", dated the day they started
+ * and pointing at nothing sent.
  */
 export function alreadySent(apps: Application[], company: string, role: string): Application | undefined {
   const key = identity(company, role);
   return apps
     .filter((a) => identity(a.company, a.role) === key)
-    .filter((a) => a.status !== 'interested' && a.status !== 'applying')
+    .filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
 }
 
@@ -1187,8 +1194,9 @@ export function stats(apps: Application[]): TrackerStats {
    * either way would state something the data does not know.
    */
   const responded = apps.filter((a) => ['interview', 'offer'].includes(a.status)).length;
-  // "Applying" has not been sent yet, so it cannot have drawn a response.
-  const sent = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying').length;
+  // "Applying" has not been sent yet, so it cannot have drawn a response —
+  // and nor has one closed only for sitting at Applying. See `closedAsStale`.
+  const sent = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a)).length;
 
   return {
     total: apps.length,

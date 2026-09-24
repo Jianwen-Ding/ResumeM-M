@@ -4,7 +4,7 @@ import request from 'supertest';
 import { Repo } from '../src/git/repo.js';
 import { createApi } from '../src/server/api.js';
 import { applyingDays, closeStaleApplying, tidyWorkdayNames } from '../src/server/sweep.js';
-import { closedAsStale, findApplication, goneStale } from '../src/model/applications.js';
+import { alreadySent, closedAsStale, findApplication, goneStale, stats } from '../src/model/applications.js';
 import { makeTempStore } from './helpers.js';
 import type { Application } from '../src/model/types.js';
 
@@ -130,6 +130,21 @@ describe('coming back to one it closed', () => {
     const apps = temp.store.load().applications;
     expect(apps).toHaveLength(1);
     expect(apps[0]).toMatchObject({ id: 'Dormant', status: 'applied' });
+  });
+
+  /*
+   * Nothing was sent, so nothing says it was. Counted as sent, the card met
+   * somebody coming back to finish it with "You applied to this on … — and it
+   * closed", and the response rate counted it among the applications that
+   * went out.
+   */
+  it('is not something already sent, to the card or to the response rate', async () => {
+    const apps = temp.store.load().applications;
+    expect(alreadySent(apps, 'Dormant', 'Software Engineer')).toBeUndefined();
+    expect(stats([...apps, row('Heard', 'interview', daysAgo(5))]).responseRate).toBe(100);
+    // A close somebody chose is still one to be reminded of.
+    const turned = row('Turned', 'closed', daysAgo(5), { history: [{ at: daysAgo(5), status: 'closed', note: 'Rejected' }] });
+    expect(alreadySent([turned], 'Turned', 'Software Engineer')?.id).toBe('Turned');
   });
 
   it('while one closed by hand stays closed, and a fresh attempt is a row of its own', async () => {
