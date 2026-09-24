@@ -270,6 +270,15 @@ function plainText(html: string): string {
 const GENERIC_SITE_WORDS =
   /\b(home|about(?:\s+us)?|careers?|jobs?|blog|contact(?:\s+us)?|press|investors?|log[ -]?in|sign[ -]?(?:in|up)|privacy(?:\s+policy)?|terms(?:\s+of\s+(?:use|service))?|help|support|faq|pricing|team|company|events?|news|resources?|docs?|documentation|status|security|sitemap|accessibility|legal|cookie(?:s|\s*(?:policy|settings))?)\b/i;
 
+/** What a breadcrumb calls itself: `aria-label="Breadcrumb"`, `class="breadcrumb"`, schema.org's `BreadcrumbList`. */
+const BREADCRUMB = /\b(?:class|id|aria-label|itemtype)\s*=\s*["'][^"']*\bbreadcrumb/i;
+/**
+ * And what one looks like when it does not say: its links joined by an arrow,
+ * "Home › Careers › Engineering". Arrows only — a footer joins its links with
+ * "|" and "·", and those are menus.
+ */
+const BREADCRUMB_STEP = /<\/a>\s*(?:›|»|→|>|&gt;|&rsaquo;|&raquo;|&rarr;|&#8250;|&#187;)\s*<a\b/gi;
+
 /**
  * Is this candidate a block of ordinary site navigation — furniture every
  * page on the site carries, rather than anything about this posting?
@@ -287,6 +296,14 @@ const GENERIC_SITE_WORDS =
 function isSiteNavigationBlock(outerHtml: string, tag: string): boolean {
   const labels = [...outerHtml.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)].map((m) => plainText(m[1] ?? ''));
   if (labels.length < 6) return false;
+  /*
+   * A breadcrumb is not a menu, however many steps it takes. Its links are
+   * where this posting sits on the site — the department, the team, the
+   * office, the kind of role — and a seven-step one in a <nav> was read as a
+   * site header and cut, every one of those with it.
+   */
+  if (BREADCRUMB.test(outerHtml)) return false;
+  if ((outerHtml.match(BREADCRUMB_STEP)?.length ?? 0) >= labels.length - 2) return false;
   const isChromeRegion =
     tag === 'nav' || tag === 'footer' || /\brole\s*=\s*["'](?:navigation|banner|contentinfo)["']/i.test(outerHtml);
   if (isChromeRegion) return true;
@@ -310,13 +327,39 @@ function isSiteNavigationBlock(outerHtml: string, tag: string): boolean {
  * department read exactly like a two-link "rail" by shape alone, and the
  * heading is what tells them apart.
  */
-function discountedView(outerHtml: string, tag: string): { discount: boolean; html: string } {
-  if (FACTS_BOX_HEADING.test(plainText(outerHtml))) return { discount: false, html: outerHtml };
-  const discount =
-    WIDGET_HEADING.test(plainText(outerHtml)) || linksToOtherPostings(outerHtml) || isSiteNavigationBlock(outerHtml, tag);
-  const html = discount ? outerHtml.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, ' ') : outerHtml;
-  return { discount, html };
+function discountedView(outerHtml: string, tag: string): { discount: boolean; html: string; ahead: string } {
+  if (FACTS_BOX_HEADING.test(plainText(outerHtml))) return { discount: false, html: outerHtml, ahead: '' };
+  const proven = linksToOtherPostings(outerHtml) || isSiteNavigationBlock(outerHtml, tag);
+  if (!proven && !WIDGET_HEADING.test(plainText(outerHtml))) return { discount: false, html: outerHtml, ahead: '' };
+  /*
+   * Where it is a rail only by what it calls itself, the links from that name
+   * on. A sidebar that says what this job is — its city, its team, its terms,
+   * each a link to the board's page for it — above the board's "Similar jobs"
+   * was named a rail by that heading, and every link in it was set aside as
+   * the rail's, the facts ahead of the heading with them. What comes before a
+   * rail's name is not the rail; it is `ahead`, and a small group of links is
+   * content — see `keepAmbiguousElement`. Proven any other way — every link a
+   * posting, or a site menu — every link goes, as before, and so does a name
+   * the markup splits with a tag, which cannot be placed.
+   *
+   * Only links that go somewhere count as ahead: a share row drawn icons first
+   * ("LinkedIn", "Twitter", then "Share this job") is buttons pointing at `#`
+   * or at a share intent, not facts about the job.
+   */
+  const at = proven ? 0 : Math.max(0, outerHtml.search(WIDGET_HEADING));
+  const links = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
+  const kept: string[] = [];
+  const before = outerHtml.slice(0, at).replace(links, (link) => {
+    if (GOES_NOWHERE.test(hrefsIn(link)[0] ?? '')) return ' ';
+    kept.push(link);
+    return link;
+  });
+  return { discount: true, html: before + outerHtml.slice(at).replace(links, ' '), ahead: plainText(kept.join(' ')) };
 }
+
+/** A link that is a button: no address, a script, a mail-to, or a share intent. */
+const GOES_NOWHERE =
+  /^(?:$|#|javascript:|mailto:)|\/\/(?:www\.)?(?:twitter|x|facebook|linkedin|reddit|pinterest)\.com\/(?:intent|share|sharer|sharing|shareArticle|submit|pin\/create)/i;
 
 /*
  * Shape, not vocabulary: what makes a stretch of non-link text read as a
@@ -406,9 +449,14 @@ function hasShortStandaloneLine(html: string): boolean {
  * cookies to improve your experience" is four words and thirty-some
  * characters, which `hasRealProse` alone would keep), and is spared only if
  * it also says one of these, or has a figure in it.
+ *
+ * Who may apply, as well as what the job pays: "Candidates must be eligible to
+ * work in the EU" in a GDPR notice and "US citizenship is required" in a
+ * consent section were cut with the privacy text around them. Not "must" or
+ * "required" on their own — every cookie banner says those.
  */
 const COOKIE_UNSAFE_WORDS =
-  /\bsalary\b|\bcompensation\b|\bvisa\b|\bsponsor\w*\b|\bremote\b|\bhybrid\b|\bbenefit\w*\b|\brequirements?\b|\bqualifications?\b|\bdeadline\b|\bclos(?:e|es|ing) (?:date|on)\b/i;
+  /\bsalary\b|\bcompensation\b|\bvisa\b|\bsponsor\w*\b|\bremote\b|\bhybrid\b|\bbenefit\w*\b|\brequirements?\b|\bqualifications?\b|\bdeadline\b|\bclos(?:e|es|ing) (?:date|on)\b|\bcitizen\w*|\beligib\w*|\bauthori[sz]ed to work\b|\bwork (?:permit|authori[sz]ation)\b|\bright to work\b|\bclearance\b|\brelocat\w*|\bbackground checks?\b/i;
 
 /**
  * Is this `<select>` a real dropdown question, or a list that stands for
@@ -483,9 +531,11 @@ function keepAmbiguousElement(
     return rest.length < TOO_LITTLE_TO_BE_A_POSTING;
   }
 
-  const { discount, html } = discountedView(outerHtml, tag);
+  const { discount, html, ahead } = discountedView(outerHtml, tag);
   if (hasRealProse(plainText(html), opts.lenient)) return true;
   if (hasShortStandaloneLine(html)) return true;
+  // Links ahead of a rail's own name, which are not the rail's. See `discountedView`.
+  if (ahead) return true;
 
   // A small group of links or buttons that proved itself neither a rail nor
   // ordinary site navigation is content, whatever it says: a filter-chip
