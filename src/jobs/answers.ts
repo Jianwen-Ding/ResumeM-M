@@ -136,13 +136,37 @@ function sameShortTerms(a: string, b: string): boolean {
  * else — "without sponsorship", "or misdemeanor", "active TS/SCI" — and the
  * answer to it is not the answer to this. The match is still offered; it is
  * just not claimed as safe to send unread.
+ *
+ * Except the furniture, which `unanswered` has always forgiven on the asked
+ * side and this did not forgive on the stored side. So the bank matched one
+ * way round and not the other: an answer kept from a form asking "How did you
+ * hear about this position?" was confident on the next form asking "How did
+ * you hear about us?" only if the two forms came in the other order. Measured
+ * with a row saved from each wording and the other asked: "Are you willing to
+ * relocate for this role?" then "Are you willing to relocate?" scored 0.67
+ * and was left for the person, while the same pair reversed scored 0.90 and
+ * was filled. "Position" and "role" are no more a qualifier on the first form
+ * than on the second.
  */
 function fullyAsked(a: string, b: string): boolean {
   const ta = terms(a);
   const tb = terms(b);
   if (tb.size === 0) return ta.size === 0;
-  for (const t of tb) if (!ta.has(t)) return false;
+  for (const t of tb) if (!ta.has(t) && !FURNITURE.has(t)) return false;
   return true;
+}
+
+/**
+ * A question's meaningful words, with the furniture taken out.
+ *
+ * For the confidence line, which is a score and was reached through the
+ * furniture: "How did you hear about this position?" against "How did you
+ * hear about us?" shares two words of three and scores 0.67, under the 0.7
+ * line, even though "position" is a word this file already says is not part
+ * of the question. Scored again without it, the two are the same question.
+ */
+function bare(s: string): string {
+  return [...terms(s)].filter((t) => !FURNITURE.has(t)).join(' ');
 }
 
 /**
@@ -157,6 +181,14 @@ const FURNITURE = new Set([
   'optional', 'required', 'max', 'maximum', 'min', 'minimum', 'limit', 'words', 'word',
   'characters', 'chars', 'briefly', 'brief', 'below', 'above', 'field', 'question',
   'company', 'organisation', 'organization', 'employer', 'position', 'role', 'team',
+  /*
+   * And the other names a form gives the thing being applied for. "How did
+   * you hear about this job?" and "…about this opportunity?" are how Lever
+   * and Workday put the question Greenhouse puts as "…about us?", and with
+   * `position` and `role` forgiven and these not, the answer given to one was
+   * left for the person on the other.
+   */
+  'job', 'opportunity', 'opening', 'vacancy', 'posting',
 ]);
 
 /**
@@ -513,7 +545,8 @@ export function matchAnswer(
      */
     confident:
       !namesAnother &&
-      best.score >= 0.7 &&
+      // Or the same score with the furniture out of it. See `bare`.
+      (best.score >= 0.7 || questionSimilarity(bare(question), bare(best.item.question)) >= 0.7) &&
       fullyAsked(question, best.item.question) &&
       unanswered(question, best.item.question, company).length === 0 &&
       sameShortTerms(question, best.item.question),

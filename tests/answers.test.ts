@@ -407,6 +407,42 @@ describe('the same question, asked by another system', () => {
     expect(m.confident).toBe(true);
   });
 
+  /*
+   * The same question with the furniture on the stored side.
+   *
+   * `unanswered` forgave "position", "role" and the rest on the asked side
+   * and `fullyAsked` did not forgive them on the stored side, so the bank
+   * matched one way round and not the other. Measured with one row saved
+   * from each wording and the other asked: "Are you willing to relocate for
+   * this role?" then "Are you willing to relocate?" scored 0.67 and was left
+   * for the person; the other order scored 0.90 and was filled. Which form
+   * somebody happened to apply through first decided whether their answer
+   * came back.
+   */
+  it('finds the answer again whichever of two wordings was saved first', () => {
+    for (const [asked, stored] of [
+      ['How did you hear about us?', 'How did you hear about this position?'],
+      ['How did you hear about us?', 'How did you hear about this job?'],
+      ['How did you hear about this opportunity?', 'How did you hear about us?'],
+      ['Are you willing to relocate?', 'Are you willing to relocate for this role?'],
+      ['What is your earliest start date?', 'Earliest start date for this position'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(true);
+    }
+  });
+
+  it('and still tells apart the questions that differ by a word that is not furniture', () => {
+    for (const [asked, stored] of [
+      ['Earliest start date', 'Latest start date'],
+      ['Preferred last name', 'Preferred first name'],
+      ['Current salary', 'Expected salary'],
+      ['Where did you hear about us?', 'How did you hear about us?'],
+      ['Are you willing to relocate?', 'Are you willing to relocate at your own expense for this role?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+  });
+
   it('keeps sponsorship and work authorization apart, which have opposite answers', () => {
     expect(reuses('Are you legally authorized to work in the United States?', 'Will you now or in the future require sponsorship?')).toBe(false);
     expect(reuses('Will you now or in the future require sponsorship?', 'Are you legally authorized to work in the United States?')).toBe(false);
