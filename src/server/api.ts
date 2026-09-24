@@ -541,6 +541,17 @@ function resumeToWriteFrom(body: { resumeId?: unknown; spec?: unknown }, data: S
   return resolveResume(body.resumeId, data);
 }
 
+/**
+ * What a resolved resume prints, as one short string: the same resume
+ * against the same store gives the same answer, and any change to what it
+ * would put on the page gives another. `lost` is left out, being a report
+ * about the resume rather than a part of it.
+ */
+export function printedFingerprint(resolved: ResolvedResume): string {
+  const { lost: _lost, ...printed } = resolved as ResolvedResume & { lost?: unknown };
+  return createHash('sha1').update(JSON.stringify(printed)).digest('hex');
+}
+
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
@@ -1640,6 +1651,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          */
         lost: resolved.lost ?? [],
         pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
+        // What this compile printed, so a card holding it can tell later
+        // whether the store would print something else. See `/extension/fresh`.
+        printed: printedFingerprint(resolved),
       });
     }),
   );
@@ -3327,6 +3341,60 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * dragged back to `applied` because a form was resubmitted, and one already
    * `applied` is left alone rather than given a second identical history line.
    */
+  /**
+   * Is what the card is holding still what the store would give it?
+   *
+   * The card builds a resume and keeps it — the copy, and the PDF compiled
+   * from it — for as long as the posting is open. Everything it printed is
+   * the store's: the entries, their bullets, the profile, the skills. Change
+   * any of those in ResumeM-M, or edit the copy itself there, and the card
+   * went on showing, attaching and filing the version from before, with
+   * nothing to say it was out of date. Only a trip through the card's own
+   * "Edit in ResumeM-M" button was ever noticed.
+   *
+   * So the card asks, when its tab comes back into view, and gets three
+   * answers: what its copy would print now, what the store holds under the
+   * copy's id, and whether the resume the copy was made from has changed
+   * since it was made — which a copy, being its own resume, does not follow.
+   */
+  api.post(
+    '/extension/fresh',
+    handler(async (req, res) => {
+      const { spec } = req.body as { spec?: ResumeSpec };
+      if (!spec?.id) throw new Error('a resume spec is required');
+      const data = store.load();
+      const withIt = { ...data, resumes: [...data.resumes.filter((r) => r.id !== spec.id), spec] };
+      const printed = printedFingerprint(resolveResume(spec.id, withIt));
+
+      const stored = data.resumes.find((r) => r.id === spec.id) ?? null;
+      const storedPrint = stored ? createHash('sha1').update(JSON.stringify(stored)).digest('hex') : null;
+
+      /*
+       * The base, by when its file last changed against when the copy was
+       * made. A clock rather than a fingerprint because the copy records no
+       * fingerprint of its base, and a copy made before this existed has to
+       * be answerable too; the file is written only when the resume is.
+       */
+      let base: { id: string; label: string; changed: boolean } | null = null;
+      const from = spec.copiedFrom ? data.resumes.find((r) => r.id === spec.copiedFrom) : undefined;
+      const made = Date.parse(spec.generatedFor?.at ?? spec.temporaryFrom ?? '');
+      if (from && Number.isFinite(made)) {
+        const touched = Math.max(
+          0,
+          ...Store.resumeFiles(from.id).map((f) => {
+            try {
+              return fs.statSync(path.join(store.root, f)).mtimeMs;
+            } catch {
+              return 0;
+            }
+          }),
+        );
+        base = { id: from.id, label: from.label ?? from.id, changed: touched > made + 1000 };
+      }
+      res.json({ printed, stored, storedPrint, base });
+    }),
+  );
+
   api.post(
     '/extension/sent',
     handler(async (req, res) => {
