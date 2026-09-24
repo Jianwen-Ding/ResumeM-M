@@ -1237,6 +1237,48 @@ async function main() {
       check('an emptied filename still saves, named from what you typed', Boolean(made), made?.id ?? 'not saved');
     }
 
+    /*
+     * A name another resume already has. The store wrote the file whatever
+     * was there, so saving a variation under a taken name or filename
+     * replaced that resume without a word; and there was no way to rename one
+     * at all, only to save a copy under a new name and delete the old.
+     */
+    console.log('\nNaming a variation something already taken');
+    {
+      const listed = async () => (await fetch(`${server.url}/api/resumes`)).json();
+      const before = await listed();
+      const other = before.find((r) => r.label && r.label !== 'Kafka-heavy variation');
+
+      await page.locator('#btn-save-as').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_label').fill(other.label.toUpperCase());
+      await page.locator('#f_id').fill('a-file-nobody-has');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(600);
+      const note = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('saving a variation under a taken name is refused, in words', /already exists/i.test(note), note);
+      await page.locator('#modal-cancel').click();
+      const after = await listed();
+      check('and nothing was saved over it', after.length === before.length && after.find((r) => r.id === other.id)?.label === other.label);
+
+      await page.locator('#btn-rename-resume').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_label').fill(other.label);
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(600);
+      const refused = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('renaming to a name another resume has is refused, in words', /already exists/i.test(refused), refused);
+
+      await page.locator('#f_label').fill('Kafka-heavy, renamed');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(1500);
+      const renamed = (await listed()).find((r) => r.label === 'Kafka-heavy, renamed');
+      check('and a name nobody has renames it', Boolean(renamed), renamed?.id ?? 'not renamed');
+      check('keeping the file it was saved as', renamed?.id === 'kafka-heavy-variation', renamed?.id ?? '');
+      const shown = await page.locator('#resume-select option:checked').innerText().catch(() => '');
+      check('and the picker shows the new name', /Kafka-heavy, renamed/.test(shown), shown);
+    }
+
     /* -------------------------------------------------------------- *
      * Arranging every resume at once                                   *
      * -------------------------------------------------------------- *

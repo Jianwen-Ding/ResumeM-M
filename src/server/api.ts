@@ -42,7 +42,7 @@ import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, closedAsStale, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
-import { derivedAutofill, workHistory } from '../model/autofill.js';
+import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
@@ -541,6 +541,24 @@ function resumeToWriteFrom(body: { resumeId?: unknown; spec?: unknown }, data: S
   return resolveResume(body.resumeId, data);
 }
 
+/** Two resume names that read as one in the picker: case, spacing and punctuation aside. */
+export function sameResumeName(a: string, b: string): boolean {
+  const flat = (x: string) => x.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const x = flat(a);
+  return Boolean(x) && x === flat(b);
+}
+
+/**
+ * What a resolved resume prints, as one short string: the same resume
+ * against the same store gives the same answer, and any change to what it
+ * would put on the page gives another. `lost` is left out, being a report
+ * about the resume rather than a part of it.
+ */
+export function printedFingerprint(resolved: ResolvedResume): string {
+  const { lost: _lost, ...printed } = resolved as ResolvedResume & { lost?: unknown };
+  return createHash('sha1').update(JSON.stringify(printed)).digest('hex');
+}
+
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
@@ -868,10 +886,76 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Rename a resume: the name it is shown by, never the file it is kept in.
+   *
+   * The file's name is what the tracker's rows, the workspaces, the
+   * extension's setting and every copy's `copiedFrom` point at, so moving it
+   * would be a rewrite of all of them for a change nobody sees. The name is
+   * the thing the picker shows and the thing a person means by "rename".
+   *
+   * Refused when another resume already goes by it — case, spacing and
+   * punctuation aside — because two entries in the picker reading the same
+   * are two resumes nobody can tell apart.
+   */
+  api.post(
+    '/resumes/:id/rename',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const label = String((req.body as { label?: unknown })?.label ?? '').replace(/\s+/g, ' ').trim();
+      const resumes = store.loadResumes();
+      const mine = resumes.find((r) => r.id === id);
+      if (!mine) {
+        res.status(404).json({ error: `There is no resume "${id}" in this save.` });
+        return;
+      }
+      if (!label) {
+        res.status(400).json({ error: 'A resume needs a name.' });
+        return;
+      }
+      const taken = resumes.find((r) => r.id !== id && sameResumeName(r.label ?? r.id, label));
+      if (taken) {
+        res.status(409).json({ error: `A resume called “${taken.label ?? taken.id}” already exists. Choose another name.` });
+        return;
+      }
+      if (mine.label === label) {
+        res.json(mine);
+        return;
+      }
+      const renamed = { ...mine, label };
+      await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => store.saveResume(renamed));
+      res.json(renamed);
+    }),
+  );
+
   api.put(
     '/resumes/:id',
     handler(async (req, res) => {
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
+
+      /*
+       * `?create=1` is a new resume, and a new resume does not land on top
+       * of an old one.
+       *
+       * This route writes the file whatever is there, which is right for a
+       * save of the resume you are editing and wrong for "Save as
+       * variation": a filename or a name that another resume already had
+       * replaced that resume, silently, with the copy.
+       */
+      if (req.query.create === '1') {
+        const resumes = store.loadResumes();
+        const sameFile = resumes.find((r) => r.id === spec.id);
+        const sameName = spec.label ? resumes.find((r) => sameResumeName(r.label ?? r.id, spec.label!)) : undefined;
+        const clash = sameFile ?? sameName;
+        if (clash) {
+          res.status(409).json({
+            error: sameFile
+              ? `A resume is already saved as “${spec.id}”. Choose another filename.`
+              : `A resume called “${clash.label ?? clash.id}” already exists. Choose another name.`,
+          });
+          return;
+        }
+      }
 
       /*
        * A write that still says `extends` is folded before it lands.
@@ -1640,6 +1724,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          */
         lost: resolved.lost ?? [],
         pdfUrl: `/pdf/${PREVIEW_DIR}/${path.basename(pdfPath)}`,
+        // What this compile printed, so a card holding it can tell later
+        // whether the store would print something else. See `/extension/fresh`.
+        printed: printedFingerprint(resolved),
       });
     }),
   );
@@ -2593,7 +2680,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * record that does not reproduce its own id answers nothing, and those
        * copies would have been left behind by the very rename they most need.
        */
-      const role = job.title ?? 'Role';
+      // Said the way the extension says it, so the tracker has one wording
+      // for a page that names no job — and it says so, where "Role" read as
+      // if it were one.
+      const role = job.title ?? 'Unknown role';
       const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
       const baseId = baseForCopy(data.resumes, baseResumeId, specId);
@@ -3106,6 +3196,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * description anybody wrote for the form.
        */
       history: resume ? workHistory(resume) : [],
+      /*
+       * And its schools, for an Education section that takes one per block
+       * and has an "Add another" for the next. See `educationHistory`: this
+       * resume's educations in its order, read as the fields above read the
+       * newest one. Resolved from the resume being sent, as the history is,
+       * and empty where none is — asked the old way, the form gets the one
+       * education in `fields` and nothing more, exactly as before.
+       */
+      education: resume ? educationHistory(resume, data.entries) : [],
     };
   };
 
@@ -3124,7 +3223,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * — the reason the writing routes take a `spec` — and a whole resume does
    * not belong in a query string. The wordings come from it, and so do the
    * jobs a work-history section asks for. A resume that cannot be resolved
-   * costs the form its history and nothing else.
+   * costs the form its history and its schools, and nothing else.
    */
   api.post(
     '/autofill',
@@ -3315,6 +3414,60 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * dragged back to `applied` because a form was resubmitted, and one already
    * `applied` is left alone rather than given a second identical history line.
    */
+  /**
+   * Is what the card is holding still what the store would give it?
+   *
+   * The card builds a resume and keeps it — the copy, and the PDF compiled
+   * from it — for as long as the posting is open. Everything it printed is
+   * the store's: the entries, their bullets, the profile, the skills. Change
+   * any of those in ResumeM-M, or edit the copy itself there, and the card
+   * went on showing, attaching and filing the version from before, with
+   * nothing to say it was out of date. Only a trip through the card's own
+   * "Edit in ResumeM-M" button was ever noticed.
+   *
+   * So the card asks, when its tab comes back into view, and gets three
+   * answers: what its copy would print now, what the store holds under the
+   * copy's id, and whether the resume the copy was made from has changed
+   * since it was made — which a copy, being its own resume, does not follow.
+   */
+  api.post(
+    '/extension/fresh',
+    handler(async (req, res) => {
+      const { spec } = req.body as { spec?: ResumeSpec };
+      if (!spec?.id) throw new Error('a resume spec is required');
+      const data = store.load();
+      const withIt = { ...data, resumes: [...data.resumes.filter((r) => r.id !== spec.id), spec] };
+      const printed = printedFingerprint(resolveResume(spec.id, withIt));
+
+      const stored = data.resumes.find((r) => r.id === spec.id) ?? null;
+      const storedPrint = stored ? createHash('sha1').update(JSON.stringify(stored)).digest('hex') : null;
+
+      /*
+       * The base, by when its file last changed against when the copy was
+       * made. A clock rather than a fingerprint because the copy records no
+       * fingerprint of its base, and a copy made before this existed has to
+       * be answerable too; the file is written only when the resume is.
+       */
+      let base: { id: string; label: string; changed: boolean } | null = null;
+      const from = spec.copiedFrom ? data.resumes.find((r) => r.id === spec.copiedFrom) : undefined;
+      const made = Date.parse(spec.generatedFor?.at ?? spec.temporaryFrom ?? '');
+      if (from && Number.isFinite(made)) {
+        const touched = Math.max(
+          0,
+          ...Store.resumeFiles(from.id).map((f) => {
+            try {
+              return fs.statSync(path.join(store.root, f)).mtimeMs;
+            } catch {
+              return 0;
+            }
+          }),
+        );
+        base = { id: from.id, label: from.label ?? from.id, changed: touched > made + 1000 };
+      }
+      res.json({ printed, stored, storedPrint, base });
+    }),
+  );
+
   api.post(
     '/extension/sent',
     handler(async (req, res) => {

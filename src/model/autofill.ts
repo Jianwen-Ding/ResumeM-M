@@ -524,3 +524,81 @@ export function workHistory(resume: ResolvedResume): PastJob[] {
   }
   return jobs;
 }
+
+/** One education, the way a form's Education block asks for it. */
+export interface PastEducation {
+  school: string;
+  /** "Bachelor of Science", where the degree line splits plainly. See `splitDegree`. */
+  degree?: string;
+  /** "Computer Science": Greenhouse's Discipline, Workday's Field of Study. */
+  major?: string;
+  location?: string;
+  /** Month 1-12 where the resume gives one; the year alone where it does not. */
+  start?: { year: number; month?: number };
+  /** When it finishes or finished. Absent for one still in progress with no end written. */
+  end?: { year: number; month?: number };
+  gpa?: string;
+}
+
+/**
+ * Every education on the resume being sent, for a form that asks for them one
+ * block at a time.
+ *
+ * Greenhouse's Education section is a School, a Degree, a Discipline and the
+ * dates, with an "Add another" under it for the next one — and the profile's
+ * fields describe one education only, the newest (see `newestEducation`). So
+ * somebody with a bachelor's and a master's had the master's put in the first
+ * block and the bachelor's left for them to add and type out again, from the
+ * resume they were attaching.
+ *
+ * From the resolved resume, exactly as `workHistory` is: this resume's
+ * schools, in this resume's order, with the wordings it chose — the later
+ * graduation date for an internship, the degree line it prints. An education
+ * it leaves off is not offered.
+ *
+ * Read the way `derivedAutofill` reads the newest one, so the first block and
+ * the rest agree about what a degree line and a date mean: the degree and the
+ * discipline only where the line splits plainly, a lone date as the end — the
+ * graduation, which is what "May 2026" on a degree means — and nothing for a
+ * degree still in progress with no end written. The GPA from the printed line,
+ * and failing that from any wording the store holds for the same entry,
+ * because whether a box marked GPA is told is a different decision from
+ * whether the resume prints it (see the note in `derivedAutofill`).
+ */
+export function educationHistory(resume: ResolvedResume, entries: Entry[] = []): PastEducation[] {
+  const out: PastEducation[] = [];
+  for (const section of resume.sections) {
+    for (const entry of section.entries) {
+      if (entry.kind !== 'education') continue;
+      const school = plainLine(entry.title);
+      if (!school) continue;
+
+      const period = parsePeriod(entry.dates ?? '');
+      const lone = Boolean(period?.start && !period.end && !period.ongoing);
+      const start = lone ? undefined : monthYear(period?.start);
+      const end = period?.ongoing ? undefined : monthYear(lone ? period?.start : period?.end);
+
+      const line = plainLine(entry.subtitle);
+      const split = splitDegree(line);
+      const stored = entries.find((e) => e.id === entry.id);
+      const wordings =
+        stored && isVariantField(stored.subtitle)
+          ? stored.subtitle.variants.map((v) => String(v.text))
+          : stored?.subtitle !== undefined
+            ? [String(stored.subtitle)]
+            : [];
+      const gpa = [line, ...wordings].map(readGpa).find(Boolean);
+      const location = plainLine(entry.location);
+
+      out.push({
+        school,
+        ...(split ? { degree: split.degree, major: split.major } : {}),
+        ...(location ? { location } : {}),
+        ...(start ? { start } : {}),
+        ...(end ? { end } : {}),
+        ...(gpa ? { gpa } : {}),
+      });
+    }
+  }
+  return out;
+}
