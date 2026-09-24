@@ -13,7 +13,7 @@ import { setupAssets } from './assets.js';
 import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
-import { moveBefore, moveBy, orderEntryIds } from './reorder.js';
+import { insertNextTo, moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
 import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 let activeProject;
@@ -2519,21 +2519,23 @@ function skillsBlock(section) {
       const chip = el('label', { className: `skill-chip${on ? ' on' : ''}` });
       const cb = el('input', { type: 'checkbox', checked: on });
       cb.onchange = () => {
-        const cur = new Set(state.skillEdits?.[gid] ?? picked);
-        if (cb.checked) cur.add(item.id);
-        else cur.delete(item.id);
+        const cur = state.skillEdits?.[gid] ?? picked;
         /*
-         * In the group's order, not the order the boxes were clicked. The
-         * list is what prints, in its own order, so unticking Python and
-         * ticking it again moved it to the end of the line on the page while
-         * the chips here stayed where they were. An id the group no longer
-         * has rides along behind them: dropping it is the "no longer in your
-         * store" warning's decision, not a side effect of another box.
+         * One skill in or out, and the rest where they were. The list is what
+         * prints, in its own order: appending in click order moved a skill
+         * unticked and ticked again to the end of the line, and rebuilding in
+         * the group's order reshuffled a resume whose list was arranged some
+         * other way — by hand in the YAML, or kept from a base by the keyword
+         * match and the AI. A skill switched on goes beside its neighbour in
+         * the group, which for a list in the group's order is the group's
+         * order. An id the group no longer has stays where it is: dropping it
+         * is the "no longer in your store" warning's decision, not a side
+         * effect of another box.
          */
         const known = group.items.map((i) => i.id);
         state.skillEdits = {
           ...(state.skillEdits ?? {}),
-          [gid]: [...known.filter((id) => cur.has(id)), ...[...cur].filter((id) => !known.includes(id))],
+          [gid]: cb.checked ? insertNextTo(cur, item.id, known) : cur.filter((id) => id !== item.id),
         };
         markDirty();
         render();

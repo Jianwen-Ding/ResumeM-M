@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { moveBefore, moveBy } from '../web/reorder.js';
+import { insertNextTo, moveBefore, moveBy } from '../web/reorder.js';
 
 /*
  * The three mistakes that a drag cannot show you, because each produces a list
@@ -98,5 +98,31 @@ describe('nudging an item one place', () => {
     const original = [...list];
     moveBy(list, 'a', 1);
     expect(list).toEqual(original);
+  });
+});
+
+/*
+ * Switching one thing on in a list that may have been arranged by hand. The
+ * list prints in its own order, so rebuilding it in the master's order around
+ * the new item reshuffled everything else.
+ */
+describe('adding one item to a list somebody arranged', () => {
+  const master = ['a', 'b', 'c', 'd'];
+
+  it('puts it after its nearest neighbour in the master that the list holds', () => {
+    expect(insertNextTo(['c', 'a'], 'b', master)).toEqual(['c', 'a', 'b']);
+    expect(insertNextTo(['c', 'a'], 'd', master)).toEqual(['c', 'd', 'a']);
+  });
+
+  it('puts it first when nothing before it in the master is there', () => {
+    expect(insertNextTo(['c', 'b'], 'a', master)).toEqual(['a', 'c', 'b']);
+  });
+
+  it('gives the master order for a list already in it', () => {
+    expect(insertNextTo(['a', 'c'], 'b', master)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('never lists an item twice', () => {
+    expect(insertNextTo(['b', 'a'], 'a', master)).toEqual(['b', 'a']);
   });
 });
