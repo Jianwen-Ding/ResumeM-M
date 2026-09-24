@@ -184,6 +184,21 @@ export function graduation(dates: string): Record<string, string> {
   const out: Record<string, string> = {};
 
   /*
+   * A lone date is the end. "May 2026" on a degree is when it finishes — the
+   * starter save writes it that way and so do most people — and read as a
+   * start, the form's graduation boxes got nothing while its "Start date"
+   * boxes got the graduation.
+   */
+  const single = Boolean(period?.start && !period.end && !period.ongoing);
+  if (single) {
+    const end = period!.start!;
+    const year = String(end.year);
+    if (!end.month) return { graduation_year: year, graduation_date: year };
+    const month = MONTHS[end.month - 1]!;
+    return { graduation_year: year, graduation_month: month, graduation_date: `${month} ${year}` };
+  }
+
+  /*
    * And when it began, for the forms whose Education block asks for both ends
    * — Greenhouse's has "Start date month" and "Start date year" beside the end.
    * Same rule: the month only where it is written.
