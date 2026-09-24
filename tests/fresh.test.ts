@@ -67,7 +67,7 @@ describe('what the card holds, against the store', () => {
     ageBase();
     const spec = copy();
     const before = (await fresh(spec)).body.printed;
-    const bullets = SAMPLE_EXPERIENCE.bullets.map((b) =>
+    const bullets = (SAMPLE_EXPERIENCE.bullets ?? []).map((b) =>
       b.id === 'b_pipeline'
         ? { ...b, variants: b.variants.map((v) => (v.id === 'v_base' ? { ...v, text: 'Built a pipeline handling **3M events/day**' } : v)) }
         : b,
