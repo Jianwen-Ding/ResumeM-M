@@ -5435,21 +5435,102 @@ async function saveAsVariation() {
    * is no longer the question you are asked first.
    */
   const parentLabel = resumeById(state.resumeId)?.label ?? state.resumeId;
-  const answer = await form('Save as variation', [
-    { name: 'label', label: 'Name', value: `${parentLabel} variation` },
-    { name: 'id', label: 'Filename', value: `${state.resumeId}-variant` },
-  ], `A copy of ${parentLabel} as it is right now. The two are separate from here on — editing either leaves the other alone.`);
-  if (!answer) return;
-
+  const about = `A copy of ${parentLabel} as it is right now. The two are separate from here on — editing either leaves the other alone.`;
   /*
-   * A cleared filename is not a reason to do nothing silently. It used to be:
-   * the guard returned, the modal closed, and the variation you had just
-   * named simply did not exist.
+   * Asked again, with the reason, until the name is one nobody has.
+   *
+   * The store wrote the file whatever was there, so a filename or a name
+   * another resume already had replaced that resume with the copy, and
+   * nothing said so. It is refused now (see `?create=1`), and the refusal
+   * reopens the form holding what was typed rather than throwing it away.
    */
-  const chosenLabel = answer.label?.trim();
-  const chosenId = slug(answer.id?.trim() || chosenLabel || '');
-  if (!chosenId) return;
+  let label = `${parentLabel} variation`;
+  let filename = `${state.resumeId}-variant`;
+  let problem = '';
+  for (;;) {
+    const answer = await form('Save as variation', [
+      { name: 'label', label: 'Name', value: label },
+      { name: 'id', label: 'Filename', value: filename },
+    ], problem ? `${problem} ${about}` : about);
+    if (!answer) return;
+    label = answer.label ?? '';
+    filename = answer.id ?? '';
 
+    /*
+     * A cleared filename is not a reason to do nothing silently. It used to
+     * be: the guard returned, the modal closed, and the variation you had
+     * just named simply did not exist.
+     */
+    const chosenLabel = label.trim();
+    const chosenId = slug(filename.trim() || chosenLabel || '');
+    if (!chosenId) return;
+    const clash = (state.store.resumes ?? []).find(
+      (r) => r.id === chosenId || (chosenLabel && sameName(r.label ?? r.id, chosenLabel)),
+    );
+    if (clash) {
+      problem =
+        clash.id === chosenId
+          ? `A resume is already saved as “${chosenId}”. Choose another filename.`
+          : `A resume called “${clash.label ?? clash.id}” already exists. Choose another name.`;
+      continue;
+    }
+    if (await createVariation(chosenId, chosenLabel).catch((err) => ((problem = err.message), false))) return;
+  }
+}
+
+/** Two resume names that read as one in the picker. The store's rule, on this side. */
+function sameName(a, b) {
+  const flat = (x) => String(x ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const x = flat(a);
+  return Boolean(x) && x === flat(b);
+}
+
+/**
+ * Rename the resume you are looking at: the name it is shown by.
+ *
+ * The file keeps its name, because the tracker, the workspaces, the
+ * extension's setting and every copy made from it point at that. Refused, and
+ * asked again with the reason, when another resume already goes by the name.
+ */
+async function renameVariation() {
+  if (state.masterView) return;
+  const mine = resumeById(state.resumeId);
+  if (!mine) return;
+  let label = mine.label ?? mine.id;
+  let problem = '';
+  for (;;) {
+    const answer = await form(
+      'Rename',
+      [{ name: 'label', label: 'Name', value: label }],
+      problem || 'The name this resume is shown by. Its file, and everything that points at it, stay as they are.',
+    );
+    if (!answer) return;
+    label = answer.label ?? '';
+    const wanted = label.replace(/\s+/g, ' ').trim();
+    if (!wanted) {
+      problem = 'A resume needs a name.';
+      continue;
+    }
+    const clash = (state.store.resumes ?? []).find((r) => r.id !== mine.id && sameName(r.label ?? r.id, wanted));
+    if (clash) {
+      problem = `A resume called “${clash.label ?? clash.id}” already exists. Choose another name.`;
+      continue;
+    }
+    try {
+      await flushAutoSave().catch(() => undefined);
+      await api(`/resumes/${encodeURIComponent(mine.id)}/rename`, { method: 'POST', body: JSON.stringify({ label: wanted }) });
+      setStatus(`Renamed to “${wanted}”`);
+      await loadStore();
+      render();
+      return;
+    } catch (err) {
+      problem = err.message;
+    }
+  }
+}
+
+/** The copy itself, once its name has been settled. See `saveAsVariation`. */
+async function createVariation(chosenId, chosenLabel) {
   /*
    * A variation is the whole bundle: which entries and bullets are switched
    * on, which phrasings are used, and which list items are shown. Saving only
@@ -5493,10 +5574,14 @@ async function saveAsVariation() {
    */
   await flushAutoSave().catch(() => undefined);
 
-  await saveResumeSpec(spec, `Saved ${spec.id}`);
+  describeNext(`Saved ${spec.id}`);
+  await api(`/resumes/${encodeURIComponent(spec.id)}?create=1`, { method: 'PUT', body: JSON.stringify(spec) });
+  setStatus(`Saved ${spec.id}`);
+  await loadStore();
   clearEdits();
   state.resumeId = spec.id;
   render();
+  return true;
 }
 
 /**
@@ -9921,6 +10006,7 @@ function render() {
   drawWayBack();
   $('#btn-base').hidden = state.masterView;
   $('#btn-save-as').hidden = state.masterView;
+  $('#btn-rename-resume').hidden = state.masterView;
   // Not on the master, which is not a variation.
   $('#btn-delete-resume').hidden = state.masterView || (state.store.resumes ?? []).length < 2;
   /*
@@ -10380,6 +10466,7 @@ async function boot() {
   $('#live-state').onclick = renderPreview;
   $('#btn-save-as').onclick = saveAsVariation;
   $('#btn-delete-resume').onclick = deleteVariation;
+  $('#btn-rename-resume').onclick = renameVariation;
   $('#btn-feedback').onclick = () => askFeedback(state.masterView);
   $('#btn-rebuild').onclick = renderPreview;
   $('#btn-add-entry').onclick = async () => {

@@ -541,6 +541,13 @@ function resumeToWriteFrom(body: { resumeId?: unknown; spec?: unknown }, data: S
   return resolveResume(body.resumeId, data);
 }
 
+/** Two resume names that read as one in the picker: case, spacing and punctuation aside. */
+export function sameResumeName(a: string, b: string): boolean {
+  const flat = (x: string) => x.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const x = flat(a);
+  return Boolean(x) && x === flat(b);
+}
+
 /**
  * What a resolved resume prints, as one short string: the same resume
  * against the same store gives the same answer, and any change to what it
@@ -879,10 +886,76 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Rename a resume: the name it is shown by, never the file it is kept in.
+   *
+   * The file's name is what the tracker's rows, the workspaces, the
+   * extension's setting and every copy's `copiedFrom` point at, so moving it
+   * would be a rewrite of all of them for a change nobody sees. The name is
+   * the thing the picker shows and the thing a person means by "rename".
+   *
+   * Refused when another resume already goes by it — case, spacing and
+   * punctuation aside — because two entries in the picker reading the same
+   * are two resumes nobody can tell apart.
+   */
+  api.post(
+    '/resumes/:id/rename',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const label = String((req.body as { label?: unknown })?.label ?? '').replace(/\s+/g, ' ').trim();
+      const resumes = store.loadResumes();
+      const mine = resumes.find((r) => r.id === id);
+      if (!mine) {
+        res.status(404).json({ error: `There is no resume "${id}" in this save.` });
+        return;
+      }
+      if (!label) {
+        res.status(400).json({ error: 'A resume needs a name.' });
+        return;
+      }
+      const taken = resumes.find((r) => r.id !== id && sameResumeName(r.label ?? r.id, label));
+      if (taken) {
+        res.status(409).json({ error: `A resume called “${taken.label ?? taken.id}” already exists. Choose another name.` });
+        return;
+      }
+      if (mine.label === label) {
+        res.json(mine);
+        return;
+      }
+      const renamed = { ...mine, label };
+      await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => store.saveResume(renamed));
+      res.json(renamed);
+    }),
+  );
+
   api.put(
     '/resumes/:id',
     handler(async (req, res) => {
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
+
+      /*
+       * `?create=1` is a new resume, and a new resume does not land on top
+       * of an old one.
+       *
+       * This route writes the file whatever is there, which is right for a
+       * save of the resume you are editing and wrong for "Save as
+       * variation": a filename or a name that another resume already had
+       * replaced that resume, silently, with the copy.
+       */
+      if (req.query.create === '1') {
+        const resumes = store.loadResumes();
+        const sameFile = resumes.find((r) => r.id === spec.id);
+        const sameName = spec.label ? resumes.find((r) => sameResumeName(r.label ?? r.id, spec.label!)) : undefined;
+        const clash = sameFile ?? sameName;
+        if (clash) {
+          res.status(409).json({
+            error: sameFile
+              ? `A resume is already saved as “${spec.id}”. Choose another filename.`
+              : `A resume called “${clash.label ?? clash.id}” already exists. Choose another name.`,
+          });
+          return;
+        }
+      }
 
       /*
        * A write that still says `extends` is folded before it lands.
