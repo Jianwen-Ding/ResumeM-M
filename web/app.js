@@ -2308,7 +2308,7 @@ function entryBlock(entry, section, choices) {
  * them, which means reordering and including are the same field — and that is
  * right: an entry's position and whether it is there at all are both this
  * resume's business rather than the store's. Moving one on a variation does
- * not move it on the resume it inherits from.
+ * not move it on the resume it was copied from.
  */
 function setEntryOrder(section, ordered) {
   state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };

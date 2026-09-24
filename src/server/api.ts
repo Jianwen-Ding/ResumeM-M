@@ -3947,10 +3947,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    *
    * Tailoring, above, decides for you — by tag match, or by asking the AI. This
    * is the other thing you want while working on an application: a resume of
-   * your own that belongs to this posting, inheriting everything from the base
-   * so it stays a thin selection rather than a copy that drifts.
+   * your own that belongs to this posting, starting as a copy of the base with
+   * every selection it makes — nothing resolves through the base any more.
    *
-   * It is created empty of opinions on purpose. The point is to go and make the
+   * It adds no opinions of its own on purpose. The point is to go and make the
    * decisions in the builder, which is why this hands back where to go.
    */
   api.post(
