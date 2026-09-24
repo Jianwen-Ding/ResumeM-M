@@ -5038,6 +5038,33 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       restored.id = id; // the filename remains the source of truth for the id
 
       /*
+       * The tier stays the one the resume has now.
+       *
+       * A version is what the resume *said*, and the tier is not something it
+       * says: it is how the save is organised, which is why it has its own
+       * route and never rides along with an edit. The old file carries the
+       * tier it had then, and writing that back put a tailored copy somebody
+       * had since marked Kept back on Temporary with the clock it started on
+       * a month earlier — measured, it was in `/resumes/expiring` straight
+       * after the restore, and the next start swept it. The timeline shows no
+       * tier change as a version, so nothing said the version being chosen
+       * was one in which the resume was on its way out.
+       *
+       * As written, not as `loadResumes` tiers it in memory: that stamps a
+       * date on read that must never reach disk. A resume that is gone keeps
+       * the old version's tier, since there is nothing now to keep.
+       */
+      const standing = store.loadResumesAsWritten().find((r) => r.id === id);
+      if (standing) {
+        delete restored.tier;
+        delete restored.temporaryFrom;
+        delete restored.base;
+        if (standing.tier !== undefined) restored.tier = standing.tier;
+        if (standing.temporaryFrom !== undefined) restored.temporaryFrom = standing.temporaryFrom;
+        if (standing.base !== undefined) restored.base = standing.base;
+      }
+
+      /*
        * Committed whether or not auto-commit is on, for the same reason the
        * outgoing version was filed above.
        *
