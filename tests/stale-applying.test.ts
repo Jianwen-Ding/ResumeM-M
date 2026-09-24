@@ -3,7 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import { Repo } from '../src/git/repo.js';
 import { createApi } from '../src/server/api.js';
-import { applyingDays, closeStaleApplying } from '../src/server/sweep.js';
+import { applyingDays, closeStaleApplying, tidyWorkdayNames } from '../src/server/sweep.js';
 import { closedAsStale, findApplication, goneStale } from '../src/model/applications.js';
 import { makeTempStore } from './helpers.js';
 import type { Application } from '../src/model/types.js';
@@ -139,5 +139,29 @@ describe('coming back to one it closed', () => {
     await request(app).post('/api/extension/sent').send({ company: 'Turned', role: 'Software Engineer' }).expect(200);
     const apps = temp.store.load().applications;
     expect(apps.map((a) => a.status).sort()).toEqual(['applied', 'closed']);
+  });
+});
+
+describe('employers already filed the way Workday books them', () => {
+  it('are renamed, workspaces too, without the rename counting as work on them', async () => {
+    const WD = 'https://intel.wd1.myworkdayjobs.com/External/job/US-OR-Hillsboro/Software-Engineering-Intern_JR1';
+    temp.write('applications.yaml', [
+      row('intel', 'applying', daysAgo(3), { company: '100 Intel Corporation', url: WD }),
+      row('lumber', 'applying', daysAgo(3), { company: '84 Lumber', url: 'https://jobs.84lumber.com/1' }),
+    ]);
+    const old = daysAgo(3);
+    temp.write('drafts/d-intel.yaml', {
+      id: 'd-intel', company: '100 Intel Corporation', role: 'Software Engineer', url: WD,
+      createdAt: old, updatedAt: old, status: 'drafting',
+    });
+
+    const renamed = await tidyWorkdayNames(temp.store, Repo.forStore(temp.dir));
+
+    expect(renamed).toEqual(['100 Intel Corporation → Intel Corporation']);
+    const apps = temp.store.load().applications;
+    expect(apps.map((a) => a.company)).toEqual(['Intel Corporation', '84 Lumber']);
+    const draft = temp.store.loadDrafts().find((d) => d.id === 'd-intel')!;
+    expect(draft.company).toBe('Intel Corporation');
+    expect(draft.updatedAt).toBe(old);
   });
 });

@@ -16,6 +16,7 @@ import {
 import { detectLevel } from '../src/jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../src/jobs/match.js';
 import { resolveResume } from '../src/model/resolve.js';
+import { identity } from '../src/model/applications.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
 
 const JSON_LD_PAGE = `<html><head><title>SWE Intern at Streamly</title>
@@ -1377,5 +1378,40 @@ describe('keywords that are ordinary words too', () => {
     expect(extractKeywords('Design REST APIs.')).toContain('rest');
     expect(extractKeywords('iOS apps in Swift and SwiftUI.')).toContain('swift');
     expect(extractKeywords('Golang microservices.')).toContain('golang');
+  });
+});
+
+/*
+ * The employer as a Workday tenant writes it into its own JSON-LD: the legal
+ * entity, with a company code in front and a country behind — measured on
+ * NVIDIA's board as "2100 NVIDIA USA". Filed as it came, one job reached from
+ * the careers site and from the board was two tracker rows.
+ */
+describe('an employer named the way Workday books it', () => {
+  const posting = (org: string) => `<html><head><title>Software Engineer</title>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"JobPosting","title":"Software Engineer",
+"hiringOrganization":{"@type":"Organization","name":${JSON.stringify(org)}},"description":"<p>Build systems.</p>"}</script>
+</head><body>Software Engineer</body></html>`;
+  const WD = 'https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/US-CA-Santa-Clara/Software-Engineer_JR1';
+
+  it('loses its company code and its country', () => {
+    expect(extractJob(posting('2100 NVIDIA USA'), WD).company).toBe('NVIDIA');
+    expect(extractJob(posting('100 Intel Corporation'), 'https://intel.wd1.myworkdayjobs.com/External/job/x_JR2').company).toBe(
+      'Intel Corporation',
+    );
+  });
+
+  it('and so is the same employer as the careers site names', () => {
+    expect(identity(extractJob(posting('2100 NVIDIA USA'), WD).company!, 'Software Engineer')).toBe(
+      identity('NVIDIA Corporation', 'Software Engineer'),
+    );
+  });
+
+  it('while a number in front is part of the name anywhere else', () => {
+    expect(extractJob(posting('84 Lumber'), 'https://jobs.84lumber.com/job/1').company).toBe('84 Lumber');
+  });
+
+  it('and one that would be left naming nobody is left as it was', () => {
+    expect(extractJob(posting('2100 Careers'), WD).company).toBe('2100 Careers');
   });
 });

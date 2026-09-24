@@ -1729,8 +1729,13 @@ export class Store {
     return this.loadDrafts().find((d) => d.id === id);
   }
 
-  saveDraft(draft: Draft): Draft {
-    const next = { ...draft, updatedAt: new Date().toISOString() };
+  /**
+   * `touch: false` keeps `updatedAt` as it was, for a write the app makes on
+   * its own — a rename is not somebody working on the application, and the
+   * stale close and the workspace retirement both read that clock.
+   */
+  saveDraft(draft: Draft, { touch = true }: { touch?: boolean } = {}): Draft {
+    const next = touch ? { ...draft, updatedAt: new Date().toISOString() } : draft;
     this.writeYaml(['drafts', `${draft.id}.yaml`], next);
     return next;
   }

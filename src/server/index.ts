@@ -8,7 +8,7 @@ import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.j
 import { Store } from '../model/store.js';
 import { currentIgnore } from '../model/current.js';
 import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
-import { closeStaleApplying, sweepTemporary } from './sweep.js';
+import { closeStaleApplying, sweepTemporary, tidyWorkdayNames } from './sweep.js';
 import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
@@ -101,6 +101,9 @@ async function openSave(store: Store, repo: Repo): Promise<void> {
    * that week from the close — so this cannot take a resume tonight, only
    * start its clock.
    */
+  const tidied = await tidyWorkdayNames(store, repo);
+  if (tidied.length > 0) console.log(`ResumeM-M: renamed employers filed with Workday's codes — ${tidied.join(', ')}.`);
+
   const closed = await closeStaleApplying(store, repo);
   if (closed.length > 0) {
     console.log(

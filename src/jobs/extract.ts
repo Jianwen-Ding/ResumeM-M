@@ -1337,8 +1337,31 @@ function headingRole(html: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The employer as a Workday tenant writes it into its own JSON-LD: the legal
+ * entity the requisition is booked to, with its company code in front and its
+ * country behind. Measured on NVIDIA's board, `hiringOrganization.name` is
+ * "2100 NVIDIA USA"; Intel's reads "100 Intel Corporation". Filed as they
+ * came, the tracker showed those as the employer, and "2100 NVIDIA USA" and
+ * "NVIDIA Corporation" — the same job, reached from the careers site — were
+ * two rows.
+ *
+ * Only on Workday. A number in front is a company code there and part of the
+ * name everywhere else: "84 Lumber", "99 Ranch Market".
+ */
+const WORKDAY = /\.myworkday(jobs|site)\.com\b/i;
+const ENTITY_CODE = /^\d{2,6}\s+(?=\S)/;
+const ENTITY_COUNTRY = /[\s,-]+(USA|U\.S\.A?\.?|US|United States( of America)?)$/i;
+
+export function workdayEmployer(name: string | undefined, url: string | undefined): string | undefined {
+  if (!name || !WORKDAY.test(url ?? '')) return name;
+  const tidied = name.trim().replace(ENTITY_CODE, '').replace(ENTITY_COUNTRY, '').trim();
+  return tidied && looksLikeCompanyName(tidied) ? tidied : name;
+}
+
 export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
-  const ld = fromJsonLd(html);
+  const found = fromJsonLd(html);
+  const ld = found && { ...found, company: workdayEmployer(found.company, url) };
   // The page's own text, without the site around it. See `withoutChrome`.
   const text = stripTags(withoutChrome(html));
   const parts = titleParts(pageTitle);
