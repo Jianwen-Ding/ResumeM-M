@@ -87,6 +87,28 @@ describe('what the AI is allowed to decide', () => {
     expect(plan.rejected[0]).toContain('no such entry or bullet');
   });
 
+  /*
+   * Retired is not a way back in. The tool path never offers an archived line
+   * or entry; a reply in JSON could name one, the plan carried it as shown,
+   * and the resolver then left it off with a warning — a change the card
+   * reported that the document did not make.
+   */
+  it('refuses to show what has been archived', () => {
+    const d = data();
+    d.entries = d.entries.map((e) =>
+      e.id === 'proj_thing'
+        ? { ...e, archived: true }
+        : e.id === 'exp_acme'
+          ? { ...e, bullets: e.bullets!.map((b) => (b.id === 'b_testing' ? { ...b, archived: true } : b)) }
+          : e,
+    );
+    const plan = sanitizeAiPlan({ enable: ['proj_thing', 'b_testing'], disable: ['b_testing'] }, d);
+    expect(plan.enable).toEqual([]);
+    expect(plan.rejected.filter((r) => r.includes('archived'))).toHaveLength(2);
+    // Hiding it is harmless, and says what was asked.
+    expect(plan.disable).toEqual(['b_testing']);
+  });
+
   it('survives a reply that is not an object at all', () => {
     for (const junk of [null, undefined, 'sorry, I cannot help', 42, []]) {
       expect(sanitizeAiPlan(junk, data()).choices).toEqual({});

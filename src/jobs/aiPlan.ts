@@ -148,8 +148,20 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
   for (const field of ['enable', 'disable'] as const) {
     for (const id of (raw[field] as unknown[]) ?? []) {
       if (typeof id !== 'string') continue;
-      if (entries.has(id) || bullets.has(id)) plan[field].push(id);
-      else plan.rejected.push(`${field} ${id}: no such entry or bullet`);
+      if (!entries.has(id) && !bullets.has(id)) {
+        plan.rejected.push(`${field} ${id}: no such entry or bullet`);
+        continue;
+      }
+      /*
+       * Retired is not a way back in. The tools never offer an archived line
+       * or entry, and the resolver leaves one off whatever a resume lists —
+       * so taking it here recorded a change the document would not make.
+       */
+      if (field === 'enable' && (entries.get(id)?.archived || bullets.get(id)?.bullet.archived)) {
+        plan.rejected.push(`enable ${id}: archived, so it stays off`);
+        continue;
+      }
+      plan[field].push(id);
     }
   }
 
