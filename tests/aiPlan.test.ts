@@ -138,6 +138,46 @@ describe('showing and hiding', () => {
     expect(restored?.find((s) => s.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_pipeline', 'b_testing']);
   });
 
+  /*
+   * Showing one thing is not permission to rearrange the rest. Both of these
+   * rebuilt the whole list in the store's order, which a resume that
+   * arranged its own lines or entries prints as written — so an AI run that
+   * switched one bullet on quietly undid the order somebody had dragged.
+   */
+  it('shows a bullet without undoing lines the base arranged itself', () => {
+    const d = store();
+    const acme = d.entries.find((e) => e.id === 'exp_acme')!;
+    const extra = { ...acme.bullets![0]!, id: 'b_extra' };
+    const entries = d.entries.map((e) => (e.id === 'exp_acme' ? { ...e, bullets: [...e.bullets!, extra] } : e));
+    const arranged = {
+      ...SAMPLE_BASE,
+      sections: SAMPLE_BASE.sections?.map((s) =>
+        s.kind === 'experience'
+          ? { ...s, bullets: { exp_acme: ['b_testing', 'b_pipeline'] }, bulletOrder: { exp_acme: 'manual' as const } }
+          : s,
+      ),
+    };
+    const withExtra = { ...d, entries };
+    const sections = applyInclusion(arranged, withExtra, sanitizeAiPlan({ enable: ['b_extra'] }, withExtra));
+    // Next to the line it follows in the store, and the arrangement kept.
+    expect(sections?.find((s) => s.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_testing', 'b_extra', 'b_pipeline']);
+  });
+
+  it('shows an entry without undoing a section arranged by hand', () => {
+    const d = store();
+    const second = { ...d.entries.find((e) => e.id === 'proj_thing')!, id: 'proj_second' };
+    const third = { ...second, id: 'proj_third' };
+    const withMore = { ...d, entries: [...d.entries, second, third] };
+    const arranged = {
+      ...SAMPLE_BASE,
+      sections: SAMPLE_BASE.sections?.map((s) =>
+        s.kind === 'project' ? { ...s, entries: ['proj_third', 'proj_thing'], order: 'manual' as const } : s,
+      ),
+    };
+    const sections = applyInclusion(arranged, withMore, sanitizeAiPlan({ enable: ['proj_second'] }, withMore));
+    expect(sections?.find((s) => s.kind === 'project')?.entries).toEqual(['proj_third', 'proj_thing', 'proj_second']);
+  });
+
   it('leaves the store itself untouched', () => {
     const d = store();
     const before = JSON.stringify(d.entries);

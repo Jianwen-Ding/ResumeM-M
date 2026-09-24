@@ -240,6 +240,25 @@ export function sanitizeSuggestions(parsed: unknown, data: StoreData): AiSuggest
   return kept;
 }
 
+/**
+ * `id` into `list` just after the nearest thing before it in `master` that the
+ * list already holds, or first where there is none — and the rest of the list
+ * left in the order it was in.
+ *
+ * Both callers used to rebuild the whole list in the store's order around the
+ * one being shown. A list in the store's order comes out the same either way;
+ * one somebody arranged — lines marked `manual`, a section sorted by hand —
+ * prints as written, and switching one thing on rearranged all of it.
+ */
+function inPlace(list: string[], id: string, master: string[]): string[] {
+  if (list.includes(id)) return list;
+  for (let i = master.indexOf(id) - 1; i >= 0; i--) {
+    const at = list.indexOf(master[i]!);
+    if (at >= 0) return [...list.slice(0, at + 1), id, ...list.slice(at + 1)];
+  }
+  return [id, ...list];
+}
+
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
   const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
   if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;
@@ -281,11 +300,8 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
     const entry = entryById.get(id);
     if (entry) {
       const section = sections.find((s) => s.kind === entry.kind);
-      // Store order, not reply order: append where the store puts it.
-      if (section && !section.entries.includes(id)) {
-        const order = data.entries.filter((e) => e.kind === entry.kind).map((e) => e.id);
-        section.entries = order.filter((e) => e === id || section.entries.includes(e));
-      }
+      // Store order, not reply order: where the store puts it.
+      if (section) section.entries = inPlace(section.entries, id, data.entries.map((e) => e.id));
       continue;
     }
     const ownerId = bulletOwner.get(id);
@@ -293,8 +309,7 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
     for (const s of sections) {
       if (!s.entries.includes(ownerId)) continue;
       const all = (entryById.get(ownerId)?.bullets ?? []).map((b) => b.id);
-      const current = new Set([...shown(s, ownerId), id]);
-      s.bullets[ownerId] = all.filter((b) => current.has(b));
+      s.bullets[ownerId] = inPlace(shown(s, ownerId), id, all);
     }
   }
 
