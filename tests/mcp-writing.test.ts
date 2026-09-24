@@ -28,7 +28,10 @@ function writing(draft?: Parameters<typeof makeWriting>[0]) {
 }
 
 function makeWriting(
-  draft: { coverLetter: { required: boolean; body: string }; questions: { id: string; question: string; answer?: string; source?: string }[] } = {
+  draft: {
+    coverLetter: { required: boolean; body: string };
+    questions: { id: string; question: string; answer?: string; source?: string; limit?: number }[];
+  } = {
     coverLetter: { required: true, body: '' },
     questions: [{ id: 'q1', question: 'Why this role?' }],
   },
@@ -479,6 +482,29 @@ describe('reading material into a proposal', () => {
     });
     expect(r.ok).toBe(false);
     expect(r.text).toContain('2015');
+  });
+
+  it('refuses dates that carry anything but a date', () => {
+    const r = authoring().proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      dates: '2023 -- 2024, promoted to Director',
+      documentId: 'd1',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('promoted');
+  });
+
+  it('takes a date range written with months, a season and Present', () => {
+    const r = authoring().proposeEntry({
+      id: 'exp_vega',
+      kind: 'experience',
+      title: 'Vega Analytics',
+      dates: 'Sept. 2023 – Summer 2024 (expected), to Present',
+      documentId: 'd1',
+    });
+    expect(r.ok, r.text).toBe(true);
   });
 
   /*
@@ -1296,5 +1322,30 @@ describe('proposing a different order for lines already in the store', () => {
       bulletsByEntry: { exp_bare: [] },
     });
     expect(s.proposeOrder('exp_bare', ['b_x'], 'why').ok).toBe(false);
+  });
+});
+
+/*
+ * The box's own limit. A script assigning a value is not held to `maxlength`,
+ * so an answer over it went into the employer's box whole and the form
+ * refused it on submit — after the run had finished and nobody was looking.
+ */
+describe('an answer box with a limit', () => {
+  const limited = () =>
+    makeWriting({ coverLetter: { required: false, body: '' }, questions: [{ id: 'q1', question: 'Why this role?', limit: 120 }] });
+
+  it('is told to the model with the question', () => {
+    expect(limited().describeWork()).toContain('at most 120 characters');
+    expect(writing().describeWork()).not.toContain('at most');
+  });
+
+  it('refuses an answer over it, saying by how much', () => {
+    const r = limited().saveAnswer('q1', 'I want to build the ingest path. '.repeat(5));
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('at most 120');
+  });
+
+  it('and takes one inside it', () => {
+    expect(limited().saveAnswer('q1', 'The ingest path is the part I know best, and the part you are hiring for.').ok).toBe(true);
   });
 });

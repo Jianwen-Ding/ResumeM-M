@@ -12,7 +12,8 @@ import { cloneProject, prepareProject, readProjects, rememberProject, setDefault
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
-import { localOnly } from './guard.js';
+import { localOnly, scriptPolicy } from './guard.js';
+import { createHash } from 'node:crypto';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = findProjectRoot(here);
@@ -195,6 +196,21 @@ export async function startServer(opts: ServerOptions = {}) {
       allowHosts: (process.env.RMM_ALLOWED_HOSTS ?? '').split(',').filter(Boolean),
     }),
   );
+
+  /*
+   * Read once: the page is a file in the build, and a policy that disagreed
+   * with it would stop the editor loading at all. See `scriptPolicy`.
+   */
+  const editorPage = path.join(projectRoot, 'web', 'index.html');
+  const policy = scriptPolicy(
+    fs.existsSync(editorPage) ? fs.readFileSync(editorPage, 'utf8') : '',
+    (text) => createHash('sha256').update(text).digest('base64'),
+  );
+  app.use((_req, res, next) => {
+    res.setHeader('Content-Security-Policy', policy);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    next();
+  });
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;

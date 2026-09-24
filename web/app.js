@@ -37,6 +37,26 @@ const el = (tag, props = {}, children = []) => {
 };
 
 /**
+ * A link to a posting, or `null` when the address is not a web page.
+ *
+ * Posting addresses come from pages, from a store cloned from somebody's git
+ * link, from a restored bundle — none of it written by the person clicking.
+ * A `javascript:` address set as an `href` runs in this editor, which can
+ * change the AI command, so anything other than http(s) is left off.
+ */
+const postingLink = (url) => {
+  try {
+    const { protocol } = new URL(url);
+    if (protocol === 'http:' || protocol === 'https:') {
+      return el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', textContent: 'posting' });
+    }
+  } catch {
+    /* not an address at all */
+  }
+  return null;
+};
+
+/**
  * A text field that waits for a Save button, and survives its panel being
  * rebuilt around it.
  *
@@ -165,6 +185,33 @@ function draftedFrom(kind) {
   const last = sources.pop();
   const from = sources.length > 0 ? `${sources.join(', ')} and ${last}` : last;
   return `Written in your voice, from ${from} — not from nothing.`;
+}
+
+/**
+ * Coming back to this tab, take up what was changed while it was away.
+ *
+ * "Edit in ResumeM-M" sends people here from the extension and back again,
+ * and the extension writes the same tailored copy — ticking a suggestion,
+ * filing the application. This tab kept its copy of the store and its edit
+ * overlays, and those are what the next auto-save writes whole: one tick
+ * here after coming back wrote the extension's changes away. Leaving the tab
+ * already writes everything pending, so on return there is nothing of this
+ * tab's to lose — and where something is still pending, nothing is done.
+ */
+async function refreshOnReturn() {
+  if (!state.store || state.masterView || state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  const before = JSON.stringify(resumeById(state.resumeId) ?? null);
+  const had = state.resumeId;
+  await loadStore();
+  // Something started while the store was being read: that edit is newer.
+  if (state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  if (state.resumeId !== had || JSON.stringify(resumeById(state.resumeId) ?? null) === before) return;
+  // Everything the overlays held was written on the way out; what is stored
+  // now is newer than they are.
+  clearEdits();
+  render();
+  scheduleRender();
+  setStatus('Updated with changes made in another tab.');
 }
 
 /** Forget every unsaved edit — used when switching resumes. */
@@ -1066,7 +1113,7 @@ async function inEntryLane(id, run) {
   }
 }
 
-async function saveEntry(entry, message) {
+async function saveEntry(entry, message, { paint = true } = {}) {
   describeNext(message ?? 'the change');
   const id = entry.id;
   // What this edit was derived from: the store as the client last saw it.
@@ -1081,7 +1128,7 @@ async function saveEntry(entry, message) {
   });
 
   setStatus(message ?? `Saved ${id}`);
-  render();
+  if (paint) render();
 }
 
 async function saveResumeSpec(spec, message) {
@@ -2475,7 +2522,19 @@ function skillsBlock(section) {
         const cur = new Set(state.skillEdits?.[gid] ?? picked);
         if (cb.checked) cur.add(item.id);
         else cur.delete(item.id);
-        state.skillEdits = { ...(state.skillEdits ?? {}), [gid]: [...cur] };
+        /*
+         * In the group's order, not the order the boxes were clicked. The
+         * list is what prints, in its own order, so unticking Python and
+         * ticking it again moved it to the end of the line on the page while
+         * the chips here stayed where they were. An id the group no longer
+         * has rides along behind them: dropping it is the "no longer in your
+         * store" warning's decision, not a side effect of another box.
+         */
+        const known = group.items.map((i) => i.id);
+        state.skillEdits = {
+          ...(state.skillEdits ?? {}),
+          [gid]: [...known.filter((id) => cur.has(id)), ...[...cur].filter((id) => !known.includes(id))],
+        };
         markDirty();
         render();
       };
@@ -3491,8 +3550,41 @@ async function addBullet(entry) {
       },
     ],
   };
-  await saveEntry(next, `Added bullet ${id}`);
+  // One addition, one undo step — see `addSkill`.
+  await undoGroup(`add a line to ${entryName(entry)}`, [], async () => {
+    /*
+     * Not painted between the two writes. Drawn after the first, the new line
+     * showed switched off for a round trip, and the preview compiled the
+     * resume without it — then again with it once the tick landed.
+     */
+    await saveEntry(next, `Added bullet ${id}`, { paint: false });
+    if (!state.masterView) await tickBulletHere(entry.id, id);
+  });
+  render();
   scheduleRender();
+}
+
+/**
+ * A new line, switched on in the resume being edited — that one and no other.
+ *
+ * `tickSkillHere` one level down: on a resume that lists its own lines for
+ * this entry, the new one was saved into the entry and drawn switched off.
+ * An entry with no list of its own prints every line, this one included, so
+ * it is left alone; the overlay is updated too, for the same reason as there.
+ */
+async function tickBulletHere(entryId, id) {
+  const root = resumeById(state.resumeId);
+  const section = (root?.sections ?? []).find((s) => (s.entries ?? []).includes(entryId));
+  if (!section) return;
+  if (state.bulletEdits?.[entryId] && !state.bulletEdits[entryId].includes(id)) {
+    state.bulletEdits = { ...state.bulletEdits, [entryId]: [...state.bulletEdits[entryId], id] };
+  }
+  const listed = section.bullets?.[entryId];
+  if (!Array.isArray(listed) || listed.includes(id)) return;
+  const sections = root.sections.map((s) =>
+    s === section ? { ...s, bullets: { ...s.bullets, [entryId]: [...listed, id] } } : s,
+  );
+  await saveResumeSpec({ ...root, sections }, `Added ${id}`);
 }
 
 async function removeBullet(entry, bullet) {
@@ -4373,29 +4465,62 @@ async function addSkill(group) {
   ], 'Tags are what the extension matches against a job posting.');
   if (!answer?.text?.trim()) return;
 
-  await inSkillsLane((groups) =>
-    groups.map((g) =>
-      g.id !== group.id
-        ? g
-        : {
-            ...g,
-            items: [
-              ...g.items,
-              {
-                // Against `g`, the group as it now stands, not the copy this
-                // button was drawn from: a skill added a moment ago is in one
-                // and not the other.
-                id: freeSkillItemId(g, `s_${slug(answer.text)}`),
-                text: answer.text.trim(),
-                ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
-              },
-            ],
-          },
-    ),
-  );
+  let added;
+  /*
+   * One addition, one undo step: the skill and the tick that puts it on this
+   * resume are two writes, and as two steps the first Ctrl+Z only unticked it.
+   * The same grouping `addEntry` has always had.
+   */
+  await undoGroup(`add ${answer.text.trim()}`, [], async () => {
+    await inSkillsLane((groups) =>
+      groups.map((g) => {
+        if (g.id !== group.id) return g;
+        // Against `g`, the group as it now stands, not the copy this button
+        // was drawn from: a skill added a moment ago is in one and not the
+        // other.
+        added = freeSkillItemId(g, `s_${slug(answer.text)}`);
+        return {
+          ...g,
+          items: [
+            ...g.items,
+            {
+              id: added,
+              text: answer.text.trim(),
+              ...(answer.tags?.trim() ? { tags: answer.tags.split(',').map((t) => t.trim()).filter(Boolean) } : {}),
+            },
+          ],
+        };
+      }),
+    );
+    if (added && !state.masterView) await tickSkillHere(group.id, added, answer.text.trim());
+  });
   setStatus('Skill added');
   render();
   scheduleRender();
+}
+
+/**
+ * A new skill, switched on in the resume being edited — that one and no other.
+ *
+ * The same rule a new entry follows (see `addEntry`), for the same reason: the
+ * button sits under a group on this resume, and on a resume that names its own
+ * list for the group — every tailored one does — the skill arrived unticked,
+ * added and not on the page you were looking at. A resume with no list for the
+ * group already prints every item, this one included, so it is left alone.
+ * The overlay is updated too, or the next auto-save writes it back without
+ * the new skill.
+ */
+async function tickSkillHere(gid, id, text) {
+  const root = resumeById(state.resumeId);
+  const skills = (root?.sections ?? []).find((s) => s.kind === 'skills' && (s.groups ?? []).includes(gid));
+  if (!skills) return;
+  if (state.skillEdits?.[gid] && !state.skillEdits[gid].includes(id)) {
+    state.skillEdits = { ...state.skillEdits, [gid]: [...state.skillEdits[gid], id] };
+  }
+  const listed = skills.items?.[gid];
+  if (!Array.isArray(listed) || listed.includes(id)) return;
+  const sections = root.sections.map((s) => (s === skills ? { ...s, items: { ...s.items, [gid]: [...listed, id] } } : s));
+  await saveResumeSpec({ ...root, sections }, `Added ${text}`);
 }
 
 async function removeSkill(group, item) {
@@ -5736,10 +5861,34 @@ async function loadApplications() {
     }
     sel.onchange = async () => {
       const moved = sel.value;
-      await api(`/applications/${encodeURIComponent(a.id)}/status`, {
-        method: 'POST',
-        body: JSON.stringify({ status: moved }),
-      });
+      /*
+       * The select already shows `moved` — the browser painted that the
+       * instant the option was picked — so a write that fails here leaves a
+       * status on screen that was never saved anywhere. With no catch below,
+       * that is exactly what happened: the request rejected, nothing told
+       * you, and the dropdown quietly disagreed with the tracker until some
+       * unrelated reload put the true status back with no explanation for
+       * why it had "changed itself".
+       *
+       * So a failure is said out loud, the same way a draft's save failure
+       * is, and the row is repainted from what the server actually holds —
+       * which is the same repaint the success path already does, just also
+       * on the way out.
+       */
+      try {
+        await api(`/applications/${encodeURIComponent(a.id)}/status`, {
+          method: 'POST',
+          body: JSON.stringify({ status: moved }),
+        });
+      } catch (err) {
+        setStatus(err.message, true);
+        // Put the saved status back now, not only after the repaint: a server
+        // that just refused the write may refuse the reload too, and then the
+        // unsaved status would still be sitting in the dropdown.
+        sel.value = a.status;
+        loadApplications().catch(() => undefined);
+        return;
+      }
       setStatus('Status updated');
       // Once, on the way in — not every time the list repaints with an
       // offer already on it.
@@ -5770,7 +5919,16 @@ async function loadApplications() {
           onclick: async (ev) => {
             ev.stopPropagation();
             if (!(await confirmModal(`Remove ${a.company}?`, 'The tracker row goes; the files on disk stay.'))) return;
-            await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            // Same reasoning as the status dropdown just above: a request
+            // that fails here used to leave the button pressed and nothing
+            // said, which reads as "did that do anything?" rather than as
+            // the clear failure it was.
+            try {
+              await api(`/applications/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            } catch (err) {
+              setStatus(err.message, true);
+              return;
+            }
             if (openApplicationId === a.id) openApplicationId = null;
             loadApplications();
           },
@@ -5988,8 +6146,8 @@ async function openApplication(id) {
       el('h3', { textContent: a.role }),
       el('div', { className: 'sub' }, [
         document.createTextNode(a.company),
-        a.url ? document.createTextNode(' · ') : null,
-        a.url ? el('a', { href: a.url, target: '_blank', textContent: 'posting' }) : null,
+        a.url && postingLink(a.url) ? document.createTextNode(' · ') : null,
+        a.url ? postingLink(a.url) : null,
       ]),
       ...sections,
     );
@@ -6659,8 +6817,8 @@ function renderDraft(draft) {
     ]),
     el('div', { className: 'where' }, [
       document.createTextNode(draft.company),
-      draft.url ? document.createTextNode(' · ') : null,
-      draft.url ? el('a', { href: draft.url, target: '_blank', textContent: 'posting' }) : null,
+      draft.url && postingLink(draft.url) ? document.createTextNode(' · ') : null,
+      draft.url ? postingLink(draft.url) : null,
     ]),
     ...blocks,
     el('div', { className: 'block' }, [
@@ -9592,6 +9750,37 @@ function renderDiff(diff) {
  * Modals                                                              *
  * ------------------------------------------------------------------ */
 
+/**
+ * Every element inside the open dialog a keyboard user could land on, in the
+ * order Tab visits them. Used both to choose where focus goes when the
+ * dialog opens and to keep it from leaving while the dialog is up — so it
+ * has to match what a browser would actually stop on: not a disabled button,
+ * and not Cancel when a caller asked for none.
+ */
+function modalFocusable() {
+  return [...$('#modal').querySelectorAll('button, [href], input, select, textarea')].filter(
+    (node) => !node.disabled && node.tabIndex !== -1 && node.style.display !== 'none',
+  );
+}
+
+/**
+ * Land the keyboard somewhere inside the dialog that was just opened, rather
+ * than leaving it wherever it already was.
+ *
+ * That "wherever" is the button that opened the dialog — still focused,
+ * still reachable by Tab, and now hidden under the overlay. `form` used to
+ * reach for the first text field and stop there, which left every dialog of
+ * plain selects and checkboxes (start a draft, add an entry) not doing this
+ * at all; `showModal` did not do it in any case, so a confirmation asking to
+ * delete something opened with the delete button behind it still focused.
+ * A text field wins when there is one, because that is where typing starts;
+ * failing that, the first focusable thing in the dialog.
+ */
+function focusModal() {
+  const typed = $('#modal-content').querySelector('input[type=text], textarea');
+  setTimeout(() => (typed ?? modalFocusable()[0])?.focus(), 0);
+}
+
 function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false, cancelLabel = 'Cancel' } = {}) {
   $('#modal-title').textContent = title;
   $('#modal-content').replaceChildren(content);
@@ -9602,6 +9791,7 @@ function showModal(title, content, { note = '', okLabel = 'Close', showCancel = 
   $('#modal-cancel').textContent = cancelLabel;
   $('#modal-ok').textContent = okLabel;
   $('#modal').classList.remove('hidden');
+  focusModal();
   return new Promise((resolve) => {
     $('#modal-ok').onclick = () => {
       $('#modal').classList.add('hidden');
@@ -9673,10 +9863,7 @@ function form(title, fields, note) {
     $('#modal-cancel').style.display = '';
     $('#modal-ok').textContent = 'Save';
     $('#modal').classList.remove('hidden');
-
-    // Focus the first editable field so the form is usable from the keyboard.
-    const first = content.querySelector('input[type=text], textarea');
-    if (first) setTimeout(() => first.focus(), 0);
+    focusModal();
 
     const close = (value) => {
       $('#modal').classList.add('hidden');
@@ -9937,7 +10124,24 @@ async function applyHash() {
   const draft = /^#workspace\/(.+)$/.exec(location.hash);
   if (draft) {
     showTab('workspace');
-    await openDraft(decodeURIComponent(draft[1]));
+    const id = decodeURIComponent(draft[1]);
+    /*
+     * The address outlives the draft: a link from the extension, or a reload,
+     * can name one that has since been discarded or swept. Opened anyway, that
+     * printed `No draft "2026-09-23-…"` and left the panel empty, holding the
+     * slot the list would otherwise have filled with something to work on.
+     */
+    const { drafts } = await api('/workspace');
+    if (!drafts.some((d) => d.id === id)) {
+      // Unless the list has already moved the address on to what it opened.
+      // `window.` because `history` in this file is the undo stack.
+      if (location.hash === draft[0]) window.history.replaceState(null, '', '#workspace');
+      setStatus('That application is no longer in the workspace.');
+      if (openDraftId === id) openDraftId = null;
+      await loadDrafts();
+      return true;
+    }
+    await openDraft(id);
     return true;
   }
 
@@ -10167,6 +10371,7 @@ async function boot() {
   // does not, reliably.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushEdits().catch(() => {});
+    else refreshOnReturn().catch(() => {});
   });
   // The preview keeps itself current; this is only for the rare "recompile it
   // anyway" — after changing the LaTeX engine, say.
@@ -10282,6 +10487,33 @@ async function boot() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) {
       $('#modal-cancel').click();
+      return;
+    }
+
+    /*
+     * Keep Tab inside the dialog while one is open.
+     *
+     * Nothing had ever stopped it leaving: the overlay blocks a click on the
+     * page behind it, but Tab and Shift+Tab just follow document order, which
+     * runs straight past the dialog into the toolbar and tabs it is sitting
+     * on top of. Landing there is not a visible mistake — the overlay is
+     * still up, so it looks like nothing happened — until whatever key comes
+     * next reaches a button nobody can see, in a part of the editor the
+     * dialog was supposed to be the only way to touch.
+     *
+     * Cycled explicitly rather than left to the browser: the browser's own
+     * tab order is exactly the thing being overridden here, so it cannot also
+     * be what re-enters the loop once the edge is reached.
+     */
+    if (e.key === 'Tab' && !$('#modal').classList.contains('hidden')) {
+      const focusable = modalFocusable();
+      if (focusable.length === 0) return;
+      const at = focusable.indexOf(document.activeElement);
+      const next = e.shiftKey
+        ? focusable[at > 0 ? at - 1 : focusable.length - 1]
+        : focusable[at >= 0 && at < focusable.length - 1 ? at + 1 : 0];
+      e.preventDefault();
+      next.focus();
       return;
     }
 

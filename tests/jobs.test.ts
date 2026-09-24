@@ -287,7 +287,16 @@ const data: StoreData = {
   config: DEFAULT_CONFIG,
 };
 
-const base: ResumeSpec = { id: 'base', label: 'Base' };
+/*
+ * A base that prints its entries. Resumes stand alone now, and one with no
+ * sections prints nothing — so matching was only ever answering for lines on
+ * the page because it read the whole store. See `printed` in match.ts.
+ */
+const PRINTED = [
+  { kind: 'experience' as const, heading: 'Experience', entries: ['exp'] },
+  { kind: 'education' as const, heading: 'Education', entries: ['edu', 'edu2'] },
+];
+const base: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED };
 
 /**
  * A tailored resume is a copy of the base with the posting's decisions laid
@@ -400,6 +409,39 @@ describe('variant matching', () => {
     expect(result.skills.sk).toBeUndefined();
   });
 
+  /*
+   * Narrowing chooses among what the base prints; it never switches on a
+   * skill the base left off. The Workspace's keyword tailor applies the match
+   * outright, so a skill somebody had removed from their base came back the
+   * moment a posting named it, with nothing to untick.
+   */
+  const trimmedBase = (items: string[], groups = ['sk']): ResumeSpec => ({
+    id: 'trimmed',
+    label: 'Trimmed',
+    sections: [{ kind: 'skills', entries: [], groups, items: { sk: items } }],
+  });
+
+  const withFour: StoreData = {
+    ...data,
+    skillGroups: [{ ...data.skillGroups[0]!, items: [...data.skillGroups[0]!.items, { id: 's_rs', text: 'Rust', tags: ['rust'] }] }],
+  };
+
+  it('never switches on a skill the base turned off', () => {
+    // The base prints Python, Go and Rust, not PHP; the posting names PHP.
+    const result = matchVariants(withFour, trimmedBase(['s_py', 's_go', 's_rs']), { keywords: ['python', 'go', 'php'] });
+    expect(result.skills.sk).toEqual(['s_py', 's_go']);
+  });
+
+  it('still narrows within what the base prints, in the base\'s own order', () => {
+    const result = matchVariants(withFour, trimmedBase(['s_go', 's_rs', 's_py']), { keywords: ['python', 'go', 'php'] });
+    expect(result.skills.sk).toEqual(['s_go', 's_py']);
+  });
+
+  it('leaves alone a group the base does not print', () => {
+    const result = matchVariants(data, trimmedBase(['s_py', 's_go'], []), { keywords: ['python', 'go'] });
+    expect(result.skills.sk).toBeUndefined();
+  });
+
   it('respects a higher threshold by making fewer changes', () => {
     const loose = matchVariants(data, base, { keywords: ['kafka'] });
     const strict = matchVariants(data, base, { keywords: ['kafka'], threshold: 99 });
@@ -413,6 +455,65 @@ describe('variant matching', () => {
  * The one signal allowed to reach a date: a tag the applicant wrote on their
  * own variant, naming the kind of posting it belongs on.
  */
+describe('matching only what the resume prints', () => {
+  /*
+   * The match read every entry in the store, so the card offered a Kafka
+   * wording for a job this resume does not list, and for a line it had turned
+   * off — boxes that changed nothing on the page when ticked.
+   */
+  const other: Entry = {
+    id: 'exp_other',
+    kind: 'experience',
+    title: 'Other Co.',
+    bullets: [
+      {
+        id: 'b_other',
+        default: 'v_plain',
+        variants: [
+          { id: 'v_plain', label: 'Plain', text: 'Moved data around' },
+          { id: 'v_kafka2', label: 'Kafka', text: 'Ran Kafka streaming jobs', tags: ['kafka', 'streaming'] },
+        ],
+      },
+    ],
+  };
+  const twoLines: Entry = {
+    ...entry,
+    bullets: [
+      ...(entry.bullets ?? []),
+      {
+        id: 'b_hidden',
+        default: 'v_plain',
+        variants: [
+          { id: 'v_plain', label: 'Plain', text: 'Wrote tests' },
+          { id: 'v_kafka3', label: 'Kafka', text: 'Tested Kafka streaming consumers', tags: ['kafka', 'streaming'] },
+        ],
+      },
+    ],
+  };
+  const store: StoreData = { ...data, entries: [twoLines, eduEntry, other] };
+
+  it('offers no wording for an entry the resume does not list', () => {
+    const result = matchVariants(store, base, { keywords: ['kafka', 'streaming'] });
+    expect(result.choices.b_pipeline).toBe('v_kafka');
+    expect(result.choices.b_other).toBeUndefined();
+  });
+
+  it('nor for a line the resume has switched off', () => {
+    const oneLine: ResumeSpec = {
+      ...base,
+      sections: [{ kind: 'experience', entries: ['exp'], bullets: { exp: ['b_pipeline'] } }],
+    };
+    const result = matchVariants(store, oneLine, { keywords: ['kafka', 'streaming'] });
+    expect(result.choices.b_pipeline).toBe('v_kafka');
+    expect(result.choices.b_hidden).toBeUndefined();
+  });
+
+  it('while an entry with no list of its own offers every line it prints', () => {
+    const result = matchVariants(store, base, { keywords: ['kafka', 'streaming'] });
+    expect(result.choices.b_hidden).toBe('v_kafka3');
+  });
+});
+
 describe('matching on the posting’s level', () => {
   const intern = detectLevel({ title: 'Software Engineer Intern' });
   const newgrad = detectLevel({ title: 'Software Engineer, New Grad' });
@@ -423,7 +524,7 @@ describe('matching on the posting’s level', () => {
   });
 
   it('switches back off it when the next posting is a new grad role', () => {
-    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu.dates': 'v_dec' } };
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED, choices: { 'edu.dates': 'v_dec' } };
     const result = matchVariants(data, onIntern, { keywords: [], level: newgrad });
     expect(result.choices['edu.dates']).toBe('v_may');
   });
@@ -465,7 +566,7 @@ describe('matching on the posting’s level', () => {
   });
 
   it('and marks the fall back off a level the same way', () => {
-    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu.dates': 'v_dec' } };
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED, choices: { 'edu.dates': 'v_dec' } };
     const result = matchVariants(data, onIntern, { keywords: [], level: newgrad });
     expect(result.rationale.find((r) => r.key === 'edu.dates')?.instruction).toBe(true);
   });
@@ -508,7 +609,7 @@ describe('matching on the posting’s level', () => {
         },
       ],
     };
-    const onIntern: ResumeSpec = { id: 'base', label: 'Base', choices: { 'edu2.dates': 'v_intern' } };
+    const onIntern: ResumeSpec = { id: 'base', label: 'Base', sections: PRINTED, choices: { 'edu2.dates': 'v_intern' } };
     expect(matchVariants(oneSided, onIntern, { keywords: [], level: newgrad }).choices['edu2.dates']).toBe('v_plain');
     // And it stays put on the posting it was written for.
     expect(matchVariants(oneSided, onIntern, { keywords: [], level: intern }).choices['edu2.dates']).toBeUndefined();
@@ -1143,5 +1244,34 @@ describe('whether a pair is worth filing a row for on its own', () => {
     // gate does not ask for one: these are real intakes.
     expect(looksLikeAnApplication('Acme', 'Product Marketing, Early Career')).toBe(true);
     expect(looksLikeAnApplication('Vega', 'Quantitative Trading')).toBe(true);
+  });
+});
+
+/*
+ * Words that are technologies only sometimes.
+ *
+ * "Go above and beyond", "react quickly", "the spring semester", "express
+ * interest": a posting with no technology in it came out asking for Go,
+ * React, Spring and Express, and the keyword match steered the resume to
+ * them. These words now count only where the posting is plainly talking about
+ * the technology.
+ */
+describe('keywords that are ordinary words too', () => {
+  it('finds none of them in ordinary prose', () => {
+    const prose = 'We want someone who will go above and beyond, own our go-to-market plan, react quickly to feedback, and express interest early. Start in the spring semester. Swift decisions matter. Let\'s go! Rest assured we move fast.';
+    const kw = extractKeywords(prose);
+    for (const word of ['go', 'react', 'spring', 'express', 'swift', 'node', 'rest']) expect(kw, word).not.toContain(word);
+  });
+
+  it('still finds them where they are the technology', () => {
+    expect(extractKeywords('We write services in Python, Go and Java.')).toContain('go');
+    expect(extractKeywords('Strong experience with Go.')).toContain('go');
+    expect(extractKeywords('Our frontend is React and TypeScript.')).toContain('react');
+    expect(extractKeywords('Backend on Node.js with Postgres.')).toContain('node');
+    expect(extractKeywords('Services built on Spring Boot.')).toContain('spring');
+    expect(extractKeywords('An Express.js API layer.')).toContain('express');
+    expect(extractKeywords('Design REST APIs.')).toContain('rest');
+    expect(extractKeywords('iOS apps in Swift and SwiftUI.')).toContain('swift');
+    expect(extractKeywords('Golang microservices.')).toContain('golang');
   });
 });

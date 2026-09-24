@@ -420,3 +420,27 @@ describe('a draft', () => {
     expect(t.store.getDraft('d1')?.company).toBe('Northwind');
   });
 });
+
+/*
+ * A file saved by an editor that writes a byte-order mark.
+ *
+ * Notepad and a good many Windows tools put U+FEFF at the start of a UTF-8
+ * file, and with CRLF line endings that made `skills.yaml` "not valid YAML"
+ * — so one hand edit on Windows stopped the whole save from opening.
+ */
+describe('a store file with a byte-order mark and Windows line endings', () => {
+  it('still loads, skills and resumes alike', () => {
+    const t = makeTempStore();
+    try {
+      const skills = path.join(t.dir, 'skills.yaml');
+      fs.writeFileSync(skills, '﻿' + fs.readFileSync(skills, 'utf8').replace(/\n/g, '\r\n'));
+      fs.writeFileSync(path.join(t.dir, 'resumes', 'crlf.yaml'), '﻿id: crlf\r\nlabel: Windows edited\r\ntier: extended\r\n');
+      const data = t.store.load();
+      expect(data.skillGroups.length).toBeGreaterThan(0);
+      expect(data.skillGroups[0]!.name.startsWith('﻿')).toBe(false);
+      expect(data.resumes.find((r) => r.id === 'crlf')?.label).toBe('Windows edited');
+    } finally {
+      t.cleanup();
+    }
+  });
+});

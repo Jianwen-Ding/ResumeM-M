@@ -6,7 +6,9 @@
 import { describe, expect, it } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { hostName, localOnly } from '../src/server/guard.js';
+import { hostName, localOnly, scriptPolicy } from '../src/server/guard.js';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 
 const appWith = (opts?: Parameters<typeof localOnly>[0]) => {
   const app = express();
@@ -128,5 +130,25 @@ describe('a write from another site', () => {
       .set('Host', '127.0.0.1:4600')
       .set('Origin', 'https://evil.example')
       .expect(200);
+  });
+});
+
+describe('the script policy', () => {
+  const sha = (text: string) => createHash('sha256').update(text).digest('base64');
+
+  it('allows the editor’s own inline import map by its hash, and nothing else inline', () => {
+    const page = fs.readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+    const importMap = /<script type="importmap">([\s\S]*?)<\/script>/.exec(page)?.[1];
+    expect(importMap).toBeTruthy();
+    const policy = scriptPolicy(page, sha);
+    expect(policy).toContain(`script-src 'self' 'sha256-${sha(importMap!)}'`);
+    expect(policy).not.toMatch(/unsafe-inline|unsafe-eval/);
+    expect(policy).toContain("base-uri 'none'");
+  });
+
+  it('hashes an inline script, not one loaded by src', () => {
+    const policy = scriptPolicy('<script src="app.js"></script><script>go()</script>', sha);
+    expect(policy.match(/'sha256-/g)).toHaveLength(1);
+    expect(policy).toContain(`'sha256-${sha('go()')}'`);
   });
 });

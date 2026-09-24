@@ -67,6 +67,42 @@ describe('a tailoring move that is checked when it is made', () => {
     expect(s.choose('edu_nowhere.dates', 'v_dec2026').text).toContain('There is no entry');
   });
 
+  /*
+   * A field that is not one of the four with wordings. `.gpa` exists on no
+   * entry and was told it "has only one wording"; `.bullets` and `.period`
+   * are objects with no variants and threw, failing the whole tool call.
+   */
+  it('names the real fields when the one asked for has no wordings to choose', () => {
+    const s = session();
+    for (const field of ['gpa', 'bullets', 'period', 'id']) {
+      const r = s.choose(`edu_neu.${field}`, 'v_anything');
+      expect(r.ok, field).toBe(false);
+      expect(r.text, field).toContain('title, dates, subtitle, location');
+      expect(r.text, field).not.toContain('has only one wording');
+    }
+  });
+
+  it('still says a real field with one wording has nothing to choose between', () => {
+    expect(session().choose('edu_neu.title', 'v_anything').text).toContain('has only one wording');
+  });
+
+  /*
+   * Named back, as reordering bullets and choosing skills name theirs. A typo
+   * or an entry from another section was dropped with a success and no word
+   * of it.
+   */
+  it('says which entries it ignored when putting a section in order', () => {
+    const r = session().orderEntries('experience', ['exp_acme', 'proj_thing', 'exp_typo']);
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain('Ignored, because they are not experience entries');
+    expect(r.text).toContain('proj_thing');
+    expect(r.text).toContain('exp_typo');
+  });
+
+  it('says nothing about ignoring when nothing was', () => {
+    expect(session().orderEntries('experience', ['exp_acme']).text).not.toContain('Ignored');
+  });
+
   it('never lets a wrong move leave anything behind', () => {
     const s = session();
     s.choose('b_pipeline', 'v_invented');
@@ -210,6 +246,48 @@ function narrow() {
   return new TailorSession(data, resolveResume('narrow', data), POSTING);
 }
 
+/*
+ * An entry has to have somewhere to go. `show` took any real id and said "will
+ * be shown"; on a resume with no section of that entry's kind the plan carried
+ * it and `applyInclusion` found nowhere to put it — the reasoning claimed an
+ * entry the resume never got, and nothing anywhere said so.
+ */
+describe('showing an entry the resume has no section for', () => {
+  const withoutProjects = () => {
+    const data = store();
+    data.resumes = [
+      ...data.resumes,
+      { id: 'noproj', label: 'No projects', tier: 'base', sections: [{ kind: 'experience', entries: ['exp_acme'] }] } as never,
+    ];
+    return { data, s: new TailorSession(data, resolveResume('noproj', data), POSTING) };
+  };
+  const aProject = (data: StoreData) => data.entries.find((e) => e.kind === 'project')!;
+
+  it('is refused by name, saying which sections there are', () => {
+    const { data, s } = withoutProjects();
+    const project = aProject(data);
+    const r = s.show(project.id);
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('no');
+    expect(r.text).toContain('experience');
+    expect(s.state.plan.enable).not.toContain(project.id);
+  });
+
+  it('and so is one of its bullets', () => {
+    const { data, s } = withoutProjects();
+    const bullet = aProject(data).bullets![0]!;
+    expect(s.show(bullet.id).ok).toBe(false);
+  });
+
+  it('but hiding one is still fine, and an empty section of its kind is somewhere to go', () => {
+    const { data, s } = withoutProjects();
+    expect(s.hide(aProject(data).id).ok).toBe(true);
+    // `narrow` has a project section with nothing in it.
+    const project = aProject(data);
+    expect(narrow().show(project.id).ok).toBe(true);
+  });
+});
+
 describe('reading the page back', () => {
   it('shows the resume with the ids the tools take', () => {
     const text = session().describeResume();
@@ -243,6 +321,40 @@ describe('reading the page back', () => {
     expect(text).toMatch(/\[b_testing\]\s+\S/);
     // And the words are the line's own, not an empty string.
     expect(text).toContain('coverage');
+  });
+
+  /*
+   * A line goes where its entry is. Showing one whose entry is not on the
+   * page said "will be shown", and `applyInclusion` found no section listing
+   * the entry and did nothing — a move reported as made that was not.
+   */
+  it('refuses to show a line whose entry is not on the page, and names the entry', () => {
+    const data = store();
+    const spec = {
+      id: 'no-acme',
+      label: 'No Acme',
+      tier: 'base' as const,
+      sections: [
+        { kind: 'education', entries: ['edu_neu'] },
+        { kind: 'experience', entries: [] },
+      ],
+    };
+    data.resumes = [...data.resumes, spec as never];
+    const s = new TailorSession(data, resolveResume('no-acme', data), POSTING);
+
+    const refused = s.show('b_testing');
+    expect(refused.ok).toBe(false);
+    expect(refused.text).toContain('exp_acme');
+    expect(s.state.plan.enable).toEqual([]);
+
+    // Shown with its entry, it goes; and a line hidden there stays hidden
+    // in the document, as the preview says.
+    expect(s.show('exp_acme').ok).toBe(true);
+    expect(s.show('b_testing').ok).toBe(true);
+    expect(s.hide('b_pipeline').ok).toBe(true);
+    const sections = applyInclusion(spec as never, data, s.state.plan);
+    expect(sections?.find((x) => x.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_testing']);
+    expect(s.describeResume()).not.toContain('[b_pipeline]');
   });
 
   it('shows an entry the model has just turned on', () => {
@@ -286,6 +398,28 @@ describe('reading the page back', () => {
     expect(text).toContain('skills group [sk_lang]');
     // The project is still offered, and marked as not currently printed.
     expect(text).toMatch(/\[proj_thing\][^\n]*\(not on this resume\)/);
+  });
+
+  /*
+   * A skill taken off this resume is marked, as an entry or a bullet is, so
+   * the model can see the applicant's choice before it picks a group's items.
+   */
+  it('marks the skills this resume leaves off', () => {
+    const data = store();
+    const base = data.resumes.find((r) => r.id === 'base')!;
+    const group = data.skillGroups.find((g) => g.id === 'sk_lang')!;
+    const [kept, dropped] = group.items;
+    const trimmed = {
+      ...base,
+      id: 'trimmed',
+      sections: base.sections?.map((x) =>
+        x.kind === 'skills' ? { ...x, items: { ...(x.items ?? {}), sk_lang: group.items.filter((i) => i.id !== dropped!.id).map((i) => i.id) } } : x,
+      ),
+    };
+    const s = new TailorSession(data, resolveResume(trimmed, { ...data, resumes: [...data.resumes, trimmed] }), POSTING);
+    const text = s.describeInventory();
+    expect(text).toMatch(new RegExp(`\\[${dropped!.id}\\][^\\n]*\\(not on this resume\\)`));
+    expect(text).not.toMatch(new RegExp(`\\[${kept!.id}\\][^\\n]*\\(not on this resume\\)`));
   });
 
   it('labels the posting as source material rather than instructions', () => {
@@ -565,6 +699,24 @@ describe('framing', () => {
     const replies = await exchange([`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`]);
     expect(replies).toEqual([]);
   });
+
+  /*
+   * A batch (`[{...}, {...}]`) is valid JSON on its own line, and destructuring
+   * an array gives `id: undefined` — the same shape as a notification, which
+   * gets no reply on purpose. That made a batch and a notification
+   * indistinguishable here, so a client that sent one and was waiting on a
+   * reply for the request inside it got nothing at all, forever.
+   */
+  it('answers a batch rather than waiting on it forever', async () => {
+    const replies = await exchange([`${JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'ping' }])}\n`]);
+    expect(replies).toHaveLength(1);
+    expect((replies[0]?.error as { code: number }).code).toBe(-32600);
+  });
+
+  it('still answers CRLF-terminated lines', async () => {
+    const replies = await exchange([`${JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' })}\r\n`]);
+    expect(replies).toEqual([{ jsonrpc: '2.0', id: 4, result: {} }]);
+  });
 });
 
 /* ------------------------------------------------------------------ *
@@ -591,6 +743,33 @@ describe('wiring a CLI up to it', () => {
     const session = JSON.parse(fs.readFileSync(path.join(dir, 'tailor-session.json'), 'utf8'));
     expect(session.posting.company).toBe('Helios Robotics');
     expect(session.out).toBe(wiring!.out);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /*
+   * The session file sits in the directory the CLI runs in, and a coding CLI
+   * reads files there without asking. The prompt and every tool result are
+   * redacted; this file was not, so an SSN pasted into a posting or typed into
+   * a draft reached the model through it anyway.
+   */
+  it('writes the session with identifiers already taken out', () => {
+    const dir = sandbox();
+    const base = payload();
+    wireUp(
+      dir,
+      'claude',
+      {
+        ...base,
+        posting: { ...POSTING, description: `${POSTING.description}\nSSN: 123-45-6789, card 4111 1111 1111 1111` },
+        draft: { coverLetter: { required: true, body: 'My SSN is 123-45-6789.' }, questions: [] },
+      },
+      '/somewhere/bin.js',
+    );
+    const raw = fs.readFileSync(path.join(dir, 'tailor-session.json'), 'utf8');
+    expect(raw).not.toContain('123-45-6789');
+    expect(raw).not.toContain('4111 1111 1111 1111');
+    // And nothing else is disturbed: the posting is still the posting.
+    expect(JSON.parse(raw).posting.company).toBe('Helios Robotics');
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -845,5 +1024,36 @@ describe('finding the server to spawn', () => {
     const data = store();
     expect(wireUp(dir, 'claude', { data, resume: resolveResume('base', data), posting: POSTING }, null)).toBeNull();
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+/*
+ * Tool results are the other way text reaches the model.
+ *
+ * `runAgent` redacts the prompt, but a tool such as `find_my_letters` hands
+ * the model corpus text as a result, and none of that passes through the
+ * prompt. So every result is redacted once more where the protocol answers,
+ * whichever tool produced it.
+ */
+describe('a tool result never carries an identifier', () => {
+  it('redacts an SSN and a card number out of whatever a tool returns', async () => {
+    const leaky: ToolDefinition[] = [
+      {
+        name: 'find_my_letters',
+        description: 'Return a stored letter.',
+        inputSchema: { type: 'object', properties: {} },
+        run: async () => ({ text: 'Dear Acme — SSN 123-45-6789, card 4111 1111 1111 1111. Phone 617-555-0100.' }),
+      },
+    ];
+    const reply = (await handle(
+      { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'find_my_letters', arguments: {} } },
+      leaky,
+      { name: 'test', version: '0' },
+    )) as { result: { content: { text: string }[] } };
+    const text = reply.result.content[0]!.text;
+    expect(text).not.toContain('123-45-6789');
+    expect(text).not.toContain('4111 1111 1111 1111');
+    expect(text).toContain('Dear Acme');
+    expect(text).toContain('617-555-0100');
   });
 });

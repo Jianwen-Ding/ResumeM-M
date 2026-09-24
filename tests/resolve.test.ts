@@ -574,3 +574,50 @@ describe('a date that ends before it starts', () => {
     expect(out.sections[0]?.entries[0]?.dates).toBe('Jul. 2026 -- Dec. 2024');
   });
 });
+
+describe('a list that names the same thing twice', () => {
+  /*
+   * A resume's list is printed as written, so a store edited by hand — which
+   * is supported — or carried over from an older version could name a skill
+   * twice and print "Python, Python, TypeScript". Once is what it means.
+   */
+  it('prints a skill once', () => {
+    const twice: ResumeSpec = {
+      id: 'twice',
+      label: 'Twice',
+      sections: [{ kind: 'skills', entries: [], groups: ['sk'], items: { sk: ['s_py', 's_py', 's_ts'] } }],
+    };
+    const r = resolveResume('twice', store([twice]));
+    expect(r.sections[0]?.skillGroups?.[0]?.items).toEqual(['Python', 'TypeScript']);
+  });
+
+  it('and a skills group once', () => {
+    const twice: ResumeSpec = {
+      id: 'twice',
+      label: 'Twice',
+      sections: [{ kind: 'skills', entries: [], groups: ['sk', 'sk'] }],
+    };
+    const r = resolveResume('twice', store([twice]));
+    expect(r.sections[0]?.skillGroups).toHaveLength(1);
+  });
+
+  it('and an entry once', () => {
+    const twice: ResumeSpec = {
+      id: 'twice',
+      label: 'Twice',
+      sections: [{ kind: 'experience', entries: ['exp', 'exp'] }],
+    };
+    const r = resolveResume('twice', store([twice]));
+    expect(r.sections[0]?.entries).toHaveLength(1);
+  });
+
+  it('and a line once', () => {
+    const twice: ResumeSpec = {
+      id: 'twice',
+      label: 'Twice',
+      sections: [{ kind: 'experience', entries: ['exp'], bullets: { exp: ['b_one', 'b_one', 'b_two'] } }],
+    };
+    const r = resolveResume('twice', store([twice]));
+    expect(r.sections[0]?.entries?.[0]?.bullets.map((b) => b.text)).toEqual(['First bullet', 'Second bullet']);
+  });
+});

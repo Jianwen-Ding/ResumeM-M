@@ -3,7 +3,9 @@ import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createApi, createPdfRouter, createCurrentRouter } from '../src/server/api.js';
+import { createApi, createPdfRouter, createCurrentRouter, questionsToWrite } from '../src/server/api.js';
+import { sameQuestion } from '../src/jobs/answers.js';
+import { resolveResume } from '../src/model/resolve.js';
 import { Repo } from '../src/git/repo.js';
 import type { Entry } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -216,6 +218,22 @@ describe('adding a phrasing', () => {
 });
 
 describe('job analysis', () => {
+  /*
+   * The resume the extension builds from is a setting, and it outlives the
+   * resume: delete it, or pick a tailored copy the sweep later takes, and
+   * every card failed with `No resume "job-helios-platform-engineer"` — an id
+   * nobody typed, on every posting, with nothing saying what to do.
+   */
+  it('says in words that the resume it builds from is gone', async () => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'job-gone-last-week' })
+      .expect(400);
+    expect(res.body.kind).toBe('no-base');
+    expect(res.body.error).not.toContain('job-gone-last-week');
+    expect(res.body.error).toMatch(/no longer in this save/i);
+  });
+
   it('extracts the posting and proposes a tailored spec', async () => {
     const res = await request(app)
       .post('/api/extension/analyze')
@@ -295,7 +313,9 @@ describe('job analysis', () => {
         id: 'narrowed',
         label: 'Narrowed',
         extends: 'base',
-        sections: [{ kind: 'skills', entries: [], items: { sk_lang: ['s_py', 's_ts', 's_php'] } }],
+        // Two of the posting's languages among three, so there is something
+        // to narrow: the match only chooses among what the base prints.
+        sections: [{ kind: 'skills', entries: [], items: { sk_lang: ['s_py', 's_go', 's_php'] } }],
       });
       t.store.saveResume({ id: 'inherits', label: 'Inherits', extends: 'narrowed' });
 
@@ -306,7 +326,7 @@ describe('job analysis', () => {
 
       const change = (res.body.skillChanges as { groupId: string; from: string[] | null }[])
         .find((c) => c.groupId === 'sk_lang');
-      expect(change?.from).toEqual(['s_py', 's_ts', 's_php']);
+      expect(change?.from).toEqual(['s_py', 's_go', 's_php']);
     });
 
     it('says nothing about skills when nothing was narrowed', async () => {
@@ -392,12 +412,13 @@ describe('job analysis', () => {
     expect(res.body.error).toMatch(/No page HTML/);
   });
 
-  it('reports an unknown base resume', async () => {
+  it('refuses an unknown base resume rather than building from another', async () => {
     const res = await request(app)
       .post('/api/extension/analyze')
       .send({ html: JOB_HTML, baseResumeId: 'ghost' })
       .expect(400);
-    expect(res.body.error).toMatch(/ghost/);
+    // Refused, in words; see "says in words that the resume it builds from is gone".
+    expect(res.body.kind).toBe('no-base');
   });
 
   it('marks an ordinary page as not a posting', async () => {
@@ -510,6 +531,24 @@ describe('job analysis', () => {
       expect(res.body.application.history.at(-1).note).toMatch(/submitted/i);
     });
 
+    it('keeps each question box’s limit on the draft, and drops one that is not a limit', async () => {
+      await request(app)
+        .post('/api/workspace')
+        .send({
+          company: 'Limitless',
+          role: 'Data Engineer',
+          questions: [
+            { question: 'Why do you want to work here?', limit: 300 },
+            { question: 'Tell us about a hard bug you fixed', limit: -5 },
+          ],
+        })
+        .expect(200);
+      const drafts = await request(app).get('/api/workspace').expect(200);
+      const draft = drafts.body.drafts.find((d: { company: string }) => d.company === 'Limitless');
+      const qs = t.store.load().drafts.find((d) => d.id === draft.id)!.questions;
+      expect(qs.map((q) => q.limit)).toEqual([300, undefined]);
+    });
+
     it('moves one that was being worked on, and its draft with it', async () => {
       await request(app)
         .post('/api/workspace')
@@ -592,6 +631,50 @@ describe('job analysis', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ status: 'applied' });
       expect(rows[0]!.history.some((h) => h.status === 'applied')).toBe(true);
+    });
+
+    /*
+     * The other half of the same window: a send landing while the workspace
+     * route is still committing the tailored resume the extension sent with
+     * it — after the route took its snapshot, before the draft exists. The
+     * send finds no draft to mark; the draft, built from the stale snapshot,
+     * opened as `drafting` under an application already `applied`, and
+     * nothing ever came back to it. Measured on the parallel send walk.
+     */
+    it('opens the draft as submitted when the send lands while the resume commits', async () => {
+      const config = t.store.loadConfig();
+      t.store.saveConfig({ ...config, git: { ...config.git, autoCommit: true } });
+      let arrived: () => void;
+      const atTheCommit = new Promise<void>((r) => (arrived = r));
+      let release: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      const commits = vi.spyOn(repo, 'commitAll').mockImplementation(async (message: string) => {
+        if (/Add tailored resume/.test(message)) {
+          arrived();
+          await held;
+        }
+        return { committed: false } as never;
+      });
+
+      const job = { company: 'Meridian', role: 'Data Engineer' };
+      const base = t.store.load().resumes[0]!;
+      const spec = { ...base, id: 'job-meridian', label: 'Meridian — Data Engineer', tier: 'temporary' };
+      const opening = request(app).post('/api/workspace').send({ ...job, spec, coverLetterRequired: false }).then((r) => r);
+      await Promise.race([
+        atTheCommit,
+        new Promise((_, no) => setTimeout(() => no(new Error('the workspace route never reached the resume commit')), 10_000)),
+      ]);
+
+      const send = await sent(job).expect(200);
+      expect(send.body.application.status).toBe('applied');
+
+      release!();
+      expect((await opening).status).toBe(200);
+      commits.mockRestore();
+
+      const drafts = await request(app).get('/api/workspace').expect(200);
+      const draft = (drafts.body.drafts as { company: string; status: string }[]).find((d) => d.company === job.company);
+      expect(draft?.status).toBe('submitted');
     });
 
     /*
@@ -983,6 +1066,14 @@ describe('answers', () => {
     expect(res.body.prompt).toContain('answer an application question');
   });
 
+  it('tells the model the box’s own limit when the form gave one', async () => {
+    const res = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true, limit: 400 })
+      .expect(200);
+    expect(res.body.prompt).toContain('at most 400 characters');
+  });
+
   it('saves a new question and a new phrasing of an existing one', async () => {
     await request(app).post('/api/answers/save').send({ question: 'New question?', answer: 'New answer' }).expect(200);
     let answers = t.store.load().answers;
@@ -1003,6 +1094,46 @@ describe('answers', () => {
     await request(app).post('/api/answers/save').send({ question: 'Q' }).expect(400);
     await request(app).post('/api/answers/save').send({ answer: 'A' }).expect(400);
   });
+
+  it('refuses to save a Social Security Number, a date of birth, a passport number, a home address', async () => {
+    for (const question of [
+      'What is your Social Security Number?',
+      'What is your date of birth?',
+      'What is your passport number?',
+      'What is your home address?',
+    ]) {
+      const res = await request(app).post('/api/answers/save').send({ question, answer: 'Something private.' }).expect(400);
+      expect(res.body.error, question).toMatch(/personal identifying information/);
+    }
+    // Nothing was written.
+    expect(t.store.load().answers).toHaveLength(2);
+  });
+
+  it('refuses an identifier typed under a question worded past the list', async () => {
+    const res = await request(app)
+      .post('/api/answers/save')
+      .send({ question: 'Government reference', answer: '123-45-6789' })
+      .expect(400);
+    expect(res.body.error).toMatch(/personal identifying information/);
+    expect(t.store.load().answers).toHaveLength(2);
+  });
+
+  it('does not duplicate an item when the same question is saved again without its id', async () => {
+    await request(app).post('/api/answers/save').send({ question: 'Brand new question?', answer: 'My answer.' }).expect(200);
+    // Retyped with different case and spacing, and without the id the first
+    // save returned — the ordinary case for a caller that only has the
+    // question text, not the bank's internal id.
+    await request(app)
+      .post('/api/answers/save')
+      .send({ question: '  brand new  question?  ', answer: 'My answer.' })
+      .expect(200);
+
+    const answers = t.store.load().answers;
+    const matches = answers.filter((a) => sameQuestion(a.question, 'Brand new question?'));
+    expect(matches).toHaveLength(1);
+    // And the identical text was not piled on as a second variant either.
+    expect(matches[0]?.variants).toHaveLength(1);
+  });
 });
 
 describe('cover letters', () => {
@@ -1016,6 +1147,52 @@ describe('cover letters', () => {
     expect(res.body.body).toBe('');
     expect(res.body.priorLetters).toHaveLength(1);
     expect(res.body.priorLetters[0].company).toBe('Acme Co.');
+  });
+
+  /*
+   * The extension writes from a proposal the store has not been given yet —
+   * it is saved with the folder — and asked for this with the proposal's own
+   * id once `extends` stopped existing, which came back "No resume named".
+   * It sends the proposal now, and the letter is written against that.
+   */
+  it('writes from a proposal the caller is holding, which the store has not seen', async () => {
+    const data = t.store.load();
+    const newgrad = data.resumes.find((r) => r.id === 'newgrad')!;
+    const stored = resolveResume('newgrad', data);
+    const dropped = stored.sections.flatMap((s) => s.entries).find((e) => e.bullets.length > 0)!;
+    const line = dropped.bullets[0]!.text;
+    const proposal = {
+      ...newgrad,
+      id: 'job-acme-co-intern',
+      tier: 'temporary',
+      copiedFrom: 'newgrad',
+      sections: newgrad.sections?.map((s) => ({ ...s, entries: s.entries?.filter((id) => id !== dropped.id) })),
+    };
+    const job = { company: 'Acme Co.', jobTitle: 'Intern', jobDescription: 'work' };
+
+    const res = await request(app).post('/api/ai/cover-letter').send({ resumeId: 'newgrad', spec: proposal, job }).expect(200);
+    expect(res.body.priorLetters).toHaveLength(1);
+    // The resume the prompt sets out, not the voice samples above it, which
+    // draw on every line in the store whatever is chosen.
+    const resumePart = (out: string) => out.slice(out.lastIndexOf('\n## Resume\n'));
+    expect(resumePart(res.body.output)).not.toContain(line);
+
+    const fromStored = await request(app).post('/api/ai/cover-letter').send({ resumeId: 'newgrad', job }).expect(200);
+    expect(resumePart(fromStored.body.output)).toContain(line);
+
+    // The one-run writer and the feedback route take it the same way, with
+    // no stored id at all.
+    await request(app)
+      .post('/api/extension/write')
+      .send({ spec: proposal, job, letter: { required: true }, questions: [] })
+      .expect(200);
+    const tailored = await request(app)
+      .post('/api/ai/tailor')
+      .send({ spec: proposal, job })
+      .expect(200);
+    expect(tailored.body.error).toBeUndefined();
+    // Nothing was saved by asking.
+    expect(t.store.load().resumes.some((r) => r.id === proposal.id)).toBe(false);
   });
 
   it('does not save an empty draft', async () => {
@@ -1139,6 +1316,42 @@ describe('feedback', () => {
       .expect(200);
     expect(res.body.parsed).toBeNull();
   });
+
+  /*
+   * The card merges `parsed.choices` straight into the resume it sends. Every
+   * other way a tailoring reply reaches a resume goes through `sanitizeAiPlan`;
+   * this route handed the model's JSON back as it came, invented wordings and
+   * repeated skills included.
+   */
+  it('answers a tailor run with only what the store can honour', async () => {
+    const fake = path.join(t.dir, 'codex');
+    fs.writeFileSync(
+      fake,
+      [
+        '#!/usr/bin/env node',
+        'process.stdout.write(JSON.stringify({',
+        '  choices: { b_pipeline: "v_kafka", b_testing: "v_invented", "edu_neu.nope": "x" },',
+        '  skills: { sk_lang: ["s_go", "s_py", "s_py", "s_nope"] },',
+        '  reasoning: "because",',
+        '}));',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    fs.chmodSync(fake, 0o755);
+    const config = t.store.loadConfig();
+    t.store.saveConfig({ ...config, ai: { ...config.ai, enabled: true, command: fake, args: ['{promptText}'], timeoutMs: 60_000 } });
+
+    const res = await request(app)
+      .post('/api/ai/tailor')
+      .send({ resumeId: 'newgrad', job: { jobDescription: 'Kafka' } })
+      .expect(200);
+    expect(res.body.parsed.choices).toEqual({ b_pipeline: 'v_kafka' });
+    // The store's order and each once.
+    expect(res.body.parsed.skills).toEqual({ sk_lang: ['s_py', 's_go'] });
+    expect(res.body.parsed.reasoning).toBe('because');
+    expect(res.body.parsed.rejected.length).toBeGreaterThan(0);
+  }, 60_000);
 
   it('returns a shortening prompt naming the bullets', async () => {
     const res = await request(app).post('/api/ai/shorten').send({ resumeId: 'newgrad', linesToCut: 2 }).expect(200);
@@ -3192,6 +3405,27 @@ describe('pinning', () => {
     expect(again.body.spec.copiedFrom).toBe(res.body.spec.copiedFrom);
   });
 
+  /*
+   * The draft's resume can have been copied from a temporary one the sweep
+   * has since taken. The walk back to a base ended on that missing id and the
+   * route refused with "The store has no resume to start from", in a store
+   * full of them.
+   */
+  it('starts from the default base when the draft\'s resume came from one since swept', async () => {
+    const made = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Kestrel', role: 'Data Engineer', source: 'by hand' })
+      .expect(200);
+    const draftId = made.body.draft.id;
+    const first = await request(app).post(`/api/workspace/${draftId}/variation`).send({}).expect(200);
+    const copy = t.store.load().resumes.find((r) => r.id === first.body.spec.id)!;
+    t.store.saveResume({ ...copy, copiedFrom: 'swept-last-week' });
+
+    const again = await request(app).post(`/api/workspace/${draftId}/variation`).send({});
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    expect(again.body.spec.copiedFrom).toBe(first.body.spec.copiedFrom);
+  });
+
   it('refuses to start a variation for a draft that is not there', async () => {
     const res = await request(app).post('/api/workspace/no-such-draft/variation').send({}).expect(400);
     expect(res.body.error).toMatch(/No draft/);
@@ -3519,5 +3753,18 @@ describe('saving an entry without mentioning its lines', () => {
       .expect(200);
 
     expect(await lines()).toEqual([]);
+  });
+});
+
+describe('the questions a writing run is handed', () => {
+  it('carry the box limit when it is a real one, and not otherwise', () => {
+    const out = questionsToWrite([
+      { id: 'q1', question: 'Why us?', limit: 500 },
+      { id: 'q2', question: 'Why now?', limit: 0 },
+      { id: 'q3', question: 'Why you?', limit: 2.5 },
+      { id: 'q4', question: 'Anything else?' },
+    ]);
+    expect(out.map((q) => q.limit)).toEqual([500, undefined, undefined, undefined]);
+    expect(out[3]).toEqual({ id: 'q4', question: 'Anything else?', answer: '' });
   });
 });

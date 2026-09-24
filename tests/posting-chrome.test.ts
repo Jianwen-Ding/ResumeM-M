@@ -20,15 +20,27 @@ const POSTING = `
 
 const CITIES = Array.from({ length: 200 }, (_, i) => `<option>City number ${i}</option>`).join('');
 
+/*
+ * Six or more links, throughout — a small link group (chips, a breadcrumb, a
+ * couple of nav items) is kept outright now unless it proves itself a rail
+ * or a big site-navigation block (see `isSiteNavigationBlock`), so what
+ * these fixtures test for — a nav, a `role="navigation"`/`"banner"` region
+ * and a footer sitemap all being removed — needs a realistic number of links
+ * in each, the way an actual site header or footer carries.
+ */
 const PAGE = `<!doctype html><html><head><title>Platform Engineer — Acme</title></head><body>
-  <nav><ul><li><a>Home</a></li><li><a>All jobs</a></li><li><a>Teams</a></li></ul></nav>
-  <div role="navigation"><div><a>Engineering blog</a></div><div><div><a>Our values</a></div></div></div>
-  <header role="banner"><a>Acme careers</a></header>
+  <nav><ul><li><a>Home</a></li><li><a>All jobs</a></li><li><a>Teams</a></li>
+    <li><a>Press</a></li><li><a>Investors</a></li><li><a>Contact</a></li></ul></nav>
+  <div role="navigation"><div><a>Engineering blog</a></div><div><div><a>Our values</a></div></div>
+    <div><a>Press</a></div><div><a>Investors</a></div><div><a>Contact</a></div><div><a>Support</a></div></div>
+  <header role="banner"><a>Acme careers</a><a>About</a><a>Blog</a><a>Press</a><a>Contact</a><a>Support</a></header>
   <label>Filter by location</label><select>${CITIES}</select>
   <main>${POSTING}</main>
-  <aside><h3>Similar jobs</h3><ul><li>Data Scientist</li><li>Sales Engineer</li></ul></aside>
+  <aside><h3>Similar jobs</h3><ul><li><a href="/jobs/41">Data Scientist</a></li><li><a href="/jobs/42">Sales Engineer</a></li></ul></aside>
   <div id="onetrust-consent-sdk"><div class="banner"><p>We use cookies to improve your experience.</p></div></div>
-  <footer><div><p>Copyright Acme Corporation. Privacy policy. Terms of use.</p></div></footer>
+  <footer><div><ul><li><a href="/privacy">Privacy policy</a></li><li><a href="/terms">Terms of use</a></li>
+    <li><a href="/careers">Careers</a></li><li><a href="/press">Press</a></li>
+    <li><a href="/contact">Contact us</a></li><li><a href="/security">Security</a></li></ul></div></footer>
 </body></html>`;
 
 describe('the site around a posting is not the posting', () => {
@@ -54,7 +66,7 @@ describe('the site around a posting is not the posting', () => {
   it('leaves out the sidebar, the cookie banner and the footer', () => {
     expect(description).not.toContain('Similar jobs');
     expect(description).not.toContain('We use cookies');
-    expect(description).not.toContain('Copyright Acme');
+    expect(description).not.toContain('Privacy policy');
   });
 
   /*
@@ -91,7 +103,15 @@ describe('never at the cost of the posting', () => {
   });
 
   it('cuts nested elements of the same tag at their own end, not the first close it meets', () => {
-    const page = `<div role="navigation"><div>Menu</div><div>More menu</div></div><div>${POSTING}</div>`;
+    // Six links, so this is unambiguously a site-navigation block and not a
+    // small kept link group (see `isSiteNavigationBlock`) — the nesting is
+    // still what this test is actually about: if the real end of the outer
+    // `role="navigation"` div were found wrongly, "More menu" would leak out
+    // as its own top-level, unremoved fragment.
+    const page =
+      `<div role="navigation"><div><a href="/a">Menu</a></div><div><a href="/b">More menu</a></div>` +
+      `<div><a href="/c">Even more</a></div><div><a href="/d">Careers</a></div>` +
+      `<div><a href="/e">Blog</a></div><div><a href="/f">Contact</a></div></div><div>${POSTING}</div>`;
     const out = withoutChrome(page);
     expect(out).not.toContain('More menu');
     expect(out).toContain('streaming platform');

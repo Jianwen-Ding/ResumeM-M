@@ -469,3 +469,82 @@ describe('rmm --data', () => {
     }
   });
 });
+
+/*
+ * Three ways `--data` went wrong on the command line, found by running it.
+ */
+describe('rmm --data, however it is written', () => {
+  let save: string;
+  let cwd: string;
+
+  beforeEach(() => {
+    save = aSave('Named Before The Command');
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-cwd-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(save, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  // Run from an empty folder, so a folder made by mistake is plain to see.
+  const rmm = (args: string[]) =>
+    run(process.execPath, [path.join(root, 'node_modules/.bin/tsx'), path.join(root, 'src/cli.ts'), ...args], {
+      cwd,
+      env: { ...process.env, RMM_AUTOCOMMIT: '0' },
+      timeout: 60_000,
+    }).then(
+      (r) => ({ code: 0, out: r.stdout, err: r.stderr }),
+      (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? 1, out: e.stdout ?? '', err: e.stderr ?? '' }),
+    );
+
+  /*
+   * The bad one. A mistyped flag straight after `--data` was taken as the
+   * folder: `./--foo` was created, filled with the bundled example, and its
+   * resumes listed as though they were the person's own.
+   */
+  it('refuses a flag where the folder should be, and makes no folder', async () => {
+    const r = await rmm(['list', '--data', '--foo']);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('--foo is a flag, not a value');
+    expect(fs.readdirSync(cwd)).toEqual([]);
+  });
+
+  it('still refuses a flag the command does take, in the words it used before', async () => {
+    const r = await rmm(['apply', 'x', '--data', '--company', 'Acme', '--role', 'SWE']);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('another flag `rmm apply` takes');
+    expect(fs.readdirSync(cwd)).toEqual([]);
+  });
+
+  /*
+   * Free text is free: a commit message may begin with a dash, and only a
+   * flag the command really takes is read as one there.
+   */
+  it('lets a message begin with a dash', async () => {
+    const r = await rmm(['save', '-m', '--first line of a message', '--data', save]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('--first line of a message');
+  });
+
+  it('takes --data before the command, as git takes -C', async () => {
+    const spaced = await rmm(['--data', save, 'list']);
+    expect(spaced.code).toBe(0);
+    expect(spaced.out).toContain('Named Before The Command');
+
+    const joined = await rmm([`--data=${save}`, 'list']);
+    expect(joined.code).toBe(0);
+    expect(joined.out).toContain('Named Before The Command');
+  });
+
+  /*
+   * Given a stray flag, an unknown command was told it takes only `--data` —
+   * which is to say it was told it exists.
+   */
+  it('calls an unknown command unknown, whatever flag it was given', async () => {
+    const r = await rmm(['bogus', '--verbose']);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('Unknown command "bogus"');
+    expect(r.err).not.toContain('is not something');
+  });
+});

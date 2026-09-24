@@ -102,9 +102,28 @@ const BODY_RULES: { level: JobLevel; re: RegExp }[] = [
   },
   {
     level: 'experienced',
-    re: /\b(?:[3-9]|[1-9]\d)\+? years? of (?:relevant |professional |industry |software |engineering )*experience\b/i,
+    // "Of" optional: "5+ years experience" is how half of them write it.
+    re: /\b(?:[3-9]|[1-9]\d)\+? years?(?: of)? (?:relevant |professional |industry |software |engineering )*experience\b/i,
   },
 ];
+
+/*
+ * A mention the posting takes back in the same breath: "This is not an
+ * internship", "no new grads for this position". Read as evidence, the first
+ * swapped a full-time posting's graduation date to the one kept for
+ * internships. The few words just before the match decide.
+ */
+const NEGATED = /\b(?:not|no|never|isn'?t|aren'?t|non)\b[\s-]*(?:an?\s+|the\s+|for\s+)?$/i;
+
+/** The first match of `re` in `text` that is not negated, if any. */
+function affirmed(text: string, re: RegExp): string | undefined {
+  const all = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  for (const hit of text.matchAll(all)) {
+    const before = text.slice(Math.max(0, (hit.index ?? 0) - 24), hit.index ?? 0);
+    if (!NEGATED.test(before)) return hit[0];
+  }
+  return undefined;
+}
 
 function firstMatch(text: string, rules: { level: JobLevel; re: RegExp }[]): { level: JobLevel; word: string } | null {
   for (const rule of rules) {
@@ -142,8 +161,8 @@ export function detectLevel(job: { title?: string; description?: string }): Leve
    */
   const found = new Map<JobLevel, string>();
   for (const rule of BODY_RULES) {
-    const hit = rule.re.exec(description);
-    if (hit && !found.has(rule.level)) found.set(rule.level, hit[0].toLowerCase());
+    const hit = affirmed(description, rule.re);
+    if (hit && !found.has(rule.level)) found.set(rule.level, hit.toLowerCase());
   }
   const only = [...found][0];
   if (found.size !== 1 || !only) return null;

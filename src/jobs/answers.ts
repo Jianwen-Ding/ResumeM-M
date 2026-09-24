@@ -1,4 +1,5 @@
 import type { AnswerBankItem, CoverLetter, Variant } from '../model/types.js';
+import { employerName } from '../model/applications.js';
 
 /**
  * Reusing what you already wrote, without an AI call.
@@ -205,6 +206,178 @@ function unanswered(asked: string, stored: string, company?: string): string[] {
   );
 }
 
+/**
+ * A question asking for something the bank must never hold at all: a Social
+ * Security Number, a date of birth, a passport number, a home address.
+ *
+ * Every other guard in this file takes confidence away from a match that is
+ * still offered for a person to read — a company mismatch, a negation, a
+ * narrower question. There is no reading of an SSN or a date of birth that
+ * makes handing it back safe: it is not this employer's business whether the
+ * bank has ever seen one, and a stored answer that happens to look right is
+ * still somebody's identifier, sitting in a file that gets copied, committed
+ * and read by whatever this store is shared with next. So this is checked
+ * before anything else runs, and it does not merely withhold `confident` —
+ * it withholds the match entirely, the one guard here that can.
+ */
+const SENSITIVE_QUESTION = [
+  /\bsocial\s*security(\s*number)?\b/i,
+  /\bssn\b/i,
+  /\bdate\s*of\s*birth\b/i,
+  /\bdob\b/i,
+  /\bpassport(\s*(number|no\.?|#))?\b/i,
+  /\b(home|mailing|residential|street)\s*address\b/i,
+  /\b(birth\s*date|birthday)\b/i,
+  /\bnational\s*(id|identity|insurance)(\s*(number|no\.?|#))?\b/i,
+  /\b(tax\s*(id|identification)|tin|itin)\b/i,
+  // The same families `redactIdentifiers` takes out: a Canadian SIN (in
+  // capitals, because "sin" is a word), a UK NI number, a driving licence.
+  /\bsocial\s*insurance(\s*(number|no\.?|#))?\b/i,
+  /\bSIN\b/,
+  /\bNI\s*(number|no\.?|#)/i,
+  /\bdriv(er'?s?|ing)\s*licen[cs]e\b/i,
+  /\b(bank\s*account|routing\s*number|iban|sort\s*code)\b/i,
+  /\b(credit|debit)\s*card\b/i,
+];
+
+/**
+ * An answer that is itself an identifier, whatever the question called it.
+ *
+ * The question list above cannot know every way a form words it ("Tax
+ * reference", "Govt. ID #"), so the value is looked at too: an SSN's
+ * 3-2-4 shape, a run of 13 to 19 digits (a card), an IBAN.
+ */
+const SENSITIVE_ANSWER = [
+  /\b\d{3}[- ]\d{2}[- ]\d{4}\b/,
+  /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}\b/,
+  // A UK National Insurance number, by the shape `redactIdentifiers` uses.
+  /\b[A-CEGHJ-PR-TW-Z]{2} ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b/,
+];
+
+/**
+ * A card number, not any long number: a card issuer's prefix and a valid
+ * Luhn check digit. A plain 13-to-19 digit rule refused ordinary answers —
+ * a timestamp, an order number — which is a save that silently fails.
+ */
+function containsCardNumber(answer: string): boolean {
+  for (const run of answer.match(/\b(?:\d[ -]?){12,18}\d\b/g) ?? []) {
+    const digits = run.replace(/\D/g, '');
+    if (digits.length < 13 || digits.length > 19) continue;
+    if (!/^(?:4|5[1-5]|2[2-7]|3[47]|6(?:011|5))/.test(digits)) continue;
+    let sum = 0;
+    for (let i = 0; i < digits.length; i++) {
+      let d = Number(digits[digits.length - 1 - i]);
+      if (i % 2 === 1) {
+        d *= 2;
+        if (d > 9) d -= 9;
+      }
+      sum += d;
+    }
+    if (sum % 10 === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * The same identifiers, taken out of a longer text rather than refused.
+ *
+ * A file dropped into the corpus is somebody's old paperwork as often as their
+ * writing — an offer letter with a social security number, an application
+ * with a date of birth, a form with a card number — and the whole of it went
+ * to the AI to be sorted and into the corpus every later prompt reads. A
+ * letter with an identifier in it is still a letter worth keeping, so the
+ * identifier is replaced, not the file refused. Dates of birth and passport
+ * numbers only where they are labelled: a bare date is a date, and "passport
+ * holder" is a phrase. Returns how many were taken out, so it can be said.
+ */
+export function redactIdentifiers(text: string): { text: string; redacted: number } {
+  let redacted = 0;
+  const hide = (s: string, re: RegExp, keep?: (m: string, ...g: string[]) => string) =>
+    s.replace(re, (m: string, ...g: string[]) => {
+      redacted++;
+      return keep ? keep(m, ...g) : '[redacted]';
+    });
+  let out = String(text ?? '');
+  out = hide(out, /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g);
+  out = hide(out, /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}(?:\s?[A-Z0-9]{1,3})?\b/g);
+  out = out.replace(/\b(?:\d[ -]?){12,18}\d\b/g, (run) => {
+    if (!containsCardNumber(run)) return run;
+    redacted++;
+    return '[redacted]';
+  });
+  out = hide(
+    out,
+    /\b(date of birth|birth ?date|d\.?o\.?b\.?)(\s*[:\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+ \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})/gi,
+    (_m, label, gap) => `${label}${gap}[redacted]`,
+  );
+  out = hide(
+    out,
+    /\b(passport(?:\s+(?:no\.?|number|#))?)(\s*[:\-#]?\s*)([A-Z]{0,2}\d[A-Z0-9]{5,8})\b/gi,
+    (_m, label, gap) => `${label}${gap}[redacted]`,
+  );
+  /*
+   * The other national numbers, where they are named. An SSN without its
+   * dashes, a Canadian SIN, a driver's licence, a tax id: a bare nine digits
+   * is an order number as often as anything, so only a number that follows
+   * its own label, and only one with five digits or more in it — "SIN wave",
+   * "a driver's license and a car" are words, and are left.
+   */
+  out = out.replace(
+    /\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin)(\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ \-][A-Z]?\d[A-Z0-9]*)*)/gi,
+    (m, label: string, gap: string, value: string) => {
+      if ((value.match(/\d/g) ?? []).length < 5) return m;
+      redacted++;
+      return `${label}${gap}[redacted]`;
+    },
+  );
+  // A UK National Insurance number has a shape nothing else shares.
+  out = hide(out, /\b[A-CEGHJ-PR-TW-Z]{2} ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b/g);
+  return { text: out, redacted };
+}
+
+/**
+ * `redactIdentifiers` over every string in a value, keys left alone.
+ *
+ * For what is handed to the model as a file rather than as text: the MCP
+ * session sits in the directory the CLI runs in, and a coding CLI reads it
+ * with its own file tools, past the redaction the prompt and the tool results
+ * get. Ids, numbers and the shape of the data are untouched.
+ */
+export function redactDeep<T>(value: T): T {
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') return redactIdentifiers(v).text;
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x)]));
+    }
+    return v;
+  };
+  return walk(value) as T;
+}
+
+export function isSensitiveAnswer(answer: string): boolean {
+  return SENSITIVE_ANSWER.some((re) => re.test(answer)) || containsCardNumber(answer);
+}
+
+export function isSensitiveQuestion(question: string): boolean {
+  return SENSITIVE_QUESTION.some((re) => re.test(question));
+}
+
+/**
+ * Whether two stored questions are the same question, allowing for the kind
+ * of difference a person retyping it introduces rather than a difference in
+ * what is being asked: leading and trailing space, doubled interior spaces,
+ * and case. Anything past that — a real wording change — is a new question,
+ * because that is what `questionSimilarity` is for; this exists only to stop
+ * "Why do you want to work here?" and "why do you want to work here? " from
+ * living in the bank as two separate items with nobody ever finding the
+ * second one.
+ */
+export function sameQuestion(a: string, b: string): boolean {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  return norm(a) === norm(b);
+}
+
 export interface AnswerMatch {
   question: string;
   /** The stored item that best covers it, if any cleared the threshold. */
@@ -238,13 +411,31 @@ function mentions(text: string, name: string): boolean {
   return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu').test(text);
 }
 
-/** Every employer the bank has written an answer for. */
+/*
+ * Labels the tools give an answer themselves, which name no one: the server's
+ * "Saved", the extension's "Chosen on a form", the seed bank's "Generic (edit
+ * per company)".
+ */
+const TOOL_LABEL = /^(saved|chosen on a form|generic\b.*|default|base)$/i;
+
+/**
+ * Every employer the bank has written an answer for.
+ *
+ * A label is taken for one only when it could be one. Every label used to be,
+ * so the seed bank's "May 2026" — the label of the answer "May 2026" — named
+ * an employer called "May 2026", and the graduation date, the sponsorship
+ * "Yes" and anything saved from a form came back never confident, the card
+ * warning that each named somebody else. A label that only repeats its own
+ * answer names the answer; the tools' own labels name nobody.
+ */
 function employersInBank(bank: AnswerBankItem[]): string[] {
   const names = new Set<string>();
   for (const item of bank) {
     for (const v of item.variants) {
       const label = (v.label ?? '').trim();
-      if (label.length >= 3) names.add(label);
+      if (label.length < 3 || TOOL_LABEL.test(label)) continue;
+      if (label.toLowerCase() === (v.text ?? '').trim().toLowerCase()) continue;
+      names.add(label);
     }
   }
   return [...names];
@@ -257,6 +448,15 @@ export function matchAnswer(
 ): AnswerMatch {
   // The threshold used to be the third argument, and callers pass it that way.
   const { threshold = 0.45, company } = typeof options === 'number' ? { threshold: options } : options;
+
+  // See `isSensitiveQuestion`: an SSN, a date of birth, a passport number, a
+  // home address never come back from the bank, not even as a loose read-first
+  // suggestion. Checked before the bank is even searched, so nothing about
+  // what is stored — or whether anything is stored — leaks through the score.
+  if (isSensitiveQuestion(question)) return { question, score: 0, confident: false };
+  // And never hand back a stored value that is itself an identifier — one
+  // banked before these checks existed, or under a question worded past them.
+  bank = bank.filter((item) => !item.variants.some((v) => isSensitiveAnswer(v.text)));
 
   let best: { item: AnswerBankItem; score: number } | undefined;
   for (const item of bank) {
@@ -276,16 +476,23 @@ export function matchAnswer(
    * you have applied before should hand back what you said to *them*, not
    * the default, which is whatever was written last.
    */
+  /*
+   * One employer, however it is written: "Acme, Inc." on the posting and
+   * "Acme" on the form are the same people, and the answer written for one
+   * was being called somebody else's on the other — vetoed, and the variant
+   * written for them passed over. See `employerName`.
+   */
+  const who = (name: string) => employerName(name).toLowerCase();
   const forThisCompany = company
-    ? best.item.variants.find((v) => (v.label ?? '').trim().toLowerCase() === company.trim().toLowerCase())
+    ? best.item.variants.find((v) => who(v.label ?? '') === who(company))
     : undefined;
   const variant = forThisCompany ?? best.item.variants.find((v) => v.id === best!.item.default) ?? best.item.variants[0];
 
   const text = variant?.text ?? '';
-  const ours = (company ?? '').trim().toLowerCase();
+  const ours = who(company ?? '');
   const namesAnother = forThisCompany
     ? undefined
-    : employersInBank(bank).find((name) => name.trim().toLowerCase() !== ours && mentions(text, name));
+    : employersInBank(bank).find((name) => who(name) !== ours && mentions(text, name));
 
   return {
     question,
@@ -330,7 +537,8 @@ export function matchAnswers(
 export function relevantLetters(letters: CoverLetter[], job: { company?: string; role?: string }, limit = 3): CoverLetter[] {
   const score = (l: CoverLetter): number => {
     let s = 0;
-    if (job.company && l.company && l.company.toLowerCase() === job.company.toLowerCase()) s += 10;
+    // One employer however it is written — see `employerName`.
+    if (job.company && l.company && employerName(l.company).toLowerCase() === employerName(job.company).toLowerCase()) s += 10;
     if (job.role && l.role && overlapWords(l.role, job.role) > 0.5) s += 4;
     // Recency as a tiebreak, in days-ago descending.
     const age = l.createdAt ? (Date.now() - Date.parse(l.createdAt)) / 86_400_000 : 9999;

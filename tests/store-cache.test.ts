@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -196,5 +196,134 @@ describe('reading a store more than once', () => {
     expect(one.store.load().applications).toHaveLength(1);
     expect(two.store.load().applications).toHaveLength(5);
     expect(one.store.load().applications).toHaveLength(1);
+  });
+});
+
+/*
+ * Drafts are one file each, like resumes and cover letters — and unlike
+ * every other per-file loader in this class, `loadDrafts` used to read and
+ * parse each one directly, bypassing `cached` entirely. So every call to
+ * `load()`, which is nearly every request the server answers, re-read and
+ * re-parsed every draft in the workspace, whether or not any of them had
+ * changed since the last call. On a hundred and fifty drafts that was 67ms of
+ * a 112ms `load()`, every single time. These are the same three questions
+ * `store-cache.test.ts` already asks of `applications.yaml` and the resumes
+ * folder, asked of drafts instead, so the fix cannot have bought its speed by
+ * losing the guarantee everything else here already has.
+ */
+describe('reading the workspace (drafts) more than once', () => {
+  function aStoreWithDraft(dir: string, id = 'd1', updatedAt = '2026-01-01T00:00:00.000Z') {
+    fs.mkdirSync(path.join(dir, 'drafts'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'drafts', `${id}.yaml`),
+      YAML.stringify({
+        id,
+        company: 'Acme',
+        role: 'Engineer',
+        createdAt: updatedAt,
+        updatedAt,
+        status: 'drafting',
+        coverLetter: { required: false, body: '' },
+        questions: [],
+      }),
+    );
+  }
+
+  it('gives the same answer twice', () => {
+    const { store, dir } = aStore(0);
+    aStoreWithDraft(dir);
+    expect(store.loadDrafts()).toEqual(store.loadDrafts());
+  });
+
+  /*
+   * The fix itself, not merely its correctness. Every test above would also
+   * pass against the version of `loadDrafts` this replaced — reading the file
+   * fresh every time is trivially never stale — so none of them can tell the
+   * cache apart from no cache at all. This is the one that can: it asserts
+   * the file is not reopened on a second call with nothing changed, which
+   * only holds if `loadDrafts` is going through `cached` the way every other
+   * per-file loader in this class does.
+   */
+  it('does not reopen a draft file on a second call with nothing changed', () => {
+    const { store, dir } = aStore(0);
+    aStoreWithDraft(dir, 'd1');
+    aStoreWithDraft(dir, 'd2');
+    store.loadDrafts(); // warm
+
+    const draftPath = (id: string) => path.join(dir, 'drafts', `${id}.yaml`);
+    const spy = vi.spyOn(fs, 'readFileSync');
+    try {
+      store.loadDrafts();
+      const reread = spy.mock.calls.some(
+        (args) => args[0] === draftPath('d1') || args[0] === draftPath('d2'),
+      );
+      expect(reread).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('sees a draft edited by hand', () => {
+    const { store, dir } = aStore(0);
+    aStoreWithDraft(dir);
+    expect(store.loadDrafts()[0]?.status).toBe('drafting');
+
+    editBehindItsBack(
+      dir,
+      'drafts/d1.yaml',
+      YAML.stringify({
+        id: 'd1',
+        company: 'Acme',
+        role: 'Engineer',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        status: 'ready',
+        coverLetter: { required: false, body: '' },
+        questions: [],
+      }),
+    );
+    expect(store.loadDrafts()[0]?.status).toBe('ready');
+  });
+
+  it('sees a draft appear, and sees one go away', () => {
+    const { store, dir } = aStore(0);
+    aStoreWithDraft(dir, 'd1');
+    expect(store.loadDrafts()).toHaveLength(1);
+
+    aStoreWithDraft(dir, 'd2');
+    expect(store.loadDrafts()).toHaveLength(2);
+
+    fs.rmSync(path.join(dir, 'drafts', 'd2.yaml'));
+    expect(store.loadDrafts()).toHaveLength(1);
+  });
+
+  it('sees a write made through the store itself', () => {
+    const { store, dir } = aStore(0);
+    aStoreWithDraft(dir, 'd1');
+    store.loadDrafts(); // warm
+    store.saveDraft({
+      id: 'd1',
+      company: 'Acme',
+      role: 'Engineer',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      status: 'submitted',
+      coverLetter: { required: false, body: '' },
+      questions: [],
+    });
+    expect(store.loadDrafts()[0]?.status).toBe('submitted');
+  });
+
+  it('does not hand out a shared object a caller could corrupt', () => {
+    const { store, dir } = aStore(0);
+    aStoreWithDraft(dir);
+    store.loadDrafts(); // warm, so the read below is a hit
+    const mine = store.loadDrafts();
+    mine[0]!.status = 'submitted';
+    mine[0]!.questions.push({ id: 'invented', question: 'Invented?', answer: 'Yes' });
+
+    const fresh = store.loadDrafts();
+    expect(fresh[0]?.status).toBe('drafting');
+    expect(fresh[0]?.questions).toHaveLength(0);
   });
 });

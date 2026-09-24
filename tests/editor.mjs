@@ -695,6 +695,334 @@ async function main() {
      * sat through, so the thing worth asserting is how long it takes.
      * -------------------------------------------------------------- */
 
+    /* -------------------------------------------------------------- *
+     * Adding a skill to the resume you are on                          *
+     *                                                                  *
+     * "+ Add skill" sits under a group on the resume being edited, and *
+     * it added the skill to the save's group and nowhere else. On a    *
+     * resume that names its own list for that group — every tailored   *
+     * one does — the new skill arrived unticked: added, and not on the *
+     * page you were looking at. A new entry has always been switched   *
+     * on in the open resume; a new skill now is too, and only there.   *
+     * -------------------------------------------------------------- */
+
+    console.log('\nAdding a skill to the resume you are on');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const group = store.skillGroups?.[0];
+      const scratch = 'editor-skills';
+      if (!group || group.items.length < 2) {
+        check('there is a skills group to add to', false, 'none in the starter save');
+      } else {
+        const keep = group.items.slice(0, group.items.length - 1).map((i) => i.id);
+        await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Skills scratch',
+            sections: [{ kind: 'skills', entries: [], groups: [group.id], items: { [group.id]: keep } }],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          await page.locator('.skill-chip').first().waitFor({ timeout: 30_000 });
+
+          await page.getByRole('button', { name: '+ Add skill' }).first().click();
+          await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+          await page.locator('#f_text').fill('Zig');
+          await page.locator('#modal-ok').click();
+
+          const chip = page.locator('.skill-chip', { hasText: 'Zig' });
+          await chip.waitFor({ timeout: 30_000 });
+          check('the new skill is ticked on the resume it was added from', await chip.locator('input').isChecked());
+
+          const listsZig = async () => {
+            const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+            const now = await (await fetch(`${server.url}/api/store`)).json();
+            const zig = now.skillGroups.find((g) => g.id === group.id)?.items.find((i) => i.text === 'Zig')?.id;
+            const mine = resumes.find((r) => r.id === scratch);
+            return Boolean(zig && mine?.sections?.find((x) => x.kind === 'skills')?.items?.[group.id]?.includes(zig));
+          };
+          let savedOn = false;
+          for (let waited = 0; waited < 20_000 && !savedOn; waited += 500) {
+            savedOn = await listsZig();
+            if (!savedOn) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and the saved resume lists it, after the save settles', savedOn);
+
+          /*
+           * One addition, one undo. The skill and the tick that puts it on
+           * this resume are two writes, and as two undo steps the first
+           * Ctrl+Z only unticked it — the skill stayed in the group.
+           */
+          await page.locator('#btn-undo').click();
+          let gone = false;
+          for (let waited = 0; waited < 15_000 && !gone; waited += 500) {
+            gone = (await page.locator('.skill-chip', { hasText: 'Zig' }).count()) === 0;
+            if (!gone) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and one undo takes the whole addition back', gone);
+        } finally {
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+          const now = await (await fetch(`${server.url}/api/store`)).json();
+          const groups = now.skillGroups.map((g) =>
+            g.id === group.id ? { ...g, items: g.items.filter((i) => i.text !== 'Zig') } : g,
+          );
+          await fetch(`${server.url}/api/skills?commit=0`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(groups),
+          }).catch(() => undefined);
+        }
+      }
+    }
+
+    /* -------------------------------------------------------------- *
+     * A skill switched off and on again keeps its place                *
+     * -------------------------------------------------------------- */
+
+    /*
+     * The list a resume saves for a group is printed in its own order. The
+     * editor wrote it in the order the boxes were clicked, so unticking the
+     * first skill and ticking it again moved it to the end of the printed
+     * line, while the chips on screen stayed in the group's order.
+     */
+    console.log('\nA skill switched off and on again keeps its place');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const group = store.skillGroups?.find((g) => g.items.length >= 3);
+      const scratch = 'editor-skill-order';
+      if (!group) {
+        check('there is a skills group with three skills', false, 'none in the starter save');
+      } else {
+        await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Skill order scratch',
+            sections: [{ kind: 'skills', entries: [], groups: [group.id] }],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          const first = page.locator('.skill-chip', { hasText: group.items[0].text }).first();
+          await first.waitFor({ timeout: 30_000 });
+          // The chip is the control; its box is styled away.
+          await first.click();
+          await page.locator('.skill-chip:not(.on)', { hasText: group.items[0].text }).first().waitFor({ timeout: 10_000 });
+          await page.locator('.skill-chip', { hasText: group.items[0].text }).first().click();
+          await page.locator('.skill-chip.on', { hasText: group.items[0].text }).first().waitFor({ timeout: 10_000 });
+
+          const saved = async () => {
+            const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+            return resumes.find((r) => r.id === scratch)?.sections?.find((x) => x.kind === 'skills')?.items?.[group.id];
+          };
+          let list;
+          for (let waited = 0; waited < 20_000 && !list; waited += 500) {
+            list = await saved();
+            if (!list) await new Promise((r) => setTimeout(r, 500));
+          }
+          const want = group.items.map((i) => i.id);
+          check(
+            'the saved list keeps the group\'s order',
+            JSON.stringify(list) === JSON.stringify(want),
+            JSON.stringify(list),
+          );
+        } finally {
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
+      }
+    }
+
+    /* -------------------------------------------------------------- *
+     * Coming back to the tab after the extension changed the resume    *
+     * -------------------------------------------------------------- */
+
+    /*
+     * The extension writes the same tailored copy this tab edits. The tab
+     * kept its own copy and its edit overlays, and wrote them whole with the
+     * next edit — one tick after coming back threw the extension's change
+     * away.
+     */
+    console.log('\nComing back after the resume was changed in another tab');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const group = store.skillGroups?.find((g) => g.items.length >= 4);
+      const scratch = 'editor-other-tab';
+      if (!group) {
+        check('there is a skills group with four skills', false, 'none in the starter save');
+      } else {
+        const [a, b, c, d] = group.items.map((i) => i.id);
+        const put = (items) =>
+          fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              label: 'Other tab scratch',
+              sections: [{ kind: 'skills', entries: [], groups: [group.id], items: { [group.id]: items } }],
+            }),
+          });
+        const saved = async () => {
+          const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+          return resumes.find((r) => r.id === scratch)?.sections?.[0]?.items?.[group.id];
+        };
+        const settle = async (want) => {
+          let got;
+          for (let waited = 0; waited < 20_000; waited += 400) {
+            got = await saved();
+            if (JSON.stringify(got) === JSON.stringify(want)) break;
+            await new Promise((r) => setTimeout(r, 400));
+          }
+          return got;
+        };
+        const chip = (text) => page.locator('.skill-chip', { hasText: text }).first();
+        await put([a, b]);
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          await chip(group.items[2].text).waitFor({ timeout: 30_000 });
+          // Here: tick the third.
+          await chip(group.items[2].text).click();
+          await settle([a, b, c]);
+          // Away: the extension files the copy with all four on it.
+          const flip = (visible) =>
+            page.evaluate((v) => {
+              Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (v ? 'visible' : 'hidden') });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }, visible);
+          await flip(false);
+          await new Promise((r) => setTimeout(r, 600));
+          await put([a, b, c, d]);
+          await flip(true);
+          await page.locator('.skill-chip.on', { hasText: group.items[3].text }).first().waitFor({ timeout: 10_000 }).catch(() => undefined);
+          // Back here: untick the first.
+          await chip(group.items[0].text).click();
+          const got = await settle([b, c, d]);
+          check('an edit after coming back keeps what the other tab did', JSON.stringify(got) === JSON.stringify([b, c, d]), JSON.stringify(got));
+        } finally {
+          await page.evaluate(() => {
+            delete document.visibilityState;
+          });
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
+      }
+    }
+
+    /* -------------------------------------------------------------- *
+     * Adding a line to an entry on the resume you are on               *
+     *                                                                  *
+     * The same gap as the skill above, one level down: "+ Add bullet"  *
+     * saved the line into the entry and nowhere else, so on a resume   *
+     * that lists its own lines for that entry the new one arrived      *
+     * switched off.                                                    *
+     * -------------------------------------------------------------- */
+
+    console.log('\nAdding a line to an entry on the resume you are on');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const entry = store.entries.find((e) => e.kind === 'experience' && !e.archived && (e.bullets ?? []).length >= 1);
+      const scratch = 'editor-bullets';
+      const line = 'Shipped a Zig rewrite of the ingest path';
+      if (!entry) {
+        check('there is an entry with a line to add to', false, 'none in the starter save');
+      } else {
+        await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Bullets scratch',
+            sections: [{ kind: 'experience', entries: [entry.id], bullets: { [entry.id]: [entry.bullets[0].id] } }],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          const box = page.locator(`#editor .entry[data-drag-id="${entry.id}"]`);
+          await box.first().waitFor({ timeout: 30_000 });
+
+          await box.getByRole('button', { name: '+ Add bullet' }).first().click();
+          await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+          await page.locator('#f_text').fill(line);
+          /*
+           * Watched from before the press, not sampled once it appears: the
+           * line used to be drawn switched off for a round trip and then on,
+           * and a single look caught that only now and then.
+           */
+          await page.evaluate((text) => {
+            window.__drawnOff = false;
+            const look = () => {
+              for (const b of document.querySelectorAll('#editor .bullet.off')) {
+                if (b.textContent.includes(text)) window.__drawnOff = true;
+              }
+            };
+            window.__offWatch = new MutationObserver(look);
+            window.__offWatch.observe(document.getElementById('editor'), {
+              subtree: true,
+              childList: true,
+              attributes: true,
+              attributeFilter: ['class'],
+            });
+          }, line);
+          await page.locator('#modal-ok').click();
+
+          const added = box.locator('.bullet', { hasText: line });
+          await added.first().waitFor({ timeout: 30_000 });
+          await page.waitForTimeout(500);
+          const off = await added.first().evaluate((n) => n.classList.contains('off'));
+          const flashed = await page.evaluate(() => {
+            window.__offWatch.disconnect();
+            return window.__drawnOff;
+          });
+          check('the new line is switched on in the resume it was added from', !off);
+          check('and is never drawn switched off on the way', !flashed);
+
+          const listsIt = async () => {
+            const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+            const now = await (await fetch(`${server.url}/api/store`)).json();
+            const id = now.entries.find((e) => e.id === entry.id)?.bullets?.find((b) => b.variants.some((v) => v.text === line))?.id;
+            const mine = resumes.find((r) => r.id === scratch);
+            return Boolean(id && mine?.sections?.find((x) => x.kind === 'experience')?.bullets?.[entry.id]?.includes(id));
+          };
+          let saved = false;
+          for (let waited = 0; waited < 20_000 && !saved; waited += 500) {
+            saved = await listsIt();
+            if (!saved) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and the saved resume lists it, after the save settles', saved);
+
+          // One addition, one undo — as for the skill above.
+          await page.locator('#btn-undo').click();
+          let gone = false;
+          for (let waited = 0; waited < 15_000 && !gone; waited += 500) {
+            gone = (await box.locator('.bullet', { hasText: line }).count()) === 0;
+            if (!gone) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('and one undo takes the whole line back', gone);
+        } finally {
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+          const now = await (await fetch(`${server.url}/api/store`)).json();
+          const current = now.entries.find((e) => e.id === entry.id);
+          if (current) {
+            await fetch(`${server.url}/api/entries/${encodeURIComponent(entry.id)}?commit=0`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...current, bullets: current.bullets.filter((b) => !b.variants.some((v) => v.text === line)) }),
+            }).catch(() => undefined);
+          }
+        }
+      }
+    }
+
     console.log('\nGoing over one page');
     {
       /*
@@ -1110,6 +1438,115 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * The flat folder's page, under the script policy                 *
+     * -------------------------------------------------------------- */
+
+    /*
+     * Every reply carries a policy allowing only the editor's own inline
+     * script. This page has one of its own — the Copy button — and a policy
+     * that forgot it leaves a button that does nothing, with the only word of
+     * it in a console nobody opens.
+     */
+    console.log('\nThe flat folder page, under the script policy');
+    {
+      const tab = await browser.newPage();
+      const blocked = [];
+      tab.on('console', (m) => {
+        if (/Content Security Policy/i.test(m.text())) blocked.push(m.text());
+      });
+      await tab.addInitScript(() => {
+        // Headless has no clipboard to write to; what matters is that the
+        // button's script ran at all.
+        Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => undefined } });
+      });
+      await tab.goto(`${server.url}/current`, { waitUntil: 'domcontentloaded' });
+      await tab.locator('#copy').click();
+      const said = await tab
+        .locator('#copy', { hasText: 'Copied' })
+        .waitFor({ timeout: 5_000 })
+        .then(
+          () => true,
+          () => false,
+        );
+      check('its Copy button still works', said && blocked.length === 0, blocked.join(' | '));
+      await tab.close();
+    }
+
+    /* -------------------------------------------------------------- *
+     * A posting address that is not a web page                        *
+     * -------------------------------------------------------------- */
+
+    /*
+     * A store cloned from a git link or restored from a bundle carries
+     * addresses nobody here typed. A `javascript:` one set as a link would run
+     * in the editor on a click — and the editor can change the AI command.
+     */
+    console.log('\nA posting address that is not a web page');
+    {
+      const open = (body) =>
+        page.evaluate(
+          async ([base, b]) => {
+            const res = await fetch(`${base}/api/workspace`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(b),
+            });
+            return (await res.json()).draft;
+          },
+          [server.url, body],
+        );
+      const hostile = await open({
+        company: 'Mallory Systems',
+        role: 'Data Engineer',
+        url: 'javascript:window.__ran=1',
+        source: 'by hand',
+      });
+      const honest = await open({
+        company: 'Trent Works',
+        role: 'Data Engineer',
+        url: 'https://trent.example/jobs/7',
+        source: 'by hand',
+      });
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.locator('.draft-card', { hasText: 'Mallory Systems' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Mallory Systems' }).waitFor({ timeout: 20_000 });
+        const hrefs = await page.locator('#draft-editor .where a').evaluateAll((as) => as.map((a) => a.href));
+        check('a javascript: address is not made a link', hrefs.length === 0, hrefs.join(', '));
+
+        await page.locator('.draft-card', { hasText: 'Trent Works' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Trent Works' }).waitFor({ timeout: 20_000 });
+        const kept = await page.locator('#draft-editor .where a').evaluateAll((as) => as.map((a) => a.href));
+        check('and a web address still is', kept.includes('https://trent.example/jobs/7'), kept.join(', '));
+      } finally {
+        for (const d of [hostile, honest]) {
+          if (d?.id) {
+            await fetch(`${server.url}/api/workspace/${encodeURIComponent(d.id)}`, { method: 'DELETE' }).catch(
+              () => undefined,
+            );
+          }
+        }
+      }
+
+      /*
+       * The address still names the one just discarded. Reloaded on it, the
+       * editor says so in words and gets on with the list — not a raw id in
+       * red over an empty panel, which is also the "nothing threw" check.
+       */
+      check('the address still names a discarded application', page.url().includes('#workspace/'), page.url());
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      const said = await page
+        .locator('#status', { hasText: 'no longer in the workspace' })
+        .waitFor({ timeout: 15_000 })
+        .then(
+          () => true,
+          () => false,
+        );
+      check('reopening it says it is gone, in words', said, await page.locator('#status').textContent());
+    }
+
+    /* -------------------------------------------------------------- *
      * Writing an application                                          *
      * -------------------------------------------------------------- */
 
@@ -1279,6 +1716,89 @@ async function main() {
         JSON.stringify(halcyon?.answers ?? []).slice(0, 80));
     } else {
       check('there is a way to finish the application', false, 'no button');
+    }
+
+    /* -------------------------------------------------------------- *
+     * When the tracker cannot save                                     *
+     * -------------------------------------------------------------- *
+     * The status dropdown and the Remove button both wrote optimistically
+     * and had no catch on the write: a request that failed — the server
+     * gone, the network down mid-save — left the browser with an unhandled
+     * rejection, nothing said on screen, and (for the dropdown) a status
+     * showing that was never written anywhere. Simulated here by aborting
+     * just the one route, which is the same shape of failure as the server
+     * stopping mid-save without needing to actually stop it out from under
+     * the rest of this run.
+     * -------------------------------------------------------------- */
+    console.log('\nWhen the tracker cannot save');
+    {
+      // As below in the overlap check: the apply flow just finished on a
+      // dialog, and a tab button under a modal is not a tab button.
+      const open = await page.evaluate(() => {
+        const m = document.querySelector('#modal');
+        if (!m || m.classList.contains('hidden')) return null;
+        const said = document.querySelector('#modal-title')?.textContent ?? '';
+        m.classList.add('hidden');
+        return said;
+      });
+      if (open !== null) console.log(`    (a dialog was open and was closed: ${JSON.stringify(open)})`);
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      const row = page.locator('tr', { hasText: 'Halcyon' });
+      await row.waitFor({ timeout: 20_000 });
+      const sel = row.locator('select');
+      const before = await sel.inputValue();
+
+      await page.route('**/api/applications/**/status', (route) => route.abort('connectionrefused'));
+      const nextIndex = (await sel.locator('option').evaluateAll((opts, cur) =>
+        Math.max(0, opts.findIndex((o) => o.value !== cur)), before));
+      await sel.selectOption({ index: nextIndex });
+      await page.waitForFunction(
+        () => /./.test(document.querySelector('#status')?.textContent ?? ''),
+        null,
+        { timeout: 10_000, polling: 100 },
+      ).catch(() => {});
+      await page.waitForTimeout(500);
+
+      check('a status change that fails to save says so',
+        (await page.locator('#status.err').count()) > 0,
+        await page.locator('#status').innerText().catch(() => '(nothing shown)'));
+      check('and the dropdown is repainted from what was actually saved, not left on the guess',
+        (await sel.inputValue()) === before,
+        `stayed on screen as ${await sel.inputValue()}, saved value is ${before}`);
+      await page.unroute('**/api/applications/**/status');
+
+      // And when the server is gone altogether, so the repaint fails too: the
+      // saved status still has to be what the dropdown shows.
+      const gone = (route) => route.abort('connectionrefused');
+      await page.route('**/api/applications**', gone);
+      await sel.selectOption({ index: nextIndex });
+      await page.waitForTimeout(800);
+      check('and with the server gone entirely, it still shows the saved status',
+        (await sel.inputValue()) === before,
+        `stayed on screen as ${await sel.inputValue()}, saved value is ${before}`);
+      await page.unroute('**/api/applications**', gone);
+
+      await page.route('**/api/applications/**', (route) => {
+        if (route.request().method() === 'DELETE') return route.abort('connectionrefused');
+        return route.continue();
+      });
+      await row.locator('button', { hasText: 'Remove' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 5_000 });
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(1500);
+
+      check('a delete that fails to save says so, too',
+        (await page.locator('#status.err').count()) > 0,
+        await page.locator('#status').innerText().catch(() => '(nothing shown)'));
+      check('and the row it could not remove is still there',
+        (await row.count()) === 1);
+      await page.unroute('**/api/applications/**');
+
+      // The two aborted requests above are the failures being tested for,
+      // already asserted on by name — not a stray error to fail the run over.
+      for (let i = errors.length - 1; i >= 0; i--) {
+        if (/ERR_CONNECTION_REFUSED/.test(errors[i])) errors.splice(i, 1);
+      }
     }
 
     /* ---- The tracker stays inside its half of the screen ---- */

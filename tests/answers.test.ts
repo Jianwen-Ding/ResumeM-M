@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { letterId, matchAnswer, matchAnswers, questionSimilarity, relevantLetters } from '../src/jobs/answers.js';
+import {
+  isSensitiveAnswer,
+  isSensitiveQuestion,
+  letterId,
+  matchAnswer,
+  matchAnswers,
+  questionSimilarity,
+  redactIdentifiers,
+  relevantLetters,
+  sameQuestion,
+} from '../src/jobs/answers.js';
 import type { AnswerBankItem, CoverLetter } from '../src/model/types.js';
 import { SAMPLE_ANSWERS } from './helpers.js';
 
@@ -291,6 +301,33 @@ describe('the same question, asked by another system', () => {
   });
 
   /*
+   * And the same employer written another way: the posting says "Helios,
+   * Inc.", the form says "Helios". Compared as written, the answer written
+   * for them was called somebody else's and only offered.
+   */
+  it('knows an employer with or without its legal form', () => {
+    const bank = [
+      {
+        id: 'a1',
+        question: 'Why do you want to work here?',
+        default: 'v0',
+        variants: [
+          { id: 'v0', label: 'Globex', text: 'Globex is why I applied — the Globex data team is the reason.' },
+          { id: 'v1', label: 'Helios, Inc.', text: 'Helios is why I applied — I have followed the Helios platform for years.' },
+        ],
+      },
+    ];
+    const asked = 'Why do you want to work here?';
+    const mine = matchAnswer(asked, bank as never, { company: 'Helios' });
+    expect(mine.namesAnother).toBeUndefined();
+    expect(mine.variant?.id).toBe('v1');
+    const again = matchAnswer(asked, bank as never, { company: 'HELIOS LLC' });
+    expect(again.variant?.id).toBe('v1');
+    // A different employer is still somebody else.
+    expect(matchAnswer(asked, bank as never, { company: 'Helios Labs' }).variant?.id).not.toBe('v1');
+  });
+
+  /*
    * A word the page added can reverse the question, and every added word
    * scores as shared vocabulary.
    *
@@ -476,4 +513,249 @@ describe('an answer written for somebody else', () => {
     expect(matchAnswer(loose, SAMPLE_ANSWERS, 0.99).item).toBeUndefined();
     expect(matchAnswers([loose], SAMPLE_ANSWERS, 0.99)[0]?.item).toBeUndefined();
   });
+});
+
+/*
+ * Some things are not this tool's to remember at all.
+ *
+ * Every other guard in `matchAnswer` withholds `confident` from a match that
+ * is still offered — a wrong company, a narrower question, a negation — so a
+ * person can read it and decide. There is no reading of an SSN, a date of
+ * birth, a passport number, or a home address that makes handing it back
+ * safe, so a question asking for one gets no match at all, not even a loose
+ * one: an item stored under that wording could only ever have been put there
+ * by something that should not have, and finding it again is the failure.
+ */
+describe('a question asking for something the bank must never hold', () => {
+  const sensitiveQuestions = [
+    'What is your Social Security Number?',
+    'Please provide your SSN.',
+    'What is your date of birth?',
+    'DOB (mm/dd/yyyy)',
+    'What is your passport number?',
+    'What is your home address?',
+    'Please give your mailing address.',
+  ];
+
+  it('recognises the questions this must refuse', () => {
+    for (const q of sensitiveQuestions) expect(isSensitiveQuestion(q), q).toBe(true);
+  });
+
+  it('leaves an ordinary question alone', () => {
+    for (const q of ['Why do you want to work here?', 'What is your email address for this application?']) {
+      expect(isSensitiveQuestion(q), q).toBe(false);
+    }
+  });
+
+  it('never returns a stored answer to one of these, even if the bank holds it', () => {
+    for (const q of sensitiveQuestions) {
+      const bank: never = [
+        { id: 'a1', question: q, default: 'v', variants: [{ id: 'v', text: 'Something that should not travel.' }] },
+      ] as never;
+      const m = matchAnswer(q, bank);
+      expect(m.item, q).toBeUndefined();
+      expect(m.answer, q).toBeUndefined();
+      expect(m.confident, q).toBe(false);
+      expect(m.score, q).toBe(0);
+    }
+  });
+});
+
+/*
+ * The question list cannot know every wording, so the value is checked too:
+ * an SSN's shape, a card-length run of digits, an IBAN — under whatever the
+ * question called it.
+ */
+describe('identifiers, however the question is worded', () => {
+  it('recognises more ways a form asks for one', () => {
+    for (const q of [
+      'National ID number',
+      'Tax ID (TIN)',
+      "Driver's license number",
+      'Birthday',
+      'Bank account for direct deposit',
+      'Credit card on file',
+    ]) {
+      expect(isSensitiveQuestion(q), q).toBe(true);
+    }
+  });
+
+  it('recognises the values themselves', () => {
+    for (const a of ['123-45-6789', '123 45 6789', '4111 1111 1111 1111', '4111111111111111', '3782-822463-10005', 'GB82 WEST 1234 5698 7654 32']) {
+      expect(isSensitiveAnswer(a), a).toBe(true);
+    }
+  });
+
+  it('leaves ordinary answers alone: phones, years, a ZIP code, prose', () => {
+    for (const a of [
+      '617-555-0100',
+      '+44 20 7946 0958',
+      '2019-2023',
+      '02115-1234',
+      'I have led three teams since 2019.',
+      // A long number that is not a card: a timestamp, an order number.
+      'Because of the pipelines you publish — 1790131234567',
+      'Order 4000123456789 shipped late.',
+    ]) {
+      expect(isSensitiveAnswer(a), a).toBe(false);
+    }
+  });
+
+  it('never hands back a stored identifier under an innocent question', () => {
+    const bank = [
+      { id: 'a1', question: 'Government reference', default: 'v', variants: [{ id: 'v', text: '123-45-6789' }] },
+    ] as never;
+    const m = matchAnswer('Government reference', bank);
+    expect(m.item).toBeUndefined();
+    expect(m.answer).toBeUndefined();
+  });
+});
+
+describe('sameQuestion', () => {
+  it('treats retyping — spacing and case — as the same question', () => {
+    expect(sameQuestion('Why do you want to work here?', '  why do you want to work here?  ')).toBe(true);
+    expect(sameQuestion('Why  do you want to work here?', 'Why do you want to work here?')).toBe(true);
+  });
+
+  it('treats an actual change in wording as a different question', () => {
+    expect(sameQuestion('Why do you want to work here?', 'Why do you want to leave your current job?')).toBe(false);
+  });
+});
+
+describe('earlier letters to the same employer, however it is written', () => {
+  it('ranks a letter sent to "Acme, Inc." first for a form that says "Acme"', () => {
+    const letters = [
+      { id: 'l1', title: 'Globex letter', company: 'Globex', role: 'Engineer', body: '', createdAt: new Date().toISOString() },
+      { id: 'l2', title: 'Acme letter', company: 'Acme, Inc.', role: 'Designer', body: '', createdAt: '2025-01-01T00:00:00Z' },
+    ];
+    expect(relevantLetters(letters as never, { company: 'Acme', role: 'Engineer' })[0]?.id).toBe('l2');
+    expect(relevantLetters(letters as never, { company: 'Acme Labs', role: 'Engineer' })[0]?.id).toBe('l1');
+  });
+});
+
+describe('a label that is not an employer', () => {
+  /*
+   * Every variant's label was taken for a company, so the seed bank's own
+   * "May 2026" answer, labelled "May 2026", named an employer called "May
+   * 2026" — and the graduation date, the sponsorship "Yes", and anything
+   * saved from a form under "Chosen on a form" or "Saved" came back never
+   * confident, with the card warning that they named somebody else.
+   */
+  const bank: AnswerBankItem[] = [
+    {
+      id: 'ans_grad',
+      question: 'What is your expected graduation date?',
+      default: 'v_may',
+      variants: [
+        { id: 'v_may', label: 'May 2026', text: 'May 2026' },
+        { id: 'v_dec', label: 'December 2026', text: 'December 2026' },
+      ],
+    },
+    {
+      id: 'ans_sponsor',
+      question: 'Will you now or in the future require sponsorship?',
+      default: 'v_yes',
+      variants: [
+        { id: 'v_no', label: 'No', text: 'No' },
+        { id: 'v_yes', label: 'Yes', text: 'Yes' },
+      ],
+    },
+    {
+      id: 'ans_hear',
+      question: 'How did you hear about us?',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'A friend saved the posting for me' }],
+    },
+    {
+      id: 'ans_relocate',
+      question: 'Are you willing to relocate?',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Saved', text: 'Yes, anywhere on the east coast' }],
+    },
+  ];
+
+  it('does not treat an answer that repeats its own label as naming an employer', () => {
+    const grad = matchAnswer('What is your expected graduation date?', bank, { company: 'Helios' });
+    expect(grad.namesAnother).toBeUndefined();
+    expect(grad.confident).toBe(true);
+    const sponsor = matchAnswer('Will you now or in the future require sponsorship?', bank, { company: 'Helios' });
+    expect(sponsor.namesAnother).toBeUndefined();
+    expect(sponsor.confident).toBe(true);
+  });
+
+  it('nor the labels the tools themselves give saved answers', () => {
+    const heard = matchAnswer('How did you hear about us?', bank, { company: 'Helios' });
+    expect(heard.namesAnother).toBeUndefined();
+  });
+
+  it('while a company label still vetoes an answer that names that company', () => {
+    const withAcme: AnswerBankItem[] = [
+      ...bank,
+      {
+        id: 'ans_why',
+        question: 'Why do you want to work here?',
+        default: 'v_acme',
+        variants: [{ id: 'v_acme', label: 'Acme', text: 'Acme builds the rockets I grew up watching.' }],
+      },
+    ];
+    const why = matchAnswer('Why do you want to work here?', withAcme, { company: 'Helios' });
+    expect(why.namesAnother).toBe('Acme');
+    expect(why.confident).toBe(false);
+  });
+});
+
+describe('identifiers taken out before anything reaches the AI', () => {
+  /*
+   * Only an SSN written with its dashes was caught. Labelled and without them,
+   * or a Canadian SIN, a UK National Insurance number, a driver's licence or a
+   * tax id, went to the model as written.
+   */
+  it.each([
+    ['SSN: 123456789', '123456789'],
+    ['Social Security Number 123456789', '123456789'],
+    ['SIN: 123 456 789', '123 456 789'],
+    ['National Insurance number: AB 12 34 56 C', 'AB 12 34 56 C'],
+    ['NI: JK 98 76 54 A', 'JK 98 76 54 A'],
+    ['my NI number is QQ123456C', 'QQ123456C'],
+    ["Driver's license: D1234567", 'D1234567'],
+    ['Driving licence number MORGA753116SM9IJ', 'MORGA753116SM9IJ'],
+    ['Tax ID: 912-34-5678', '912-34-5678'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'Call me at 617-555-0142',
+    'Order 123456789 shipped',
+    'Built a SIN wave generator',
+    'I hold a driver’s license and a car',
+    'Improved throughput by 123456 requests a day',
+  ])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
+  });
+});
+
+describe('identifier questions the bank never answers', () => {
+  /*
+   * The redaction learned these; the bank's own list did not, so an answer
+   * given to "What is your SIN?" or "Driving licence number" was kept and
+   * offered on the next form that asked.
+   */
+  it.each(['What is your SIN?', 'Social Insurance Number', 'NI number', 'Driving licence number'])(
+    'treats "%s" as an identifier',
+    (q) => {
+      expect(isSensitiveQuestion(q)).toBe(true);
+    },
+  );
+  it('and an NI number as an identifier whatever the question called it', () => {
+    expect(isSensitiveAnswer('AB 12 34 56 C')).toBe(true);
+  });
+  it.each(['Is there anything you would change about your last role?', 'Do you have a single point of contact?'])(
+    'while "%s" is an ordinary question',
+    (q) => {
+      expect(isSensitiveQuestion(q)).toBe(false);
+    },
+  );
 });

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
+import { withoutBom } from './bom.js';
 import { andList, newlyRepeated, type Option } from './duplicates.js';
 import { flattenResumes, needsFlattening } from './flatten.js';
 import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
@@ -29,6 +30,7 @@ import {
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
 import { applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
+import { extractJob } from '../jobs/extract.js';
 import {
   normalizeAnswers,
   normalizeApplications,
@@ -133,7 +135,16 @@ export function removeFile(full: string, what: string): void {
  * file somebody made and has not filled in yet, and they stay the empty thing
  * they are.
  */
+export { withoutBom } from './bom.js';
+
 export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
+  /*
+   * A byte-order mark is how Notepad and a good many Windows tools start a
+   * UTF-8 file, and it made a hand-edited `skills.yaml` "not valid YAML" —
+   * one edit on Windows and the save would not open. It says nothing about
+   * the content, so it goes.
+   */
+  raw = withoutBom(raw);
   if (!raw.trim()) return fallback;
 
   let parsed: unknown;
@@ -471,6 +482,27 @@ export class Store {
    * nothing about it looking wrong from either end. Cloning costs a fraction
    * of parsing and removes the question rather than arguing it per caller.
    */
+  /**
+   * Size and modification time together, as one string — "has this file
+   * moved since I last looked", answered without reading it.
+   *
+   * Together rather than either alone, for the reason `cached` below has
+   * always kept them together: a hand edit, a git checkout, a restored
+   * snapshot, a second process writing all move at least one, and
+   * `writeAtomic` renames a fresh file into place, which moves both.
+   * `'missing'` for a file that is not there is its own stable answer — it
+   * only ever collides with another file that is also not there, which is
+   * not a collision that could hide a change.
+   */
+  private statKey(full: string): string {
+    try {
+      const stat = fs.statSync(full);
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return 'missing';
+    }
+  }
+
   private cached<T>(full: string, parse: (raw: string) => T, missing: T): T {
     let stat;
     try {
@@ -494,6 +526,73 @@ export class Store {
     const value = parse(readStoreFile(full, path.relative(this.root, full)));
     this.parsed.set(full, { key, value });
     return structuredClone(value) as T;
+  }
+
+  /**
+   * The part of `resumeTextStamp` that every resume shares: the four files
+   * entries live in, and skills.yaml.
+   *
+   * Split out so a caller stamping many resumes in one pass — `fitResumes`
+   * scoring a posting against the whole store — can compute this once and
+   * hand it to `resumeTextStamp` for every resume, instead of asking the
+   * same five files about themselves once per resume.
+   */
+  entriesAndSkillsStamp(): string {
+    return [...Store.ENTRY_FILES, 'skills.yaml'].map((rel) => this.statKey(this.file(rel))).join('|');
+  }
+
+  /**
+   * A cheap fingerprint for the handful of files that decide what one resume
+   * would print as plain text: its own file, the four files entries live in,
+   * and skills.yaml.
+   *
+   * For `fitResumes` (see `jobs/fit.ts`), which is the one caller: scoring a
+   * posting against every resume in the store means building each resume's
+   * printed text, and that build — joining every bullet and running a regex
+   * over the result — is most of that function's cost. Between two calls
+   * where nothing on disk has moved, no resume's printed text can have
+   * changed, so rebuilding it is paying the same regex again for the same
+   * answer. "Has anything moved" is exactly the question `statKey` above
+   * already answers per file without reading it; this asks it of the files
+   * one resume's text actually depends on, so a caller can tell whether its
+   * own cache of that text is still good.
+   *
+   * `shared` defaults to computing `entriesAndSkillsStamp` itself, so a
+   * caller asking about one resume needs nothing extra — but a caller asking
+   * about many, in a row, should pass the one answer it already has rather
+   * than pay for it again on every resume. See `entriesAndSkillsStamp`.
+   *
+   * The resume's own file is stat'd directly under its ordinary name first,
+   * deliberately *not* through `file` — `file` resolves a name through
+   * `onDiskSpelling`, and `onDiskSpelling` answers a name that is not there
+   * under its exact spelling by listing the whole folder and normalising
+   * every sibling's name to compare it, which is the ordinary answer for the
+   * ".yml" spelling nothing writes any more. Asked once per resume, for every
+   * resume, that is a listing of the *entire* resumes folder repeated once
+   * per resume in it — three hundred resumes cost 67ms here alone on a store
+   * that size, almost all of it that scan, and it would grow with the square
+   * of the folder rather than with it. A resume `saveResume` wrote — which is
+   * all of them, barring a hand-edit — stats directly under its exact name in
+   * one syscall, no folder listing involved. Only where that plain stat finds
+   * nothing does this fall back to `file`'s full resolution, which is what
+   * makes the case worth paying for: a hand-written ".yml", or a filename
+   * another OS has Unicode-decomposed — see `onDiskSpelling` — costs the scan
+   * again, but only for the resumes that actually need it.
+   */
+  resumeTextStamp(id: string, shared: string = this.entriesAndSkillsStamp()): string {
+    // Checked here rather than left to `path.join`, because the line below
+    // does not go through `file` and so does not get its boundary check for
+    // free. Every id in this app is also a filename — see `assertName`.
+    assertName(`${id}.yaml`);
+    const plain = path.join(this.root, 'resumes', `${id}.yaml`);
+    let own: string;
+    try {
+      const stat = fs.statSync(plain);
+      own = `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      own = Store.RESUME_SPELLINGS.map((ext) => this.statKey(this.file('resumes', `${id}.${ext}`))).join('|');
+    }
+    return [shared, own].join('|');
   }
 
   /** A markdown file with a YAML header, read once and kept apart. */
@@ -1578,14 +1677,25 @@ export class Store {
   /**
    * Applications in progress. One file each, like resumes, so a draft is
    * readable in a diff and easy to delete by hand.
+   *
+   * Read through `this.cached`, like every other per-file loader in this
+   * class — this one had been calling `readStoreFile` and `parseStoreYaml`
+   * directly instead, so a save with a normal season's worth of drafts in
+   * flight (a few dozen to a few hundred) paid a fresh read and a fresh YAML
+   * parse of every one of them on every single call to `load()`, which is
+   * nearly every request the server answers. Measured on 150 drafts: 67ms of
+   * a 112ms `load()`, every time, whether or not a draft had changed since
+   * the last call. Cached, the same 150 drafts cost under a millisecond once
+   * warm, because `cached` already keys on a file's size and modification
+   * time and only re-reads what actually moved.
    */
   loadDrafts(): Draft[] {
     const dir = this.file('drafts');
     return this.listing('drafts', (f) => f.endsWith('.yaml'))
       .map((f) => {
-        const draft = parseStoreYaml<Partial<Draft>>(
-          `drafts/${f}`,
-          readStoreFile(path.join(dir, f), `drafts/${f}`),
+        const draft = this.cached<Partial<Draft>>(
+          path.join(dir, f),
+          (raw) => parseStoreYaml<Partial<Draft>>(`drafts/${f}`, raw, {}),
           {},
         );
         // The filename is the id, the same way it is for resumes, and for the
@@ -1594,7 +1704,20 @@ export class Store {
         // renaming one left `deleteDraft` unlinking a path that is not there —
         // so discarding it failed and completing it silently left it on the
         // list forever.
-        return { ...draft, id: path.basename(f, '.yaml').normalize('NFC') };
+        /*
+         * Posting text that is a whole page of markup, read as the page's
+         * text. The Workspace's tailor used to save `html.slice(0, 20_000)`
+         * when a link answered with a JavaScript shell, and every letter and
+         * answer written from that draft read the scripts and styles. Repaired
+         * here, on the way in, so a draft saved by that version is read as
+         * text without anyone having to find it.
+         */
+        const posting = draft.jobDescription;
+        const repaired =
+          typeof posting === 'string' && /^\s*<(?:!doctype|html)\b/i.test(posting)
+            ? { jobDescription: extractJob(posting).description }
+            : {};
+        return { ...draft, ...repaired, id: path.basename(f, '.yaml').normalize('NFC') };
       })
       .filter((d): d is Draft => Boolean(d && d.id))
       .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));

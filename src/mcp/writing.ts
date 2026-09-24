@@ -203,6 +203,7 @@ export class WritingSession {
         const mine = this.state.answers[q.id];
         lines.push(
           `- [${q.id}] ${q.question}` +
+            (q.limit ? `  (the box takes at most ${q.limit} characters)` : '') +
             (mine ? '  (answered)' : q.answer?.trim() ? '  (already has an answer — build on it, do not replace it blindly)' : ''),
         );
         if (!mine && q.answer?.trim()) lines.push(`    currently: ${clip(q.answer, 400)}`);
@@ -374,6 +375,18 @@ export class WritingSession {
     if (!text) return no('The answer is empty.');
     const gap = placeholderIn(text);
     if (gap) return no(unfilled(gap));
+    /*
+     * Over the box's own limit is an answer the form refuses on submit — and
+     * the extension puts it in whole, because a script is not held to
+     * `maxlength`. Refused here, where it can still be rewritten shorter,
+     * rather than cut off mid-sentence later.
+     */
+    if (question.limit && text.length > question.limit) {
+      return no(
+        `That is ${text.length} characters, and the box takes at most ${question.limit}. ` +
+          `Write it shorter — say less, rather than cutting it off.`,
+      );
+    }
     this.state.answers[questionId] = text;
     return ok(`Saved as the answer to "${clip(question.question, 80)}".`);
   }

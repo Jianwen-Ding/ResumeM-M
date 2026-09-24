@@ -423,6 +423,51 @@ describe('reading a file and sorting it, in one call', () => {
     expect(out.items[0]?.by).toBe('ai');
   });
 
+  /*
+   * A dropped file is somebody's old paperwork as often as their writing: an
+   * offer letter with a social security number on it, an application with a
+   * date of birth, a reimbursement form with a card number. All of it went to
+   * the AI to be sorted, and into the corpus every later prompt draws on.
+   * Identifiers are redacted as the file is read, before either.
+   */
+  const PAPERWORK = Buffer.from(
+    'Dear Streamly,\n\nI am writing about the internship, having spent two years on pipelines that mostly stayed up.\n\n' +
+      'SSN: 123-45-6789. Date of birth: 02/03/1999. Passport No. X1234567. Card 4111 1111 1111 1111. IBAN GB82 WEST 1234 5698 7654 32.\n' +
+      'Call me on 617-555-0100. I am a passport holder of two countries.\n\nSincerely,\nJianwen Ding\n',
+  );
+  const SECRETS = ['123-45-6789', '02/03/1999', 'X1234567', '4111 1111 1111 1111', 'GB82 WEST'];
+
+  it('redacts identifiers from a dropped file, keeping the writing', async () => {
+    const out = await ingestFile(off, 'offer.txt', PAPERWORK);
+    for (const secret of SECRETS) expect(out.text, secret).not.toContain(secret);
+    expect(out.items.map((i) => i.text).join(' ')).not.toContain('123-45-6789');
+    expect(out.text).toContain('[redacted]');
+    expect(out.text).toContain('having spent two years on pipelines');
+    expect(out.text).toContain('617-555-0100');
+    expect(out.text).toContain('passport holder of two countries');
+  });
+
+  it('never shows the AI an identifier from a dropped file', async () => {
+    // A stand-in that refuses to answer properly if any identifier reached it.
+    const watching: StoreConfig = {
+      ...DEFAULT_CONFIG,
+      ai: {
+        ...DEFAULT_CONFIG.ai,
+        enabled: true,
+        command: process.execPath,
+        args: [
+          '-e',
+          `let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const leaked=${JSON.stringify(SECRETS)}.some(x=>s.includes(x)||process.argv.join(" ").includes(x));process.stdout.write(leaked?"leaked":'{"items":[{"blocks":[0],"kind":"letter","title":"To Streamly"}]}');process.exit(0)});`,
+          '{promptText}',
+        ],
+        timeoutMs: 10_000,
+      },
+    };
+    const out = await ingestFile(watching, 'offer.txt', PAPERWORK);
+    expect(out.aiError).toBeUndefined();
+    expect(out.usedAi).toBe(true);
+  });
+
   it('keeps the file when the AI answers with nonsense, and says what happened', async () => {
     const out = await ingestFile(saying('I would rather not.'), 'letter.txt', FILE);
     expect(out.usedAi).toBe(false);

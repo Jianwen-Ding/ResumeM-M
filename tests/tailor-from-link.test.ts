@@ -15,7 +15,7 @@ import path from 'node:path';
 import { createApi } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
 import { DEFAULT_CONFIG } from '../src/model/types.js';
-import { makeTempStore, tempDir, type TempStore } from './helpers.js';
+import { hasLatex, makeTempStore, tempDir, type TempStore } from './helpers.js';
 
 const scripts = tempDir('rmm-tailor-stub-');
 
@@ -436,4 +436,212 @@ describe('analysing a posting with the AI switched on', () => {
     // leaving the person wondering why the star never lights up.
     expect(res.body.aiFailed).toBeTruthy();
   });
+});
+
+/*
+ * The keyword tailor saves its result outright — there is no box to untick —
+ * so the skills it writes have to be ones the base already prints. It used
+ * to narrow each group from the whole group, and a language somebody had
+ * turned off on their base came back the moment a posting named it.
+ */
+describe('tailoring by keyword never switches on a skill the base turned off', () => {
+  it('keeps the base\'s own skills when the posting names one the base hides', async () => {
+    serve();
+    // Go is in the group and the posting names it; this base leaves it off.
+    t.store.saveResume({
+      id: 'no-go',
+      label: 'No Go',
+      sections: [{ kind: 'skills', entries: [], groups: ['sk_lang'], items: { sk_lang: ['s_py', 's_ts', 's_php'] } }],
+    });
+    const draft = await openSpace();
+    const res = await tailor(draft.id, { baseResumeId: 'no-go' }).expect(200);
+    const saved = t.store.load().resumes.find((r) => r.id === res.body.spec.id);
+    const items = saved?.sections?.find((s) => s.kind === 'skills')?.items?.sk_lang;
+    expect(items).not.toContain('s_go');
+    expect(items).toEqual(['s_py', 's_ts', 's_php']);
+  });
+});
+
+/*
+ * A link that answers with a page and no posting in it.
+ *
+ * A careers site rendered by JavaScript sends an empty shell to anything that
+ * does not run it. The extraction of that shell is empty, and the draft's
+ * posting text was replaced with `html.slice(0, 20_000)` — the raw markup,
+ * scripts and all — which every letter and answer after it then read, while
+ * the posting text the applicant had pasted was gone.
+ */
+describe('a link that answers with an empty shell', () => {
+  it('keeps the pasted posting text rather than saving the raw markup over it', async () => {
+    const http = await import('node:http');
+    const shell = `<!doctype html><html><head><script>window.__APP__={"flags":"x".repeat(1)}</script><style>.a{color:red}</style></head><body><div id="root"></div><script src="/bundle.js"></script></body></html>`;
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(shell);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      serve();
+      const port = (server.address() as { port: number }).port;
+      const opened = await request(app)
+        .post('/api/workspace')
+        .send({
+          company: 'Streamly',
+          role: 'Data Platform Intern',
+          url: `http://127.0.0.1:${port}/careers/42`,
+          jobDescription: 'Kafka streaming infrastructure in Go and Python. Distributed systems, Kubernetes on AWS.',
+        })
+        .expect(200);
+      const draft = opened.body.draft ?? opened.body;
+      const res = await tailor(draft.id).expect(200);
+      const saved = t.store.getDraft(res.body.draft.id);
+      expect(saved?.jobDescription).not.toMatch(/<script|<style|<div id="root">/);
+      expect(saved?.jobDescription).toContain('Kafka streaming infrastructure in Go and Python.');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads posting text an older version saved as raw markup as text', async () => {
+    serve();
+    const draft = await openSpace();
+    const saved = t.store.getDraft(draft.id)!;
+    t.store.saveDraft({
+      ...saved,
+      jobDescription: '<!doctype html><html><head><script>var a=1</script><style>.a{}</style></head><body><p>Kafka streaming in Go.</p></body></html>',
+    });
+    const read = t.store.getDraft(draft.id);
+    expect(read?.jobDescription).not.toMatch(/<script|<style|<p>|var a=1/);
+    expect(read?.jobDescription).toContain('Kafka streaming in Go.');
+  });
+});
+
+/*
+ * A tailored copy somebody has kept is theirs.
+ *
+ * The copy's id is derived from the company and the role, so the same posting
+ * — a repost, a second go — derives the same id. Once the first copy had been
+ * promoted to a kept resume and edited, tailoring again wrote a fresh
+ * temporary copy over it: the edits gone, and the resume marked for the
+ * sweep a week later. A kept resume is never overwritten by a copy; the new
+ * one takes the next free id.
+ */
+describe('tailoring again never overwrites a copy that was kept', () => {
+  it('leaves a promoted copy as it was and files the new one beside it', async () => {
+    serve();
+    const draft = await openSpace();
+    const first = await tailor(draft.id).expect(200);
+    const id = first.body.spec.id as string;
+
+    const kept = t.store.load().resumes.find((r) => r.id === id)!;
+    t.store.saveResume({ ...kept, tier: 'extended', label: 'My Streamly resume, hand-tuned' });
+
+    const second = await tailor(first.body.draft.id).expect(200);
+    expect(second.body.spec.id).not.toBe(id);
+    const after = t.store.load().resumes.find((r) => r.id === id);
+    expect(after?.tier).toBe('extended');
+    expect(after?.label).toBe('My Streamly resume, hand-tuned');
+  });
+
+  it('still replaces its own temporary copy on a second run', async () => {
+    serve();
+    const draft = await openSpace();
+    const first = await tailor(draft.id).expect(200);
+    const second = await tailor(first.body.draft.id).expect(200);
+    expect(second.body.spec.id).toBe(first.body.spec.id);
+  });
+
+  it('never lets a posted temporary copy overwrite a kept resume when filing', async () => {
+    serve();
+    t.store.saveResume({ id: 'job-streamly', label: 'Kept Streamly resume', tier: 'base' });
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({
+        company: 'Streamly',
+        role: 'Data Platform Intern',
+        spec: { id: 'job-streamly', label: 'Streamly', tier: 'temporary', copiedFrom: 'intern' },
+      })
+      .expect(200);
+    expect(t.store.getResume('job-streamly')?.label).toBe('Kept Streamly resume');
+    expect(t.store.getResume('job-streamly')?.tier).toBe('base');
+    expect(res.body.application.resumeId).not.toBe('job-streamly');
+  });
+});
+
+/*
+ * A link that is not a web page, or never stops being one.
+ *
+ * Postings are often PDFs. The fetch decoded whatever came back as text, so a
+ * PDF's bytes went into extraction and on to the AI as binary noise. And the
+ * whole body was read before being cut to size, so a link that streamed
+ * without end held the request until the fifteen-second abort.
+ */
+describe('a posting link that is a PDF, or that never ends', () => {
+  const serveOnce = async (reply: (res: import('node:http').ServerResponse) => void) => {
+    const http = await import('node:http');
+    const server = http.createServer((_req, res) => reply(res));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    return { server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/posting` };
+  };
+  const spaceFor = async (url: string) => {
+    const opened = await request(app)
+      .post('/api/workspace')
+      .send({ company: 'Streamly', role: 'Data Platform Intern', url, jobDescription: 'Pasted text.' })
+      .expect(200);
+    return opened.body.draft ?? opened.body;
+  };
+
+  it.skipIf(!hasLatex())('reads a PDF posting as its text', async () => {
+    const fsMod = await import('node:fs');
+    const os = await import('node:os');
+    const pathMod = await import('node:path');
+    const { execFileSync } = await import('node:child_process');
+    const dir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), 'rmm-pdf-posting-'));
+    fsMod.writeFileSync(pathMod.join(dir, 's.tex'), '\\documentclass{article}\\begin{document}Platform Engineer. You will own our Kafka streaming pipeline.\\end{document}');
+    let pdf: Buffer | undefined;
+    for (const [cmd, args] of [['tectonic', ['s.tex']], ['pdflatex', ['-interaction=nonstopmode', 's.tex']]] as const) {
+      try {
+        execFileSync(cmd, [...args], { cwd: dir, stdio: 'ignore' });
+        if (fsMod.existsSync(pathMod.join(dir, 's.pdf'))) { pdf = fsMod.readFileSync(pathMod.join(dir, 's.pdf')); break; }
+      } catch { /* next engine */ }
+    }
+    expect(pdf, 'a PDF to serve').toBeTruthy();
+    const { server, url } = await serveOnce((res) => {
+      res.writeHead(200, { 'content-type': 'application/pdf' });
+      res.end(pdf);
+    });
+    try {
+      serve();
+      const draft = await spaceFor(url);
+      const res = await tailor(draft.id).expect(200);
+      const saved = t.store.getDraft(res.body.draft.id);
+      expect(saved?.jobDescription).toContain('Kafka streaming pipeline');
+      expect(saved?.jobDescription).not.toMatch(/%PDF|endobj|endstream/);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stops reading a page that never ends, rather than waiting it out', async () => {
+    const { server, url } = await serveOnce((res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.write('<html><body><h1>Platform Engineer</h1><p>You will own our Kafka pipeline.</p>');
+      const filler = `<p>${'more text about the team '.repeat(200)}</p>`;
+      const pump = setInterval(() => {
+        if (!res.write(filler)) return;
+      }, 1);
+      res.on('close', () => clearInterval(pump));
+    });
+    try {
+      serve();
+      const draft = await spaceFor(url);
+      const began = Date.now();
+      const res = await tailor(draft.id).expect(200);
+      expect(Date.now() - began).toBeLessThan(10_000);
+      expect(res.body.fetched).toBe(true);
+    } finally {
+      server.closeAllConnections?.();
+      server.close();
+    }
+  }, 30_000);
 });

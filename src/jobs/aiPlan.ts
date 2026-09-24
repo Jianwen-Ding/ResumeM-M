@@ -148,8 +148,20 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
   for (const field of ['enable', 'disable'] as const) {
     for (const id of (raw[field] as unknown[]) ?? []) {
       if (typeof id !== 'string') continue;
-      if (entries.has(id) || bullets.has(id)) plan[field].push(id);
-      else plan.rejected.push(`${field} ${id}: no such entry or bullet`);
+      if (!entries.has(id) && !bullets.has(id)) {
+        plan.rejected.push(`${field} ${id}: no such entry or bullet`);
+        continue;
+      }
+      /*
+       * Retired is not a way back in. The tools never offer an archived line
+       * or entry, and the resolver leaves one off whatever a resume lists —
+       * so taking it here recorded a change the document would not make.
+       */
+      if (field === 'enable' && (entries.get(id)?.archived || bullets.get(id)?.bullet.archived)) {
+        plan.rejected.push(`enable ${id}: archived, so it stays off`);
+        continue;
+      }
+      plan[field].push(id);
     }
   }
 
@@ -240,6 +252,25 @@ export function sanitizeSuggestions(parsed: unknown, data: StoreData): AiSuggest
   return kept;
 }
 
+/**
+ * `id` into `list` just after the nearest thing before it in `master` that the
+ * list already holds, or first where there is none — and the rest of the list
+ * left in the order it was in.
+ *
+ * Both callers used to rebuild the whole list in the store's order around the
+ * one being shown. A list in the store's order comes out the same either way;
+ * one somebody arranged — lines marked `manual`, a section sorted by hand —
+ * prints as written, and switching one thing on rearranged all of it.
+ */
+function inPlace(list: string[], id: string, master: string[]): string[] {
+  if (list.includes(id)) return list;
+  for (let i = master.indexOf(id) - 1; i >= 0; i--) {
+    const at = list.indexOf(master[i]!);
+    if (at >= 0) return [...list.slice(0, at + 1), id, ...list.slice(at + 1)];
+  }
+  return [id, ...list];
+}
+
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
   const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
   if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;
@@ -263,12 +294,26 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
     // explicit list is what resurrected retired text onto a tailored resume.
     (entryById.get(entryId)?.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
 
-  for (const id of plan.disable) {
+  /*
+   * Entries first, then their lines. Every hide used to run before every
+   * show, so hiding a line of an entry the same plan put on the page found
+   * the entry not there yet and did nothing — and the entry then arrived with
+   * all of its lines, the one the model had been told was left off among them.
+   */
+  for (const id of plan.enable) {
     const entry = entryById.get(id);
-    if (entry) {
-      for (const s of sections) s.entries = s.entries.filter((e) => e !== id);
-      continue;
-    }
+    if (!entry) continue;
+    const section = sections.find((s) => s.kind === entry.kind);
+    // Store order, not reply order: where the store puts it.
+    if (section) section.entries = inPlace(section.entries, id, data.entries.map((e) => e.id));
+  }
+
+  for (const id of plan.disable) {
+    if (!entryById.has(id)) continue;
+    for (const s of sections) s.entries = s.entries.filter((e) => e !== id);
+  }
+
+  for (const id of plan.disable) {
     const ownerId = bulletOwner.get(id);
     if (!ownerId) continue;
     for (const s of sections) {
@@ -278,23 +323,12 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
   }
 
   for (const id of plan.enable) {
-    const entry = entryById.get(id);
-    if (entry) {
-      const section = sections.find((s) => s.kind === entry.kind);
-      // Store order, not reply order: append where the store puts it.
-      if (section && !section.entries.includes(id)) {
-        const order = data.entries.filter((e) => e.kind === entry.kind).map((e) => e.id);
-        section.entries = order.filter((e) => e === id || section.entries.includes(e));
-      }
-      continue;
-    }
     const ownerId = bulletOwner.get(id);
     if (!ownerId) continue;
     for (const s of sections) {
       if (!s.entries.includes(ownerId)) continue;
       const all = (entryById.get(ownerId)?.bullets ?? []).map((b) => b.id);
-      const current = new Set([...shown(s, ownerId), id]);
-      s.bullets[ownerId] = all.filter((b) => current.has(b));
+      s.bullets[ownerId] = inPlace(shown(s, ownerId), id, all);
     }
   }
 

@@ -20,6 +20,7 @@
  */
 
 import type { Readable, Writable } from 'node:stream';
+import { redactIdentifiers } from '../jobs/answers.js';
 
 /**
  * The version we answer with.
@@ -67,6 +68,20 @@ export async function handle(
   tools: ToolDefinition[],
   serverInfo: { name: string; version: string },
 ): Promise<unknown | null> {
+  /*
+   * A batch — `[{...}, {...}]` rather than one object — is valid JSON-RPC and
+   * answered with silence here, because destructuring an array gives `id`
+   * `undefined` the same as a notification does, and a notification gets no
+   * reply by design. The difference matters: a notification is silence the
+   * client asked for, and this is silence for a request it is still waiting
+   * on. None of the five methods above batch anyone sends over this stdio
+   * transport, so rather than implement it, this says so — which is still an
+   * answer, and the one thing a hung client cannot get from saying nothing.
+   */
+  if (Array.isArray(request)) {
+    return ERROR(null, -32600, 'Batch requests are not supported; send one request per line.');
+  }
+
   const { id, method, params } = request;
 
   if (method === 'initialize') {
@@ -106,7 +121,14 @@ export async function handle(
     const args = (params?.arguments as Record<string, unknown>) ?? {};
     try {
       const result = await tool.run(args);
-      return RESULT(id, { content: [{ type: 'text', text: result.text }], isError: Boolean(result.isError) });
+      /*
+       * The other way text reaches the model. `runAgent` redacts the prompt,
+       * but a tool such as `find_my_letters` hands over corpus text as a
+       * result, and none of it passes through the prompt. See
+       * `redactIdentifiers`.
+       */
+      const text = redactIdentifiers(result.text).text;
+      return RESULT(id, { content: [{ type: 'text', text }], isError: Boolean(result.isError) });
     } catch (err) {
       // The same reasoning: a thrown error is still something the model can
       // act on, and it can only act on what comes back as content.

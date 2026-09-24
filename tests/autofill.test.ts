@@ -335,6 +335,23 @@ describe('when the degree ends, as the boxes forms ask for it in', () => {
     expect(graduation('Two semesters')).toEqual({});
     expect(graduation('')).toEqual({});
   });
+
+  /*
+   * A lone date on a degree is when it ends — "May 2026" is how the starter
+   * save writes it, and how most people do. It was read as the start: the
+   * form's graduation boxes got nothing, and its "Start date" boxes got the
+   * graduation date.
+   */
+  it('reads a single date as the graduation, not the start', () => {
+    expect(graduation('May 2027')).toEqual({ graduation_year: '2027', graduation_month: 'May', graduation_date: 'May 2027' });
+    expect(graduation('Expected May 2027')).toEqual({
+      graduation_year: '2027',
+      graduation_month: 'May',
+      graduation_date: 'May 2027',
+    });
+    expect(graduation('Anticipated Dec 2026').graduation_date).toBe('December 2026');
+    expect(graduation('2027')).toEqual({ graduation_year: '2027', graduation_date: '2027' });
+  });
 });
 
 /*

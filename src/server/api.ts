@@ -1,5 +1,6 @@
 import express, { type Request, type Response, type Router } from 'express';
-import { randomUUID } from 'node:crypto';
+import { extractText } from '../ingest/text.js';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +35,7 @@ import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
-import { matchAnswer, matchAnswers, relevantLetters, letterId } from '../jobs/answers.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
 import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
@@ -42,7 +43,7 @@ import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill } from '../model/autofill.js';
-import { baseForCopy, byBaseFirst, defaultBaseId } from '../model/bases.js';
+import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
@@ -51,7 +52,7 @@ import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/per
 import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
-import { Store } from '../model/store.js';
+import { Store, withoutBom } from '../model/store.js';
 import { isVariantField, layoutFor, RESUME_TIERS, type ResumeTier } from '../model/types.js';
 import type {
   AnswerBankItem,
@@ -186,12 +187,45 @@ async function fetchPosting(url: string): Promise<string> {
     });
     if (!res.ok) throw new Error(`the site replied ${res.status}`);
 
-    const text = await res.text();
-    return text.slice(0, 2_000_000);
+    /*
+     * Read up to the cap and no further. `res.text()` read the whole body
+     * before it was cut, so a link that streamed without end held the request
+     * until the abort, and a large one was held in memory entire.
+     */
+    const reader = res.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (reader && total < POSTING_CAP) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    await reader?.cancel().catch(() => undefined);
+    const bytes = Buffer.concat(chunks).subarray(0, POSTING_CAP);
+
+    /*
+     * A posting is often a PDF or a Word file, and decoding one as text sent
+     * its bytes into extraction and on to the AI as noise. Read as the file it
+     * is — the same reader that takes files dropped into the corpus — and
+     * handed on as paragraphs, which is what extraction reads.
+     */
+    const type = res.headers.get('content-type') ?? '';
+    const document = /pdf|officedocument|msword/i.test(type) || /^(%PDF|PK)/.test(bytes.subarray(0, 4).toString('latin1'));
+    if (document) {
+      const name = decodeURIComponent(target.pathname.split('/').pop() || 'posting') || 'posting';
+      const { text } = await extractText(/\.(pdf|docx)$/i.test(name) ? name : `${name}${/pdf/i.test(type) ? '.pdf' : ''}`, bytes);
+      const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<html><body>${text.split(/\n{2,}/).map((para) => `<p>${escape(para.trim())}</p>`).join('')}</body></html>`;
+    }
+    return bytes.toString('utf8');
   } finally {
     clearTimeout(timer);
   }
 }
+
+/** The most of a fetched posting read before the rest is left unread. */
+const POSTING_CAP = 2_000_000;
 
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
 function handler(fn: (req: Request, res: Response) => Promise<unknown>) {
@@ -318,6 +352,22 @@ function plainText(field: MaybeVariant | undefined): string {
  * rewriting one of several phrasings from it would be picking a winner nobody
  * asked for.
  */
+
+/** A form's `maxlength` as sent, or nothing: a positive whole number of characters. */
+function validLimit(limit: unknown): number | undefined {
+  return typeof limit === 'number' && Number.isInteger(limit) && limit > 0 && limit < 1_000_000 ? limit : undefined;
+}
+
+/** The questions a writing run is handed, each with its box's limit when the form gave one. */
+export function questionsToWrite(
+  questions: { id: string; question: string; answer?: string; limit?: number }[] | undefined,
+): Draft['questions'] {
+  return (questions ?? []).map((q) => {
+    const limit = validLimit(q.limit);
+    return { id: q.id, question: q.question, answer: q.answer ?? '', ...(limit ? { limit } : {}) };
+  });
+}
+
 export function withDatesFrom(entry: Entry, store: Store): Entry {
   if (!entry.period?.start) return entry;
   if (entry.dates !== undefined && typeof entry.dates !== 'string') return entry;
@@ -464,11 +514,42 @@ function writingTools(
 /** Where the compiled MCP entry point sits relative to this file. */
 const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
 
+/**
+ * The resume a letter or an answer is written against: the one the caller is
+ * holding, where it sent it, and the stored one it names otherwise.
+ *
+ * The extension holds a proposal the store has not been given — it is saved
+ * when the folder is built, not before — and used to name the resume under it
+ * with `spec.extends`. Resumes stopped inheriting, a proposal carries
+ * `copiedFrom` instead, and the proposal's own id went in its place: every
+ * letter, every one-run write and every "AI feedback" asked from the card
+ * came back `No resume named "job-acme-…"`, and the card showed no previous
+ * letter to start from. Sending the proposal itself is also the better answer
+ * than the base ever was, because it is what the letter goes out beside.
+ */
+function resumeToWriteFrom(body: { resumeId?: unknown; spec?: unknown }, data: StoreData): ResolvedResume {
+  const spec = body.spec as ResumeSpec | undefined;
+  if (spec && typeof spec === 'object' && typeof spec.id === 'string' && spec.id && (spec.sections === undefined || Array.isArray(spec.sections))) {
+    return resolveResume(spec, { ...data, resumes: [...data.resumes.filter((r) => r.id !== spec.id), spec] });
+  }
+  if (typeof body.resumeId !== 'string' || !body.resumeId) throw new Error('resumeId is required');
+  return resolveResume(body.resumeId, data);
+}
+
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
 
   const autoCommit = () => store.loadConfig().git.autoCommit;
+
+  /**
+   * A tailored copy the extension posts, kept off any resume somebody kept.
+   * The copy's id is derived from the posting, so a copy promoted and edited
+   * earlier holds it; a temporary copy takes the next free id instead of
+   * writing over it. See `copyIdFor`.
+   */
+  const keptSafe = (spec: ResumeSpec): ResumeSpec =>
+    spec.tier === 'temporary' ? { ...spec, id: copyIdFor(store.load().resumes, spec.id) } : spec;
   // Work the user started and walked away from.
 
   /**
@@ -1574,6 +1655,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         letterId?: string;
         draftId?: string;
         resumeId?: string;
+        spec?: ResumeSpec;
       };
       const data = store.load();
 
@@ -1598,7 +1680,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       let sentWith;
       try {
-        sentWith = body.resumeId ? resolveResume(String(body.resumeId), data) : undefined;
+        sentWith = body.spec || body.resumeId ? resumeToWriteFrom(body, data) : undefined;
       } catch {
         sentWith = undefined;
       }
@@ -1998,22 +2080,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/tailor',
     handler(async (req, res) => {
-      const { resumeId, job } = req.body as { resumeId: string; job: TailorContext };
+      const { job } = req.body as { resumeId?: string; spec?: ResumeSpec; job: TailorContext };
       // Without this, a missing `job` surfaced as "Cannot read properties of
       // undefined (reading 'company')", which names nothing a caller can fix.
       if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to tailor against');
 
       const data = store.load();
-      const resolved = resolveResume(resumeId, data);
+      const resolved = resumeToWriteFrom(req.body, data);
       const result = await runAgent(configForTask(data.config, 'tailor'), tailorPrompt(data, resolved, job));
       if (!result.executed) return res.json({ ...result, parsed: null });
 
-      const parsed = extractJson<{
-        choices?: Record<string, string>;
-        skills?: Record<string, string[]>;
-        suggestions?: { bulletId: string; label: string; text: string; why: string }[];
-        reasoning?: string;
-      }>(result.output);
+      const raw = extractJson<{ reasoning?: unknown }>(result.output);
+      if (!raw) return res.json({ ...result, parsed: null });
+      /*
+       * Only what the store can honour, as every other way a tailoring reply
+       * reaches a resume. The extension merges `choices` straight into the
+       * resume it sends, and this handed the model's JSON back as it came —
+       * an invented wording id, a skill named twice.
+       */
+      const plan = sanitizeAiPlan(raw, data);
+      const parsed = {
+        choices: plan.choices,
+        skills: plan.skills,
+        suggestions: sanitizeSuggestions(raw, data),
+        reasoning: typeof raw.reasoning === 'string' ? raw.reasoning : undefined,
+        rejected: plan.rejected,
+      };
       res.json({ ...result, parsed });
     }),
   );
@@ -2040,13 +2132,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/cover-letter',
     handler(async (req, res) => {
-      const { resumeId, job, save } = req.body as {
-        resumeId: string;
+      const { job, save } = req.body as {
+        resumeId?: string;
+        spec?: ResumeSpec;
         job: TailorContext;
         save?: boolean;
       };
       const data = store.load();
-      const resolved = resolveResume(resumeId, data);
+      const resolved = resumeToWriteFrom(req.body, data);
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
 
       const result = await runAgent(
@@ -2145,24 +2238,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/extension/write',
     handler(async (req, res) => {
-      const { resumeId, job, letter, questions } = req.body as {
-        resumeId: string;
+      const { job, letter, questions } = req.body as {
+        resumeId?: string;
+        spec?: ResumeSpec;
         job: TailorContext;
         letter?: { required?: boolean; body?: string };
-        questions?: { id: string; question: string; answer?: string }[];
+        questions?: { id: string; question: string; answer?: string; limit?: number }[];
       };
-      if (!resumeId) throw new Error('resumeId is required');
       if (!job?.jobDescription?.trim()) throw new Error('A job description is needed to write against');
 
       const data = store.load();
-      const resolved = resolveResume(resumeId, data);
+      const resolved = resumeToWriteFrom(req.body, data);
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
       const wantsLetter = Boolean(letter?.required);
-      const pending: Draft['questions'] = (questions ?? []).map((q) => ({
-        id: q.id,
-        question: q.question,
-        answer: q.answer ?? '',
-      }));
+      const pending = questionsToWrite(questions);
 
       if (!wantsLetter && pending.length === 0) {
         res.json({ letter: null, answers: {}, priorLetters: prior, aiUsed: false });
@@ -2233,10 +2322,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/answer',
     handler(async (req, res) => {
-      const { question, job, force } = req.body as {
+      const { question, job, force, limit } = req.body as {
         question: string;
         job?: TailorContext;
         force?: boolean;
+        limit?: number;
       };
       const data = store.load();
       /*
@@ -2260,7 +2350,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return;
       }
 
-      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job));
+      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job, limit));
 
       /*
        * `output` means "text you may use". When the AI did not run, `runAgent`
@@ -2297,16 +2387,56 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         itemId?: string;
       };
       if (!question?.trim() || !answer?.trim()) throw new Error('question and answer are required');
+      /*
+       * An SSN, a date of birth, a passport number, a home address: never
+       * remembered, so never reused. See `isSensitiveQuestion`. Refused here
+       * rather than silently dropped, because a silent drop reads to the
+       * caller as saved — the box the person just typed into still holds it
+       * for *this* application, which is untouched; only the reusable bank
+       * declines it.
+       */
+      if (isSensitiveQuestion(question) || isSensitiveAnswer(answer)) {
+        throw new Error(
+          'This looks like a request for personal identifying information (an SSN, a date of ' +
+            'birth, a passport number, a home address). The answer bank does not keep those, so ' +
+            'it was not saved.',
+        );
+      }
 
       const answers = store.load().answers;
-      const existing = itemId ? answers.find((a) => a.id === itemId) : undefined;
+      /*
+       * Found by id when the caller has one, and otherwise by the question
+       * itself — not only by id. Without this, saving a question the bank
+       * already holds, from a caller that never learned its id, added a
+       * second item with the same question rather than a variant of the
+       * first: two competing answers to "Why do you want to work here?",
+       * with `matchAnswer` seeing only whichever came first and the second
+       * unreachable by anything but a fresh save. `sameQuestion` allows for
+       * the whitespace and case a retyped question differs by; a real
+       * change in wording is a new question and gets a new item, same as
+       * always.
+       */
+      const existing = itemId
+        ? answers.find((a) => a.id === itemId)
+        : answers.find((a) => sameQuestion(a.question, question));
 
       if (existing) {
-        // A new phrasing of a question already in the bank, not a new question.
-        const id = `v_${slug(label ?? new Date().toISOString().slice(0, 10))}` || `v_${Date.now()}`;
-        const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
-        existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
-        existing.default = unique;
+        /*
+         * The same wording saved twice is not a second variant — it is the
+         * same click landing twice, from a retry or a double submit — so it
+         * is not piled on as one. It is made the default, since saving it
+         * again is the caller saying this is the one to use now.
+         */
+        const already = existing.variants.find((v) => v.text.trim() === answer.trim());
+        if (already) {
+          existing.default = already.id;
+        } else {
+          // A new phrasing of a question already in the bank, not a new question.
+          const id = `v_${slug(label ?? new Date().toISOString().slice(0, 10))}` || `v_${Date.now()}`;
+          const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
+          existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
+          existing.default = unique;
+        }
       } else {
         answers.push({
           id: answerId(question, answers),
@@ -2422,12 +2552,26 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * copies would have been left behind by the very rename they most need.
        */
       const role = job.title ?? 'Role';
-      const specId = tailoredResumeId(employer, role);
+      const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
       const baseId = baseForCopy(data.resumes, baseResumeId, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
       const base = data.resumes.find((r) => r.id === baseId);
-      if (!base) throw new Error(`No resume "${baseId}"`);
+      if (!base) {
+        /*
+         * Said, and named as a kind the extension can act on. The resume the
+         * extension builds from is a setting, and it outlives the resume:
+         * deleted, or a tailored copy the sweep took, and every card failed
+         * with `No resume "job-…"` — an id nobody typed, on every posting.
+         */
+        res.status(400).json({
+          kind: 'no-base',
+          error:
+            'The resume JobHelper builds from is no longer in this save. Choose another in JobHelper’s ' +
+            'settings, or pin one as your base in ResumeM-M.',
+        });
+        return;
+      }
 
       /*
        * `none` still produces a spec, and deliberately: the application wants
@@ -2449,7 +2593,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * is the same moment this reply arrives. It resolves each resume once,
        * which is the same work the editor's own list does.
        */
-      const fit = fitResumes(data, job.keywords);
+      const fit = fitResumes(data, job.keywords, undefined, store);
 
       let aiParsed: unknown = null;
       let aiRaw: string | undefined;
@@ -3104,31 +3248,37 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       const application = await withCommit(repo, autoCommit(), `${id}: applied`, () => {
-        if (tracked) return advance(store, id, 'applied', note);
+        const recorded = ((): Application => {
+          if (tracked) return advance(store, id, 'applied', note);
+          /*
+           * Submitted without ever opening a workspace — a form filled straight
+           * from the card, which is the quick path and the one most likely to
+           * leave no trace. Recording it is the whole point.
+           */
+          const made: Application = {
+            id,
+            company: body.company!,
+            role: body.role!,
+            url: body.url,
+            status: 'applied',
+            appliedAt: now,
+            history: [{ at: now, status: 'applied', note }],
+          };
+          store.upsertApplication(made);
+          return made;
+        })();
         /*
-         * Submitted without ever opening a workspace — a form filled straight
-         * from the card, which is the quick path and the one most likely to
-         * leave no trace. Recording it is the whole point.
+         * And the draft, if there is one, stops looking like something to
+         * finish — found the same way, for the same reason, and in this same
+         * commit. Written after it, the move to "submitted" reached disk but
+         * not the version history; given a commit of its own, every send cost
+         * a second git run.
          */
-        const made: Application = {
-          id,
-          company: body.company!,
-          role: body.role!,
-          url: body.url,
-          status: 'applied',
-          appliedAt: now,
-          history: [{ at: now, status: 'applied', note }],
-        };
-        store.upsertApplication(made);
-        return made;
+        const draft = findDraft(store.loadDrafts(), body.company!, body.role!);
+        if (draft && draft.status !== 'submitted') store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
+        return recorded;
       });
 
-      // And the draft, if there is one, stops looking like something to finish
-      // — found the same way, for the same reason.
-      const draft = findDraft(store.loadDrafts(), body.company, body.role);
-      if (draft && draft.status !== 'submitted') {
-        store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
-      }
 
       res.json({ application, changed: true });
     }),
@@ -3146,10 +3296,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // A posting-specific spec from the extension is saved first so the
       // snapshot refers to something that still exists later.
       if (body.spec) {
-        await withCommit(repo, autoCommit(), `Add tailored resume "${body.spec.id}"`, () =>
-          store.saveResume(body.spec as ResumeSpec),
-        );
-        body.resumeId = body.spec.id;
+        // Never over a kept resume: see `copyIdFor`.
+        const spec = keptSafe(body.spec as ResumeSpec);
+        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
+        body.spec = spec;
+        body.resumeId = spec.id;
       }
 
       const result = await buildBundle(store, body);
@@ -3330,7 +3481,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         coverLetterRequired?: boolean;
         /** What the extension has already been written into, if anything. */
         coverLetter?: string;
-        questions?: { question: string; required?: boolean; answer?: string }[];
+        questions?: { question: string; required?: boolean; answer?: string; limit?: number }[];
         /**
          * Nobody pressed anything: this is the extension noticing that work
          * has been done and holding a place for it. See `holdASpace`.
@@ -3411,7 +3562,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
       if (body.spec) {
-        const spec = body.spec;
+        const spec = keptSafe(body.spec);
+        body.spec = spec;
         await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
       }
 
@@ -3470,6 +3622,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           source: match.confident ? 'bank' : 'empty',
         };
       });
+      // The box's limit travels with its question, whichever branch made it.
+      questions.forEach((d, i) => {
+        const limit = validLimit((incoming[i] as { limit?: number }).limit) ?? d.limit;
+        if (limit) d.limit = limit;
+        else delete d.limit;
+      });
 
       const now = new Date().toISOString();
       const draft: Draft = {
@@ -3526,92 +3684,127 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         draft.coverLetter = { required: true, body: body.coverLetter, edited: true };
       }
 
-      const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () =>
-        store.saveDraft(draft),
-      );
+      /** The tracker's side of opening a workspace. Runs inside the draft's commit. */
+      const track = (): void => {
 
-      /*
-       * An application being written is already an application. Track it as
-       * "applying" so the tracker shows what is in flight, not only what has
-       * been sent — completing the draft moves it to "applied".
-       *
-       * Read here, not from `data` at the top of the handler. `data` was
-       * loaded before the save above, and that save awaits a git commit — a
-       * process, tens to hundreds of milliseconds under load. Anything that
-       * writes this row in that window is invisible to a snapshot taken
-       * before it, and what followed was not a stale read but a destroyed
-       * one: the row was found missing, so a *new* one was written over the
-       * top, with `applying` for a status and a one-line history.
-       *
-       * Measured, on a store being driven by the extension: an application
-       * that had been staged and then submitted came back out of this handler
-       * reading `applying`, with the "Bundle created" and "applied" entries
-       * gone. The tracker said an application that had gone out had not, which
-       * is the failure that gets a job applied for twice.
-       *
-       * Nothing awaits between this read and the write below, so the two are
-       * one step as far as anything else on this server is concerned.
-       */
-      /*
-       * By identity, not by id. A draft can legitimately carry an id the
-       * tracker row does not — the row may have been made by hand, or by a
-       * send on a different day — and matching on the id alone meant writing
-       * a second row for a job that already had one.
-       */
-      /*
-       * What stage a row opened this way starts at.
-       *
-       * "Applying" is a claim about what somebody is doing, and merely having
-       * a workspace is not that claim. The extension opens one as soon as a
-       * resume is built, which it does on anything job-shaped you open — so
-       * the tracker filled with rows nobody had started: `Indeed — Now Hiring:
-       * 300 Software Intern Jobs`, a `preview.redd.it` image url, one row for
-       * `NVIDIA Corporation` and another for `2100 NVIDIA USA`, every one of
-       * them reading `applying` for ever. The list that is supposed to say
-       * what is in flight said everything was.
-       *
-       * The place to write still opens at the first sign of work, because the
-       * letter is drafted before the form is ever seen and putting the writing
-       * surface behind the form would be backwards. It is the *stage* that
-       * waits: `interested` — "Not applied" — until the extension reports
-       * something actually put into the employer's boxes.
-       *
-       * Only on the automatic route. Pressing "Write these in ResumeM-M"
-       * carries no `auto`, and somebody pressing it is applying.
-       */
-      const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
-      const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
-
-      const tracked = findApplication(store.load().applications, draft.company, draft.role);
-      if (!tracked) {
-        store.upsertApplication({
-          id,
-          company: draft.company,
-          role: draft.role,
-          url: draft.url,
-          status: started,
-          resumeId: draft.resumeId,
-          source: draft.source,
-          /*
-           * Dated, like one made by hand. The tracker sorts on `appliedAt` and
-           * prints it as the date column, so an application started from the
-           * extension — the one you are working on right now — had a blank date
-           * and sat at the bottom of the list, under everything already sent.
-           * It is the date it started; `trackStatus` records when it was sent.
-           */
-          appliedAt: now,
-          history: [{ at: now, status: started, note }],
-        });
-      } else if (body.actedOnForm && tracked.status === 'interested') {
         /*
-         * And the moment it stops being a bookmark, it is moved on.
+         * An application being written is already an application. Track it as
+         * "applying" so the tracker shows what is in flight, not only what has
+         * been sent — completing the draft moves it to "applied".
          *
-         * Only out of `interested`, and only ever forwards: a row that has
-         * been sent, answered, or closed is past this and must not be dragged
-         * back by a keeper tick on a tab somebody left open.
+         * Read here, not from `data` at the top of the handler. `data` was
+         * loaded before this handler's first await, and every await here —
+         * the commit above all — is a process, tens to hundreds of
+         * milliseconds under load. Anything that
+         * writes this row in that window is invisible to a snapshot taken
+         * before it, and what followed was not a stale read but a destroyed
+         * one: the row was found missing, so a *new* one was written over the
+         * top, with `applying` for a status and a one-line history.
+         *
+         * Measured, on a store being driven by the extension: an application
+         * that had been staged and then submitted came back out of this handler
+         * reading `applying`, with the "Bundle created" and "applied" entries
+         * gone. The tracker said an application that had gone out had not, which
+         * is the failure that gets a job applied for twice.
+         *
+         * Nothing awaits between this read and the write below, so the two are
+         * one step as far as anything else on this server is concerned.
          */
-        advance(store, tracked.id, 'applying', 'Started filling in the form');
-      }
+        /*
+         * By identity, not by id. A draft can legitimately carry an id the
+         * tracker row does not — the row may have been made by hand, or by a
+         * send on a different day — and matching on the id alone meant writing
+         * a second row for a job that already had one.
+         */
+        /*
+         * What stage a row opened this way starts at.
+         *
+         * "Applying" is a claim about what somebody is doing, and merely having
+         * a workspace is not that claim. The extension opens one as soon as a
+         * resume is built, which it does on anything job-shaped you open — so
+         * the tracker filled with rows nobody had started: `Indeed — Now Hiring:
+         * 300 Software Intern Jobs`, a `preview.redd.it` image url, one row for
+         * `NVIDIA Corporation` and another for `2100 NVIDIA USA`, every one of
+         * them reading `applying` for ever. The list that is supposed to say
+         * what is in flight said everything was.
+         *
+         * The place to write still opens at the first sign of work, because the
+         * letter is drafted before the form is ever seen and putting the writing
+         * surface behind the form would be backwards. It is the *stage* that
+         * waits: `interested` — "Not applied" — until the extension reports
+         * something actually put into the employer's boxes.
+         *
+         * Only on the automatic route. Pressing "Write these in ResumeM-M"
+         * carries no `auto`, and somebody pressing it is applying.
+         */
+        const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
+        const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
+
+        const tracked = findApplication(store.load().applications, draft.company, draft.role);
+        /*
+         * In the draft's commit, not after it.
+         *
+         * Written after that commit, a bare write here reached disk and never
+         * the version history — present in every read, absent from `git log`,
+         * and gone the moment the store was restored from history. Given a
+         * commit of its own, every workspace opened cost two git runs, which
+         * under load delayed the draft it exists to open. Called from inside
+         * the draft's `withCommit`, the read above and this write happen in
+         * the same synchronous step as the draft save, and one commit holds all
+         * three.
+         */
+        if (!tracked) {
+          store.upsertApplication({
+              id,
+              company: draft.company,
+              role: draft.role,
+              url: draft.url,
+              status: started,
+              resumeId: draft.resumeId,
+              source: draft.source,
+              /*
+               * Dated, like one made by hand. The tracker sorts on `appliedAt` and
+               * prints it as the date column, so an application started from the
+               * extension — the one you are working on right now — had a blank date
+               * and sat at the bottom of the list, under everything already sent.
+               * It is the date it started; `trackStatus` records when it was sent.
+               */
+              appliedAt: now,
+              history: [{ at: now, status: started, note }],
+            });
+        } else if (body.actedOnForm && tracked.status === 'interested') {
+          /*
+           * And the moment it stops being a bookmark, it is moved on.
+           *
+           * Only out of `interested`, and only ever forwards: a row that has
+           * been sent, answered, or closed is past this and must not be dragged
+           * back by a keeper tick on a tab somebody left open.
+           */
+          advance(store, tracked.id, 'applying', 'Started filling in the form');
+        }
+      };
+
+      const saved = await withCommit(repo, autoCommit(), `Open workspace for ${draft.company}`, () => {
+        /*
+         * Sent already? Asked again here, from a fresh read, in the same
+         * synchronous step as the save.
+         *
+         * `data` was loaded at the top of the handler, before its awaits, so a
+         * send landing in between was invisible to it: the draft opened as
+         * `drafting`, and the send — which had already looked for a draft and
+         * found none — never came back to mark it. Measured on the parallel
+         * send walk: a fast Submit left the workspace reading `drafting` under
+         * an application already `applied`. The send marks its draft inside
+         * its own commit callback, synchronously too, so one of the two always
+         * sees the other.
+         */
+        if (draft.status !== 'submitted' && alreadySent(store.load().applications, draft.company, draft.role)) {
+          draft.status = 'submitted';
+        }
+        const written = store.saveDraft(draft);
+        track();
+        return written;
+      });
 
       res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });
     }),
@@ -3682,6 +3875,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         seen.add(baseId);
         baseId = data.resumes.find((r) => r.id === baseId)?.copiedFrom ?? defaultBaseId(data.resumes);
       }
+      /*
+       * And somewhere that is still there. A copy made from a temporary
+       * resume the sweep has since taken walks back to an id with nothing
+       * behind it, and "The store has no resume to start from" is not true of
+       * a store full of them; the default is the answer `baseForCopy` gives.
+       */
+      if (!data.resumes.some((r) => r.id === baseId)) baseId = defaultBaseId(data.resumes);
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) throw new Error('The store has no resume to start from');
 
@@ -3757,8 +3957,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
       if (!html.trim()) throw new Error('This draft has no link and no posting text to work from');
 
-      const job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
-      const specId = tailoredResumeId(draft.company, draft.role);
+      /*
+       * A page with nothing readable in it is not the posting. A careers site
+       * rendered by JavaScript sends an empty shell to anything that does not
+       * run it, and its extraction is empty; the text the draft already
+       * carries — what the applicant pasted — is the posting then.
+       */
+      let job = extractJob(html, draft.url, `${draft.role} at ${draft.company}`);
+      if (fetched && !job.description.trim() && draft.jobDescription?.trim()) {
+        job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
+      }
+      const specId = copyIdFor(data.resumes, tailoredResumeId(draft.company, draft.role));
 
       /*
        * Tailoring twice must not make a resume that inherits from itself. The
@@ -3784,7 +3993,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             tailorPrompt(data, resolveResume(baseId!, data), {
               jobTitle: draft.role,
               company: draft.company,
-              jobDescription: job.description ?? html,
+              jobDescription: job.description,
               url: draft.url,
             }),
           );
@@ -3822,7 +4031,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // letter and the answers to draw on. Those two fields, and nothing else:
       // fetching the posting and running the AI take long enough that the
       // letter and the answers on disk have moved on.
-      const description = job.description || html.slice(0, 20_000);
+      // Never the raw markup: scripts and styles are not a posting, and every
+      // letter and answer written from this draft reads what is saved here.
+      const description = job.description || draft.jobDescription || '';
       const saved = await reviseDraft(draft.id, `Attach a tailored resume to ${draft.company}`, (fresh) => {
         fresh.resumeId = spec.id;
         fresh.jobDescription = description;
@@ -4000,7 +4211,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.needsReview = undefined;
             continue;
           }
-          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job));
+          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job, q.limit));
           if (agent.executed && agent.output.trim()) {
             q.answer = agent.output.trim();
             q.source = 'ai';
@@ -4165,11 +4376,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const answers = store.load().answers;
         for (const q of answered) {
           if (q.source === 'bank' && !q.edited) continue;
-          const existing = answers.find((a) => a.id === q.fromAnswerId || a.question === q.question);
+          // An SSN, a date of birth, a passport number, a home address: never
+          // remembered, so never reused. See `isSensitiveQuestion`. The
+          // application record above still keeps what was actually sent —
+          // that is the history of this one application — but it does not
+          // go into the bank other applications draw from.
+          if (isSensitiveQuestion(q.question) || isSensitiveAnswer(q.answer)) continue;
+          const existing = answers.find((a) => a.id === q.fromAnswerId || sameQuestion(a.question, q.question));
           if (existing) {
-            const vid = `v_${Date.now().toString(36)}`;
-            existing.variants.push({ id: vid, label: draft.company, text: q.answer });
-            existing.default = vid;
+            // The same wording saved twice — a form resubmitted, a workspace
+            // completed twice — is not a second variant. See `/answers/save`.
+            const already = existing.variants.find((v) => v.text.trim() === q.answer.trim());
+            if (already) {
+              existing.default = already.id;
+            } else {
+              const vid = `v_${Date.now().toString(36)}`;
+              existing.variants.push({ id: vid, label: draft.company, text: q.answer });
+              existing.default = vid;
+            }
           } else {
             answers.push({
               id: answerId(q.question, answers),
@@ -4535,7 +4759,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       };
 
       const text = await readAt(path.posix.join('resumes', `${id}.yaml`));
-      const restored = text === undefined ? undefined : (YAML.parse(text) as ResumeSpec | null);
+      const restored = text === undefined ? undefined : (YAML.parse(withoutBom(text)) as ResumeSpec | null);
       if (!restored) {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }
@@ -4616,6 +4840,16 @@ function answerId(question: string, taken: AnswerBankItem[]): string {
   return taken.some((a) => a.id === base) ? `${base}-${fingerprint(question)}` : base;
 }
 
+
+/** The "Copy the path" button on the flat folder's page, allowed by its hash. */
+const COPY_PATH_SCRIPT = `
+  document.getElementById('copy').onclick = async (ev) => {
+    await navigator.clipboard.writeText(document.getElementById('path').textContent);
+    ev.target.textContent = 'Copied';
+  };
+`;
+const COPY_PATH_POLICY = `script-src 'sha256-${createHash('sha256').update(COPY_PATH_SCRIPT).digest('base64')}'; base-uri 'none'`;
+
 /**
  * The flat folder, as a page you can open.
  *
@@ -4662,6 +4896,9 @@ export function createCurrentRouter(store: Store): Router {
         ? 'Nothing built yet. Build an application and its files land here.'
         : 'Nothing is mid-application, so there is nothing to upload.';
 
+    // Its own policy: the server's allows only the editor's inline script, and
+    // this page's one button is an inline script of its own.
+    res.setHeader('Content-Security-Policy', COPY_PATH_POLICY);
     res.type('html').send(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Ready to upload</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4688,12 +4925,7 @@ export function createCurrentRouter(store: Store): Router {
   <div class="strip"><code id="path">${escape(folder.dir)}</code><button id="copy">Copy the path</button></div>
   ${rows ? `<ul>${rows}</ul>` : `<div class="empty">${empty}</div>`}
 </main>
-<script>
-  document.getElementById('copy').onclick = async (ev) => {
-    await navigator.clipboard.writeText(document.getElementById('path').textContent);
-    ev.target.textContent = 'Copied';
-  };
-</script>
+<script>${COPY_PATH_SCRIPT}</script>
 </body></html>`);
   });
 

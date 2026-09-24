@@ -306,7 +306,7 @@ describe('keyword scoring, on whole words', () => {
       resumes: [],
     } as unknown as StoreData;
 
-    const result = matchVariants(data, { id: 'base', label: 'b', sections: [] }, {
+    const result = matchVariants(data, { id: 'base', label: 'b', sections: [{ kind: 'experience', entries: ['e1'] }] }, {
       keywords: ['Rust', 'iOS', 'Java'],
     });
 

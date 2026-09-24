@@ -36,6 +36,10 @@ import type { AiPlan } from '../jobs/aiPlan.js';
 import { pickBullet } from '../model/resolve.js';
 import type { Bullet, Entry, MaybeVariant, ResolvedResume, SkillGroup, StoreData } from '../model/types.js';
 
+/** The entry fields that can carry alternate wordings — see `choose`. */
+const WORDED_FIELDS = ['title', 'dates', 'subtitle', 'location'] as const;
+type WordedField = (typeof WORDED_FIELDS)[number];
+
 export interface TailorPosting {
   company?: string;
   jobTitle?: string;
@@ -237,10 +241,22 @@ export class TailorSession {
         }
       }
     }
+    /*
+     * Skills marked the way entries and bullets are. Without it every item of
+     * every group read as equally available, so the model had no way to see
+     * that the applicant had taken a skill off this resume — and choosing a
+     * group's items is how one comes back.
+     */
+    const printed = new Map(this.resume.sections.flatMap((sec) => sec.skillGroups).map((g) => [g.id, g.items]));
     for (const group of this.groups.values()) {
-      lines.push(`### skills group [${group.id}] ${group.name}`);
+      const shown = printed.get(group.id);
+      lines.push(`### skills group [${group.id}] ${group.name}${shown ? '' : '  (not on this resume)'}`);
       for (const item of group.items) {
-        lines.push(`    [${item.id}] ${item.text}${item.tags?.length ? `  tags: ${item.tags.join(', ')}` : ''}`);
+        const off = shown && !shown.includes(item.text);
+        lines.push(
+          `    [${item.id}] ${item.text}${off ? '  (not on this resume)' : ''}` +
+            `${item.tags?.length ? `  tags: ${item.tags.join(', ')}` : ''}`,
+        );
       }
     }
     return lines.join('\n');
@@ -274,9 +290,22 @@ export class TailorSession {
     const dot = target.indexOf('.');
     if (dot > 0) {
       const entry = this.entries.get(target.slice(0, dot));
-      const name = target.slice(dot + 1) as 'title' | 'dates' | 'subtitle' | 'location';
-      const field = entry?.[name];
       if (!entry) return no(`There is no entry "${target.slice(0, dot)}". Entries: ${some([...this.entries.keys()])}.`);
+      /*
+       * Only the four fields that can have wordings.
+       *
+       * The name after the dot was cast and trusted, so `edu_neu.gpa` — a
+       * field no entry has — was told it "has only one wording", which sent a
+       * model looking for a second wording of a field that does not exist
+       * rather than for the right name. And `edu_neu.bullets` or `.period`,
+       * which are objects with no `variants`, reached `.variants.find` and
+       * threw: the whole tool call failed on a typo.
+       */
+      const name = target.slice(dot + 1);
+      if (!WORDED_FIELDS.includes(name as WordedField)) {
+        return no(`"${name}" is not a field with wordings to choose between. The fields are: ${WORDED_FIELDS.join(', ')}.`);
+      }
+      const field = entry[name as WordedField];
       if (!field || typeof field === 'string') {
         return no(`${target} has only one wording, so there is nothing to choose between.`);
       }
@@ -315,6 +344,33 @@ export class TailorSession {
           `Bullets: ${some([...this.bullets.keys()])}.`,
       );
     }
+    /*
+     * Somewhere to put it. An entry goes into the section of its kind, and a
+     * resume without one had nowhere: `show` said "will be shown", the plan
+     * carried it, and `applyInclusion` quietly found no section — so the
+     * reasoning claimed an entry the resume never got.
+     */
+    const kind = what === 'entry' ? this.entries.get(id)!.kind : this.bullets.get(id)!.entry.kind;
+    if (on && !this.resume.sections.some((s) => s.kind === kind)) {
+      return no(
+        `${id} belongs in a ${kind} section, and this resume has none to put it in. Its sections are: ` +
+          `${some(this.resume.sections.map((s) => s.kind))}.`,
+      );
+    }
+    /*
+     * And a line goes where its entry is. One whose entry is not on the page
+     * — and not about to be — was answered "will be shown", and
+     * `applyInclusion` found no section listing the entry and did nothing.
+     */
+    if (on && what === 'bullet') {
+      const owner = this.bullets.get(id)!.entry;
+      const onPage = this.resume.sections.some(
+        (s) => s.kind === owner.kind && this.orderedEntries(s.kind, s.entries.map((e) => e.id)).includes(owner.id),
+      );
+      if (!onPage) {
+        return no(`${id} is a line of ${owner.id}, which is not on this resume, so it has nowhere to go. Show ${owner.id} first if it belongs here.`);
+      }
+    }
     const [into, outOf] = on
       ? ([this.state.plan.enable, this.state.plan.disable] as const)
       : ([this.state.plan.disable, this.state.plan.enable] as const);
@@ -352,10 +408,17 @@ export class TailorSession {
       return no(`There is no "${kind}" section. The sections are: ${some(kinds)}.`);
     }
     const named = [...new Set(entryIds.filter((id) => mine.includes(id)))];
+    // Named back, as `order` and `skills` name theirs: a typo, or an entry
+    // from another section, was dropped with a success and no word of it, so
+    // the model had no reason to think any of its order had been ignored.
+    const strangers = entryIds.filter((id) => !mine.includes(id));
     if (named.length === 0) return no(`None of those are ${kind} entries. They are: ${some(mine)}.`);
     this.state.plan.entryOrder[kind] = named;
     const rest = mine.filter((id) => !named.includes(id));
-    return ok(`${kind} will read: ${[...named, ...rest].join(', ')}.`);
+    return ok(
+      `${kind} will read: ${[...named, ...rest].join(', ')}.` +
+        (strangers.length ? ` Ignored, because they are not ${kind} entries: ${some(strangers)}.` : ''),
+    );
   }
 
   /** Choose which items of a skills group to print. */

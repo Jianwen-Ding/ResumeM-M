@@ -87,6 +87,28 @@ describe('what the AI is allowed to decide', () => {
     expect(plan.rejected[0]).toContain('no such entry or bullet');
   });
 
+  /*
+   * Retired is not a way back in. The tool path never offers an archived line
+   * or entry; a reply in JSON could name one, the plan carried it as shown,
+   * and the resolver then left it off with a warning — a change the card
+   * reported that the document did not make.
+   */
+  it('refuses to show what has been archived', () => {
+    const d = data();
+    d.entries = d.entries.map((e) =>
+      e.id === 'proj_thing'
+        ? { ...e, archived: true }
+        : e.id === 'exp_acme'
+          ? { ...e, bullets: e.bullets!.map((b) => (b.id === 'b_testing' ? { ...b, archived: true } : b)) }
+          : e,
+    );
+    const plan = sanitizeAiPlan({ enable: ['proj_thing', 'b_testing'], disable: ['b_testing'] }, d);
+    expect(plan.enable).toEqual([]);
+    expect(plan.rejected.filter((r) => r.includes('archived'))).toHaveLength(2);
+    // Hiding it is harmless, and says what was asked.
+    expect(plan.disable).toEqual(['b_testing']);
+  });
+
   it('survives a reply that is not an object at all', () => {
     for (const junk of [null, undefined, 'sorry, I cannot help', 42, []]) {
       expect(sanitizeAiPlan(junk, data()).choices).toEqual({});
@@ -136,6 +158,64 @@ describe('showing and hiding', () => {
     const restored = applyInclusion(base, d, sanitizeAiPlan({ enable: ['b_pipeline'] }, d));
     // b_pipeline comes first in the store, so it comes first here.
     expect(restored?.find((s) => s.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_pipeline', 'b_testing']);
+  });
+
+  /*
+   * Showing one thing is not permission to rearrange the rest. Both of these
+   * rebuilt the whole list in the store's order, which a resume that
+   * arranged its own lines or entries prints as written — so an AI run that
+   * switched one bullet on quietly undid the order somebody had dragged.
+   */
+  it('shows a bullet without undoing lines the base arranged itself', () => {
+    const d = store();
+    const acme = d.entries.find((e) => e.id === 'exp_acme')!;
+    const extra = { ...acme.bullets![0]!, id: 'b_extra' };
+    const entries = d.entries.map((e) => (e.id === 'exp_acme' ? { ...e, bullets: [...e.bullets!, extra] } : e));
+    const arranged = {
+      ...SAMPLE_BASE,
+      sections: SAMPLE_BASE.sections?.map((s) =>
+        s.kind === 'experience'
+          ? { ...s, bullets: { exp_acme: ['b_testing', 'b_pipeline'] }, bulletOrder: { exp_acme: 'manual' as const } }
+          : s,
+      ),
+    };
+    const withExtra = { ...d, entries };
+    const sections = applyInclusion(arranged, withExtra, sanitizeAiPlan({ enable: ['b_extra'] }, withExtra));
+    // Next to the line it follows in the store, and the arrangement kept.
+    expect(sections?.find((s) => s.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_testing', 'b_extra', 'b_pipeline']);
+  });
+
+  it('shows an entry without undoing a section arranged by hand', () => {
+    const d = store();
+    const second = { ...d.entries.find((e) => e.id === 'proj_thing')!, id: 'proj_second' };
+    const third = { ...second, id: 'proj_third' };
+    const withMore = { ...d, entries: [...d.entries, second, third] };
+    const arranged = {
+      ...SAMPLE_BASE,
+      sections: SAMPLE_BASE.sections?.map((s) =>
+        s.kind === 'project' ? { ...s, entries: ['proj_third', 'proj_thing'], order: 'manual' as const } : s,
+      ),
+    };
+    const sections = applyInclusion(arranged, withMore, sanitizeAiPlan({ enable: ['proj_second'] }, withMore));
+    expect(sections?.find((s) => s.kind === 'project')?.entries).toEqual(['proj_third', 'proj_thing', 'proj_second']);
+  });
+
+  /*
+   * Entries settle before lines. Every hide ran before every show, so hiding
+   * a line of an entry the same plan shows found the entry off the page and
+   * did nothing — and the entry then arrived with all of its lines, the one
+   * the model had been told was left off among them.
+   */
+  it('hides a line of an entry the same plan shows', () => {
+    const d = store();
+    const withoutAcme = {
+      ...SAMPLE_BASE,
+      sections: SAMPLE_BASE.sections?.map((s) => (s.kind === 'experience' ? { ...s, entries: [], bullets: {} } : s)),
+    };
+    const sections = applyInclusion(withoutAcme, d, sanitizeAiPlan({ enable: ['exp_acme'], disable: ['b_testing'] }, d));
+    const experience = sections?.find((s) => s.kind === 'experience');
+    expect(experience?.entries).toEqual(['exp_acme']);
+    expect(experience?.bullets?.exp_acme).toEqual(['b_pipeline']);
   });
 
   it('leaves the store itself untouched', () => {

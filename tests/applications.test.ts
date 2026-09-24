@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, freshApplicationId, slug, stats } from '../src/model/applications.js';
+import { advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, findDraft, freshApplicationId, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -1493,5 +1493,40 @@ describe('saying what the store no longer has', () => {
   it.skipIf(!latex)('says nothing when the store has everything it asked for', { timeout: 180_000 }, async () => {
     const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'intern' });
     expect(result.missing).toBeUndefined();
+  });
+});
+
+/*
+ * One employer, written two ways.
+ *
+ * A posting names the company in full — "Acme, Inc." — and its form names it
+ * short. Matched on the name as written, the two were two tracker rows and two
+ * workspaces for one job, and the letter written in one was nowhere in the
+ * other. A trailing legal form now names nobody in particular.
+ */
+describe('an employer is the same employer with or without "Inc."', () => {
+  const row = (id: string, company: string) => ({
+    id,
+    company,
+    role: 'Platform Engineer',
+    status: 'applying' as const,
+    appliedAt: '2026-09-01',
+  });
+
+  it('finds the tracker row and the workspace across a legal form', () => {
+    const rows = [row('acme', 'Acme, Inc.')] as Parameters<typeof findApplication>[0];
+    expect(findApplication(rows, 'Acme', 'Platform Engineer')?.id).toBe('acme');
+    expect(findApplication(rows, 'ACME LLC', 'Platform Engineer')?.id).toBe('acme');
+    const drafts = [{ id: 'd1', company: 'Acme', role: 'Platform Engineer', status: 'drafting' }];
+    expect(findDraft(drafts, 'Acme, Inc.', 'Platform Engineer')?.id).toBe('d1');
+    expect(findDraft(drafts, 'Acme Corp.', 'Platform Engineer')?.id).toBe('d1');
+  });
+
+  it('still tells different employers apart', () => {
+    const rows = [row('acme', 'Acme, Inc.')] as Parameters<typeof findApplication>[0];
+    expect(findApplication(rows, 'Acme Labs', 'Platform Engineer')).toBeUndefined();
+    expect(findApplication(rows, 'Northwind, Inc.', 'Platform Engineer')).toBeUndefined();
+    // A name that is only a legal form keeps its word, rather than matching everything.
+    expect(findApplication([row('co', 'Co')] as Parameters<typeof findApplication>[0], 'Acme', 'Platform Engineer')).toBeUndefined();
   });
 });

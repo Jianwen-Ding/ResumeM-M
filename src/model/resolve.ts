@@ -220,10 +220,16 @@ function resolveEntry(
    * order, and a resume that disagrees with the master is one that was
    * dragged and is left exactly as it is.
    */
-  const asked = wantedBullets
+  /*
+   * Each line once. A list is printed as written, so one naming a line twice
+   * — a hand-edited store, which is supported, or one carried over from an
+   * older version — printed it twice.
+   */
+  const listed = wantedBullets ? [...new Set(wantedBullets)] : undefined;
+  const asked = listed
     ? bulletsAreHandOrdered(section, entry.id)
-      ? wantedBullets
-      : orderedBullets(wantedBullets, entry)
+      ? listed
+      : orderedBullets(listed, entry)
     : undefined;
 
   const ordered: Bullet[] = asked
@@ -437,7 +443,8 @@ export function adoptBulletOrder(sections: SectionSpec[], entries: Entry[]): Sec
 }
 
 export function orderedEntries(section: SectionSpec, entries: Entry[]): string[] {
-  const ids = section.entries ?? [];
+  // Each entry once, as with lines and skills: see `listed` in `resolveEntry`.
+  const ids = [...new Set(section.entries ?? [])];
   if (section.order !== 'newest' && section.order !== 'oldest') return ids;
 
   const keyOf = (id: string) => {
@@ -511,7 +518,8 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
     const skillGroups: ResolvedSection['skillGroups'] = [];
 
     if (section.kind === 'skills') {
-      for (const gid of section.groups ?? []) {
+      // Each group once, like everything else a list names.
+      for (const gid of new Set(section.groups ?? [])) {
         const group = data.skillGroups.find((g) => g.id === gid);
         if (!group) {
           /*
@@ -537,7 +545,8 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
          * nothing anywhere saying so.
          */
         const items: string[] = [];
-        for (const iid of wanted ?? group.items.map((i) => i.id)) {
+        // Each skill once; see `listed` in `resolveEntry`.
+        for (const iid of new Set(wanted ?? group.items.map((i) => i.id))) {
           const item = group.items.find((i) => i.id === iid);
           if (!item || !item.text) {
             note('skill', iid, `Skills group "${group.name}" no longer has the skill "${iid}", so it was left off.`);

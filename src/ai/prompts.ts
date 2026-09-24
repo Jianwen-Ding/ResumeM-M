@@ -1,6 +1,7 @@
 import { buildVoiceContext, renderVoiceContext } from './voice.js';
 import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
 import { looksLikeCompanyName } from '../jobs/extract.js';
+import { employerName } from '../model/applications.js';
 import { effortInstruction } from './presets.js';
 import type {
   Bullet,
@@ -102,8 +103,10 @@ function feedbackWorkspaceContext(): string {
     'You are working in ResumeM-M, which automatically compiles smaller, tailored resumes',
     '(sub-resumes) from a larger master inventory in the active save folder.',
     'The master is the shared source of experience, education, projects, skills, and alternate phrasings.',
-    'Each sub-resume selects entries, bullets, skill items, and wording variants; it can inherit choices',
-    'from a base resume. Shared source edits flow through to every resume that references them.',
+    'Each sub-resume selects entries, bullets, skill items, and wording variants, and stands alone: one',
+    'made from a base is a copy, so changing its selections never changes the base, or the reverse.',
+    'Shared source edits (the text of an entry, a bullet or a skill) flow through to every resume that',
+    'references them.',
     'Alternate phrasings of the same bullet are choices, not separate achievements printed together.',
     'Distinguish advice about improving the shared source from advice about selecting content for one',
     'submission. Hiding something on a tailored resume does not require deleting it from the master.',
@@ -266,13 +269,15 @@ function priorWorkIndex(data: StoreData, { question, job }: PriorWork): string {
   const lines = ['## What they have written before', ''];
 
   if (letters.length > 0) {
-    const here = (job?.company ?? '').toLowerCase();
+    // One employer however it is written — see `employerName`.
+    const who = (name?: string) => employerName(name ?? '').toLowerCase();
+    const here = who(job?.company);
     // The same employer first, for the same reason the picker does it: the
     // most useful letter to start from is the one they sent these people.
     const ranked = here
       ? [...letters].sort(
           (a, b) =>
-            Number((b.company ?? '').toLowerCase() === here) - Number((a.company ?? '').toLowerCase() === here),
+            Number(who(b.company) === here) - Number(who(a.company) === here),
         )
       : letters;
     lines.push(`${plural(letters.length, 'cover letter')}, most recent first:`);
@@ -853,8 +858,22 @@ function companyLine(company?: string): string {
   return `Company: ${name}  (scraped from the page; not a usable company name — see above)`;
 }
 
+/**
+ * The box's own limit, in words the model can plan to.
+ *
+ * Only a real `maxlength`: the form refuses anything over it on submit, and a
+ * limit the page never states is not one to invent.
+ */
+export function limitLine(limit?: number): string[] {
+  if (!limit || !Number.isFinite(limit) || limit <= 0) return [];
+  return [
+    `The box takes at most ${limit} characters, spaces included, and the form refuses anything longer.`,
+    'Stay inside it with room to spare; do not write to the limit and trim.',
+  ];
+}
+
 /** Answer an application question, reusing a previous answer where one fits. */
-export function answerPrompt(data: StoreData, question: string, job?: TailorContext): string {
+export function answerPrompt(data: StoreData, question: string, job?: TailorContext, limit?: number): string {
   return [
     preamble(data),
     '',
@@ -862,6 +881,7 @@ export function answerPrompt(data: StoreData, question: string, job?: TailorCont
     'Answer the question below in the voice described above, and write nothing else.',
     '',
     ...outputContract('answer'),
+    ...limitLine(limit),
     '',
     '### What the answer does',
     '- Answers the question that was asked, first and directly. Not the question',

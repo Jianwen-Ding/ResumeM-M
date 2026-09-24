@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
+import { ignoreBrokenPipe } from './cli-io.js';
 import { Repo, cloneRepo } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
@@ -15,6 +16,11 @@ import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
+
+// Every command here prints as it goes rather than buffering everything up
+// front, so every command can meet a reader that stops early. See cli-io.ts.
+ignoreBrokenPipe(process.stdout);
+ignoreBrokenPipe(process.stderr);
 
 const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url)));
 /*
@@ -134,6 +140,27 @@ const TAKES: Record<string, { value?: string[]; bare?: string[] }> = {
   serve: { value: ['port'] },
 };
 
+/** The flags whose value is free text, and so may legitimately begin with a dash. */
+const FREE_TEXT = new Set(['m', 'message', 'focus']);
+
+/** Every command there is, for telling an unknown one from a known one given a stray flag. */
+const COMMANDS = new Set([...WORKS_IN_A_STORE, 'clone', 'help', '--help', '-h']);
+
+/**
+ * `--data` before the command, moved after it.
+ *
+ * `--data` belongs to every command, and every tool with a flag like that —
+ * git's `-C`, docker's `--context` — takes it before the command as readily as
+ * after. `rmm --data ~/saves/work list` was read as the command `--data` and
+ * refused as unknown, though the folder had been read correctly all along.
+ */
+export function commandFirst(argv: string[]): string[] {
+  const [first, second, ...rest] = argv;
+  if (first === '--data' && second !== undefined) return [...rest.slice(0, 1), '--data', second, ...rest.slice(1)];
+  if (first?.startsWith('--data=') && second !== undefined) return [second, first, ...rest];
+  return argv;
+}
+
 /** The first flag this command does not take, with what it does take. */
 function unknownFlag(command: string, rest: string[]): string | null {
   const spec = TAKES[command] ?? {};
@@ -156,15 +183,28 @@ function unknownFlag(command: string, rest: string[]): string | null {
    * dash, because a commit message is free text and free text may begin with
    * one. `--push` after `-m` is a mistake; `--not-a-flag` is a message.
    */
-  const stolenFlag = (next: string | undefined): boolean => {
+  const stolenFlag = (flag: string, next: string | undefined): boolean => {
     if (!next?.startsWith('--') || next === '--') return false;
     const n = next.slice(2).split('=')[0] ?? '';
-    return value.has(n) || bare.has(n);
+    if (value.has(n) || bare.has(n)) return true;
+    /*
+     * And any `--` at all after a flag whose value can never begin with one.
+     *
+     * The rule above is right for free text and only for free text: a commit
+     * message or a feedback focus may start with a dash. A folder, a port, a
+     * url, a company or a role does not. Judged only against this command's
+     * own flags, `rmm list --data --foo` — a mistyped flag straight after
+     * `--data` — took `--foo` as the folder, created it, filled it with the
+     * bundled example, and listed those resumes as though they were yours.
+     */
+    return !FREE_TEXT.has(flag.replace(/^--?/, '').split('=')[0] ?? '');
   };
   const noValue = (flag: string, next: string): string => {
     const spelled = flag === '-m' ? '--message' : flag;
+    const n = next.slice(2).split('=')[0] ?? '';
+    const what = value.has(n) || bare.has(n) ? `another flag \`rmm ${command}\` takes` : 'a flag, not a value';
     return (
-      `${flag} was given ${next} as its value, but ${next} is another flag \`rmm ${command}\` takes — ` +
+      `${flag} was given ${next} as its value, but ${next} is ${what} — ` +
       `so ${flag} has no value. Put the value after ${flag}, or write ${spelled}=${next} if that really is the value.`
     );
   };
@@ -191,7 +231,7 @@ function unknownFlag(command: string, rest: string[]): string | null {
     if (token === '--') break; // everything after it is a value, by convention
     if (token === '-m' && value.has('m')) {
       if (rest[i + 1] === undefined || rest[i + 1] === '') return nothingAfter('-m');
-      if (stolenFlag(rest[i + 1])) return noValue('-m', rest[i + 1]!);
+      if (stolenFlag('-m', rest[i + 1])) return noValue('-m', rest[i + 1]!);
       i++;
       continue;
     }
@@ -203,7 +243,7 @@ function unknownFlag(command: string, rest: string[]): string | null {
         continue;
       }
       if (rest[i + 1] === undefined || rest[i + 1] === '') return nothingAfter(token);
-      if (stolenFlag(rest[i + 1])) return noValue(token, rest[i + 1]!);
+      if (stolenFlag(token, rest[i + 1])) return noValue(token, rest[i + 1]!);
       i++; // its value is not a flag
       continue;
     }
@@ -356,7 +396,14 @@ function fmtFit(r: { pages: number; fits: boolean; overflowPt: number; overflowL
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
 
-  const wrong = command && !['help', '--help', '-h'].includes(command) ? unknownFlag(command, rest) : null;
+  /*
+   * Only for a command that exists. An unknown one given a stray flag was told
+   * `rmm bogus` takes only `--data` — which is to say it was told `rmm bogus`
+   * is a command — when the one useful thing to say is that it is not. The
+   * switch below says that, with the usage.
+   */
+  const wrong =
+    command && COMMANDS.has(command) && !['help', '--help', '-h'].includes(command) ? unknownFlag(command, rest) : null;
   if (wrong) {
     console.error(wrong);
     return 1;
@@ -742,15 +789,17 @@ async function main(argv: string[]): Promise<number> {
  * `unknownFlag` is the same call `main` makes, on the same arguments. Running
  * it twice costs nothing; running it too late cost a folder.
  */
+const ARGV = commandFirst(process.argv.slice(2));
 {
-  const command = process.argv[2] ?? '';
-  const refused = ['help', '--help', '-h'].includes(command) ? null : unknownFlag(command, process.argv.slice(3));
+  const command = ARGV[0] ?? '';
+  const refused =
+    ['help', '--help', '-h'].includes(command) || !COMMANDS.has(command) ? null : unknownFlag(command, ARGV.slice(1));
   if (!refused && WORKS_IN_A_STORE.has(command) && seedStore(path.join(projectRoot, 'data'), dataDir)) {
     console.error(`Started a new save at ${dataDir}, from the bundled example — there was nothing there.`);
   }
 }
 
-main(process.argv.slice(2))
+main(ARGV)
   .then((code) => {
     if (code !== 0) process.exitCode = code;
   })

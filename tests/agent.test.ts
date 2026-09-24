@@ -958,3 +958,37 @@ describe('telling someone which part of their AI setting is wrong', () => {
     }
   });
 });
+
+/*
+ * The last door every prompt goes through.
+ *
+ * Identifiers are refused at the answer bank and redacted as a file is read,
+ * but a prompt is assembled from many places — the corpus, the drafts, the
+ * posting — and anything that reached the store before those guards existed
+ * is still there. So the prompt is redacted once more on its way out, whatever
+ * it was built from, and whatever the AI is switched on or off.
+ */
+describe('a prompt never leaves with an identifier in it', () => {
+  it('redacts an SSN, a card number and a labelled date of birth before the run', async () => {
+    const echo = config({
+      enabled: true,
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write(process.argv.slice(1).join(" "))', '{promptText}'],
+      timeoutMs: 10_000,
+    });
+    const prompt = 'Write a letter. Notes: SSN 123-45-6789, card 4111 1111 1111 1111, Date of birth: 02/03/1999. Phone 617-555-0100.';
+    const run = await runAgent(echo, prompt);
+    expect(run.output).not.toContain('123-45-6789');
+    expect(run.output).not.toContain('4111 1111 1111 1111');
+    expect(run.output).not.toContain('02/03/1999');
+    expect(run.output).toContain('617-555-0100');
+    expect(run.output).toContain('Write a letter.');
+  });
+
+  it('and the copy handed back when the AI is off is redacted too', async () => {
+    const off = config({ enabled: false });
+    const run = await runAgent(off, 'Answer this: my SSN is 123-45-6789.');
+    expect(run.executed).toBe(false);
+    expect(run.output).not.toContain('123-45-6789');
+  });
+});

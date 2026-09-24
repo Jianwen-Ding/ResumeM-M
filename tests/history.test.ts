@@ -356,6 +356,45 @@ describe('POST /store/save', () => {
   });
 });
 
+describe('workspace and application writes stay in the version history', () => {
+  /*
+   * Opening a workspace commits the draft, then — a moment later, once the
+   * tracker row is read back off disk — writes the application it starts or
+   * advances. That second write used to happen bare: on disk immediately, and
+   * never committed on its own, so a save left running is a save whose
+   * tracker has quietly stopped being recoverable.
+   */
+  /*
+   * In one commit, not two. A commit of its own kept the row in the history
+   * but made every workspace opened cost a second git run, which under load
+   * delayed the very draft it opens.
+   */
+  const commitCount = async () => (await request(app).get('/api/history').expect(200)).body.commits.length as number;
+
+  it('commits the application row a new workspace opens, with the draft, in one commit', async () => {
+    const before = await commitCount();
+    await request(app).post('/api/workspace').send({ company: 'Acme', role: 'Engineer' }).expect(200);
+
+    const after = (await request(app).get('/api/config/store').expect(200)).body;
+    expect(after.pending).toEqual([]);
+    expect(await commitCount()).toBe(before + 1);
+  });
+
+  /*
+   * The other half of the same bug: marking a workspace submitted, once the
+   * application it belongs to has already gone out and been committed.
+   */
+  it('commits a workspace being marked submitted when the application is sent', async () => {
+    await request(app).post('/api/workspace').send({ company: 'Globex', role: 'Analyst' }).expect(200);
+    const before = await commitCount();
+    await request(app).post('/api/extension/sent').send({ company: 'Globex', role: 'Analyst' }).expect(200);
+
+    const after = (await request(app).get('/api/config/store').expect(200)).body;
+    expect(after.pending).toEqual([]);
+    expect(await commitCount()).toBe(before + 1);
+  });
+});
+
 describe('restoring a version', () => {
   it('rolls the resume back to what that version said', async () => {
     const first = await history();

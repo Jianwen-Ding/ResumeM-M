@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { inlineTex, renderLatex, tex, texHref } from '../src/render/latex.js';
+import { compileResume } from '../src/render/compile.js';
 import { DEFAULT_LAYOUT, type ResolvedResume } from '../src/model/types.js';
+import { hasLatex } from './helpers.js';
 
 describe('escaping', () => {
   it('escapes the characters that would otherwise be LaTeX syntax', () => {
@@ -149,8 +154,15 @@ describe('a link target', () => {
     expect(texHref('https://github.com/someone/a_project')).toBe('https://github.com/someone/a_project');
   });
 
+  /*
+   * `&` escaped as well. hyperref takes `\&` as a plain ampersand in the
+   * target, and a bare one is an alignment tab wherever the link has already
+   * been read as a macro argument — which an entry title always has, inside
+   * `\resumeSubheading`'s table. One query string in a linked title and no
+   * PDF was produced at all: "Argument of \href@split has an extra }".
+   */
   it('keeps a fragment and a query working', () => {
-    expect(texHref('https://x.example/p?a=1&b=2#top')).toBe('https://x.example/p?a=1&b=2\\#top');
+    expect(texHref('https://x.example/p?a=1&b=2#top')).toBe('https://x.example/p?a=1\\&b=2\\#top');
   });
 
   it('percent-encodes the three characters TeX reads first', () => {
@@ -325,4 +337,21 @@ describe('document generation', () => {
     );
     expect(out).not.toContain('\\section{Experience}');
   });
+});
+
+describe.runIf(await hasLatex())('a link with a query string, compiled', () => {
+  it('builds with one in an entry title and one in a bullet', async () => {
+    const r = resume();
+    const entry = r.sections[0]!.entries[0]!;
+    entry.title = '[Acme](https://acme.example/jobs?team=infra&level=2)';
+    entry.bullets[0]!.text = 'Wrote [the post](https://blog.example/?a=1&b=2) about it';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-href-'));
+    try {
+      const pdfPath = path.join(dir, 'out.pdf');
+      await compileResume(r, { pdfPath });
+      expect(fs.existsSync(pdfPath)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
