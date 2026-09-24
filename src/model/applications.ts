@@ -469,6 +469,60 @@ export function findDraft<T extends { id: string; company: string; role: string;
   return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
 }
 
+/**
+ * The workspace a job should be written in now, leaving out any that belong
+ * to an application that is over.
+ *
+ * `findDraft` answers by name alone, and a sent space is kept for a fortnight
+ * after its last keystroke — longer than most rejections take to arrive. So a
+ * job turned down on Monday and reposted on Wednesday still had its old space,
+ * `findDraft` handed it back, and `POST /workspace` took that space's id for
+ * the new attempt. The id is the rejected application's, `findApplication`
+ * rightly found no live row, and the "new" row was written with
+ * `upsertApplication` — which replaces by id. Measured through the routes:
+ * `closed` with three lines of history became `applying` with one, the
+ * rejection note and the snapshot folder's address gone, and the fresh space
+ * opened as `submitted`, holding the old letter and the old answers, for an
+ * application nobody had sent.
+ *
+ * Over means what it means to `findApplication`: the space's own row is
+ * closed, and not closed only for being left alone. A sent space with no row
+ * of its own counts as over too when every row this job has is finished — it
+ * was sent, and the send it was for is behind it.
+ */
+export function draftForJob<T extends { id: string; company: string; role: string; status: string; updatedAt?: string }>(
+  drafts: T[],
+  apps: Application[],
+  company: string,
+  role: string,
+): T | undefined {
+  const live = findApplication(apps, company, role);
+  const over = (d: T): boolean => {
+    const row = apps.find((a) => a.id === d.id);
+    if (row) return row.status === 'closed' && !closedAsStale(row);
+    return d.status === 'submitted' && !live && Boolean(alreadySent(apps, company, role));
+  };
+  return findDraft(
+    drafts.filter((d) => !over(d)),
+    company,
+    role,
+  );
+}
+
+/**
+ * Whether the application being worked on now has gone out.
+ *
+ * `alreadySent` is the question a person asks in front of a posting — "have
+ * I ever sent this one" — and a rejection from March answers yes. That is the
+ * wrong question for opening a space: a space for the repost opened as
+ * `submitted` because of the rejection, and sat under the sent ones in the
+ * Workspace while it was being written. This asks it of the live row only.
+ */
+export function liveOneSent(apps: Application[], company: string, role: string): boolean {
+  const live = findApplication(apps, company, role);
+  return Boolean(live) && live!.status !== 'interested' && live!.status !== 'applying' && !closedAsStale(live!);
+}
+
 export interface BundleRequest {
   company: string;
   role: string;

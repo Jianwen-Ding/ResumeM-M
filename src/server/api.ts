@@ -41,7 +41,7 @@ import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder 
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, closedAsStale, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { advance, alreadySent, buildBundle, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -3010,7 +3010,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           job.company && job.title
             ? {
                 id:
-                  findDraft(store.loadDrafts(), job.company, job.title)?.id ??
+                  // Not a space left over from an application that is over:
+                  // see `draftForJob`.
+                  draftForJob(store.loadDrafts(), data.applications, job.company, job.title)?.id ??
                   findApplication(data.applications, job.company, job.title)?.id ??
                   freshApplicationId(data.applications, job.company, job.title),
               }
@@ -3818,8 +3820,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * every other path uses it — apply, be turned down, and apply again to
        * the repost the same day, and today's id is already taken.
        */
+      /*
+       * And never a space that belongs to an application already over — see
+       * `draftForJob`. Its id is that application's, and the row written
+       * under it below replaced the rejection with the repost.
+       */
       const id =
-        findDraft(store.loadDrafts(), body.company, body.role)?.id ??
+        draftForJob(store.loadDrafts(), data.applications, body.company, body.role)?.id ??
         findApplication(data.applications, body.company, body.role)?.id ??
         freshApplicationId(data.applications, body.company, body.role);
 
@@ -3919,13 +3926,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          *
          * Read off the tracker rather than remembered, so the two lists cannot
          * disagree about the same job whichever of them was written first.
-         * `alreadySent` covers everything past `applying`, because an
-         * application at `interviewing` went out too.
+         * `liveOneSent` covers everything past `applying`, because an
+         * application at `interviewing` went out too — but only of the
+         * application still live. `alreadySent` counted a rejection from
+         * March, so the space for the repost opened as sent.
          */
         status:
           existing?.status === 'submitted'
             ? 'submitted'
-            : alreadySent(data.applications, body.company, body.role)
+            : liveOneSent(data.applications, body.company, body.role)
               ? 'submitted'
               : (existing?.status ?? 'drafting'),
         coverLetter: existing?.coverLetter ?? {
@@ -4062,7 +4071,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * its own commit callback, synchronously too, so one of the two always
          * sees the other.
          */
-        if (draft.status !== 'submitted' && alreadySent(store.load().applications, draft.company, draft.role)) {
+        if (draft.status !== 'submitted' && liveOneSent(store.load().applications, draft.company, draft.role)) {
           draft.status = 'submitted';
         }
         const written = store.saveDraft(draft);

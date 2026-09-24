@@ -2428,6 +2428,34 @@ describe('workspace', () => {
     expect(mine[0].status).toBe('applied');
   });
 
+  /*
+   * Turned down, and the job reposted while the old space is still kept.
+   *
+   * A sent space stays for a fortnight, and a rejection usually arrives
+   * inside that. The old space was found by name, its id was the rejected
+   * application's, and the row written for the repost replaced the rejection
+   * outright — `closed` with its "Rejected" line became `applying` with one
+   * line — while the new space opened as `submitted`, for an application
+   * nobody had sent.
+   */
+  it('opens a space of its own for a repost, and leaves the rejection as it was', async () => {
+    const first = await open().expect(200);
+    await request(app).post('/api/extension/sent').send({ company: 'Streamly', role: 'Data Platform Intern' }).expect(200);
+    const was = first.body.draft.id;
+    await request(app).post(`/api/applications/${encodeURIComponent(was)}/status`).send({ status: 'closed', note: 'Rejected' }).expect(200);
+
+    const again = await open({ url: 'https://boards.greenhouse.io/streamly/jobs/2' }).expect(200);
+
+    expect(again.body.draft.id).not.toBe(was);
+    expect(again.body.draft.status).toBe('drafting');
+    const { body } = await request(app).get('/api/applications').expect(200);
+    const rejected = body.applications.find((a: { id: string }) => a.id === was);
+    expect(rejected.status).toBe('closed');
+    expect(rejected.history.at(-1).note).toBe('Rejected');
+    const repost = body.applications.find((a: { id: string }) => a.id === again.body.draft.id);
+    expect(repost).toMatchObject({ status: 'applying', url: 'https://boards.greenhouse.io/streamly/jobs/2' });
+  });
+
   it('pre-fills what the answer bank already covers', async () => {
     const res = await open().expect(200);
     const draft = res.body.draft;
