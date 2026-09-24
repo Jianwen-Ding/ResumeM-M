@@ -1108,10 +1108,11 @@ describe('autofill', () => {
     // A stored resume by name answers the same way, from its own lines.
     const stored = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad' }).expect(200)).body;
     expect(stored.history[0].description).toBe('• Built a pipeline handling 2M events/day\n• Raised coverage from 41% to 88%');
-    // Asked the old way, or about a resume that is not there, there is no history to give.
+    // Asked the old way there is no history to give; about a resume that is
+    // not there, it comes from the save's base (see the education case).
     expect((await request(app).get('/api/autofill').expect(200)).body.history).toEqual([]);
     const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
-    expect(missing.history).toEqual([]);
+    expect(missing.history.map((h: { company: string }) => h.company)).toEqual(['Acme Co.']);
     expect(missing.fields.graduation_date).toBe('May 2026');
   });
 
@@ -1165,13 +1166,26 @@ describe('autofill', () => {
     // The fields are the newest one's, and only the newest one's.
     expect(sent.fields.degree).toBe('Master of Science');
 
-    // A stored resume listing one school answers one; asked the old way, or
-    // about a resume that is not there, there are none to give.
+    // A stored resume listing one school answers one; asked the old way
+    // there are none to give.
     const stored = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad' }).expect(200)).body;
     expect(stored.education.map((e: { school: string }) => e.school)).toEqual(['Northeastern University']);
     expect((await request(app).get('/api/autofill').expect(200)).body.education).toEqual([]);
+  });
+
+  /*
+   * Naming no resume, or one that is gone, is answered from the save's own
+   * base. Autofill pressed on a form the card never built for, with nothing
+   * picked in the popup, was given the profile and no resume at all — the
+   * School filled from the profile, and every date and every second school
+   * left empty with nothing said.
+   */
+  it('answers from the save’s base when no resume, or a missing one, is named', async () => {
+    const none = (await request(app).post('/api/autofill').send({}).expect(200)).body;
+    expect(none.education.map((e: { school: string }) => e.school)).toEqual(['Northeastern University']);
+    expect(none.education[0].start).toEqual({ year: 2022, month: 9 });
     const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
-    expect(missing.education).toEqual([]);
+    expect(missing.education).toEqual(none.education);
   });
 
   /*

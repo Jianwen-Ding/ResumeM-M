@@ -3229,7 +3229,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/autofill',
     handler(async (req, res) => {
       const data = store.load();
-      const body = (req.body ?? {}) as { resumeId?: unknown; spec?: unknown; choices?: unknown };
+      const asked = (req.body ?? {}) as { resumeId?: unknown; spec?: unknown; choices?: unknown };
+      /*
+       * And, naming none, the resume this save starts from.
+       *
+       * Autofill pressed on a form the card never built a resume for, with no
+       * resume picked in the popup, asked with nothing named — and was given
+       * the profile and no resume at all, so no schools and no jobs: a
+       * Greenhouse form got its School from the profile and every date, and
+       * every second school, left empty, with nothing said. A resume named
+       * that is no longer here goes the same way. The save's own base is what
+       * "my resume" means when nobody said which.
+       */
+      const named =
+        (asked.spec && typeof asked.spec === 'object') ||
+        (typeof asked.resumeId === 'string' && data.resumes.some((r) => r.id === asked.resumeId));
+      const body = named ? asked : { ...asked, spec: undefined, resumeId: defaultBaseId(data.resumes) };
       let resume: ResolvedResume | undefined;
       if (body.spec || body.resumeId) {
         try {
