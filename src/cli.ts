@@ -12,6 +12,7 @@ import { findProjectRoot, resolveStoreDir, seedStore } from './model/location.js
 import { buildBundle, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
+import { currentIgnore } from './model/current.js';
 import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { WritingSample } from './model/types.js';
@@ -410,7 +411,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const store = new Store(dataDir);
-  const repo = Repo.forStore(dataDir);
+  const repo = Repo.forStore(dataDir, () => currentIgnore(store));
 
   switch (command) {
     case 'list': {

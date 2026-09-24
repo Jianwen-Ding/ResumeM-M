@@ -612,3 +612,64 @@ describe('folders that exist only between two renames', () => {
   });
 });
 
+/*
+ * The flat folder of files being sent is rebuilt from the tracker whenever
+ * anything changes, and `git add -- .` walking it mid-rebuild failed the whole
+ * add — "unable to stat 'out/current/Jianwen-Ding-Resume.pdf'", twelve times
+ * on one test server in a single sweep, each one a save the version history
+ * silently never recorded.
+ */
+describe('a folder that is rebuilt rather than written', () => {
+  const current = () => path.join(root, 'out', 'current');
+
+  beforeEach(() => {
+    fs.mkdirSync(current(), { recursive: true });
+    fs.writeFileSync(path.join(current(), 'Test-Person-Resume.pdf'), '%PDF-1.4');
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Test Person\n');
+  });
+
+  it('is not committed, and not walked', async () => {
+    const repo = new Repo(root, ['.'], () => ['/out/current/']);
+    await repo.ensure();
+    await repo.commitAll('Save the profile');
+    const tracked = git(['ls-files']).split('\n').filter(Boolean);
+    expect(tracked).toContain('profile.yaml');
+    expect(tracked.some((f) => f.startsWith('out/current/'))).toBe(false);
+    expect(git(['status', '--porcelain', '--untracked-files=all'])).not.toContain('out/current');
+    expect(fs.readFileSync(path.join(root, '.gitignore'), 'utf8')).toContain('/out/current/');
+  });
+
+  /*
+   * `.gitignore` says nothing about a file git already tracks, and a save
+   * written before this has the folder in its history — so it would still be
+   * walked, and the race kept. Taken out of the index once; left on disk.
+   */
+  it('is taken out of the history of a save that already has it, and left on disk', async () => {
+    const before = new Repo(root);
+    await before.ensure();
+    await before.commitAll('Written before the folder was ignored');
+    expect(git(['ls-files']).split('\n')).toContain('out/current/Test-Person-Resume.pdf');
+
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Someone Else\n');
+    const repo = new Repo(root, ['.'], () => ['/out/current/']);
+    await repo.commitAll('Rename');
+    expect(git(['ls-files']).split('\n').some((f) => f.startsWith('out/current/'))).toBe(false);
+    expect(fs.existsSync(path.join(current(), 'Test-Person-Resume.pdf'))).toBe(true);
+    expect(repo.lastCommitError).toBeUndefined();
+    // The rename is in the same commit, as a save with nothing else to say.
+    expect(git(['show', '--stat', '--format=%s', 'HEAD'])).toContain('profile.yaml');
+  });
+
+  it('follows the output folder when it moves', async () => {
+    let where = ['/out/current/'];
+    const repo = new Repo(root, ['.'], () => where);
+    await repo.ensure();
+    await repo.commitAll('First');
+    where = ['/built/current/'];
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Again\n');
+    await repo.commitAll('Second');
+    const ignores = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+    expect(ignores).toContain('/out/current/');
+    expect(ignores).toContain('/built/current/');
+  });
+});

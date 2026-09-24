@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { Repo, cloneRepo } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
+import { currentIgnore } from '../model/current.js';
 import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
 import { sweepTemporary } from './sweep.js';
 import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
@@ -35,7 +36,7 @@ const isSave = (dir: string) =>
 const existingStore = (dir: string): string | undefined => (isSave(dir) ? dir : undefined);
 
 function projectSession(store: Store) {
-  const repo = Repo.forStore(store.root);
+  const repo = Repo.forStore(store.root, () => currentIgnore(store));
   const assets = new Assets(store, repo);
   const jobs = new Jobs();
 

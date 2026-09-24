@@ -64,7 +64,17 @@ export class Repo {
    */
   lastCommitError?: { message: string; at: string };
 
-  constructor(root: string, scope: string[] = ['.']) {
+  constructor(
+    root: string,
+    scope: string[] = ['.'],
+    /**
+     * Folders inside the save that are rebuilt rather than written, and so
+     * are nothing to keep a history of — see `currentIgnore`. Asked at each
+     * commit, because where the output folder is can change under a running
+     * server.
+     */
+    private readonly rebuilt: () => string[] = () => [],
+  ) {
     this.root = path.resolve(root);
     this.scope = scope.length > 0 ? scope : ['.'];
   }
@@ -78,8 +88,8 @@ export class Repo {
    * tool's code, and it is the thing you might one day push to a private
    * GitHub repo. Sharing a repo with the source would entangle all three.
    */
-  static forStore(storeDir: string): Repo {
-    return new Repo(path.resolve(storeDir), ['.']);
+  static forStore(storeDir: string, rebuilt?: () => string[]): Repo {
+    return new Repo(path.resolve(storeDir), ['.'], rebuilt);
   }
 
   private async git(args: string[]): Promise<string> {
@@ -214,8 +224,8 @@ export class Repo {
    */
   private static readonly IGNORED = ['.rmm-building-*/', '.rmm-*.tmp'];
 
-  /** Written once per process per store; see `IGNORED`. */
-  private ignoresWritten = false;
+  /** What was last made sure of, per process per store; see `IGNORED`. */
+  private ignoresWrittenFor: string | null = null;
 
   /**
    * Make sure the store's `.gitignore` carries what it has to, without
@@ -225,31 +235,52 @@ export class Repo {
    * runs when a repository is being created and the stores that need this
    * most are the ones that already exist. Appending, never rewriting: this
    * file belongs to whoever opened the store.
+   *
+   * Returns whether it wrote, and the rebuilt folders it has just started
+   * ignoring — which may already be in the history, and `.gitignore` says
+   * nothing about a file git already tracks.
    */
-  private ensureIgnores(): boolean {
-    if (this.ignoresWritten) return false;
-    this.ignoresWritten = true;
+  private ensureIgnores(): { wrote: boolean; untrack: string[] } {
+    const rebuilt = this.rebuilt();
+    const wanted = [...Repo.IGNORED, ...rebuilt];
+    const key = wanted.join('\n');
+    if (this.ignoresWrittenFor === key) return { wrote: false, untrack: [] };
+    this.ignoresWrittenFor = key;
     try {
       const at = path.join(this.root, '.gitignore');
       const had = fs.existsSync(at) ? fs.readFileSync(at, 'utf8') : '';
       const lines = had.split('\n').map((l) => l.trim());
-      const missing = Repo.IGNORED.filter((p) => !lines.includes(p));
-      if (missing.length === 0) return false;
+      const missing = wanted.filter((p) => !lines.includes(p));
+      if (missing.length === 0) return { wrote: false, untrack: [] };
 
-      const block = ['# ResumeM-M: files that exist for the length of one rename.', ...missing].join('\n');
-      const body = had && !had.endsWith('\n') ? `${had}\n${block}\n` : `${had}${block}\n`;
+      const temporary = missing.filter((p) => Repo.IGNORED.includes(p));
+      const derived = missing.filter((p) => !Repo.IGNORED.includes(p));
+      const blocks = [
+        ...(temporary.length ? ['# ResumeM-M: files that exist for the length of one rename.', ...temporary] : []),
+        ...(derived.length ? ['# ResumeM-M: rebuilt whenever anything changes, so nothing to keep a history of.', ...derived] : []),
+      ].join('\n');
+      const body = had && !had.endsWith('\n') ? `${had}\n${blocks}\n` : `${had}${blocks}\n`;
       fs.writeFileSync(at, body, 'utf8');
-      return true;
+      return { wrote: true, untrack: derived.map((p) => p.replace(/^\/+|\/+$/g, '')) };
     } catch {
       // A store whose .gitignore cannot be written still commits; it just
       // keeps the race this was for. Not a reason to refuse the save.
-      return false;
+      return { wrote: false, untrack: [] };
     }
   }
 
   private async commitNow(message: string, paths?: string[]): Promise<string | undefined> {
     if (!(await this.isRepo())) return undefined;
-    const wroteIgnores = this.ensureIgnores();
+    const { wrote: wroteIgnores, untrack } = this.ensureIgnores();
+    /*
+     * And out of the index, where a store written before the folder was
+     * ignored has it already: an ignored file git tracks is still walked by
+     * the add below, which is the race all over again. The files stay on
+     * disk; the next commit records only that they are no longer followed.
+     */
+    for (const folder of untrack) {
+      await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]).catch(() => undefined);
+    }
     const targets = paths ?? this.scope;
     await this.git(['add', '--', ...targets]);
 
