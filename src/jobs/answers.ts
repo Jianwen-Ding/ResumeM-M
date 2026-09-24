@@ -445,10 +445,10 @@ function mentions(text: string, name: string): boolean {
 
 /*
  * Labels the tools give an answer themselves, which name no one: the server's
- * "Saved", the extension's "Chosen on a form", the seed bank's "Generic (edit
- * per company)".
+ * "Saved", the extension's "Chosen on a form" and "Typed on a form", the seed
+ * bank's "Generic (edit per company)".
  */
-const TOOL_LABEL = /^(saved|chosen on a form|generic\b.*|default|base)$/i;
+const TOOL_LABEL = /^(saved|chosen on a form|typed on a form|generic\b.*|default|base)$/i;
 
 /**
  * Every employer the bank has written an answer for.

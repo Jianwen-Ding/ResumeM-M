@@ -724,6 +724,27 @@ describe('a label that is not an employer', () => {
     expect(heard.namesAnother).toBeUndefined();
   });
 
+  /*
+   * The extension keeps what was typed on a form under "Typed on a form", as
+   * it keeps what was chosen under "Chosen on a form". An answer that happens
+   * to say those words — "I typed on a form at the career fair" — is not an
+   * answer written for an employer by that name.
+   */
+  it('nor the label the extension gives an answer typed on a form', () => {
+    const typed: AnswerBankItem[] = [
+      ...bank,
+      {
+        id: 'ans_start',
+        question: 'Earliest start date',
+        default: 'v_1',
+        variants: [{ id: 'v_1', label: 'Typed on a form', text: 'Two weeks after an offer, as typed on a form last spring' }],
+      },
+    ];
+    const start = matchAnswer('Earliest start date', typed, { company: 'Helios' });
+    expect(start.namesAnother).toBeUndefined();
+    expect(start.confident).toBe(true);
+  });
+
   it('while a company label still vetoes an answer that names that company', () => {
     const withAcme: AnswerBankItem[] = [
       ...bank,
