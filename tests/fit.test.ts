@@ -157,14 +157,41 @@ describe('which of them is worth marking', () => {
     expect([...recommend(tied)].sort()).toEqual(['a', 'b']);
   });
 
-  it('never marks more than three, however many are level', () => {
+  /*
+   * And never some of them. Taking the first three of ten equals is choosing
+   * between equals by the order they were written — the same invented
+   * difference, three times over — so where the mark cannot go on every one
+   * of them it goes on none.
+   */
+  it('never marks more than three, and marks none of ten equals rather than three of them', () => {
     const many = Array.from({ length: 30 }, (_, i) => ({
       id: `r${i}`,
       hits: i < 10 ? 8 : 0,
       because: [],
       share: i < 10 ? 0.8 : 0,
     }));
-    expect(recommend(many).size).toBe(3);
+    expect(recommend(many).size).toBe(0);
+    // Three level at the top still fit, and all three are marked.
+    const three = many.map((f, i) => (i < 10 && i >= 3 ? { ...f, hits: 1, share: 0.1 } : f));
+    expect([...recommend(three)].sort()).toEqual(['r0', 'r1', 'r2']);
+  });
+
+  /*
+   * The reported shape: a store of five, where only one may be marked, and
+   * two resumes built for postings level at the top. The star went to the
+   * first of the two in the order they were written.
+   */
+  it('marks neither of two equals when there is room to mark only one', () => {
+    const five = [
+      { id: 'helios', hits: 9, because: [], share: 0.5 },
+      { id: 'other', hits: 9, because: [], share: 0.5 },
+      { id: 'base', hits: 7, because: [], share: 0.4 },
+      { id: 'intern', hits: 6, because: [], share: 0.3 },
+      { id: 'newgrad', hits: 6, because: [], share: 0.3 },
+    ];
+    expect([...recommend(five)]).toEqual([]);
+    // And the one clearly ahead in the same store is still marked.
+    expect([...recommend(five.map((f) => (f.id === 'other' ? { ...f, hits: 5 } : f)))]).toEqual(['helios']);
   });
 
   it('marks nothing at all for an empty store', () => {

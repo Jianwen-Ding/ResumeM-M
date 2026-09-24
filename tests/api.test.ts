@@ -831,6 +831,79 @@ describe('job analysis', () => {
   }, 60_000);
 
   /*
+   * The base's skills print in its own list's order. An AI run that narrowed
+   * the list handed back the store's order, so "Go, Python" came out
+   * "Python, Go" on a resume nobody had asked to rearrange.
+   */
+  /*
+   * Reported: the posting asked for x86_64, which the applicant has, and
+   * nothing switched — the posting's keywords came from a fixed vocabulary
+   * that has no x86 in it.
+   */
+  it('reads the posting for the terms the applicant has, and offers the skill it names', async () => {
+    const data = t.store.load();
+    const group = data.skillGroups[0]!;
+    t.store.saveSkillGroups([
+      { ...group, items: [...group.items, { id: 's_x86', text: 'x86_64', tags: [] }] },
+      ...data.skillGroups.slice(1),
+    ]);
+    const intern = data.resumes.find((r) => r.id === 'intern')!;
+    t.store.saveResume({
+      ...intern,
+      id: 'no-x86',
+      label: 'No x86',
+      sections: [
+        ...(intern.sections ?? []).filter((x) => x.kind !== 'skills'),
+        { kind: 'skills', entries: [], groups: [group.id], items: { [group.id]: group.items.map((i) => i.id) } },
+      ],
+    });
+    const html = JOB_HTML.replace('</body>', '<p>You will write x86-64 assembly for our runtime.</p></body>');
+
+    const res = await request(app).post('/api/extension/analyze').send({ html, baseResumeId: 'no-x86' }).expect(200);
+    expect(res.body.job.keywords).toContain('x86_64');
+    const change = (res.body.skillChanges ?? []).find((c: { groupId: string }) => c.groupId === group.id);
+    expect(change?.to).toContain('s_x86');
+    expect(change?.from).not.toContain('s_x86');
+  });
+
+  it('narrows skills the AI picks without reordering the base', async () => {
+    const fake = path.join(t.dir, 'codex');
+    fs.writeFileSync(
+      fake,
+      [
+        '#!/usr/bin/env node',
+        'const prompt = process.argv.slice(2).join(" ");',
+        'if (/tools under/.test(prompt)) process.stdout.write("I do not have any tools named resume.");',
+        'else process.stdout.write(JSON.stringify({ skills: { sk_lang: ["s_py", "s_go"] }, reasoning: "narrowed" }));',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    fs.chmodSync(fake, 0o755);
+    const config = t.store.loadConfig();
+    t.store.saveConfig({ ...config, ai: { ...config.ai, enabled: true, command: fake, args: ['{promptText}'], timeoutMs: 60_000 } });
+
+    const intern = t.store.load().resumes.find((r) => r.id === 'intern')!;
+    t.store.saveResume({
+      ...intern,
+      id: 'go-first',
+      label: 'Go first',
+      sections: [
+        ...(intern.sections ?? []).filter((s) => s.kind !== 'skills'),
+        { kind: 'skills', entries: [], groups: ['sk_lang'], items: { sk_lang: ['s_go', 's_py', 's_ts'] } },
+      ],
+    });
+
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ html: JOB_HTML, baseResumeId: 'go-first', tailor: 'ai' })
+      .expect(200);
+    expect(res.body.aiUsed).toBe(true);
+    const skills = res.body.spec.sections.find((s: { kind: string }) => s.kind === 'skills');
+    expect(skills.items.sk_lang).toEqual(['s_go', 's_py']);
+  }, 60_000);
+
+  /*
    * Which settings are not the file's to decide, said by the one thing that
    * knows. "Let it look up the company online" writes a tool list, and only
    * one of the CLIs takes one — so for the rest the switch reaches nothing,
@@ -1002,6 +1075,47 @@ describe('autofill', () => {
   });
 
   /*
+   * The resume itself, where the extension has it — the card's proposal, which
+   * the store has not been given. Its wordings answer the fields, and its jobs
+   * answer a form's work-history blocks: the lines it prints, as it prints
+   * them.
+   */
+  it('takes the resume being sent, and answers a work history from its jobs', async () => {
+    const newgrad = t.store.load().resumes.find((r) => r.id === 'newgrad')!;
+    const proposal = {
+      ...newgrad,
+      id: 'job-helios',
+      tier: 'temporary',
+      copiedFrom: 'newgrad',
+      choices: { ...(newgrad.choices ?? {}), 'edu_neu.dates': 'v_dec2026', b_pipeline: 'v_kafka' },
+      sections: newgrad.sections?.map((s) => (s.kind === 'experience' ? { ...s, bullets: { exp_acme: ['b_pipeline'] } } : s)),
+    };
+    const sent = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: proposal }).expect(200)).body;
+    expect(sent.fields.graduation_date).toBe('December 2026');
+    expect(sent.history).toEqual([
+      {
+        company: 'Acme Co.',
+        title: 'Software Engineer Co-op',
+        location: 'Boston, MA',
+        start: { year: 2024, month: 7 },
+        end: { year: 2024, month: 12 },
+        current: false,
+        // The wording it chose, and only the line it prints.
+        description: '• Built a Kafka pipeline handling 2M events/day',
+      },
+    ]);
+
+    // A stored resume by name answers the same way, from its own lines.
+    const stored = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad' }).expect(200)).body;
+    expect(stored.history[0].description).toBe('• Built a pipeline handling 2M events/day\n• Raised coverage from 41% to 88%');
+    // Asked the old way, or about a resume that is not there, there is no history to give.
+    expect((await request(app).get('/api/autofill').expect(200)).body.history).toEqual([]);
+    const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
+    expect(missing.history).toEqual([]);
+    expect(missing.fields.graduation_date).toBe('May 2026');
+  });
+
+  /*
    * Ignored rather than refused: the defaults answer perfectly well, and a
    * form half-filled from them beats one not filled at all.
    */
@@ -1072,6 +1186,50 @@ describe('answers', () => {
       .send({ question: 'Why are you interested in this role?', force: true, limit: 400 })
       .expect(200);
     expect(res.body.prompt).toContain('at most 400 characters');
+  });
+
+  /*
+   * The resume the answer goes beside, as the card sends it, so the prompt
+   * can show it as what the reader already has. Without one the prompt says
+   * nothing about a resume, as before — and one the store cannot resolve
+   * costs the answer nothing but that.
+   */
+  /*
+   * A draft and what should change about it: a redraft asked for, so past the
+   * answer bank even without `force`, and into the prompt word for word.
+   */
+  it('carries a draft and what should change about it into the prompt, and past the answer bank', async () => {
+    const res = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', draft: 'Because it is.', feedback: 'Say why the ingest work.' })
+      .expect(200);
+    expect(res.body.source).toBe('prompt');
+    expect(res.body.prompt).toContain('Because it is.');
+    expect(res.body.prompt).toContain('What they said about it: Say why the ingest work.');
+  });
+
+  it('shows the model the resume going with the application, when the card sends it', async () => {
+    const base = t.store.load().resumes.find((r) => r.id === 'base')!;
+    const withSpec = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true, spec: { ...base, id: 'job-helios', label: 'Helios' } })
+      .expect(200);
+    expect(withSpec.body.prompt).toContain('## Resume');
+    expect(withSpec.body.prompt).toContain('Built a pipeline handling');
+
+    const without = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true })
+      .expect(200);
+    expect(without.body.prompt).not.toContain('## Resume');
+    expect(without.body.prompt).not.toContain('Built a pipeline handling');
+
+    const unknown = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true, resumeId: 'no-such-resume' })
+      .expect(200);
+    expect(unknown.body.prompt).toContain('answer an application question');
+    expect(unknown.body.prompt).not.toContain('## Resume');
   });
 
   it('saves a new question and a new phrasing of an existing one', async () => {
@@ -1193,6 +1351,20 @@ describe('cover letters', () => {
     expect(tailored.body.error).toBeUndefined();
     // Nothing was saved by asking.
     expect(t.store.load().resumes.some((r) => r.id === proposal.id)).toBe(false);
+  });
+
+  it('carries the letter in the box and what should change about it into the prompt', async () => {
+    const res = await request(app)
+      .post('/api/ai/cover-letter')
+      .send({
+        resumeId: 'newgrad',
+        job: { company: 'Acme Co.', jobTitle: 'Intern', jobDescription: 'work' },
+        draft: 'Dear Acme, a first go.',
+        feedback: 'Open with the posting.',
+      })
+      .expect(200);
+    expect(res.body.output).toContain('Dear Acme, a first go.');
+    expect(res.body.output).toContain('What they said about it: Open with the posting.');
   });
 
   it('does not save an empty draft', async () => {
@@ -3232,6 +3404,23 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
 
     await request(app).get('/current/not-a-file.pdf').expect(404);
     await request(app).get('/current/..%2F..%2Fetc%2Fpasswd').expect(404);
+  });
+
+  /*
+   * A file taken out of the folder between the look and the read — the sync
+   * replaces these whenever the tracker changes — was answered by Express's
+   * own error page and logged as an unhandled ENOENT, twice on one test
+   * server in a sweep. It is the same answer as a file that was never there.
+   */
+  it('answers a file removed while it was being served as one not there', async () => {
+    const real = fs.existsSync;
+    const seen = vi.spyOn(fs, 'existsSync').mockImplementation((p) => String(p).endsWith('Gone-Resume.pdf') || real(p));
+    try {
+      const res = await request(app).get('/current/Gone-Resume.pdf').expect(404);
+      expect(res.text).toContain('That file is not in the folder any more.');
+    } finally {
+      seen.mockRestore();
+    }
   });
 
   /*

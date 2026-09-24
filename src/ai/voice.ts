@@ -36,10 +36,33 @@ function clean(text: string): string {
 }
 
 /**
+ * Whether a letter or an answer counts as their writing. See the note on
+ * `CoverLetter.voice`: absent means yes, `false` keeps it out.
+ *
+ * Out of everything a request is told to sound like or to adapt — these
+ * samples, the letter and the answers to start from, the paste of what they
+ * have written, and what `find_my_letters` and `find_my_answers` hand over,
+ * which is what the switch beside it promises. Only the samples used to
+ * honour it, so a letter switched off as written to somebody else's template
+ * came back as "the letter to start from". Not out of what is true:
+ * `check_claim` still reads one taken out as something they have said.
+ */
+export const countsAsTheirs = (item: { voice?: boolean }): boolean => item.voice !== false;
+
+export interface SampleOptions {
+  /**
+   * Whether the resume's own bullets count as a sample. Yes for anything that
+   * writes resume lines; no for a letter or an answer — see `preamble` in
+   * prompts.ts, where they were the thing the answer was built out of.
+   */
+  resume?: boolean;
+}
+
+/**
  * Everything of the user's own writing that the store holds, longest-form
  * first: prose shows voice better than a resume bullet does.
  */
-export function collectSamples(data: StoreData): VoiceSample[] {
+export function collectSamples(data: StoreData, { resume = true }: SampleOptions = {}): VoiceSample[] {
   const out: VoiceSample[] = [];
 
   for (const s of data.samples ?? []) {
@@ -57,14 +80,14 @@ export function collectSamples(data: StoreData): VoiceSample[] {
    * still a letter you sent and is not how you write.
    */
   for (const letter of data.coverLetters ?? []) {
-    if (letter.voice === false) continue;
+    if (!countsAsTheirs(letter)) continue;
     const text = clean(letter.body);
     if (text.length < 40) continue;
     out.push({ kind: 'letter', title: letter.title, text });
   }
 
   for (const item of data.answers ?? []) {
-    if (item.voice === false) continue;
+    if (!countsAsTheirs(item)) continue;
     for (const v of item.variants) {
       const text = clean(v.text);
       // One-word answers ("No") say nothing about how someone writes.
@@ -72,6 +95,8 @@ export function collectSamples(data: StoreData): VoiceSample[] {
       out.push({ kind: 'answer', title: item.question, text });
     }
   }
+
+  if (!resume) return out;
 
   // Resume bullets are terse but they are the register the resume itself is
   // written in, which is exactly what a tailoring request needs to match.
@@ -100,8 +125,8 @@ export function collectSamples(data: StoreData): VoiceSample[] {
  * whichever happens to be longest. A letter, an answer, and some bullets tell
  * a model more than three letters do.
  */
-export function buildVoiceContext(data: StoreData): VoiceContext {
-  const all = collectSamples(data);
+export function buildVoiceContext(data: StoreData, options: SampleOptions = {}): VoiceContext {
+  const all = collectSamples(data, options);
   const available = all.reduce((n, s) => n + s.text.length, 0);
 
   const byKind = new Map<VoiceSample['kind'], VoiceSample[]>();

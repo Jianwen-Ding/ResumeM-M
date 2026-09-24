@@ -1,7 +1,10 @@
-import { removeWhatIsFiled } from '../git/repo.js';
+import { removeWhatIsFiled, withCommit } from '../git/repo.js';
 import type { Repo } from '../git/repo.js';
 import { Store } from '../model/store.js';
 import { DEFAULT_TEMPORARY_DAYS, dueToGo, type DueToGo } from '../model/tiers.js';
+import { closeStale, DEFAULT_APPLYING_DAYS, goneStale } from '../model/applications.js';
+import type { Application } from '../model/types.js';
+import { workdayEmployer } from '../jobs/extract.js';
 
 /**
  * Taking away the resumes that were made for one posting and are done with.
@@ -90,4 +93,74 @@ export async function sweepTemporary(
     (d) => store.deleteResume(d.id),
   );
   return { swept: removed, held, days };
+}
+
+/** How long an application may sit at Applying in this save. */
+export function applyingDays(store: Store): number {
+  const said = store.loadConfig().applications?.applyingDays;
+  return typeof said === 'number' ? said : DEFAULT_APPLYING_DAYS;
+}
+
+/**
+ * Close what has sat at Applying for the window with nothing done to it.
+ *
+ * On opening the save, like the resume sweep, and for its reason: never at
+ * the moment a clock ticks over under somebody using the tracker. Scoped to
+ * the tracker file, because this is the app changing something on its own
+ * and has no business committing whatever else is unsaved on disk.
+ */
+export async function closeStaleApplying(
+  store: Store,
+  repo: Repo,
+  { now = Date.now() }: { now?: number } = {},
+): Promise<Application[]> {
+  const days = applyingDays(store);
+  const stale = goneStale(store.load().applications, store.loadDrafts(), { days, now });
+  if (stale.length === 0) return [];
+  const names = stale.slice(0, 3).map((s) => `${s.company} — ${s.role}`).join(', ');
+  return withCommit(
+    repo,
+    store.loadConfig().git.autoCommit,
+    `Close ${names}${stale.length > 3 ? ` and ${stale.length - 3} more` : ''} — ${days} days at Applying`,
+    () => closeStale(store, stale, days),
+    ['applications.yaml'],
+  );
+}
+
+/**
+ * Employer names stored the way Workday books them, put right.
+ *
+ * `workdayEmployer` stops "2100 NVIDIA USA" being read off a Workday page from
+ * now on; the rows already filed under such a name are still filed under it,
+ * and an application still in flight would then be sent under the tidied
+ * name and land in a second row beside its own. Only rows whose address is a
+ * Workday board, by the same rule the reading uses, and in one commit of the
+ * tracker and the workspaces.
+ */
+export async function tidyWorkdayNames(store: Store, repo: Repo): Promise<string[]> {
+  const apps = store.load().applications;
+  const renamed: string[] = [];
+  for (const app of apps) {
+    const tidied = workdayEmployer(app.company, app.url);
+    if (tidied && tidied !== app.company) {
+      renamed.push(`${app.company} → ${tidied}`);
+      app.company = tidied;
+    }
+  }
+  const drafts = store.loadDrafts().filter((d) => {
+    const tidied = workdayEmployer(d.company, d.url);
+    return tidied && tidied !== d.company;
+  });
+  if (renamed.length === 0 && drafts.length === 0) return [];
+  await withCommit(
+    repo,
+    store.loadConfig().git.autoCommit,
+    `Tidy Workday employer names — ${renamed.slice(0, 3).join(', ') || `${drafts.length} workspace(s)`}`,
+    () => {
+      if (renamed.length > 0) store.saveApplications(apps);
+      for (const d of drafts) store.saveDraft({ ...d, company: workdayEmployer(d.company, d.url)! }, { touch: false });
+    },
+    ['applications.yaml', 'drafts'],
+  );
+  return renamed;
 }

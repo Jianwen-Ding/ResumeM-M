@@ -32,7 +32,7 @@
  * not a limitation of this file.
  */
 
-import type { AiPlan } from '../jobs/aiPlan.js';
+import { inListOrder, type AiPlan } from '../jobs/aiPlan.js';
 import { pickBullet } from '../model/resolve.js';
 import type { Bullet, Entry, MaybeVariant, ResolvedResume, SkillGroup, StoreData } from '../model/types.js';
 
@@ -432,13 +432,19 @@ export class TailorSession {
       return no(`None of those are items of ${groupId}. Its items are: ${some(group.items.map((i) => i.id))}.`);
     }
     /*
-     * Store order, not the order they were named in. The list maps straight
-     * to printed text, so accepting the reply's order let a repeated id print
-     * a skill twice — and this is the one place where order is the person's
-     * arrangement rather than a tailoring decision.
+     * The order this resume prints the group in, not the order they were
+     * named in. The list maps straight to printed text, so accepting the
+     * reply's order let a repeated id print a skill twice — and this is the
+     * one place where order is the person's arrangement rather than a
+     * tailoring decision. That arrangement is the resume's own list now, not
+     * the store's: the route puts the plan back in it (`skillsInBaseOrder`),
+     * and this says what that will read.
      */
     this.state.plan.skills[groupId] = known;
-    const text = group.items.filter((i) => known.includes(i.id)).map((i) => i.text);
+    const printed = this.resume.sections.flatMap((s) => s.skillGroups).find((g) => g.id === groupId)?.items ?? [];
+    const own = printed.map((t) => group.items.find((i) => i.text === t)?.id).filter((id): id is string => Boolean(id));
+    const ordered = inListOrder(known, own, group.items.map((i) => i.id));
+    const text = ordered.map((id) => group.items.find((i) => i.id === id)!.text);
     return ok(
       `${group.name} will read: ${text.join(', ')}.` +
         (strangers.length ? ` Ignored, because they are not in this group: ${some(strangers)}.` : ''),

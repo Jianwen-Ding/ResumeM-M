@@ -310,6 +310,25 @@ describe('checking a claim against the resume', () => {
   });
 
   /*
+   * A preposition is not a claim.
+   *
+   * Every word of three letters or more had to be found, and the tool's own
+   * example is a sentence — so a resume that says "using Kafka" answered
+   * "Partly … Not in it: with", and the model was told to drop an exact,
+   * true claim over the grammar of the sentence it was asked for.
+   */
+  it('does not ask for the grammar of the sentence to be on the resume', () => {
+    const s = (text: string) =>
+      new WritingSession(store(), resolveResume('base', store()), POSTING, writing().draft as never, text);
+    const carries = s('Cut median latency from 900ms to 180ms using Kafka.');
+    expect(carries.checkClaim('cut latency from 900ms to 180ms with Kafka').ok).toBe(true);
+    // Every word that carries the claim is still checked.
+    expect(carries.checkClaim('cut latency from 900ms to 150ms with Kafka').ok).toBe(false);
+    // And a word that turns it round is not a function word.
+    expect(carries.checkClaim('never used Kafka').ok).toBe(false);
+  });
+
+  /*
    * A tool whose only job is keeping a letter honest cannot be the thing that
    * invents a language. `includes` said yes to Rust for a resume that says
    * "trust", and yes to SQL for one that only says PostgreSQL.
@@ -1347,5 +1366,210 @@ describe('an answer box with a limit', () => {
 
   it('and takes one inside it', () => {
     expect(limited().saveAnswer('q1', 'The ingest path is the part I know best, and the part you are hiring for.').ok).toBe(true);
+  });
+});
+
+/*
+ * Their own letters and answers are their account of their own work.
+ *
+ * `check_claim` looked in the resume alone and said "Do not write it" to
+ * anything else, so the story told well in three earlier letters could not be
+ * told a fourth time — and the letter was built out of resume lines instead,
+ * the one thing the reader already has in front of them.
+ */
+describe('checking a claim against what they have told before', () => {
+  const STORY = 'At Vega I rebuilt the on-call rotation after a week where one person took every page. Pages dropped by half.';
+  const told = (over: Partial<StoreData> = {}) => {
+    const data = store();
+    return new WritingSession(
+      {
+        ...data,
+        coverLetters: [
+          { id: 'l1', title: 'Platform — Helios', company: 'Helios', body: STORY, createdAt: '2026-01-01T00:00:00Z' },
+          { id: 'l2', title: 'Data — Northwind', company: 'Northwind', body: 'I care about the rotation of crops.', createdAt: '2026-01-02T00:00:00Z' },
+        ],
+        ...over,
+      },
+      resolveResume('base', data),
+      POSTING,
+      writing().draft as never,
+      resumeAsText(resolveResume('base', data)),
+    );
+  };
+
+  it('takes a story from an earlier letter, and quotes where it was told', () => {
+    const r = told().checkClaim('rebuilt the on-call rotation');
+    expect(r.ok, r.text).toBe(true);
+    expect(r.text).toContain('in their letter to Helios');
+    expect(r.text).toContain('rebuilt the on-call rotation');
+  });
+
+  it('takes the part the resume carries and the part a letter does, together', () => {
+    // "pipeline" is on the resume; the rotation is only in the letter.
+    const r = told().checkClaim('pipeline and the on-call rotation');
+    expect(r.ok, r.text).toBe(true);
+    expect(r.text).toContain('The resume carries pipeline');
+  });
+
+  it('does not assemble a claim out of words from different letters', () => {
+    // "crops" is in one letter and "on-call" in another: no one thing says both.
+    const r = told().checkClaim('on-call rotation of crops');
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('crops');
+  });
+
+  it('checks the number in a story as closely as one on the resume', () => {
+    expect(told().checkClaim('Pages dropped by half').ok).toBe(true);
+    expect(told().checkClaim('Pages dropped by 90%').ok).toBe(false);
+  });
+
+  it('takes a story from an earlier answer too', () => {
+    const s = told({
+      coverLetters: [],
+      answers: [{ id: 'a1', question: 'Tell us about a conflict.', variants: [{ id: 'v', label: 'l', text: STORY }] }] as never,
+    });
+    const r = s.checkClaim('rebuilt the on-call rotation');
+    expect(r.ok, r.text).toBe(true);
+    expect(r.text).toContain('in their answer to "Tell us about a conflict."');
+  });
+
+  it('still refuses what neither the resume nor anything they wrote carries', () => {
+    const r = told().checkClaim('Rust compiler internals');
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('Do not write it');
+  });
+
+  it('says so in the tools the model reads', () => {
+    const tools = writingTools(writing());
+    const describe = (name: string) => tools.find((t) => t.name === name)!.description;
+    expect(describe('check_claim')).toMatch(/written before/);
+    expect(describe('read_resume')).toMatch(/do not retell/i);
+  });
+
+  /*
+   * Taken out of their voice is not taken back. A letter switched off because
+   * it was written to somebody else's template is still one they sent, and
+   * what it says about them they have said — the switch is about what the
+   * writing is told to sound like, not about what is true.
+   */
+  it('still takes a story from a letter taken out of their voice', () => {
+    const s = told({
+      coverLetters: [
+        { id: 'l1', title: 'Platform — Helios', company: 'Helios', body: STORY, createdAt: '2026-01-01T00:00:00Z', voice: false },
+      ],
+    });
+    const r = s.checkClaim('rebuilt the on-call rotation');
+    expect(r.ok, r.text).toBe(true);
+    expect(r.text).toContain('in their letter to Helios');
+  });
+});
+
+/*
+ * But nothing taken out of their voice is handed over to be adapted. The
+ * switch says it is "left out of the examples any AI request is told to sound
+ * like", and `find_my_letters` and `find_my_answers` are how a run goes and
+ * gets more of exactly that.
+ */
+describe('fetching writing taken out of their voice', () => {
+  const OFF = 'To whom it may concern, please find enclosed my application for the advertised position.';
+  const session = (over: Partial<StoreData>) => {
+    const data = store();
+    return new WritingSession({ ...data, ...over }, resolveResume('base', data), POSTING, writing().draft as never, '');
+  };
+
+  it('finds only the letters that count as theirs', () => {
+    const s = session({
+      coverLetters: [
+        { id: 'l1', title: 'Platform — Helios', company: 'Helios', body: `${OFF} Kafka.`, createdAt: '2026-01-01T00:00:00Z', voice: false },
+        { id: 'l2', title: 'Data — Northwind', company: 'Northwind', body: 'Kafka at Northwind, in my own words.', createdAt: '2026-01-02T00:00:00Z' },
+      ],
+    });
+    const found = s.findLetters('Helios Kafka');
+    expect(found).toContain('in my own words');
+    expect(found).not.toContain(OFF);
+  });
+
+  it('says why there is nothing, when everything is switched off', () => {
+    const s = session({
+      coverLetters: [{ id: 'l1', title: 'Platform — Helios', company: 'Helios', body: OFF, createdAt: '2026-01-01T00:00:00Z', voice: false }],
+      answers: [{ id: 'a1', question: 'Why this role?', default: 'v', variants: [{ id: 'v', label: 'l', text: OFF }], voice: false }] as never,
+    });
+    for (const found of [s.findLetters('Helios'), s.findAnswers('Why this role?')]) {
+      expect(found).not.toContain(OFF);
+      expect(found).not.toContain('This will be the first');
+      expect(found).toMatch(/left out of their voice/);
+    }
+  });
+
+  it('finds only the answers that count as theirs', () => {
+    const s = session({
+      answers: [
+        { id: 'a1', question: 'Why this role?', default: 'v', variants: [{ id: 'v', label: 'l', text: OFF }], voice: false },
+        { id: 'a2', question: 'Why this role at a startup?', default: 'v', variants: [{ id: 'v', label: 'l', text: 'Mine, in my words.' }] },
+      ] as never,
+    });
+    const found = s.findAnswers('Why this role?');
+    expect(found).toContain('Mine, in my words.');
+    expect(found).not.toContain(OFF);
+  });
+});
+
+/*
+ * A word limit the question states for itself. Forms rarely enforce these,
+ * so a draft over it went into the box whole and the person found out by
+ * counting — or did not.
+ */
+describe('a question that states its own word limit', () => {
+  const limited = () =>
+    makeWriting({
+      coverLetter: { required: false, body: '' },
+      questions: [{ id: 'q1', question: 'Why this role? (50 words max)' }],
+    });
+  const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(' ');
+
+  it('is told to the model with the question', () => {
+    expect(limited().describeWork()).toContain('at most 50 words');
+  });
+
+  it('refuses an answer over it, saying by how much', () => {
+    const r = limited().saveAnswer('q1', words(60));
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('60 words');
+    expect(r.text).toContain('at most 50');
+  });
+
+  it('and takes one inside it', () => {
+    expect(limited().saveAnswer('q1', words(45)).ok).toBe(true);
+  });
+});
+
+/* "Way too wordy": a letter far longer than any they send goes back to be cut. */
+describe('a letter longer than theirs', () => {
+  const words = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(' ');
+  const theirs = (n: number) => {
+    const data = store();
+    return new WritingSession(
+      { ...data, coverLetters: [{ id: 'l', title: 'x', body: words(n), createdAt: '2026-01-01T00:00:00Z' }] },
+      resolveResume('base', data),
+      POSTING,
+      writing().draft as never,
+      '',
+    );
+  };
+
+  it('is refused, naming how long theirs run', () => {
+    const r = theirs(100).saveLetter(words(200));
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('200 words');
+    expect(r.text).toContain('100');
+  });
+
+  it('while one about their length is saved', () => {
+    expect(theirs(100).saveLetter(words(110)).ok).toBe(true);
+  });
+
+  it('and with nothing of theirs to go by, only a long one is', () => {
+    expect(writing().saveLetter(words(280)).ok).toBe(true);
+    expect(writing().saveLetter(words(320)).ok).toBe(false);
   });
 });

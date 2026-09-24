@@ -37,12 +37,12 @@ import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
-import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions } from '../jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
-import { deriveSpec, matchVariants } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
-import { derivedAutofill } from '../model/autofill.js';
+import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
+import { advance, alreadySent, buildBundle, closedAsStale, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { derivedAutofill, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
@@ -513,6 +513,11 @@ function writingTools(
 
 /** Where the compiled MCP entry point sits relative to this file. */
 const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
+
+/** Text a caller sent, trimmed — or nothing, for anything else or blank. */
+function sentText(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+}
 
 /**
  * The resume a letter or an answer is written against: the one the caller is
@@ -2132,20 +2137,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/cover-letter',
     handler(async (req, res) => {
-      const { job, save } = req.body as {
+      const { job, save, draft, feedback } = req.body as {
         resumeId?: string;
         spec?: ResumeSpec;
         job: TailorContext;
         save?: boolean;
+        /** The letter in the box, and what they want changed about it. */
+        draft?: string;
+        feedback?: string;
       };
       const data = store.load();
       const resolved = resumeToWriteFrom(req.body, data);
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
+      const revision = { draft: sentText(draft), feedback: sentText(feedback) };
 
       const result = await runAgent(
         configForTask(data.config, 'write'),
-        coverLetterPrompt(data, resolved, job, prior, { tools: canWire(data.config.ai.command) && serverEntry(mcpDir) !== null }),
-        writingTools(data, resolved, job, { coverLetter: { required: true, body: '' }, questions: [] }),
+        coverLetterPrompt(data, resolved, job, prior, {
+          tools: canWire(data.config.ai.command) && serverEntry(mcpDir) !== null,
+          ...revision,
+        }),
+        // The draft is what is in the box, so the tools say so too: `read_work`
+        // shows it as theirs, to build on rather than replace.
+        writingTools(data, resolved, job, { coverLetter: { required: true, body: revision.draft ?? '' }, questions: [] }),
       );
 
       /*
@@ -2283,7 +2297,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       try {
         const agent = await runAgent(
           configForTask(data.config, 'write'),
-          applicationWritingPrompt(data, resolved, job),
+          applicationWritingPrompt(data, resolved, job, { letter: wantsLetter, questions: pending }),
           writingTools(data, resolved, job, {
             coverLetter: { required: wantsLetter, body: letter?.body ?? '' },
             questions: pending,
@@ -2322,13 +2336,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/answer',
     handler(async (req, res) => {
-      const { question, job, force, limit } = req.body as {
+      const { question, job, force, limit, draft, feedback } = req.body as {
         question: string;
         job?: TailorContext;
         force?: boolean;
         limit?: number;
+        /** The resume going with the application — see `resumeToWriteFrom`. */
+        resumeId?: string;
+        spec?: ResumeSpec;
+        /** The answer in the box, and what they want changed about it. */
+        draft?: string;
+        feedback?: string;
       };
       const data = store.load();
+      const revision = { draft: sentText(draft), feedback: sentText(feedback) };
       /*
        * Who is asking, so the bank knows which answers are theirs.
        *
@@ -2340,7 +2361,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const match = matchAnswer(question, data.answers, { company: job?.company });
 
-      if (match.confident && !force) {
+      // Something to change about a draft is a redraft asked for, and the
+      // bank's answer is not one.
+      if (match.confident && !force && !revision.feedback && !revision.draft) {
         res.json({
           output: match.answer,
           executed: false,
@@ -2350,7 +2373,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return;
       }
 
-      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job, limit));
+      /*
+       * The resume this answer goes beside, where the caller said which. The
+       * card sends the one it is building, so the prompt can show it as what
+       * the reader already has rather than leave the model to retell it from
+       * memory. One that cannot be resolved is left out rather than failing an
+       * answer that never needed it.
+       */
+      let resume: ResolvedResume | undefined;
+      if (req.body.spec || req.body.resumeId) {
+        try {
+          resume = resumeToWriteFrom(req.body, data);
+        } catch {
+          resume = undefined;
+        }
+      }
+      const result = await runAgent(
+        configForTask(data.config, 'write'),
+        answerPrompt(data, question, job, limit, { resume, ...revision }),
+      );
 
       /*
        * `output` means "text you may use". When the AI did not run, `runAgent`
@@ -2506,7 +2547,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const data = store.load();
       const current = trail[trail.length - 1]!;
-      const job = mergeJobPages(trail);
+      // With the applicant's own terms the posting names: see `withYourTerms`.
+      const job = withYourTerms(mergeJobPages(trail), data);
       // The verdict is about the page you are on; the description is about all
       // of them. A form page is worth offering on even though it describes
       // nothing, which is exactly the case a single score could not express.
@@ -2583,7 +2625,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const match =
         mode === 'none'
           ? { choices: {}, skills: {}, rationale: [] }
-          : matchVariants(data, base, { keywords: job.keywords, level: detectLevel(job) });
+          : matchVariants(data, base, {
+              keywords: job.keywords,
+              level: detectLevel(job),
+              // The card shows each change as a box to tick, so a skill the base
+              // left off can be offered here. Not in the Workspace, which applies.
+              offerAdditions: true,
+            });
 
       /*
        * And how well each of the others would have suited it.
@@ -2732,7 +2780,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         ? {
             ...match,
             choices: { ...match.choices, ...plan.choices },
-            skills: { ...match.skills, ...plan.skills },
+            skills: { ...match.skills, ...skillsInBaseOrder(plan.skills, base, data) },
           }
         : match;
 
@@ -3008,48 +3056,96 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }
   };
 
+  /**
+   * What a form can be filled from, as one resume says it.
+   *
+   * Shared by the two ways of asking: a GET naming the wordings in `choices`,
+   * which is how the extension asked before it sent the resume itself, and a
+   * POST carrying the resume — which is also what the work history needs.
+   */
+  const autofillFor = (data: StoreData, choices: Record<string, string>, resume?: ResolvedResume) => {
+    // Resolved: a form field takes a name, not a set of them.
+    const p = resolveProfile(data.profile, {}, []);
+    return {
+      fields: {
+        full_name: p.name,
+        email: p.email,
+        phone: p.phone,
+        linkedin: p.linkedin,
+        github: p.github,
+        website: p.website,
+        location: p.location,
+        /*
+         * And the parts of those two that forms actually ask for.
+         *
+         * No ATS asks for a full name or a location: they ask for First
+         * name and Last name, and for City, State and Country, and they
+         * mark them required. The extension has always recognised those
+         * labels — `FIELD_PATTERNS` in its autofill.js has had all five
+         * keys from the start — and the store had nothing to offer them,
+         * so the commonest boxes on an application form came out empty on
+         * a profile that plainly knew the answers. Every test store had
+         * them typed in as extras, which is what hid it.
+         *
+         * Before the hand-entered extras, never after: a value somebody
+         * typed is a decision and this is only a reading. See
+         * `derivedAutofill`, which yields nothing at all where the reading
+         * is not plain.
+         */
+        ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
+        ...(p.autofill ?? {}),
+      },
+      answers: data.answers.map((a) => ({
+        id: a.id,
+        question: a.question,
+        answer: (a.variants.find((v) => v.id === a.default) ?? a.variants[0])?.text ?? '',
+      })),
+      /*
+       * The jobs this resume lists, for a form's work-history blocks. See
+       * `workHistory`: this resume's jobs and the lines it prints, never a
+       * description anybody wrote for the form.
+       */
+      history: resume ? workHistory(resume) : [],
+    };
+  };
+
   api.get(
     '/autofill',
     handler(async (req, res) => {
       const data = store.load();
-      const choices = choicesFrom(req.query.choices);
-      // Resolved: a form field takes a name, not a set of them.
-      const p = resolveProfile(data.profile, {}, []);
-      res.json({
-        fields: {
-          full_name: p.name,
-          email: p.email,
-          phone: p.phone,
-          linkedin: p.linkedin,
-          github: p.github,
-          website: p.website,
-          location: p.location,
-          /*
-           * And the parts of those two that forms actually ask for.
-           *
-           * No ATS asks for a full name or a location: they ask for First
-           * name and Last name, and for City, State and Country, and they
-           * mark them required. The extension has always recognised those
-           * labels — `FIELD_PATTERNS` in its autofill.js has had all five
-           * keys from the start — and the store had nothing to offer them,
-           * so the commonest boxes on an application form came out empty on
-           * a profile that plainly knew the answers. Every test store had
-           * them typed in as extras, which is what hid it.
-           *
-           * Before the hand-entered extras, never after: a value somebody
-           * typed is a decision and this is only a reading. See
-           * `derivedAutofill`, which yields nothing at all where the reading
-           * is not plain.
-           */
-          ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
-          ...(p.autofill ?? {}),
-        },
-        answers: data.answers.map((a) => ({
-          id: a.id,
-          question: a.question,
-          answer: (a.variants.find((v) => v.id === a.default) ?? a.variants[0])?.text ?? '',
-        })),
-      });
+      res.json(autofillFor(data, choicesFrom(req.query.choices)));
+    }),
+  );
+
+  /**
+   * The same, for the resume being sent.
+   *
+   * POST because the card's resume is a proposal the store has not been given
+   * — the reason the writing routes take a `spec` — and a whole resume does
+   * not belong in a query string. The wordings come from it, and so do the
+   * jobs a work-history section asks for. A resume that cannot be resolved
+   * costs the form its history and nothing else.
+   */
+  api.post(
+    '/autofill',
+    handler(async (req, res) => {
+      const data = store.load();
+      const body = (req.body ?? {}) as { resumeId?: unknown; spec?: unknown; choices?: unknown };
+      let resume: ResolvedResume | undefined;
+      if (body.spec || body.resumeId) {
+        try {
+          resume = resumeToWriteFrom(body, data);
+        } catch {
+          resume = undefined;
+        }
+      }
+      const spec =
+        body.spec && typeof body.spec === 'object'
+          ? (body.spec as ResumeSpec)
+          : data.resumes.find((r) => r.id === body.resumeId);
+      const choices =
+        typeof body.choices === 'string' ? choicesFrom(body.choices) : { ...(spec?.choices ?? {}) };
+      res.json(autofillFor(data, choices, resume));
     }),
   );
 
@@ -3242,7 +3338,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       // Past `applied` already: the tracker knows more than the page does.
       const BEFORE_SENT: Application['status'][] = ['interested', 'applying'];
-      if (tracked && !BEFORE_SENT.includes(tracked.status)) {
+      if (tracked && !BEFORE_SENT.includes(tracked.status) && !closedAsStale(tracked)) {
         res.json({ application: tracked, changed: false });
         return;
       }
@@ -3772,7 +3868,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
               appliedAt: now,
               history: [{ at: now, status: started, note }],
             });
-        } else if (body.actedOnForm && tracked.status === 'interested') {
+        } else if (body.actedOnForm && (tracked.status === 'interested' || closedAsStale(tracked))) {
           /*
            * And the moment it stops being a bookmark, it is moved on.
            *
@@ -3851,10 +3947,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    *
    * Tailoring, above, decides for you — by tag match, or by asking the AI. This
    * is the other thing you want while working on an application: a resume of
-   * your own that belongs to this posting, inheriting everything from the base
-   * so it stays a thin selection rather than a copy that drifts.
+   * your own that belongs to this posting, starting as a copy of the base with
+   * every selection it makes — nothing resolves through the base any more.
    *
-   * It is created empty of opinions on purpose. The point is to go and make the
+   * It adds no opinions of its own on purpose. The point is to go and make the
    * decisions in the builder, which is why this hands back where to go.
    */
   api.post(
@@ -3967,6 +4063,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (fetched && !job.description.trim() && draft.jobDescription?.trim()) {
         job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
       }
+      job = withYourTerms(job, data);
       const specId = copyIdFor(data.resumes, tailoredResumeId(draft.company, draft.role));
 
       /*
@@ -4014,7 +4111,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       const finalMatch = plan
-        ? { ...match, choices: { ...match.choices, ...plan.choices }, skills: { ...match.skills, ...plan.skills } }
+        ? { ...match, choices: { ...match.choices, ...plan.choices }, skills: { ...match.skills, ...skillsInBaseOrder(plan.skills, base, data) } }
         : match;
 
       const spec = deriveSpec(base, specId, `${draft.role} — ${draft.company}`, finalMatch, {
@@ -4116,7 +4213,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           const resolved = resolveResume(resumeId, data);
           const agent = await runAgent(
             configForTask(data.config, 'write'),
-            applicationWritingPrompt(data, resolved, job),
+            applicationWritingPrompt(data, resolved, job, { letter: wantsLetter, questions: pending }),
             writingTools(data, resolved, job, {
               coverLetter: { required: wantsLetter, body: draft.coverLetter.body },
               questions: pending,
@@ -4189,6 +4286,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         if (questionId && wanted.length === 0) throw new Error('That question is not on this application any more');
         const overwrite = force || Boolean(questionId);
 
+        /*
+         * The resume this application goes out with, so an answer can leave
+         * its lines to it — resolved once, and only if a question gets as far
+         * as the AI. A resume id the store no longer has costs the answer
+         * nothing but that.
+         */
+        let resolvedForAnswers: ResolvedResume | null | undefined;
+        const draftResume = (): ResolvedResume | undefined => {
+          if (resolvedForAnswers === undefined) {
+            const resumeId = draft.resumeId ?? data.resumes[0]?.id;
+            try {
+              resolvedForAnswers = resumeId ? resolveResume(resumeId, data) : null;
+            } catch {
+              resolvedForAnswers = null;
+            }
+          }
+          return resolvedForAnswers ?? undefined;
+        };
+
         for (const q of wanted) {
           if (q.edited && !overwrite) continue;
           if (q.answer.trim() && q.source === 'bank' && !overwrite) continue;
@@ -4211,7 +4327,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.needsReview = undefined;
             continue;
           }
-          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job, q.limit));
+          const agent = await runAgent(
+            configForTask(data.config, 'write'),
+            answerPrompt(data, q.question, job, q.limit, { resume: draftResume() }),
+          );
           if (agent.executed && agent.output.trim()) {
             q.answer = agent.output.trim();
             q.source = 'ai';
@@ -4941,7 +5060,16 @@ export function createCurrentRouter(store: Store): Router {
     // and a .txt cover letter opens as text, both in the tab.
     if (name.toLowerCase().endsWith('.pdf')) res.type('application/pdf');
     else if (name.toLowerCase().endsWith('.txt')) res.type('text/plain; charset=utf-8');
-    res.sendFile(file);
+    /*
+     * Gone between the look above and the read, which the sync makes ordinary
+     * — it replaces these files whenever the tracker changes. Left to Express,
+     * that was its own error page naming the file's full path on this machine,
+     * and an unhandled ENOENT in the log.
+     */
+    res.sendFile(file, (err) => {
+      if (!err || res.headersSent) return;
+      res.status(404).type('html').send('<p>That file is not in the folder any more.</p>');
+    });
   });
 
   return router;

@@ -24,6 +24,34 @@ const IN_FLIGHT: ApplicationStatus[] = ['applying', 'applied'];
 export const CURRENT_DIR = 'current';
 
 /**
+ * The flat folder as a line for the save's `.gitignore`, where it is inside
+ * the save at all.
+ *
+ * It is rebuilt from the tracker whenever anything changes, so it is nothing
+ * to keep a history of — and the rebuilding is what raced the commits. `git
+ * add -- .` listed a PDF, the folder was synced under it, and the stat that
+ * followed failed the whole add: "unable to stat
+ * 'out/current/Jianwen-Ding-Resume.pdf'", twelve times on one test server in
+ * a single run, each one a save the version history silently never recorded.
+ * The same race `Repo.IGNORED` closes for scratch files, in a folder whose
+ * files are replaced far more often.
+ *
+ * Nothing where the output folder is outside the save, which is the default:
+ * there is no history of it to spare.
+ */
+export function currentIgnore(store: Store): string[] {
+  let out: string;
+  try {
+    out = store.outDir();
+  } catch {
+    return [];
+  }
+  const rel = path.relative(store.root, path.join(out, CURRENT_DIR));
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return [];
+  return [`/${rel.split(path.sep).join('/')}/`];
+}
+
+/**
  * The owner recorded for a standing document, which is no application's.
  *
  * `applications` counts the applications whose files are actually here, and a

@@ -1220,3 +1220,99 @@ describe('messaging overlays and chat widgets never reach the AI', () => {
     expect(out).not.toContain('Priya Raman');
   });
 });
+
+/*
+ * Three shapes that cut a posting's own facts, found by building pages to
+ * break the filter and reading what came out. Every fact here is spelled so
+ * that it appears nowhere else on the page, so a pass cannot come from the
+ * posting body saying it too.
+ */
+describe('facts beside a rail, in a long breadcrumb, or in a consent block', () => {
+  const body = (extra: string) => `<html><body>${NAV}<main>${postingBody()}</main>${extra}${FOOTER}</body></html>`;
+  const RAIL = '<h3>Similar jobs</h3><ul><li><a href="/jobs/482913">Data Engineer, Ledger</a></li><li><a href="/jobs/482914">ML Engineer, Fraud</a></li></ul>';
+
+  /*
+   * A sidebar that says what this job is — its city, its team, its terms,
+   * each a link to the board's page for it — above the board's rail of other
+   * jobs. "Similar jobs" named the whole sidebar a rail, every link in it was
+   * set aside as the rail's, and the facts went with it.
+   */
+  it('keeps facts linked ahead of a rail in the same sidebar', () => {
+    const html = body(`<aside class="sidebar"><div class="facts">
+        <a href="/jobs?location=somerville">Somerville, MA</a> <a href="/jobs?team=ledger">Ledger Team</a>
+        <a href="/jobs?type=cth">Contract-to-hire</a> <a href="/jobs?remote=hybrid">Hybrid Flex</a></div>${RAIL}</aside>`);
+    const out = withoutChrome(html);
+    for (const fact of ['Somerville, MA', 'Ledger Team', 'Contract-to-hire', 'Hybrid Flex']) expect(out).toContain(fact);
+  });
+
+  // "Remote Payroll Similar jobs": too few words to read as a sentence, even
+  // with the rail's heading lending two.
+  it('keeps even two one-word ones, which read as nothing by shape', () => {
+    const html = body(`<aside class="sidebar"><a href="/jobs?remote=1">Remote</a> <a href="/jobs?team=pay">Payroll</a>${RAIL}</aside>`);
+    const out = withoutChrome(html);
+    expect(out).toContain('Remote');
+    expect(out).toContain('Payroll');
+  });
+
+  it('still cuts a rail that names itself first', () => {
+    expect(withoutChrome(body(`<aside class="sidebar">${RAIL}</aside>`))).not.toContain('Data Engineer, Ledger');
+  });
+
+  // Buttons ahead of the name are not facts: they point at "#" or a share intent.
+  it('still cuts a share row drawn icons first', () => {
+    const out = withoutChrome(
+      body(`<aside class="sidebar"><a href="#" class="share-li">Share on LinkedIn</a>
+        <a href="https://twitter.com/intent/tweet?url=x">Share on Twitter</a>
+        <a href="https://www.facebook.com/sharer/sharer.php?u=x">Share on Facebook</a> <span>Share this job</span></aside>`),
+    );
+    expect(out).not.toContain('Share on LinkedIn');
+    expect(out).not.toContain('Share this job');
+  });
+
+  /*
+   * Seven steps in a <nav> read as a site header — six links or more in one
+   * is a menu — though every step past "Careers" is where this job sits.
+   */
+  it('keeps a breadcrumb however many steps it takes', () => {
+    const html = body(`<nav aria-label="Breadcrumb"><a href="/">Home</a> › <a href="/careers">Careers</a> ›
+      <a href="/careers/ledger">Ledger Infrastructure</a> › <a href="/careers/ledger/core">Core Settlement</a> ›
+      <a href="/careers/cambridge">Cambridge Hub</a> › <a href="/careers/cth">Contract-to-hire</a> › <a href="#">This role</a></nav>`);
+    const out = withoutChrome(html);
+    for (const fact of ['Ledger Infrastructure', 'Core Settlement', 'Cambridge Hub', 'Contract-to-hire']) expect(out).toContain(fact);
+    // The site's own menu, as long as the breadcrumb, still goes.
+    expect(out).not.toContain('Engineering blog');
+  });
+
+  it('and one that does not say it is, by the arrows between its steps', () => {
+    const html = body(`<nav><a href="/">Home</a> &rsaquo; <a href="/careers">Careers</a> &rsaquo;
+      <a href="/careers/ledger">Ledger Infrastructure</a> &rsaquo; <a href="/careers/ledger/core">Core Settlement</a> &rsaquo;
+      <a href="/careers/cambridge">Cambridge Hub</a> &rsaquo; <a href="/careers/cth">Contract-to-hire</a> &rsaquo; <a href="#">This role</a></nav>`);
+    const out = withoutChrome(html);
+    for (const fact of ['Ledger Infrastructure', 'Cambridge Hub']) expect(out).toContain(fact);
+    // A footer row joined by pipes is still a menu.
+    const piped = withoutChrome(
+      body(`<nav class="legal"><a href="/privacy">Privacy Statement</a> | <a href="/terms">Terms of Use</a> | <a href="/cookies">Cookie Settings</a> |
+        <a href="/a11y">Accessibility</a> | <a href="/sitemap">Sitemap</a> | <a href="/imprint">Imprint</a></nav>`),
+    );
+    expect(piped).not.toContain('Privacy Statement');
+  });
+
+  /*
+   * A consent block is cut unless it says something about the job, and the
+   * words it was allowed to say that in knew salaries and visas but not
+   * whether you may work there at all.
+   */
+  it('keeps a line about who may apply in a block named for consent', () => {
+    const gdpr = withoutChrome(
+      body('<div id="gdpr-notice"><p>By applying you agree to our candidate privacy notice. Candidates must be eligible to work in the EU.</p></div>'),
+    );
+    expect(gdpr).toContain('Candidates must be eligible to work in the EU.');
+    const consent = withoutChrome(
+      body('<section class="consent"><p>US citizenship is required for this position.</p><label><input type="checkbox"> I agree to the privacy policy</label></section>'),
+    );
+    expect(consent).toContain('US citizenship is required for this position.');
+    // And a banner that is only about cookies still goes, "must" and all.
+    const banner = withoutChrome(body('<div class="cookie-consent"><p>You must accept cookies to use this site.</p><button>OK</button></div>'));
+    expect(banner).not.toContain('You must accept cookies');
+  });
+});

@@ -6,8 +6,9 @@ import { createRequire } from 'node:module';
 import { Repo, cloneRepo } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
+import { currentIgnore } from '../model/current.js';
 import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
-import { sweepTemporary } from './sweep.js';
+import { closeStaleApplying, sweepTemporary, tidyWorkdayNames } from './sweep.js';
 import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
@@ -35,7 +36,7 @@ const isSave = (dir: string) =>
 const existingStore = (dir: string): string | undefined => (isSave(dir) ? dir : undefined);
 
 function projectSession(store: Store) {
-  const repo = Repo.forStore(store.root);
+  const repo = Repo.forStore(store.root, () => currentIgnore(store));
   const assets = new Assets(store, repo);
   const jobs = new Jobs();
 
@@ -92,6 +93,22 @@ async function openSave(store: Store, repo: Repo): Promise<void> {
     console.log(
       `ResumeM-M: renamed ${renamed.length} tailored resume(s) so two postings cannot share one — ` +
         `${renamed.map((r) => `${r.from} → ${r.to}`).join(', ')}.`,
+    );
+  }
+
+  /*
+   * Before the sweep: a close starts the resume's week, and the sweep counts
+   * that week from the close — so this cannot take a resume tonight, only
+   * start its clock.
+   */
+  const tidied = await tidyWorkdayNames(store, repo);
+  if (tidied.length > 0) console.log(`ResumeM-M: renamed employers filed with Workday's codes — ${tidied.join(', ')}.`);
+
+  const closed = await closeStaleApplying(store, repo);
+  if (closed.length > 0) {
+    console.log(
+      `ResumeM-M: closed ${closed.length} application(s) left at Applying with nothing done — ` +
+        `${closed.map((a) => `${a.company} (${a.role})`).join(', ')}. Set one back in the tracker if it is still live.`,
     );
   }
 

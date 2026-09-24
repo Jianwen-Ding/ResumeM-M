@@ -14,8 +14,9 @@ import {
   roleFromUrl,
 } from '../src/jobs/extract.js';
 import { detectLevel } from '../src/jobs/level.js';
-import { deriveSpec, matchVariants } from '../src/jobs/match.js';
+import { deriveSpec, matchVariants, withYourTerms } from '../src/jobs/match.js';
 import { resolveResume } from '../src/model/resolve.js';
+import { identity } from '../src/model/applications.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
 
 const JSON_LD_PAGE = `<html><head><title>SWE Intern at Streamly</title>
@@ -440,6 +441,110 @@ describe('variant matching', () => {
   it('leaves alone a group the base does not print', () => {
     const result = matchVariants(data, trimmedBase(['s_py', 's_go'], []), { keywords: ['python', 'go'] });
     expect(result.skills.sk).toBeUndefined();
+  });
+
+  /*
+   * Reported: the posting asked for x86_64, which the applicant has, and
+   * nothing switched. The posting's keywords came from a fixed vocabulary
+   * with no x86 in it, so nothing of theirs could be matched to it.
+   */
+  describe('terms the applicant has, named by the posting', () => {
+    const withX86: StoreData = {
+      ...data,
+      skillGroups: [
+        { ...data.skillGroups[0]!, items: [...data.skillGroups[0]!.items, { id: 's_x86', text: 'x86_64', tags: [] }] },
+      ],
+    };
+    const posting = (description: string) => ({ keywords: ['python'], description });
+
+    it('counts as a keyword however the posting separates it', () => {
+      for (const said of ['Experience with x86_64 assembly', 'x86-64 and ARM', 'Low-level x86 64 work']) {
+        expect(withYourTerms(posting(said), withX86).keywords).toContain('x86_64');
+      }
+    });
+
+    it('but not a short or everyday word, which the vocabulary reads in context', () => {
+      const plain: StoreData = {
+        ...data,
+        skillGroups: [{ ...data.skillGroups[0]!, items: [{ id: 's_c', text: 'C', tags: [] }, { id: 's_react', text: 'React', tags: [] }] }],
+      };
+      const job = withYourTerms(posting('Grade C or better; you react quickly under pressure.'), plain);
+      expect(job.keywords).toEqual(['python']);
+    });
+
+    it('offers a skill the base left off when the posting names it — where it is offered as its own box', () => {
+      const job = withYourTerms(posting('Python, Go, and x86-64 assembly'), withX86);
+      const offered = matchVariants(withX86, trimmedBase(['s_py', 's_go']), { keywords: job.keywords, offerAdditions: true });
+      // Beside its neighbour in the group, after what the base prints.
+      expect(offered.skills.sk).toEqual(['s_py', 's_go', 's_x86']);
+      // The Workspace applies a match outright, with nothing to untick: never there.
+      const applied = matchVariants(withX86, trimmedBase(['s_py', 's_go']), { keywords: job.keywords });
+      expect(applied.skills.sk).toBeUndefined();
+    });
+
+    it('switches a phrasing tagged with it', () => {
+      const tagged: StoreData = {
+        ...data,
+        entries: data.entries.map((e) =>
+          e.id === 'exp'
+            ? {
+                ...e,
+                bullets: e.bullets!.map((b, i) =>
+                  i === 0
+                    ? { ...b, variants: [...b.variants, { id: 'v_x86', label: 'Low level', text: 'Hand-tuned the hot loop in assembly', tags: ['x86_64'] }] }
+                    : b,
+                ),
+              }
+            : e,
+        ),
+      };
+      const job = withYourTerms(posting('We write x86-64 assembly by hand.'), tagged);
+      const result = matchVariants(tagged, base, { keywords: job.keywords });
+      expect(result.choices.b_pipeline).toBe('v_x86');
+    });
+
+    /*
+     * Not a tag that says which posting a line is for. "industry" and
+     * "senior" mark a phrasing for experienced hires — the level rule reads
+     * them against what the posting is for — and read as keywords, an
+     * internship posting that happens to say "industry experience is a plus"
+     * scored that phrasing up by the three points a real skill gets and
+     * swapped it onto an intern application. "short", on the fixture's own
+     * fitting phrasing, is the same kind of tag.
+     */
+    it('but not a level tag, which says which posting a line is for rather than what it is about', () => {
+      const tagged: StoreData = {
+        ...data,
+        entries: data.entries.map((e) =>
+          e.id === 'exp'
+            ? {
+                ...e,
+                bullets: e.bullets!.map((b, i) =>
+                  i === 0
+                    ? {
+                        ...b,
+                        variants: [
+                          ...b.variants,
+                          { id: 'v_senior', label: 'Industry', text: 'Owned the pipeline for the industry group', tags: ['industry', 'senior'] },
+                        ],
+                      }
+                    : b,
+                ),
+              }
+            : e,
+        ),
+      };
+      const job = withYourTerms(
+        posting('Summer internship. Industry experience is a plus, and senior engineers will mentor you. Keep it short.'),
+        tagged,
+      );
+      expect(job.keywords).toEqual(['python']);
+      const result = matchVariants(tagged, base, {
+        keywords: job.keywords,
+        level: detectLevel({ title: 'Software Engineer Intern' }),
+      });
+      expect(result.choices.b_pipeline).toBeUndefined();
+    });
   });
 
   it('respects a higher threshold by making fewer changes', () => {
@@ -1273,5 +1378,40 @@ describe('keywords that are ordinary words too', () => {
     expect(extractKeywords('Design REST APIs.')).toContain('rest');
     expect(extractKeywords('iOS apps in Swift and SwiftUI.')).toContain('swift');
     expect(extractKeywords('Golang microservices.')).toContain('golang');
+  });
+});
+
+/*
+ * The employer as a Workday tenant writes it into its own JSON-LD: the legal
+ * entity, with a company code in front and a country behind — measured on
+ * NVIDIA's board as "2100 NVIDIA USA". Filed as it came, one job reached from
+ * the careers site and from the board was two tracker rows.
+ */
+describe('an employer named the way Workday books it', () => {
+  const posting = (org: string) => `<html><head><title>Software Engineer</title>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"JobPosting","title":"Software Engineer",
+"hiringOrganization":{"@type":"Organization","name":${JSON.stringify(org)}},"description":"<p>Build systems.</p>"}</script>
+</head><body>Software Engineer</body></html>`;
+  const WD = 'https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/US-CA-Santa-Clara/Software-Engineer_JR1';
+
+  it('loses its company code and its country', () => {
+    expect(extractJob(posting('2100 NVIDIA USA'), WD).company).toBe('NVIDIA');
+    expect(extractJob(posting('100 Intel Corporation'), 'https://intel.wd1.myworkdayjobs.com/External/job/x_JR2').company).toBe(
+      'Intel Corporation',
+    );
+  });
+
+  it('and so is the same employer as the careers site names', () => {
+    expect(identity(extractJob(posting('2100 NVIDIA USA'), WD).company!, 'Software Engineer')).toBe(
+      identity('NVIDIA Corporation', 'Software Engineer'),
+    );
+  });
+
+  it('while a number in front is part of the name anywhere else', () => {
+    expect(extractJob(posting('84 Lumber'), 'https://jobs.84lumber.com/job/1').company).toBe('84 Lumber');
+  });
+
+  it('and one that would be left naming nobody is left as it was', () => {
+    expect(extractJob(posting('2100 Careers'), WD).company).toBe('2100 Careers');
   });
 });

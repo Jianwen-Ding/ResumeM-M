@@ -357,6 +357,19 @@ describe('reading the page back', () => {
     expect(s.describeResume()).not.toContain('[b_pipeline]');
   });
 
+  it('says a skills pick in the order the resume prints it', () => {
+    const data = store();
+    const spec = {
+      id: 'go-first',
+      label: 'Go first',
+      tier: 'base' as const,
+      sections: [{ kind: 'skills', entries: [], groups: ['sk_lang'], items: { sk_lang: ['s_go', 's_py', 's_ts'] } }],
+    };
+    data.resumes = [...data.resumes, spec as never];
+    const s = new TailorSession(data, resolveResume('go-first', data), POSTING);
+    expect(s.skills('sk_lang', ['s_py', 's_go']).text).toContain('Go, Python.');
+  });
+
   it('shows an entry the model has just turned on', () => {
     const s = narrow();
     expect(s.describeResume()).not.toContain('[proj_thing]');

@@ -841,6 +841,58 @@ async function main() {
     }
 
     /* -------------------------------------------------------------- *
+     * A resume's own skill order survives unticking one               *
+     * -------------------------------------------------------------- */
+
+    /*
+     * The list prints in its own order, and a resume can hold one that is not
+     * the group's — written by hand in the YAML, or kept from a base by the
+     * keyword match and the AI. Every tick rewrote the whole list in the
+     * group's order, so switching one skill off reshuffled the rest of the
+     * printed line.
+     */
+    console.log('\nA resume\'s own skill order survives unticking one');
+    {
+      const store = await (await fetch(`${server.url}/api/store`)).json();
+      const group = store.skillGroups?.find((g) => g.items.length >= 3);
+      const scratch = 'editor-own-skill-order';
+      if (!group) {
+        check('there is a skills group with three skills', false, 'none in the starter save');
+      } else {
+        const ids = group.items.map((i) => i.id);
+        await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Own skill order scratch',
+            sections: [{ kind: 'skills', entries: [], groups: [group.id], items: { [group.id]: [ids[2], ids[0], ids[1]] } }],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+          await page.locator('#resume-select').selectOption(scratch);
+          const chip = page.locator('.skill-chip', { hasText: group.items[0].text }).first();
+          await chip.waitFor({ timeout: 30_000 });
+          await chip.click();
+          await page.locator('.skill-chip:not(.on)', { hasText: group.items[0].text }).first().waitFor({ timeout: 10_000 });
+
+          const want = JSON.stringify([ids[2], ids[1]]);
+          let list;
+          for (let waited = 0; waited < 20_000 && JSON.stringify(list) !== want; waited += 500) {
+            const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+            list = resumes.find((r) => r.id === scratch)?.sections?.find((x) => x.kind === 'skills')?.items?.[group.id];
+            if (JSON.stringify(list) !== want) await new Promise((r) => setTimeout(r, 500));
+          }
+          check('the rest keep the order the resume had them in', JSON.stringify(list) === want, JSON.stringify(list));
+        } finally {
+          await fetch(`${server.url}/api/resumes/${scratch}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
+      }
+    }
+
+    /* -------------------------------------------------------------- *
      * Coming back to the tab after the extension changed the resume    *
      * -------------------------------------------------------------- */
 

@@ -41,6 +41,25 @@ export function moveBy(list, id, delta) {
   return out;
 }
 
+/**
+ * `list` with `id` added just after the nearest item before it in `master`
+ * that the list already holds — or first, where there is none — and every
+ * other item left where it was.
+ *
+ * For switching one thing on in a list somebody may have arranged. Rebuilding
+ * the list in `master`'s order instead gives the same answer for a list that
+ * was already in that order and reshuffles one that was not. The server's
+ * `inPlace` in `src/jobs/aiPlan.ts` is the same rule.
+ */
+export function insertNextTo(list, id, master) {
+  if (list.includes(id)) return [...list];
+  for (let i = master.indexOf(id) - 1; i >= 0; i--) {
+    const at = list.indexOf(master[i]);
+    if (at >= 0) return [...list.slice(0, at + 1), id, ...list.slice(at + 1)];
+  }
+  return [id, ...list];
+}
+
 /*
  * Date order, for the editor's own list.
  *

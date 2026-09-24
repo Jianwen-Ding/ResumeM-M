@@ -31,6 +31,8 @@
 import type { AnswerBankItem, CoverLetter, Draft, ResolvedResume, StoreData } from '../model/types.js';
 import type { MoveResult, TailorPosting } from './session.js';
 import { questionSimilarity } from '../jobs/answers.js';
+import { DEFAULT_LETTER_WORDS, letterWordCap, ownLetterLength, statedWordLimit, wordCount } from '../ai/length.js';
+import { countsAsTheirs } from '../ai/voice.js';
 
 const ok = (text: string): MoveResult => ({ ok: true, text });
 const no = (text: string): MoveResult => ({ ok: false, text });
@@ -79,6 +81,24 @@ function carries(haystack: string, word: string): boolean {
 }
 
 const plural = (n: number, word: string) => `${n} ${n === 1 ? word : `${word}s`}`;
+
+/*
+ * Words that say nothing about what somebody did.
+ *
+ * The tool's own description invites a sentence — "cut latency from 900ms to
+ * 180ms with Kafka" — and every word of three letters or more had to be found,
+ * so a resume that says "using Kafka" answered "Partly … Not in it: with",
+ * and the model was told to drop an exact, true claim over a preposition. The
+ * same shape as the full stop in `checkClaim`: a check failing on the grammar
+ * of the sentence it asks for. "not" and "never" are not on the list — a
+ * claim turned round by one of them is a different claim.
+ */
+const FUNCTION_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'these', 'those', 'was', 'were', 'are', 'been', 'from',
+  'into', 'onto', 'our', 'their', 'they', 'them', 'its', 'his', 'her', 'who', 'which', 'while', 'then',
+  'than', 'when', 'where', 'what', 'have', 'has', 'had', 'but', 'all', 'any', 'per', 'via', 'also',
+  'very', 'just', 'more', 'most', 'each', 'both', 'such', 'about',
+]);
 
 /*
  * A gap the writer meant to come back to, in whatever bracket they reached for.
@@ -137,6 +157,18 @@ function unfilled(gap: string): string {
   );
 }
 
+/**
+ * Why a search of their writing came back empty when there is writing: "None
+ * yet" would be false, and would send the model off to write as though they
+ * had never written anything.
+ */
+function leftOut(count: number, kind: 'letter' | 'answer'): string {
+  return (
+    `None to go by: the ${plural(count, kind)} they have ${count === 1 ? 'is' : 'are'} left out of their voice, ` +
+    'kept but not to be imitated. Write this from the posting and what the resume and check_claim support.'
+  );
+}
+
 /** Trim a body to something that will not bury everything else in the reply. */
 function clip(text: string, room: number): string {
   const clean = (text ?? '').trim();
@@ -147,6 +179,8 @@ export class WritingSession {
   readonly state: WritingState = emptyWriting();
 
   private readonly resumeText: string;
+  /** Every letter and answer they have written, each with where it was said. */
+  private readonly ownWords: { where: string; text: string }[];
 
   constructor(
     readonly data: StoreData,
@@ -157,6 +191,19 @@ export class WritingSession {
     resumeText: string,
   ) {
     this.resumeText = resumeText;
+    // Every letter, including one taken out of their voice: a letter written
+    // to somebody else's template is still one they sent, and what it says
+    // about them they have said.
+    this.ownWords = [
+      ...(data.coverLetters ?? [])
+        .filter((l) => l.body?.trim())
+        .map((l) => ({ where: `in their letter to ${l.company || l.title}`, text: l.body })),
+      ...(data.answers ?? []).flatMap((a) =>
+        a.variants
+          .filter((v) => v.text?.trim())
+          .map((v) => ({ where: `in their answer to "${clip(a.question, 80)}"`, text: v.text })),
+      ),
+    ];
   }
 
   /* ---------------------------------------------------------------- *
@@ -201,9 +248,11 @@ export class WritingSession {
       lines.push('', 'Questions on the form:');
       for (const q of this.draft.questions) {
         const mine = this.state.answers[q.id];
+        const words = statedWordLimit(q.question);
         lines.push(
           `- [${q.id}] ${q.question}` +
             (q.limit ? `  (the box takes at most ${q.limit} characters)` : '') +
+            (words ? `  (the question asks for at most ${words} words)` : '') +
             (mine ? '  (answered)' : q.answer?.trim() ? '  (already has an answer — build on it, do not replace it blindly)' : ''),
         );
         if (!mine && q.answer?.trim()) lines.push(`    currently: ${clip(q.answer, 400)}`);
@@ -222,8 +271,12 @@ export class WritingSession {
    * the thing.
    */
   findLetters(query: string, limit = 3): string {
-    const letters = this.data.coverLetters ?? [];
-    if (letters.length === 0) return 'None yet. This will be the first.';
+    // Only what counts as theirs: this hands letters over to be adapted, and
+    // one taken out of their voice is kept and not imitated.
+    const all = this.data.coverLetters ?? [];
+    const letters = all.filter(countsAsTheirs);
+    if (all.length === 0) return 'None yet. This will be the first.';
+    if (letters.length === 0) return leftOut(all.length, 'letter');
 
     const terms = query
       .toLowerCase()
@@ -254,15 +307,21 @@ export class WritingSession {
    * answer; a bad suggestion presented as a good one is not.
    */
   findAnswers(question: string, limit = 3): string {
-    const bank = this.data.answers ?? [];
-    if (bank.length === 0) return 'None yet.';
+    const all = this.data.answers ?? [];
+    const bank = all.filter(countsAsTheirs);
+    if (all.length === 0) return 'None yet.';
+    if (bank.length === 0) return leftOut(all.length, 'answer');
     const ranked = [...bank]
       .map((a: AnswerBankItem) => ({ a, score: questionSimilarity(question, a.question) }))
       .filter(({ score }) => score > 0)
       .sort((x, y) => y.score - x.score)
       .slice(0, Math.max(1, Math.min(limit, 5)));
     if (ranked.length === 0) {
-      return `Nothing in the answer bank is about that. There are ${plural(bank.length, 'answer')} in it, none close enough to build on — write this one from the resume and the posting.`;
+      return (
+        `Nothing in the answer bank is about that. There are ${plural(bank.length, 'answer')} in it, none close ` +
+        'enough to build on. Look for the story in their letters (find_my_letters) before reaching for the ' +
+        'resume, and do not retell a resume line.'
+      );
     }
     return ranked
       .map(({ a }) => {
@@ -273,12 +332,24 @@ export class WritingSession {
   }
 
   /**
-   * Is this actually in the resume?
+   * Is this something they can say?
    *
    * The one question a letter most needs answered and the one a single-shot
    * prompt cannot answer: the resume is in the context, but "does it say two
    * million events a day or twenty" is a lookup, and a model doing a lookup
    * from memory mid-sentence is a model about to round a number.
+   *
+   * The resume, and what they have told employers before. This looked in the
+   * resume alone and said "Do not write it" to everything else — so a story
+   * told well in three earlier letters could not be told a fourth time, and
+   * the letter was built out of resume lines instead, which the reader already
+   * has in front of them. Their own letters and answers are their own account
+   * of their own work, and as good a source as the resume for what they did.
+   *
+   * One source at a time, though. Every word of an invented claim can usually
+   * be found somewhere across a season of letters, so what the resume does not
+   * carry has to come from a single letter or answer, and the sentences it
+   * comes from are quoted so the model can see they say what it means.
    */
   checkClaim(claim: string): MoveResult {
     const words = claim
@@ -306,7 +377,7 @@ export class WritingSession {
        * Only trailing dots: the one in `node.js` has a letter after it.
        */
       .map((w) => w.replace(/\.+$/, ''))
-      .filter((w) => w.length > 2 || /[\d+#%]/.test(w));
+      .filter((w) => (w.length > 2 || /[\d+#%]/.test(w)) && !FUNCTION_WORDS.has(w));
     if (words.length === 0) return no('Give a phrase to look for — a technology, a number, a piece of work.');
 
     const hay = this.resumeText.toLowerCase();
@@ -314,18 +385,51 @@ export class WritingSession {
     const missing = words.filter((w) => !carries(hay, w));
 
     if (missing.length === 0) {
-      return ok(`Every word of that appears in the resume. The lines that carry it:\n${this.linesFor(words)}`);
+      return ok(
+        `Every word of that appears in the resume. The lines that carry it:\n${this.linesFor(words)}\n` +
+          'The reader has those lines in front of them already, so do not restate them: say why this matters here.',
+      );
     }
+
+    const told = this.toldBefore(missing);
+    if (told) {
+      return ok(
+        (found.length > 0 ? `The resume carries ${found.join(', ')}; the rest they` : 'Not on this resume, but they') +
+          ` have told before, ${told.where}:\n${told.lines}\n` +
+          'Retell it in their words, for this posting, and add nothing to it that is not there.',
+      );
+    }
+
     if (found.length === 0) {
       return no(
-        `None of that is in the resume: ${missing.join(', ')}. Do not write it. If the posting asks for it and ` +
-          `this person has not claimed it, the letter says what they have done instead.`,
+        `None of that is in the resume, and nothing they have written before says it: ${missing.join(', ')}. ` +
+          'Do not write it. If the posting asks for it and this person has not claimed it, the letter says what ' +
+          'they have done instead.',
       );
     }
     return no(
-      `Partly. In the resume: ${found.join(', ')}. Not in it: ${missing.join(', ')}. Write only the part that is, ` +
-        `and check any number against the line it came from:\n${this.linesFor(found)}`,
+      `Partly. In the resume: ${found.join(', ')}. Not in it, nor in any one thing they have written before: ` +
+        `${missing.join(', ')}. Write only the part that is, and check any number against the line it came from:\n` +
+        this.linesFor(found),
     );
+  }
+
+  /**
+   * The one earlier letter or answer that carries every one of these words,
+   * and the sentences of it that do.
+   */
+  private toldBefore(words: string[]): { where: string; lines: string } | null {
+    for (const source of this.ownWords) {
+      if (!words.every((w) => carries(source.text.toLowerCase(), w))) continue;
+      const lines = source.text
+        .split(/(?<=[.!?])\s+|\n+/)
+        .filter((s) => words.some((w) => carries(s.toLowerCase(), w)))
+        .slice(0, 3)
+        .map((s) => `  ${clip(s, 300)}`)
+        .join('\n');
+      return { where: source.where, lines };
+    }
+    return null;
   }
 
   private linesFor(words: string[]): string {
@@ -358,8 +462,22 @@ export class WritingSession {
     }
     const gap = placeholderIn(text);
     if (gap) return no(unfilled(gap));
+    /*
+     * "Way too wordy." A letter half as long again as any they send is handed
+     * back while it can still be cut — the prompt asks for their length, and
+     * this is the one place that can hold a run to it.
+     */
+    const words = wordCount(text);
+    const cap = letterWordCap(this.data);
+    if (words > cap) {
+      const own = ownLetterLength(this.data);
+      return no(
+        `That is ${words} words. ${own ? `Their own letters run about ${own.median}` : `A letter here runs ${DEFAULT_LETTER_WORDS.low}–${DEFAULT_LETTER_WORDS.high}`}, ` +
+          `so cut it to under ${cap}: say less, rather than saying the same in fewer words.`,
+      );
+    }
     this.state.letter = text;
-    return ok(`Saved, ${text.split(/\s+/).length} words. Call read_work to see what is still outstanding.`);
+    return ok(`Saved, ${words} words. Call read_work to see what is still outstanding.`);
   }
 
   /** One answer, to one question the form actually asked. */
@@ -387,12 +505,25 @@ export class WritingSession {
           `Write it shorter — say less, rather than cutting it off.`,
       );
     }
+    /*
+     * And a limit the question states in words. Forms rarely enforce these —
+     * the box takes whatever is put in it — so a draft over it went in whole,
+     * and the person found out by counting, or did not.
+     */
+    const stated = statedWordLimit(question.question);
+    const words = wordCount(text);
+    if (stated && words > stated) {
+      return no(
+        `That is ${words} words, and the question asks for at most ${stated}. ` +
+          `Write it shorter — say less, rather than cutting it off.`,
+      );
+    }
     this.state.answers[questionId] = text;
     return ok(`Saved as the answer to "${clip(question.question, 80)}".`);
   }
 
   describeWritten(): string {
-    const parts = [this.state.letter ? `A letter of ${this.state.letter.split(/\s+/).length} words.` : 'No letter yet.'];
+    const parts = [this.state.letter ? `A letter of ${wordCount(this.state.letter)} words.` : 'No letter yet.'];
     const answered = Object.keys(this.state.answers).length;
     parts.push(`${answered} of ${this.draft.questions.length} questions answered.`);
     const left = this.draft.questions.filter((q) => !this.state.answers[q.id]);
