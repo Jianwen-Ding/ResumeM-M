@@ -108,3 +108,38 @@ describe('what the card holds, against the store', () => {
     if (render.status === 200) expect(render.body.printed).toBe(body.printed);
   });
 });
+
+/*
+ * One short string that moves when anything in the save changes, so the
+ * extension can ask every few seconds without reading the store.
+ */
+describe('whether anything in the save has changed', () => {
+  const revision = async () => (await request(app).get('/api/revision').expect(200)).body.revision as string;
+
+  it('stays the same while nothing is written', async () => {
+    expect(await revision()).toBe(await revision());
+  });
+
+  it('moves when a resume is saved', async () => {
+    const before = await revision();
+    const base = t.store.load().resumes.find((r) => r.id === 'base')!;
+    t.store.saveResume({ ...base, label: `${base.label} (edited)` });
+    expect(await revision()).not.toBe(before);
+  });
+
+  it('and when a file is taken away', async () => {
+    const before = await revision();
+    t.store.deleteResume('intern');
+    expect(await revision()).not.toBe(before);
+  });
+
+  it('but not when only the build output changes', async () => {
+    // The output inside the save, as `withinProject` puts it, so the walk
+    // meets it and has to step over it.
+    t.store.saveConfig({ output: { dir: 'out', withinProject: true } } as never);
+    expect(path.dirname(t.store.outDir())).toBe(t.store.root);
+    const before = await revision();
+    fs.writeFileSync(path.join(t.store.outDir(), 'preview-scratch.pdf'), 'x');
+    expect(await revision()).toBe(before);
+  });
+});

@@ -600,6 +600,51 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * Store reads                                                       *
    * ---------------------------------------------------------------- */
 
+  /**
+   * Whether anything in the save has changed, as one short string.
+   *
+   * The extension builds from the store and then holds what it built — the
+   * resume list, the copy, what it printed, the answers it matched — and
+   * until now learnt of a change only when its tab came back into view, and
+   * then only for the copy. A variation saved in the editor did not appear in
+   * the card's picker at all until the card was put up again. This is cheap
+   * enough to ask every few seconds: a fingerprint of every file's time and
+   * size, which moves on any write — the editor's, a restore from the
+   * version history, a hand edit — and on nothing else. The build output and
+   * the history's own folder are left out; they change when nothing the card
+   * holds has.
+   */
+  api.get(
+    '/revision',
+    handler(async (_req, res) => {
+      const out = path.resolve(store.outDir());
+      const hash = createHash('sha1');
+      const walk = (dir: string) => {
+        let names: string[];
+        try {
+          names = fs.readdirSync(dir).sort();
+        } catch {
+          return;
+        }
+        for (const name of names) {
+          if (name.startsWith('.')) continue;
+          const full = path.join(dir, name);
+          if (path.resolve(full) === out || name === 'snapshots') continue;
+          let st: fs.Stats;
+          try {
+            st = fs.statSync(full);
+          } catch {
+            continue;
+          }
+          if (st.isDirectory()) walk(full);
+          else hash.update(`${path.relative(store.root, full)}\u0000${st.mtimeMs}\u0000${st.size}\n`);
+        }
+      };
+      walk(store.root);
+      res.json({ revision: hash.digest('hex') });
+    }),
+  );
+
   api.get(
     '/store',
     handler(async (_req, res) => {
