@@ -1824,6 +1824,56 @@ async function main() {
      * stopping mid-save without needing to actually stop it out from under
      * the rest of this run.
      * -------------------------------------------------------------- */
+    /*
+     * A dialog whose save fails.
+     *
+     * "Record an application", "New cover letter" and "New saved answer"
+     * closed first and saved after, with nothing catching the save: a write
+     * the store refused left the dialog gone, what was typed gone with it,
+     * and nothing on screen. Refused here once, by cutting the one request
+     * off as a server that has gone would, and then let through.
+     */
+    console.log('\nA dialog whose save fails');
+    {
+      const open = await page.evaluate(() => {
+        const m = document.querySelector('#modal');
+        if (!m || m.classList.contains('hidden')) return null;
+        m.classList.add('hidden');
+        return true;
+      });
+      if (open) console.log('    (a dialog was open and was closed)');
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      let refused = 0;
+      await page.route('**/api/applications', (route) => {
+        if (route.request().method() !== 'POST' || refused > 0) return route.fallback();
+        refused++;
+        return route.abort('connectionrefused');
+      });
+      await page.locator('#btn-add-app').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_company').fill('Wrenfield Analytics');
+      await page.locator('#f_role').fill('Data Engineer');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      const note = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('a save that fails brings the dialog back, saying why', /^Not saved — ResumeM-M could not be reached\. What you typed is still here/.test(note), note);
+      check('with what was typed still in it', (await page.locator('#f_company').inputValue().catch(() => '')) === 'Wrenfield Analytics');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(1200);
+      await page.unroute('**/api/applications');
+      const apps = (await (await fetch(`${server.url}/api/applications`)).json()).applications ?? [];
+      check('and pressing OK again saves it', apps.some((a) => a.company === 'Wrenfield Analytics'));
+
+      await page.locator('#btn-add-app').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_company').fill('Only a company');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(400);
+      const needs = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('and a box the save needs, left empty, is asked for rather than dropped', /needs a company and a role/.test(needs), needs);
+      await page.locator('#modal-cancel').click();
+    }
+
     console.log('\nWhen the tracker cannot save');
     {
       // As below in the overlap check: the apply flow just finished on a

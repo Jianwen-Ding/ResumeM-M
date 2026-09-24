@@ -6278,16 +6278,54 @@ async function openApplication(id) {
   loadApplications().catch((err) => setStatus(err.message, true));
 }
 
+/**
+ * A form whose answer is saved, asked again until it is.
+ *
+ * These dialogs closed first and saved after, so a save the store refused —
+ * a save switched under the editor, a folder that would not take the write —
+ * rejected into nothing: the dialog was gone, what was typed with it, and
+ * the screen said nothing at all. A box left empty that the save needs
+ * closed the dialog just as silently. `save` answers a sentence to ask
+ * again with it, or throws; either way the form comes back holding what was
+ * typed, with the reason above the buttons.
+ */
+async function formThatSaves(title, fields, note, save) {
+  let values = Object.fromEntries(fields.map((f) => [f.name, f.value ?? '']));
+  let problem = '';
+  for (;;) {
+    const answer = await form(
+      title,
+      fields.map((f) => ({ ...f, value: values[f.name] })),
+      [problem, note].filter(Boolean).join(' '),
+    );
+    if (!answer) return false;
+    values = { ...values, ...answer };
+    try {
+      const again = await save(answer);
+      if (typeof again === 'string') {
+        problem = again;
+        continue;
+      }
+      return true;
+    } catch (err) {
+      // The browser's own words for a server that did not answer.
+      const why = /failed to fetch|networkerror|load failed/i.test(err.message) ? 'ResumeM-M could not be reached' : err.message;
+      problem = `Not saved — ${why}. What you typed is still here.`;
+    }
+  }
+}
+
 async function addApplication() {
-  const answer = await form('Record an application', [
+  await formThatSaves('Record an application', [
     { name: 'company', label: 'Company', value: '' },
     { name: 'role', label: 'Role', value: '' },
     { name: 'url', label: 'URL', value: '' },
     { name: 'notes', label: 'Notes', value: '', multiline: true },
-  ]);
-  if (!answer?.company?.trim() || !answer?.role?.trim()) return;
-  await api('/applications', { method: 'POST', body: JSON.stringify({ ...answer, resumeId: state.resumeId }) });
-  loadApplications();
+  ], '', async (answer) => {
+    if (!answer.company?.trim() || !answer.role?.trim()) return 'An application needs a company and a role.';
+    await api('/applications', { method: 'POST', body: JSON.stringify({ ...answer, resumeId: state.resumeId }) });
+    loadApplications();
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -7628,12 +7666,15 @@ async function editLetter(letter) {
 }
 
 async function addLetter() {
-  const answer = await form('New cover letter', [
+  await formThatSaves('New cover letter', [
     { name: 'company', label: 'Company', value: '' },
     { name: 'role', label: 'Role', value: '' },
     { name: 'body', label: 'Body', value: '', multiline: true, tall: true },
-  ]);
-  if (!answer?.body?.trim()) return;
+  ], '', saveLetter);
+}
+
+async function saveLetter(answer) {
+  if (!answer.body?.trim()) return 'A letter needs something in it.';
   /*
    * A name no letter already has.
    *
@@ -7664,14 +7705,15 @@ async function addLetter() {
 }
 
 async function addAnswer() {
-  const answer = await form('New saved answer', [
+  await formThatSaves('New saved answer', [
     { name: 'question', label: 'Question, as forms usually word it', value: '' },
     { name: 'answer', label: 'Your answer', value: '', multiline: true, tall: true },
-  ], 'Offered automatically when a form asks something close to this.');
-  if (!answer?.question?.trim() || !answer?.answer?.trim()) return;
-  await api('/answers/save', { method: 'POST', body: JSON.stringify(answer) });
-  setStatus('Answer saved');
-  loadLetters();
+  ], 'Offered automatically when a form asks something close to this.', async (answer) => {
+    if (!answer.question?.trim() || !answer.answer?.trim()) return 'A saved answer needs the question and the answer.';
+    await api('/answers/save', { method: 'POST', body: JSON.stringify(answer) });
+    setStatus('Answer saved');
+    loadLetters();
+  });
 }
 
 /**
@@ -10606,7 +10648,14 @@ async function boot() {
   $('#voice').oninput = markVoiceUnsaved;
   $('#btn-save-voice').onclick = async () => {
     const saved = $('#voice').value;
-    await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: saved }) });
+    // Said when it fails. The notes stay in the box either way; a failure
+    // that went unsaid left them looking saved when they were not.
+    try {
+      await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: saved }) });
+    } catch (err) {
+      setStatus(`Notes not saved — ${err.message}. They are still in the box.`, true);
+      return;
+    }
     // Before the reload, or the box still counts as edited and `loadVoice`
     // would politely decline to refresh the very thing it just saved.
     voiceAsLoaded = saved;
