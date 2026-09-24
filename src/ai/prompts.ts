@@ -1,4 +1,4 @@
-import { buildVoiceContext, renderVoiceContext } from './voice.js';
+import { buildVoiceContext, countsAsTheirs, renderVoiceContext } from './voice.js';
 import { DEFAULT_LETTER_WORDS, ownLetterLength, statedWordLimit, wordCount } from './length.js';
 import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
 import { looksLikeCompanyName } from '../jobs/extract.js';
@@ -272,9 +272,11 @@ const PRIOR_BUDGET = 9000;
  * fills up.
  */
 function priorWorkIndex(data: StoreData, { question, job }: PriorWork): string {
-  const letters = [...(data.coverLetters ?? [])]
+  // Only what counts as theirs: this is the list of things to go and adapt.
+  const letters = (data.coverLetters ?? [])
+    .filter(countsAsTheirs)
     .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
-  const answers = [...(data.answers ?? [])];
+  const answers = (data.answers ?? []).filter(countsAsTheirs);
   if (letters.length === 0 && answers.length === 0) return '';
 
   const lines = ['## What they have written before', ''];
@@ -329,11 +331,13 @@ export interface PriorWork {
 }
 
 function priorWork(data: StoreData, { question, job, letters, skip }: PriorWork): string {
-  const chosenLetters = (letters ?? relevantLetters(data.coverLetters ?? [], job ?? {}, 3)).filter(
-    (l) => !skip?.letterId || l.id !== skip.letterId,
+  // Only what counts as theirs, whoever picked the letters: all of this is
+  // offered to be adapted, or held up as what they sound like.
+  const chosenLetters = (letters ?? relevantLetters((data.coverLetters ?? []).filter(countsAsTheirs), job ?? {}, 3)).filter(
+    (l) => countsAsTheirs(l) && (!skip?.letterId || l.id !== skip.letterId),
   );
 
-  const ranked = [...(data.answers ?? [])].filter((a) => !skip?.answerIds.has(a.id));
+  const ranked = (data.answers ?? []).filter((a) => countsAsTheirs(a) && !skip?.answerIds.has(a.id));
   if (question) {
     ranked.sort((a, b) => questionSimilarity(question, b.question) - questionSimilarity(question, a.question));
   }
@@ -429,11 +433,14 @@ export function startingPoint(
   const answerIds = new Set<string>();
   const answerWords = new Map<string, number>();
 
-  const body = letter?.body?.trim() ?? '';
+  // One taken out of their voice is not a place to start: this is where the
+  // shape and the length of what they write are taken from.
+  const usable = letter && countsAsTheirs(letter) ? letter : undefined;
+  const body = usable?.body?.trim() ?? '';
   // A line or two is a note, not a letter to start from.
-  const letterShown = Boolean(letter) && wordCount(body) >= 40;
-  if (letter && letterShown) {
-    const where = [letter.company, letter.role].filter(Boolean).join(' — ') || letter.title;
+  const letterShown = Boolean(usable) && wordCount(body) >= 40;
+  if (usable && letterShown) {
+    const where = [usable.company, usable.role].filter(Boolean).join(' — ') || usable.title;
     parts.push(
       `### The letter to start from — ${where} (${wordCount(body)} words)`,
       '',
@@ -448,7 +455,8 @@ export function startingPoint(
   for (const question of questions) {
     // The same "about the question at all" line `find_my_answers` draws: the
     // best of a bad lot is not a place to start.
-    const closest = [...(data.answers ?? [])]
+    const closest = (data.answers ?? [])
+      .filter(countsAsTheirs)
       .map((a) => ({ a, score: questionSimilarity(question, a.question) }))
       .filter(({ a, score }) => score > 0 && a.variants.some((v) => v.text?.trim()))
       .sort((x, y) => y.score - x.score)[0]?.a;
@@ -470,7 +478,7 @@ export function startingPoint(
 
   return {
     text: parts.length > 0 ? ['## Start from what they have already written', '', ...parts].join('\n') : '',
-    letterId: letterShown ? letter?.id : undefined,
+    letterId: letterShown ? usable?.id : undefined,
     answerIds,
     answerWords,
   };
@@ -924,8 +932,8 @@ export function coverLetterPrompt(
       ? priorLetters.map((l, n) =>
           typeof l === 'string' ? ({ id: `given-${n}`, title: `An earlier letter`, body: l } as CoverLetter) : l,
         )
-      : relevantLetters(data.coverLetters ?? [], { company: job.company, role: job.jobTitle }, 3);
-  const start = startingPoint(data, { letter: letters[0] });
+      : relevantLetters((data.coverLetters ?? []).filter(countsAsTheirs), { company: job.company, role: job.jobTitle }, 3);
+  const start = startingPoint(data, { letter: letters.find(countsAsTheirs) });
   return [
     preamble(data, { resumeLines: false }),
     '',
@@ -1566,7 +1574,7 @@ export function applicationWritingPrompt(
    */
   wanted: { letter?: boolean; questions?: { question: string }[] } = {},
 ): string {
-  const closestLetter = relevantLetters(data.coverLetters ?? [], { company: job.company, role: job.jobTitle }, 1)[0];
+  const closestLetter = relevantLetters((data.coverLetters ?? []).filter(countsAsTheirs), { company: job.company, role: job.jobTitle }, 1)[0];
   const start = startingPoint(data, {
     letter: wanted.letter === false ? undefined : closestLetter,
     questions: (wanted.questions ?? []).map((q) => q.question),

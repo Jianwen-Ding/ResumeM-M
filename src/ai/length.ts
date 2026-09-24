@@ -1,4 +1,5 @@
 import type { StoreData } from '../model/types.js';
+import { countsAsTheirs } from './voice.js';
 
 /**
  * How long a letter or an answer should run, read from what this person
@@ -56,7 +57,7 @@ export interface LetterLength {
  */
 export function ownLetterLength(data: Pick<StoreData, 'coverLetters'>): LetterLength | null {
   const counts = (data.coverLetters ?? [])
-    .filter((l) => l.voice !== false)
+    .filter(countsAsTheirs)
     .map((l) => wordCount(l.body))
     .filter((n) => n >= LETTER_FLOOR)
     .sort((a, b) => a - b);

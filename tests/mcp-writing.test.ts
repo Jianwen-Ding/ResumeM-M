@@ -1445,6 +1445,73 @@ describe('checking a claim against what they have told before', () => {
     expect(describe('check_claim')).toMatch(/written before/);
     expect(describe('read_resume')).toMatch(/do not retell/i);
   });
+
+  /*
+   * Taken out of their voice is not taken back. A letter switched off because
+   * it was written to somebody else's template is still one they sent, and
+   * what it says about them they have said — the switch is about what the
+   * writing is told to sound like, not about what is true.
+   */
+  it('still takes a story from a letter taken out of their voice', () => {
+    const s = told({
+      coverLetters: [
+        { id: 'l1', title: 'Platform — Helios', company: 'Helios', body: STORY, createdAt: '2026-01-01T00:00:00Z', voice: false },
+      ],
+    });
+    const r = s.checkClaim('rebuilt the on-call rotation');
+    expect(r.ok, r.text).toBe(true);
+    expect(r.text).toContain('in their letter to Helios');
+  });
+});
+
+/*
+ * But nothing taken out of their voice is handed over to be adapted. The
+ * switch says it is "left out of the examples any AI request is told to sound
+ * like", and `find_my_letters` and `find_my_answers` are how a run goes and
+ * gets more of exactly that.
+ */
+describe('fetching writing taken out of their voice', () => {
+  const OFF = 'To whom it may concern, please find enclosed my application for the advertised position.';
+  const session = (over: Partial<StoreData>) => {
+    const data = store();
+    return new WritingSession({ ...data, ...over }, resolveResume('base', data), POSTING, writing().draft as never, '');
+  };
+
+  it('finds only the letters that count as theirs', () => {
+    const s = session({
+      coverLetters: [
+        { id: 'l1', title: 'Platform — Helios', company: 'Helios', body: `${OFF} Kafka.`, createdAt: '2026-01-01T00:00:00Z', voice: false },
+        { id: 'l2', title: 'Data — Northwind', company: 'Northwind', body: 'Kafka at Northwind, in my own words.', createdAt: '2026-01-02T00:00:00Z' },
+      ],
+    });
+    const found = s.findLetters('Helios Kafka');
+    expect(found).toContain('in my own words');
+    expect(found).not.toContain(OFF);
+  });
+
+  it('says why there is nothing, when everything is switched off', () => {
+    const s = session({
+      coverLetters: [{ id: 'l1', title: 'Platform — Helios', company: 'Helios', body: OFF, createdAt: '2026-01-01T00:00:00Z', voice: false }],
+      answers: [{ id: 'a1', question: 'Why this role?', default: 'v', variants: [{ id: 'v', label: 'l', text: OFF }], voice: false }] as never,
+    });
+    for (const found of [s.findLetters('Helios'), s.findAnswers('Why this role?')]) {
+      expect(found).not.toContain(OFF);
+      expect(found).not.toContain('This will be the first');
+      expect(found).toMatch(/left out of their voice/);
+    }
+  });
+
+  it('finds only the answers that count as theirs', () => {
+    const s = session({
+      answers: [
+        { id: 'a1', question: 'Why this role?', default: 'v', variants: [{ id: 'v', label: 'l', text: OFF }], voice: false },
+        { id: 'a2', question: 'Why this role at a startup?', default: 'v', variants: [{ id: 'v', label: 'l', text: 'Mine, in my words.' }] },
+      ] as never,
+    });
+    const found = s.findAnswers('Why this role?');
+    expect(found).toContain('Mine, in my words.');
+    expect(found).not.toContain(OFF);
+  });
 });
 
 /*

@@ -853,6 +853,102 @@ describe('writing from what they wrote before, not from the resume', () => {
 });
 
 /*
+ * The switch beside every letter and answer says one taken out is "left out
+ * of the examples any AI request is told to sound like". The voice samples
+ * kept that; the letter to start from, the paste of what they have written
+ * and the list the tools fetch from did not — so a letter written to
+ * somebody else's template, switched off for exactly that, came back as the
+ * one to start from, "its shape, its length".
+ */
+describe('writing they have taken out of their voice', () => {
+  const words = (n: number, seed: string) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
+  const TEMPLATE = 'To whom it may concern, please find enclosed my application for the advertised position';
+  const OWN = 'At Vega I rebuilt the on-call rotation after a week where one person took every page';
+  const store = {
+    ...data,
+    coverLetters: [
+      // The closest by every measure — the same employer, the same role,
+      // the newest — and switched off.
+      {
+        id: 'l_template',
+        title: 'Platform Engineer — Helios Robotics',
+        company: 'Helios Robotics',
+        role: 'Platform Engineer',
+        createdAt: '2026-05-01T00:00:00Z',
+        body: `${TEMPLATE} ${words(100, 't')}`,
+        voice: false,
+      },
+      {
+        id: 'l_own',
+        title: 'Data Engineer — Northwind',
+        company: 'Northwind',
+        role: 'Data Engineer',
+        createdAt: '2026-04-01T00:00:00Z',
+        body: `${OWN} ${words(100, 'o')}`,
+      },
+    ],
+    answers: [
+      {
+        id: 'a_off',
+        question: 'Why are you interested in this role?',
+        default: 'v',
+        variants: [{ id: 'v', label: 'Saved', text: 'OFF-ANSWER, written to a template.' }],
+        voice: false,
+      },
+      {
+        id: 'a_on',
+        question: 'Why are you interested in this company?',
+        default: 'v',
+        variants: [{ id: 'v', label: 'Saved', text: 'ON-ANSWER, in their own words.' }],
+      },
+    ],
+  };
+  const helios = { company: 'Helios Robotics', jobTitle: 'Platform Engineer', jobDescription: 'On-call, Kafka.' };
+
+  it('starts a letter from the closest one that counts as theirs, and shows the other nowhere', () => {
+    for (const tools of [true, false]) {
+      const p = coverLetterPrompt(store, resolved, helios, [], { tools });
+      expect(p, `tools: ${tools}`).toContain('The letter to start from — Northwind — Data Engineer');
+      expect(p, `tools: ${tools}`).not.toContain(TEMPLATE);
+      // Nor in the list of letters the tools fetch from.
+      expect(p, `tools: ${tools}`).not.toContain('- Platform Engineer — Helios Robotics');
+    }
+    // Handed the letters by a caller that ranked every one of them.
+    expect(coverLetterPrompt(store, resolved, helios, store.coverLetters)).not.toContain(TEMPLATE);
+  });
+
+  it('starts an answer from the closest one that counts as theirs', () => {
+    const p = answerPrompt(store, 'Why are you interested in this role at Helios?', helios);
+    expect(p).toContain('start from their answer to "Why are you interested in this company?"');
+    expect(p).toContain('ON-ANSWER');
+    expect(p).not.toContain('OFF-ANSWER');
+  });
+
+  it('writes an application from neither', () => {
+    const p = applicationWritingPrompt(store, resolved, helios, {
+      letter: true,
+      questions: [{ question: 'Why are you interested in this role?' }],
+    });
+    expect(p).toContain(OWN);
+    expect(p).toContain('ON-ANSWER');
+    expect(p).not.toContain(TEMPLATE);
+    expect(p).not.toContain('OFF-ANSWER');
+    expect(p).not.toContain('- Platform Engineer — Helios Robotics');
+    expect(p).not.toContain('- Why are you interested in this role?');
+  });
+
+  it('does not judge whether a draft sounds like them by either', () => {
+    const draft = makeDraft({ company: 'Helios Robotics', role: 'Platform Engineer' });
+    const letter = letterFeedbackPrompt(store, draft, store.coverLetters);
+    expect(letter).toContain(OWN);
+    expect(letter).not.toContain(TEMPLATE);
+    const answer = answerFeedbackPrompt(store, draft, draft.questions[0]!);
+    expect(answer).toContain('ON-ANSWER');
+    expect(answer).not.toContain('OFF-ANSWER');
+  });
+});
+
+/*
  * Asked for: a way to load feedback into the AI's answers. A redraft that
  * cannot be told what was wrong with the last one is a second roll of the
  * same dice.

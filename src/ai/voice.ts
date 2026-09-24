@@ -35,6 +35,20 @@ function clean(text: string): string {
   return String(text ?? '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/**
+ * Whether a letter or an answer counts as their writing. See the note on
+ * `CoverLetter.voice`: absent means yes, `false` keeps it out.
+ *
+ * Out of everything a request is told to sound like or to adapt — these
+ * samples, the letter and the answers to start from, the paste of what they
+ * have written, and what `find_my_letters` and `find_my_answers` hand over,
+ * which is what the switch beside it promises. Only the samples used to
+ * honour it, so a letter switched off as written to somebody else's template
+ * came back as "the letter to start from". Not out of what is true:
+ * `check_claim` still reads one taken out as something they have said.
+ */
+export const countsAsTheirs = (item: { voice?: boolean }): boolean => item.voice !== false;
+
 export interface SampleOptions {
   /**
    * Whether the resume's own bullets count as a sample. Yes for anything that
@@ -66,14 +80,14 @@ export function collectSamples(data: StoreData, { resume = true }: SampleOptions
    * still a letter you sent and is not how you write.
    */
   for (const letter of data.coverLetters ?? []) {
-    if (letter.voice === false) continue;
+    if (!countsAsTheirs(letter)) continue;
     const text = clean(letter.body);
     if (text.length < 40) continue;
     out.push({ kind: 'letter', title: letter.title, text });
   }
 
   for (const item of data.answers ?? []) {
-    if (item.voice === false) continue;
+    if (!countsAsTheirs(item)) continue;
     for (const v of item.variants) {
       const text = clean(v.text);
       // One-word answers ("No") say nothing about how someone writes.

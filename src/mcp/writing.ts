@@ -32,6 +32,7 @@ import type { AnswerBankItem, CoverLetter, Draft, ResolvedResume, StoreData } fr
 import type { MoveResult, TailorPosting } from './session.js';
 import { questionSimilarity } from '../jobs/answers.js';
 import { DEFAULT_LETTER_WORDS, letterWordCap, ownLetterLength, statedWordLimit, wordCount } from '../ai/length.js';
+import { countsAsTheirs } from '../ai/voice.js';
 
 const ok = (text: string): MoveResult => ({ ok: true, text });
 const no = (text: string): MoveResult => ({ ok: false, text });
@@ -156,6 +157,18 @@ function unfilled(gap: string): string {
   );
 }
 
+/**
+ * Why a search of their writing came back empty when there is writing: "None
+ * yet" would be false, and would send the model off to write as though they
+ * had never written anything.
+ */
+function leftOut(count: number, kind: 'letter' | 'answer'): string {
+  return (
+    `None to go by: the ${plural(count, kind)} they have ${count === 1 ? 'is' : 'are'} left out of their voice, ` +
+    'kept but not to be imitated. Write this from the posting and what the resume and check_claim support.'
+  );
+}
+
 /** Trim a body to something that will not bury everything else in the reply. */
 function clip(text: string, room: number): string {
   const clean = (text ?? '').trim();
@@ -258,8 +271,12 @@ export class WritingSession {
    * the thing.
    */
   findLetters(query: string, limit = 3): string {
-    const letters = this.data.coverLetters ?? [];
-    if (letters.length === 0) return 'None yet. This will be the first.';
+    // Only what counts as theirs: this hands letters over to be adapted, and
+    // one taken out of their voice is kept and not imitated.
+    const all = this.data.coverLetters ?? [];
+    const letters = all.filter(countsAsTheirs);
+    if (all.length === 0) return 'None yet. This will be the first.';
+    if (letters.length === 0) return leftOut(all.length, 'letter');
 
     const terms = query
       .toLowerCase()
@@ -290,8 +307,10 @@ export class WritingSession {
    * answer; a bad suggestion presented as a good one is not.
    */
   findAnswers(question: string, limit = 3): string {
-    const bank = this.data.answers ?? [];
-    if (bank.length === 0) return 'None yet.';
+    const all = this.data.answers ?? [];
+    const bank = all.filter(countsAsTheirs);
+    if (all.length === 0) return 'None yet.';
+    if (bank.length === 0) return leftOut(all.length, 'answer');
     const ranked = [...bank]
       .map((a: AnswerBankItem) => ({ a, score: questionSimilarity(question, a.question) }))
       .filter(({ score }) => score > 0)
