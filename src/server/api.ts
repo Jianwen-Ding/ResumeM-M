@@ -42,7 +42,7 @@ import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
-import { derivedAutofill } from '../model/autofill.js';
+import { derivedAutofill, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
@@ -3056,48 +3056,96 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }
   };
 
+  /**
+   * What a form can be filled from, as one resume says it.
+   *
+   * Shared by the two ways of asking: a GET naming the wordings in `choices`,
+   * which is how the extension asked before it sent the resume itself, and a
+   * POST carrying the resume — which is also what the work history needs.
+   */
+  const autofillFor = (data: StoreData, choices: Record<string, string>, resume?: ResolvedResume) => {
+    // Resolved: a form field takes a name, not a set of them.
+    const p = resolveProfile(data.profile, {}, []);
+    return {
+      fields: {
+        full_name: p.name,
+        email: p.email,
+        phone: p.phone,
+        linkedin: p.linkedin,
+        github: p.github,
+        website: p.website,
+        location: p.location,
+        /*
+         * And the parts of those two that forms actually ask for.
+         *
+         * No ATS asks for a full name or a location: they ask for First
+         * name and Last name, and for City, State and Country, and they
+         * mark them required. The extension has always recognised those
+         * labels — `FIELD_PATTERNS` in its autofill.js has had all five
+         * keys from the start — and the store had nothing to offer them,
+         * so the commonest boxes on an application form came out empty on
+         * a profile that plainly knew the answers. Every test store had
+         * them typed in as extras, which is what hid it.
+         *
+         * Before the hand-entered extras, never after: a value somebody
+         * typed is a decision and this is only a reading. See
+         * `derivedAutofill`, which yields nothing at all where the reading
+         * is not plain.
+         */
+        ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
+        ...(p.autofill ?? {}),
+      },
+      answers: data.answers.map((a) => ({
+        id: a.id,
+        question: a.question,
+        answer: (a.variants.find((v) => v.id === a.default) ?? a.variants[0])?.text ?? '',
+      })),
+      /*
+       * The jobs this resume lists, for a form's work-history blocks. See
+       * `workHistory`: this resume's jobs and the lines it prints, never a
+       * description anybody wrote for the form.
+       */
+      history: resume ? workHistory(resume) : [],
+    };
+  };
+
   api.get(
     '/autofill',
     handler(async (req, res) => {
       const data = store.load();
-      const choices = choicesFrom(req.query.choices);
-      // Resolved: a form field takes a name, not a set of them.
-      const p = resolveProfile(data.profile, {}, []);
-      res.json({
-        fields: {
-          full_name: p.name,
-          email: p.email,
-          phone: p.phone,
-          linkedin: p.linkedin,
-          github: p.github,
-          website: p.website,
-          location: p.location,
-          /*
-           * And the parts of those two that forms actually ask for.
-           *
-           * No ATS asks for a full name or a location: they ask for First
-           * name and Last name, and for City, State and Country, and they
-           * mark them required. The extension has always recognised those
-           * labels — `FIELD_PATTERNS` in its autofill.js has had all five
-           * keys from the start — and the store had nothing to offer them,
-           * so the commonest boxes on an application form came out empty on
-           * a profile that plainly knew the answers. Every test store had
-           * them typed in as extras, which is what hid it.
-           *
-           * Before the hand-entered extras, never after: a value somebody
-           * typed is a decision and this is only a reading. See
-           * `derivedAutofill`, which yields nothing at all where the reading
-           * is not plain.
-           */
-          ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
-          ...(p.autofill ?? {}),
-        },
-        answers: data.answers.map((a) => ({
-          id: a.id,
-          question: a.question,
-          answer: (a.variants.find((v) => v.id === a.default) ?? a.variants[0])?.text ?? '',
-        })),
-      });
+      res.json(autofillFor(data, choicesFrom(req.query.choices)));
+    }),
+  );
+
+  /**
+   * The same, for the resume being sent.
+   *
+   * POST because the card's resume is a proposal the store has not been given
+   * — the reason the writing routes take a `spec` — and a whole resume does
+   * not belong in a query string. The wordings come from it, and so do the
+   * jobs a work-history section asks for. A resume that cannot be resolved
+   * costs the form its history and nothing else.
+   */
+  api.post(
+    '/autofill',
+    handler(async (req, res) => {
+      const data = store.load();
+      const body = (req.body ?? {}) as { resumeId?: unknown; spec?: unknown; choices?: unknown };
+      let resume: ResolvedResume | undefined;
+      if (body.spec || body.resumeId) {
+        try {
+          resume = resumeToWriteFrom(body, data);
+        } catch {
+          resume = undefined;
+        }
+      }
+      const spec =
+        body.spec && typeof body.spec === 'object'
+          ? (body.spec as ResumeSpec)
+          : data.resumes.find((r) => r.id === body.resumeId);
+      const choices =
+        typeof body.choices === 'string' ? choicesFrom(body.choices) : { ...(spec?.choices ?? {}) };
+      res.json(autofillFor(data, choices, resume));
     }),
   );
 

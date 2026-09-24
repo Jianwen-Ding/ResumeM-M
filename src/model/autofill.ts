@@ -26,7 +26,7 @@
  */
 import { parsePeriod } from './period.js';
 import { isVariantField } from './types.js';
-import type { Entry, MaybeVariant, Profile } from './types.js';
+import type { Entry, MaybeVariant, Profile, ResolvedResume } from './types.js';
 
 /**
  * Words that belong to the surname rather than being one.
@@ -447,4 +447,80 @@ export function derivedAutofill(
   }
 
   return out;
+}
+
+/** One job, the way a work-history section of a form asks for it. */
+export interface PastJob {
+  company: string;
+  title?: string;
+  location?: string;
+  /** Month 1-12 where the resume gives one; the year alone where it does not. */
+  start?: { year: number; month?: number };
+  end?: { year: number; month?: number };
+  /** "Present": the form's "I currently work here". */
+  current: boolean;
+  /** The lines this resume prints for it, as plain text, one to a line. */
+  description: string;
+}
+
+/** Store markup is for the renderer; a form box takes plain words. */
+function plainLine(text: string | undefined): string {
+  return String(text ?? '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/(^|[\s(])\*([^*]+)\*(?=[\s).,;:]|$)/g, '$1$2')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const monthYear = (p?: { year: number; month?: number }) =>
+  p?.year ? { year: p.year, ...(p.month ? { month: p.month } : {}) } : undefined;
+
+/**
+ * Every job on the resume being sent, for the work-history blocks a form asks
+ * for one at a time.
+ *
+ * Workday's "My Experience" wants each job as Job Title, Company, Location,
+ * "I currently work here", From, To and Role Description, and nothing filled
+ * any of it: the profile knows one current job, and the Role Description —
+ * the box that most plainly *is* the resume — was left for the person to type
+ * out again, job by job, from the document they were attaching.
+ *
+ * From the resolved resume, so it is this resume's jobs, in this resume's
+ * order, with the lines this resume prints: a job it leaves off is not
+ * offered, and a line it has switched off is not in the box. The words are
+ * the store's own — nothing here writes a description; it copies the one
+ * already on the page. An experience entry's heading is the employer and its
+ * second line the role, as `derivedAutofill` reads the current job.
+ */
+export function workHistory(resume: ResolvedResume): PastJob[] {
+  const jobs: PastJob[] = [];
+  for (const section of resume.sections) {
+    for (const entry of section.entries) {
+      if (entry.kind !== 'experience') continue;
+      const company = plainLine(entry.title);
+      if (!company) continue;
+      const period = parsePeriod(entry.dates ?? '');
+      // A lone date on a job is when it was, start and end alike.
+      const start = monthYear(period?.start);
+      const end = period?.ongoing ? undefined : monthYear(period?.end ?? (period?.start && !period.ongoing ? period.start : undefined));
+      const title = plainLine(entry.subtitle);
+      const location = plainLine(entry.location);
+      jobs.push({
+        company,
+        ...(title ? { title } : {}),
+        ...(location ? { location } : {}),
+        ...(start ? { start } : {}),
+        ...(end ? { end } : {}),
+        current: Boolean(period?.ongoing),
+        description: entry.bullets
+          .map((b) => plainLine(b.text))
+          .filter(Boolean)
+          .map((line) => `• ${line}`)
+          .join('\n'),
+      });
+    }
+  }
+  return jobs;
 }

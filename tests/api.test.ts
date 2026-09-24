@@ -1075,6 +1075,47 @@ describe('autofill', () => {
   });
 
   /*
+   * The resume itself, where the extension has it — the card's proposal, which
+   * the store has not been given. Its wordings answer the fields, and its jobs
+   * answer a form's work-history blocks: the lines it prints, as it prints
+   * them.
+   */
+  it('takes the resume being sent, and answers a work history from its jobs', async () => {
+    const newgrad = t.store.load().resumes.find((r) => r.id === 'newgrad')!;
+    const proposal = {
+      ...newgrad,
+      id: 'job-helios',
+      tier: 'temporary',
+      copiedFrom: 'newgrad',
+      choices: { ...(newgrad.choices ?? {}), 'edu_neu.dates': 'v_dec2026', b_pipeline: 'v_kafka' },
+      sections: newgrad.sections?.map((s) => (s.kind === 'experience' ? { ...s, bullets: { exp_acme: ['b_pipeline'] } } : s)),
+    };
+    const sent = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: proposal }).expect(200)).body;
+    expect(sent.fields.graduation_date).toBe('December 2026');
+    expect(sent.history).toEqual([
+      {
+        company: 'Acme Co.',
+        title: 'Software Engineer Co-op',
+        location: 'Boston, MA',
+        start: { year: 2024, month: 7 },
+        end: { year: 2024, month: 12 },
+        current: false,
+        // The wording it chose, and only the line it prints.
+        description: '• Built a Kafka pipeline handling 2M events/day',
+      },
+    ]);
+
+    // A stored resume by name answers the same way, from its own lines.
+    const stored = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad' }).expect(200)).body;
+    expect(stored.history[0].description).toBe('• Built a pipeline handling 2M events/day\n• Raised coverage from 41% to 88%');
+    // Asked the old way, or about a resume that is not there, there is no history to give.
+    expect((await request(app).get('/api/autofill').expect(200)).body.history).toEqual([]);
+    const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
+    expect(missing.history).toEqual([]);
+    expect(missing.fields.graduation_date).toBe('May 2026');
+  });
+
+  /*
    * Ignored rather than refused: the defaults answer perfectly well, and a
    * form half-filled from them beats one not filled at all.
    */

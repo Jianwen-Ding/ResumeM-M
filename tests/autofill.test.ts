@@ -7,8 +7,8 @@
  * submitted application is neither.
  */
 import { describe, expect, it } from 'vitest';
-import { derivedAutofill, graduation, readGpa, splitDegree, splitLocation, splitName } from '../src/model/autofill.js';
-import type { Entry } from '../src/model/types.js';
+import { derivedAutofill, graduation, readGpa, splitDegree, splitLocation, splitName, workHistory } from '../src/model/autofill.js';
+import type { Entry, ResolvedResume } from '../src/model/types.js';
 
 describe('splitting a name into the two boxes a form has', () => {
   it('takes the first and last word', () => {
@@ -481,5 +481,61 @@ describe('the job somebody holds now', () => {
   it('ignores ongoing entries that are not jobs, and ones put away', () => {
     expect(derivedAutofill({}, [job({ archived: true })])).toEqual({});
     expect(derivedAutofill({}, [job({ kind: 'project' })])).toEqual({});
+  });
+});
+
+/*
+ * A form's work-history blocks, answered from the resume being sent: its jobs,
+ * in its order, with the lines it prints and nothing written for the form.
+ */
+describe('the jobs a work-history section asks for', () => {
+  const resume = (entries: ResolvedResume['sections'][number]['entries']): ResolvedResume =>
+    ({
+      id: 'r',
+      label: 'R',
+      profile: { name: 'Test Person' },
+      sections: [{ kind: 'experience', heading: 'Experience', entries, skillGroups: [] }],
+      layout: {},
+      warnings: [],
+    }) as unknown as ResolvedResume;
+
+  it('reads each job with its dates, and its lines as plain words', () => {
+    const jobs = workHistory(
+      resume([
+        {
+          id: 'e1',
+          kind: 'experience',
+          title: 'Vega **Analytics**',
+          subtitle: 'Backend Engineer',
+          location: 'Boston, MA',
+          dates: 'Jun. 2023 -- Present',
+          bullets: [
+            { id: 'b1', variantId: 'v', text: 'Built a `Kafka` pipeline handling **2M events/day**' },
+            { id: 'b2', variantId: 'v', text: 'Cut latency from *900ms* to 180ms' },
+          ],
+        },
+        { id: 'e2', kind: 'experience', title: 'Acme Co.', dates: 'Summer 2022', bullets: [] },
+      ]),
+    );
+    expect(jobs[0]).toEqual({
+      company: 'Vega Analytics',
+      title: 'Backend Engineer',
+      location: 'Boston, MA',
+      start: { year: 2023, month: 6 },
+      current: true,
+      description: '• Built a Kafka pipeline handling 2M events/day\n• Cut latency from 900ms to 180ms',
+    });
+    // A lone date is when the job was, start and end alike; no lines is no description.
+    expect(jobs[1]).toMatchObject({ company: 'Acme Co.', current: false, description: '' });
+    expect(jobs[1]?.start?.year).toBe(2022);
+    expect(jobs[1]?.end?.year).toBe(2022);
+  });
+
+  it('leaves out what is not a job', () => {
+    const r = resume([
+      { id: 'p', kind: 'project', title: 'A thing', bullets: [{ id: 'b', variantId: 'v', text: 'Did it' }] },
+      { id: 'e', kind: 'experience', title: '   ', bullets: [] },
+    ] as never);
+    expect(workHistory(r)).toEqual([]);
   });
 });
