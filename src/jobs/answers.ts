@@ -16,22 +16,148 @@ const STOP = new Set([
   'how', 'would', 'will', 'can', 'please', 'describe', 'tell', 'us', 'if', 'any', 'have', 'has',
 ]);
 
+/*
+ * The same question, worded the ways forms word it.
+ *
+ * Measured with a row typed on one form and the same question asked by the
+ * next, none of these was confident, so the person typed the answer again:
+ *
+ *     "Expected salary"        "Salary expectations"      inflection, order
+ *     "Portfolio link"         "Portfolio URL"            a synonym
+ *     "Current employer"       "Who is your current employer?"   framing
+ *     "Are you 18 or older?"   "Are you at least 18?"     an age, put two ways
+ *
+ * So both questions are read the same way before they are compared: the
+ * framing taken off the front, an age threshold written as one token, each
+ * word taken back to its stem, and a handful of words that name the same
+ * thing given one name. Every guard below still runs on what comes out, so
+ * this can only make two wordings of one question the same question — a
+ * word that differs ("current" and "expected", "earliest" and "latest",
+ * "first" and "last") still differs after it.
+ */
+
+/*
+ * A question's opening that asks for the thing and is not the thing: "Who is
+ * your current employer?" asks for the current employer. Only at the start,
+ * and only in front of "your", because that is where it is framing — "Who
+ * referred you?" is a question about who, and "State" alone is a place.
+ * "What is your" was already all stop words; "who", "enter" and "provide"
+ * were not, and each counted as a word the stored question never asked.
+ */
+const FRAMING =
+  /^\s*(?:(?:please|kindly)\s+)?(?:(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:enter|provide|give|list|share|state|specify|indicate|confirm|tell\s+us|let\s+us\s+know)|(?:who|what)(?:\s+(?:is|are)|['’]s))\s+your\b/i;
+
+/*
+ * A minimum age, however it is put: "18 or older", "18 years of age or
+ * older", "18+", "at least 18", "over the age of 18", "older than 18". All
+ * become `agemin18`, one word with the number in it, so that 18 and 21 stay
+ * different questions — a bare number is otherwise forgiven as padding (see
+ * `unanswered`), and "at least 21" is not what "at least 18" asked.
+ *
+ * Only a number put as an age: one not followed by some other unit, so "at
+ * least 3 years of experience" and "10+ years" are left as they are. And only
+ * the "at least" direction — "under 18" and "younger than 18" are the other
+ * question, and are left alone to stay different from it. "Over 18" is
+ * here, unlike "over 5 years" below, because as an age it is the everyday
+ * way of saying "18 or older", and forms use the two for the same box.
+ */
+const AGE_UNIT = String.raw`(?:\s+years?(?:\s+of\s+age|\s+old)?)?`;
+const NOT_A_UNIT = String.raw`(?!\s*(?:\+|years?|yrs?|months?|weeks?|days?|hours?|%|[a-z0-9]))`;
+const AGE_MINIMUM = [
+  new RegExp(
+    String.raw`\b(?:the\s+age\s+of\s+)?(\d{2})${AGE_UNIT}\s*(?:or\s+(?:older|over|above)|\+)${NOT_A_UNIT}`,
+    'gi',
+  ),
+  new RegExp(
+    String.raw`\b(?:at\s+least|over|above|older\s+than)\s+(?:the\s+age\s+of\s+)?(\d{2})${AGE_UNIT}(?:\s+or\s+(?:older|over|above))?${NOT_A_UNIT}`,
+    'gi',
+  ),
+];
+
+/*
+ * And any other minimum: "5+ years", "at least 5 years", "5 or more years".
+ * Numbers of one or two digits are too short to be terms, so "Do you have 5+
+ * years of Python experience?" and "...3+ years..." were the same question
+ * to the matcher, scored 1.000 and came back confident — as "Are you 21 or
+ * older?" and "Are you 18 or older?" did. Written as `min5`, the number is a
+ * word the two questions do not share. Only these three ways of saying "at
+ * least": "more than 5" and "over 5" are left as they are, because a person
+ * with exactly five years answers them differently.
+ */
+const AT_LEAST = [/\b(\d{1,3})\s*\+/g, /\b(?:at\s+least|minimum\s+of)\s+(\d{1,3})\b/g, /\b(\d{1,3})\s+or\s+more\b/g];
+
+/** The question as it is compared: framing off, an age or a minimum as one token. */
+function normalise(s: string): string {
+  let out = String(s ?? '').toLowerCase().replace(FRAMING, ' ');
+  for (const re of AGE_MINIMUM) out = out.replace(re, (_m, age: string) => ` agemin${age} `);
+  for (const re of AT_LEAST) out = out.replace(re, (_m, n: string) => ` min${n} `);
+  return out;
+}
+
+/*
+ * Words a stem must never become, because a guard reads them: "note" is not
+ * "not", "none" is not "non", "willing" is not "will".
+ */
+const NEGATION = new Set(['no', 'not', 'non', 'nor', 'never', 'none']);
+
+/*
+ * One name for things forms call by several. Keyed by stem, so "URLs",
+ * "websites" and "links" are all one word. Deliberately short: a synonym is
+ * a claim that two questions are the same question, and "site" is not on it
+ * because "on site" is a working arrangement, not a web address.
+ */
+const SAME_THING: Record<string, string> = {
+  url: 'link',
+  websit: 'link',
+  homepag: 'link',
+  compens: 'salary',
+  desir: 'expect',
+};
+
+/*
+ * A word taken back to its stem, lightly: a plural, then one ending. Enough
+ * that "expected", "expecting" and "expectations" are one word, and
+ * "relocate", "relocating" and "relocation" another, without the reach of a
+ * full stemmer — every merge here is two words becoming one, and a merge
+ * that should not have happened is a false match. Numbers, and words of
+ * three letters or fewer, are left as written.
+ */
+const ENDINGS = ['ation', 'ating', 'ated', 'ment', 'ness', 'ing', 'ed', 'ate', 'e'];
+
+function stem(w: string): string {
+  if (FURNITURE.has(w) || /[0-9+#]/.test(w)) return w;
+  if (w.length < 4) return SAME_THING[w] ?? w;
+  let s = w;
+  if (s.endsWith('ies') && s.length > 4) s = `${s.slice(0, -3)}y`;
+  else if (s.endsWith('s') && !/(?:ss|us|is)$/.test(s)) s = s.slice(0, -1);
+  // "positions", "jobs", "openings": still the furniture they were.
+  if (FURNITURE.has(s)) return s;
+  const plural = s;
+  for (const ending of ENDINGS) {
+    if (!s.endsWith(ending) || s.length - ending.length < 3) continue;
+    s = s.slice(0, -ending.length);
+    // "preferred" is "prefer", "planning" is "plan".
+    if ((ending === 'ed' || ending === 'ing') && /([^aeiouylsz])\1$/.test(s)) s = s.slice(0, -1);
+    break;
+  }
+  if (NEGATION.has(s) || STOP.has(s)) s = plural;
+  return SAME_THING[s] ?? s;
+}
+
+function tokens(s: string): string[] {
+  return normalise(s).split(/[^a-z0-9+#]+/).filter(Boolean);
+}
+
 /** Every word, common ones included: the fallback when filtering leaves nothing. */
 function words(s: string): Set<string> {
-  return new Set(
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9+#]+/)
-      .filter(Boolean),
-  );
+  return new Set(tokens(s));
 }
 
 function terms(s: string): Set<string> {
   return new Set(
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9+#]+/)
-      .filter((w) => w.length > 2 && !STOP.has(w)),
+    tokens(s)
+      .filter((w) => w.length > 2 && !STOP.has(w))
+      .map(stem),
   );
 }
 
@@ -67,6 +193,11 @@ export function questionSimilarity(a: string, b: string): number {
     ta = words(a);
     tb = words(b);
   }
+  return overlap(ta, tb);
+}
+
+/** The score itself, over two questions already read into terms. */
+function overlap(ta: Set<string>, tb: Set<string>): number {
   if (ta.size === 0 || tb.size === 0) return 0;
 
   let shared = 0;
@@ -104,12 +235,7 @@ export function questionSimilarity(a: string, b: string): number {
  * read for nothing.
  */
 function shortTerms(s: string): Set<string> {
-  return new Set(
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9+#]+/)
-      .filter((w) => w.length > 0 && w.length <= 2 && /[a-z]/.test(w) && !STOP.has(w)),
-  );
+  return new Set(tokens(s).filter((w) => w.length > 0 && w.length <= 2 && /[a-z]/.test(w) && !STOP.has(w)));
 }
 
 /**
@@ -165,8 +291,8 @@ function fullyAsked(a: string, b: string): boolean {
  * line, even though "position" is a word this file already says is not part
  * of the question. Scored again without it, the two are the same question.
  */
-function bare(s: string): string {
-  return [...terms(s)].filter((t) => !FURNITURE.has(t)).join(' ');
+function bare(s: string): Set<string> {
+  return new Set([...terms(s)].filter((t) => !FURNITURE.has(t)));
 }
 
 /**
@@ -546,7 +672,7 @@ export function matchAnswer(
     confident:
       !namesAnother &&
       // Or the same score with the furniture out of it. See `bare`.
-      (best.score >= 0.7 || questionSimilarity(bare(question), bare(best.item.question)) >= 0.7) &&
+      (best.score >= 0.7 || overlap(bare(question), bare(best.item.question)) >= 0.7) &&
       fullyAsked(question, best.item.question) &&
       unanswered(question, best.item.question, company).length === 0 &&
       sameShortTerms(question, best.item.question),
