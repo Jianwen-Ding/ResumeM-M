@@ -1,4 +1,5 @@
 import { buildVoiceContext, renderVoiceContext } from './voice.js';
+import { DEFAULT_LETTER_WORDS, ownLetterLength, statedWordLimit, wordCount } from './length.js';
 import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
 import { looksLikeCompanyName } from '../jobs/extract.js';
 import { employerName } from '../model/applications.js';
@@ -34,12 +35,22 @@ import type {
  *
  * So `voice: false` where the task cannot produce prose, and the default
  * stays as it was for everything that can.
+ *
+ * `resumeLines: false` for a letter or an answer. The samples add up to two
+ * dozen resume bullets as the register a resume is written in, which is right
+ * for a request that writes resume lines and wrong for one that writes prose
+ * to go beside the resume: those bullets were the most concrete thing in an
+ * answer prompt about what the person had done, so the answer was built on
+ * one of them, reworded, and sent next to the resume that already said it.
  */
-function preamble(data: StoreData, { voice = true }: { voice?: boolean } = {}): string {
+function preamble(
+  data: StoreData,
+  { voice = true, resumeLines = true }: { voice?: boolean; resumeLines?: boolean } = {},
+): string {
   return [
     'You are helping with a resume and job-search assistant. Follow these rules exactly.',
     '',
-    voice ? renderVoiceContext(buildVoiceContext(data)) : '',
+    voice ? renderVoiceContext(buildVoiceContext(data, { resume: resumeLines })) : '',
     '## Hard rules',
     '- Never invent experience, employers, dates, technologies, or metrics. Work only from what you are given.',
     '- Never inflate a number. If a claim has no metric, do not add one.',
@@ -313,12 +324,16 @@ export interface PriorWork {
   job?: { company?: string; role?: string };
   /** Letters the caller already picked out; ranked from the store otherwise. */
   letters?: CoverLetter[];
+  /** Already shown whole as the place to start, so not pasted a second time. */
+  skip?: Pick<StartingPoint, 'letterId' | 'answerIds'>;
 }
 
-function priorWork(data: StoreData, { question, job, letters }: PriorWork): string {
-  const chosenLetters = letters ?? relevantLetters(data.coverLetters ?? [], job ?? {}, 3);
+function priorWork(data: StoreData, { question, job, letters, skip }: PriorWork): string {
+  const chosenLetters = (letters ?? relevantLetters(data.coverLetters ?? [], job ?? {}, 3)).filter(
+    (l) => !skip?.letterId || l.id !== skip.letterId,
+  );
 
-  const ranked = [...(data.answers ?? [])];
+  const ranked = [...(data.answers ?? [])].filter((a) => !skip?.answerIds.has(a.id));
   if (question) {
     ranked.sort((a, b) => questionSimilarity(question, b.question) - questionSimilarity(question, a.question));
   }
@@ -378,6 +393,155 @@ function clip(text: string, room: number): string {
   if (room <= 0) return '';
   // The ellipsis counts against the room, so a clip never exceeds what it was given.
   return clean.length > room ? `${clean.slice(0, room - 1).trimEnd()}…` : clean;
+}
+
+/**
+ * Where to start: the closest letter and the closest answers, whole.
+ *
+ * With the writing tools attached, everything they had written before was
+ * listed rather than shown — titles and questions, to be fetched with
+ * `find_my_letters` and `find_my_answers`. On demand turned out to mean
+ * rarely: a run that never calls them writes from the posting and the
+ * resume, which is how letters and answers came back retelling resume lines
+ * while the story already told to three employers sat unread in the store.
+ * So the one letter to start from, and for each question the one answer to
+ * start from, go into every prompt whole, above the rest of what they have
+ * written — which stays a list or a paste as before, without these in it
+ * twice.
+ */
+const START_LETTER = 4000;
+const START_ANSWER = 1500;
+
+export interface StartingPoint {
+  text: string;
+  /** Shown here, so the paste below does not show it again. */
+  letterId?: string;
+  answerIds: Set<string>;
+  /** Question → how many words their answer to the closest one ran. */
+  answerWords: Map<string, number>;
+}
+
+export function startingPoint(
+  data: StoreData,
+  { letter, questions = [] }: { letter?: CoverLetter; questions?: string[] },
+): StartingPoint {
+  const parts: string[] = [];
+  const answerIds = new Set<string>();
+  const answerWords = new Map<string, number>();
+
+  const body = letter?.body?.trim() ?? '';
+  // A line or two is a note, not a letter to start from.
+  const letterShown = Boolean(letter) && wordCount(body) >= 40;
+  if (letter && letterShown) {
+    const where = [letter.company, letter.role].filter(Boolean).join(' — ') || letter.title;
+    parts.push(
+      `### The letter to start from — ${where} (${wordCount(body)} words)`,
+      '',
+      clip(body, START_LETTER),
+      '',
+      'Start from this one. Keep what still fits this posting — its shape, its length, the story',
+      'it tells — and change what this posting needs changed. It was written to somebody else, so',
+      'every name, product and reason in it is checked against this posting before it stays.',
+    );
+  }
+
+  for (const question of questions) {
+    // The same "about the question at all" line `find_my_answers` draws: the
+    // best of a bad lot is not a place to start.
+    const closest = [...(data.answers ?? [])]
+      .map((a) => ({ a, score: questionSimilarity(question, a.question) }))
+      .filter(({ a, score }) => score > 0 && a.variants.some((v) => v.text?.trim()))
+      .sort((x, y) => y.score - x.score)[0]?.a;
+    if (!closest) continue;
+    const texts = closest.variants
+      .slice(0, 2)
+      .map((v) => v.text?.trim())
+      .filter(Boolean) as string[];
+    answerWords.set(question, wordCount(texts[0]));
+    if (answerIds.has(closest.id)) continue;
+    answerIds.add(closest.id);
+    parts.push(
+      ...(parts.length > 0 ? [''] : []),
+      `### For "${clip(question, 140)}", start from their answer to "${clip(closest.question, 140)}"`,
+      '',
+      texts.map((t) => clip(t, START_ANSWER)).join('\n\n— or —\n\n'),
+    );
+  }
+
+  return {
+    text: parts.length > 0 ? ['## Start from what they have already written', '', ...parts].join('\n') : '',
+    letterId: letterShown ? letter?.id : undefined,
+    answerIds,
+    answerWords,
+  };
+}
+
+/**
+ * The resume is already in the reader's hands.
+ *
+ * The letter was told to build its middle from "one or two pieces of work
+ * from the resume", the tools said the resume was the only thing that could
+ * support a claim, and `check_claim` answered "Do not write it" to any story
+ * that was not on it. So a story told well in an earlier letter could not be
+ * told again, and what came back was a resume line with its words moved
+ * around — the one thing the reader already has, on the desk beside it.
+ */
+function notTheResume(): string[] {
+  return [
+    '### Tell them what the resume does not',
+    '- The resume goes with this application, and the reader has it open. Do not retell its',
+    '  lines — not word for word and not reworded. A sentence whose facts all come from one',
+    '  resume line tells them nothing they have not just read.',
+    '- The stories come from what they have written before: the letters and answers here.',
+    '  Retell one for this posting, shorter, in their words. Their own account of their own work',
+    '  can say what a resume has no room for — why it mattered, what was hard, what they decided —',
+    '  but only what that account actually says. Fill no gap in it yourself.',
+    '- Where nothing they have written fits, lean on the resume without restating it: name the',
+    '  work in a few words and spend the sentence on why it matters to this posting.',
+  ];
+}
+
+/**
+ * "Way too wordy", about drafts that were following their instructions.
+ *
+ * A shorter target alone does not do it: asked for 180 words, a model writes
+ * 180 words of the same padding. These are the sentences padding is made of.
+ */
+function sayLess(): string[] {
+  return [
+    '### Say it once, briefly',
+    '- Every sentence tells the reader something new. Cut any that restates the posting, the',
+    '  question, the resume or an earlier sentence.',
+    '- No summing up at the end: no "In short", "Ultimately", "Overall", "All in all".',
+    '- No run of three adjectives, no "not only… but also", no sentence opening "As a".',
+    '- Short sentences, one idea each. Where you are unsure whether one earns its place, cut it.',
+  ];
+}
+
+/** The letter's length, from the letters they send. See `ownLetterLength`. */
+function letterLengthLine(data: StoreData): string {
+  const own = ownLetterLength(data);
+  if (!own) {
+    return `- ${DEFAULT_LETTER_WORDS.low}–${DEFAULT_LETTER_WORDS.high} words, in three short paragraphs. Under is better than over.`;
+  }
+  return `- About ${own.median} words, which is how long the letters they send run. Shorter is fine; longer is not.`;
+}
+
+/**
+ * An answer's length: the limit its question states, else the length of
+ * their answer to the closest question, else short by kind of question.
+ */
+function answerLengthLines(question: string, closestWords?: number): string[] {
+  const stated = statedWordLimit(question);
+  if (stated) return [`- The question asks for at most ${stated} words. Stay under it; well under is fine.`];
+  if (closestWords && closestWords >= 20) {
+    return [`- About ${closestWords} words, the length of their answer to the closest question below. Not longer.`];
+  }
+  return [
+    '- Short: a sentence or two for a factual question ("how did you hear about us"), two to',
+    '  four sentences for "why this role" or "why us", 80–150 words for anything asking you to',
+    '  describe something. Filling a box to its limit is not a goal.',
+  ];
 }
 
 
@@ -717,35 +881,44 @@ export function coverLetterPrompt(
   /** Set when the run has the writing tools attached; see `tailorPrompt`. */
   options: { tools?: boolean } = {},
 ): string {
+  const letters =
+    priorLetters.length > 0
+      ? priorLetters.map((l, n) =>
+          typeof l === 'string' ? ({ id: `given-${n}`, title: `An earlier letter`, body: l } as CoverLetter) : l,
+        )
+      : relevantLetters(data.coverLetters ?? [], { company: job.company, role: job.jobTitle }, 3);
+  const start = startingPoint(data, { letter: letters[0] });
   return [
-    preamble(data),
+    preamble(data, { resumeLines: false }),
     '',
     '## Task: draft a cover letter',
     'Write the letter for the posting below, in the voice described above, and write nothing else.',
     '',
-    ...(options.tools ? howToUseTheWritingTools() : outputContract('letter')),
+    ...(options.tools ? howToUseTheWritingTools(Boolean(start.letterId)) : outputContract('letter')),
     '',
     '### What the letter does',
-    '- Three or four paragraphs, 200–320 words. Shorter is better than padded.',
+    letterLengthLine(data),
     '- Opening: why this posting in particular. Name something concrete from it —',
     '  what the team builds, the problem the role exists to solve, a constraint they',
     '  mention. "I am writing to express my interest" and "I was excited to see"',
     '  are not openings; they are throat-clearing.',
-    '- Middle: one or two pieces of work from the resume below, chosen because this',
-    '  posting asks for them. Say what the problem was and what changed. Use the',
-    '  metric that is already in the resume, exactly as it is written there, and',
-    '  invent no others. Do not walk the resume top to bottom.',
+    '- Middle: one story, two at most, chosen because this posting asks for what it',
+    '  shows. Take it from the letter to start from, or from another letter or answer',
+    '  of theirs, and retell it for this posting: what the problem was and what',
+    '  changed. A number goes in only exactly as they have already written it.',
     '- Close: what they want out of the role, in their own terms. One or two',
     '  sentences. No promise to "hit the ground running", no request for a call.',
     '- Salutation and sign-off: follow whatever their own letters below do. Where',
     '  there are none to follow, skip both and start with the first paragraph.',
     '',
+    ...notTheResume(),
+    '',
+    ...sayLess(),
+    '',
     '### What never appears',
     '- A sentence that would be true of any applicant for any job. Test it: if the',
     '  employer\'s name and the role could be swapped out and the sentence still',
     '  stood, cut the sentence.',
-    '- Near-verbatim resume bullets. The resume already says what was done; the',
-    '  letter says why it is the relevant thing to have done.',
     '- The role title more than once, and never as the name of the place — "bring',
     '  that to Software Engineering" is a letter no one read before sending.',
     '- passionate, excited, thrilled, proven track record, leverage, synergy,',
@@ -756,9 +929,11 @@ export function coverLetterPrompt(
     employerNaming(job.company),
     '',
     mayLookThingsUp(data, { company: job.company, jobTitle: job.jobTitle }),
+    start.text,
+    '',
     /*
-     * Their own letters and answers. A letter written from nothing every time
-     * drifts; one that starts from what was already said well stays
+     * The rest of their own letters and answers. A letter written from nothing
+     * every time drifts; one that starts from what was already said well stays
      * recognisably the same person.
      *
      * Listed when the writing tools are attached and pasted when they are not.
@@ -766,16 +941,11 @@ export function coverLetterPrompt(
      * subset as well would spend the context on something it could ask for a
      * piece at a time, hide everything the ranking cut, and give it two copies
      * to disagree about. Without tools this is the only chance to show any of
-     * it, so the full text goes in.
+     * it, so the full text goes in — less the letter already shown above.
      */
-    (options.tools ? priorWorkIndex : priorWork)(data, {
-      job: { company: job.company, role: job.jobTitle },
-      letters: priorLetters.length > 0
-        ? priorLetters.map((l, n) =>
-            typeof l === 'string' ? ({ id: `given-${n}`, title: `An earlier letter`, body: l } as CoverLetter) : l,
-          )
-        : undefined,
-    }),
+    options.tools
+      ? priorWorkIndex(data, { job: { company: job.company, role: job.jobTitle } })
+      : priorWork(data, { job: { company: job.company, role: job.jobTitle }, letters, skip: start }),
     '',
     '## Posting',
     companyLine(job.company),
@@ -873,9 +1043,21 @@ export function limitLine(limit?: number): string[] {
 }
 
 /** Answer an application question, reusing a previous answer where one fits. */
-export function answerPrompt(data: StoreData, question: string, job?: TailorContext, limit?: number): string {
+export function answerPrompt(
+  data: StoreData,
+  question: string,
+  job?: TailorContext,
+  limit?: number,
+  /**
+   * The resume going with the application, when the caller knows it. Shown so
+   * the answer can leave its lines to it; without one the prompt says nothing
+   * about a resume, as it always has.
+   */
+  options: { resume?: ResolvedResume } = {},
+): string {
+  const start = startingPoint(data, { questions: [question] });
   return [
-    preamble(data),
+    preamble(data, { resumeLines: false }),
     '',
     '## Task: answer an application question',
     'Answer the question below in the voice described above, and write nothing else.',
@@ -886,17 +1068,18 @@ export function answerPrompt(data: StoreData, question: string, job?: TailorCont
     '### What the answer does',
     '- Answers the question that was asked, first and directly. Not the question',
     '  you would rather answer, and not a paragraph of context before it.',
-    '- Matches the length the question implies: a word limit if one is given, a',
-    '  sentence or two for "how did you hear about us", a short paragraph for',
-    '  "why this role", 150–250 words for anything asking you to describe',
-    '  something. Filling a box to its limit is not a goal.',
-    '- Stands on one concrete thing they actually did, from the material below,',
-    '  rather than on what they believe about themselves.',
-    '- Reuses what they have already written where it fits. If one of the answers',
-    '  below already covers this, adapt it rather than starting over — staying',
-    '  recognisably the same person across a season of applications matters more',
-    '  than novelty. A cover letter below may say it better than any of the',
-    '  answers do; take it from there if so.',
+    ...answerLengthLines(question, start.answerWords.get(question)),
+    '- Starts from what they have already said. Where there is an answer to start',
+    '  from below, keep what still fits and change what this posting needs changed —',
+    '  staying recognisably the same person across a season of applications matters',
+    '  more than novelty. A story in one of their letters may answer it better than',
+    '  any of their answers do; take it from there if so.',
+    '- Stands on one concrete thing they actually did, told as they have told it',
+    '  before, rather than on what they believe about themselves.',
+    '',
+    ...notTheResume(),
+    '',
+    ...sayLess(),
     '',
     '### What never appears',
     '- Restating the question before answering it.',
@@ -911,13 +1094,18 @@ export function answerPrompt(data: StoreData, question: string, job?: TailorCont
     employerNaming(job?.company),
     '',
     mayLookThingsUp(data, { company: job?.company, jobTitle: job?.jobTitle }),
+    start.text,
+    '',
     // The closest questions first, and the letters that went with this kind of
-    // posting — the same material either way, ranked for this question.
-    priorWork(data, { question, job: { company: job?.company, role: job?.jobTitle } }),
+    // posting — the same material either way, ranked for this question, less
+    // the answer already shown above as the one to start from.
+    priorWork(data, { question, job: { company: job?.company, role: job?.jobTitle }, skip: start }),
     '',
     job
       ? `## Posting\n${companyLine(job.company)}\n${job.jobTitle ? `Role: ${job.jobTitle}` : 'Role: not stated on the page.'}\n\n${job.jobDescription.slice(0, 4000)}`
       : '',
+    '',
+    options.resume ? `## Resume\n${resumeAsText(options.resume)}` : '',
     '',
     `## Question\n${question}`,
   ]
@@ -1281,19 +1469,27 @@ export function phrasingDraftPrompt(
  * always the point: check before you claim, and look at what they wrote
  * before.
  */
-function howToUseTheWritingTools(): string[] {
+function howToUseTheWritingTools(startsFromALetter: boolean): string[] {
   return [
     '## How to do it',
     '',
     'You have a set of tools under `resume`. Use them; do not answer in prose.',
     '',
-    '1. `read_posting`, then `read_resume` — what this is for, and what it is written from.',
+    '1. `read_posting` — what this is for. The resume is below, and the reader will have it too.',
     '2. `read_work` — what the form asks for, and anything already typed into it.',
-    '3. `find_my_letters` — search what they have sent before for what this posting is about.',
-    '   Where one already says the thing well, adapt it.',
+    ...(startsFromALetter
+      ? [
+          '3. Start from the letter under "Start from what they have already written", and',
+          '   `find_my_letters` for another that tells the story this posting wants better.',
+        ]
+      : [
+          '3. `find_my_letters` — search what they have sent before for what this posting is about.',
+          '   Where one already tells the story this posting wants, start from it.',
+        ]),
     '4. `check_claim` before writing any sentence that says they did something, and for',
-    '   every number. The resume is the only thing that can support the letter, and a',
-    '   metric rounded from memory is found in an interview rather than here.',
+    '   every number. It looks in the resume and in what they have written before, and',
+    '   those are the only things that can support the letter; a metric rounded from',
+    '   memory is found in an interview rather than here.',
     '5. `save_letter`, and `save_answer` for each question.',
     '6. `finish`, saying what you leaned on.',
     '',
@@ -1317,9 +1513,23 @@ function howToUseTheWritingTools(): string[] {
  * time, and the model holds the whole application in one head while it does.
  * It is also three quarters cheaper.
  */
-export function applicationWritingPrompt(data: StoreData, resume: ResolvedResume, job: TailorContext): string {
+export function applicationWritingPrompt(
+  data: StoreData,
+  resume: ResolvedResume,
+  job: TailorContext,
+  /**
+   * What the form wants, so the letter and the answers to start from can be
+   * put in front of the model rather than left for it to go looking for.
+   */
+  wanted: { letter?: boolean; questions?: { question: string }[] } = {},
+): string {
+  const closestLetter = relevantLetters(data.coverLetters ?? [], { company: job.company, role: job.jobTitle }, 1)[0];
+  const start = startingPoint(data, {
+    letter: wanted.letter === false ? undefined : closestLetter,
+    questions: (wanted.questions ?? []).map((q) => q.question),
+  });
   return [
-    preamble(data),
+    preamble(data, { resumeLines: false }),
     '',
     '## Task: write this application',
     'Write the cover letter and the answers this form is asking for, in the voice described above.',
@@ -1331,15 +1541,27 @@ export function applicationWritingPrompt(data: StoreData, resume: ResolvedResume
     'role" is the short version of that, not a second attempt at it.',
     '',
     '### What the letter does',
-    '- Three or four paragraphs, 200–320 words.',
+    letterLengthLine(data),
     '- Opening: why this posting in particular, naming something concrete from it.',
-    '- Middle: one or two pieces of work from the resume, chosen because this posting asks for them.',
-    '  Say what the problem was and what changed. Check every metric with check_claim.',
+    '- Middle: one story, two at most, from their earlier letters and answers, retold for this',
+    '  posting: what the problem was and what changed. Check every number with check_claim.',
     '- Close: what they want out of the role, in their own terms.',
+    '',
+    '### What an answer does',
+    '- Answers what was asked, first and directly.',
+    '- Runs to the word limit its question states, where it states one — read_work shows it —',
+    '  and otherwise about as long as their answer to the closest question they have answered',
+    '  before. With neither: a sentence or two for a factual question, two to four sentences for',
+    '  a "why", 80–150 words for "describe a time".',
+    '- Starts from their answer to the closest question, below, where there is one.',
+    '',
+    ...notTheResume(),
+    '',
+    ...sayLess(),
     '',
     '### What never appears',
     '- A sentence that would be true of any applicant for any job.',
-    '- Near-verbatim resume bullets, or a claim the resume does not carry.',
+    '- A claim that neither the resume nor anything they have written before carries.',
     '- passionate, excited, thrilled, proven track record, leverage, dynamic, fast-paced.',
     '',
     employerNaming(job.company),
@@ -1348,14 +1570,25 @@ export function applicationWritingPrompt(data: StoreData, resume: ResolvedResume
     '',
     '## How to do it',
     '',
-    '1. `read_posting`, `read_resume`, `read_work`.',
-    '2. `find_my_letters` and `find_my_answers` — what they have written before. Adapt rather than',
-    '   starting over where one of them already says the thing.',
+    '1. `read_posting`, `read_work`.',
+    ...(start.text
+      ? [
+          '2. Start from what is under "Start from what they have already written" below, and use',
+          '   `find_my_letters` and `find_my_answers` for anything else they have told that fits better.',
+        ]
+      : [
+          '2. `find_my_letters` and `find_my_answers` — what they have written before. Start from one',
+          '   of them wherever it already tells the story, rather than from nothing.',
+        ]),
     '3. `check_claim` for anything you are about to say they did, and for every number.',
     '4. `save_letter`, then `save_answer` for each question.',
     '5. `finish`.',
     '',
     'Nothing you print outside a tool call is kept.',
+    '',
+    start.text,
+    '',
+    priorWorkIndex(data, { job: { company: job.company, role: job.jobTitle } }),
     '',
     '## Posting',
     companyLine(job.company),

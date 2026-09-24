@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   answerFeedbackPrompt,
   answerPrompt,
+  applicationWritingPrompt,
   bulletFeedbackPrompt,
   coverLetterPrompt,
   feedbackPrompt,
@@ -700,5 +701,153 @@ describe('an answer box with a limit', () => {
     expect(answerPrompt(data, 'Why this role?', undefined, 500)).toContain('at most 500 characters');
     expect(answerPrompt(data, 'Why this role?')).not.toContain('characters, spaces included');
     expect(answerPrompt(data, 'Why this role?', undefined, 0)).not.toContain('characters, spaces included');
+  });
+});
+
+/*
+ * Reported: "instead of rephrasing stories I've told in previous cover
+ * letters, they end up heavily rephrasing a resume point already in the
+ * resume sent", and "the AI should use previous questions when writing
+ * questions and the previous cover letter when writing a cover letter —
+ * right now it's way too wordy".
+ */
+describe('writing from what they wrote before, not from the resume', () => {
+  const words = (n: number, seed: string) => Array.from({ length: n }, (_, i) => `${seed}${i}`).join(' ');
+  const STORY =
+    'At Vega I rebuilt the on-call rotation after a week where one person took every page, ' +
+    'and the thing I learned was that a rota nobody trusts is worse than none.';
+  const withLetters = {
+    ...data,
+    coverLetters: [
+      {
+        id: 'l_helios',
+        title: 'Platform Engineer — Helios Robotics',
+        company: 'Helios Robotics',
+        role: 'Platform Engineer',
+        createdAt: '2026-03-01T00:00:00Z',
+        body: `${STORY} ${words(100, 'h')}`,
+      },
+      {
+        id: 'l_other',
+        title: 'Data Engineer — Northwind',
+        company: 'Northwind',
+        role: 'Data Engineer',
+        createdAt: '2026-04-01T00:00:00Z',
+        body: words(140, 'n'),
+      },
+    ],
+  };
+  const helios = { company: 'Helios Robotics', jobTitle: 'Platform Engineer', jobDescription: 'On-call, Kafka, latency.' };
+  const startSection = (p: string) => {
+    const at = p.indexOf('## Start from what they have already written');
+    if (at < 0) return '';
+    const next = p.slice(at + 3).search(/\n## /);
+    return next < 0 ? p.slice(at) : p.slice(at, at + 3 + next);
+  };
+
+  it('starts a letter from the closest one they sent, whole, even when the tools could fetch it', () => {
+    for (const tools of [true, false]) {
+      const p = coverLetterPrompt(withLetters, resolved, helios, [], { tools });
+      const start = startSection(p);
+      expect(start, `tools: ${tools}`).toContain('The letter to start from — Helios Robotics — Platform Engineer');
+      expect(start, `tools: ${tools}`).toContain(STORY);
+      // Above everything else they have written, whichever shape that takes.
+      const rest = p.indexOf(tools ? '## What they have written before' : '## What you have already written');
+      expect(p.indexOf('## Start from what they have already written')).toBeLessThan(rest);
+    }
+  });
+
+  it('does not paste the letter it starts from a second time', () => {
+    const p = coverLetterPrompt(withLetters, resolved, helios, [], { tools: false });
+    const pasted = p.slice(p.indexOf('## What you have already written'), p.indexOf('## Posting'));
+    expect(pasted).not.toContain(STORY);
+    expect(pasted).toContain('Northwind');
+  });
+
+  it('starts an answer from their answer to the closest question', () => {
+    const p = answerPrompt(data, 'Why are you interested in this role at Helios?');
+    const start = startSection(p);
+    expect(start).toContain('start from their answer to "Why are you interested in this role?"');
+    expect(start).toContain('Because the work is interesting.');
+  });
+
+  it('starts each question of an application from its own closest answer, and the letter from the closest letter', () => {
+    const p = applicationWritingPrompt(withLetters, resolved, helios, {
+      letter: true,
+      questions: [
+        { question: 'Why are you interested in this role?' },
+        { question: 'Will you require visa sponsorship for employment?' },
+      ],
+    });
+    const start = startSection(p);
+    expect(start).toContain(STORY);
+    expect(start).toContain('Because the work is interesting.');
+    expect(start).toContain('require sponsorship for employment visa status');
+  });
+
+  it('tells every one of them not to retell the resume, and to tell the stories instead', () => {
+    const prompts = {
+      letter: coverLetterPrompt(withLetters, resolved, helios, [], { tools: false }),
+      letterTools: coverLetterPrompt(withLetters, resolved, helios, [], { tools: true }),
+      answer: answerPrompt(withLetters, 'Why this role?', helios),
+      application: applicationWritingPrompt(withLetters, resolved, helios, { letter: true, questions: [] }),
+    };
+    for (const [name, p] of Object.entries(prompts)) {
+      expect(p, name).toContain('Do not retell its');
+      expect(p, name).toMatch(/The stories come from what they have written before/);
+      expect(p, name).toMatch(/Fill no gap in it yourself/);
+      expect(p, name).not.toMatch(/pieces of work from the resume/);
+    }
+  });
+
+  it('leaves resume lines out of the writing samples of a letter or an answer', () => {
+    // The fixture's own bullets are long enough to be samples.
+    expect(shortenPrompt(data, [{ id: 'b', text: 'a bullet' }], 1)).toContain('Bullets from your resume');
+    expect(coverLetterPrompt(data, resolved, helios, [])).not.toContain('Bullets from your resume');
+    expect(answerPrompt(data, 'Why this role?')).not.toContain('Bullets from your resume');
+  });
+
+  it('asks for a letter as long as theirs run, and a short one where there is nothing to go by', () => {
+    const own = coverLetterPrompt(withLetters, resolved, helios, []);
+    // 120 and 140 words: the middle of the two.
+    expect(own).toMatch(/About 1[23]\d words, which is how long the letters they send run/);
+    const none = coverLetterPrompt(data, resolved, helios, []);
+    expect(none).toContain('150–220 words');
+    for (const p of [own, none]) expect(p).not.toContain('200–320');
+  });
+
+  it('holds an answer to the limit its question states, else to the length of their closest answer', () => {
+    expect(answerPrompt(data, 'Describe a project you are proud of (100 words max).')).toContain('at most 100 words');
+    const long = words(60, 'w');
+    const bank = { ...data, answers: [{ id: 'a', question: 'Describe a project you are proud of.', default: 'v', variants: [{ id: 'v', label: 'l', text: long }] }] };
+    expect(answerPrompt(bank, 'Describe a project you are most proud of.')).toContain('About 60 words');
+    expect(answerPrompt({ ...data, answers: [] }, 'Describe a project you are proud of.')).toContain('80–150 words');
+    for (const p of [answerPrompt(data, 'Describe something.')]) expect(p).not.toContain('150–250');
+  });
+
+  /*
+   * Only pointed at when it is there. A store with nothing written yet has no
+   * section to start from, and a step naming one sends the model looking for
+   * a heading that does not exist.
+   */
+  it('points at the place to start only when there is one', () => {
+    const bare = { ...data, coverLetters: [], answers: [] };
+    const letter = coverLetterPrompt(bare, resolved, helios, [], { tools: true });
+    const application = applicationWritingPrompt(bare, resolved, helios, { letter: true, questions: [{ question: 'Why us?' }] });
+    for (const p of [letter, application]) {
+      expect(p).not.toContain('## Start from what they have already written');
+      expect(p).not.toContain('under "Start from what they have already written"');
+      expect(p).toContain('find_my_letters');
+    }
+    expect(coverLetterPrompt(withLetters, resolved, helios, [], { tools: true })).toContain(
+      'Start from the letter under "Start from what they have already written"',
+    );
+  });
+
+  it('says what padding is made of', () => {
+    for (const p of [coverLetterPrompt(data, resolved, helios, []), answerPrompt(data, 'Why?')]) {
+      expect(p).toContain('### Say it once, briefly');
+      expect(p).toMatch(/No summing up at the end/);
+    }
   });
 });

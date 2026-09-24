@@ -2283,7 +2283,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       try {
         const agent = await runAgent(
           configForTask(data.config, 'write'),
-          applicationWritingPrompt(data, resolved, job),
+          applicationWritingPrompt(data, resolved, job, { letter: wantsLetter, questions: pending }),
           writingTools(data, resolved, job, {
             coverLetter: { required: wantsLetter, body: letter?.body ?? '' },
             questions: pending,
@@ -2327,6 +2327,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         job?: TailorContext;
         force?: boolean;
         limit?: number;
+        /** The resume going with the application — see `resumeToWriteFrom`. */
+        resumeId?: string;
+        spec?: ResumeSpec;
       };
       const data = store.load();
       /*
@@ -2350,7 +2353,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return;
       }
 
-      const result = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, question, job, limit));
+      /*
+       * The resume this answer goes beside, where the caller said which. The
+       * card sends the one it is building, so the prompt can show it as what
+       * the reader already has rather than leave the model to retell it from
+       * memory. One that cannot be resolved is left out rather than failing an
+       * answer that never needed it.
+       */
+      let resume: ResolvedResume | undefined;
+      if (req.body.spec || req.body.resumeId) {
+        try {
+          resume = resumeToWriteFrom(req.body, data);
+        } catch {
+          resume = undefined;
+        }
+      }
+      const result = await runAgent(
+        configForTask(data.config, 'write'),
+        answerPrompt(data, question, job, limit, { resume }),
+      );
 
       /*
        * `output` means "text you may use". When the AI did not run, `runAgent`
@@ -4124,7 +4145,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           const resolved = resolveResume(resumeId, data);
           const agent = await runAgent(
             configForTask(data.config, 'write'),
-            applicationWritingPrompt(data, resolved, job),
+            applicationWritingPrompt(data, resolved, job, { letter: wantsLetter, questions: pending }),
             writingTools(data, resolved, job, {
               coverLetter: { required: wantsLetter, body: draft.coverLetter.body },
               questions: pending,
@@ -4197,6 +4218,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         if (questionId && wanted.length === 0) throw new Error('That question is not on this application any more');
         const overwrite = force || Boolean(questionId);
 
+        /*
+         * The resume this application goes out with, so an answer can leave
+         * its lines to it — resolved once, and only if a question gets as far
+         * as the AI. A resume id the store no longer has costs the answer
+         * nothing but that.
+         */
+        let resolvedForAnswers: ResolvedResume | null | undefined;
+        const draftResume = (): ResolvedResume | undefined => {
+          if (resolvedForAnswers === undefined) {
+            const resumeId = draft.resumeId ?? data.resumes[0]?.id;
+            try {
+              resolvedForAnswers = resumeId ? resolveResume(resumeId, data) : null;
+            } catch {
+              resolvedForAnswers = null;
+            }
+          }
+          return resolvedForAnswers ?? undefined;
+        };
+
         for (const q of wanted) {
           if (q.edited && !overwrite) continue;
           if (q.answer.trim() && q.source === 'bank' && !overwrite) continue;
@@ -4219,7 +4259,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             q.needsReview = undefined;
             continue;
           }
-          const agent = await runAgent(configForTask(data.config, 'write'), answerPrompt(data, q.question, job, q.limit));
+          const agent = await runAgent(
+            configForTask(data.config, 'write'),
+            answerPrompt(data, q.question, job, q.limit, { resume: draftResume() }),
+          );
           if (agent.executed && agent.output.trim()) {
             q.answer = agent.output.trim();
             q.source = 'ai';

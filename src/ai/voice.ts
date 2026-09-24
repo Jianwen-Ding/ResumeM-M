@@ -35,11 +35,20 @@ function clean(text: string): string {
   return String(text ?? '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+export interface SampleOptions {
+  /**
+   * Whether the resume's own bullets count as a sample. Yes for anything that
+   * writes resume lines; no for a letter or an answer — see `preamble` in
+   * prompts.ts, where they were the thing the answer was built out of.
+   */
+  resume?: boolean;
+}
+
 /**
  * Everything of the user's own writing that the store holds, longest-form
  * first: prose shows voice better than a resume bullet does.
  */
-export function collectSamples(data: StoreData): VoiceSample[] {
+export function collectSamples(data: StoreData, { resume = true }: SampleOptions = {}): VoiceSample[] {
   const out: VoiceSample[] = [];
 
   for (const s of data.samples ?? []) {
@@ -73,6 +82,8 @@ export function collectSamples(data: StoreData): VoiceSample[] {
     }
   }
 
+  if (!resume) return out;
+
   // Resume bullets are terse but they are the register the resume itself is
   // written in, which is exactly what a tailoring request needs to match.
   const bullets: string[] = [];
@@ -100,8 +111,8 @@ export function collectSamples(data: StoreData): VoiceSample[] {
  * whichever happens to be longest. A letter, an answer, and some bullets tell
  * a model more than three letters do.
  */
-export function buildVoiceContext(data: StoreData): VoiceContext {
-  const all = collectSamples(data);
+export function buildVoiceContext(data: StoreData, options: SampleOptions = {}): VoiceContext {
+  const all = collectSamples(data, options);
   const available = all.reduce((n, s) => n + s.text.length, 0);
 
   const byKind = new Map<VoiceSample['kind'], VoiceSample[]>();

@@ -53,9 +53,9 @@ export function writingTools(session: WritingSession): ToolDefinition[] {
     {
       name: 'read_resume',
       description:
-        'The resume that will be sent with this letter. Everything the letter says about this person has to be ' +
-        'supported by it — the letter is read beside it, and a claim the resume does not carry is one a reader ' +
-        'notices immediately.',
+        'The resume that will be sent with this letter. The letter is read beside it, so do not retell its lines — ' +
+        'the reader already has them. What the letter says about this person has to be supported by it or by ' +
+        'something they have written before; check_claim looks in both.',
       inputSchema: NO_ARGS,
       run: () => text(session.describeResume()),
     },
@@ -93,7 +93,7 @@ export function writingTools(session: WritingSession): ToolDefinition[] {
         'Search the answers this person has given to application questions before, ranked against a question you ' +
         'are about to answer. The same reasoning as find_my_letters: consistency beats novelty. It returns only ' +
         'answers that are about the question — if it says there is nothing close, there is nothing close, and ' +
-        'this one is written from the resume and the posting.',
+        'the story for this one is in their letters before it is in the resume.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -111,10 +111,11 @@ export function writingTools(session: WritingSession): ToolDefinition[] {
     {
       name: 'check_claim',
       description:
-        'Before writing a sentence that says this person did something, check it against the resume. Give the ' +
-        'claim — "cut latency from 900ms to 180ms with Kafka" — and this says which of it the resume actually ' +
-        'carries, and quotes the lines. Use it for every number. A rounded metric in a cover letter is the kind ' +
-        'of mistake that is only found in an interview.',
+        'Before writing a sentence that says this person did something, check it against the resume and what they ' +
+        'have written before. Give the claim — "cut latency from 900ms to 180ms with Kafka" — and this says ' +
+        'whether the resume carries it or one of their earlier letters or answers tells it, and quotes where. Use ' +
+        'it for every number. A rounded metric in a cover letter is the kind of mistake that is only found in an ' +
+        'interview.',
       inputSchema: {
         type: 'object',
         properties: { claim: { type: 'string', description: 'What you are about to say they did.' } },
@@ -128,9 +129,10 @@ export function writingTools(session: WritingSession): ToolDefinition[] {
     {
       name: 'save_letter',
       description:
-        'The finished letter, as the argument. Three or four paragraphs. No markdown, no salutation unless their ' +
-        'own letters use one, no placeholder of any kind. Anything you want to say *about* the letter goes in ' +
-        'finish, not here — this argument is the letter, word for word, and nothing else.',
+        'The finished letter, as the argument. As long as the letters they send and no longer, in short ' +
+        'paragraphs. No markdown, no salutation unless their own letters use one, no placeholder of any kind. ' +
+        'Anything you want to say *about* the letter goes in finish, not here — this argument is the letter, word ' +
+        'for word, and nothing else.',
       inputSchema: {
         type: 'object',
         properties: { body: { type: 'string', description: 'The letter itself.' } },
@@ -144,8 +146,8 @@ export function writingTools(session: WritingSession): ToolDefinition[] {
     {
       name: 'save_answer',
       description:
-        'The answer to one question the form asked, by its id from read_work. Match the length the question ' +
-        'implies rather than filling the box.',
+        'The answer to one question the form asked, by its id from read_work. Keep inside any word limit the ' +
+        'question states, and otherwise match the length the question implies rather than filling the box.',
       inputSchema: {
         type: 'object',
         properties: {

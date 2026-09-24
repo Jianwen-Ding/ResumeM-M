@@ -1147,6 +1147,36 @@ describe('answers', () => {
     expect(res.body.prompt).toContain('at most 400 characters');
   });
 
+  /*
+   * The resume the answer goes beside, as the card sends it, so the prompt
+   * can show it as what the reader already has. Without one the prompt says
+   * nothing about a resume, as before — and one the store cannot resolve
+   * costs the answer nothing but that.
+   */
+  it('shows the model the resume going with the application, when the card sends it', async () => {
+    const base = t.store.load().resumes.find((r) => r.id === 'base')!;
+    const withSpec = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true, spec: { ...base, id: 'job-helios', label: 'Helios' } })
+      .expect(200);
+    expect(withSpec.body.prompt).toContain('## Resume');
+    expect(withSpec.body.prompt).toContain('Built a pipeline handling');
+
+    const without = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true })
+      .expect(200);
+    expect(without.body.prompt).not.toContain('## Resume');
+    expect(without.body.prompt).not.toContain('Built a pipeline handling');
+
+    const unknown = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', force: true, resumeId: 'no-such-resume' })
+      .expect(200);
+    expect(unknown.body.prompt).toContain('answer an application question');
+    expect(unknown.body.prompt).not.toContain('## Resume');
+  });
+
   it('saves a new question and a new phrasing of an existing one', async () => {
     await request(app).post('/api/answers/save').send({ question: 'New question?', answer: 'New answer' }).expect(200);
     let answers = t.store.load().answers;

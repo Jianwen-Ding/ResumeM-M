@@ -78,6 +78,18 @@ describe('what counts as a sample of someone’s writing', () => {
     expect(bullets?.text).toMatch(/^- /m);
   });
 
+  /*
+   * But not for a letter or an answer, which go beside the resume: those
+   * bullets were the most concrete thing in the prompt about what the person
+   * had done, so the answer was built out of one of them.
+   */
+  it('leaves the resume bullets out when asked to, and keeps everything else', () => {
+    const all = collectSamples(base);
+    const prose = collectSamples(base, { resume: false });
+    expect(prose.some((s) => s.kind === 'resume')).toBe(false);
+    expect(prose).toEqual(all.filter((s) => s.kind !== 'resume'));
+  });
+
   it('has no bullet section when every bullet is too terse to matter', () => {
     const data = store({
       entries: [
