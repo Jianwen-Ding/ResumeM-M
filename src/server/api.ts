@@ -3005,18 +3005,27 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * The same three-step fallback the workspace endpoint uses, so the
          * name here is the one the stager filed the files under rather than a
          * second opinion about what this application should be called.
+         *
+         * And under the names the stager used, which are `employer` and `role`
+         * above — what `generatedFor` carries and the extension files every
+         * build, stage and send under. This asked the page's own reading
+         * instead, and answered `null` whenever the page did not name both:
+         * the ordinary bare form on a company's own careers host, whose
+         * employer is read off the address. Measured on
+         * `careers.helios-labs.com/apply/platform-engineer`: a row and a
+         * workspace filed as "Helios Labs — Platform Engineer", and every
+         * later analysis of that page said it belonged to no application —
+         * so a card opened on it in a second tab, or from the email link,
+         * had nothing to attach.
          */
-        application:
-          job.company && job.title
-            ? {
-                id:
-                  // Not a space left over from an application that is over:
-                  // see `draftForJob`.
-                  draftForJob(store.loadDrafts(), data.applications, job.company, job.title)?.id ??
-                  findApplication(data.applications, job.company, job.title)?.id ??
-                  freshApplicationId(data.applications, job.company, job.title),
-              }
-            : null,
+        application: {
+          id:
+            // Not a space left over from an application that is over: see
+            // `draftForJob`.
+            draftForJob(store.loadDrafts(), data.applications, employer, role)?.id ??
+            findApplication(data.applications, employer, role)?.id ??
+            freshApplicationId(data.applications, employer, role),
+        },
         score,
         kind: verdict.kind,
         why: verdict.why,

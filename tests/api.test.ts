@@ -1002,6 +1002,32 @@ describe('job analysis', () => {
     expect(off.body.tailor).toBe('match');
     expect(off.body.spec.choices.b_pipeline).toBe('v_kafka');
   });
+
+  /*
+   * A bare form on a company's own careers host names nobody, and the
+   * employer is read off the address. Everything is filed under that name —
+   * the copy's `generatedFor` says it, and the extension stages, builds and
+   * sends under it — and the analysis answered that the page belonged to no
+   * application at all, so a card opened on it afresh had nothing to attach.
+   */
+  it('says which application a page naming nobody belongs to, by the names it was filed under', async () => {
+    const url = 'https://careers.helios-labs.com/apply/platform-engineer';
+    const html = `<html><head><title>Apply</title></head><body><h1>Submit application</h1>
+      <p>Kafka streaming in Go and Python. Responsibilities include distributed systems.</p>
+      <form><input name="first_name"><input name="email"><input type="file" name="resume"></form></body></html>`;
+    const first = (await request(app).post('/api/extension/analyze').send({ html, url, title: 'Apply', tailor: 'none' }).expect(200)).body;
+    const named = first.spec.generatedFor;
+    expect(named).toMatchObject({ company: 'Helios Labs', role: 'Platform Engineer' });
+    expect(first.job.company).toBeUndefined();
+
+    const opened = await request(app)
+      .post('/api/workspace')
+      .send({ company: named.company, role: named.role, url, spec: first.spec, auto: true, actedOnForm: true })
+      .expect(200);
+
+    const again = (await request(app).post('/api/extension/analyze').send({ html, url, title: 'Apply', tailor: 'none' }).expect(200)).body;
+    expect(again.application?.id).toBe(opened.body.draft.id);
+  });
 });
 
 describe('autofill', () => {
