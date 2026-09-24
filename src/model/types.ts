@@ -780,6 +780,14 @@ export interface StoreConfig {
      */
     temporaryDays?: number;
   };
+  applications?: {
+    /**
+     * How many days an application may sit at Applying with nothing done to
+     * it before it is closed. Zero or less leaves them alone, for the same
+     * reason `temporaryDays` gives.
+     */
+    applyingDays?: number;
+  };
 }
 
 export const DEFAULT_CONFIG: StoreConfig = {

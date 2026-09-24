@@ -41,7 +41,7 @@ import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder 
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { advance, alreadySent, buildBundle, closedAsStale, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -3338,7 +3338,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       // Past `applied` already: the tracker knows more than the page does.
       const BEFORE_SENT: Application['status'][] = ['interested', 'applying'];
-      if (tracked && !BEFORE_SENT.includes(tracked.status)) {
+      if (tracked && !BEFORE_SENT.includes(tracked.status) && !closedAsStale(tracked)) {
         res.json({ application: tracked, changed: false });
         return;
       }
@@ -3868,7 +3868,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
               appliedAt: now,
               history: [{ at: now, status: started, note }],
             });
-        } else if (body.actedOnForm && tracked.status === 'interested') {
+        } else if (body.actedOnForm && (tracked.status === 'interested' || closedAsStale(tracked))) {
           /*
            * And the moment it stops being a bookmark, it is moved on.
            *

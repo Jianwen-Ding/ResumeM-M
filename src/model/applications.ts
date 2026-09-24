@@ -401,7 +401,9 @@ export function findApplication(apps: Application[], company: string, role: stri
   if (same.length === 0) return undefined;
 
   const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
-  const unsent = same.filter((a) => a.status === 'interested' || a.status === 'applying');
+  // Closed only for being left alone is still this application; see
+  // `closedAsStale`.
+  const unsent = same.filter((a) => a.status === 'interested' || a.status === 'applying' || closedAsStale(a));
   if (unsent.length > 0) return unsent.sort(byNewest)[0];
   // Undefined when every one of them is finished: this is a new attempt, and
   // it needs a row and a folder of its own. See `freshApplicationId`.
@@ -874,7 +876,9 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
     const ORDER: ApplicationStatus[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
     const asked: ApplicationStatus = req.status ?? 'applied';
     const status =
-      settled && ORDER.indexOf(settled.status) > ORDER.indexOf(asked) ? settled.status : asked;
+      settled && !closedAsStale(settled) && ORDER.indexOf(settled.status) > ORDER.indexOf(asked)
+        ? settled.status
+        : asked;
 
     const application: Application = {
       ...settled,
@@ -1010,6 +1014,98 @@ export function advance(store: Store, id: string, status: ApplicationStatus, not
   // An application that has moved past sending takes its files out of the way.
   syncCurrent(store);
   return app;
+}
+
+/**
+ * How long an application may sit at `applying` with nothing happening to it
+ * before the tracker stops calling it in flight.
+ *
+ * `applying` is written the moment something goes into an employer's boxes,
+ * and nothing takes it off again except a send the page was seen to make. A
+ * form abandoned half way, a posting that closed under you, a send the
+ * watcher missed — all of them read `applying` for ever, and the list that is
+ * meant to say what is still to finish fills with things nobody is finishing.
+ */
+export const DEFAULT_APPLYING_DAYS = 14;
+
+/**
+ * The note a stale close is written with, and how one is told apart from a
+ * close somebody chose.
+ *
+ * The difference matters in one place: coming back to the posting. A job you
+ * closed yourself is over, and a fresh attempt at it is a new application
+ * (see `findApplication`). One closed here was only left alone for a while,
+ * and picking it up again is the same application carrying on — it must not
+ * become a second row beside the first.
+ */
+const STALE_NOTE = 'Closed on its own: at Applying for';
+
+export function closedAsStale(app: Application): boolean {
+  if (app.status !== 'closed') return false;
+  const last = app.history?.at(-1);
+  return last?.status === 'closed' && (last.note ?? '').startsWith(STALE_NOTE);
+}
+
+export interface GoneStale {
+  id: string;
+  company: string;
+  role: string;
+  /** The last sign of anyone working on it. */
+  since: string;
+}
+
+/**
+ * Which applications have sat at `applying` for `days` with nothing done.
+ *
+ * "Nothing done" is the last line of its history and, where a workspace is
+ * open for it, the last save to that workspace. The history alone would close
+ * a letter somebody was writing yesterday into a space opened three weeks
+ * ago, because writing does not move the status.
+ *
+ * Zero or less switches it off, for the reason `temporaryDays` gives: a
+ * setting typed as "0" by mistake must not close everything at once.
+ */
+export function goneStale(
+  apps: Application[],
+  drafts: { company: string; role: string; status: string; updatedAt?: string; id: string }[],
+  { days = DEFAULT_APPLYING_DAYS, now = Date.now() }: { days?: number; now?: number } = {},
+): GoneStale[] {
+  if (!(days > 0)) return [];
+  const cutoff = now - days * 86_400_000;
+  const out: GoneStale[] = [];
+  for (const app of apps) {
+    if (app.status !== 'applying') continue;
+    const stamps = [app.history?.at(-1)?.at, app.appliedAt, findDraft(drafts, app.company, app.role)?.updatedAt]
+      .map((at) => Date.parse(at ?? ''))
+      .filter(Number.isFinite);
+    // Nothing dated at all is nothing to measure from, and closing on no
+    // evidence is the one mistake this must not make.
+    if (stamps.length === 0) continue;
+    const last = Math.max(...stamps);
+    if (last <= cutoff) out.push({ id: app.id, company: app.company, role: app.role, since: new Date(last).toISOString() });
+  }
+  return out;
+}
+
+/** Close them, each with the note that says why and how to tell. */
+export function closeStale(store: Store, stale: GoneStale[], days: number): Application[] {
+  if (stale.length === 0) return [];
+  const apps = store.load().applications;
+  const at = new Date().toISOString();
+  const closed: Application[] = [];
+  for (const one of stale) {
+    const app = apps.find((a) => a.id === one.id);
+    // Moved on since the list was made: sent, or closed by hand.
+    if (!app || app.status !== 'applying') continue;
+    app.status = 'closed';
+    app.history = [...(app.history ?? []), { at, status: 'closed', note: `${STALE_NOTE} ${days} days with nothing sent` }];
+    closed.push(app);
+  }
+  if (closed.length === 0) return [];
+  store.saveApplications(apps);
+  // Out of the upload folder with them, which carries only what is in flight.
+  syncCurrent(store);
+  return closed;
 }
 
 export interface TrackerStats {

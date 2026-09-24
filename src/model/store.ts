@@ -811,6 +811,7 @@ export class Store {
       output: { ...DEFAULT_CONFIG.output, ...(raw.output ?? {}) },
       layout: { ...DEFAULT_CONFIG.layout, ...(raw.layout ?? {}) },
       resumes: { ...DEFAULT_CONFIG.resumes, ...(raw.resumes ?? {}) },
+      applications: { ...(raw.applications ?? {}) },
     };
 
     config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
@@ -853,6 +854,7 @@ export class Store {
        * until a resume came out set smaller than they had allowed.
        */
       ...(patch.resumes ? { resumes: { ...current.resumes, ...patch.resumes } } : {}),
+      ...(patch.applications ? { applications: { ...current.applications, ...patch.applications } } : {}),
       ...(patch.layout
         ? {
             layout: {

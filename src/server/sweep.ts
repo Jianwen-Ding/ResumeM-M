@@ -1,7 +1,9 @@
-import { removeWhatIsFiled } from '../git/repo.js';
+import { removeWhatIsFiled, withCommit } from '../git/repo.js';
 import type { Repo } from '../git/repo.js';
 import { Store } from '../model/store.js';
 import { DEFAULT_TEMPORARY_DAYS, dueToGo, type DueToGo } from '../model/tiers.js';
+import { closeStale, DEFAULT_APPLYING_DAYS, goneStale } from '../model/applications.js';
+import type { Application } from '../model/types.js';
 
 /**
  * Taking away the resumes that were made for one posting and are done with.
@@ -90,4 +92,36 @@ export async function sweepTemporary(
     (d) => store.deleteResume(d.id),
   );
   return { swept: removed, held, days };
+}
+
+/** How long an application may sit at Applying in this save. */
+export function applyingDays(store: Store): number {
+  const said = store.loadConfig().applications?.applyingDays;
+  return typeof said === 'number' ? said : DEFAULT_APPLYING_DAYS;
+}
+
+/**
+ * Close what has sat at Applying for the window with nothing done to it.
+ *
+ * On opening the save, like the resume sweep, and for its reason: never at
+ * the moment a clock ticks over under somebody using the tracker. Scoped to
+ * the tracker file, because this is the app changing something on its own
+ * and has no business committing whatever else is unsaved on disk.
+ */
+export async function closeStaleApplying(
+  store: Store,
+  repo: Repo,
+  { now = Date.now() }: { now?: number } = {},
+): Promise<Application[]> {
+  const days = applyingDays(store);
+  const stale = goneStale(store.load().applications, store.loadDrafts(), { days, now });
+  if (stale.length === 0) return [];
+  const names = stale.slice(0, 3).map((s) => `${s.company} — ${s.role}`).join(', ');
+  return withCommit(
+    repo,
+    store.loadConfig().git.autoCommit,
+    `Close ${names}${stale.length > 3 ? ` and ${stale.length - 3} more` : ''} — ${days} days at Applying`,
+    () => closeStale(store, stale, days),
+    ['applications.yaml'],
+  );
 }
