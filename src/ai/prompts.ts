@@ -518,6 +518,40 @@ function sayLess(): string[] {
   ];
 }
 
+/** A draft already in the box, and what they want changed about it. */
+export interface Revision {
+  draft?: string;
+  /** In their own words — "shorter", "use the on-call story instead". */
+  feedback?: string;
+}
+
+/**
+ * What they want changed about the draft they have.
+ *
+ * Asked for in so many words: a way to load feedback into an answer. A
+ * redraft that cannot be told what was wrong with the last one is a second
+ * roll of the same dice; given the draft and a sentence about it, the run has
+ * something to fix rather than something to replace. Their word beats every
+ * instruction above it except the ones about inventing things — "make it
+ * longer" is theirs to ask for, a metric nobody wrote down is not.
+ */
+function whatToChange(revision: Revision = {}): string {
+  const draft = revision.draft?.trim() ?? '';
+  const feedback = revision.feedback?.trim() ?? '';
+  if (!draft && !feedback) return '';
+  return [
+    '## What they want changed',
+    '',
+    ...(draft ? ['Their draft as it stands:', '', clip(draft, 6000), ''] : []),
+    ...(feedback ? [`What they said about it: ${clip(feedback, 1000)}`, ''] : []),
+    draft
+      ? 'Rewrite it the way they asked, and keep what they did not ask you to change: this draft is the place to start now, ahead of anything below.'
+      : 'Write it the way they asked.',
+    'Where what they said and the instructions above disagree, what they said wins — except the rules against',
+    'inventing anything, which nothing they say can lift.',
+  ].join('\n');
+}
+
 /** The letter's length, from the letters they send. See `ownLetterLength`. */
 function letterLengthLine(data: StoreData): string {
   const own = ownLetterLength(data);
@@ -878,8 +912,12 @@ export function coverLetterPrompt(
   job: TailorContext,
   /** Letters the caller judged relevant. Bare text still works. */
   priorLetters: (CoverLetter | string)[],
-  /** Set when the run has the writing tools attached; see `tailorPrompt`. */
-  options: { tools?: boolean } = {},
+  /**
+   * `tools`: set when the run has the writing tools attached; see
+   * `tailorPrompt`. `draft` and `feedback`: a redraft of the letter in the
+   * box, told what to change — see `whatToChange`.
+   */
+  options: { tools?: boolean } & Revision = {},
 ): string {
   const letters =
     priorLetters.length > 0
@@ -929,6 +967,8 @@ export function coverLetterPrompt(
     employerNaming(job.company),
     '',
     mayLookThingsUp(data, { company: job.company, jobTitle: job.jobTitle }),
+    whatToChange(options),
+    '',
     start.text,
     '',
     /*
@@ -1049,11 +1089,12 @@ export function answerPrompt(
   job?: TailorContext,
   limit?: number,
   /**
-   * The resume going with the application, when the caller knows it. Shown so
-   * the answer can leave its lines to it; without one the prompt says nothing
-   * about a resume, as it always has.
+   * `resume`: the one going with the application, when the caller knows it.
+   * Shown so the answer can leave its lines to it; without one the prompt says
+   * nothing about a resume, as it always has. `draft` and `feedback`: a
+   * redraft of the answer in the box, told what to change.
    */
-  options: { resume?: ResolvedResume } = {},
+  options: { resume?: ResolvedResume } & Revision = {},
 ): string {
   const start = startingPoint(data, { questions: [question] });
   return [
@@ -1094,6 +1135,8 @@ export function answerPrompt(
     employerNaming(job?.company),
     '',
     mayLookThingsUp(data, { company: job?.company, jobTitle: job?.jobTitle }),
+    whatToChange(options),
+    '',
     start.text,
     '',
     // The closest questions first, and the letters that went with this kind of

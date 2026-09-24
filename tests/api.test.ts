@@ -1153,6 +1153,20 @@ describe('answers', () => {
    * nothing about a resume, as before — and one the store cannot resolve
    * costs the answer nothing but that.
    */
+  /*
+   * A draft and what should change about it: a redraft asked for, so past the
+   * answer bank even without `force`, and into the prompt word for word.
+   */
+  it('carries a draft and what should change about it into the prompt, and past the answer bank', async () => {
+    const res = await request(app)
+      .post('/api/ai/answer')
+      .send({ question: 'Why are you interested in this role?', draft: 'Because it is.', feedback: 'Say why the ingest work.' })
+      .expect(200);
+    expect(res.body.source).toBe('prompt');
+    expect(res.body.prompt).toContain('Because it is.');
+    expect(res.body.prompt).toContain('What they said about it: Say why the ingest work.');
+  });
+
   it('shows the model the resume going with the application, when the card sends it', async () => {
     const base = t.store.load().resumes.find((r) => r.id === 'base')!;
     const withSpec = await request(app)
@@ -1296,6 +1310,20 @@ describe('cover letters', () => {
     expect(tailored.body.error).toBeUndefined();
     // Nothing was saved by asking.
     expect(t.store.load().resumes.some((r) => r.id === proposal.id)).toBe(false);
+  });
+
+  it('carries the letter in the box and what should change about it into the prompt', async () => {
+    const res = await request(app)
+      .post('/api/ai/cover-letter')
+      .send({
+        resumeId: 'newgrad',
+        job: { company: 'Acme Co.', jobTitle: 'Intern', jobDescription: 'work' },
+        draft: 'Dear Acme, a first go.',
+        feedback: 'Open with the posting.',
+      })
+      .expect(200);
+    expect(res.body.output).toContain('Dear Acme, a first go.');
+    expect(res.body.output).toContain('What they said about it: Open with the posting.');
   });
 
   it('does not save an empty draft', async () => {

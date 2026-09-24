@@ -851,3 +851,43 @@ describe('writing from what they wrote before, not from the resume', () => {
     }
   });
 });
+
+/*
+ * Asked for: a way to load feedback into the AI's answers. A redraft that
+ * cannot be told what was wrong with the last one is a second roll of the
+ * same dice.
+ */
+describe('a draft and what they want changed about it', () => {
+  const words = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join(' ');
+
+  it('shows the draft and what they said, only when there is something to show', () => {
+    const p = answerPrompt(data, 'Why this role?', undefined, undefined, {
+      draft: 'My first go at this.',
+      feedback: 'Shorter, and use the on-call story.',
+    });
+    expect(p).toContain('## What they want changed');
+    expect(p).toContain('My first go at this.');
+    expect(p).toContain('What they said about it: Shorter, and use the on-call story.');
+    expect(answerPrompt(data, 'Why this role?')).not.toContain('## What they want changed');
+    expect(answerPrompt(data, 'Why this role?', undefined, undefined, { feedback: '   ' })).not.toContain(
+      '## What they want changed',
+    );
+  });
+
+  it('puts it above the place to start, and lets it win over everything but the rule against inventing', () => {
+    const lettered = {
+      ...data,
+      coverLetters: [{ id: 'l', title: 'To Acme', company: 'Acme', body: words(80), createdAt: '2026-01-01T00:00:00Z' }],
+    };
+    const p = coverLetterPrompt(lettered, resolved, { jobDescription: 'job', company: 'Acme' }, [], {
+      tools: true,
+      draft: 'Dear team, a first go.',
+      feedback: 'Longer.',
+    });
+    expect(p).toMatch(/what they said wins/);
+    expect(p).toMatch(/except the rules against\s+inventing anything/);
+    const at = p.indexOf('## What they want changed');
+    expect(at).toBeGreaterThan(-1);
+    expect(at).toBeLessThan(p.indexOf('## Start from what they have already written'));
+  });
+});

@@ -514,6 +514,11 @@ function writingTools(
 /** Where the compiled MCP entry point sits relative to this file. */
 const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
 
+/** Text a caller sent, trimmed — or nothing, for anything else or blank. */
+function sentText(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+}
+
 /**
  * The resume a letter or an answer is written against: the one the caller is
  * holding, where it sent it, and the stored one it names otherwise.
@@ -2132,20 +2137,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/cover-letter',
     handler(async (req, res) => {
-      const { job, save } = req.body as {
+      const { job, save, draft, feedback } = req.body as {
         resumeId?: string;
         spec?: ResumeSpec;
         job: TailorContext;
         save?: boolean;
+        /** The letter in the box, and what they want changed about it. */
+        draft?: string;
+        feedback?: string;
       };
       const data = store.load();
       const resolved = resumeToWriteFrom(req.body, data);
       const prior = relevantLetters(data.coverLetters, { company: job.company, role: job.jobTitle });
+      const revision = { draft: sentText(draft), feedback: sentText(feedback) };
 
       const result = await runAgent(
         configForTask(data.config, 'write'),
-        coverLetterPrompt(data, resolved, job, prior, { tools: canWire(data.config.ai.command) && serverEntry(mcpDir) !== null }),
-        writingTools(data, resolved, job, { coverLetter: { required: true, body: '' }, questions: [] }),
+        coverLetterPrompt(data, resolved, job, prior, {
+          tools: canWire(data.config.ai.command) && serverEntry(mcpDir) !== null,
+          ...revision,
+        }),
+        // The draft is what is in the box, so the tools say so too: `read_work`
+        // shows it as theirs, to build on rather than replace.
+        writingTools(data, resolved, job, { coverLetter: { required: true, body: revision.draft ?? '' }, questions: [] }),
       );
 
       /*
@@ -2322,7 +2336,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/ai/answer',
     handler(async (req, res) => {
-      const { question, job, force, limit } = req.body as {
+      const { question, job, force, limit, draft, feedback } = req.body as {
         question: string;
         job?: TailorContext;
         force?: boolean;
@@ -2330,8 +2344,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         /** The resume going with the application — see `resumeToWriteFrom`. */
         resumeId?: string;
         spec?: ResumeSpec;
+        /** The answer in the box, and what they want changed about it. */
+        draft?: string;
+        feedback?: string;
       };
       const data = store.load();
+      const revision = { draft: sentText(draft), feedback: sentText(feedback) };
       /*
        * Who is asking, so the bank knows which answers are theirs.
        *
@@ -2343,7 +2361,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const match = matchAnswer(question, data.answers, { company: job?.company });
 
-      if (match.confident && !force) {
+      // Something to change about a draft is a redraft asked for, and the
+      // bank's answer is not one.
+      if (match.confident && !force && !revision.feedback && !revision.draft) {
         res.json({
           output: match.answer,
           executed: false,
@@ -2370,7 +2390,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
       const result = await runAgent(
         configForTask(data.config, 'write'),
-        answerPrompt(data, question, job, limit, { resume }),
+        answerPrompt(data, question, job, limit, { resume, ...revision }),
       );
 
       /*
