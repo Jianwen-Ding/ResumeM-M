@@ -164,4 +164,23 @@ describe('employers already filed the way Workday books them', () => {
     expect(draft.company).toBe('Intel Corporation');
     expect(draft.updatedAt).toBe(old);
   });
+  /*
+   * The commit is scoped to the tracker and the workspaces folder, and a save
+   * that has never opened a workspace has no such folder. `git add` refuses a
+   * path that matches nothing — "pathspec 'drafts' did not match any files"
+   * — so the rename was written and the commit behind it failed, leaving the
+   * tracker changed on disk and in no version.
+   */
+  it('are committed in a save that has never had a workspace', async () => {
+    const WD = 'https://intel.wd1.myworkdayjobs.com/External/job/US-OR-Hillsboro/Software-Engineering-Intern_JR1';
+    temp.store.saveConfig({ git: { autoCommit: true } });
+    temp.write('applications.yaml', [row('intel', 'applying', daysAgo(3), { company: '100 Intel Corporation', url: WD })]);
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+
+    expect(await tidyWorkdayNames(temp.store, repo)).toHaveLength(1);
+
+    expect(repo.lastCommitError, 'the commit did not fail').toBeUndefined();
+    expect(await repo.pending(['applications.yaml']), 'and the tracker is in it').toEqual([]);
+  });
 });
