@@ -5518,7 +5518,19 @@ async function renameVariation() {
     }
     try {
       await flushAutoSave().catch(() => undefined);
-      await api(`/resumes/${encodeURIComponent(mine.id)}/rename`, { method: 'POST', body: JSON.stringify({ label: wanted }) });
+      /*
+       * Grouped so that it is a step at all, for the tier chip's reason.
+       *
+       * The rename is a POST, which `docKeyFor` rightly does not record, while
+       * every step already on the stack holds this resume under its old name
+       * and undo puts a whole resume back. Measured: tick a box, rename, press
+       * Ctrl+Z meaning the rename — the box and the name both went back in
+       * one press, under "Undid change". Naming the document makes the rename
+       * its own step, and stops an older one putting the old name back.
+       */
+      await undoGroup('rename', [`resume:${mine.id}`], () =>
+        api(`/resumes/${encodeURIComponent(mine.id)}/rename`, { method: 'POST', body: JSON.stringify({ label: wanted }) }),
+      );
       setStatus(`Renamed to “${wanted}”`);
       await loadStore();
       render();

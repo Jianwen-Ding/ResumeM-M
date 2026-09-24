@@ -48,6 +48,10 @@ describe('undo in the builder', () => {
           r.id === id ? { ...r, tier: body.tier, ...(body.tier === 'temporary' ? {} : { temporaryFrom: undefined }) } : r,
         );
         result = { ok: true };
+      } else if (url.endsWith('/rename') && method === 'POST') {
+        const id = decodeURIComponent(url.split('?')[0].split('/').slice(-2)[0]);
+        data.resumes = data.resumes.map((r) => (r.id === id ? { ...r, label: body.label } : r));
+        result = data.resumes.find((r) => r.id === id);
       } else if (url.startsWith('/api/resumes/') && method === 'PUT') {
         const id = decodeURIComponent(url.split('?')[0].split('/').pop());
         data.resumes = data.resumes.map((r) => (r.id === id ? { ...body, id } : r));
@@ -224,6 +228,41 @@ describe('undo in the builder', () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(spec('newgrad').tier, 'the resume is still kept').toBe('extended');
     expect(spec('newgrad').temporaryFrom, 'and has no sweep clock').toBeUndefined();
+  });
+
+  /*
+   * Rename is the tier chip's problem again, one button along.
+   *
+   * `POST /resumes/:id/rename` is action-shaped, so `docKeyFor` records no
+   * step for it — while every step already on the stack holds the resume
+   * under its old name, and undo puts a whole resume back. Tick a box, rename
+   * the resume, press Ctrl+Z meaning the box: the name went back too, with
+   * the status line saying only "Undid change".
+   */
+  it('keeps a new name when you undo something done before the rename', async () => {
+    const boxes = [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+    boxes[0].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+    const ticked = structuredClone(spec('newgrad'));
+
+    document.querySelector('#btn-rename-resume').click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-content [name="label"]').value = 'Renamed resume';
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(spec('newgrad').label).toBe('Renamed resume'));
+
+    // The step the user means is the rename, the last thing they did.
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(spec('newgrad').label, 'one press takes back the rename').toBe(ticked.label);
+    expect(spec('newgrad').sections, 'and only the rename').toEqual(ticked.sections);
+
+    // And a second press takes back the box, under the name it now has.
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(spec('newgrad').sections).not.toEqual(ticked.sections);
   });
 
   /*
