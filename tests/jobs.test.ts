@@ -501,6 +501,49 @@ describe('variant matching', () => {
       const result = matchVariants(tagged, base, { keywords: job.keywords });
       expect(result.choices.b_pipeline).toBe('v_x86');
     });
+
+    /*
+     * Not a tag that says which posting a line is for. "industry" and
+     * "senior" mark a phrasing for experienced hires — the level rule reads
+     * them against what the posting is for — and read as keywords, an
+     * internship posting that happens to say "industry experience is a plus"
+     * scored that phrasing up by the three points a real skill gets and
+     * swapped it onto an intern application. "short", on the fixture's own
+     * fitting phrasing, is the same kind of tag.
+     */
+    it('but not a level tag, which says which posting a line is for rather than what it is about', () => {
+      const tagged: StoreData = {
+        ...data,
+        entries: data.entries.map((e) =>
+          e.id === 'exp'
+            ? {
+                ...e,
+                bullets: e.bullets!.map((b, i) =>
+                  i === 0
+                    ? {
+                        ...b,
+                        variants: [
+                          ...b.variants,
+                          { id: 'v_senior', label: 'Industry', text: 'Owned the pipeline for the industry group', tags: ['industry', 'senior'] },
+                        ],
+                      }
+                    : b,
+                ),
+              }
+            : e,
+        ),
+      };
+      const job = withYourTerms(
+        posting('Summer internship. Industry experience is a plus, and senior engineers will mentor you. Keep it short.'),
+        tagged,
+      );
+      expect(job.keywords).toEqual(['python']);
+      const result = matchVariants(tagged, base, {
+        keywords: job.keywords,
+        level: detectLevel({ title: 'Software Engineer Intern' }),
+      });
+      expect(result.choices.b_pipeline).toBeUndefined();
+    });
   });
 
   it('respects a higher threshold by making fewer changes', () => {

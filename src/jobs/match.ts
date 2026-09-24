@@ -148,7 +148,17 @@ function termsYouHave(data: StoreData): string[] {
  * Short terms and everyday words are left to the vocabulary, which reads them
  * in context: "C" is a grade and "React" a verb far more often than either is
  * a language in a posting that does not otherwise say so.
+ *
+ * And the tags that are instructions rather than vocabulary are left alone
+ * entirely. A level tag ("intern", "senior", "industry") says which kind of
+ * hire a phrasing is for, and `considerLevel` reads it against what the
+ * posting is for; as a keyword, an internship posting that says "industry
+ * experience is a plus" scored every phrasing tagged for experienced hires up
+ * by the three points a real skill gets, and swapped it in. "short" is for
+ * fitting a page, which no posting's wording should reach.
  */
+const NOT_VOCABULARY = new Set([...ALL_LEVEL_TAGS, 'short']);
+
 export function withYourTerms<J extends { keywords: string[]; description: string }>(job: J, data: StoreData): J {
   const have = new Set(job.keywords.map(norm));
   const text = spaced(job.description ?? '');
@@ -156,6 +166,7 @@ export function withYourTerms<J extends { keywords: string[]; description: strin
   for (const term of termsYouHave(data)) {
     const glued = norm(term);
     if (glued.length < 3 || /^\d+$/.test(glued) || have.has(glued) || ORDINARY_WORDS.has(glued)) continue;
+    if (NOT_VOCABULARY.has(glued)) continue;
     if (!mentions(text, term)) continue;
     have.add(glued);
     added.push(term);

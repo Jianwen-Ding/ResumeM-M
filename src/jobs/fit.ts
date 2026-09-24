@@ -227,7 +227,15 @@ export function recommend(fits: ResumeFit[]): Set<string> {
   if (best.hits - median < 2) return new Set();
 
   const room = Math.min(3, Math.max(1, Math.floor(fits.length / 3)));
-  // Everything level with the best, up to the cap — a tie is not a ranking
-  // either, and marking one of two equals would be inventing a difference.
-  return new Set(ranked.filter((f) => f.hits === best.hits).slice(0, room).map((f) => f.id));
+  /*
+   * Everything level with the best, or nothing — a tie is not a ranking
+   * either, and marking one of two equals would be inventing a difference.
+   *
+   * This took the first `room` of them, which is that invention whenever more
+   * are level than there is room to mark: in a store of five, two resumes tied
+   * at the top and the star went to whichever happened to be written first.
+   * When the mark cannot go on all of them, the honest mark is none.
+   */
+  const level = ranked.filter((f) => f.hits === best.hits);
+  return level.length > room ? new Set() : new Set(level.map((f) => f.id));
 }
