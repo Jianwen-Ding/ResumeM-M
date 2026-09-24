@@ -1415,3 +1415,26 @@ describe('an employer named the way Workday books it', () => {
     expect(extractJob(posting('2100 Careers'), WD).company).toBe('2100 Careers');
   });
 });
+
+/*
+ * The name a site gives itself, measured on Amazon's board as "Amazon.jobs" —
+ * which was filed as the employer, beside a second row for the same job.
+ */
+describe('a site that names itself with its address', () => {
+  const page = (site: string) => `<html><head><title>Sr Software Engineer, Graviton Software, Annapurna Labs - Job ID: 10444966 | Amazon.jobs</title>
+<meta property="og:site_name" content="${site}"><meta property="og:title" content="Sr Software Engineer, Graviton Software, Annapurna Labs">
+</head><body><h1>Sr Software Engineer, Graviton Software, Annapurna Labs</h1><p>Build Graviton software.</p></body></html>`;
+  const URL = 'https://www.amazon.jobs/en/jobs/10444966/sr-software-engineer-graviton-software-annapurna-labs';
+
+  it('is read as the company the address belongs to', () => {
+    expect(extractJob(page('Amazon.jobs'), URL).company).toBe('Amazon');
+  });
+
+  it('while a site name that is a company is taken as it is', () => {
+    expect(extractJob(page('Halewood Group'), URL).company).toBe('Halewood Group');
+  });
+
+  it('and one that is only a word about the page is not a company at all', () => {
+    expect(extractJob(page('Careers'), URL).company).not.toBe('Careers');
+  });
+});

@@ -1359,6 +1359,27 @@ export function workdayEmployer(name: string | undefined, url: string | undefine
   return tidied && looksLikeCompanyName(tidied) ? tidied : name;
 }
 
+/**
+ * The name a site gives itself, when it is one you could write to.
+ *
+ * Taken raw, it was whatever the CMS was configured with: Amazon's board says
+ * "Amazon.jobs", measured on its posting pages, and the tracker filed the
+ * application under that — beside a second row for the same job under the
+ * employer the apply flow named. A name shaped like an address is read the
+ * way `employerFallback` reads an address ("Amazon.jobs" is Amazon); anything
+ * else has to pass `looksLikeCompanyName`, as every other source here does.
+ */
+function siteName(html: string): string | undefined {
+  const said = metaContent(html, ['og:site_name'])?.trim();
+  if (!said) return undefined;
+  if (looksLikeCompanyName(said)) return said;
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(said)) {
+    const read = employerFallback(`https://${said}`);
+    return read !== said && looksLikeCompanyName(read) ? read : undefined;
+  }
+  return undefined;
+}
+
 export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
   const found = fromJsonLd(html);
   const ld = found && { ...found, company: workdayEmployer(found.company, url) };
@@ -1383,7 +1404,7 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
   const namedCompany =
     ld?.company ??
     companyFromUrl(url) ??
-    metaContent(html, ['og:site_name']) ??
+    siteName(html) ??
     // "Software Engineer Intern at Acme" is the common page-title shape.
     /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim();
 
