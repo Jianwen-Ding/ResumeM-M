@@ -7,7 +7,16 @@
  * submitted application is neither.
  */
 import { describe, expect, it } from 'vitest';
-import { derivedAutofill, graduation, readGpa, splitDegree, splitLocation, splitName, workHistory } from '../src/model/autofill.js';
+import {
+  derivedAutofill,
+  educationHistory,
+  graduation,
+  readGpa,
+  splitDegree,
+  splitLocation,
+  splitName,
+  workHistory,
+} from '../src/model/autofill.js';
 import type { Entry, ResolvedResume } from '../src/model/types.js';
 
 describe('splitting a name into the two boxes a form has', () => {
@@ -537,5 +546,115 @@ describe('the jobs a work-history section asks for', () => {
       { id: 'e', kind: 'experience', title: '   ', bullets: [] },
     ] as never);
     expect(workHistory(r)).toEqual([]);
+  });
+});
+
+/*
+ * A form's Education section, one block per school with an "Add another" for
+ * the next: answered from the resume being sent, every education it lists, in
+ * its order, read the way the fields read the newest one.
+ */
+describe('the schools an Education section asks for, one block at a time', () => {
+  const resume = (entries: ResolvedResume['sections'][number]['entries']): ResolvedResume =>
+    ({
+      id: 'r',
+      label: 'R',
+      profile: { name: 'Morgan Testwell' },
+      sections: [
+        { kind: 'education', heading: 'Education', entries, skillGroups: [] },
+        { kind: 'experience', heading: 'Experience', entries: [{ id: 'x', kind: 'experience', title: 'Acme Co.', bullets: [] }], skillGroups: [] },
+      ],
+      layout: {},
+      warnings: [],
+    }) as unknown as ResolvedResume;
+
+  it("reads each school with its degree, discipline, dates and grade, in the resume's order", () => {
+    const schools = educationHistory(
+      resume([
+        {
+          id: 'edu_bu',
+          kind: 'education',
+          title: 'Boston University',
+          subtitle: 'Master of Science in Computer Science',
+          location: 'Boston, MA',
+          dates: 'Sep. 2027 -- May 2028',
+          bullets: [],
+        },
+        {
+          id: 'edu_neu',
+          kind: 'education',
+          title: 'Northeastern **University**',
+          subtitle: 'Bachelor of Science in Computer Science, GPA 3.8/4.0',
+          dates: 'Sep. 2023 -- May 2027',
+          bullets: [],
+        },
+      ]),
+    );
+    expect(schools).toEqual([
+      {
+        school: 'Boston University',
+        degree: 'Master of Science',
+        major: 'Computer Science',
+        location: 'Boston, MA',
+        start: { year: 2027, month: 9 },
+        end: { year: 2028, month: 5 },
+      },
+      {
+        school: 'Northeastern University',
+        degree: 'Bachelor of Science',
+        major: 'Computer Science',
+        start: { year: 2023, month: 9 },
+        end: { year: 2027, month: 5 },
+        gpa: '3.8',
+      },
+    ]);
+  });
+
+  it('takes a lone date as the graduation, and gives no end to one still going', () => {
+    const [lone, going] = educationHistory(
+      resume([
+        { id: 'a', kind: 'education', title: 'Boston University', dates: 'May 2028', bullets: [] },
+        { id: 'b', kind: 'education', title: 'Northeastern University', dates: 'Sep. 2023 -- Present', bullets: [] },
+      ]),
+    );
+    expect(lone).toEqual({ school: 'Boston University', end: { year: 2028, month: 5 } });
+    expect(going).toEqual({ school: 'Northeastern University', start: { year: 2023, month: 9 } });
+  });
+
+  it('offers no degree or discipline for a line that does not split plainly', () => {
+    const [one] = educationHistory(
+      resume([{ id: 'a', kind: 'education', title: 'Boston University', subtitle: 'Master of Engineering, Robotics', bullets: [] }]),
+    );
+    expect(one).toEqual({ school: 'Boston University' });
+  });
+
+  it('finds the grade in a wording the resume did not print, as the fields do', () => {
+    const stored = {
+      id: 'edu_neu',
+      kind: 'education',
+      title: 'Northeastern University',
+      subtitle: {
+        default: 'v_plain',
+        variants: [
+          { id: 'v_plain', label: 'Plain', text: 'Bachelor of Science in Computer Science' },
+          { id: 'v_gpa', label: 'With GPA', text: 'Bachelor of Science in Computer Science, GPA 3.7' },
+        ],
+      },
+      bullets: [],
+    } as unknown as Entry;
+    const [one] = educationHistory(
+      resume([{ id: 'edu_neu', kind: 'education', title: 'Northeastern University', subtitle: 'Bachelor of Science in Computer Science', bullets: [] }]),
+      [stored],
+    );
+    expect(one?.gpa).toBe('3.7');
+    expect(one?.degree).toBe('Bachelor of Science');
+  });
+
+  it('leaves out what is not an education, and one with no school named', () => {
+    const r = resume([
+      { id: 'p', kind: 'project', title: 'A thing', bullets: [] },
+      { id: 'e', kind: 'education', title: '  ', subtitle: 'Bachelor of Science in Physics', bullets: [] },
+    ] as never);
+    expect(educationHistory(r)).toEqual([]);
   });
 });

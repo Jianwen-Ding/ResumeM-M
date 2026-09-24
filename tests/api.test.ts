@@ -9,7 +9,7 @@ import { resolveResume } from '../src/model/resolve.js';
 import { Repo } from '../src/git/repo.js';
 import type { Entry } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
-import { hasLatex, makeTempStore, type TempStore } from './helpers.js';
+import { hasLatex, makeTempStore, SAMPLE_BASE, SAMPLE_EDUCATION, type TempStore } from './helpers.js';
 
 const latex = await hasLatex();
 
@@ -1113,6 +1113,65 @@ describe('autofill', () => {
     const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
     expect(missing.history).toEqual([]);
     expect(missing.fields.graduation_date).toBe('May 2026');
+  });
+
+  /*
+   * And its schools, for an Education section with an "Add another": every
+   * education the resume being sent lists, in its order, with the wording it
+   * chose — here the later graduation date — resolved exactly as the history
+   * is. The fields still carry the newest one alone, as they always have.
+   */
+  it('answers every education on the resume being sent, in its order', async () => {
+    t.write('education.yaml', [
+      SAMPLE_EDUCATION,
+      {
+        id: 'edu_bu',
+        kind: 'education',
+        title: 'Boston University',
+        location: 'Boston, MA',
+        subtitle: 'Master of Science in Computer Science, GPA 3.9',
+        dates: 'Sep. 2027 -- May 2028',
+        bullets: [],
+      },
+    ]);
+    const proposal = {
+      ...SAMPLE_BASE,
+      id: 'job-helios',
+      tier: 'temporary',
+      copiedFrom: 'base',
+      choices: { 'edu_neu.dates': 'v_dec2026' },
+      sections: SAMPLE_BASE.sections?.map((s) => (s.kind === 'education' ? { ...s, entries: ['edu_bu', 'edu_neu'] } : s)),
+    };
+    const sent = (await request(app).post('/api/autofill').send({ resumeId: 'base', spec: proposal }).expect(200)).body;
+    expect(sent.education).toEqual([
+      {
+        school: 'Boston University',
+        degree: 'Master of Science',
+        major: 'Computer Science',
+        location: 'Boston, MA',
+        start: { year: 2027, month: 9 },
+        end: { year: 2028, month: 5 },
+        gpa: '3.9',
+      },
+      {
+        school: 'Northeastern University',
+        degree: 'Bachelor of Science',
+        major: 'Computer Science',
+        location: 'Boston, MA',
+        start: { year: 2022, month: 9 },
+        end: { year: 2026, month: 12 },
+      },
+    ]);
+    // The fields are the newest one's, and only the newest one's.
+    expect(sent.fields.degree).toBe('Master of Science');
+
+    // A stored resume listing one school answers one; asked the old way, or
+    // about a resume that is not there, there are none to give.
+    const stored = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad' }).expect(200)).body;
+    expect(stored.education.map((e: { school: string }) => e.school)).toEqual(['Northeastern University']);
+    expect((await request(app).get('/api/autofill').expect(200)).body.education).toEqual([]);
+    const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
+    expect(missing.education).toEqual([]);
   });
 
   /*

@@ -42,7 +42,7 @@ import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, closedAsStale, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
-import { derivedAutofill, workHistory } from '../model/autofill.js';
+import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
@@ -3109,6 +3109,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * description anybody wrote for the form.
        */
       history: resume ? workHistory(resume) : [],
+      /*
+       * And its schools, for an Education section that takes one per block
+       * and has an "Add another" for the next. See `educationHistory`: this
+       * resume's educations in its order, read as the fields above read the
+       * newest one. Resolved from the resume being sent, as the history is,
+       * and empty where none is — asked the old way, the form gets the one
+       * education in `fields` and nothing more, exactly as before.
+       */
+      education: resume ? educationHistory(resume, data.entries) : [],
     };
   };
 
@@ -3127,7 +3136,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * — the reason the writing routes take a `spec` — and a whole resume does
    * not belong in a query string. The wordings come from it, and so do the
    * jobs a work-history section asks for. A resume that cannot be resolved
-   * costs the form its history and nothing else.
+   * costs the form its history and its schools, and nothing else.
    */
   api.post(
     '/autofill',
