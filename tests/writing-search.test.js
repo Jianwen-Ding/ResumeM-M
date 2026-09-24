@@ -118,3 +118,67 @@ describe('finding something in what you have already written', () => {
     await vi.waitFor(() => expect(cards('letters')).toHaveLength(2));
   });
 });
+
+/*
+ * A letter added by hand is named after the day and the company, and that
+ * name is its file. Two for one company on one day — two roles there, or two
+ * old letters pasted in with the company left blank — were given one name,
+ * and the second was written over the first.
+ */
+describe('adding a cover letter by hand', () => {
+  let letters;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#letters';
+
+    const fixture = makeTempStore();
+    const data = fixture.store.load();
+    fixture.cleanup();
+    letters = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        const path = String(url);
+        let result = {};
+        if (path === '/api/store') result = { ...data, coverLetters: letters };
+        else if (path === '/api/ai/jobs') result = { jobs: [] };
+        else if (path === '/api/letters') result = letters;
+        else if (path.startsWith('/api/letters/') && options.method === 'PUT') {
+          const id = decodeURIComponent(path.split('?')[0].split('/').pop());
+          const letter = { ...JSON.parse(options.body), id };
+          letters = [...letters.filter((l) => l.id !== id), letter];
+          result = letter;
+        }
+        return { ok: true, json: async () => structuredClone(result) };
+      }),
+    );
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#btn-add-letter')).not.toBeNull());
+  });
+
+  const add = async (company, role, body) => {
+    document.querySelector('#btn-add-letter').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal-content [name="body"]')).not.toBeNull());
+    document.querySelector('#modal-content [name="company"]').value = company;
+    document.querySelector('#modal-content [name="role"]').value = role;
+    document.querySelector('#modal-content [name="body"]').value = body;
+    const had = letters.length;
+    document.querySelector('#modal-ok').click();
+    await vi.waitFor(() => expect(document.querySelector('#status').textContent).toMatch(/saved|not saved/i));
+    await new Promise((go) => setTimeout(go, 20));
+    return had;
+  };
+
+  it('keeps both of two letters written to one company on one day', async () => {
+    await add('Helios', 'Platform Engineer', 'The first letter.');
+    document.querySelector('#status').textContent = '';
+    await add('Helios', 'Site Reliability Engineer', 'The second letter.');
+
+    expect(letters.map((l) => l.body).sort()).toEqual(['The first letter.', 'The second letter.']);
+    expect(new Set(letters.map((l) => l.id)).size).toBe(2);
+  });
+});

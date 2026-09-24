@@ -7634,7 +7634,20 @@ async function addLetter() {
     { name: 'body', label: 'Body', value: '', multiline: true, tall: true },
   ]);
   if (!answer?.body?.trim()) return;
-  const id = `${new Date().toISOString().slice(0, 10)}-${slug(answer.company || 'letter')}`;
+  /*
+   * A name no letter already has.
+   *
+   * The day and the company, and that name is the file — so two letters to
+   * one company on one day (two roles there, or two old ones pasted in with
+   * the company left blank) were given one name, and `PUT /letters/:id`
+   * wrote the second over the first. Measured: two added, one left. Asked
+   * of the server rather than of the list on screen, because the extension
+   * and the Workspace file letters from elsewhere.
+   */
+  const base = `${new Date().toISOString().slice(0, 10)}-${slug(answer.company || 'letter')}`;
+  const taken = new Set((await api('/letters')).map((l) => l.id));
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
   await api(`/letters/${encodeURIComponent(id)}`, {
     method: 'PUT',
     body: JSON.stringify({
