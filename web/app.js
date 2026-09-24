@@ -5992,7 +5992,14 @@ async function loadApplications() {
       // Once, on the way in — not every time the list repaints with an
       // offer already on it.
       if (moved === 'offer' && a.status !== 'offer') celebrate(a.company);
-      loadApplications();
+      /*
+       * The record beside the table too, when it is this one. Only the
+       * table was repainted, so the pane's history stopped a step short of
+       * the dropdown next to it until something else was clicked.
+       * `openApplication` repaints the table itself.
+       */
+      if (openApplicationId === a.id) openApplication(a.id);
+      else loadApplications();
     };
     const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
       // Both dates get the same treatment: "2026-09-" over "17" is not a
@@ -6028,7 +6035,20 @@ async function loadApplications() {
               setStatus(err.message, true);
               return;
             }
-            if (openApplicationId === a.id) openApplicationId = null;
+            /*
+             * And out of the pane, when it was the one open. Only the id was
+             * forgotten, so the table lost the row while the pane beside it
+             * went on showing the role, the company and everything that was
+             * sent, as though it were still tracked.
+             */
+            if (openApplicationId === a.id) {
+              openApplicationId = null;
+              setChildren(
+                $('#app-detail'),
+                el('div', { className: 'empty' }, [el('b', {}, 'Pick an application'), `${a.company} is no longer tracked.`]),
+              );
+              if (location.hash.startsWith('#applications/')) window.history.replaceState(null, '', '#applications');
+            }
             loadApplications();
           },
         }),
