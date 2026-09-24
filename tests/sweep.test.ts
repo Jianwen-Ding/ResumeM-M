@@ -410,3 +410,40 @@ describe('a resume the history has an older version of', () => {
     expect(swept.map((d) => d.id)).toEqual(['job-old']);
   });
 });
+
+/*
+ * Opening a save brings it up to date, and with auto-commit on, what that
+ * wrote is a version of its own.
+ *
+ * The migrations wrote the files and committed nothing, so after the start
+ * `git status` listed every resume and config.yaml as changed, and they rode
+ * into whatever commit came next — a bullet edit, a tracked application —
+ * under a message that had nothing to do with them.
+ */
+describe('opening a save written by an older version', () => {
+  it('commits what the migrations wrote, under their own name', async () => {
+    const { openSave } = await import('../src/server/index.js');
+    temp.store.saveConfig({ git: { autoCommit: true } });
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    const before = (await repo.log(50)).length;
+
+    await openSave(temp.store, repo);
+
+    expect(await repo.pending(), 'nothing is left changed and uncommitted').toEqual([]);
+    const log = await repo.log(50);
+    expect(log.length).toBeGreaterThan(before);
+    expect(log.map((c) => c.message).join('\n')).toMatch(/up to date/i);
+  });
+
+  it('commits nothing when auto-commit is off', async () => {
+    const { openSave } = await import('../src/server/index.js');
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    const before = (await repo.log(50)).length;
+
+    await openSave(temp.store, repo);
+
+    expect((await repo.log(50)).length).toBe(before);
+  });
+});
