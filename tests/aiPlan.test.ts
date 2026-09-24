@@ -178,6 +178,24 @@ describe('showing and hiding', () => {
     expect(sections?.find((s) => s.kind === 'project')?.entries).toEqual(['proj_third', 'proj_thing', 'proj_second']);
   });
 
+  /*
+   * Entries settle before lines. Every hide ran before every show, so hiding
+   * a line of an entry the same plan shows found the entry off the page and
+   * did nothing — and the entry then arrived with all of its lines, the one
+   * the model had been told was left off among them.
+   */
+  it('hides a line of an entry the same plan shows', () => {
+    const d = store();
+    const withoutAcme = {
+      ...SAMPLE_BASE,
+      sections: SAMPLE_BASE.sections?.map((s) => (s.kind === 'experience' ? { ...s, entries: [], bullets: {} } : s)),
+    };
+    const sections = applyInclusion(withoutAcme, d, sanitizeAiPlan({ enable: ['exp_acme'], disable: ['b_testing'] }, d));
+    const experience = sections?.find((s) => s.kind === 'experience');
+    expect(experience?.entries).toEqual(['exp_acme']);
+    expect(experience?.bullets?.exp_acme).toEqual(['b_pipeline']);
+  });
+
   it('leaves the store itself untouched', () => {
     const d = store();
     const before = JSON.stringify(d.entries);

@@ -282,12 +282,26 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
     // explicit list is what resurrected retired text onto a tailored resume.
     (entryById.get(entryId)?.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
 
-  for (const id of plan.disable) {
+  /*
+   * Entries first, then their lines. Every hide used to run before every
+   * show, so hiding a line of an entry the same plan put on the page found
+   * the entry not there yet and did nothing — and the entry then arrived with
+   * all of its lines, the one the model had been told was left off among them.
+   */
+  for (const id of plan.enable) {
     const entry = entryById.get(id);
-    if (entry) {
-      for (const s of sections) s.entries = s.entries.filter((e) => e !== id);
-      continue;
-    }
+    if (!entry) continue;
+    const section = sections.find((s) => s.kind === entry.kind);
+    // Store order, not reply order: where the store puts it.
+    if (section) section.entries = inPlace(section.entries, id, data.entries.map((e) => e.id));
+  }
+
+  for (const id of plan.disable) {
+    if (!entryById.has(id)) continue;
+    for (const s of sections) s.entries = s.entries.filter((e) => e !== id);
+  }
+
+  for (const id of plan.disable) {
     const ownerId = bulletOwner.get(id);
     if (!ownerId) continue;
     for (const s of sections) {
@@ -297,13 +311,6 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
   }
 
   for (const id of plan.enable) {
-    const entry = entryById.get(id);
-    if (entry) {
-      const section = sections.find((s) => s.kind === entry.kind);
-      // Store order, not reply order: where the store puts it.
-      if (section) section.entries = inPlace(section.entries, id, data.entries.map((e) => e.id));
-      continue;
-    }
     const ownerId = bulletOwner.get(id);
     if (!ownerId) continue;
     for (const s of sections) {

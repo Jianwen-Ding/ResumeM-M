@@ -357,6 +357,20 @@ export class TailorSession {
           `${some(this.resume.sections.map((s) => s.kind))}.`,
       );
     }
+    /*
+     * And a line goes where its entry is. One whose entry is not on the page
+     * — and not about to be — was answered "will be shown", and
+     * `applyInclusion` found no section listing the entry and did nothing.
+     */
+    if (on && what === 'bullet') {
+      const owner = this.bullets.get(id)!.entry;
+      const onPage = this.resume.sections.some(
+        (s) => s.kind === owner.kind && this.orderedEntries(s.kind, s.entries.map((e) => e.id)).includes(owner.id),
+      );
+      if (!onPage) {
+        return no(`${id} is a line of ${owner.id}, which is not on this resume, so it has nowhere to go. Show ${owner.id} first if it belongs here.`);
+      }
+    }
     const [into, outOf] = on
       ? ([this.state.plan.enable, this.state.plan.disable] as const)
       : ([this.state.plan.disable, this.state.plan.enable] as const);

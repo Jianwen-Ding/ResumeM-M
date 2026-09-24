@@ -323,6 +323,40 @@ describe('reading the page back', () => {
     expect(text).toContain('coverage');
   });
 
+  /*
+   * A line goes where its entry is. Showing one whose entry is not on the
+   * page said "will be shown", and `applyInclusion` found no section listing
+   * the entry and did nothing — a move reported as made that was not.
+   */
+  it('refuses to show a line whose entry is not on the page, and names the entry', () => {
+    const data = store();
+    const spec = {
+      id: 'no-acme',
+      label: 'No Acme',
+      tier: 'base' as const,
+      sections: [
+        { kind: 'education', entries: ['edu_neu'] },
+        { kind: 'experience', entries: [] },
+      ],
+    };
+    data.resumes = [...data.resumes, spec as never];
+    const s = new TailorSession(data, resolveResume('no-acme', data), POSTING);
+
+    const refused = s.show('b_testing');
+    expect(refused.ok).toBe(false);
+    expect(refused.text).toContain('exp_acme');
+    expect(s.state.plan.enable).toEqual([]);
+
+    // Shown with its entry, it goes; and a line hidden there stays hidden
+    // in the document, as the preview says.
+    expect(s.show('exp_acme').ok).toBe(true);
+    expect(s.show('b_testing').ok).toBe(true);
+    expect(s.hide('b_pipeline').ok).toBe(true);
+    const sections = applyInclusion(spec as never, data, s.state.plan);
+    expect(sections?.find((x) => x.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_testing']);
+    expect(s.describeResume()).not.toContain('[b_pipeline]');
+  });
+
   it('shows an entry the model has just turned on', () => {
     const s = narrow();
     expect(s.describeResume()).not.toContain('[proj_thing]');
