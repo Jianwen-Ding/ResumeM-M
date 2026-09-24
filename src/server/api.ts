@@ -3408,7 +3408,41 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const { status, note } = req.body as { status: Application['status']; note?: string };
       const id = String(req.params.id);
-      const app = await withCommit(repo, autoCommit(), `${id}: ${status}`, () => advance(store, id, status, note));
+      const app = await withCommit(repo, autoCommit(), `${id}: ${status}`, () => {
+        const moved = advance(store, id, status, note);
+        /*
+         * And back to not sent, its space goes back among the live ones.
+         *
+         * Every send marks the space `submitted`, and nothing ever unmarked
+         * it. The card's "Not sent after all" moves the row back to
+         * `applying` and says it is "back among the ones being worked on";
+         * measured through the routes, the tracker read `applying` while the
+         * Workspace went on listing the space under the sent ones — and
+         * `retireStaleDrafts`, which lets go of sent spaces a fortnight after
+         * the last keystroke, would then close the space of an application
+         * still in flight. Opening it again on the page did not help either:
+         * `POST /workspace` keeps a space that is already `submitted`.
+         *
+         * The other way too: marked as sent here, by hand, the space is
+         * marked as the extension's send marks it, or it stays `drafting`
+         * beside a row that went out and is never retired.
+         *
+         * By id first, which is how a space and the row it opened share a
+         * name, and by the job's names when the row was made another way —
+         * never a space of an earlier application that is over.
+         */
+        const unsent = status === 'interested' || status === 'applying';
+        const sent = status === 'applied' || status === 'interview' || status === 'offer';
+        if (unsent || sent) {
+          const drafts = store.loadDrafts();
+          const space =
+            drafts.find((d) => d.id === moved.id) ??
+            draftForJob(drafts, store.load().applications, moved.company, moved.role);
+          if (space && unsent && space.status === 'submitted') store.saveDraft({ ...space, status: 'drafting' });
+          if (space && sent && space.status !== 'submitted') store.saveDraft({ ...space, status: 'submitted' });
+        }
+        return moved;
+      });
       res.json(app);
     }),
   );

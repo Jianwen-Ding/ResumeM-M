@@ -2559,6 +2559,29 @@ describe('workspace', () => {
   });
 
   /*
+   * "Not sent after all" in the card puts the row back to Applying and says
+   * the application is "back among the ones being worked on". The space the
+   * send had marked stayed marked, so the Workspace listed it under the sent
+   * ones and the fortnight's retirement would have closed it while the
+   * application was still in flight.
+   */
+  it('reopens the space when an application is put back to not sent', async () => {
+    const { body } = await open().expect(200);
+    await request(app).post('/api/extension/sent').send({ company: 'Streamly', role: 'Data Platform Intern' }).expect(200);
+    expect(t.store.getDraft(body.draft.id)?.status).toBe('submitted');
+
+    await request(app)
+      .post(`/api/applications/${encodeURIComponent(body.draft.id)}/status`)
+      .send({ status: 'applying', note: 'Prepared, then not sent' })
+      .expect(200);
+
+    expect(t.store.getDraft(body.draft.id)?.status).toBe('drafting');
+    // And marked as sent by hand in the tracker, it is marked as a send marks it.
+    await request(app).post(`/api/applications/${encodeURIComponent(body.draft.id)}/status`).send({ status: 'applied' }).expect(200);
+    expect(t.store.getDraft(body.draft.id)?.status).toBe('submitted');
+  });
+
+  /*
    * A sent space is not a closed one, and not a permanent one either.
    *
    * It stays listed so the follow-up question, or the portal that rejected the
