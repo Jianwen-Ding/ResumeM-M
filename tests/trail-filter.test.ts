@@ -1371,3 +1371,40 @@ describe('a section of this job\'s duties is not labelled as other openings', ()
     expect(extractJob(html, 'https://careers.acme.example/jobs/4410').description).toContain(MARK);
   });
 });
+
+/*
+ * A consent manager's banner, by the names the common ones give themselves.
+ *
+ * A block was taken for a cookie banner only when its id or class had
+ * "cookie" or "consent" as a word of its own, so Cookiebot's
+ * `CybotCookiebotDialog`, a `cookieBanner`, Didomi's and Quantcast's hosts
+ * were read as the posting. And one that was recognised was kept whole for
+ * any digit in it: the "We and our 842 partners" every IAB banner opens with,
+ * a "3rd party" cookie. A figure that is pay still keeps it.
+ */
+describe('a consent manager\'s banner is cut, by its own name and with its partner count', () => {
+  const body = (extra: string) => `<html><body>${NAV}<main>${postingBody()}</main>${extra}${FOOTER}</body></html>`;
+  const TCF = 'We and our 842 partners store and/or access information on a device, such as cookies.';
+  it.each([
+    ['Cookiebot', `<div id="CybotCookiebotDialog" class="CybotCookiebotDialogActive"><h2>This website uses cookies</h2><p>${TCF}</p><button>Allow all</button></div>`],
+    ['a camel-cased banner', `<div class="cookieBanner"><p>${TCF}</p><button>OK</button></div>`],
+    ['Didomi', `<div id="didomi-host"><div class="didomi-popup"><p>${TCF}</p></div></div>`],
+    ['Quantcast', `<div id="qc-cmp2-container"><div class="qc-cmp2-summary"><p>${TCF}</p></div></div>`],
+    ['OneTrust, with a 3rd party', '<div id="onetrust-consent-sdk"><p>We use 3rd party cookies to personalise ads.</p><button>Accept</button></div>'],
+  ])('%s', (_cmp, banner) => {
+    const out = extractJob(body(banner), 'https://careers.acme.example/jobs/4410').description;
+    expect(out).not.toContain('partners store');
+    expect(out).not.toContain('3rd party cookies');
+    expectPostingSurvives(out);
+  });
+  it('while pay said in a consent block is still kept', () => {
+    const out = withoutChrome(body('<div id="gdpr-notice"><p>By applying you agree to our notice. The Zurich variant of this role pays CHF 120,000.</p></div>'));
+    expect(out).toContain('CHF 120,000');
+  });
+  it('and a page wrapper the site names for its banner is not the banner', () => {
+    const html = `<html><body><div class="page has-cookie-banner"><main><h1>Support Engineer</h1>
+      <p>Own tier-two tickets and decide what wakes an engineer up at night.</p>${FILLER('Paragraph', 4)}</main></div>
+      <section><h2>About Acme</h2>${FILLER('About', 3)}</section></body></html>`;
+    expect(extractJob(html).description).toContain('decide what wakes an engineer up');
+  });
+});

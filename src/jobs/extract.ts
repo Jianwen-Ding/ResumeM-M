@@ -170,8 +170,14 @@ const CHROME_TAGS = /<(nav|footer|aside|select|svg|template|iframe|noscript)\b[^
 /** `<select>` alone, for measuring the safety net's baseline. See `withoutChrome`. */
 const SELECT_TAG = /<select\b[^>]*>/gi;
 const CHROME_ROLES = /<([a-z][a-z0-9]*)\b[^>]*\brole\s*=\s*["'](?:navigation|banner|contentinfo|complementary|search)["'][^>]*>/gi;
+/*
+ * "Cookie" anywhere in the name, because the consent managers run it into
+ * the words around it — Cookiebot's `CybotCookiebotDialog`, a `cookieBanner`
+ * — and those were read as the posting. And the hosts of the ones that do
+ * not say it at all: Didomi, Quantcast, Osano.
+ */
 const CHROME_NAMES =
-  /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*\b(?:cookie|cookies|consent|gdpr|onetrust)\b[^"']*["'][^>]*>/gi;
+  /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*(?:cookie|\b(?:consent|gdpr|onetrust|didomi-host|qc-cmp2-container|osano-cm-window)\b)[^"']*["'][^>]*>/gi;
 /*
  * Messaging and support chat, by the names the widgets give themselves: a
  * job board's messaging overlay (the applicant's own conversations, other
@@ -490,6 +496,15 @@ function hasShortStandaloneLine(html: string): boolean {
  * consent section were cut with the privacy text around them. Not "must" or
  * "required" on their own — every cookie banner says those.
  */
+/**
+ * A figure that is pay, in a block named for cookies: a currency beside a
+ * number, a percentage, an hourly or yearly rate. Not any digit — every IAB
+ * banner opens "We and our 842 partners", and "3rd party" and "13 months"
+ * are what cookie text says — which kept the whole banner for the AI.
+ */
+const COOKIE_FIGURE =
+  /\p{Sc}\s?\d|\d\s?\p{Sc}|\d\s?%|\b(?:USD|EUR|GBP|CHF|CAD|AUD|INR|SGD|JPY)\s?\d|\d\s?(?:USD|EUR|GBP|CHF|CAD|AUD|INR|SGD|JPY)\b|\d\s*(?:\/|per|an?)\s*(?:hr|hour|h|yr|year|annum|month)\b/iu;
+
 const COOKIE_UNSAFE_WORDS =
   /\bsalary\b|\bcompensation\b|\bvisa\b|\bsponsor\w*\b|\bremote\b|\bhybrid\b|\bbenefit\w*\b|\brequirements?\b|\bqualifications?\b|\bdeadline\b|\bclos(?:e|es|ing) (?:date|on)\b|\bcitizen\w*|\beligib\w*|\bauthori[sz]ed to work\b|\bwork (?:permit|authori[sz]ation)\b|\bright to work\b|\bclearance\b|\brelocat\w*|\bbackground checks?\b/i;
 
@@ -546,10 +561,13 @@ function keepAmbiguousElement(
   if (tag === 'select') return !isLongOptionList(outerHtml);
 
   if (opts.isCookieNamed) {
+    // A wrapper that holds the page's own heading is not a banner, whatever
+    // the site put on its class while the banner is up.
+    if (/<(?:h1|main)\b/i.test(outerHtml)) return true;
     const withoutLinksOrButtons = plainText(
       outerHtml.replace(/<(a|button)\b[^>]*>[\s\S]*?<\/\1>/gi, ' '),
     );
-    const safe = !DIGIT_CURRENCY_OR_PERCENT.test(withoutLinksOrButtons) && !COOKIE_UNSAFE_WORDS.test(withoutLinksOrButtons);
+    const safe = !COOKIE_FIGURE.test(withoutLinksOrButtons) && !COOKIE_UNSAFE_WORDS.test(withoutLinksOrButtons);
     return !safe;
   }
 
