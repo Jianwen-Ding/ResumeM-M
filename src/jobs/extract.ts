@@ -122,6 +122,17 @@ const NAMED_ENTITIES: Record<string, string> = {
   rsaquo: '›', lsaquo: '‹', raquo: '»', laquo: '«', ensp: ' ', emsp: ' ', thinsp: ' ',
 };
 
+/** Every entity in `text` decoded once, and nothing else about it changed. */
+function decodeEntities(text: string): string {
+  return text.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, name: string) => {
+    if (name[0] === '#') {
+      const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+    }
+    return Object.hasOwn(NAMED_ENTITIES, name.toLowerCase()) ? NAMED_ENTITIES[name.toLowerCase()]! : whole;
+  });
+}
+
 /**
  * A title or a name as a person reads it: every entity decoded, however many
  * times over it was escaped, and every kind of space made one plain space.
@@ -137,13 +148,7 @@ export function readableName(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
   let out = text;
   for (let i = 0; i < 5; i++) {
-    const next = out.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, name: string) => {
-      if (name[0] === '#') {
-        const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
-        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
-      }
-      return Object.hasOwn(NAMED_ENTITIES, name.toLowerCase()) ? NAMED_ENTITIES[name.toLowerCase()]! : whole;
-    });
+    const next = decodeEntities(out);
     if (next === out) break;
     out = next;
   }
@@ -944,6 +949,18 @@ function jsonLdFacts(obj: Record<string, unknown>): string[] {
  */
 const bare = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
+/**
+ * A JSON-LD description as text. LinkedIn and Greenhouse write the posting's
+ * markup into it escaped — "&lt;strong&gt;Requirements&lt;/strong&gt;" —
+ * and taking the tags out before reading the entities handed the AI and the
+ * save "<p><strong>Requirements</strong></p><ul><li>…", markup and all. So
+ * escaped markup is read as markup first, and what it escaped is read after.
+ */
+function jsonLdDescription(raw: string): string {
+  if (!/&lt;\/?[a-z][a-z0-9]*\b/i.test(raw)) return stripTags(raw);
+  return decodeEntities(stripTags(decodeEntities(raw)));
+}
+
 /** Walk JSON-LD, which is the only structured source most boards agree on. */
 function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] }) | undefined {
   const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
@@ -973,7 +990,7 @@ function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] })
           title: typeof obj.title === 'string' ? readableName(obj.title) : undefined,
           company: typeof org?.name === 'string' ? readableName(org.name) : undefined,
           location: [addr?.addressLocality, addr?.addressRegion].filter(Boolean).join(', ') || undefined,
-          description: typeof obj.description === 'string' ? stripTags(obj.description) : '',
+          description: typeof obj.description === 'string' ? jsonLdDescription(obj.description) : '',
           facts: jsonLdFacts(obj),
           source: 'json-ld',
         };

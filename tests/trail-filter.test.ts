@@ -1501,3 +1501,32 @@ describe('a person\'s email and phone number are not kept with the posting', () 
     expect(description).toContain('Salary: $130,000 - $160,000, plus 401(k). Requisition 2025-10-0045. Experience 2019-2024 at a payments company preferred.');
   });
 });
+
+/*
+ * A JSON-LD description whose markup is written as entities.
+ *
+ * LinkedIn and Greenhouse put the posting's HTML into JSON-LD escaped —
+ * "&lt;strong&gt;Requirements&lt;/strong&gt;" — and the tags were taken out
+ * before the entities were read, so the AI and the save were handed the
+ * posting as "<p><strong>Requirements</strong></p><ul><li>…", markup and all.
+ */
+describe('a JSON-LD description written with its markup escaped', () => {
+  it('is read as the posting, not as markup', () => {
+    const ld = {
+      '@context': 'https://schema.org',
+      '@type': 'JobPosting',
+      title: 'Data Analyst',
+      hiringOrganization: { '@type': 'Organization', name: 'Acme' },
+      description:
+        '&lt;p&gt;&lt;strong&gt;Requirements&lt;/strong&gt;&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Five years of SQL and Python in analytics&lt;/li&gt;&lt;li&gt;Tableau or Looker&lt;/li&gt;&lt;/ul&gt;' +
+        `&lt;p&gt;${'We are a small analytics team inside a large company, and we answer the questions finance asks. '.repeat(3)}&lt;/p&gt;` +
+        '&lt;p&gt;Salary: $90,000 &amp;ndash; $110,000 &amp;amp; equity&lt;/p&gt;',
+    };
+    const html = `<html><head><script type="application/ld+json">${JSON.stringify(ld)}</script></head><body><main><h1>Data Analyst</h1></main></body></html>`;
+    const { description } = extractJob(html, 'https://www.linkedin.com/jobs/view/4012345678/', 'Data Analyst | Acme | LinkedIn');
+    expect(description).not.toMatch(/<\/?(?:p|strong|ul|li)>/);
+    expect(description).toContain('- Five years of SQL and Python in analytics');
+    expect(description).toContain('- Tableau or Looker');
+    expect(description).toContain('Salary: $90,000 – $110,000 & equity');
+  });
+});
