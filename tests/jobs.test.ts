@@ -164,6 +164,46 @@ describe('a title with its entities escaped twice', () => {
   });
 });
 
+/*
+ * A sign-in page, which titles itself with the step and not the job.
+ *
+ * Measured on iCIMS: "Login | Careers Markon", served from
+ * careers-markon.icims.com, and the card said the role was "Login". None of
+ * these words is a job, and the rest of such a title is the site's name.
+ */
+describe('a page titled with an auth or step word', () => {
+  const ICIMS = 'https://careers-markon.icims.com/jobs/4021/login';
+  const signIn = (title: string, url = ICIMS) =>
+    extractJob(
+      `<html><head><title>${title}</title></head><body><h1>Sign in</h1>
+       <form><label>Email</label><input name="email"><button>Next</button></form></body></html>`,
+      url,
+      title,
+    );
+
+  it('does not take "Login" as the role on iCIMS\'s sign-in page', () => {
+    const job = signIn('Login | Careers Markon');
+    expect(job.title).toBeUndefined();
+    expect(job.company).toBe('Careers Markon');
+  });
+
+  it.each([
+    'Login', 'Sign in', 'Sign In', 'Log In', 'Create Account', 'Register', 'My Account',
+    'Apply', 'Application', 'Careers', 'Job Search', 'Home',
+  ])('never takes "%s" as the role', (word) => {
+    for (const url of [ICIMS, 'https://example.test/portal']) {
+      for (const title of [word, `${word} | Careers Markon`, `${word} — Markon`]) {
+        expect(signIn(title, url).title ?? '').not.toMatch(new RegExp(`^${word}$`, 'i'));
+      }
+    }
+    expect(looksLikeRoleTitle(word)).toBe(false);
+  });
+
+  it('still reads a real role beside the auth word', () => {
+    expect(signIn('Sign In | Platform Engineer | Markon').title).toBe('Platform Engineer');
+  });
+});
+
 describe('company from url', () => {
   it.each([
     ['https://boards.greenhouse.io/streamly/jobs/1', 'Streamly'],

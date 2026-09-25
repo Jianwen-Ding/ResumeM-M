@@ -1206,8 +1206,11 @@ const NOT_A_ROLE =
    * this job — Novena Health" got the phrase treated as a name. Anything
    * that starts with applying, and says nothing after it but where or how,
    * is the page talking about itself.
+   *
+   * And the sign-in step in front of an application. iCIMS titles it "Login
+   * | Careers Markon", and the card said the job was "Login".
    */
-  /^(apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
+  /^(log[ -]?in|log[ -]?on|sign[ -]?(in|on|up)|create (an |your )?account|register|registration|my account|job search|search jobs|apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
 
 /**
  * The role, read out of the address, when the page itself never says it.
@@ -1435,7 +1438,6 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
    */
   const declared = ld?.title ?? metaContent(html, ['og:title', 'twitter:title']);
   const roleish = parts.find((part) => !NOT_A_ROLE.test(part) && ROLE_NOUN.test(part)) ?? headingRole(html);
-  const leftover = parts.find((part) => !NOT_A_ROLE.test(part));
 
   /** Every way of knowing the employer that does not go through the title. */
   const namedCompany =
@@ -1444,6 +1446,14 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
     siteName(html) ??
     // "Software Engineer Intern at Acme" is the common page-title shape.
     /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim();
+
+  /*
+   * Nor the employer, where something else already named it. With "Login"
+   * refused, "Login | Careers Markon" on careers-markon.icims.com was left
+   * with "Careers Markon" — the name the address gives — and filed it as the
+   * job. What the page never names is an unknown role, not the company twice.
+   */
+  const leftover = parts.find((part) => !NOT_A_ROLE.test(part) && bare(part) !== bare(namedCompany ?? ''));
 
   /*
    * "Apply — Acme" names the employer, not the job.
