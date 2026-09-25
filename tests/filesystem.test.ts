@@ -878,7 +878,7 @@ describe('two applications in flight, one upload dialog', () => {
     expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
   });
 
-  it('and at once when the one holding it has been sent', () => {
+  it('keeps it for an application just filed as sent, whose files are still to be attached', () => {
     const now = new Date();
     t.write('applications.yaml', [
       { ...touched(bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'), now), status: 'applied' as const },
@@ -886,8 +886,6 @@ describe('two applications in flight, one upload dialog', () => {
     ]);
     syncCurrent(t.store, undefined, 'a1');
     const folder = syncCurrent(t.store, undefined, 'a2');
-    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
-    // Its files stay, under their own name.
-    expect(folder.files.some((f) => folder.belongsTo[f] === 'a1')).toBe(true);
+    expect(folder.belongsTo['Test-Person-Resume.pdf']).toBe('a1');
   });
 });
