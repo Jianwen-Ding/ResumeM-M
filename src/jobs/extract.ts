@@ -1443,6 +1443,46 @@ function siteName(html: string): string | undefined {
   return undefined;
 }
 
+/*
+ * The equal-opportunity statement, which is the law's text rather than the
+ * job's. Greenhouse and Lever close every posting with it, and it went to the
+ * AI as part of the job: a paragraph naming race, religion, disability and
+ * veteran status, for a letter and answers to be tailored to.
+ *
+ * A sentence is the statement when it says "equal opportunity" or
+ * "affirmative action", or names three of the characteristics the law
+ * protects while talking about employment — a self-identification step's
+ * questions name them too, and stay. Unless it also states something about
+ * this job — pay, a visa, where the work is — which a posting sometimes says
+ * in the same breath. Taken out a sentence at a time, so the rest of its
+ * paragraph stays.
+ */
+const EEO_NAMED = /\bequal\s+(?:employment\s+)?opportunit(?:y|ies)\b|\baffirmative[\s-]+action\b/i;
+const PROTECTED_TRAIT =
+  /\b(?:race|colou?r|religion|creed|sex|sexual\s+orientation|gender(?:\s+(?:identity|expression))?|national\s+origin|ancestry|age|disabilit(?:y|ies)|veteran|marital\s+status|genetic\s+information|pregnancy)\b/gi;
+const ABOUT_EMPLOYMENT = /\b(?:employ\w*|applicants?|candidates?|discriminat\w*|without\s+regard|consideration)\b/i;
+const JOB_FACT_IN_PASSING =
+  /\p{Sc}\s?\d|\bsalary\b|\bvisas?\b|\bsponsor\w*|\bremote\b|\bhybrid\b|\bon-?site\b|\brelocat\w*|\bclearance\b|\bauthori[sz]ed to work\b|\bdeadline\b/iu;
+
+function isEqualOpportunityStatement(sentence: string): boolean {
+  if (JOB_FACT_IN_PASSING.test(sentence)) return false;
+  if (EEO_NAMED.test(sentence)) return true;
+  const traits = new Set((sentence.match(PROTECTED_TRAIT) ?? []).map((t) => t.toLowerCase().replace(/\s+/g, ' ')));
+  return traits.size >= 3 && ABOUT_EMPLOYMENT.test(sentence);
+}
+
+function withoutEqualOpportunityStatement(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const sentences = line.split(/(?<=[.!?])\s+/);
+      const kept = sentences.filter((s) => !isEqualOpportunityStatement(s));
+      return kept.length === sentences.length ? line : kept.join(' ');
+    })
+    .join('\n')
+    .replace(/\n\s*\n\s*\n+/g, '\n\n');
+}
+
 export function extractJob(html: string, url?: string, said?: string): ExtractedJob {
   // Decoded before it is split or tested. See `readableName`.
   const pageTitle = readableName(said);
@@ -1562,6 +1602,7 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
         ? [facts.join('\n'), ldText, rest.join('\n')].filter(Boolean).join('\n\n')
         : [facts.join('\n'), text].filter(Boolean).join('\n\n');
   }
+  description = withoutEqualOpportunityStatement(description);
 
   return {
     title,

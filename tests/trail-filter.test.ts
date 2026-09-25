@@ -1408,3 +1408,41 @@ describe('a consent manager\'s banner is cut, by its own name and with its partn
     expect(extractJob(html).description).toContain('decide what wakes an engineer up');
   });
 });
+
+/*
+ * The equal-opportunity statement is the law's text, not the job's.
+ *
+ * Greenhouse and Lever close every posting with it, and it went to the AI as
+ * part of the job — a paragraph naming race, religion, disability and veteran
+ * status for a letter and answers to be tailored to. It is taken out a
+ * sentence at a time, so a visa line or a salary said in the same paragraph
+ * stays.
+ */
+describe('the equal-opportunity statement is not handed over as the job', () => {
+  const GREENHOUSE_EEO =
+    'Acme is an Equal Opportunity Employer. All qualified applicants will receive consideration for employment without regard to race, color, religion, sex, sexual orientation, gender identity, national origin, disability, or protected veteran status.';
+  const LEVER_EEO =
+    'We do not discriminate on the basis of race, religion, color, national origin, gender, sexual orientation, age, marital status, veteran status, or disability status.';
+  const html = `<html><body><main><h1>Senior Data Engineer</h1>
+    <h3>What you'll do</h3><ul><li>Build the pipelines that feed billing.</li><li>Own the warehouse's SLAs.</li></ul>
+    <h3>Salary range</h3><p>$150,000 - $190,000 a year</p>
+    <p>${'We are a team of forty engineers across three time zones who care about craft. '.repeat(3)}</p>
+    <div class="content-conclusion"><p>${GREENHOUSE_EEO}</p></div>
+    <div><p>${LEVER_EEO}</p></div>
+    <p>Acme is an equal opportunity employer. We cannot sponsor visas for this role.</p>
+    <p>As an equal opportunity employer we hire across the EU, and this role is remote.</p>
+    </main></body></html>`;
+  const { description } = extractJob(html, 'https://boards.greenhouse.io/acme/jobs/4012345', 'Senior Data Engineer');
+
+  it('leaves the statement out', () => {
+    expect(description).not.toContain('Acme is an Equal Opportunity Employer');
+    expect(description).not.toContain('Acme is an equal opportunity employer');
+    expect(description).not.toContain('without regard to race');
+    expect(description).not.toContain('do not discriminate');
+  });
+  it('and keeps the job around it, the visa line in the same paragraph too', () => {
+    for (const fact of ['Build the pipelines that feed billing.', '$150,000 - $190,000 a year', 'We cannot sponsor visas for this role.', 'this role is remote', 'forty engineers']) {
+      expect(description).toContain(fact);
+    }
+  });
+});
