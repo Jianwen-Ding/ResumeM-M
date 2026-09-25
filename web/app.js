@@ -2622,7 +2622,7 @@ function skillsBlock(section) {
 
   frag.append(
     el('div', { className: 'add-row' }, [
-      el('button', { className: 'link', textContent: '+ Add skill group', onclick: addSkillGroup }),
+      el('button', { className: 'link', textContent: '+ Add skill group', onclick: () => addSkillGroup(section) }),
     ]),
   );
   return frag;
@@ -4596,7 +4596,14 @@ async function removeSkill(group, item) {
   scheduleRender();
 }
 
-async function addSkillGroup() {
+async function addSkillGroup(into) {
+  /*
+   * Which skills section, when there are two: the one whose button it was.
+   * By place, because the store is reloaded before the resume is written and
+   * the section object is a different one by then. The group went into every
+   * skills section, and printed once under each heading.
+   */
+  const at = into ? (resumeById(state.resumeId)?.sections ?? []).indexOf(into) : -1;
   const answer = await form('New skill group', [
     { name: 'name', label: 'Group name, e.g. Languages', value: '' },
     { name: 'items', label: 'Skills, comma separated', value: '' },
@@ -4636,8 +4643,9 @@ async function addSkillGroup() {
 
     // The open resume's own sections, for the reason given in addEntry.
     const root = resumeById(state.resumeId);
-    const sections = (root.sections ?? []).map((s) =>
-      s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
+    const target = root.sections?.[at]?.kind === 'skills' ? at : (root.sections ?? []).findIndex((s) => s.kind === 'skills');
+    const sections = (root.sections ?? []).map((s, i) =>
+      i === target ? { ...s, groups: [...(s.groups ?? []), id] } : s,
     );
     if (!sections.some((s) => s.kind === 'skills')) {
       sections.push({ kind: 'skills', entries: [], groups: [id] });

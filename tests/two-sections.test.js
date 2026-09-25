@@ -34,10 +34,11 @@ afterEach(() => {
 
 let puts;
 
-function serve() {
+function serve(shape) {
   const fixture = makeTempStore();
   const data = fixture.store.load();
   fixture.cleanup();
+  shape?.(data);
 
   data.entries.push(
     { id: 'c_award', kind: 'custom', title: 'Dean’s List', bullets: [] },
@@ -64,6 +65,9 @@ function serve() {
       } else if (url === '/api/resumes/expiring') result = { due: [] };
       else if (String(url).startsWith('/api/render')) {
         result = { pages: 1, fits: true, adjustments: [], warnings: [], lost: [], pdfUrl: '/pdf/x.pdf' };
+      } else if (url === '/api/skills' && method === 'PUT') {
+        data.skillGroups = JSON.parse(init.body);
+        result = data.skillGroups;
       } else if (String(url).startsWith('/api/resumes/') && method === 'PUT') {
         const spec = JSON.parse(init.body);
         puts.push(spec);
@@ -76,11 +80,11 @@ function serve() {
   );
 }
 
-async function boot() {
+async function boot(shape) {
   vi.resetModules();
   document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
   window.location.hash = '#resumes';
-  serve();
+  serve(shape);
   await import('../web/app.js');
   await vi.waitFor(() => expect(document.querySelectorAll('#editor .entry').length).toBeGreaterThan(1));
 }
@@ -144,5 +148,48 @@ describe('two sections of one kind', () => {
 
     expect(saved('Awards')).toEqual(['c_award']);
     expect(saved('Leadership')).toEqual(['c_lead', 'entry_hackathon-winner']);
+  });
+});
+
+/*
+ * Two skills sections, and a group added under one of them.
+ *
+ * "+ Add skill group" sits under each skills section, and the group went into
+ * every skills section the resume had — so it printed twice, once under each
+ * heading, from one press under one of them.
+ */
+describe('two skills sections', () => {
+  beforeEach(async () => {
+    await boot((data) => {
+      data.skillGroups.push({ id: 'sk_cert', name: 'Certifications', items: [{ id: 's_aws_cert', text: 'AWS SAA' }] });
+      for (const resume of data.resumes) {
+        resume.sections = [
+          ...(resume.sections ?? []),
+          { kind: 'skills', heading: 'Certifications', entries: [], groups: ['sk_cert'] },
+        ];
+      }
+    });
+    vi.useFakeTimers();
+  });
+
+  const groupsUnder = (heading) =>
+    puts.at(-1)?.sections?.filter((s) => s.kind === 'skills').find((s) => (s.heading ?? '') === heading)?.groups;
+
+  it('adds a group to the section whose button was pressed, and not to the other', async () => {
+    const dialog = (async () => {
+      await vi.waitFor(() => expect(document.querySelector('#modal [name=name]')).not.toBeNull());
+      const name = document.querySelector('#modal [name=name]');
+      name.value = 'Clouds';
+      name.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#modal-ok').click();
+    })();
+    const adds = [...document.querySelectorAll('#editor button')].filter((b) => b.textContent === '+ Add skill group');
+    expect(adds, 'one under each skills section').toHaveLength(2);
+    adds[1].click();
+    await dialog;
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(groupsUnder('Certifications')).toEqual(['sk_cert', 'sk_clouds']);
+    expect(groupsUnder(''), 'the first skills section is left as it was').toEqual(['sk_lang']);
   });
 });
