@@ -1316,3 +1316,32 @@ describe('facts beside a rail, in a long breadcrumb, or in a consent block', () 
     expect(banner).not.toContain('You must accept cookies');
   });
 });
+
+/*
+ * A rail of other openings under the names the boards give it.
+ *
+ * The label above knew "Similar jobs", "More roles" and "People also viewed".
+ * LinkedIn heads its rail "Jobs you may be interested in", Indeed "Jobs you
+ * might like" and "Explore other jobs", and a careers site "You might also
+ * like" — and each card's salary and city reached the AI unmarked, beside
+ * this job's own.
+ */
+describe('a list of other openings is labelled under the names boards give it', () => {
+  const MARK = '[Other openings listed on this site — not this job:]';
+  const main = '<main><h1>Backend Engineer</h1><p>You will own our billing APIs. Requires 3+ years of Python. Salary: $130,000–$160,000.</p></main>';
+  const filler = `<p>${'We build tools for teams that ship software every day and care about craft. '.repeat(6)}</p>`;
+  it.each([
+    ['LinkedIn', 'Jobs you may be interested in', '/jobs/view/4012345999/', '/jobs/view/4012346000/'],
+    ['Indeed', 'Jobs you might like', '/viewjob?jk=a1b2c3', '/viewjob?jk=d4e5f6'],
+    ['Indeed', 'Explore other jobs', '/q-backend-l-austin-jobs.html', '/cmp/Globex/jobs'],
+    ['a careers site', 'You might also like', '/careers/4411', '/careers/4412'],
+  ])('on %s, under "%s"', (_board, heading, first, second) => {
+    const html = `<html><body>${main}<section class="rail"><h2>${heading}</h2><ul>
+      <li><a href="${first}">Frontend Engineer</a><span>Globex · Austin, TX · $120K - $140K</span></li>
+      <li><a href="${second}">Data Engineer</a><span>Initech · Remote · $110K</span></li></ul></section>${filler}</body></html>`;
+    const out = extractJob(html, 'https://www.example.com/jobs/view/4012345678/').description;
+    expect(out).toContain(MARK);
+    expect(out.indexOf(MARK)).toBeLessThan(out.indexOf('$120K - $140K'));
+    expect(out.indexOf('$130,000–$160,000')).toBeLessThan(out.indexOf(MARK));
+  });
+});
