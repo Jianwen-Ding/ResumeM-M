@@ -452,6 +452,15 @@ function containsCardNumber(answer: string): boolean {
  * numbers only where they are labelled: a bare date is a date, and "passport
  * holder" is a phrase. Returns how many were taken out, so it can be said.
  */
+/*
+ * What a form puts between a label and its value, and a review step writes
+ * out with both: the format it wants, "(MM/DD/YYYY)", "(no dashes)", and the
+ * star that marks it required. With only a colon, a dash or a space allowed
+ * there, "Date of Birth (MM/DD/YYYY): 04/02/1999" and "Social Security
+ * Number *: 123456789" went to the AI whole.
+ */
+const LABEL_HINT = String.raw`(?:\s*\([^)\n]{0,40}\))?(?:\s*\*)?`;
+
 export function redactIdentifiers(text: string): { text: string; redacted: number } {
   let redacted = 0;
   const hide = (s: string, re: RegExp, keep?: (m: string, ...g: string[]) => string) =>
@@ -469,12 +478,12 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
   });
   out = hide(
     out,
-    /\b(date of birth|birth ?date|d\.?o\.?b\.?)(\s*[:\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+ \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})/gi,
+    new RegExp(String.raw`\b(date of birth|birth ?date|d\.?o\.?b\.?)(${LABEL_HINT}\s*[:,\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+ \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})`, 'gi'),
     (_m, label, gap) => `${label}${gap}[redacted]`,
   );
   out = hide(
     out,
-    /\b(passport(?:\s+(?:no\.?|number|#))?)(\s*[:\-#]?\s*)([A-Z]{0,2}\d[A-Z0-9]{5,8})\b/gi,
+    new RegExp(String.raw`\b(passport(?:\s+(?:no\.?|number|#))?)(${LABEL_HINT}\s*[:\-#]?\s*)([A-Z]{0,2}\d[A-Z0-9]{5,8})\b`, 'gi'),
     (_m, label, gap) => `${label}${gap}[redacted]`,
   );
   /*
@@ -485,7 +494,7 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
    * "a driver's license and a car" are words, and are left.
    */
   out = out.replace(
-    /\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin)(\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ \-][A-Z]?\d[A-Z0-9]*)*)/gi,
+    new RegExp(String.raw`\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin)(${LABEL_HINT}\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ \-][A-Z]?\d[A-Z0-9]*)*)`, 'gi'),
     (m, label: string, gap: string, value: string) => {
       if ((value.match(/\d/g) ?? []).length < 5) return m;
       redacted++;

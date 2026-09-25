@@ -946,3 +946,35 @@ describe('identifier questions the bank never answers', () => {
     },
   );
 });
+
+describe('an identifier with a hint between its label and its value', () => {
+  /*
+   * A form's label carries the format it wants, and a review step writes the
+   * label out whole: "Date of Birth (MM/DD/YYYY): 04/02/1999", "Social
+   * Security Number *: 123456789". Only a colon, a dash or a space was allowed
+   * between the label and the value, so each of these went to the AI whole.
+   */
+  it.each([
+    ['Date of Birth (MM/DD/YYYY): 04/02/1999', '04/02/1999'],
+    ['Birth date (YYYY-MM-DD) 1999-04-02', '1999-04-02'],
+    ['Date of birth *: 04/02/1999', '04/02/1999'],
+    ['your date of birth, 04/02/1999, is on file', '04/02/1999'],
+    ['SSN (no dashes): 123456789', '123456789'],
+    ['Social Security Number *: 123456789', '123456789'],
+    ['SIN (Canada): 046 454 286', '046 454 286'],
+    ["Driver's license # (optional): D1234567", 'D1234567'],
+    ['Passport number (as shown): X12345678', 'X12345678'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'Social Security Number (last 4 digits): 6789',
+    'Passport (required for travel) 2 trips a year',
+    'Date of birth (you must be 18 or older)',
+  ])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
+  });
+});
