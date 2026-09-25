@@ -5187,11 +5187,40 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       };
 
       const text = await readAt(path.posix.join('resumes', `${id}.yaml`));
-      const restored = text === undefined ? undefined : (YAML.parse(withoutBom(text)) as ResumeSpec | null);
-      if (!restored) {
+      const asWritten = text === undefined ? undefined : (YAML.parse(withoutBom(text)) as ResumeSpec | null);
+      if (!asWritten) {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }
-      restored.id = id; // the filename remains the source of truth for the id
+      asWritten.id = id; // the filename remains the source of truth for the id
+
+      /*
+       * A version from before resumes were flattened, folded against the
+       * resumes of *its* commit.
+       *
+       * That file is `extends: base` and a handful of choices, and what it
+       * printed came from the base as it was then. Written back as it was, it
+       * inherited again: `loadResumes` folds on read, against the base as it
+       * is now — so the version came back without whatever the base had
+       * since dropped, and from then on followed every later edit of the
+       * base, the one thing a flattened store promises cannot happen. Folded
+       * here, it is the whole document that version printed, standing alone,
+       * with the base named in `copiedFrom` as every folded resume has it.
+       */
+      let restored = asWritten;
+      if (asWritten.extends) {
+        const then: ResumeSpec[] = [];
+        for (const [file, objectId] of tree) {
+          const named = /^resumes\/([^/]+)\.ya?ml$/.exec(file);
+          if (!named) continue;
+          try {
+            const spec = YAML.parse(withoutBom(await repo.blob(objectId))) as ResumeSpec | null;
+            if (spec && typeof spec === 'object') then.push({ ...spec, id: named[1]! });
+          } catch {
+            // A resume at that commit that cannot be read is one fewer to fold against.
+          }
+        }
+        restored = flattenOne(asWritten, then);
+      }
 
       /*
        * The tier stays the one the resume has now.
