@@ -6728,6 +6728,23 @@ async function flushDraftEdits() {
  * at all, until the draft happened to be reopened. See the Workspace tab.
  */
 function drawResumeChoices(select, draft) {
+  const option = (r) => el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId });
+  /*
+   * The ones made for this application first, under a heading of their own.
+   *
+   * "Temporary resumes created for a job application should always be on the
+   * very top … when looking at that very job application." This was the
+   * store's order, so the resume tailored for this posting sat wherever its
+   * file happened to fall. Made for it means temporary, and either the one
+   * this application holds or one generated for this company and role.
+   */
+  const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+  const forThis = (r) =>
+    tierOf(r) === 'temporary' &&
+    (r.id === draft.resumeId || (r.generatedFor && same(r.generatedFor.company, draft.company) && same(r.generatedFor.role, draft.role)));
+  const resumes = state.store.resumes ?? [];
+  const own = resumes.filter(forThis);
+  const rest = resumes.filter((r) => !own.includes(r));
   select.replaceChildren(
     /*
      * A placeholder when nothing is attached yet.
@@ -6738,9 +6755,9 @@ function drawResumeChoices(select, draft) {
      * An empty choice is the honest thing to show when no choice has been made.
      */
     ...(draft.resumeId ? [] : [el('option', { value: '', textContent: '— choose a resume —' })]),
-    ...state.store.resumes.map((r) =>
-      el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }),
-    ),
+    ...(own.length
+      ? [el('optgroup', { label: 'For this application' }, own.map(option)), el('optgroup', { label: 'Everything else' }, rest.map(option))]
+      : rest.map(option)),
   );
 }
 

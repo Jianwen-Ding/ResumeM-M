@@ -1323,6 +1323,41 @@ async function main() {
           .$eval('#draft-editor select', (s) => s.options[s.selectedIndex]?.textContent ?? '')
           .catch(() => '(no picker)');
         check('and an open application sends it under the new name too', sends === 'Kafka-heavy, renamed again', sends);
+
+        /*
+         * And the one made for this application heads the list. Reported:
+         * "temporary resumes created for a job application should always be
+         * on the very top … when looking at that very job application".
+         */
+        await fetch(`${server.url}/api/resumes/job-picker-ridge-scratch?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Data Engineer — Picker Ridge',
+            tier: 'temporary',
+            generatedFor: { company: 'Picker Ridge', role: 'Data Engineer', at: new Date().toISOString() },
+            sections: [],
+          }),
+        });
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="workspace"]').click();
+          await page.locator('.draft-card', { hasText: 'Picker Ridge' }).first().click();
+          await page.locator('#draft-editor .where', { hasText: 'Picker Ridge' }).waitFor({ timeout: 20_000 });
+          const top = await page
+            .$eval('#draft-editor select', (s) => {
+              const first = s.querySelector('optgroup');
+              return { group: first?.label ?? '', options: [...(first?.querySelectorAll('option') ?? [])].map((o) => o.textContent) };
+            })
+            .catch(() => ({ group: '(no picker)', options: [] }));
+          check(
+            "the resume made for this application is at the very top of what it can send",
+            top.group === 'For this application' && top.options[0] === 'Data Engineer — Picker Ridge',
+            JSON.stringify(top),
+          );
+        } finally {
+          await fetch(`${server.url}/api/resumes/job-picker-ridge-scratch?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
       } finally {
         await fetch(`${server.url}/api/workspace/${encodeURIComponent(draft.id)}`, { method: 'DELETE' }).catch(() => undefined);
         await page.locator('#tabs button[data-tab="resumes"]').click();

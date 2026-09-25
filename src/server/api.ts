@@ -3101,6 +3101,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             draftForJob(store.loadDrafts(), data.applications, employer, role)?.id ??
             findApplication(data.applications, employer, role)?.id ??
             freshApplicationId(data.applications, employer, role),
+          /*
+           * And the resume made for it, so the card can put that one first in
+           * its picker: "temporary resumes created for a job application
+           * should always be on the very top … when looking at that very job
+           * application". Absent until one has been built.
+           */
+          resumeId: findApplication(data.applications, employer, role)?.resumeId,
         },
         score,
         kind: verdict.kind,
