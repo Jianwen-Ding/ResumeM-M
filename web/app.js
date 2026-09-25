@@ -6286,33 +6286,36 @@ async function openApplication(id) {
  * rejected into nothing: the dialog was gone, what was typed with it, and
  * the screen said nothing at all. A box left empty that the save needs
  * closed the dialog just as silently. `save` answers a sentence to ask
- * again with it, or throws; either way the form comes back holding what was
+ * again with it, or throws; either way the form stays up holding what was
  * typed, with the reason above the buttons.
+ *
+ * Stays up while it saves, too, rather than closing and being redrawn. A
+ * slow save left no dialog and nothing said, and a dialog opened in that
+ * time — a letter begun while an answer saved — was the one on screen when
+ * the first save failed: its form was drawn over the letter, and the letter
+ * was gone.
  */
 async function formThatSaves(title, fields, note, save) {
-  let values = Object.fromEntries(fields.map((f) => [f.name, f.value ?? '']));
-  let problem = '';
-  for (;;) {
-    const answer = await form(
-      title,
-      fields.map((f) => ({ ...f, value: values[f.name] })),
-      [problem, note].filter(Boolean).join(' '),
-    );
-    if (!answer) return false;
-    values = { ...values, ...answer };
+  const answer = await form(title, fields, note, async (values, { cancelled }) => {
     try {
-      const again = await save(answer);
-      if (typeof again === 'string') {
-        problem = again;
-        continue;
-      }
-      return true;
+      const again = await save(values);
+      if (typeof again === 'string') return [again, note].filter(Boolean).join(' ');
+      return undefined;
     } catch (err) {
-      // The browser's own words for a server that did not answer.
-      const why = /failed to fetch|networkerror|load failed/i.test(err.message) ? 'ResumeM-M could not be reached' : err.message;
-      problem = `Not saved — ${why}. What you typed is still here.`;
+      // The browser's own words for a server that did not answer. The
+      // server's own reasons are sentences already, full stop and all.
+      const why = /failed to fetch|networkerror|load failed/i.test(err.message)
+        ? 'ResumeM-M could not be reached'
+        : err.message.replace(/[\s.]+$/, '');
+      // Put down while it was saving: there is no dialog left to say it in.
+      if (cancelled()) {
+        setStatus(`Not saved — ${why}.`, true);
+        return undefined;
+      }
+      return [`Not saved — ${why}. What you typed is still here.`, note].filter(Boolean).join(' ');
     }
-  }
+  });
+  return Boolean(answer);
 }
 
 async function addApplication() {
@@ -10006,6 +10009,8 @@ function showModal(title, content, { note = '', okLabel = 'Close', showCancel = 
   // to get through: one moves on, the other sounds like it stops.
   $('#modal-cancel').textContent = cancelLabel;
   $('#modal-ok').textContent = okLabel;
+  // A form put down while it was saving leaves OK disabled. See `form`.
+  $('#modal-ok').disabled = false;
   $('#modal').classList.remove('hidden');
   focusModal();
   return new Promise((resolve) => {
@@ -10024,8 +10029,13 @@ function confirmModal(title, body) {
   return showModal(title, el('p', { textContent: body }), { okLabel: 'Delete', showCancel: true });
 }
 
-/** A multi-field form modal. `prompt()` can only ask for one thing. */
-function form(title, fields, note) {
+/**
+ * A multi-field form modal. `prompt()` can only ask for one thing.
+ *
+ * `submit`, when given, is run on OK with the dialog still up: it answers a
+ * sentence to stay open with, or nothing to close. See `formThatSaves`.
+ */
+function form(title, fields, note, submit) {
   return new Promise((resolve) => {
     const inputs = {};
     const content = el('div');
@@ -10078,15 +10088,29 @@ function form(title, fields, note) {
     $('#modal-note').textContent = note ?? '';
     $('#modal-cancel').style.display = '';
     $('#modal-ok').textContent = 'Save';
+    $('#modal-ok').disabled = false;
     $('#modal').classList.remove('hidden');
     focusModal();
 
+    let closed = false;
     const close = (value) => {
+      closed = true;
+      $('#modal-ok').disabled = false;
       $('#modal').classList.add('hidden');
       resolve(value);
     };
-    $('#modal-ok').onclick = () =>
-      close(Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.get()])));
+    $('#modal-ok').onclick = async () => {
+      const values = Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.get()]));
+      if (!submit) return close(values);
+      $('#modal-ok').disabled = true;
+      $('#modal-note').textContent = 'Saving…';
+      const problem = await submit(values, { cancelled: () => closed }).catch((err) => err.message);
+      // Cancelled while it saved, and the dialog may be somebody else's by now.
+      if (closed) return;
+      $('#modal-ok').disabled = false;
+      if (typeof problem === 'string') $('#modal-note').textContent = problem;
+      else close(values);
+    };
     $('#modal-cancel').onclick = () => close(null);
   });
 }

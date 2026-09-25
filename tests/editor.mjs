@@ -1971,6 +1971,69 @@ async function main() {
       const needs = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
       check('and a box the save needs, left empty, is asked for rather than dropped', /needs a company and a role/.test(needs), needs);
       await page.locator('#modal-cancel').click();
+
+      /*
+       * A slow save. The dialog closed the moment OK was pressed and the save
+       * went on behind it with nothing on screen, so the next dialog opened
+       * in that time — a letter, say — was the one on screen when the first
+       * save failed, and the failure redrew its own form over it: the letter
+       * gone, and its dialog never answered. Held here until checked.
+       */
+      await page.locator('#tabs button[data-tab="letters"]').click();
+      let letGo;
+      const held = new Promise((go) => (letGo = go));
+      const hold = async (route) => {
+        await held;
+        return route.abort('connectionrefused');
+      };
+      await page.route('**/api/answers/save', hold);
+      await page.locator('#btn-add-answer').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_question').fill('What drew you to logistics software?');
+      await page.locator('#f_answer').fill('Freight is where software meets the physical world.');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(400);
+      const whileSaving = await page.evaluate(() => ({
+        open: !document.querySelector('#modal').classList.contains('hidden'),
+        title: document.querySelector('#modal-title')?.textContent ?? '',
+        note: document.querySelector('#modal-note')?.textContent ?? '',
+        okDisabled: document.querySelector('#modal-ok')?.disabled ?? false,
+      }));
+      check('a save still under way keeps its dialog open, saying so',
+        whileSaving.open && whileSaving.title === 'New saved answer' && /saving/i.test(whileSaving.note),
+        JSON.stringify(whileSaving));
+      check('and cannot be sent twice while it is', whileSaving.okDisabled);
+      letGo();
+      await page.waitForTimeout(800);
+      await page.unroute('**/api/answers/save', hold);
+      const late = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('and when it then fails, the answer typed is still there, with the reason',
+        /^Not saved — ResumeM-M could not be reached/.test(late) &&
+          (await page.locator('#f_answer').inputValue().catch(() => '')) === 'Freight is where software meets the physical world.',
+        late);
+      check('and it can be pressed again', !(await page.locator('#modal-ok').isDisabled()));
+      await page.locator('#modal-cancel').click();
+
+      /*
+       * The server's own reasons are sentences, full stop included, and the
+       * note went on to add another: "…so it was not saved.. What you typed
+       * is still here." Refused here with a question the bank never keeps.
+       */
+      const errorsBefore = errors.length;
+      await page.locator('#btn-add-answer').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_question').fill('What is your social security number?');
+      await page.locator('#f_answer').fill('I would rather give that to a person');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      const refusedNote = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('a reason the server gives is said once, with one full stop',
+        /^Not saved — This looks like/.test(refusedNote) && !/\.\./.test(refusedNote), refusedNote);
+      await page.locator('#modal-cancel').click();
+      // The refusal just checked, by name.
+      for (let i = errors.length - 1; i >= errorsBefore; i--) {
+        if (/^400 \/api\/answers\/save$|status of 400/.test(errors[i])) errors.splice(i, 1);
+      }
     }
 
     console.log('\nWhen the tracker cannot save');
