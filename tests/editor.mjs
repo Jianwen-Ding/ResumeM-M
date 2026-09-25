@@ -1949,6 +1949,16 @@ async function main() {
       check('and the application carries the answer that was given', 
         (halcyon?.answers ?? []).some((a) => /ingest work/i.test(a.answer ?? '')),
         JSON.stringify(halcyon?.answers ?? []).slice(0, 80));
+
+      /*
+       * And the "Filed" dialog put away before anything else is pressed. It
+       * opens only once the editor has re-read the workspace, after the files
+       * above are already on disk — so the next step's "close whatever is
+       * open" could run first, find nothing, and have the dialog arrive over
+       * the tab it was about to click.
+       */
+      const filed = page.locator('#modal:not(.hidden) #modal-title', { hasText: 'Filed' });
+      if (await filed.waitFor({ timeout: 15_000 }).then(() => true, () => false)) await page.locator('#modal-ok').click();
     } else {
       check('there is a way to finish the application', false, 'no button');
     }
