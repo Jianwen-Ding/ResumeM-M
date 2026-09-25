@@ -98,6 +98,81 @@ describe('what the card holds, against the store', () => {
     expect((await fresh(spec)).body.base).toMatchObject({ id: 'base', changed: true });
   });
 
+  /*
+   * A base edited while the AI is tailoring from it.
+   *
+   * A run takes minutes, and the copy it made was dated when the run
+   * finished — so an edit to the base made while it ran looked older than the
+   * copy, and was never reported, although the copy had been made from the
+   * base as it was before that edit.
+   */
+  describe('while the AI is tailoring from it', () => {
+    const POSTING = `<html><head><title>Data Platform Intern at Streamly</title>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"JobPosting","title":"Data Platform Intern",
+"hiringOrganization":{"@type":"Organization","name":"Streamly"},
+"description":"<p>Kafka streaming infrastructure in Go and Python, Kubernetes on AWS.</p>"}
+</script></head><body>Apply now</body></html>`;
+
+    /** A stand-in for the AI that takes its time, and edits the base halfway through if told to. */
+    function slowAi({ editBase }: { editBase: boolean }) {
+      const fake = path.join(path.dirname(t.dir), 'slow-ai.cjs');
+      const baseFile = path.join(t.dir, 'resumes', 'base.yaml');
+      fs.writeFileSync(
+        fake,
+        [
+          '#!/usr/bin/env node',
+          "const fs = require('node:fs');",
+          'const wait = (ms) => new Promise((r) => setTimeout(r, ms));',
+          '(async () => {',
+          '  await wait(1500);',
+          editBase
+            ? `  const f = ${JSON.stringify(baseFile)};\n` +
+              "  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(/^label: .*$/m, 'label: Base resume (edited during the run)'));"
+            : '',
+          '  await wait(1500);',
+          "  process.stdout.write(JSON.stringify({ choices: {}, reasoning: 'took its time' }));",
+          '})();',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      fs.chmodSync(fake, 0o755);
+      const config = t.store.loadConfig();
+      t.store.saveConfig({
+        ...config,
+        ai: { ...config.ai, enabled: true, command: fake, args: ['{promptText}'], timeoutMs: 60_000 },
+      });
+    }
+
+    const tailor = async () =>
+      (
+        await request(app)
+          .post('/api/extension/analyze')
+          .send({ html: POSTING, baseResumeId: 'base', tailor: 'ai' })
+          .expect(200)
+      ).body as { spec: ResumeSpec; aiUsed?: boolean };
+
+    it('reports an edit to the base made during the run', async () => {
+      ageBase();
+      slowAi({ editBase: true });
+      const { spec, aiUsed } = await tailor();
+      expect(aiUsed).toBe(true);
+      expect(spec.copiedFrom).toBe('base');
+      // Made from the base as it was when the run read it: before the edit.
+      expect(spec.label).not.toMatch(/edited during the run/);
+      expect(t.store.load().resumes.find((r) => r.id === 'base')?.label).toMatch(/edited during the run/);
+      expect((await fresh(spec)).body.base).toMatchObject({ id: 'base', changed: true });
+    }, 60_000);
+
+    it('and nothing of a base left alone while it ran', async () => {
+      ageBase();
+      slowAi({ editBase: false });
+      const { spec } = await tailor();
+      expect((await fresh(spec)).body.base).toMatchObject({ id: 'base', changed: false });
+    }, 60_000);
+  });
+
   it('and the compile the card gets carries the same print', async () => {
     ageBase();
     const spec = copy();

@@ -2677,6 +2677,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const trail: PageSource[] = pages?.length ? pages : html ? [{ url, title, html }] : [];
       if (trail.length === 0) throw new Error('No page HTML supplied');
 
+      // When the base is read, which is what the copy is dated by. See `deriveSpec`.
+      const readAt = new Date().toISOString();
       const data = store.load();
       const current = trail[trail.length - 1]!;
       // With the applicant's own terms the posting names: see `withYourTerms`.
@@ -2931,6 +2933,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         url,
         company: employer,
         role,
+        at: readAt,
       }, data.resumes);
 
       // Showing and hiding entries or bullets, the other half of what the AI
@@ -4300,6 +4303,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
 
       const { useAi, baseResumeId } = req.body as { useAi?: boolean; baseResumeId?: string };
+      // When the base is read, which is what the copy is dated by. See `deriveSpec`.
+      const readAt = new Date().toISOString();
       const data = store.load();
 
       // The posting text: fetched from the link when there is one, falling
@@ -4383,6 +4388,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         url: draft.url,
         company: draft.company,
         role: draft.role,
+        at: readAt,
       }, data.resumes);
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
       if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
