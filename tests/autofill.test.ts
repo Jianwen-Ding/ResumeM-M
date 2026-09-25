@@ -8,8 +8,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  degreeName,
   derivedAutofill,
   educationHistory,
+  schoolName,
   graduation,
   readGpa,
   splitDegree,
@@ -656,5 +658,50 @@ describe('the schools an Education section asks for, one block at a time', () =>
       { id: 'e', kind: 'education', title: '  ', subtitle: 'Bachelor of Science in Physics', bullets: [] },
     ] as never);
     expect(educationHistory(r)).toEqual([]);
+  });
+});
+
+/*
+ * A school line and a degree line as a resume writes them, to the boxes a form
+ * has. Measured on Twitch's live Greenhouse board with a resume shaped like
+ * this: both School searches were sent "University of Virginia, 3.97 GPA" and
+ * "Northeastern University, 4.0 GPA", found nothing, and were left on
+ * "Select..." while everything else in both blocks filled.
+ */
+describe('a school and a degree as a form asks for them', () => {
+  it('takes the grade off the school line, and reads the grade from it', () => {
+    expect(schoolName('University of Virginia, 3.97 GPA')).toBe('University of Virginia');
+    expect(schoolName('Northeastern University, 4.0 GPA')).toBe('Northeastern University');
+    expect(schoolName('Georgia Tech — GPA: 3.8/4.0')).toBe('Georgia Tech');
+    expect(readGpa('University of Virginia, 3.97 GPA')).toBe('3.97');
+    expect(readGpa('GPA 3.8/4.0')).toBe('3.8');
+  });
+
+  it('leaves a school line with no grade in it as it is', () => {
+    expect(schoolName('University of California, Berkeley')).toBe('University of California, Berkeley');
+    expect(schoolName('3M Technical Institute')).toBe('3M Technical Institute');
+  });
+
+  it('takes a standing off the degree, and leaves a plain degree alone', () => {
+    expect(degreeName('Candidate for Bachelor of Science')).toBe('Bachelor of Science');
+    expect(degreeName('Former Candidate for Bachelor of Science')).toBe('Bachelor of Science');
+    expect(degreeName('Expected Master of Engineering')).toBe('Master of Engineering');
+    expect(degreeName('Bachelor of Science')).toBe('Bachelor of Science');
+  });
+
+  it('and the education list and the fields a form is given both read that way', () => {
+    const entries = [
+      {
+        id: 'edu_uva', kind: 'education', title: 'University of Virginia, 3.97 GPA', location: 'Charlottesville, VA',
+        subtitle: 'Candidate for Bachelor of Science in Computer Science', dates: 'Aug 2025 – Dec 2027', bullets: [],
+      },
+    ] as unknown as Entry[];
+    const fields = derivedAutofill({ name: 'Morgan Testwell' }, entries);
+    expect(fields).toMatchObject({ school: 'University of Virginia', degree: 'Bachelor of Science', major: 'Computer Science', gpa: '3.97' });
+    const resume = { sections: [{ kind: 'education', entries: entries.map((e) => ({ ...e })) }] } as unknown as ResolvedResume;
+    expect(educationHistory(resume, entries)[0]).toMatchObject({
+      school: 'University of Virginia', degree: 'Bachelor of Science', major: 'Computer Science', gpa: '3.97',
+      start: { year: 2025, month: 8 }, end: { year: 2027, month: 12 },
+    });
   });
 });

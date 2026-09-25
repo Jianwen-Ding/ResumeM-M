@@ -1002,6 +1002,32 @@ describe('job analysis', () => {
     expect(off.body.tailor).toBe('match');
     expect(off.body.spec.choices.b_pipeline).toBe('v_kafka');
   });
+
+  /*
+   * A bare form on a company's own careers host names nobody, and the
+   * employer is read off the address. Everything is filed under that name —
+   * the copy's `generatedFor` says it, and the extension stages, builds and
+   * sends under it — and the analysis answered that the page belonged to no
+   * application at all, so a card opened on it afresh had nothing to attach.
+   */
+  it('says which application a page naming nobody belongs to, by the names it was filed under', async () => {
+    const url = 'https://careers.helios-labs.com/apply/platform-engineer';
+    const html = `<html><head><title>Apply</title></head><body><h1>Submit application</h1>
+      <p>Kafka streaming in Go and Python. Responsibilities include distributed systems.</p>
+      <form><input name="first_name"><input name="email"><input type="file" name="resume"></form></body></html>`;
+    const first = (await request(app).post('/api/extension/analyze').send({ html, url, title: 'Apply', tailor: 'none' }).expect(200)).body;
+    const named = first.spec.generatedFor;
+    expect(named).toMatchObject({ company: 'Helios Labs', role: 'Platform Engineer' });
+    expect(first.job.company).toBeUndefined();
+
+    const opened = await request(app)
+      .post('/api/workspace')
+      .send({ company: named.company, role: named.role, url, spec: first.spec, auto: true, actedOnForm: true })
+      .expect(200);
+
+    const again = (await request(app).post('/api/extension/analyze').send({ html, url, title: 'Apply', tailor: 'none' }).expect(200)).body;
+    expect(again.application?.id).toBe(opened.body.draft.id);
+  });
 });
 
 describe('autofill', () => {
@@ -1108,11 +1134,46 @@ describe('autofill', () => {
     // A stored resume by name answers the same way, from its own lines.
     const stored = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad' }).expect(200)).body;
     expect(stored.history[0].description).toBe('• Built a pipeline handling 2M events/day\n• Raised coverage from 41% to 88%');
-    // Asked the old way, or about a resume that is not there, there is no history to give.
+    // Asked the old way there is no history to give; about a resume that is
+    // not there, it comes from the save's base (see the education case).
     expect((await request(app).get('/api/autofill').expect(200)).body.history).toEqual([]);
     const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
-    expect(missing.history).toEqual([]);
+    expect(missing.history.map((h: { company: string }) => h.company)).toEqual(['Acme Co.']);
     expect(missing.fields.graduation_date).toBe('May 2026');
+  });
+
+  /*
+   * Both names, and the form picks: the legal name as the ordinary fields,
+   * and the name the resume being sent prints as the preferred ones — only
+   * when the two differ, so a "Preferred name" box is not given the same
+   * name twice.
+   */
+  it('sends the legal name, and the resume\'s own name as the preferred one', async () => {
+    const profile = t.store.load().profile;
+    const named = (dflt: string, variants: { id: string; label: string; text: string }[]) =>
+      t.store.saveProfile({ ...profile, autofill: undefined, name: { default: dflt, variants } });
+    named('v_legal', [
+      { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+    ]);
+    const newgrad = t.store.load().resumes.find((r) => r.id === 'newgrad')!;
+    const choosing = (id: string) => ({ ...newgrad, id: 'job-helios', choices: { ...(newgrad.choices ?? {}), 'profile.name': id } });
+
+    const known = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_known') }).expect(200)).body.fields;
+    expect([known.full_name, known.first_name, known.last_name]).toEqual(['Jianwen Ding', 'Jianwen', 'Ding']);
+    expect([known.preferred_name, known.preferred_first_name, known.preferred_last_name]).toEqual(['Jason Ding', 'Jason', 'Ding']);
+
+    const legal = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_legal') }).expect(200)).body.fields;
+    expect(legal.full_name).toBe('Jianwen Ding');
+    expect(legal.preferred_name).toBeUndefined();
+
+    // And the alternate labelled legal is the legal name, whichever is the default.
+    named('v_known', [
+      { id: 'v_legal', label: 'Legal name', text: 'Jianwen Ding' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+    ]);
+    const byDefault = (await request(app).get('/api/autofill').expect(200)).body.fields;
+    expect([byDefault.full_name, byDefault.preferred_name]).toEqual(['Jianwen Ding', 'Jason Ding']);
   });
 
   /*
@@ -1165,13 +1226,26 @@ describe('autofill', () => {
     // The fields are the newest one's, and only the newest one's.
     expect(sent.fields.degree).toBe('Master of Science');
 
-    // A stored resume listing one school answers one; asked the old way, or
-    // about a resume that is not there, there are none to give.
+    // A stored resume listing one school answers one; asked the old way
+    // there are none to give.
     const stored = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad' }).expect(200)).body;
     expect(stored.education.map((e: { school: string }) => e.school)).toEqual(['Northeastern University']);
     expect((await request(app).get('/api/autofill').expect(200)).body.education).toEqual([]);
+  });
+
+  /*
+   * Naming no resume, or one that is gone, is answered from the save's own
+   * base. Autofill pressed on a form the card never built for, with nothing
+   * picked in the popup, was given the profile and no resume at all — the
+   * School filled from the profile, and every date and every second school
+   * left empty with nothing said.
+   */
+  it('answers from the save’s base when no resume, or a missing one, is named', async () => {
+    const none = (await request(app).post('/api/autofill').send({}).expect(200)).body;
+    expect(none.education.map((e: { school: string }) => e.school)).toEqual(['Northeastern University']);
+    expect(none.education[0].start).toEqual({ year: 2022, month: 9 });
     const missing = (await request(app).post('/api/autofill').send({ resumeId: 'no-such-resume' }).expect(200)).body;
-    expect(missing.education).toEqual([]);
+    expect(missing.education).toEqual(none.education);
   });
 
   /*
@@ -2414,6 +2488,34 @@ describe('workspace', () => {
     expect(mine[0].status).toBe('applied');
   });
 
+  /*
+   * Turned down, and the job reposted while the old space is still kept.
+   *
+   * A sent space stays for a fortnight, and a rejection usually arrives
+   * inside that. The old space was found by name, its id was the rejected
+   * application's, and the row written for the repost replaced the rejection
+   * outright — `closed` with its "Rejected" line became `applying` with one
+   * line — while the new space opened as `submitted`, for an application
+   * nobody had sent.
+   */
+  it('opens a space of its own for a repost, and leaves the rejection as it was', async () => {
+    const first = await open().expect(200);
+    await request(app).post('/api/extension/sent').send({ company: 'Streamly', role: 'Data Platform Intern' }).expect(200);
+    const was = first.body.draft.id;
+    await request(app).post(`/api/applications/${encodeURIComponent(was)}/status`).send({ status: 'closed', note: 'Rejected' }).expect(200);
+
+    const again = await open({ url: 'https://boards.greenhouse.io/streamly/jobs/2' }).expect(200);
+
+    expect(again.body.draft.id).not.toBe(was);
+    expect(again.body.draft.status).toBe('drafting');
+    const { body } = await request(app).get('/api/applications').expect(200);
+    const rejected = body.applications.find((a: { id: string }) => a.id === was);
+    expect(rejected.status).toBe('closed');
+    expect(rejected.history.at(-1).note).toBe('Rejected');
+    const repost = body.applications.find((a: { id: string }) => a.id === again.body.draft.id);
+    expect(repost).toMatchObject({ status: 'applying', url: 'https://boards.greenhouse.io/streamly/jobs/2' });
+  });
+
   it('pre-fills what the answer bank already covers', async () => {
     const res = await open().expect(200);
     const draft = res.body.draft;
@@ -2514,6 +2616,29 @@ describe('workspace', () => {
     await request(app).delete(`/api/workspace/${body.draft.id}`).expect(200);
     await request(app).get(`/api/workspace/${body.draft.id}`).expect(400);
     await request(app).delete(`/api/workspace/${body.draft.id}`).expect(400);
+  });
+
+  /*
+   * "Not sent after all" in the card puts the row back to Applying and says
+   * the application is "back among the ones being worked on". The space the
+   * send had marked stayed marked, so the Workspace listed it under the sent
+   * ones and the fortnight's retirement would have closed it while the
+   * application was still in flight.
+   */
+  it('reopens the space when an application is put back to not sent', async () => {
+    const { body } = await open().expect(200);
+    await request(app).post('/api/extension/sent').send({ company: 'Streamly', role: 'Data Platform Intern' }).expect(200);
+    expect(t.store.getDraft(body.draft.id)?.status).toBe('submitted');
+
+    await request(app)
+      .post(`/api/applications/${encodeURIComponent(body.draft.id)}/status`)
+      .send({ status: 'applying', note: 'Prepared, then not sent' })
+      .expect(200);
+
+    expect(t.store.getDraft(body.draft.id)?.status).toBe('drafting');
+    // And marked as sent by hand in the tracker, it is marked as a send marks it.
+    await request(app).post(`/api/applications/${encodeURIComponent(body.draft.id)}/status`).send({ status: 'applied' }).expect(200);
+    expect(t.store.getDraft(body.draft.id)?.status).toBe('submitted');
   });
 
   /*
@@ -3705,9 +3830,11 @@ describe('pinning', () => {
     const resolved = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
     expect(resolved.profile.name).toBe('Jason Ding');
 
-    // The form-filling data the extension reads is a name, not a set of them.
+    // The form-filling data the extension reads is names, not a set of them:
+    // the one labelled legal, and the pinned one as the name used day to day.
     const autofill = (await request(app).get('/api/autofill').expect(200)).body;
-    expect(autofill.fields.full_name).toBe('Jason Ding');
+    expect(autofill.fields.full_name).toBe('Jianwen Ding');
+    expect(autofill.fields.preferred_name).toBe('Jason Ding');
   });
 
   it('says a name with no alternates has none to pin', async () => {

@@ -645,4 +645,46 @@ describe('restoring a version', () => {
     expect(t.store.getResume('base')?.label).toBe('Base resume — a week of work later');
     expect(t.store.getResume('intern')).toEqual(intern);
   });
+  /*
+   * A version is what the resume said, and a tier is not something it says.
+   *
+   * The file at an old commit carries the tier it had then, and the restore
+   * wrote the whole file back. So a tailored copy somebody had since marked
+   * Kept — the chip whose whole purpose is "do not sweep this one" — went
+   * back to Temporary with the clock it started on a month ago, and the next
+   * start swept it. Nothing in the timeline shows a tier change as a version,
+   * so there was no way to see that the version being chosen was one in
+   * which the resume was on its way out.
+   */
+  it('keeps the tier the resume has now, so a kept resume is not put back on the sweep clock', async () => {
+    const month = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const newgrad = t.store.getResume('newgrad')!;
+    const copy = {
+      ...newgrad,
+      id: 'job-acme',
+      label: 'Acme — Engineer',
+      tier: 'temporary',
+      temporaryFrom: month,
+      generatedFor: { company: 'Acme', role: 'Engineer', at: month },
+    };
+    await request(app).put('/api/resumes/job-acme').send(copy).expect(200);
+    const first = (await history('job-acme'))[0]!.hash;
+
+    // An edit, so there is an earlier version to go back to…
+    await request(app)
+      .put('/api/resumes/job-acme')
+      .send({ ...copy, choices: { ...(copy.choices ?? {}), 'edu_neu.dates': 'v_dec2026' } })
+      .expect(200);
+    // …and then "keep this one".
+    await request(app).put('/api/resumes/job-acme/tier').send({ tier: 'extended' }).expect(200);
+
+    await request(app).post(`/api/resumes/job-acme/history/${first}/restore`).expect(200);
+
+    const now = t.store.getResume('job-acme')!;
+    expect(now.choices?.['edu_neu.dates'], 'the version came back').not.toBe('v_dec2026');
+    expect(now.tier, 'and the resume is still kept').toBe('extended');
+    expect(now.temporaryFrom).toBeUndefined();
+    const expiring = await request(app).get('/api/resumes/expiring').expect(200);
+    expect(expiring.body.due.map((d: { id: string }) => d.id)).not.toContain('job-acme');
+  });
 });

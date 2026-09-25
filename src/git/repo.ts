@@ -281,7 +281,25 @@ export class Repo {
     for (const folder of untrack) {
       await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]).catch(() => undefined);
     }
-    const targets = paths ?? this.scope;
+    /*
+     * Only paths there is something at — on disk, or in the index as a file
+     * that has since been removed.
+     *
+     * `git add` refuses the whole command over one path that matches
+     * nothing: "pathspec 'drafts' did not match any files". The passes that
+     * scope their commit to the tracker and the workspaces name `drafts`,
+     * and a save that has never opened a workspace has no such folder — so
+     * the tracker was rewritten, the commit behind it failed, and the change
+     * sat on disk in no version.
+     */
+    const targets: string[] = [];
+    for (const target of paths ?? this.scope) {
+      const there =
+        fs.existsSync(path.join(this.root, target)) ||
+        (await this.git(['ls-files', '--', target]).catch(() => '')).trim() !== '';
+      if (there) targets.push(target);
+    }
+    if (targets.length === 0) return undefined;
     await this.git(['add', '--', ...targets]);
 
     // Only commit what is staged within scope; unrelated working-tree changes

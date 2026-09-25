@@ -407,6 +407,147 @@ describe('the same question, asked by another system', () => {
     expect(m.confident).toBe(true);
   });
 
+  /*
+   * The same question with the furniture on the stored side.
+   *
+   * `unanswered` forgave "position", "role" and the rest on the asked side
+   * and `fullyAsked` did not forgive them on the stored side, so the bank
+   * matched one way round and not the other. Measured with one row saved
+   * from each wording and the other asked: "Are you willing to relocate for
+   * this role?" then "Are you willing to relocate?" scored 0.67 and was left
+   * for the person; the other order scored 0.90 and was filled. Which form
+   * somebody happened to apply through first decided whether their answer
+   * came back.
+   */
+  it('finds the answer again whichever of two wordings was saved first', () => {
+    for (const [asked, stored] of [
+      ['How did you hear about us?', 'How did you hear about this position?'],
+      ['How did you hear about us?', 'How did you hear about this job?'],
+      ['How did you hear about this opportunity?', 'How did you hear about us?'],
+      ['Are you willing to relocate?', 'Are you willing to relocate for this role?'],
+      ['What is your earliest start date?', 'Earliest start date for this position'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(true);
+    }
+  });
+
+  it('and still tells apart the questions that differ by a word that is not furniture', () => {
+    for (const [asked, stored] of [
+      ['Earliest start date', 'Latest start date'],
+      ['Preferred last name', 'Preferred first name'],
+      ['Current salary', 'Expected salary'],
+      ['Where did you hear about us?', 'How did you hear about us?'],
+      ['Are you willing to relocate?', 'Are you willing to relocate at your own expense for this role?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+  });
+
+  /*
+   * Two wordings of one question, typed on one form and asked by the next.
+   * Measured before this: none of the first four pairs was confident, so the
+   * extension, which fills only confident matches, left each for the person
+   * to type again.
+   */
+  it('finds the answer again through inflection and word order', () => {
+    for (const [asked, stored] of [
+      ['Salary expectations', 'Expected salary'],
+      ['Expected salary', 'Salary expectations'],
+      ['What are your salary expectations?', 'Expected salary'],
+      ['Desired salary', 'Expected salary'],
+      ['Expected compensation', 'Expected salary'],
+      ['Are you willing to relocate?', 'Willingness to relocate'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(true);
+    }
+  });
+
+  it('finds the answer again through another word for a link', () => {
+    for (const [asked, stored] of [
+      ['Portfolio URL', 'Portfolio link'],
+      ['Portfolio link', 'Portfolio URL'],
+      ['Portfolio website', 'Portfolio link'],
+      ['Link to your portfolio', 'Portfolio URL'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(true);
+    }
+  });
+
+  it('finds the answer again through the framing a form puts round it', () => {
+    for (const [asked, stored] of [
+      ['Who is your current employer?', 'Current employer'],
+      ['Current employer', 'Who is your current employer?'],
+      ['Please enter your current employer', 'Current employer'],
+      ['Please enter your portfolio URL', 'Portfolio link'],
+      ['Please provide your emergency contact', 'Emergency contact'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(true);
+    }
+  });
+
+  it('finds the answer again however a minimum age is put', () => {
+    for (const [asked, stored] of [
+      ['Are you at least 18?', 'Are you 18 or older?'],
+      ['Are you 18 or older?', 'Are you at least 18?'],
+      ['Are you at least 18 years of age?', 'Are you 18 or older?'],
+      ['Are you at least 18 years old?', 'Are you 18 or older?'],
+      ['Are you over the age of 18?', 'Are you 18 or older?'],
+      ['Are you 18 years or older?', 'Are you at least 18?'],
+      ['Are you 18+?', 'Are you at least 18?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(true);
+    }
+  });
+
+  /*
+   * And none of that reaches a question that differs by a word that matters.
+   * Two of these were confident before any of it: "Are you 21 or older?"
+   * against "...18 or older?" and "5+ years" against "3+ years", because a
+   * one- or two-digit number was too short to be a term at all.
+   */
+  it('still tells apart the questions those wordings sit beside', () => {
+    for (const [asked, stored] of [
+      // What somebody is paid now is not what they are asking for.
+      ['Current salary', 'Expected salary'],
+      ['Expected salary', 'Current salary'],
+      ['What is your current salary?', 'Salary expectations'],
+      ['Salary expectations', 'What is your current salary?'],
+      ['Current compensation', 'Desired salary'],
+      ['Salary history', 'Expected salary'],
+      ['Latest start date', 'Earliest start date'],
+      ['Earliest start date', 'Latest start date'],
+      ['Preferred last name', 'Preferred first name'],
+      ['Preferred first name', 'Preferred last name'],
+      ['Who is your previous employer?', 'Current employer'],
+      ['Are you a current employee?', 'Current employer'],
+      ['GitHub URL', 'Portfolio link'],
+      ['LinkedIn URL', 'Portfolio URL'],
+      // "site" is a working arrangement, not a web address.
+      ['Are you comfortable working on site?', 'Are you comfortable working on our website?'],
+      // The other side of an age, another age, and an age denied.
+      ['Are you under 18?', 'Are you 18 or older?'],
+      ['Are you younger than 18?', 'Are you at least 18?'],
+      ['Are you at least 21?', 'Are you 18 or older?'],
+      ['Are you 21 or older?', 'Are you at least 18?'],
+      ['Are you not at least 18?', 'Are you 18 or older?'],
+      // A minimum that is not an age, and another minimum.
+      ['Do you have at least 3 years of experience?', 'Are you at least 18?'],
+      ['Do you have 5+ years of Python experience?', 'Do you have 3+ years of Python experience?'],
+      ['Do you have at least 5 years of experience?', 'Do you have at least 3 years of experience?'],
+      ['Do you have more than 5 years of experience?', 'Do you have at least 5 years of experience?'],
+    ] as [string, string][]) {
+      expect(ask(asked, stored).confident, `${asked} ⟵ ${stored}`).toBe(false);
+    }
+    // While the same minimum, put another way, is the same question.
+    expect(ask('Do you have 5 or more years of experience?', 'Do you have 5+ years of experience?').confident).toBe(true);
+  });
+
+  it('never takes a word back to a stem that is a negation', () => {
+    // "note" is not "not", and "none" is not "non".
+    expect(ask('Anything else not?', 'Anything else to note?').confident).toBe(false);
+    expect(ask('Non of the above', 'None of the above').confident).toBe(false);
+  });
+
   it('keeps sponsorship and work authorization apart, which have opposite answers', () => {
     expect(reuses('Are you legally authorized to work in the United States?', 'Will you now or in the future require sponsorship?')).toBe(false);
     expect(reuses('Will you now or in the future require sponsorship?', 'Are you legally authorized to work in the United States?')).toBe(false);
@@ -535,6 +676,10 @@ describe('a question asking for something the bank must never hold', () => {
     'What is your passport number?',
     'What is your home address?',
     'Please give your mailing address.',
+    'Address Line 1',
+    'Zip code',
+    'Postal Code',
+    'Apartment/Suite',
   ];
 
   it('recognises the questions this must refuse', () => {
@@ -544,6 +689,27 @@ describe('a question asking for something the bank must never hold', () => {
   it('leaves an ordinary question alone', () => {
     for (const q of ['Why do you want to work here?', 'What is your email address for this application?']) {
       expect(isSensitiveQuestion(q), q).toBe(false);
+    }
+  });
+
+  /*
+   * The framing a form puts round a question is taken off before it is
+   * compared. The refusal reads the question as it was asked, so a national
+   * ID or a date of birth asked for "please" is refused the same.
+   */
+  it('refuses them however the form frames the question', () => {
+    for (const q of [
+      'Please enter your national ID number',
+      'Please provide your social security number',
+      'Who is your passport issuer and what is your passport number?',
+      'Please enter your date of birth',
+    ]) {
+      const bank: never = [
+        { id: 'a1', question: q.replace(/^please (enter|provide) your /i, ''), default: 'v', variants: [{ id: 'v', text: 'Kept by mistake.' }] },
+      ] as never;
+      const m = matchAnswer(q, bank);
+      expect(m.item, q).toBeUndefined();
+      expect(m.confident, q).toBe(false);
     }
   });
 
@@ -686,6 +852,27 @@ describe('a label that is not an employer', () => {
   it('nor the labels the tools themselves give saved answers', () => {
     const heard = matchAnswer('How did you hear about us?', bank, { company: 'Helios' });
     expect(heard.namesAnother).toBeUndefined();
+  });
+
+  /*
+   * The extension keeps what was typed on a form under "Typed on a form", as
+   * it keeps what was chosen under "Chosen on a form". An answer that happens
+   * to say those words — "I typed on a form at the career fair" — is not an
+   * answer written for an employer by that name.
+   */
+  it('nor the label the extension gives an answer typed on a form', () => {
+    const typed: AnswerBankItem[] = [
+      ...bank,
+      {
+        id: 'ans_start',
+        question: 'Earliest start date',
+        default: 'v_1',
+        variants: [{ id: 'v_1', label: 'Typed on a form', text: 'Two weeks after an offer, as typed on a form last spring' }],
+      },
+    ];
+    const start = matchAnswer('Earliest start date', typed, { company: 'Helios' });
+    expect(start.namesAnother).toBeUndefined();
+    expect(start.confident).toBe(true);
   });
 
   it('while a company label still vetoes an answer that names that company', () => {

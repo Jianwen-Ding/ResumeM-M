@@ -98,7 +98,15 @@ async function serve() {
 
   const child = spawn('npx', ['tsx', 'src/server/index.ts'], {
     cwd: root,
-    env: { ...process.env, RMM_DATA: dir, PORT: String(port), RMM_AUTOCOMMIT: '0', RMM_AI: '0' },
+    // With a list of saves of its own, never the one in the home directory.
+    env: {
+      ...process.env,
+      RMM_DATA: dir,
+      PORT: String(port),
+      RMM_AUTOCOMMIT: '0',
+      RMM_AI: '0',
+      RMM_PROJECTS_FILE: path.join(dir, '..', `rmm-editor-projects-${port}.json`),
+    },
     stdio: 'ignore',
   });
 
@@ -1277,6 +1285,48 @@ async function main() {
       check('keeping the file it was saved as', renamed?.id === 'kafka-heavy-variation', renamed?.id ?? '');
       const shown = await page.locator('#resume-select option:checked').innerText().catch(() => '');
       check('and the picker shows the new name', /Kafka-heavy, renamed/.test(shown), shown);
+
+      /*
+       * And so does the other picker, the one an open application sends from.
+       * It was drawn with the draft and never again, so renaming the resume in
+       * the builder and going back to the Workspace tab left it offering the
+       * old name — and a variation saved meanwhile was not in it at all.
+       */
+      const draft = (
+        await (
+          await fetch(`${server.url}/api/workspace`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ company: 'Picker Ridge', role: 'Data Engineer', source: 'by hand' }),
+          })
+        ).json()
+      ).draft;
+      try {
+        await fetch(`${server.url}/api/workspace/${encodeURIComponent(draft.id)}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ resumeId: renamed?.id }),
+        });
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.locator('.draft-card', { hasText: 'Picker Ridge' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Picker Ridge' }).waitFor({ timeout: 20_000 });
+
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.locator('#btn-rename-resume').click();
+        await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+        await page.locator('#f_label').fill('Kafka-heavy, renamed again');
+        await page.locator('#modal-ok').click();
+        await page.waitForTimeout(1500);
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.waitForTimeout(800);
+        const sends = await page
+          .$eval('#draft-editor select', (s) => s.options[s.selectedIndex]?.textContent ?? '')
+          .catch(() => '(no picker)');
+        check('and an open application sends it under the new name too', sends === 'Kafka-heavy, renamed again', sends);
+      } finally {
+        await fetch(`${server.url}/api/workspace/${encodeURIComponent(draft.id)}`, { method: 'DELETE' }).catch(() => undefined);
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+      }
     }
 
     /* -------------------------------------------------------------- *
@@ -1640,6 +1690,97 @@ async function main() {
       check('reopening it says it is gone, in words', said, await page.locator('#status').textContent());
     }
 
+    /*
+     * A draft that goes while it is open.
+     *
+     * The step above failed about once in three runs with a 400 on the Trent
+     * Works draft after its cleanup deleted it. Nothing had been typed: a
+     * click on a card opened the draft, and the address that click set fired
+     * `hashchange`, which opened the same draft a second time — a second read
+     * that could land after the delete. Here the reads are slowed, as on a
+     * loaded machine, so the second one is counted rather than raced.
+     *
+     * JobHelper finishing an application, or the sweep retiring one, removes
+     * a draft somebody may have open. Typing into it then, or clicking its
+     * card in a list drawn before it went, has to say what happened in words
+     * — not `No draft "2026-…"` — and leave what was typed on screen.
+     */
+    console.log('\nA draft that goes while it is open');
+    {
+      const make = async (company) =>
+        (
+          await (
+            await fetch(`${server.url}/api/workspace`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ company, role: 'Data Engineer', url: 'https://example.invalid/j', source: 'by hand' }),
+            })
+          ).json()
+        ).draft;
+      const drop = (d) => fetch(`${server.url}/api/workspace/${encodeURIComponent(d.id)}`, { method: 'DELETE' }).catch(() => undefined);
+      const quiet = await make('Quillon Freight');
+      const other = await make('Ostrander Mills');
+      const errorsBefore = errors.length;
+      const reads = [];
+      const slow = async (route) => {
+        if (route.request().method() === 'GET') {
+          reads.push(new URL(route.request().url()).pathname);
+          await new Promise((go) => setTimeout(go, 150));
+        }
+        return route.fallback();
+      };
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.locator('.draft-card', { hasText: 'Ostrander Mills' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Ostrander Mills' }).waitFor({ timeout: 20_000 });
+
+        await page.route(/\/api\/workspace\/[^/]+$/, slow);
+        await page.locator('.draft-card', { hasText: 'Quillon Freight' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Quillon Freight' }).waitFor({ timeout: 20_000 });
+        await page.waitForTimeout(1000);
+        await page.unroute(/\/api\/workspace\/[^/]+$/, slow);
+        const mine = reads.filter((p) => p.endsWith(`/${encodeURIComponent(quiet.id)}`)).length;
+        check('opening a draft reads it once, not again when the address changes', mine === 1, `${mine} reads`);
+
+        await drop(quiet);
+        const notes = page.locator('#draft-editor textarea').last();
+        await notes.fill('A note typed after it went');
+        await notes.blur();
+        const told = await page
+          .waitForFunction(
+            () => /no longer in the workspace/i.test(`${document.querySelector('#draft-save-state')?.textContent} ${document.querySelector('#status')?.textContent}`),
+            null,
+            { timeout: 10_000, polling: 100 },
+          )
+          .then(() => true, () => false);
+        const shown = `${await page.locator('#draft-save-state').innerText().catch(() => '')} | ${await page.locator('#status').innerText().catch(() => '')}`;
+        check('typing into a draft removed elsewhere says it is gone, in words', told && !/No draft "/.test(shown), shown);
+        check('and what was typed is still on screen', (await notes.inputValue().catch(() => '')) === 'A note typed after it went');
+
+        await drop(other);
+        // Emptied first, so the line above cannot answer for this one.
+        await page.evaluate(() => { document.querySelector('#status').textContent = ''; });
+        await page.locator('.draft-card', { hasText: 'Ostrander Mills' }).first().click();
+        const gone = await page
+          .locator('#status', { hasText: 'no longer in the workspace' })
+          .waitFor({ timeout: 10_000 })
+          .then(() => true, () => false);
+        const says = await page.locator('#status').innerText().catch(() => '');
+        check('and a card for one that has gone says so too, rather than its id', gone && !/No draft "/.test(says), says);
+        await page.waitForTimeout(800);
+      } finally {
+        await page.unroute(/\/api\/workspace\/[^/]+$/, slow).catch(() => undefined);
+        await drop(quiet);
+        await drop(other);
+        // The requests for a draft that has gone are the failures under test,
+        // asserted on above by what the screen said.
+        for (let i = errors.length - 1; i >= errorsBefore; i--) {
+          if (/^400 \/api\/workspace\/|status of 400/.test(errors[i])) errors.splice(i, 1);
+        }
+      }
+    }
+
     /* -------------------------------------------------------------- *
      * Writing an application                                          *
      * -------------------------------------------------------------- */
@@ -1808,6 +1949,16 @@ async function main() {
       check('and the application carries the answer that was given', 
         (halcyon?.answers ?? []).some((a) => /ingest work/i.test(a.answer ?? '')),
         JSON.stringify(halcyon?.answers ?? []).slice(0, 80));
+
+      /*
+       * And the "Filed" dialog put away before anything else is pressed. It
+       * opens only once the editor has re-read the workspace, after the files
+       * above are already on disk — so the next step's "close whatever is
+       * open" could run first, find nothing, and have the dialog arrive over
+       * the tab it was about to click.
+       */
+      const filed = page.locator('#modal:not(.hidden) #modal-title', { hasText: 'Filed' });
+      if (await filed.waitFor({ timeout: 15_000 }).then(() => true, () => false)) await page.locator('#modal-ok').click();
     } else {
       check('there is a way to finish the application', false, 'no button');
     }
@@ -1824,6 +1975,195 @@ async function main() {
      * stopping mid-save without needing to actually stop it out from under
      * the rest of this run.
      * -------------------------------------------------------------- */
+    /*
+     * A dialog whose save fails.
+     *
+     * "Record an application", "New cover letter" and "New saved answer"
+     * closed first and saved after, with nothing catching the save: a write
+     * the store refused left the dialog gone, what was typed gone with it,
+     * and nothing on screen. Refused here once, by cutting the one request
+     * off as a server that has gone would, and then let through.
+     */
+    console.log('\nA dialog whose save fails');
+    {
+      const open = await page.evaluate(() => {
+        const m = document.querySelector('#modal');
+        if (!m || m.classList.contains('hidden')) return null;
+        m.classList.add('hidden');
+        return true;
+      });
+      if (open) console.log('    (a dialog was open and was closed)');
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      let refused = 0;
+      await page.route('**/api/applications', (route) => {
+        if (route.request().method() !== 'POST' || refused > 0) return route.fallback();
+        refused++;
+        return route.abort('connectionrefused');
+      });
+      await page.locator('#btn-add-app').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_company').fill('Wrenfield Analytics');
+      await page.locator('#f_role').fill('Data Engineer');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      const note = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('a save that fails brings the dialog back, saying why', /^Not saved — ResumeM-M could not be reached\. What you typed is still here/.test(note), note);
+      check('with what was typed still in it', (await page.locator('#f_company').inputValue().catch(() => '')) === 'Wrenfield Analytics');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(1200);
+      await page.unroute('**/api/applications');
+      const apps = (await (await fetch(`${server.url}/api/applications`)).json()).applications ?? [];
+      check('and pressing OK again saves it', apps.some((a) => a.company === 'Wrenfield Analytics'));
+
+      await page.locator('#btn-add-app').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_company').fill('Only a company');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(400);
+      const needs = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('and a box the save needs, left empty, is asked for rather than dropped', /needs a company and a role/.test(needs), needs);
+      await page.locator('#modal-cancel').click();
+
+      /*
+       * A slow save. The dialog closed the moment OK was pressed and the save
+       * went on behind it with nothing on screen, so the next dialog opened
+       * in that time — a letter, say — was the one on screen when the first
+       * save failed, and the failure redrew its own form over it: the letter
+       * gone, and its dialog never answered. Held here until checked.
+       */
+      await page.locator('#tabs button[data-tab="letters"]').click();
+      let letGo;
+      const held = new Promise((go) => (letGo = go));
+      const hold = async (route) => {
+        await held;
+        return route.abort('connectionrefused');
+      };
+      await page.route('**/api/answers/save', hold);
+      await page.locator('#btn-add-answer').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_question').fill('What drew you to logistics software?');
+      await page.locator('#f_answer').fill('Freight is where software meets the physical world.');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(400);
+      const whileSaving = await page.evaluate(() => ({
+        open: !document.querySelector('#modal').classList.contains('hidden'),
+        title: document.querySelector('#modal-title')?.textContent ?? '',
+        note: document.querySelector('#modal-note')?.textContent ?? '',
+        okDisabled: document.querySelector('#modal-ok')?.disabled ?? false,
+      }));
+      check('a save still under way keeps its dialog open, saying so',
+        whileSaving.open && whileSaving.title === 'New saved answer' && /saving/i.test(whileSaving.note),
+        JSON.stringify(whileSaving));
+      check('and cannot be sent twice while it is', whileSaving.okDisabled);
+      letGo();
+      await page.waitForTimeout(800);
+      await page.unroute('**/api/answers/save', hold);
+      const late = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('and when it then fails, the answer typed is still there, with the reason',
+        /^Not saved — ResumeM-M could not be reached/.test(late) &&
+          (await page.locator('#f_answer').inputValue().catch(() => '')) === 'Freight is where software meets the physical world.',
+        late);
+      check('and it can be pressed again', !(await page.locator('#modal-ok').isDisabled()));
+      await page.locator('#modal-cancel').click();
+
+      /*
+       * The server's own reasons are sentences, full stop included, and the
+       * note went on to add another: "…so it was not saved.. What you typed
+       * is still here." Refused here with a question the bank never keeps.
+       */
+      const errorsBefore = errors.length;
+      await page.locator('#btn-add-answer').click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_question').fill('What is your social security number?');
+      await page.locator('#f_answer').fill('I would rather give that to a person');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      const refusedNote = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
+      check('a reason the server gives is said once, with one full stop',
+        /^Not saved — This looks like/.test(refusedNote) && !/\.\./.test(refusedNote), refusedNote);
+      await page.locator('#modal-cancel').click();
+      // The refusal just checked, by name.
+      for (let i = errors.length - 1; i >= errorsBefore; i--) {
+        if (/^400 \/api\/answers\/save$|status of 400/.test(errors[i])) errors.splice(i, 1);
+      }
+
+      /*
+       * The other three dialogs on Letters & Answers: opening a letter and
+       * editing an answer closed first and saved after, and deleting an
+       * answer did not look at its reply. A write that did not land took the
+       * text with it and said nothing — an uncaught "Failed to fetch" in the
+       * console was the only trace.
+       */
+      await fetch(`${server.url}/api/answers/save`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question: 'Earliest date you could start?', answer: 'Two weeks after an offer', label: 'Typed on a form' }),
+      });
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      await page.locator('#tabs button[data-tab="letters"]').click();
+      const typedCard = page.locator('#answers .mini-card', { hasText: 'Earliest date you could start?' });
+      await typedCard.waitFor({ timeout: 10_000 });
+
+      const refuseWrite = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
+      await page.route('**/api/answers', refuseWrite);
+      await typedCard.locator('button', { hasText: 'Edit' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      const labelShown = await page.locator('#f_label').inputValue();
+      await page.locator('#f_answer').fill('Three weeks after an offer, having thought about it');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      check('an answer edited while the save fails keeps its dialog, saying why',
+        (await page.locator('#modal:not(.hidden)').count()) === 1 &&
+          /^Not saved — ResumeM-M could not be reached/.test(await page.locator('#modal-note').innerText().catch(() => '')) &&
+          (await page.locator('#f_answer').inputValue().catch(() => '')) === 'Three weeks after an offer, having thought about it',
+        await page.locator('#modal-note').innerText().catch(() => '(no dialog)'));
+      await page.locator('#modal-cancel').click().catch(() => undefined);
+
+      await typedCard.locator('button', { hasText: 'Delete' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      check('and a delete that fails says so, leaving the answer listed',
+        (await page.locator('#status.err').count()) > 0 && (await typedCard.count()) === 1,
+        await page.locator('#status').innerText().catch(() => ''));
+      await page.unroute('**/api/answers', refuseWrite);
+
+      /*
+       * And the label. The box was there on every edit and read only when
+       * "Keep the old wording" was ticked, so a label typed for the version
+       * being edited — the employer's name, which is what picks a version
+       * for that employer — went nowhere. It opened reading "Updated"
+       * whatever the version was called, so where a version came from —
+       * "Typed on a form" — was not on screen either.
+       */
+      check('editing an answer shows the label its version has', labelShown === 'Typed on a form', labelShown);
+      await typedCard.locator('button', { hasText: 'Edit' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_label').fill('Helios Freight');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(1000);
+      const relabelled = ((await (await fetch(`${server.url}/api/store`)).json()).answers ?? [])
+        .find((a) => a.question === 'Earliest date you could start?');
+      const labels = (relabelled?.variants ?? []).map((v) => v.label);
+      check('and a label typed for it is the label it keeps', JSON.stringify(labels) === '["Helios Freight"]', JSON.stringify(labels));
+      await page.evaluate(() => document.querySelector('#modal')?.classList.add('hidden'));
+
+      const refuseLetter = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
+      await page.route('**/api/letters/**', refuseLetter);
+      await page.locator('#letters .mini-card').first().locator('button', { hasText: 'Open' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_body').fill('A letter reworked for an hour.');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      check('and a letter edited while the save fails keeps its dialog, saying why',
+        (await page.locator('#modal:not(.hidden)').count()) === 1 &&
+          /^Not saved — ResumeM-M could not be reached/.test(await page.locator('#modal-note').innerText().catch(() => '')) &&
+          (await page.locator('#f_body').inputValue().catch(() => '')) === 'A letter reworked for an hour.',
+        await page.locator('#modal-note').innerText().catch(() => '(no dialog)'));
+      await page.locator('#modal-cancel').click().catch(() => undefined);
+      await page.unroute('**/api/letters/**', refuseLetter);
+    }
+
     console.log('\nWhen the tracker cannot save');
     {
       // As below in the overlap check: the apply flow just finished on a

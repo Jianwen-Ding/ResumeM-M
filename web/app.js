@@ -460,8 +460,21 @@ async function stepHistory(direction) {
      * re-applied exactly what had just been undone and the next auto-save
      * wrote it out again. From the outside, Ctrl+Z did nothing at all.
      */
+    const was = state.resumeId;
     clearEdits();
     await loadStore();
+
+    /*
+     * A step that took away the resume on screen — undoing "Save as
+     * variation" — left `loadStore` to pick one, and it picks the save's
+     * first base: not where the person was when they made the copy. Back to
+     * the one it was copied from, when that is still here.
+     */
+    if (was && state.resumeId !== was) {
+      const change = entry.changes.find((c) => c.docKey === `resume:${was}`);
+      const from = (change?.after ?? change?.before)?.copiedFrom;
+      if (from && state.store.resumes.some((r) => r.id === from)) state.resumeId = from;
+    }
 
     /*
      * Go to the resume that moved, so what happened is on screen.
@@ -5518,7 +5531,19 @@ async function renameVariation() {
     }
     try {
       await flushAutoSave().catch(() => undefined);
-      await api(`/resumes/${encodeURIComponent(mine.id)}/rename`, { method: 'POST', body: JSON.stringify({ label: wanted }) });
+      /*
+       * Grouped so that it is a step at all, for the tier chip's reason.
+       *
+       * The rename is a POST, which `docKeyFor` rightly does not record, while
+       * every step already on the stack holds this resume under its old name
+       * and undo puts a whole resume back. Measured: tick a box, rename, press
+       * Ctrl+Z meaning the rename — the box and the name both went back in
+       * one press, under "Undid change". Naming the document makes the rename
+       * its own step, and stops an older one putting the old name back.
+       */
+      await undoGroup('rename', [`resume:${mine.id}`], () =>
+        api(`/resumes/${encodeURIComponent(mine.id)}/rename`, { method: 'POST', body: JSON.stringify({ label: wanted }) }),
+      );
       setStatus(`Renamed to “${wanted}”`);
       await loadStore();
       render();
@@ -5837,6 +5862,11 @@ function celebrate(company) {
 function sentOn(a) {
   const went = (a.history ?? []).find((h) => h.status === 'applied');
   if (went?.at) return went.at.slice(0, 10);
+  // Closed by the tracker for sitting at Applying: never sent, whatever
+  // `closed` usually means. See `closedAsStale` in applications.ts, whose
+  // note this is.
+  const last = a.history?.at(-1);
+  if (a.status === 'closed' && last?.status === 'closed' && /^Closed on its own: at Applying for/.test(last.note ?? '')) return '';
   // Rows from before the history was kept, or filed straight as applied.
   return ['applied', 'interview', 'offer', 'closed'].includes(a.status) ? (a.appliedAt?.slice(0, 10) ?? '') : '';
 }
@@ -5980,7 +6010,14 @@ async function loadApplications() {
       // Once, on the way in — not every time the list repaints with an
       // offer already on it.
       if (moved === 'offer' && a.status !== 'offer') celebrate(a.company);
-      loadApplications();
+      /*
+       * The record beside the table too, when it is this one. Only the
+       * table was repainted, so the pane's history stopped a step short of
+       * the dropdown next to it until something else was clicked.
+       * `openApplication` repaints the table itself.
+       */
+      if (openApplicationId === a.id) openApplication(a.id);
+      else loadApplications();
     };
     const row = el('tr', { className: a.id === openApplicationId ? 'selected' : '' }, [
       // Both dates get the same treatment: "2026-09-" over "17" is not a
@@ -6016,7 +6053,20 @@ async function loadApplications() {
               setStatus(err.message, true);
               return;
             }
-            if (openApplicationId === a.id) openApplicationId = null;
+            /*
+             * And out of the pane, when it was the one open. Only the id was
+             * forgotten, so the table lost the row while the pane beside it
+             * went on showing the role, the company and everything that was
+             * sent, as though it were still tracked.
+             */
+            if (openApplicationId === a.id) {
+              openApplicationId = null;
+              setChildren(
+                $('#app-detail'),
+                el('div', { className: 'empty' }, [el('b', {}, 'Pick an application'), `${a.company} is no longer tracked.`]),
+              );
+              if (location.hash.startsWith('#applications/')) window.history.replaceState(null, '', '#applications');
+            }
             loadApplications();
           },
         }),
@@ -6246,16 +6296,64 @@ async function openApplication(id) {
   loadApplications().catch((err) => setStatus(err.message, true));
 }
 
+/**
+ * Why a write did not land, as the end of a sentence. The browser's own words
+ * for a server that did not answer are replaced; the server's reasons are
+ * sentences already, full stop and all.
+ */
+function whyNotSaved(err) {
+  return /failed to fetch|networkerror|load failed/i.test(err.message)
+    ? 'ResumeM-M could not be reached'
+    : err.message.replace(/[\s.]+$/, '');
+}
+
+/**
+ * A form whose answer is saved, asked again until it is.
+ *
+ * These dialogs closed first and saved after, so a save the store refused —
+ * a save switched under the editor, a folder that would not take the write —
+ * rejected into nothing: the dialog was gone, what was typed with it, and
+ * the screen said nothing at all. A box left empty that the save needs
+ * closed the dialog just as silently. `save` answers a sentence to ask
+ * again with it, or throws; either way the form stays up holding what was
+ * typed, with the reason above the buttons.
+ *
+ * Stays up while it saves, too, rather than closing and being redrawn. A
+ * slow save left no dialog and nothing said, and a dialog opened in that
+ * time — a letter begun while an answer saved — was the one on screen when
+ * the first save failed: its form was drawn over the letter, and the letter
+ * was gone.
+ */
+async function formThatSaves(title, fields, note, save) {
+  const answer = await form(title, fields, note, async (values, { cancelled }) => {
+    try {
+      const again = await save(values);
+      if (typeof again === 'string') return [again, note].filter(Boolean).join(' ');
+      return undefined;
+    } catch (err) {
+      const why = whyNotSaved(err);
+      // Put down while it was saving: there is no dialog left to say it in.
+      if (cancelled()) {
+        setStatus(`Not saved — ${why}.`, true);
+        return undefined;
+      }
+      return [`Not saved — ${why}. What you typed is still here.`, note].filter(Boolean).join(' ');
+    }
+  });
+  return Boolean(answer);
+}
+
 async function addApplication() {
-  const answer = await form('Record an application', [
+  await formThatSaves('Record an application', [
     { name: 'company', label: 'Company', value: '' },
     { name: 'role', label: 'Role', value: '' },
     { name: 'url', label: 'URL', value: '' },
     { name: 'notes', label: 'Notes', value: '', multiline: true },
-  ]);
-  if (!answer?.company?.trim() || !answer?.role?.trim()) return;
-  await api('/applications', { method: 'POST', body: JSON.stringify({ ...answer, resumeId: state.resumeId }) });
-  loadApplications();
+  ], '', async (answer) => {
+    if (!answer.company?.trim() || !answer.role?.trim()) return 'An application needs a company and a role.';
+    await api('/applications', { method: 'POST', body: JSON.stringify({ ...answer, resumeId: state.resumeId }) });
+    loadApplications();
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -6425,7 +6523,19 @@ async function openDraft(id) {
   if (draftSave.current) await flushDraftEdits();
 
   openDraftId = id;
-  location.hash = `#workspace/${encodeURIComponent(id)}`;
+  /*
+   * The address, without a second open.
+   *
+   * `location.hash =` fires `hashchange`, and `applyHash` answers that by
+   * opening the draft the address names — this one, again. So every click on
+   * a card read the draft twice and drew it twice, the second time after the
+   * panel was already up and typeable; and a draft finished or discarded
+   * elsewhere in between came back as `No draft "…"` in red about something
+   * nobody had touched. `pushState` makes the same history entry, Back still
+   * fires `hashchange`, and only an address that came from outside opens.
+   */
+  const address = `#workspace/${encodeURIComponent(id)}`;
+  if (location.hash !== address) window.history.pushState(null, '', address);
   try {
     let draft = await api(`/workspace/${encodeURIComponent(id)}`);
     // Another draft was opened while this one was being fetched; that one owns
@@ -6445,7 +6555,17 @@ async function openDraft(id) {
     }
     renderDraft(draft);
   } catch (err) {
-    setStatus(err.message, true);
+    if (draftGone(err)) {
+      // In the list that was drawn, and gone since: the same words, and the
+      // same way on, as an address naming one that has gone. See `applyHash`.
+      if (openDraftId === id) {
+        openDraftId = null;
+        window.history.replaceState(null, '', '#workspace');
+      }
+      setStatus(DRAFT_GONE);
+    } else {
+      setStatus(err.message, true);
+    }
   }
   // Repaint the list so the newly-open one is marked. Floating, because the
   // panel is already drawn and nothing waits on it — but not unhandled: a
@@ -6501,6 +6621,12 @@ function setDraftSaveState(mode, detail) {
           : 'Unsaved changes';
 }
 
+/** What the editor says about a draft that is not in the workspace any more. */
+const DRAFT_GONE = 'That application is no longer in the workspace.';
+
+/** Whether a workspace request failed because its draft has gone. The server's words for it. */
+const draftGone = (err) => /^No draft "/.test(err?.message ?? '');
+
 /** Write the open draft now. Safe to call when there is nothing to write. */
 async function saveDraftNow(message) {
   const draft = draftSave.current;
@@ -6523,7 +6649,21 @@ async function saveDraftNow(message) {
     })
     .catch((err) => {
       draftSave.dirty = true;
-      setDraftSaveState('failed', err.message);
+      if (draftGone(err)) {
+        /*
+         * Finished or discarded somewhere else — JobHelper, the sweep, another
+         * tab — while it was open here. Said as that, not as the server's
+         * `No draft "2026-…"`; what was typed stays on screen to be copied,
+         * and the list stops offering the one that has gone. Not left dirty:
+         * no retry can land, and opening the next draft would only try again.
+         */
+        draftSave.dirty = false;
+        setDraftSaveState('failed', 'this application is no longer in the workspace');
+        setStatus(`${DRAFT_GONE} It was finished or discarded somewhere else; what you typed is still on screen to copy.`, true);
+        loadDrafts().catch(() => undefined);
+      } else {
+        setDraftSaveState('failed', err.message);
+      }
       throw err;
     })
     .finally(() => {
@@ -6551,6 +6691,31 @@ async function flushDraftEdits() {
   draftSave.timer = null;
   if (draftSave.dirty) await saveDraftNow();
   await draftSave.pending?.catch(() => {});
+}
+
+/**
+ * The resumes an application could send, in its "Send" picker.
+ *
+ * Its own function so the picker can be redrawn without the draft: it was
+ * drawn with the draft and never again, so a resume renamed in the builder
+ * was still offered under its old name, and one saved there was not offered
+ * at all, until the draft happened to be reopened. See the Workspace tab.
+ */
+function drawResumeChoices(select, draft) {
+  select.replaceChildren(
+    /*
+     * A placeholder when nothing is attached yet.
+     *
+     * Without one the select showed the first resume in the list as though it
+     * had been chosen, while the draft had no resume at all — so the panel said
+     * "Send: Base resume" and building the files answered "400 Bad Request".
+     * An empty choice is the honest thing to show when no choice has been made.
+     */
+    ...(draft.resumeId ? [] : [el('option', { value: '', textContent: '— choose a resume —' })]),
+    ...state.store.resumes.map((r) =>
+      el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }),
+    ),
+  );
 }
 
 function renderDraft(draft) {
@@ -6866,19 +7031,8 @@ function renderDraft(draft) {
   };
   notesBox.onblur = () => saveDraftNow().catch(() => {});
 
-  const resumeSelect = el('select');
-  /*
-   * A placeholder when nothing is attached yet.
-   *
-   * Without one the select showed the first resume in the list as though it
-   * had been chosen, while the draft had no resume at all — so the panel said
-   * "Send: Base resume" and building the files answered "400 Bad Request".
-   * An empty choice is the honest thing to show when no choice has been made.
-   */
-  if (!draft.resumeId) resumeSelect.append(el('option', { value: '', textContent: '— choose a resume —' }));
-  for (const r of state.store.resumes) {
-    resumeSelect.append(el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }));
-  }
+  const resumeSelect = el('select', { className: 'draft-resume' });
+  drawResumeChoices(resumeSelect, draft);
   resumeSelect.onchange = async () => {
     if (!resumeSelect.value) return;
     draft.resumeId = resumeSelect.value;
@@ -7579,30 +7733,51 @@ async function loadLetters() {
   );
 }
 
+/*
+ * Opening a letter and editing an answer go through `formThatSaves` for the
+ * reason it gives: they closed first and saved after, so a write that did
+ * not land took an hour's rewording with it and said nothing.
+ */
 async function editLetter(letter) {
-  const answer = await form(letter.title ?? 'Cover letter', [
+  await formThatSaves(letter.title ?? 'Cover letter', [
     { name: 'title', label: 'Title', value: letter.title ?? '' },
     { name: 'company', label: 'Company', value: letter.company ?? '' },
     { name: 'role', label: 'Role', value: letter.role ?? '' },
     { name: 'body', label: 'Body', value: letter.body ?? '', multiline: true, tall: true },
-  ]);
-  if (!answer) return;
-  await api(`/letters/${encodeURIComponent(letter.id)}`, {
-    method: 'PUT',
-    body: JSON.stringify({ ...letter, ...answer }),
+  ], '', async (answer) => {
+    await api(`/letters/${encodeURIComponent(letter.id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ ...letter, ...answer }),
+    });
+    setStatus('Letter saved');
+    loadLetters();
   });
-  setStatus('Letter saved');
-  loadLetters();
 }
 
 async function addLetter() {
-  const answer = await form('New cover letter', [
+  await formThatSaves('New cover letter', [
     { name: 'company', label: 'Company', value: '' },
     { name: 'role', label: 'Role', value: '' },
     { name: 'body', label: 'Body', value: '', multiline: true, tall: true },
-  ]);
-  if (!answer?.body?.trim()) return;
-  const id = `${new Date().toISOString().slice(0, 10)}-${slug(answer.company || 'letter')}`;
+  ], '', saveLetter);
+}
+
+async function saveLetter(answer) {
+  if (!answer.body?.trim()) return 'A letter needs something in it.';
+  /*
+   * A name no letter already has.
+   *
+   * The day and the company, and that name is the file — so two letters to
+   * one company on one day (two roles there, or two old ones pasted in with
+   * the company left blank) were given one name, and `PUT /letters/:id`
+   * wrote the second over the first. Measured: two added, one left. Asked
+   * of the server rather than of the list on screen, because the extension
+   * and the Workspace file letters from elsewhere.
+   */
+  const base = `${new Date().toISOString().slice(0, 10)}-${slug(answer.company || 'letter')}`;
+  const taken = new Set((await api('/letters')).map((l) => l.id));
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
   await api(`/letters/${encodeURIComponent(id)}`, {
     method: 'PUT',
     body: JSON.stringify({
@@ -7619,14 +7794,15 @@ async function addLetter() {
 }
 
 async function addAnswer() {
-  const answer = await form('New saved answer', [
+  await formThatSaves('New saved answer', [
     { name: 'question', label: 'Question, as forms usually word it', value: '' },
     { name: 'answer', label: 'Your answer', value: '', multiline: true, tall: true },
-  ], 'Offered automatically when a form asks something close to this.');
-  if (!answer?.question?.trim() || !answer?.answer?.trim()) return;
-  await api('/answers/save', { method: 'POST', body: JSON.stringify(answer) });
-  setStatus('Answer saved');
-  loadLetters();
+  ], 'Offered automatically when a form asks something close to this.', async (answer) => {
+    if (!answer.question?.trim() || !answer.answer?.trim()) return 'A saved answer needs the question and the answer.';
+    await api('/answers/save', { method: 'POST', body: JSON.stringify(answer) });
+    setStatus('Answer saved');
+    loadLetters();
+  });
 }
 
 /**
@@ -7656,36 +7832,60 @@ async function removeAnswer(item, usedIn = 0) {
 
   // Through the whole list, which is the only way the bank is written: the
   // endpoint refuses anything that is not a list, so a filter is the edit.
-  const answers = (await api('/store')).answers.filter((a) => a.id !== item.id);
-  await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+  try {
+    const answers = (await api('/store')).answers.filter((a) => a.id !== item.id);
+    await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+  } catch (err) {
+    setStatus(`“${item.question}” was not deleted — ${whyNotSaved(err)}.`, true);
+    return;
+  }
   setStatus(`Deleted “${item.question}”`);
   loadLetters();
 }
 
 async function editAnswer(item) {
   const v = item.variants.find((x) => x.id === item.default) ?? item.variants[0];
-  const answer = await form(item.question, [
+  /*
+   * The label the version has, and the one it keeps.
+   *
+   * The box opened reading "Updated" whatever the version was called, and
+   * was read only when the old wording was kept as another version — so a
+   * label typed for the version being edited went nowhere. It is the
+   * employer's name that picks a version for that employer (see
+   * `matchAnswer`), and "Typed on a form" is how you can tell one the
+   * extension kept; neither was on screen, and the first could not be set.
+   */
+  await formThatSaves(item.question, [
     { name: 'answer', label: 'Answer', value: v?.text ?? '', multiline: true, tall: true },
-    { name: 'label', label: 'Label for this version', value: 'Updated' },
+    { name: 'label', label: 'Label for this version', value: v?.label ?? '' },
     { name: 'asNew', label: 'Keep the old wording as another version', type: 'checkbox', value: false },
-  ]);
-  if (!answer?.answer?.trim()) return;
+  ], '', async (answer) => {
+    if (!answer.answer?.trim()) return 'An answer needs some words. To remove this one, use Delete.';
+    const label = answer.label?.trim() ?? '';
 
-  if (answer.asNew) {
-    await api('/answers/save', {
-      method: 'POST',
-      body: JSON.stringify({ itemId: item.id, question: item.question, answer: answer.answer, label: answer.label }),
-    });
-  } else {
-    const answers = (await api('/store')).answers.map((a) =>
-      a.id !== item.id
-        ? a
-        : { ...a, variants: a.variants.map((x) => (x.id === v.id ? { ...x, text: answer.answer.trim() } : x)) },
-    );
-    await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
-  }
-  setStatus('Answer saved');
-  loadLetters();
+    if (answer.asNew) {
+      // A new version under the old one's name would be two of one name.
+      const named = label && label !== v?.label ? label : 'Updated';
+      await api('/answers/save', {
+        method: 'POST',
+        body: JSON.stringify({ itemId: item.id, question: item.question, answer: answer.answer, label: named }),
+      });
+    } else {
+      const answers = (await api('/store')).answers.map((a) =>
+        a.id !== item.id
+          ? a
+          : {
+              ...a,
+              variants: a.variants.map((x) =>
+                x.id === v.id ? { ...x, text: answer.answer.trim(), ...(label ? { label } : {}) } : x,
+              ),
+            },
+      );
+      await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+    }
+    setStatus('Answer saved');
+    loadLetters();
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -9877,6 +10077,8 @@ function showModal(title, content, { note = '', okLabel = 'Close', showCancel = 
   // to get through: one moves on, the other sounds like it stops.
   $('#modal-cancel').textContent = cancelLabel;
   $('#modal-ok').textContent = okLabel;
+  // A form put down while it was saving leaves OK disabled. See `form`.
+  $('#modal-ok').disabled = false;
   $('#modal').classList.remove('hidden');
   focusModal();
   return new Promise((resolve) => {
@@ -9895,8 +10097,13 @@ function confirmModal(title, body) {
   return showModal(title, el('p', { textContent: body }), { okLabel: 'Delete', showCancel: true });
 }
 
-/** A multi-field form modal. `prompt()` can only ask for one thing. */
-function form(title, fields, note) {
+/**
+ * A multi-field form modal. `prompt()` can only ask for one thing.
+ *
+ * `submit`, when given, is run on OK with the dialog still up: it answers a
+ * sentence to stay open with, or nothing to close. See `formThatSaves`.
+ */
+function form(title, fields, note, submit) {
   return new Promise((resolve) => {
     const inputs = {};
     const content = el('div');
@@ -9949,15 +10156,29 @@ function form(title, fields, note) {
     $('#modal-note').textContent = note ?? '';
     $('#modal-cancel').style.display = '';
     $('#modal-ok').textContent = 'Save';
+    $('#modal-ok').disabled = false;
     $('#modal').classList.remove('hidden');
     focusModal();
 
+    let closed = false;
     const close = (value) => {
+      closed = true;
+      $('#modal-ok').disabled = false;
       $('#modal').classList.add('hidden');
       resolve(value);
     };
-    $('#modal-ok').onclick = () =>
-      close(Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.get()])));
+    $('#modal-ok').onclick = async () => {
+      const values = Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.get()]));
+      if (!submit) return close(values);
+      $('#modal-ok').disabled = true;
+      $('#modal-note').textContent = 'Saving…';
+      const problem = await submit(values, { cancelled: () => closed }).catch((err) => err.message);
+      // Cancelled while it saved, and the dialog may be somebody else's by now.
+      if (closed) return;
+      $('#modal-ok').disabled = false;
+      if (typeof problem === 'string') $('#modal-note').textContent = problem;
+      else close(values);
+    };
     $('#modal-cancel').onclick = () => close(null);
   });
 }
@@ -10224,7 +10445,7 @@ async function applyHash() {
       // Unless the list has already moved the address on to what it opened.
       // `window.` because `history` in this file is the undo stack.
       if (location.hash === draft[0]) window.history.replaceState(null, '', '#workspace');
-      setStatus('That application is no longer in the workspace.');
+      setStatus(DRAFT_GONE);
       if (openDraftId === id) openDraftId = null;
       await loadDrafts();
       return true;
@@ -10393,7 +10614,13 @@ function setupTabs() {
         assetUI.load().catch((e) => setStatus(e.message, true));
         loadDocuments().catch((e) => setStatus(e.message, true));
       }
-      if (btn.dataset.tab === 'workspace') loadDrafts().catch((e) => setStatus(e.message, true));
+      if (btn.dataset.tab === 'workspace') {
+        // The builder may have renamed, saved or deleted a resume since the
+        // open draft was drawn. See `drawResumeChoices`.
+        const picker = $('#draft-editor select.draft-resume');
+        if (picker && draftSave.current) drawResumeChoices(picker, draftSave.current);
+        loadDrafts().catch((e) => setStatus(e.message, true));
+      }
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'history') {
@@ -10561,7 +10788,14 @@ async function boot() {
   $('#voice').oninput = markVoiceUnsaved;
   $('#btn-save-voice').onclick = async () => {
     const saved = $('#voice').value;
-    await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: saved }) });
+    // Said when it fails. The notes stay in the box either way; a failure
+    // that went unsaid left them looking saved when they were not.
+    try {
+      await api('/voice', { method: 'PUT', body: JSON.stringify({ voice: saved }) });
+    } catch (err) {
+      setStatus(`Notes not saved — ${err.message}. They are still in the box.`, true);
+      return;
+    }
     // Before the reload, or the box still counts as edited and `loadVoice`
     // would politely decline to refresh the very thing it just saved.
     voiceAsLoaded = saved;

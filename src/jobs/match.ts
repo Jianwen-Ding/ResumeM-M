@@ -352,13 +352,20 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
  *
  * `all` is no longer needed to know what the base holds, and is kept only so
  * the callers that pass it do not all have to change at once.
+ *
+ * `meta.at` is when `base` was read, and the copy is dated by it. The copy is
+ * the base as it was then, and `/extension/fresh` asks whether the base has
+ * changed since by comparing its file's time with this one. Dated when this
+ * runs instead — at the end of an AI pass, minutes after the read — an edit
+ * made to the base during the pass looked older than the copy and was never
+ * reported. Without it, the copy is dated now.
  */
 export function deriveSpec(
   base: ResumeSpec,
   id: string,
   label: string,
   match: MatchResult,
-  meta: { url?: string; company?: string; role?: string },
+  meta: { url?: string; company?: string; role?: string; at?: string },
   _all: ResumeSpec[] = [],
 ): ResumeSpec {
   const spec: ResumeSpec = {
@@ -373,7 +380,7 @@ export function deriveSpec(
      */
     choices: { ...(base.choices ?? {}), ...match.choices },
     sections: narrowSkills(base.sections, match.skills),
-    generatedFor: { ...meta, at: new Date().toISOString() },
+    generatedFor: { ...meta, at: meta.at ?? new Date().toISOString() },
     /* Where it came from, as a record. Nothing merges behind it. */
     copiedFrom: base.id,
     /* Made for one posting, and swept a week after that posting is done. */

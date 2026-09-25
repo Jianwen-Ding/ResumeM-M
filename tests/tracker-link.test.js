@@ -261,3 +261,103 @@ describe('narrowing the tracker', () => {
     await vi.waitFor(() => expect(document.querySelector('#app-status')?.value).toBe('applied'));
   });
 });
+
+/*
+ * The pane beside the table is about one row, and the row's own controls
+ * change that row without looking at the pane.
+ *
+ * Remove the application that is open and the table lost the row while the
+ * pane went on showing its role, its company and everything that was sent,
+ * as though it were still tracked. Change its status and the pane's history
+ * stopped a step short of the dropdown beside it.
+ */
+describe('the open record, when its row is changed', () => {
+  let apps;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#applications/a';
+
+    const fixture = makeTempStore();
+    const data = fixture.store.load();
+    fixture.cleanup();
+
+    apps = [
+      {
+        id: 'a',
+        company: 'Helios',
+        role: 'Platform Engineer',
+        status: 'applied',
+        appliedAt: '2026-03-12T09:00:00Z',
+        history: [{ at: '2026-03-12T09:00:00Z', status: 'applied', note: 'Bundle created' }],
+      },
+      { id: 'b', company: 'Lyra', role: 'Data Scientist', status: 'applied', appliedAt: '2026-05-01T09:00:00Z' },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        const method = options.method ?? 'GET';
+        const path = String(url);
+        let result = {};
+        if (path === '/api/store') result = data;
+        else if (path === '/api/ai/jobs') result = { jobs: [] };
+        else if (path === '/api/applications') {
+          result = {
+            applications: apps,
+            stats: { total: apps.length, last7: 0, last30: 0, responseRate: 0 },
+            current: { dir: '/tmp/current', files: [], applications: 0, inFlight: 0 },
+          };
+        } else if (path.endsWith('/status') && method === 'POST') {
+          const id = decodeURIComponent(path.split('/').slice(-2)[0]);
+          const { status } = JSON.parse(options.body);
+          apps = apps.map((a) =>
+            a.id === id ? { ...a, status, history: [...(a.history ?? []), { at: '2026-06-01T09:00:00Z', status }] } : a,
+          );
+          result = apps.find((a) => a.id === id);
+        } else if (path.startsWith('/api/applications/') && method === 'DELETE') {
+          const id = decodeURIComponent(path.split('/').pop());
+          apps = apps.filter((a) => a.id !== id);
+          result = { ok: true };
+        } else if (path.startsWith('/api/applications/')) {
+          const id = decodeURIComponent(path.split('/').pop());
+          const application = apps.find((a) => a.id === id);
+          if (!application) {
+            return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: `No application "${id}"` }) };
+          }
+          result = { application, resume: null, copiedFromLabel: null, letter: null, files: [] };
+        }
+        return { ok: true, json: async () => structuredClone(result) };
+      }),
+    );
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#app-detail')?.textContent).toContain('Platform Engineer'));
+  });
+
+  const rowOf = (company) =>
+    [...document.querySelectorAll('#apps-wrap tbody tr:not(.group)')].find((r) => r.children[1]?.textContent === company);
+
+  it('stops showing an application once it has been removed', async () => {
+    rowOf('Helios').querySelector('button.danger').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal')?.classList.contains('hidden')).toBe(false));
+    document.querySelector('#modal-ok').click();
+    await vi.waitFor(() => expect(rowOf('Helios')).toBeUndefined());
+    await new Promise((go) => setTimeout(go, 50));
+
+    const panel = document.querySelector('#app-detail');
+    expect(panel?.textContent, 'the pane no longer shows the removed record').not.toContain('Platform Engineer');
+  });
+
+  it('shows the new status in the open record’s history', async () => {
+    const select = rowOf('Helios').querySelector('select');
+    select.value = 'interview';
+    select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(apps.find((a) => a.id === 'a').status).toBe('interview'));
+
+    await vi.waitFor(() => {
+      expect(document.querySelector('#app-detail')?.textContent).toMatch(/interview/i);
+    });
+  });
+});

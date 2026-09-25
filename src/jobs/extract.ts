@@ -113,6 +113,41 @@ function stripTags(html: string): string {
     .trim();
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  ndash: '–', mdash: '—', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+  hellip: '…', middot: '·', bull: '•', trade: '™', reg: '®', copy: '©',
+  rsaquo: '›', lsaquo: '‹', raquo: '»', laquo: '«', ensp: ' ', emsp: ' ', thinsp: ' ',
+};
+
+/**
+ * A title or a name as a person reads it: every entity decoded, however many
+ * times over it was escaped, and every kind of space made one plain space.
+ *
+ * Measured on SmartRecruiters, whose JSON-LD says "Staff&amp;nbsp;Software
+ * Engineer": JSON-LD is script text and nothing decodes it, a `<meta>`
+ * attribute is read raw here, and a page title comes from the browser decoded
+ * once — which turns "&amp;nbsp;" into "&nbsp;" and stops. Decoded until
+ * nothing changes, so "&amp;amp;" is "&" and "&amp;nbsp;" is a space. Only for
+ * short fields; a description keeps the single decode `stripTags` gives it.
+ */
+export function readableName(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  let out = text;
+  for (let i = 0; i < 5; i++) {
+    const next = out.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, name: string) => {
+      if (name[0] === '#') {
+        const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+      }
+      return Object.hasOwn(NAMED_ENTITIES, name.toLowerCase()) ? NAMED_ENTITIES[name.toLowerCase()]! : whole;
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/[\s\u00a0\u2000-\u200b\u202f\u205f\u3000]+/g, ' ').trim();
+}
+
 /*
  * The parts of a page that are the site rather than the posting.
  *
@@ -908,8 +943,8 @@ function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] })
         const loc = obj.jobLocation as Record<string, unknown> | undefined;
         const addr = (Array.isArray(loc) ? loc[0] : loc)?.['address'] as Record<string, unknown> | undefined;
         return {
-          title: typeof obj.title === 'string' ? obj.title : undefined,
-          company: typeof org?.name === 'string' ? org.name : undefined,
+          title: typeof obj.title === 'string' ? readableName(obj.title) : undefined,
+          company: typeof org?.name === 'string' ? readableName(org.name) : undefined,
           location: [addr?.addressLocality, addr?.addressRegion].filter(Boolean).join(', ') || undefined,
           description: typeof obj.description === 'string' ? stripTags(obj.description) : '',
           facts: jsonLdFacts(obj),
@@ -928,7 +963,7 @@ function metaContent(html: string, names: string[]): string | undefined {
       'i',
     );
     const m = re.exec(html);
-    if (m?.[1]) return m[1].trim();
+    if (m?.[1]) return readableName(m[1]);
   }
   return undefined;
 }
@@ -1171,8 +1206,11 @@ const NOT_A_ROLE =
    * this job — Novena Health" got the phrase treated as a name. Anything
    * that starts with applying, and says nothing after it but where or how,
    * is the page talking about itself.
+   *
+   * And the sign-in step in front of an application. iCIMS titles it "Login
+   * | Careers Markon", and the card said the job was "Login".
    */
-  /^(apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
+  /^(log[ -]?in|log[ -]?on|sign[ -]?(in|on|up)|create (an |your )?account|register|registration|my account|job search|search jobs|apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
 
 /**
  * The role, read out of the address, when the page itself never says it.
@@ -1331,7 +1369,7 @@ function titleParts(pageTitle?: string): string[] {
  */
 function headingRole(html: string): string | undefined {
   for (const match of html.matchAll(/<h[12][^>]*>([\s\S]{0,120}?)<\/h[12]>/gi)) {
-    const text = stripTags(match[1] ?? '').replace(/\s+/g, ' ').trim();
+    const text = readableName(match[1]?.replace(/<[^>]+>/g, ' ') ?? '')!;
     if (text.length > 2 && text.length <= 80 && ROLE_NOUN.test(text) && !NOT_A_ROLE.test(text)) return text;
   }
   return undefined;
@@ -1380,7 +1418,9 @@ function siteName(html: string): string | undefined {
   return undefined;
 }
 
-export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
+export function extractJob(html: string, url?: string, said?: string): ExtractedJob {
+  // Decoded before it is split or tested. See `readableName`.
+  const pageTitle = readableName(said);
   const found = fromJsonLd(html);
   const ld = found && { ...found, company: workdayEmployer(found.company, url) };
   // The page's own text, without the site around it. See `withoutChrome`.
@@ -1398,7 +1438,6 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
    */
   const declared = ld?.title ?? metaContent(html, ['og:title', 'twitter:title']);
   const roleish = parts.find((part) => !NOT_A_ROLE.test(part) && ROLE_NOUN.test(part)) ?? headingRole(html);
-  const leftover = parts.find((part) => !NOT_A_ROLE.test(part));
 
   /** Every way of knowing the employer that does not go through the title. */
   const namedCompany =
@@ -1407,6 +1446,14 @@ export function extractJob(html: string, url?: string, pageTitle?: string): Extr
     siteName(html) ??
     // "Software Engineer Intern at Acme" is the common page-title shape.
     /\bat\s+([A-Z][\w&.\- ]{1,40})\s*$/.exec(pageTitle ?? '')?.[1]?.trim();
+
+  /*
+   * Nor the employer, where something else already named it. With "Login"
+   * refused, "Login | Careers Markon" on careers-markon.icims.com was left
+   * with "Careers Markon" — the name the address gives — and filed it as the
+   * job. What the page never names is an unknown role, not the company twice.
+   */
+  const leftover = parts.find((part) => !NOT_A_ROLE.test(part) && bare(part) !== bare(namedCompany ?? ''));
 
   /*
    * "Apply — Acme" names the employer, not the job.

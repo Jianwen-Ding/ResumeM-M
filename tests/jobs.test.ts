@@ -108,6 +108,102 @@ describe('a page that calls itself Apply', () => {
   });
 });
 
+/*
+ * Entities in a title, escaped once more than they should be.
+ *
+ * Measured on a SmartRecruiters posting: the card read "Staff&amp;nbsp;Software
+ * Engineer". JSON-LD is script text, so nothing ever decodes it; a `<meta>`
+ * attribute is read raw here; and a page title arrives from the browser
+ * decoded exactly once, which leaves "&nbsp;" of an "&amp;nbsp;".
+ */
+describe('a title with its entities escaped twice', () => {
+  const SR_URL = 'https://jobs.smartrecruiters.com/HalewoodGroup/744000012345-staff-software-engineer';
+  const ENTITY = /&(?:[a-z]+|#\d+|#x[0-9a-f]+);/i;
+
+  it('decodes the title and the employer out of JSON-LD', () => {
+    const html = `<html><head><script type="application/ld+json">
+{"@context":"https://schema.org","@type":"JobPosting","title":"Staff&amp;nbsp;Software Engineer",
+"hiringOrganization":{"@type":"Organization","name":"Smith &amp;amp; Nephew"},
+"description":"<p>Build things.</p>"}
+</script></head><body></body></html>`;
+    const job = extractJob(html, SR_URL, 'Staff&nbsp;Software Engineer | Smith & Nephew');
+    expect(job.title).toBe('Staff Software Engineer');
+    expect(job.company).toBe('Smith & Nephew');
+  });
+
+  it('decodes a title read from og:title, a heading, or the page title', () => {
+    const meta = extractJob(
+      `<html><head><meta property="og:title" content="Staff&amp;amp;nbsp;Software Engineer &amp;#8211; R&amp;amp;D"></head><body></body></html>`,
+      SR_URL,
+    );
+    expect(meta.title).toBe('Staff Software Engineer – R&D');
+
+    const heading = extractJob(
+      '<html><body><h1>Staff&amp;nbsp;Software&#160;Engineer</h1><p>Build things.</p></body></html>',
+      'https://example.test/jobs/1',
+      'Careers',
+    );
+    expect(heading.title).toBe('Staff Software Engineer');
+
+    const titled = extractJob('<html><body><p>Build things.</p></body></html>', 'https://example.test/jobs/1', 'Staff&nbsp;Software Engineer | Acme &amp;amp; Co');
+    expect(titled.title).toBe('Staff Software Engineer');
+    expect(titled.company).toBe('Acme & Co');
+  });
+
+  it('never leaves entity text in a title or employer, merged across pages', () => {
+    const merged = mergeJobPages([
+      {
+        url: SR_URL,
+        title: 'Staff&amp;nbsp;Software Engineer | Smith &amp;amp; Nephew',
+        html: '<html><head><meta property="og:site_name" content="Smith &amp;amp; Nephew"></head><body><p>Build things.</p></body></html>',
+      },
+    ]);
+    expect(merged.title).not.toMatch(ENTITY);
+    expect(merged.company).not.toMatch(ENTITY);
+    expect(merged.title).toBe('Staff Software Engineer');
+  });
+});
+
+/*
+ * A sign-in page, which titles itself with the step and not the job.
+ *
+ * Measured on iCIMS: "Login | Careers Markon", served from
+ * careers-markon.icims.com, and the card said the role was "Login". None of
+ * these words is a job, and the rest of such a title is the site's name.
+ */
+describe('a page titled with an auth or step word', () => {
+  const ICIMS = 'https://careers-markon.icims.com/jobs/4021/login';
+  const signIn = (title: string, url = ICIMS) =>
+    extractJob(
+      `<html><head><title>${title}</title></head><body><h1>Sign in</h1>
+       <form><label>Email</label><input name="email"><button>Next</button></form></body></html>`,
+      url,
+      title,
+    );
+
+  it('does not take "Login" as the role on iCIMS\'s sign-in page', () => {
+    const job = signIn('Login | Careers Markon');
+    expect(job.title).toBeUndefined();
+    expect(job.company).toBe('Careers Markon');
+  });
+
+  it.each([
+    'Login', 'Sign in', 'Sign In', 'Log In', 'Create Account', 'Register', 'My Account',
+    'Apply', 'Application', 'Careers', 'Job Search', 'Home',
+  ])('never takes "%s" as the role', (word) => {
+    for (const url of [ICIMS, 'https://example.test/portal']) {
+      for (const title of [word, `${word} | Careers Markon`, `${word} — Markon`]) {
+        expect(signIn(title, url).title ?? '').not.toMatch(new RegExp(`^${word}$`, 'i'));
+      }
+    }
+    expect(looksLikeRoleTitle(word)).toBe(false);
+  });
+
+  it('still reads a real role beside the auth word', () => {
+    expect(signIn('Sign In | Platform Engineer | Markon').title).toBe('Platform Engineer');
+  });
+});
+
 describe('company from url', () => {
   it.each([
     ['https://boards.greenhouse.io/streamly/jobs/1', 'Streamly'],

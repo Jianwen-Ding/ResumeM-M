@@ -41,7 +41,7 @@ import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder 
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, closedAsStale, findApplication, findDraft, fingerprint, freshApplicationId, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { advance, alreadySent, buildBundle, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -559,6 +559,32 @@ export function printedFingerprint(resolved: ResolvedResume): string {
   return createHash('sha1').update(JSON.stringify(printed)).digest('hex');
 }
 
+/**
+ * The alternate of the profile's name that is the legal one: the alternate
+ * whose label says "legal", or none, which resolves to the default.
+ */
+function legalNameChoice(profile: StoreData['profile']): Record<string, string> {
+  if (!isVariantField(profile.name)) return {};
+  const legal = profile.name.variants.find((v) => /\blegal\b/i.test(v.label ?? ''));
+  return legal ? { [PROFILE_NAME_KEY]: legal.id } : {};
+}
+
+/**
+ * The name a resume prints, as a form's preferred-name boxes ask for it —
+ * and nothing when it is the legal name, so a "Preferred name" box on a form
+ * is left for the person rather than given the same name twice.
+ */
+function preferredNameFields(printed: string, legal: string): Record<string, string> {
+  const name = String(printed ?? '').replace(/\s+/g, ' ').trim();
+  if (!name || name === String(legal ?? '').replace(/\s+/g, ' ').trim()) return {};
+  const words = name.split(' ');
+  return {
+    preferred_name: name,
+    preferred_first_name: words[0] ?? name,
+    ...(words.length > 1 ? { preferred_last_name: words.slice(1).join(' ') } : {}),
+  };
+}
+
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
@@ -599,6 +625,51 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   /* ---------------------------------------------------------------- *
    * Store reads                                                       *
    * ---------------------------------------------------------------- */
+
+  /**
+   * Whether anything in the save has changed, as one short string.
+   *
+   * The extension builds from the store and then holds what it built — the
+   * resume list, the copy, what it printed, the answers it matched — and
+   * until now learnt of a change only when its tab came back into view, and
+   * then only for the copy. A variation saved in the editor did not appear in
+   * the card's picker at all until the card was put up again. This is cheap
+   * enough to ask every few seconds: a fingerprint of every file's time and
+   * size, which moves on any write — the editor's, a restore from the
+   * version history, a hand edit — and on nothing else. The build output and
+   * the history's own folder are left out; they change when nothing the card
+   * holds has.
+   */
+  api.get(
+    '/revision',
+    handler(async (_req, res) => {
+      const out = path.resolve(store.outDir());
+      const hash = createHash('sha1');
+      const walk = (dir: string) => {
+        let names: string[];
+        try {
+          names = fs.readdirSync(dir).sort();
+        } catch {
+          return;
+        }
+        for (const name of names) {
+          if (name.startsWith('.')) continue;
+          const full = path.join(dir, name);
+          if (path.resolve(full) === out || name === 'snapshots') continue;
+          let st: fs.Stats;
+          try {
+            st = fs.statSync(full);
+          } catch {
+            continue;
+          }
+          if (st.isDirectory()) walk(full);
+          else hash.update(`${path.relative(store.root, full)}\u0000${st.mtimeMs}\u0000${st.size}\n`);
+        }
+      };
+      walk(store.root);
+      res.json({ revision: hash.digest('hex') });
+    }),
+  );
 
   api.get(
     '/store',
@@ -2632,6 +2703,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const trail: PageSource[] = pages?.length ? pages : html ? [{ url, title, html }] : [];
       if (trail.length === 0) throw new Error('No page HTML supplied');
 
+      // When the base is read, which is what the copy is dated by. See `deriveSpec`.
+      const readAt = new Date().toISOString();
       const data = store.load();
       const current = trail[trail.length - 1]!;
       // With the applicant's own terms the posting names: see `withYourTerms`.
@@ -2886,6 +2959,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         url,
         company: employer,
         role,
+        at: readAt,
       }, data.resumes);
 
       // Showing and hiding entries or bullets, the other half of what the AI
@@ -3005,16 +3079,27 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * The same three-step fallback the workspace endpoint uses, so the
          * name here is the one the stager filed the files under rather than a
          * second opinion about what this application should be called.
+         *
+         * And under the names the stager used, which are `employer` and `role`
+         * above — what `generatedFor` carries and the extension files every
+         * build, stage and send under. This asked the page's own reading
+         * instead, and answered `null` whenever the page did not name both:
+         * the ordinary bare form on a company's own careers host, whose
+         * employer is read off the address. Measured on
+         * `careers.helios-labs.com/apply/platform-engineer`: a row and a
+         * workspace filed as "Helios Labs — Platform Engineer", and every
+         * later analysis of that page said it belonged to no application —
+         * so a card opened on it in a second tab, or from the email link,
+         * had nothing to attach.
          */
-        application:
-          job.company && job.title
-            ? {
-                id:
-                  findDraft(store.loadDrafts(), job.company, job.title)?.id ??
-                  findApplication(data.applications, job.company, job.title)?.id ??
-                  freshApplicationId(data.applications, job.company, job.title),
-              }
-            : null,
+        application: {
+          id:
+            // Not a space left over from an application that is over: see
+            // `draftForJob`.
+            draftForJob(store.loadDrafts(), data.applications, employer, role)?.id ??
+            findApplication(data.applications, employer, role)?.id ??
+            freshApplicationId(data.applications, employer, role),
+        },
         score,
         kind: verdict.kind,
         why: verdict.why,
@@ -3154,8 +3239,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * POST carrying the resume — which is also what the work history needs.
    */
   const autofillFor = (data: StoreData, choices: Record<string, string>, resume?: ResolvedResume) => {
-    // Resolved: a form field takes a name, not a set of them.
-    const p = resolveProfile(data.profile, {}, []);
+    /*
+     * Two names, and the form decides which box gets which.
+     *
+     * The legal name is the profile's own — its default, or the alternate
+     * whose label says "legal" — and the preferred one is the name the resume
+     * being sent prints. A form asking for a legal name gets the first; a
+     * plain "Name" gets the second unless the form has a box of its own for
+     * a preferred name, in which case the plain one is the legal box. That
+     * choice is made in the extension, which can see the form; this only says
+     * what both names are. See `preferredNameFields`.
+     */
+    const p = resolveProfile(data.profile, legalNameChoice(data.profile), []);
+    const printed = resolveProfile(data.profile, choices, []).name;
     return {
       fields: {
         full_name: p.name,
@@ -3183,6 +3279,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * is not plain.
          */
         ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
+        ...preferredNameFields(printed, p.name),
         ...(p.autofill ?? {}),
       },
       answers: data.answers.map((a) => ({
@@ -3229,7 +3326,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/autofill',
     handler(async (req, res) => {
       const data = store.load();
-      const body = (req.body ?? {}) as { resumeId?: unknown; spec?: unknown; choices?: unknown };
+      const asked = (req.body ?? {}) as { resumeId?: unknown; spec?: unknown; choices?: unknown };
+      /*
+       * And, naming none, the resume this save starts from.
+       *
+       * Autofill pressed on a form the card never built a resume for, with no
+       * resume picked in the popup, asked with nothing named — and was given
+       * the profile and no resume at all, so no schools and no jobs: a
+       * Greenhouse form got its School from the profile and every date, and
+       * every second school, left empty, with nothing said. A resume named
+       * that is no longer here goes the same way. The save's own base is what
+       * "my resume" means when nobody said which.
+       */
+      const named =
+        (asked.spec && typeof asked.spec === 'object') ||
+        (typeof asked.resumeId === 'string' && data.resumes.some((r) => r.id === asked.resumeId));
+      const body = named ? asked : { ...asked, spec: undefined, resumeId: defaultBaseId(data.resumes) };
       let resume: ResolvedResume | undefined;
       if (body.spec || body.resumeId) {
         try {
@@ -3391,7 +3503,41 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const { status, note } = req.body as { status: Application['status']; note?: string };
       const id = String(req.params.id);
-      const app = await withCommit(repo, autoCommit(), `${id}: ${status}`, () => advance(store, id, status, note));
+      const app = await withCommit(repo, autoCommit(), `${id}: ${status}`, () => {
+        const moved = advance(store, id, status, note);
+        /*
+         * And back to not sent, its space goes back among the live ones.
+         *
+         * Every send marks the space `submitted`, and nothing ever unmarked
+         * it. The card's "Not sent after all" moves the row back to
+         * `applying` and says it is "back among the ones being worked on";
+         * measured through the routes, the tracker read `applying` while the
+         * Workspace went on listing the space under the sent ones — and
+         * `retireStaleDrafts`, which lets go of sent spaces a fortnight after
+         * the last keystroke, would then close the space of an application
+         * still in flight. Opening it again on the page did not help either:
+         * `POST /workspace` keeps a space that is already `submitted`.
+         *
+         * The other way too: marked as sent here, by hand, the space is
+         * marked as the extension's send marks it, or it stays `drafting`
+         * beside a row that went out and is never retired.
+         *
+         * By id first, which is how a space and the row it opened share a
+         * name, and by the job's names when the row was made another way —
+         * never a space of an earlier application that is over.
+         */
+        const unsent = status === 'interested' || status === 'applying';
+        const sent = status === 'applied' || status === 'interview' || status === 'offer';
+        if (unsent || sent) {
+          const drafts = store.loadDrafts();
+          const space =
+            drafts.find((d) => d.id === moved.id) ??
+            draftForJob(drafts, store.load().applications, moved.company, moved.role);
+          if (space && unsent && space.status === 'submitted') store.saveDraft({ ...space, status: 'drafting' });
+          if (space && sent && space.status !== 'submitted') store.saveDraft({ ...space, status: 'submitted' });
+        }
+        return moved;
+      });
       res.json(app);
     }),
   );
@@ -3803,8 +3949,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * every other path uses it — apply, be turned down, and apply again to
        * the repost the same day, and today's id is already taken.
        */
+      /*
+       * And never a space that belongs to an application already over — see
+       * `draftForJob`. Its id is that application's, and the row written
+       * under it below replaced the rejection with the repost.
+       */
       const id =
-        findDraft(store.loadDrafts(), body.company, body.role)?.id ??
+        draftForJob(store.loadDrafts(), data.applications, body.company, body.role)?.id ??
         findApplication(data.applications, body.company, body.role)?.id ??
         freshApplicationId(data.applications, body.company, body.role);
 
@@ -3904,13 +4055,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          *
          * Read off the tracker rather than remembered, so the two lists cannot
          * disagree about the same job whichever of them was written first.
-         * `alreadySent` covers everything past `applying`, because an
-         * application at `interviewing` went out too.
+         * `liveOneSent` covers everything past `applying`, because an
+         * application at `interviewing` went out too — but only of the
+         * application still live. `alreadySent` counted a rejection from
+         * March, so the space for the repost opened as sent.
          */
         status:
           existing?.status === 'submitted'
             ? 'submitted'
-            : alreadySent(data.applications, body.company, body.role)
+            : liveOneSent(data.applications, body.company, body.role)
               ? 'submitted'
               : (existing?.status ?? 'drafting'),
         coverLetter: existing?.coverLetter ?? {
@@ -4047,7 +4200,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * its own commit callback, synchronously too, so one of the two always
          * sees the other.
          */
-        if (draft.status !== 'submitted' && alreadySent(store.load().applications, draft.company, draft.role)) {
+        if (draft.status !== 'submitted' && liveOneSent(store.load().applications, draft.company, draft.role)) {
           draft.status = 'submitted';
         }
         const written = store.saveDraft(draft);
@@ -4188,6 +4341,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
 
       const { useAi, baseResumeId } = req.body as { useAi?: boolean; baseResumeId?: string };
+      // When the base is read, which is what the copy is dated by. See `deriveSpec`.
+      const readAt = new Date().toISOString();
       const data = store.load();
 
       // The posting text: fetched from the link when there is one, falling
@@ -4271,6 +4426,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         url: draft.url,
         company: draft.company,
         role: draft.role,
+        at: readAt,
       }, data.resumes);
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
       if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
@@ -5036,6 +5192,33 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }
       restored.id = id; // the filename remains the source of truth for the id
+
+      /*
+       * The tier stays the one the resume has now.
+       *
+       * A version is what the resume *said*, and the tier is not something it
+       * says: it is how the save is organised, which is why it has its own
+       * route and never rides along with an edit. The old file carries the
+       * tier it had then, and writing that back put a tailored copy somebody
+       * had since marked Kept back on Temporary with the clock it started on
+       * a month earlier — measured, it was in `/resumes/expiring` straight
+       * after the restore, and the next start swept it. The timeline shows no
+       * tier change as a version, so nothing said the version being chosen
+       * was one in which the resume was on its way out.
+       *
+       * As written, not as `loadResumes` tiers it in memory: that stamps a
+       * date on read that must never reach disk. A resume that is gone keeps
+       * the old version's tier, since there is nothing now to keep.
+       */
+      const standing = store.loadResumesAsWritten().find((r) => r.id === id);
+      if (standing) {
+        delete restored.tier;
+        delete restored.temporaryFrom;
+        delete restored.base;
+        if (standing.tier !== undefined) restored.tier = standing.tier;
+        if (standing.temporaryFrom !== undefined) restored.temporaryFrom = standing.temporaryFrom;
+        if (standing.base !== undefined) restored.base = standing.base;
+      }
 
       /*
        * Committed whether or not auto-commit is on, for the same reason the

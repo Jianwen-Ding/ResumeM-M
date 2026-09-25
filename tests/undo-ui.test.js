@@ -48,10 +48,20 @@ describe('undo in the builder', () => {
           r.id === id ? { ...r, tier: body.tier, ...(body.tier === 'temporary' ? {} : { temporaryFrom: undefined }) } : r,
         );
         result = { ok: true };
+      } else if (url.endsWith('/rename') && method === 'POST') {
+        const id = decodeURIComponent(url.split('?')[0].split('/').slice(-2)[0]);
+        data.resumes = data.resumes.map((r) => (r.id === id ? { ...r, label: body.label } : r));
+        result = data.resumes.find((r) => r.id === id);
       } else if (url.startsWith('/api/resumes/') && method === 'PUT') {
         const id = decodeURIComponent(url.split('?')[0].split('/').pop());
-        data.resumes = data.resumes.map((r) => (r.id === id ? { ...body, id } : r));
+        data.resumes = data.resumes.some((r) => r.id === id)
+          ? data.resumes.map((r) => (r.id === id ? { ...body, id } : r))
+          : [...data.resumes, { ...body, id }];
         result = data.resumes.find((r) => r.id === id);
+      } else if (url.startsWith('/api/resumes/') && method === 'DELETE') {
+        const id = decodeURIComponent(url.split('?')[0].split('/').pop());
+        data.resumes = data.resumes.filter((r) => r.id !== id);
+        result = { ok: true };
       } else if (url.startsWith('/api/entries/') && method === 'PUT') {
         data.entries = data.entries.some((e) => e.id === body.id)
           ? data.entries.map((e) => (e.id === body.id ? body : e))
@@ -227,6 +237,41 @@ describe('undo in the builder', () => {
   });
 
   /*
+   * Rename is the tier chip's problem again, one button along.
+   *
+   * `POST /resumes/:id/rename` is action-shaped, so `docKeyFor` records no
+   * step for it — while every step already on the stack holds the resume
+   * under its old name, and undo puts a whole resume back. Tick a box, rename
+   * the resume, press Ctrl+Z meaning the box: the name went back too, with
+   * the status line saying only "Undid change".
+   */
+  it('keeps a new name when you undo something done before the rename', async () => {
+    const boxes = [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+    boxes[0].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+    const ticked = structuredClone(spec('newgrad'));
+
+    document.querySelector('#btn-rename-resume').click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-content [name="label"]').value = 'Renamed resume';
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(spec('newgrad').label).toBe('Renamed resume'));
+
+    // The step the user means is the rename, the last thing they did.
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(spec('newgrad').label, 'one press takes back the rename').toBe(ticked.label);
+    expect(spec('newgrad').sections, 'and only the rename').toEqual(ticked.sections);
+
+    // And a second press takes back the box, under the name it now has.
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(spec('newgrad').sections).not.toEqual(ticked.sections);
+  });
+
+  /*
    * Adding an entry writes the entry and the section that lists it. Recorded
    * per request that is two presses, and the state in between is one no
    * action ever produced — the entry is in the save with nothing pointing at
@@ -331,6 +376,33 @@ describe('undo in the builder', () => {
     expect(spec('newgrad')).not.toEqual(afterEdit);
     expect(selector.value, 'the editor followed the change').toBe('newgrad');
     expect(document.querySelector('#status').textContent).toMatch(/new grad/i);
+  });
+
+  /*
+   * Undoing a "Save as variation" takes away the resume on screen, and the
+   * editor went wherever a save with no resume open goes — its first base —
+   * rather than back to the one the copy was made from, which is where the
+   * person was when they made it. The next edit then landed on a resume they
+   * had not been looking at.
+   */
+  it('goes back to the resume a copy was made from when the copy is undone', async () => {
+    // Not the one a save with nothing open falls back to, or this proves nothing.
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'intern';
+    selector.dispatchEvent(new Event('change'));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    document.querySelector('#btn-save-as').click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-content [name="label"]').value = 'A copy to take back';
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(selector.value).toBe('intern-variant'));
+
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(spec('intern-variant'), 'the copy is gone').toBeUndefined();
+    expect(selector.value, 'and the editor is back on the one it was copied from').toBe('intern');
   });
 
   /*

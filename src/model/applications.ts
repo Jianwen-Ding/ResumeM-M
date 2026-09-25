@@ -447,12 +447,19 @@ export function freshApplicationId(apps: Application[], company: string, role: s
  * are in the middle of would be a lie told confidently. Everything past
  * sending counts, `closed` included — a job you were turned down for is the
  * one you would most like to be reminded about before writing another letter.
+ *
+ * Except a close the tracker made itself (see `closedAsStale`), which is
+ * `applying` left alone for a fortnight: nothing was sent, and it is the same
+ * application carrying on when somebody comes back to it. Counted, the card
+ * met the person coming back to finish it with "You applied to this on 4
+ * September — and it closed. See what you sent", dated the day they started
+ * and pointing at nothing sent.
  */
 export function alreadySent(apps: Application[], company: string, role: string): Application | undefined {
   const key = identity(company, role);
   return apps
     .filter((a) => identity(a.company, a.role) === key)
-    .filter((a) => a.status !== 'interested' && a.status !== 'applying')
+    .filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
 }
 
@@ -467,6 +474,60 @@ export function findDraft<T extends { id: string; company: string; role: string;
   if (same.length === 0) return undefined;
   const open = same.filter((d) => d.status !== 'submitted');
   return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
+}
+
+/**
+ * The workspace a job should be written in now, leaving out any that belong
+ * to an application that is over.
+ *
+ * `findDraft` answers by name alone, and a sent space is kept for a fortnight
+ * after its last keystroke — longer than most rejections take to arrive. So a
+ * job turned down on Monday and reposted on Wednesday still had its old space,
+ * `findDraft` handed it back, and `POST /workspace` took that space's id for
+ * the new attempt. The id is the rejected application's, `findApplication`
+ * rightly found no live row, and the "new" row was written with
+ * `upsertApplication` — which replaces by id. Measured through the routes:
+ * `closed` with three lines of history became `applying` with one, the
+ * rejection note and the snapshot folder's address gone, and the fresh space
+ * opened as `submitted`, holding the old letter and the old answers, for an
+ * application nobody had sent.
+ *
+ * Over means what it means to `findApplication`: the space's own row is
+ * closed, and not closed only for being left alone. A sent space with no row
+ * of its own counts as over too when every row this job has is finished — it
+ * was sent, and the send it was for is behind it.
+ */
+export function draftForJob<T extends { id: string; company: string; role: string; status: string; updatedAt?: string }>(
+  drafts: T[],
+  apps: Application[],
+  company: string,
+  role: string,
+): T | undefined {
+  const live = findApplication(apps, company, role);
+  const over = (d: T): boolean => {
+    const row = apps.find((a) => a.id === d.id);
+    if (row) return row.status === 'closed' && !closedAsStale(row);
+    return d.status === 'submitted' && !live && Boolean(alreadySent(apps, company, role));
+  };
+  return findDraft(
+    drafts.filter((d) => !over(d)),
+    company,
+    role,
+  );
+}
+
+/**
+ * Whether the application being worked on now has gone out.
+ *
+ * `alreadySent` is the question a person asks in front of a posting — "have
+ * I ever sent this one" — and a rejection from March answers yes. That is the
+ * wrong question for opening a space: a space for the repost opened as
+ * `submitted` because of the rejection, and sat under the sent ones in the
+ * Workspace while it was being written. This asks it of the live row only.
+ */
+export function liveOneSent(apps: Application[], company: string, role: string): boolean {
+  const live = findApplication(apps, company, role);
+  return Boolean(live) && live!.status !== 'interested' && live!.status !== 'applying' && !closedAsStale(live!);
 }
 
 export interface BundleRequest {
@@ -1037,6 +1098,9 @@ export const DEFAULT_APPLYING_DAYS = 14;
  * (see `findApplication`). One closed here was only left alone for a while,
  * and picking it up again is the same application carrying on — it must not
  * become a second row beside the first.
+ *
+ * The editor reads it too, to leave the tracker's Sent column blank for one
+ * (`sentOn` in web/app.js), so a change of wording here is a change there.
  */
 const STALE_NOTE = 'Closed on its own: at Applying for';
 
@@ -1122,10 +1186,6 @@ export function stats(apps: Application[]): TrackerStats {
   const byStatus: Record<string, number> = {};
   for (const a of apps) byStatus[a.status] = (byStatus[a.status] ?? 0) + 1;
 
-  const now = Date.now();
-  const since = (days: number) =>
-    apps.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
-
   /*
    * A response is somebody coming back to you. `closed` is not counted: it
    * covers a rejection, which is a reply, and being ghosted, which is the
@@ -1133,8 +1193,16 @@ export function stats(apps: Application[]): TrackerStats {
    * either way would state something the data does not know.
    */
   const responded = apps.filter((a) => ['interview', 'offer'].includes(a.status)).length;
-  // "Applying" has not been sent yet, so it cannot have drawn a response.
-  const sent = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying').length;
+  // "Applying" has not been sent yet, so it cannot have drawn a response —
+  // and nor has one closed only for sitting at Applying. See `closedAsStale`.
+  const wentOut = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a));
+  const sent = wentOut.length;
+
+  // Sent in the window, so over the same rows: every row started in it was
+  // counted, and a stale close or a form still open read as sent lately.
+  const now = Date.now();
+  const since = (days: number) =>
+    wentOut.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
 
   return {
     total: apps.length,

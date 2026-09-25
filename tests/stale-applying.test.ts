@@ -4,7 +4,7 @@ import request from 'supertest';
 import { Repo } from '../src/git/repo.js';
 import { createApi } from '../src/server/api.js';
 import { applyingDays, closeStaleApplying, tidyWorkdayNames } from '../src/server/sweep.js';
-import { closedAsStale, findApplication, goneStale } from '../src/model/applications.js';
+import { alreadySent, closedAsStale, findApplication, goneStale, stats } from '../src/model/applications.js';
 import { makeTempStore } from './helpers.js';
 import type { Application } from '../src/model/types.js';
 
@@ -132,6 +132,35 @@ describe('coming back to one it closed', () => {
     expect(apps[0]).toMatchObject({ id: 'Dormant', status: 'applied' });
   });
 
+  /*
+   * Nothing was sent, so nothing says it was. Counted as sent, the card met
+   * somebody coming back to finish it with "You applied to this on … — and it
+   * closed", and the response rate counted it among the applications that
+   * went out.
+   */
+  it('is not something already sent, to the card or to the response rate', async () => {
+    const apps = temp.store.load().applications;
+    expect(alreadySent(apps, 'Dormant', 'Software Engineer')).toBeUndefined();
+    expect(stats([...apps, row('Heard', 'interview', daysAgo(5))]).responseRate).toBe(100);
+    // A close somebody chose is still one to be reminded of.
+    const turned = row('Turned', 'closed', daysAgo(5), { history: [{ at: daysAgo(5), status: 'closed', note: 'Rejected' }] });
+    expect(alreadySent([turned], 'Turned', 'Software Engineer')?.id).toBe('Turned');
+  });
+
+  /*
+   * Nor among the ones sent lately. `last7` and `last30` are "applications
+   * sent in the last 7 and 30 days", and counted every row started in them —
+   * so the tracker's "Last 30 days" read 3 beside a response rate worked out
+   * over 1, the other two being this close and a form still being filled in.
+   */
+  it('and is not counted among the applications sent lately', () => {
+    const apps = temp.store.load().applications;
+    const s = stats([...apps, row('Heard', 'interview', daysAgo(5)), row('Filling', 'applying', daysAgo(2))]);
+    expect(s.last30).toBe(1);
+    expect(s.last7).toBe(1);
+    expect(s.responseRate).toBe(100);
+  });
+
   it('while one closed by hand stays closed, and a fresh attempt is a row of its own', async () => {
     temp.write('applications.yaml', [
       row('Turned', 'closed', daysAgo(20), { company: 'Turned', history: [{ at: daysAgo(20), status: 'closed', note: 'Rejected' }] }),
@@ -163,5 +192,24 @@ describe('employers already filed the way Workday books them', () => {
     const draft = temp.store.loadDrafts().find((d) => d.id === 'd-intel')!;
     expect(draft.company).toBe('Intel Corporation');
     expect(draft.updatedAt).toBe(old);
+  });
+  /*
+   * The commit is scoped to the tracker and the workspaces folder, and a save
+   * that has never opened a workspace has no such folder. `git add` refuses a
+   * path that matches nothing — "pathspec 'drafts' did not match any files"
+   * — so the rename was written and the commit behind it failed, leaving the
+   * tracker changed on disk and in no version.
+   */
+  it('are committed in a save that has never had a workspace', async () => {
+    const WD = 'https://intel.wd1.myworkdayjobs.com/External/job/US-OR-Hillsboro/Software-Engineering-Intern_JR1';
+    temp.store.saveConfig({ git: { autoCommit: true } });
+    temp.write('applications.yaml', [row('intel', 'applying', daysAgo(3), { company: '100 Intel Corporation', url: WD })]);
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+
+    expect(await tidyWorkdayNames(temp.store, repo)).toHaveLength(1);
+
+    expect(repo.lastCommitError, 'the commit did not fail').toBeUndefined();
+    expect(await repo.pending(['applications.yaml']), 'and the tracker is in it').toEqual([]);
   });
 });

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { Repo, cloneRepo } from '../git/repo.js';
+import { Repo, cloneRepo, commitQuietly } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
 import { Store } from '../model/store.js';
 import { currentIgnore } from '../model/current.js';
@@ -67,8 +67,25 @@ function projectSession(store: Store) {
  * nothing either, because the migration starts every clock from now. Which
  * is the point. A save upgraded today loses nothing tonight.
  */
-async function openSave(store: Store, repo: Repo): Promise<void> {
+export async function openSave(store: Store, repo: Repo): Promise<void> {
+  /*
+   * The migrations are committed, under their own names, when auto-commit is
+   * on.
+   *
+   * They wrote the files and nothing else. Measured on a save from before
+   * tiers, auto-commit on: after the start, `git status` showed the four
+   * resumes and config.yaml modified and the log unchanged. Those changes
+   * then rode into whatever commit came next — "Update entry …" or "Track
+   * application to …" — which is a version history saying a bullet edit
+   * sorted every resume into tiers and moved the page settings up to the
+   * save. Scoped to what each pass writes, as the tracker's passes below
+   * are, so nothing unsaved elsewhere is swept into them.
+   */
+  const autoCommit = store.loadConfig().git.autoCommit;
   const { flattened, tiered, lifted, problems } = store.migrateResumes();
+  if (autoCommit && (flattened.length > 0 || tiered.length > 0 || lifted.length > 0)) {
+    await commitQuietly(repo, 'Bring the resumes up to date with this version', ['resumes', 'config.yaml']);
+  }
   for (const problem of problems) console.warn(`ResumeM-M: ${problem}`);
   if (flattened.length > 0) {
     console.log(`ResumeM-M: folded ${flattened.length} resume(s) that recorded a base into themselves.`);
@@ -89,6 +106,13 @@ async function openSave(store: Store, repo: Repo): Promise<void> {
    * `migrateTailoredIds`.
    */
   const { renamed } = store.migrateTailoredIds();
+  if (autoCommit && renamed.length > 0) {
+    await commitQuietly(repo, 'Rename tailored resumes so two postings cannot share one', [
+      'resumes',
+      'applications.yaml',
+      'drafts',
+    ]);
+  }
   if (renamed.length > 0) {
     console.log(
       `ResumeM-M: renamed ${renamed.length} tailored resume(s) so two postings cannot share one — ` +
