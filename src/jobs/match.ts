@@ -2,7 +2,7 @@ import type { ResumeSpec, StoreData, Variant } from '../model/types.js';
 import { isVariantField } from '../model/types.js';
 import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
 import { inListOrder } from './aiPlan.js';
-import { ORDINARY_WORDS, SUITES } from './extract.js';
+import { ORDINARY_WORDS, productsOf, sameTerm, spellingsOf } from './extract.js';
 
 /**
  * Deterministic variant matching on tags and keyword overlap. This runs with
@@ -30,7 +30,8 @@ export interface MatchResult {
 
 /** Normalise a tag or keyword so "front-end" and "frontend" compare equal. */
 function norm(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+  // And every spelling of one thing as the one: "Postgres" is "PostgreSQL". See `ALIASES`.
+  return sameTerm(s.toLowerCase().replace(/[^a-z0-9+#]/g, ''));
 }
 
 /**
@@ -80,12 +81,15 @@ function spaced(s: string): string {
 }
 
 function mentions(text: string, keyword: string): boolean {
-  const written = spaced(keyword).trim();
-  if (written && text.includes(` ${written} `)) return true;
-  const glued = norm(keyword);
-  if (glued && text.includes(` ${glued} `)) return true;
+  // In any of its spellings: "k8s" answers "Kubernetes". See `ALIASES`.
+  for (const said of spellingsOf(keyword)) {
+    const written = spaced(said).trim();
+    if (written && text.includes(` ${written} `)) return true;
+    const glued = said.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+    if (glued && text.includes(` ${glued} `)) return true;
+  }
   // A suite asked for is answered by any of its products. See `SUITES`.
-  return (SUITES[glued] ?? []).some((product) => text.includes(` ${spaced(product).trim()} `));
+  return productsOf(keyword).some((product) => text.includes(` ${spaced(product).trim()} `));
 }
 
 export interface MatchOptions {

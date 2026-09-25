@@ -85,7 +85,29 @@ const KEYWORD_VOCAB = [
    */
   'git', 'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'jenkins', 'teamcity', 'circleci',
   'github actions', 'atlassian', 'atlassian bamboo', 'artifactory', 'ansible', 'prometheus', 'grafana',
+  'microsoft office',
 ];
+
+/**
+ * One thing, written more than one way.
+ *
+ * A posting asks for PostgreSQL and a resume says Postgres; a posting says
+ * k8s and a resume says Kubernetes. The words differ and the experience does
+ * not, and nothing matched: the two spellings were two keywords, each
+ * answered only by itself. So a posting naming any spelling here is read as
+ * asking for the first, and a resume line in any spelling answers it.
+ *
+ * Only spellings that mean nothing else. "JS" is left out: written as a word
+ * it is JavaScript, but `Node.js` and `Vue.js` split to the same word, and
+ * saying them is not saying JavaScript.
+ */
+export const ALIASES: Record<string, string[]> = {
+  postgresql: ['postgres'],
+  kubernetes: ['k8s'],
+  gcp: ['google cloud'],
+  aws: ['amazon web services'],
+  'microsoft office': ['ms office', 'office 365', 'microsoft 365'],
+};
 
 /**
  * A vendor's suite, named by its products.
@@ -99,7 +121,36 @@ const KEYWORD_VOCAB = [
  */
 export const SUITES: Record<string, string[]> = {
   atlassian: ['jira', 'confluence', 'bitbucket', 'atlassian bamboo', 'trello', 'opsgenie', 'statuspage', 'sourcetree'],
+  aws: ['dynamodb', 'ec2', 'redshift', 'cloudformation', 'sagemaker'],
+  gcp: ['bigquery'],
+  // Not bare "Word" or "Excel": one is a word, and "you will excel" is a sentence.
+  'microsoft office': ['powerpoint', 'microsoft excel', 'microsoft word', 'ms excel', 'ms word'],
 };
+
+/** A term with its separators gone: "Google Cloud" → `googlecloud`, as match and fit key them. */
+const glue = (s: string) => s.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+
+/** Every spelling's glued form → the glued form of the term it spells. See `ALIASES`. */
+const SPELLS: Map<string, string> = new Map(
+  Object.entries(ALIASES).flatMap(([term, others]) => [term, ...others].map((s) => [glue(s), glue(term)] as [string, string])),
+);
+const SPELLINGS: Map<string, string[]> = new Map(Object.entries(ALIASES).map(([term, others]) => [glue(term), [term, ...others]]));
+const PRODUCTS: Map<string, string[]> = new Map(Object.entries(SUITES).map(([suite, products]) => [glue(suite), products]));
+
+/** The one glued form every spelling of a term shares: `postgres` → `postgresql`. */
+export function sameTerm(glued: string): string {
+  return SPELLS.get(glued) ?? glued;
+}
+
+/** Every way a keyword is written, itself included. See `ALIASES`. */
+export function spellingsOf(keyword: string): string[] {
+  return SPELLINGS.get(sameTerm(glue(keyword))) ?? [keyword];
+}
+
+/** The products of a suite, for a keyword that names one. See `SUITES`. */
+export function productsOf(keyword: string): string[] {
+  return PRODUCTS.get(sameTerm(glue(keyword))) ?? [];
+}
 
 function stripTags(html: string): string {
   return html
@@ -1136,6 +1187,13 @@ export function extractKeywords(text: string): string[] {
         found.add(term);
         break;
       }
+    }
+  }
+  // Every spelling of one thing, read as the one. See `ALIASES`.
+  for (const [term, others] of Object.entries(ALIASES)) {
+    for (const other of others) {
+      const said = found.delete(other) || new RegExp(`(^|[^a-z0-9+#])${escapeTerm(other)}([^a-z0-9+#]|$)`).test(lower);
+      if (said) found.add(term);
     }
   }
   // And the suite, when a product of it is asked for. See `SUITES`.
