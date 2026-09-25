@@ -492,9 +492,15 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
    * is an order number as often as anything, so only a number that follows
    * its own label, and only one with five digits or more in it — "SIN wave",
    * "a driver's license and a car" are words, and are left.
+   *
+   * And the national IDs by their own names — a national or government ID,
+   * India's Aadhaar, Singapore's NRIC, Brazil's CPF, Spain's DNI and NIE,
+   * Poland's PESEL, the Dutch BSN, the Swedish personnummer — which went to
+   * the AI as written. A dot joins the parts of one as a space or a dash
+   * does: "123.456.789-09" ended after three digits.
    */
   out = out.replace(
-    new RegExp(String.raw`\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin)(${LABEL_HINT}\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ \-][A-Z]?\d[A-Z0-9]*)*)`, 'gi'),
+    new RegExp(String.raw`\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin|national\s+id(?:entity|entification)?(?:\s+card)?(?:\s+(?:no\.?|number|#))?|gov(?:ernmen)?t\.?[\s-]+(?:issued\s+)?id(?:\s+(?:no\.?|number|#))?|aadhaa?r(?:\s+(?:no\.?|number))?|nric|cpf|dni|nie|pesel|bsn|personnummer|personal\s+(?:identity|identification|id)\s+(?:no\.?|number|code))(${LABEL_HINT}\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ .\-][A-Z]?\d[A-Z0-9]*)*)`, 'gi'),
     (m, label: string, gap: string, value: string) => {
       if ((value.match(/\d/g) ?? []).length < 5) return m;
       redacted++;

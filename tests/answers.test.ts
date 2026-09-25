@@ -978,3 +978,40 @@ describe('an identifier with a hint between its label and its value', () => {
     expect(redactIdentifiers(text).text).toBe(text);
   });
 });
+
+describe('a national ID number, where it is named', () => {
+  /*
+   * The labelled numbers were an American, a Canadian and a British set. A
+   * national ID by that name, India's Aadhaar, Singapore's NRIC, Brazil's CPF,
+   * Spain's DNI and NIE, Poland's PESEL, the Dutch BSN and the Swedish
+   * personnummer went to the AI as written — the CPF also because its dots
+   * ended the number after three digits.
+   */
+  it.each([
+    ['National ID: 12345678', '12345678'],
+    ['National ID number: A1234567', 'A1234567'],
+    ['National identity card number 850402-1234', '850402-1234'],
+    ['Government-issued ID #: 4410-2231-77', '4410-2231-77'],
+    ['Aadhaar: 1234 5678 9012', '1234 5678 9012'],
+    ['NRIC: S1234567D', 'S1234567D'],
+    ['CPF: 123.456.789-09', '123.456.789-09'],
+    ['DNI: 12345678Z', '12345678Z'],
+    ['NIE: X1234567L', 'X1234567L'],
+    ['PESEL 85040212345', '85040212345'],
+    ['BSN: 123456782', '123456782'],
+    ['Personnummer: 850402-1234', '850402-1234'],
+    ['Personal identity number 19850402-1234', '19850402-1234'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'A national ID is required for the background check',
+    'Bring a government-issued ID on day 1',
+    'Requisition ID: 2025-10-0045',
+  ])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
+  });
+});
