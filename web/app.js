@@ -6693,6 +6693,31 @@ async function flushDraftEdits() {
   await draftSave.pending?.catch(() => {});
 }
 
+/**
+ * The resumes an application could send, in its "Send" picker.
+ *
+ * Its own function so the picker can be redrawn without the draft: it was
+ * drawn with the draft and never again, so a resume renamed in the builder
+ * was still offered under its old name, and one saved there was not offered
+ * at all, until the draft happened to be reopened. See the Workspace tab.
+ */
+function drawResumeChoices(select, draft) {
+  select.replaceChildren(
+    /*
+     * A placeholder when nothing is attached yet.
+     *
+     * Without one the select showed the first resume in the list as though it
+     * had been chosen, while the draft had no resume at all — so the panel said
+     * "Send: Base resume" and building the files answered "400 Bad Request".
+     * An empty choice is the honest thing to show when no choice has been made.
+     */
+    ...(draft.resumeId ? [] : [el('option', { value: '', textContent: '— choose a resume —' })]),
+    ...state.store.resumes.map((r) =>
+      el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }),
+    ),
+  );
+}
+
 function renderDraft(draft) {
   const panel = $('#draft-editor');
   if (!draft) {
@@ -7006,19 +7031,8 @@ function renderDraft(draft) {
   };
   notesBox.onblur = () => saveDraftNow().catch(() => {});
 
-  const resumeSelect = el('select');
-  /*
-   * A placeholder when nothing is attached yet.
-   *
-   * Without one the select showed the first resume in the list as though it
-   * had been chosen, while the draft had no resume at all — so the panel said
-   * "Send: Base resume" and building the files answered "400 Bad Request".
-   * An empty choice is the honest thing to show when no choice has been made.
-   */
-  if (!draft.resumeId) resumeSelect.append(el('option', { value: '', textContent: '— choose a resume —' }));
-  for (const r of state.store.resumes) {
-    resumeSelect.append(el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }));
-  }
+  const resumeSelect = el('select', { className: 'draft-resume' });
+  drawResumeChoices(resumeSelect, draft);
   resumeSelect.onchange = async () => {
     if (!resumeSelect.value) return;
     draft.resumeId = resumeSelect.value;
@@ -10600,7 +10614,13 @@ function setupTabs() {
         assetUI.load().catch((e) => setStatus(e.message, true));
         loadDocuments().catch((e) => setStatus(e.message, true));
       }
-      if (btn.dataset.tab === 'workspace') loadDrafts().catch((e) => setStatus(e.message, true));
+      if (btn.dataset.tab === 'workspace') {
+        // The builder may have renamed, saved or deleted a resume since the
+        // open draft was drawn. See `drawResumeChoices`.
+        const picker = $('#draft-editor select.draft-resume');
+        if (picker && draftSave.current) drawResumeChoices(picker, draftSave.current);
+        loadDrafts().catch((e) => setStatus(e.message, true));
+      }
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'history') {

@@ -1285,6 +1285,48 @@ async function main() {
       check('keeping the file it was saved as', renamed?.id === 'kafka-heavy-variation', renamed?.id ?? '');
       const shown = await page.locator('#resume-select option:checked').innerText().catch(() => '');
       check('and the picker shows the new name', /Kafka-heavy, renamed/.test(shown), shown);
+
+      /*
+       * And so does the other picker, the one an open application sends from.
+       * It was drawn with the draft and never again, so renaming the resume in
+       * the builder and going back to the Workspace tab left it offering the
+       * old name — and a variation saved meanwhile was not in it at all.
+       */
+      const draft = (
+        await (
+          await fetch(`${server.url}/api/workspace`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ company: 'Picker Ridge', role: 'Data Engineer', source: 'by hand' }),
+          })
+        ).json()
+      ).draft;
+      try {
+        await fetch(`${server.url}/api/workspace/${encodeURIComponent(draft.id)}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ resumeId: renamed?.id }),
+        });
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.locator('.draft-card', { hasText: 'Picker Ridge' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Picker Ridge' }).waitFor({ timeout: 20_000 });
+
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.locator('#btn-rename-resume').click();
+        await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+        await page.locator('#f_label').fill('Kafka-heavy, renamed again');
+        await page.locator('#modal-ok').click();
+        await page.waitForTimeout(1500);
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.waitForTimeout(800);
+        const sends = await page
+          .$eval('#draft-editor select', (s) => s.options[s.selectedIndex]?.textContent ?? '')
+          .catch(() => '(no picker)');
+        check('and an open application sends it under the new name too', sends === 'Kafka-heavy, renamed again', sends);
+      } finally {
+        await fetch(`${server.url}/api/workspace/${encodeURIComponent(draft.id)}`, { method: 'DELETE' }).catch(() => undefined);
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+      }
     }
 
     /* -------------------------------------------------------------- *
