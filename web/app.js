@@ -5849,6 +5849,11 @@ function celebrate(company) {
 function sentOn(a) {
   const went = (a.history ?? []).find((h) => h.status === 'applied');
   if (went?.at) return went.at.slice(0, 10);
+  // Closed by the tracker for sitting at Applying: never sent, whatever
+  // `closed` usually means. See `closedAsStale` in applications.ts, whose
+  // note this is.
+  const last = a.history?.at(-1);
+  if (a.status === 'closed' && last?.status === 'closed' && /^Closed on its own: at Applying for/.test(last.note ?? '')) return '';
   // Rows from before the history was kept, or filed straight as applied.
   return ['applied', 'interview', 'offer', 'closed'].includes(a.status) ? (a.appliedAt?.slice(0, 10) ?? '') : '';
 }

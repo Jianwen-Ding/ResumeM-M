@@ -1098,6 +1098,9 @@ export const DEFAULT_APPLYING_DAYS = 14;
  * (see `findApplication`). One closed here was only left alone for a while,
  * and picking it up again is the same application carrying on — it must not
  * become a second row beside the first.
+ *
+ * The editor reads it too, to leave the tracker's Sent column blank for one
+ * (`sentOn` in web/app.js), so a change of wording here is a change there.
  */
 const STALE_NOTE = 'Closed on its own: at Applying for';
 

@@ -205,3 +205,40 @@ describe('the tracker is ordered by what needs the reader', () => {
     expect(document.querySelectorAll('#apps-wrap tbody tr.group')).toHaveLength(0);
   });
 });
+
+/*
+ * The Sent column, for a row the tracker closed itself.
+ *
+ * `closeStaleApplying` closes an application left at Applying for a fortnight
+ * with nothing sent, and says so in the note it writes. `sentOn` falls back to
+ * the day a row was started for anything closed — right for a row from before
+ * the history was kept, and for a close somebody chose — so a stale close read
+ * as sent on the day it was begun. The server stopped counting these as sent
+ * (`alreadySent`, the response rate); the column beside them still did.
+ */
+describe('the Sent column', () => {
+  const sentFor = (company) =>
+    [...document.querySelectorAll('#apps-wrap tbody tr')].find((tr) => tr.children[1]?.textContent === company)
+      ?.children[4]?.textContent;
+
+  it('is blank for one the tracker closed for sitting at Applying, and dated for one closed by hand', async () => {
+    await draw([
+      app({
+        id: 's',
+        company: 'StaleCo',
+        status: 'closed',
+        appliedAt: OLD,
+        history: [
+          { at: OLD, status: 'applying', note: 'Workspace opened' },
+          { at: MID, status: 'closed', note: 'Closed on its own: at Applying for 14 days with nothing sent' },
+        ],
+      }),
+      app({ id: 't', company: 'TurnedCo', status: 'closed', appliedAt: OLD, history: [{ at: OLD, status: 'closed', note: 'Rejected' }] }),
+      app({ id: 'o', company: 'OldCo', status: 'closed', appliedAt: OLD }),
+    ]);
+
+    expect(sentFor('StaleCo')).toBe('');
+    expect(sentFor('TurnedCo')).toBe('2026-01-01');
+    expect(sentFor('OldCo')).toBe('2026-01-01');
+  });
+});
