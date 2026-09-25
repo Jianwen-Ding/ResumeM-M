@@ -108,6 +108,62 @@ describe('a page that calls itself Apply', () => {
   });
 });
 
+/*
+ * Entities in a title, escaped once more than they should be.
+ *
+ * Measured on a SmartRecruiters posting: the card read "Staff&amp;nbsp;Software
+ * Engineer". JSON-LD is script text, so nothing ever decodes it; a `<meta>`
+ * attribute is read raw here; and a page title arrives from the browser
+ * decoded exactly once, which leaves "&nbsp;" of an "&amp;nbsp;".
+ */
+describe('a title with its entities escaped twice', () => {
+  const SR_URL = 'https://jobs.smartrecruiters.com/HalewoodGroup/744000012345-staff-software-engineer';
+  const ENTITY = /&(?:[a-z]+|#\d+|#x[0-9a-f]+);/i;
+
+  it('decodes the title and the employer out of JSON-LD', () => {
+    const html = `<html><head><script type="application/ld+json">
+{"@context":"https://schema.org","@type":"JobPosting","title":"Staff&amp;nbsp;Software Engineer",
+"hiringOrganization":{"@type":"Organization","name":"Smith &amp;amp; Nephew"},
+"description":"<p>Build things.</p>"}
+</script></head><body></body></html>`;
+    const job = extractJob(html, SR_URL, 'Staff&nbsp;Software Engineer | Smith & Nephew');
+    expect(job.title).toBe('Staff Software Engineer');
+    expect(job.company).toBe('Smith & Nephew');
+  });
+
+  it('decodes a title read from og:title, a heading, or the page title', () => {
+    const meta = extractJob(
+      `<html><head><meta property="og:title" content="Staff&amp;amp;nbsp;Software Engineer &amp;#8211; R&amp;amp;D"></head><body></body></html>`,
+      SR_URL,
+    );
+    expect(meta.title).toBe('Staff Software Engineer – R&D');
+
+    const heading = extractJob(
+      '<html><body><h1>Staff&amp;nbsp;Software&#160;Engineer</h1><p>Build things.</p></body></html>',
+      'https://example.test/jobs/1',
+      'Careers',
+    );
+    expect(heading.title).toBe('Staff Software Engineer');
+
+    const titled = extractJob('<html><body><p>Build things.</p></body></html>', 'https://example.test/jobs/1', 'Staff&nbsp;Software Engineer | Acme &amp;amp; Co');
+    expect(titled.title).toBe('Staff Software Engineer');
+    expect(titled.company).toBe('Acme & Co');
+  });
+
+  it('never leaves entity text in a title or employer, merged across pages', () => {
+    const merged = mergeJobPages([
+      {
+        url: SR_URL,
+        title: 'Staff&amp;nbsp;Software Engineer | Smith &amp;amp; Nephew',
+        html: '<html><head><meta property="og:site_name" content="Smith &amp;amp; Nephew"></head><body><p>Build things.</p></body></html>',
+      },
+    ]);
+    expect(merged.title).not.toMatch(ENTITY);
+    expect(merged.company).not.toMatch(ENTITY);
+    expect(merged.title).toBe('Staff Software Engineer');
+  });
+});
+
 describe('company from url', () => {
   it.each([
     ['https://boards.greenhouse.io/streamly/jobs/1', 'Streamly'],

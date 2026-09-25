@@ -113,6 +113,41 @@ function stripTags(html: string): string {
     .trim();
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  ndash: '–', mdash: '—', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+  hellip: '…', middot: '·', bull: '•', trade: '™', reg: '®', copy: '©',
+  rsaquo: '›', lsaquo: '‹', raquo: '»', laquo: '«', ensp: ' ', emsp: ' ', thinsp: ' ',
+};
+
+/**
+ * A title or a name as a person reads it: every entity decoded, however many
+ * times over it was escaped, and every kind of space made one plain space.
+ *
+ * Measured on SmartRecruiters, whose JSON-LD says "Staff&amp;nbsp;Software
+ * Engineer": JSON-LD is script text and nothing decodes it, a `<meta>`
+ * attribute is read raw here, and a page title comes from the browser decoded
+ * once — which turns "&amp;nbsp;" into "&nbsp;" and stops. Decoded until
+ * nothing changes, so "&amp;amp;" is "&" and "&amp;nbsp;" is a space. Only for
+ * short fields; a description keeps the single decode `stripTags` gives it.
+ */
+export function readableName(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  let out = text;
+  for (let i = 0; i < 5; i++) {
+    const next = out.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, name: string) => {
+      if (name[0] === '#') {
+        const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+      }
+      return Object.hasOwn(NAMED_ENTITIES, name.toLowerCase()) ? NAMED_ENTITIES[name.toLowerCase()]! : whole;
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/[\s\u00a0\u2000-\u200b\u202f\u205f\u3000]+/g, ' ').trim();
+}
+
 /*
  * The parts of a page that are the site rather than the posting.
  *
@@ -908,8 +943,8 @@ function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] })
         const loc = obj.jobLocation as Record<string, unknown> | undefined;
         const addr = (Array.isArray(loc) ? loc[0] : loc)?.['address'] as Record<string, unknown> | undefined;
         return {
-          title: typeof obj.title === 'string' ? obj.title : undefined,
-          company: typeof org?.name === 'string' ? org.name : undefined,
+          title: typeof obj.title === 'string' ? readableName(obj.title) : undefined,
+          company: typeof org?.name === 'string' ? readableName(org.name) : undefined,
           location: [addr?.addressLocality, addr?.addressRegion].filter(Boolean).join(', ') || undefined,
           description: typeof obj.description === 'string' ? stripTags(obj.description) : '',
           facts: jsonLdFacts(obj),
@@ -928,7 +963,7 @@ function metaContent(html: string, names: string[]): string | undefined {
       'i',
     );
     const m = re.exec(html);
-    if (m?.[1]) return m[1].trim();
+    if (m?.[1]) return readableName(m[1]);
   }
   return undefined;
 }
@@ -1331,7 +1366,7 @@ function titleParts(pageTitle?: string): string[] {
  */
 function headingRole(html: string): string | undefined {
   for (const match of html.matchAll(/<h[12][^>]*>([\s\S]{0,120}?)<\/h[12]>/gi)) {
-    const text = stripTags(match[1] ?? '').replace(/\s+/g, ' ').trim();
+    const text = readableName(match[1]?.replace(/<[^>]+>/g, ' ') ?? '')!;
     if (text.length > 2 && text.length <= 80 && ROLE_NOUN.test(text) && !NOT_A_ROLE.test(text)) return text;
   }
   return undefined;
@@ -1380,7 +1415,9 @@ function siteName(html: string): string | undefined {
   return undefined;
 }
 
-export function extractJob(html: string, url?: string, pageTitle?: string): ExtractedJob {
+export function extractJob(html: string, url?: string, said?: string): ExtractedJob {
+  // Decoded before it is split or tested. See `readableName`.
+  const pageTitle = readableName(said);
   const found = fromJsonLd(html);
   const ld = found && { ...found, company: workdayEmployer(found.company, url) };
   // The page's own text, without the site around it. See `withoutChrome`.
