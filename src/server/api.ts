@@ -429,22 +429,23 @@ function sentBefore(
  * place. `deriveSpec` copies the base's sections and narrows the skills lists
  * to what the posting asked for; `applyInclusion` copies the *same* base's
  * sections and applies what the AI decided — what is shown, what is hidden,
- * and what order it goes in. So the AI's version already carries everything
- * the base had, and the only thing it is missing is the narrowed `items`.
+ * and what order the lines inside an entry go in. So the AI's version already
+ * carries everything the base had, and the only thing it is missing is the
+ * narrowed `items`.
  *
  * It used to be written the other way round — the AI's sections first and
  * `deriveSpec`'s spread over the top, with `entries` and `bullets` named
  * afterwards to put them back. `order` and `bulletOrder` were not named, and
- * they are precisely what `applyInclusion` sets to `manual` to say the AI
- * arranged this itself. `Store.load()` runs `adoptDateOrder` over every
- * resume, so the base carries a date sort for very nearly every section, and
- * the spread restored it: `manual` became `newest` and the arrangement was
- * restacked into date order on the way to the page.
+ * `bulletOrder` is precisely what `applyInclusion` sets to `manual` to say
+ * the AI arranged an entry's lines itself. Whatever the base carried under
+ * those names the spread put back over the AI's — `order` above all, since
+ * `Store.load()` runs `adoptDateOrder` and gives very nearly every section a
+ * date sort — so an arrangement the tool had reported as made was restacked
+ * on the way to the page.
  *
- * Silently, and the tool had already told the model it worked — "experience
- * will read: exp_old, exp_new" — which is the shape of failure that the
- * comments in `applyInclusion` say the `manual` flags exist to prevent. They
- * did their job; this call site undid it one line later.
+ * (The AI no longer reorders entries at all — "AI should be able to
+ * rearrange bullet points but not entries ever" — so a section's `order` is
+ * now always the base's, and comes through here untouched.)
  *
  * Naming the one field that actually differs, rather than spreading a whole
  * object and patching up whatever it broke, is what stops the next field
@@ -467,7 +468,8 @@ function decidedAnything(state: SessionState): boolean {
     Object.keys(plan.choices).length > 0 ||
     Object.keys(plan.skills).length > 0 ||
     Object.keys(plan.order).length > 0 ||
-    Object.keys(plan.entryOrder).length > 0 ||
+    // Not `entryOrder`: the AI cannot reorder entries, so a plan holding only
+    // one decided nothing.
     plan.enable.length > 0 ||
     plan.disable.length > 0 ||
     suggestions.length > 0 ||

@@ -37,8 +37,7 @@ export interface AiPlan {
   /** Entry and bullet ids to leave off. */
   disable: string[];
   /**
-   * A new order for the bullets inside an entry, and for the entries inside a
-   * section, keyed by entry id and by section kind.
+   * A new order for the bullets inside an entry, keyed by entry id.
    *
    * A permutation and nothing else. The set of things on the page is decided
    * by `enable` and `disable`; this only says which comes first. An id that
@@ -52,6 +51,16 @@ export interface AiPlan {
    * that was the whole vocabulary.
    */
   order: Record<string, string[]>;
+  /**
+   * Always empty: the AI never reorders entries. "AI should be able to
+   * rearrange bullet points but not entries ever." The order of the entries
+   * in a section is the person's — the date sort, or the one they dragged.
+   *
+   * The field stays so a plan keeps its shape (a session file or a reply that
+   * still carries one is read without breaking), but `sanitizeAiPlan` never
+   * fills it and notes in `rejected` a reply that asked, and `applyInclusion`
+   * ignores it whatever it holds.
+   */
   entryOrder: Record<string, string[]>;
   /** What was thrown away, so the caller can say the reply was partly junk. */
   rejected: string[];
@@ -165,7 +174,7 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
     }
   }
 
-  /* Ordering. A permutation of what is already there, never a way in. */
+  /* Ordering of an entry's bullets. A permutation of what is already there, never a way in. */
   for (const [entryId, ids] of Object.entries((raw.order as Record<string, unknown>) ?? {})) {
     const entry = entries.get(entryId);
     if (!entry || !Array.isArray(ids)) {
@@ -178,12 +187,15 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
     if (named.length > 0) plan.order[entryId] = named;
   }
 
-  for (const [kind, ids] of Object.entries((raw.entryOrder as Record<string, unknown>) ?? {})) {
-    if (!Array.isArray(ids)) continue;
-    const mine = new Set(data.entries.filter((e) => e.kind === kind).map((e) => e.id));
-    const named = dedupe(ids.filter((i): i is string => typeof i === 'string' && mine.has(i)));
-    if (named.length !== ids.length) plan.rejected.push(`entryOrder ${kind}: dropped ids that are not ${kind} entries`);
-    if (named.length > 0) plan.entryOrder[kind] = named;
+  /*
+   * The order of entries, refused. "AI should be able to rearrange bullet
+   * points but not entries ever": which job comes first is the person's. A
+   * reply that names one is told so in `rejected`, and `entryOrder` stays
+   * empty.
+   */
+  const askedEntryOrder = raw.entryOrder;
+  if (askedEntryOrder && typeof askedEntryOrder === 'object' && Object.keys(askedEntryOrder as object).length > 0) {
+    plan.rejected.push('entryOrder: entries are never reordered, so they keep the order this resume gives them');
   }
 
   return plan;
@@ -330,7 +342,8 @@ export function inListOrder(ids: string[], own: string[], store: string[]): stri
 }
 
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
-  const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
+  // Bullets only: `entryOrder` is never applied, so it is not a reason to act.
+  const reordering = Object.keys(plan.order).length > 0;
   if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;
 
   const sections = (base.sections ?? []).map((s) => ({
@@ -391,34 +404,18 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
   }
 
   /*
-   * And last, the order — after showing and hiding have settled what is on
-   * the page, because reordering a list that is about to lose an entry is
-   * work thrown away, and because `shown` has to materialise the default list
-   * before there is anything to permute.
+   * And last, the order of each entry's lines — after showing and hiding
+   * have settled what is on the page, because reordering a list that is
+   * about to lose a line is work thrown away, and because `shown` has to
+   * materialise the default list before there is anything to permute.
+   *
+   * Never the order of the entries themselves, whatever the plan carries:
+   * "AI should be able to rearrange bullet points but not entries ever". A
+   * section keeps its entries in the order, and the sort, the base gave it —
+   * `sanitizeAiPlan` never fills `entryOrder`, and this is the last door for
+   * a plan built some other way.
    */
   for (const s of sections) {
-    const wanted = plan.entryOrder[s.kind];
-    if (wanted) {
-      s.entries = reorder(s.entries, wanted);
-      /*
-       * And the sort steps aside, or the arrangement is thrown away between
-       * here and the page.
-       *
-       * `adoptDateOrder` turns the date sort on for very nearly every
-       * section, because it turns it on wherever it provably changes
-       * nothing — so a plan that rearranged entries wrote the new list into
-       * a section that then sorted by date and ignored it. The tool said it
-       * had moved them, the plan showed them moved, and the document did
-       * not, which is the worst shape this can take in something an agent is
-       * trusting.
-       *
-       * The editor has always done this: dragging an entry there turns the
-       * section's sort off in the same breath and says so on screen. This is
-       * the same decision, made in the same place, for the same reason.
-       */
-      s.order = 'manual';
-    }
-
     for (const entryId of s.entries) {
       const order = plan.order[entryId];
       if (!order) continue;

@@ -293,6 +293,10 @@ describe('fixtures', () => {
  *
  * Accepting an order from a reply is only safe because it is a permutation
  * and can be nothing else — these are the tests that say so.
+ *
+ * The lines inside an entry only. "AI should be able to rearrange bullet
+ * points but not entries ever": an order for a section's entries is refused,
+ * and said to be.
  */
 describe('putting things in a different order', () => {
   it('takes an order for the bullets inside an entry', () => {
@@ -327,15 +331,37 @@ describe('putting things in a different order', () => {
     expect(plan.order.exp_acme).toEqual(['b_pipeline', 'b_testing']);
   });
 
-  it('reorders entries within a section, by kind', () => {
+  it('refuses an order for the entries of a section, and says so', () => {
     const plan = sanitizeAiPlan({ entryOrder: { experience: ['exp_acme'] } }, data());
-    expect(plan.entryOrder).toEqual({ experience: ['exp_acme'] });
+    expect(plan.entryOrder).toEqual({});
+    expect(plan.rejected).toHaveLength(1);
+    expect(plan.rejected[0]).toMatch(/^entryOrder: entries are never reordered/);
   });
 
-  it('will not move an entry into a section it does not belong to', () => {
-    const plan = sanitizeAiPlan({ entryOrder: { experience: ['proj_thing'] } }, data());
+  it('refuses it whatever it names, and keeps the rest of the reply', () => {
+    const plan = sanitizeAiPlan(
+      {
+        choices: { b_pipeline: 'v_kafka' },
+        order: { exp_acme: ['b_testing', 'b_pipeline'] },
+        // A real section and real ids, a stranger, and a section that is not one.
+        entryOrder: { experience: ['exp_acme'], project: ['exp_acme'], publications: ['x'] },
+      },
+      data(),
+    );
     expect(plan.entryOrder).toEqual({});
-    expect(plan.rejected.join(' ')).toContain('experience');
+    expect(plan.rejected.filter((r) => r.startsWith('entryOrder'))).toHaveLength(1);
+    // The bullet order and the wording in the same reply still stand.
+    expect(plan.order).toEqual({ exp_acme: ['b_testing', 'b_pipeline'] });
+    expect(plan.choices).toEqual({ b_pipeline: 'v_kafka' });
+  });
+
+  it('says nothing when the reply names no entry order', () => {
+    expect(sanitizeAiPlan({ entryOrder: {} }, data()).rejected).toEqual([]);
+  });
+
+  it('does nothing at all to the resume when an entry order is all it asked for', () => {
+    const d = data();
+    expect(applyInclusion(SAMPLE_BASE, d, sanitizeAiPlan({ entryOrder: { experience: ['exp_acme'] } }, d))).toBeUndefined();
   });
 
   /*
@@ -369,7 +395,7 @@ describe('putting things in a different order', () => {
  * The editor already knew: dragging an entry there turns that section's date
  * sort off in the same breath, and says so. The AI's path did neither.
  */
-describe('an order the AI asks for is the order that prints', () => {
+describe('an order the AI asks for is the order that prints — for lines, never for entries', () => {
   /** The ids that will actually print, which is the only thing worth asserting. */
   const printedBullets = (d: StoreData, sections: NonNullable<ReturnType<typeof applyInclusion>>, entryId: string) => {
     const spec = { ...SAMPLE_BASE, id: 'tailored', sections };
@@ -400,17 +426,25 @@ describe('an order the AI asks for is the order that prints', () => {
   });
 
   /*
-   * And the same for entries, against the date sort — which is on for very
-   * nearly every section, because `adoptDateOrder` turns it on wherever it
-   * provably changes nothing. A section still sorting by date reads the AI's
-   * list, ignores it, and sorts by date.
+   * Entries are the other way round: an order the AI asks for never prints.
+   * "AI should be able to rearrange bullet points but not entries ever."
+   *
+   * Against the date sort — which is on for very nearly every section,
+   * because `adoptDateOrder` turns it on wherever it provably changes
+   * nothing. The old feature turned it off (`manual`) so the AI's
+   * arrangement would stick; now the sort stays, and so does its order.
    *
    * Built here rather than taken from the sample store, which holds one
-   * experience entry: a reorder test needs two, and the first version of
+   * experience entry: an order test needs two, and the first version of
    * this skipped itself on a store that could not provide them and passed
    * for it.
+   *
+   * Two routes in: a reply through `sanitizeAiPlan`, which is the path every
+   * real run takes, and a plan built by hand with `entryOrder` filled in,
+   * because `applyInclusion` is the last door and must hold on its own. A
+   * line is hidden in both, so the sections are actually rebuilt.
    */
-  it('a reordered entry stays where the AI put it, date sort or not', () => {
+  const dated = () => {
     const d = data();
     const older = {
       id: 'exp_older',
@@ -434,24 +468,53 @@ describe('an order the AI asks for is the order that prints', () => {
       // everything — and what quietly discarded the AI's arrangement.
       sections: [{ kind: 'experience' as const, order: 'newest' as const, entries: ['exp_newer', 'exp_older'] }],
     };
-    const store = { ...withBoth, resumes: [...withBoth.resumes, base] };
+    return { store: { ...withBoth, resumes: [...withBoth.resumes, base] }, base };
+  };
+  // Oldest first: the opposite of what the date sort does.
+  const backwards = ['exp_older', 'exp_newer'];
 
-    // Oldest first: the opposite of what the date sort would do.
-    const wanted = ['exp_older', 'exp_newer'];
-    const sections = applyInclusion(base, store, sanitizeAiPlan({ entryOrder: { experience: wanted } }, store))!;
+  it('an entry order the AI asks for does not print, and the date sort stays', () => {
+    const { store, base } = dated();
+    const plan = sanitizeAiPlan({ entryOrder: { experience: backwards }, disable: ['b_testing'] }, store);
+    const sections = applyInclusion(base, store, plan)!;
     expect(sections, 'the plan changed something').toBeDefined();
 
-    const spec = { ...base, id: 'tailored', sections };
-    const out = resolveResume('tailored', { ...store, resumes: [...store.resumes, spec] });
-    expect(out.sections.find((s) => s.kind === 'experience')?.entries.map((e) => e.id)).toEqual(wanted);
+    expect(printedEntries(store, sections, 'experience')).toEqual(['exp_newer', 'exp_older']);
+    expect(sections.find((s) => s.kind === 'experience')?.order).toBe('newest');
+  });
+
+  it('nor does one a plan carries without going through the sanitiser', () => {
+    const { store, base } = dated();
+    const plan = { ...sanitizeAiPlan({ disable: ['b_testing'] }, store), entryOrder: { experience: backwards } };
+    const sections = applyInclusion(base, store, plan)!;
+    expect(printedEntries(store, sections, 'experience')).toEqual(['exp_newer', 'exp_older']);
+    expect(sections.find((s) => s.kind === 'experience')?.order).toBe('newest');
+  });
+
+  /* A section the person arranged by hand keeps exactly that arrangement. */
+  it('keeps a section the person arranged by hand as they arranged it', () => {
+    const d = data();
+    const second = { ...d.entries.find((e) => e.id === 'proj_thing')!, id: 'proj_second', bullets: [] };
+    const withMore: StoreData = { ...d, entries: [...d.entries, second] };
+    const arranged = {
+      ...SAMPLE_BASE,
+      id: 'arranged',
+      sections: SAMPLE_BASE.sections?.map((s) =>
+        s.kind === 'project' ? { ...s, entries: ['proj_second', 'proj_thing'], order: 'manual' as const } : s,
+      ),
+    };
+    const store = { ...withMore, resumes: [...withMore.resumes, arranged] };
+    const plan = { ...sanitizeAiPlan({ disable: ['b_testing'] }, store), entryOrder: { project: ['proj_thing', 'proj_second'] } };
+    const sections = applyInclusion(arranged, store, plan)!;
+    expect(printedEntries(store, sections, 'project')).toEqual(['proj_second', 'proj_thing']);
   });
 
   /*
    * Saying so is the whole mechanism, so it is asserted directly too: a
-   * resume that arranged its own lines says `bulletOrder`, and a section the
-   * AI arranged by hand stops sorting by date.
+   * resume that arranged its own lines says `bulletOrder`. And a section is
+   * never marked arranged by hand, because the AI cannot arrange its entries.
    */
-  it('writes down that it arranged them, rather than leaving it to be guessed', () => {
+  it('writes down that it arranged the lines, and never that it arranged a section', () => {
     const d = data();
     const entry = d.entries.find((e) => (e.bullets ?? []).length >= 2)!;
     const ids = (entry.bullets ?? []).filter((b) => !b.archived).map((b) => b.id);
@@ -464,7 +527,7 @@ describe('an order the AI asks for is the order that prints', () => {
     )!;
     const mine = sections.find((s) => (s.bullets ?? {})[entry.id]);
     expect(mine?.bulletOrder?.[entry.id]).toBe('manual');
-    expect(sections.find((s) => s.kind === 'experience')?.order).toBe('manual');
+    for (const s of sections) expect(s.order, s.kind).not.toBe('manual');
   });
 
   /* And a plan that arranges nothing leaves both alone. */

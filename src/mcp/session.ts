@@ -80,6 +80,11 @@ export interface MoveResult {
 const ok = (text: string): MoveResult => ({ ok: true, text });
 const no = (text: string): MoveResult => ({ ok: false, text });
 
+/** What a request to reorder entries is told. See `TailorSession.orderEntries`. */
+const NO_ENTRY_REORDERING =
+  'Entries are never reordered: a section keeps its entries in the order this person arranged them. ' +
+  'The lines inside an entry can still be put in a different order, and entries can be shown or hidden.';
+
 /** The chosen phrasing of a field that may carry alternates. */
 function plain(field: MaybeVariant | undefined): string {
   if (!field) return '';
@@ -406,25 +411,14 @@ export class TailorSession {
     );
   }
 
-  /** Put a section's entries in a different order. */
-  orderEntries(kind: string, entryIds: string[]): MoveResult {
-    const mine = [...this.entries.values()].filter((e) => e.kind === kind).map((e) => e.id);
-    if (mine.length === 0) {
-      const kinds = [...new Set([...this.entries.values()].map((e) => e.kind))];
-      return no(`There is no "${kind}" section. The sections are: ${some(kinds)}.`);
-    }
-    const named = [...new Set(entryIds.filter((id) => mine.includes(id)))];
-    // Named back, as `order` and `skills` name theirs: a typo, or an entry
-    // from another section, was dropped with a success and no word of it, so
-    // the model had no reason to think any of its order had been ignored.
-    const strangers = entryIds.filter((id) => !mine.includes(id));
-    if (named.length === 0) return no(`None of those are ${kind} entries. They are: ${some(mine)}.`);
-    this.state.plan.entryOrder[kind] = named;
-    const rest = mine.filter((id) => !named.includes(id));
-    return ok(
-      `${kind} will read: ${[...named, ...rest].join(', ')}.` +
-        (strangers.length ? ` Ignored, because they are not ${kind} entries: ${some(strangers)}.` : ''),
-    );
+  /*
+   * Putting a section's entries in a different order, refused. "AI should be
+   * able to rearrange bullet points but not entries ever": which entry comes
+   * first is the person's. The tool that called this is gone; this answers a
+   * client that still asks, and leaves nothing in the plan.
+   */
+  orderEntries(_kind: string, _entryIds: string[]): MoveResult {
+    return no(NO_ENTRY_REORDERING);
   }
 
   /** Choose which items of a skills group to print. */
@@ -530,9 +524,9 @@ export class TailorSession {
     parts.push(choices.length ? `Phrasings chosen: ${choices.map(([k, v]) => `${k}→${v}`).join(', ')}` : 'No phrasing changed.');
     parts.push(plan.enable.length ? `Shown: ${plan.enable.join(', ')}` : 'Nothing newly shown.');
     parts.push(plan.disable.length ? `Left off: ${plan.disable.join(', ')}` : 'Nothing hidden.');
+    // Lines only: entries are never reordered, so there is no entry order to report.
     const orders = Object.entries(plan.order).map(([k, v]) => `${k}: ${v.join(' → ')}`);
-    const entryOrders = Object.entries(plan.entryOrder).map(([k, v]) => `${k}: ${v.join(' → ')}`);
-    parts.push([...orders, ...entryOrders].length ? `Reordered: ${[...orders, ...entryOrders].join('; ')}` : 'Order unchanged.');
+    parts.push(orders.length ? `Reordered: ${orders.join('; ')}` : 'Order unchanged.');
     const skills = Object.entries(plan.skills);
     if (skills.length) parts.push(`Skills: ${skills.map(([k, v]) => `${k} → ${v.join(', ')}`).join('; ')}`);
     if (suggestions.length) parts.push(`Suggested phrasings, awaiting a person: ${suggestions.length}`);
@@ -555,11 +549,8 @@ export class TailorSession {
     const added = this.state.plan.enable.filter(
       (id) => this.entries.get(id)?.kind === kind && !shown.includes(id),
     );
-    const all = [...shown, ...added];
-    const wanted = this.state.plan.entryOrder[kind];
-    if (!wanted) return all;
-    const named = wanted.filter((id) => all.includes(id));
-    return [...named, ...all.filter((id) => !named.includes(id))];
+    // In the resume's own order, never a plan's: entries are not reordered.
+    return [...shown, ...added];
   }
 
   private shownBullets(entry: Entry, current: string[]): string[] {

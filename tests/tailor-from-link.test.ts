@@ -346,7 +346,14 @@ describe('analysing a posting with the AI switched on', () => {
    * Asserted on the section rather than on the plan, because the plan was
    * always right: it is the resume that came out wrong.
    */
-  it('keeps the order the model chose, rather than restacking it by date', async () => {
+  /*
+   * Entries, though, keep the resume's own order whatever the model asks.
+   * "AI should be able to rearrange bullet points but not entries ever." A
+   * reply that still names an `entryOrder` is told so in `rejected`, and the
+   * section keeps the sort the base gave it rather than becoming `manual` —
+   * which is how the old feature made an entry order stick.
+   */
+  it('keeps the line order the model chose, and the resume’s own entry order', async () => {
     serve(JSON.stringify({
       entryOrder: { experience: ['exp_acme'] },
       order: { exp_acme: ['b_testing', 'b_pipeline'] },
@@ -359,8 +366,15 @@ describe('analysing a posting with the AI switched on', () => {
     expect(experience.bullets.exp_acme).toEqual(['b_testing', 'b_pipeline']);
     // And the resume saying it arranged them itself, which is what makes the
     // line above survive rendering.
-    expect(experience.order).toBe('manual');
     expect(experience.bulletOrder?.exp_acme).toBe('manual');
+
+    // The entry order refused, and said so; the section's own sort kept.
+    expect(res.body.rejected).toEqual(expect.arrayContaining([expect.stringMatching(/^entryOrder: /)]));
+    const base = t.store.load().resumes.find((r) => r.id === 'base')!;
+    const own = base.sections?.find((s) => s.kind === 'experience');
+    expect(experience.order).not.toBe('manual');
+    expect(experience.order).toBe(own?.order);
+    expect(experience.entries).toEqual(own?.entries);
   });
 
   /*

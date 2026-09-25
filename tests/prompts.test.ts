@@ -668,31 +668,56 @@ describe('saying exactly what a letter and an answer should be', () => {
   });
 });
 
-describe('telling the AI it may rearrange', () => {
-  it('names ordering among the moves, and says what it is for', () => {
+/*
+ * "AI should be able to rearrange bullet points but not entries ever." The
+ * lines inside an entry, yes, and the prompt says what that is for; the
+ * entries of a section, never, and the prompt says that too — in both
+ * versions, the JSON reply and the tools, since a model shown an
+ * `entryOrder` field or a `reorder_entries` tool will use it.
+ */
+describe('telling the AI it may rearrange lines, and never entries', () => {
+  const both = () => ({
+    json: tailorPrompt(data, resolved, { jobDescription: 'Kafka streaming ingest', jobTitle: 'Platform Engineer' }),
+    tools: tailorPrompt(data, resolved, { jobDescription: 'Kafka streaming ingest', jobTitle: 'Platform Engineer' }, { tools: true }),
+  });
+
+  it('names ordering the lines among the moves, and says what it is for', () => {
     const p = tailorPrompt(data, resolved, { jobDescription: 'Kafka streaming ingest', jobTitle: 'Platform Engineer' });
-    expect(p).toMatch(/put things in a different order/);
+    expect(p).toMatch(/put the bullet points of an entry in a different\s+order/);
     expect(p).toMatch(/first bullet of an entry more attention than the last/);
-    expect(p).toMatch(/by how directly each line answers \*this\* posting/);
+    expect(p).toMatch(/by how\s+directly each line answers \*this\* posting/);
   });
 
   /*
-   * A model told only that it may reorder will reorder. The two limits are
-   * what stop it scrambling a project that reads design, build, measure, and
-   * shuffling jobs out of the reverse-chronological order a reader takes as a
-   * fact about dates.
+   * A model told only that it may reorder will reorder. The limit is what
+   * stops it scrambling a project that reads design, build, measure.
    */
   it('says when not to', () => {
     const p = tailorPrompt(data, resolved, { jobDescription: 'job' });
     expect(p).toMatch(/bullets read as a sequence/);
-    expect(p).toMatch(/reverse\s*\n?chronological order/);
     expect(p).toMatch(/Naming nothing leaves the order exactly as it is/);
   });
 
-  it('shows it the shape to answer in', () => {
-    const p = tailorPrompt(data, resolved, { jobDescription: 'job' });
-    expect(p).toContain('"order":');
-    expect(p).toContain('"entryOrder":');
+  it('says the entries are never reordered', () => {
+    for (const [mode, p] of Object.entries(both())) {
+      expect(p, mode).toMatch(/You may never change the order of the entries themselves/);
+      expect(p, mode).not.toMatch(/first entry of a section more/);
+      expect(p, mode).not.toMatch(/Reordering entries is for/);
+    }
+  });
+
+  it('shows it the shape to answer in, with no entry order', () => {
+    const { json } = both();
+    expect(json).toContain('"order":');
+    expect(json).not.toContain('"entryOrder":');
+    expect(json).not.toContain('entryOrder');
+  });
+
+  it('names the tool for lines and none for entries', () => {
+    const { tools } = both();
+    expect(tools).toContain('`reorder_bullets`');
+    expect(tools).not.toContain('reorder_entries');
+    expect(tools).toMatch(/Nothing can change the order of the entries themselves/);
   });
 });
 
