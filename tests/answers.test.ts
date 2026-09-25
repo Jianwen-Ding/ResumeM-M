@@ -1156,4 +1156,36 @@ describe('the identifiers the extension refuses, refused here as well', () => {
     const bank = [{ id: 'a1', question: 'Reference for the form', default: 'v', variants: [{ id: 'v', text: a }] }] as never;
     expect(matchAnswer('Reference for the form', bank).item).toBeUndefined();
   });
+
+  /*
+   * Where somebody was born, and a Medicare or Medicaid number. Refused by
+   * neither this list nor JobHelper's: "Place of birth" and "Country of birth"
+   * missed `date of birth`, "Birthplace" missed `birthday`, and a Medicare
+   * number is a government health identifier named by neither list. Each was
+   * saved by /answers/save and handed back by `matchAnswer`.
+   */
+  it.each([
+    'Place of birth',
+    'Country of birth',
+    'City of birth',
+    'Birthplace',
+    'Birth place',
+    'Birth country',
+    'Where were you born?',
+    'Medicare number',
+    'Medicaid number',
+    'Medicare/Medicaid number',
+  ])('treats "%s" as an identifier', (q) => {
+    expect(isSensitiveQuestion(q)).toBe(true);
+    const bank = [{ id: 'a1', question: q, default: 'v', variants: [{ id: 'v', text: 'Kept by mistake.' }] }] as never;
+    expect(matchAnswer(q, bank).item).toBeUndefined();
+  });
+
+  it.each(['Are you willing to give birth to new ideas?', 'Which medical devices have you worked on?', 'Have you worked with Medicare claims data?'])(
+    'while "%s" is still asked',
+    (q) => {
+      // Not a place of birth, and not a number: a question about work.
+      expect(isSensitiveQuestion(q)).toBe(false);
+    },
+  );
 });
