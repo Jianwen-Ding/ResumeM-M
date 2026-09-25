@@ -469,7 +469,9 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
       return keep ? keep(m, ...g) : '[redacted]';
     });
   let out = String(text ?? '');
-  out = hide(out, /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g);
+  // An SSN's 3-2-4, with dots, and with the en dashes a word processor or a
+  // PDF's text puts where the hyphens were, as well as hyphens and spaces.
+  out = hide(out, /\b\d{3}(?:\s?[-–.]\s?| )\d{2}(?:\s?[-–.]\s?| )\d{4}\b/g);
   out = hide(out, /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}(?:\s?[A-Z0-9]{1,3})?\b/g);
   out = out.replace(/\b(?:\d[ -]?){12,18}\d\b/g, (run) => {
     if (!containsCardNumber(run)) return run;

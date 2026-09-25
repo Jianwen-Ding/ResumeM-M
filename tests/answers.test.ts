@@ -1042,3 +1042,25 @@ describe('a date of birth, however it is written', () => {
     },
   );
 });
+
+describe('an SSN written with dots or with en dashes', () => {
+  /*
+   * The 3-2-4 shape was caught with hyphens and spaces only. Typed with dots,
+   * or with the en dashes a word processor or a PDF's text puts in place of
+   * hyphens, it went to the AI whole — with its label or without.
+   */
+  it.each([
+    ['123.45.6789', '123.45.6789'],
+    ['SSN: 123.45.6789', '123.45.6789'],
+    ['SSN: 123–45–6789', '123–45–6789'],
+    ['my number is 123 – 45 – 6789', '6789'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each(['Version 12.45.6789 of the SDK', 'Salary $120.000 – $150.000', 'Years 2019–2024', 'Call 617.555.0142'])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
+  });
+});
