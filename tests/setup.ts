@@ -26,6 +26,13 @@ import { afterAll } from 'vitest';
 import { sweepTempDirs } from './helpers.js';
 
 process.env.RMM_COMPILE_CACHE ??= path.join(os.tmpdir(), 'rmm-compiled');
+/*
+ * And never the real list of saves. A server started without a
+ * `preferencesFile` reads and writes the one in the home directory — the list
+ * of saves the person running the tests has open — so every run gets a
+ * throwaway one unless a test names its own.
+ */
+process.env.RMM_PROJECTS_FILE ??= path.join(os.tmpdir(), `rmm-vitest-projects-${process.pid}.json`);
 
 afterAll(() => {
   sweepTempDirs();

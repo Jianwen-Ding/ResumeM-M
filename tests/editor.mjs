@@ -98,7 +98,15 @@ async function serve() {
 
   const child = spawn('npx', ['tsx', 'src/server/index.ts'], {
     cwd: root,
-    env: { ...process.env, RMM_DATA: dir, PORT: String(port), RMM_AUTOCOMMIT: '0', RMM_AI: '0' },
+    // With a list of saves of its own, never the one in the home directory.
+    env: {
+      ...process.env,
+      RMM_DATA: dir,
+      PORT: String(port),
+      RMM_AUTOCOMMIT: '0',
+      RMM_AI: '0',
+      RMM_PROJECTS_FILE: path.join(dir, '..', `rmm-editor-projects-${port}.json`),
+    },
     stdio: 'ignore',
   });
 
