@@ -1186,10 +1186,6 @@ export function stats(apps: Application[]): TrackerStats {
   const byStatus: Record<string, number> = {};
   for (const a of apps) byStatus[a.status] = (byStatus[a.status] ?? 0) + 1;
 
-  const now = Date.now();
-  const since = (days: number) =>
-    apps.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
-
   /*
    * A response is somebody coming back to you. `closed` is not counted: it
    * covers a rejection, which is a reply, and being ghosted, which is the
@@ -1199,7 +1195,14 @@ export function stats(apps: Application[]): TrackerStats {
   const responded = apps.filter((a) => ['interview', 'offer'].includes(a.status)).length;
   // "Applying" has not been sent yet, so it cannot have drawn a response —
   // and nor has one closed only for sitting at Applying. See `closedAsStale`.
-  const sent = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a)).length;
+  const wentOut = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a));
+  const sent = wentOut.length;
+
+  // Sent in the window, so over the same rows: every row started in it was
+  // counted, and a stale close or a form still open read as sent lately.
+  const now = Date.now();
+  const since = (days: number) =>
+    wentOut.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
 
   return {
     total: apps.length,

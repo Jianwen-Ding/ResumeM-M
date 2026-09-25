@@ -147,6 +147,20 @@ describe('coming back to one it closed', () => {
     expect(alreadySent([turned], 'Turned', 'Software Engineer')?.id).toBe('Turned');
   });
 
+  /*
+   * Nor among the ones sent lately. `last7` and `last30` are "applications
+   * sent in the last 7 and 30 days", and counted every row started in them —
+   * so the tracker's "Last 30 days" read 3 beside a response rate worked out
+   * over 1, the other two being this close and a form still being filled in.
+   */
+  it('and is not counted among the applications sent lately', () => {
+    const apps = temp.store.load().applications;
+    const s = stats([...apps, row('Heard', 'interview', daysAgo(5)), row('Filling', 'applying', daysAgo(2))]);
+    expect(s.last30).toBe(1);
+    expect(s.last7).toBe(1);
+    expect(s.responseRate).toBe(100);
+  });
+
   it('while one closed by hand stays closed, and a fresh attempt is a row of its own', async () => {
     temp.write('applications.yaml', [
       row('Turned', 'closed', daysAgo(20), { company: 'Turned', history: [{ at: daysAgo(20), status: 'closed', note: 'Rejected' }] }),
