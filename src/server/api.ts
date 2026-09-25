@@ -37,7 +37,7 @@ import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
-import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder } from '../jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder, skillsOnThePage } from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
@@ -2938,7 +2938,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // The AI selects; it never writes a resume. Everything it returns is
       // checked against the store, and anything that is not a real id it could
       // have chosen from is discarded. See jobs/aiPlan.ts.
-      const plan = aiParsed ? sanitizeAiPlan(aiParsed, data) : null;
+      const plan = aiParsed ? skillsOnThePage(sanitizeAiPlan(aiParsed, data), base) : null;
       const finalMatch = plan
         ? {
             ...match,
@@ -4403,7 +4403,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             }),
           );
           try {
-            plan = sanitizeAiPlan(extractJson(agent.output), data);
+            plan = skillsOnThePage(sanitizeAiPlan(extractJson(agent.output), data), base);
           } catch {
             plan = null; // a malformed reply must not sink the deterministic match
           }

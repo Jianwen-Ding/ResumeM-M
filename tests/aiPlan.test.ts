@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder } from '../src/jobs/aiPlan.js';
+import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder, skillsOnThePage } from '../src/jobs/aiPlan.js';
+import { deriveSpec } from '../src/jobs/match.js';
 import { resolveResume } from '../src/model/resolve.js';
 import type { StoreData } from '../src/model/types.js';
 import {
@@ -250,6 +251,27 @@ describe('skills the AI picks', () => {
 
   it('leaves a group the base has no list for in the store\'s order', () => {
     expect(skillsInBaseOrder({ sk_lang: ['s_py', 's_go'] }, SAMPLE_BASE, data())).toEqual({ sk_lang: ['s_py', 's_go'] });
+  });
+  /*
+   * A group the base does not print. The pick went into the copy's `items`
+   * and came back to the card as a skills change, and the resume — which
+   * prints only the groups its skills section names — did not change.
+   */
+  it('refuses a pick for a group the resume does not print, and says so', () => {
+    const store = data();
+    const bare = { ...SAMPLE_BASE, sections: [...(SAMPLE_BASE.sections ?? []).filter((s) => s.kind !== 'skills'), { kind: 'skills' as const, entries: [], groups: [] }] };
+    const plan = sanitizeAiPlan({ skills: { sk_lang: ['s_go'] } }, store);
+    expect(plan.skills, 'a real group and a real item').toEqual({ sk_lang: ['s_go'] });
+
+    // What the route did with it: into the copy, and printed nowhere.
+    const copy = deriveSpec(bare, 'copy', 'Copy', { choices: {}, skills: plan.skills, rationale: [] } as never, {});
+    expect(resolveResume(copy, { ...store, resumes: [...store.resumes, copy] }).sections.flatMap((s) => s.skillGroups)).toEqual([]);
+
+    const kept = skillsOnThePage(plan, bare);
+    expect(kept.skills).toEqual({});
+    expect(kept.rejected).toContain('skills sk_lang: not on this resume');
+    // And a group it does print is left alone.
+    expect(skillsOnThePage(plan, SAMPLE_BASE).skills).toEqual({ sk_lang: ['s_go'] });
   });
 });
 

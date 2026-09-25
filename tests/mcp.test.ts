@@ -289,6 +289,39 @@ describe('showing an entry the resume has no section for', () => {
 });
 
 describe('reading the page back', () => {
+  /*
+   * A skills pick, read back. `describeResume` applied the plan's shows,
+   * hides, orders and wordings and not its skills, so after "Languages will
+   * read: Python, Go" the page the model checked still listed all four — a
+   * move that worked, read back as one that did nothing.
+   */
+  it('shows a skills pick taking effect', () => {
+    const s = session();
+    expect(s.describeResume()).toContain('- Languages: Python, Go, TypeScript, PHP');
+    expect(s.skills('sk_lang', ['s_go', 's_py']).text).toContain('Python, Go.');
+    expect(s.describeResume()).toContain('- Languages: Python, Go');
+    expect(s.describeResume()).not.toContain('- Languages: Python, Go, TypeScript');
+  });
+
+  /*
+   * And a group the resume does not list has nowhere to go, the way an entry
+   * with no section of its kind has nowhere to go. `skills` answered "will
+   * read" for one, the plan carried it, and the compiled resume — which
+   * prints only the groups its skills section names — never showed it.
+   */
+  it('refuses a skills pick for a group this resume does not print', () => {
+    const data = store();
+    data.resumes = [
+      ...data.resumes,
+      { id: 'noskills', label: 'No skills', tier: 'base', sections: [{ kind: 'skills', entries: [], groups: [] }] } as never,
+    ];
+    const s = new TailorSession(data, resolveResume('noskills', data), POSTING);
+    const r = s.skills('sk_lang', ['s_go']);
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('not on this resume');
+    expect(s.state.plan.skills.sk_lang).toBeUndefined();
+  });
+
   it('shows the resume with the ids the tools take', () => {
     const text = session().describeResume();
     expect(text).toContain('[b_pipeline]');

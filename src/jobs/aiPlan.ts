@@ -301,6 +301,27 @@ export function skillsInBaseOrder(
   return out;
 }
 
+/**
+ * The plan's skills picks for the groups this resume prints, and a refusal
+ * for the rest.
+ *
+ * A resume prints only the groups its skills section names, so a pick for
+ * any other group was written into the copy's `items`, sent back to the card
+ * as a skills change, and printed nowhere: the model chose, the plan said so,
+ * and the document did not change. The MCP session refuses the same pick as
+ * it is made; this is the same rule for a reply that came back as JSON.
+ */
+export function skillsOnThePage(plan: AiPlan, base: ResumeSpec): AiPlan {
+  const printed = new Set((base.sections ?? []).filter((s) => s.kind === 'skills').flatMap((s) => s.groups ?? []));
+  const skills: Record<string, string[]> = {};
+  const rejected = [...plan.rejected];
+  for (const [groupId, ids] of Object.entries(plan.skills)) {
+    if (printed.has(groupId)) skills[groupId] = ids;
+    else rejected.push(`skills ${groupId}: not on this resume`);
+  }
+  return { ...plan, skills, rejected };
+}
+
 /** `ids` in `own`'s order, and any `own` lacks beside their neighbour in `store`. */
 export function inListOrder(ids: string[], own: string[], store: string[]): string[] {
   let list = own.filter((id) => ids.includes(id));

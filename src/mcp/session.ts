@@ -162,8 +162,14 @@ export class TailorSession {
     const lines: string[] = [`${this.resume.label} — as it stands now`];
     for (const section of this.resume.sections) {
       lines.push('', `## ${section.heading}`);
+      /*
+       * With the plan's picks applied, as everything below applies its shows,
+       * hides and wordings. Without them a skills pick that had worked read
+       * back as the group unchanged.
+       */
       for (const group of section.skillGroups) {
-        lines.push(`- ${group.name}: ${group.items.join(', ')}`);
+        const picked = this.state.plan.skills[group.id];
+        lines.push(`- ${group.name}: ${(picked ? this.pickedSkills(group.id, picked) : group.items).join(', ')}`);
       }
       for (const entryId of this.orderedEntries(section.kind, section.entries.map((e) => e.id))) {
         const resolvedEntry = section.entries.find((e) => e.id === entryId);
@@ -426,6 +432,20 @@ export class TailorSession {
     const group = this.groups.get(groupId);
     if (!group) return no(`There is no skills group "${groupId}". Groups: ${some([...this.groups.keys()])}.`);
 
+    /*
+     * Somewhere to put it, as `setShown` asks of an entry. The resume prints
+     * only the groups its skills section names, so a pick for any other was
+     * answered "will read", carried in the plan, and never printed.
+     */
+    const onPage = this.resume.sections.some((sec) => sec.skillGroups.some((g) => g.id === groupId));
+    if (!onPage) {
+      const listed = this.resume.sections.flatMap((sec) => sec.skillGroups.map((g) => g.id));
+      return no(
+        `${groupId} is not on this resume, so there is nothing to choose its skills for. ` +
+          (listed.length ? `The groups it prints are: ${some(listed)}.` : 'It prints no skills groups.'),
+      );
+    }
+
     const known = group.items.filter((i) => itemIds.includes(i.id)).map((i) => i.id);
     const strangers = itemIds.filter((id) => !group.items.some((i) => i.id === id));
     if (known.length === 0) {
@@ -441,14 +461,20 @@ export class TailorSession {
      * and this says what that will read.
      */
     this.state.plan.skills[groupId] = known;
-    const printed = this.resume.sections.flatMap((s) => s.skillGroups).find((g) => g.id === groupId)?.items ?? [];
-    const own = printed.map((t) => group.items.find((i) => i.text === t)?.id).filter((id): id is string => Boolean(id));
-    const ordered = inListOrder(known, own, group.items.map((i) => i.id));
-    const text = ordered.map((id) => group.items.find((i) => i.id === id)!.text);
+    const text = this.pickedSkills(groupId, known);
     return ok(
       `${group.name} will read: ${text.join(', ')}.` +
         (strangers.length ? ` Ignored, because they are not in this group: ${some(strangers)}.` : ''),
     );
+  }
+
+  /** What a group will print with these of its items picked, in the resume's own order. */
+  private pickedSkills(groupId: string, known: string[]): string[] {
+    const group = this.groups.get(groupId);
+    if (!group) return [];
+    const printed = this.resume.sections.flatMap((s) => s.skillGroups).find((g) => g.id === groupId)?.items ?? [];
+    const own = printed.map((t) => group.items.find((i) => i.text === t)?.id).filter((id): id is string => Boolean(id));
+    return inListOrder(known, own, group.items.map((i) => i.id)).map((id) => group.items.find((i) => i.id === id)!.text);
   }
 
   /**
