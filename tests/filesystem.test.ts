@@ -861,4 +861,33 @@ describe('two applications in flight, one upload dialog', () => {
     const folder = syncCurrent(t.store, undefined, 'a2');
     expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
   });
+
+  /*
+   * Plain names as often as that allows. Asked for: "I'd rather have plain
+   * names more often". The hold is for two tabs at once, not for the posting
+   * before this one.
+   */
+  it('hands it on after twenty minutes, not two hours', () => {
+    const halfAnHourAgo = new Date(Date.now() - 30 * 60 * 1000);
+    t.write('applications.yaml', [
+      touched(bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'), halfAnHourAgo),
+      touched(bundleFor('a2', 'Beta', 'Platform Engineer', 'Test-Person-Resume.pdf'), new Date()),
+    ]);
+    syncCurrent(t.store, undefined, 'a1');
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
+  });
+
+  it('and at once when the one holding it has been sent', () => {
+    const now = new Date();
+    t.write('applications.yaml', [
+      { ...touched(bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'), now), status: 'applied' as const },
+      touched(bundleFor('a2', 'Beta', 'Platform Engineer', 'Test-Person-Resume.pdf'), now),
+    ]);
+    syncCurrent(t.store, undefined, 'a1');
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
+    // Its files stay, under their own name.
+    expect(folder.files.some((f) => folder.belongsTo[f] === 'a1')).toBe(true);
+  });
 });

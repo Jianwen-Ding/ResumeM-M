@@ -275,10 +275,11 @@ function readSources(dir: string): Record<string, string> {
  * name went to whichever staged last: tab A's card said its resume was
  * `First-Last-Resume.pdf`, tab B staged, and the file under that name became
  * B's — with A's card still naming it and the upload dialog over this folder
- * still offering it for A's form. So a name already held by an application
- * touched within `HOLD_MS` stays with it (`heldBy`), and the newcomer takes
- * the suffix. One left alone longer than that hands the name on, which keeps
- * the plain name for the ordinary case of applying to one job after another.
+ * still offering it for A's form. So a name already held by an unsent
+ * application touched within `HOLD_MS` stays with it (`heldBy`), and the
+ * newcomer takes the suffix. One sent, or left alone longer than that, hands
+ * the name on, which keeps the plain name for the ordinary case of applying to
+ * one job after another.
  */
 function uniqueNames(
   claims: { name: string; app: Application }[],
@@ -347,14 +348,24 @@ function uniqueNames(
  * the save folder every time.
  */
 /**
- * How long an application keeps the plain name against another one staged
- * after it: the length of a sitting, the same two hours the browser
- * extension keeps an application's pages together for.
+ * How long an unsent application keeps the plain name against another one
+ * staged after it.
+ *
+ * Two hours at first, the length of a sitting, and that suffixed the second
+ * of any two applications made back to back. Asked for: "I'd rather have
+ * plain names more often". Twenty minutes covers two tabs genuinely being
+ * worked on at once, which is the mix-up this exists for, and lets the plain
+ * name go to whichever posting is in hand the rest of the time.
  */
-const HOLD_MS = 2 * 60 * 60 * 1000;
+const HOLD_MS = 20 * 60 * 1000;
 
-/** Whether the tracker has heard from this application within `HOLD_MS`. */
+/**
+ * Whether this application still holds its plain name: not sent yet, and
+ * heard from within `HOLD_MS`. One that has been sent is done with the upload
+ * dialog, so it gives the name up at once — its files stay, suffixed.
+ */
 function recentlyTouched(app: Application, now = Date.now()): boolean {
+  if (app.status !== 'applying') return false;
   const last = Math.max(
     Date.parse(app.appliedAt ?? '') || 0,
     ...(app.history ?? []).map((h) => Date.parse(h.at ?? '') || 0),
