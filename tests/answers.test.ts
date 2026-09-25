@@ -1015,3 +1015,30 @@ describe('a national ID number, where it is named', () => {
     expect(redactIdentifiers(text).text).toBe(text);
   });
 });
+
+describe('a date of birth, however it is written', () => {
+  /*
+   * A labelled date of birth was caught as digits, as "April 2, 1999" and as
+   * "2 April 1999". Under "Birthday" or "Born", with the month cut short, or
+   * with the day said as "2nd", it went to the AI as written.
+   */
+  it.each([
+    ['Birthday: 04/02/1999', '04/02/1999'],
+    ['Born: 04/02/1999', '04/02/1999'],
+    ['Date of Birth: Apr. 2, 1999', 'Apr. 2, 1999'],
+    ['Date of birth: 2nd April 1999', '2nd April 1999'],
+    ['Date of birth - April 2nd, 1999', 'April 2nd, 1999'],
+    ['DOB: 2nd of April 1999', '2nd of April 1999'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each(['Founded in 2012, born out of a hackathon', 'Our birthday party is on Friday', 'Posted April 2nd, 2026'])(
+    'leaves %s alone',
+    (text) => {
+      expect(redactIdentifiers(text).text).toBe(text);
+    },
+  );
+});

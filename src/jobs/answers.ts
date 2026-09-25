@@ -476,9 +476,13 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
     redacted++;
     return '[redacted]';
   });
+  /*
+   * Under "Birthday" and "Born" too, with the month cut short ("Apr. 2,
+   * 1999") and the day said as "2nd" — each of which went to the AI whole.
+   */
   out = hide(
     out,
-    new RegExp(String.raw`\b(date of birth|birth ?date|d\.?o\.?b\.?)(${LABEL_HINT}\s*[:,\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+ \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})`, 'gi'),
+    new RegExp(String.raw`\b(date of birth|birth ?date|birthday|born(?: on)?|d\.?o\.?b\.?)(${LABEL_HINT}\s*[:,\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4}|\d{1,2}(?:st|nd|rd|th)?(?: of)? [A-Z][a-z]+\.?,? \d{4})`, 'gi'),
     (_m, label, gap) => `${label}${gap}[redacted]`,
   );
   out = hide(
