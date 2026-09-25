@@ -1648,6 +1648,97 @@ async function main() {
       check('reopening it says it is gone, in words', said, await page.locator('#status').textContent());
     }
 
+    /*
+     * A draft that goes while it is open.
+     *
+     * The step above failed about once in three runs with a 400 on the Trent
+     * Works draft after its cleanup deleted it. Nothing had been typed: a
+     * click on a card opened the draft, and the address that click set fired
+     * `hashchange`, which opened the same draft a second time — a second read
+     * that could land after the delete. Here the reads are slowed, as on a
+     * loaded machine, so the second one is counted rather than raced.
+     *
+     * JobHelper finishing an application, or the sweep retiring one, removes
+     * a draft somebody may have open. Typing into it then, or clicking its
+     * card in a list drawn before it went, has to say what happened in words
+     * — not `No draft "2026-…"` — and leave what was typed on screen.
+     */
+    console.log('\nA draft that goes while it is open');
+    {
+      const make = async (company) =>
+        (
+          await (
+            await fetch(`${server.url}/api/workspace`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ company, role: 'Data Engineer', url: 'https://example.invalid/j', source: 'by hand' }),
+            })
+          ).json()
+        ).draft;
+      const drop = (d) => fetch(`${server.url}/api/workspace/${encodeURIComponent(d.id)}`, { method: 'DELETE' }).catch(() => undefined);
+      const quiet = await make('Quillon Freight');
+      const other = await make('Ostrander Mills');
+      const errorsBefore = errors.length;
+      const reads = [];
+      const slow = async (route) => {
+        if (route.request().method() === 'GET') {
+          reads.push(new URL(route.request().url()).pathname);
+          await new Promise((go) => setTimeout(go, 150));
+        }
+        return route.fallback();
+      };
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="workspace"]').click();
+        await page.locator('.draft-card', { hasText: 'Ostrander Mills' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Ostrander Mills' }).waitFor({ timeout: 20_000 });
+
+        await page.route(/\/api\/workspace\/[^/]+$/, slow);
+        await page.locator('.draft-card', { hasText: 'Quillon Freight' }).first().click();
+        await page.locator('#draft-editor .where', { hasText: 'Quillon Freight' }).waitFor({ timeout: 20_000 });
+        await page.waitForTimeout(1000);
+        await page.unroute(/\/api\/workspace\/[^/]+$/, slow);
+        const mine = reads.filter((p) => p.endsWith(`/${encodeURIComponent(quiet.id)}`)).length;
+        check('opening a draft reads it once, not again when the address changes', mine === 1, `${mine} reads`);
+
+        await drop(quiet);
+        const notes = page.locator('#draft-editor textarea').last();
+        await notes.fill('A note typed after it went');
+        await notes.blur();
+        const told = await page
+          .waitForFunction(
+            () => /no longer in the workspace/i.test(`${document.querySelector('#draft-save-state')?.textContent} ${document.querySelector('#status')?.textContent}`),
+            null,
+            { timeout: 10_000, polling: 100 },
+          )
+          .then(() => true, () => false);
+        const shown = `${await page.locator('#draft-save-state').innerText().catch(() => '')} | ${await page.locator('#status').innerText().catch(() => '')}`;
+        check('typing into a draft removed elsewhere says it is gone, in words', told && !/No draft "/.test(shown), shown);
+        check('and what was typed is still on screen', (await notes.inputValue().catch(() => '')) === 'A note typed after it went');
+
+        await drop(other);
+        // Emptied first, so the line above cannot answer for this one.
+        await page.evaluate(() => { document.querySelector('#status').textContent = ''; });
+        await page.locator('.draft-card', { hasText: 'Ostrander Mills' }).first().click();
+        const gone = await page
+          .locator('#status', { hasText: 'no longer in the workspace' })
+          .waitFor({ timeout: 10_000 })
+          .then(() => true, () => false);
+        const says = await page.locator('#status').innerText().catch(() => '');
+        check('and a card for one that has gone says so too, rather than its id', gone && !/No draft "/.test(says), says);
+        await page.waitForTimeout(800);
+      } finally {
+        await page.unroute(/\/api\/workspace\/[^/]+$/, slow).catch(() => undefined);
+        await drop(quiet);
+        await drop(other);
+        // The requests for a draft that has gone are the failures under test,
+        // asserted on above by what the screen said.
+        for (let i = errors.length - 1; i >= errorsBefore; i--) {
+          if (/^400 \/api\/workspace\/|status of 400/.test(errors[i])) errors.splice(i, 1);
+        }
+      }
+    }
+
     /* -------------------------------------------------------------- *
      * Writing an application                                          *
      * -------------------------------------------------------------- */

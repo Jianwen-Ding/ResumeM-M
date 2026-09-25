@@ -6495,7 +6495,19 @@ async function openDraft(id) {
   if (draftSave.current) await flushDraftEdits();
 
   openDraftId = id;
-  location.hash = `#workspace/${encodeURIComponent(id)}`;
+  /*
+   * The address, without a second open.
+   *
+   * `location.hash =` fires `hashchange`, and `applyHash` answers that by
+   * opening the draft the address names — this one, again. So every click on
+   * a card read the draft twice and drew it twice, the second time after the
+   * panel was already up and typeable; and a draft finished or discarded
+   * elsewhere in between came back as `No draft "…"` in red about something
+   * nobody had touched. `pushState` makes the same history entry, Back still
+   * fires `hashchange`, and only an address that came from outside opens.
+   */
+  const address = `#workspace/${encodeURIComponent(id)}`;
+  if (location.hash !== address) window.history.pushState(null, '', address);
   try {
     let draft = await api(`/workspace/${encodeURIComponent(id)}`);
     // Another draft was opened while this one was being fetched; that one owns
@@ -6515,7 +6527,17 @@ async function openDraft(id) {
     }
     renderDraft(draft);
   } catch (err) {
-    setStatus(err.message, true);
+    if (draftGone(err)) {
+      // In the list that was drawn, and gone since: the same words, and the
+      // same way on, as an address naming one that has gone. See `applyHash`.
+      if (openDraftId === id) {
+        openDraftId = null;
+        window.history.replaceState(null, '', '#workspace');
+      }
+      setStatus(DRAFT_GONE);
+    } else {
+      setStatus(err.message, true);
+    }
   }
   // Repaint the list so the newly-open one is marked. Floating, because the
   // panel is already drawn and nothing waits on it — but not unhandled: a
@@ -6571,6 +6593,12 @@ function setDraftSaveState(mode, detail) {
           : 'Unsaved changes';
 }
 
+/** What the editor says about a draft that is not in the workspace any more. */
+const DRAFT_GONE = 'That application is no longer in the workspace.';
+
+/** Whether a workspace request failed because its draft has gone. The server's words for it. */
+const draftGone = (err) => /^No draft "/.test(err?.message ?? '');
+
 /** Write the open draft now. Safe to call when there is nothing to write. */
 async function saveDraftNow(message) {
   const draft = draftSave.current;
@@ -6593,7 +6621,21 @@ async function saveDraftNow(message) {
     })
     .catch((err) => {
       draftSave.dirty = true;
-      setDraftSaveState('failed', err.message);
+      if (draftGone(err)) {
+        /*
+         * Finished or discarded somewhere else — JobHelper, the sweep, another
+         * tab — while it was open here. Said as that, not as the server's
+         * `No draft "2026-…"`; what was typed stays on screen to be copied,
+         * and the list stops offering the one that has gone. Not left dirty:
+         * no retry can land, and opening the next draft would only try again.
+         */
+        draftSave.dirty = false;
+        setDraftSaveState('failed', 'this application is no longer in the workspace');
+        setStatus(`${DRAFT_GONE} It was finished or discarded somewhere else; what you typed is still on screen to copy.`, true);
+        loadDrafts().catch(() => undefined);
+      } else {
+        setDraftSaveState('failed', err.message);
+      }
       throw err;
     })
     .finally(() => {
@@ -10311,7 +10353,7 @@ async function applyHash() {
       // Unless the list has already moved the address on to what it opened.
       // `window.` because `history` in this file is the undo stack.
       if (location.hash === draft[0]) window.history.replaceState(null, '', '#workspace');
-      setStatus('That application is no longer in the workspace.');
+      setStatus(DRAFT_GONE);
       if (openDraftId === id) openDraftId = null;
       await loadDrafts();
       return true;
