@@ -1485,6 +1485,28 @@ function withoutEqualOpportunityStatement(text: string): string {
     .replace(/\n\s*\n\s*\n+/g, '\n\n');
 }
 
+/*
+ * A person's email address and phone number, which are not the posting.
+ *
+ * LinkedIn's "Meet the hiring team" gives the recruiter's own address and
+ * direct line, a careers page signs off with the recruiter's, and a review
+ * step writes out the applicant's. All of them went into the description,
+ * and so into the save and every prompt written from it. Nothing the AI
+ * writes needs one. A mailbox the company keeps for applicants — careers@,
+ * jobs@, recruiting@ — is how to apply, and is left.
+ */
+const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
+const COMPANY_MAILBOX =
+  /^(?:careers?|jobs?|recruit\w*|talent\w*|hr|hiring|apply|applications?|people|accommodations?|accessibility|staffing|employment|resumes?|cv|info|hello|contact|privacy)$/i;
+const PHONE =
+  /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\b\d{3}[\s.-])\d{3}[\s.-]\d{4}\b|\+\d{1,3}(?:[\s.-]\(?\d{1,5}\)?){2,5}\b/g;
+
+function withoutPersonalContacts(text: string): string {
+  return text
+    .replace(EMAIL, (address) => (COMPANY_MAILBOX.test(address.split('@')[0] ?? '') ? address : '[redacted]'))
+    .replace(PHONE, '[redacted]');
+}
+
 export function extractJob(html: string, url?: string, said?: string): ExtractedJob {
   // Decoded before it is split or tested. See `readableName`.
   const pageTitle = readableName(said);
@@ -1611,7 +1633,7 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
    * the door to the AI — a confirmation page's "Social Security Number
    * 123-45-6789" was kept in the store as written. See `redactIdentifiers`.
    */
-  description = redactIdentifiers(description).text;
+  description = withoutPersonalContacts(redactIdentifiers(description).text);
 
   return {
     title,

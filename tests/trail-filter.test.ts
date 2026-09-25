@@ -1470,3 +1470,34 @@ describe('an identifier on a page of the trail is not kept with the posting', ()
     expect(merged.description).toContain('Salary: $62,000 - $70,000. Requisition JR-0012345. Experience 2019-2024 with ADP preferred.');
   });
 });
+
+/*
+ * A person's email and phone number are not the posting.
+ *
+ * LinkedIn's "Meet the hiring team" gives the recruiter's own address and
+ * direct line, and a review step writes out the applicant's; both went into
+ * the description, and so into the save and the AI's prompt. A mailbox the
+ * company keeps for applicants is how to apply, and stays.
+ */
+describe('a person\'s email and phone number are not kept with the posting', () => {
+  const html = `<html><body><main><h1>Backend Engineer</h1>
+    <p>${'You will build the billing APIs that every merchant on the platform calls, and keep them fast. '.repeat(3)}</p>
+    <p>Salary: $130,000 - $160,000, plus 401(k). Requisition 2025-10-0045. Experience 2019-2024 at a payments company preferred.</p>
+    <p>Questions about accommodations? Write to careers@acme.com.</p>
+    <div class="jobs-poster"><h2>Meet the hiring team</h2><p>Sarah Kim, Technical Recruiter</p>
+      <p>sarah.kim@acme.com · +1 (512) 555-0187</p><p>Mobile: 512.555.0199 · UK office +44 20 7946 0958</p></div>
+    <dl><dt>Email address</dt><dd>jane.doe+jobs@gmail.com</dd><dt>Phone</dt><dd>617-555-0142</dd></dl>
+    </main></body></html>`;
+  const { description } = extractJob(html, 'https://www.linkedin.com/jobs/view/4012345678/', 'Backend Engineer | Acme | LinkedIn');
+
+  it('leaves out the recruiter\'s and the applicant\'s', () => {
+    for (const contact of ['sarah.kim@acme.com', '(512) 555-0187', '512.555.0199', '7946 0958', 'jane.doe+jobs@gmail.com', '617-555-0142']) {
+      expect(description).not.toContain(contact);
+    }
+  });
+  it('and keeps the recruiter\'s name, the company\'s mailbox and the posting\'s own numbers', () => {
+    expect(description).toContain('Sarah Kim, Technical Recruiter');
+    expect(description).toContain('careers@acme.com');
+    expect(description).toContain('Salary: $130,000 - $160,000, plus 401(k). Requisition 2025-10-0045. Experience 2019-2024 at a payments company preferred.');
+  });
+});
