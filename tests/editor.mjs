@@ -2056,6 +2056,7 @@ async function main() {
       await page.route('**/api/answers', refuseWrite);
       await typedCard.locator('button', { hasText: 'Edit' }).click();
       await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      const labelShown = await page.locator('#f_label').inputValue();
       await page.locator('#f_answer').fill('Three weeks after an offer, having thought about it');
       await page.locator('#modal-ok').click();
       await page.waitForTimeout(800);
@@ -2074,6 +2075,26 @@ async function main() {
         (await page.locator('#status.err').count()) > 0 && (await typedCard.count()) === 1,
         await page.locator('#status').innerText().catch(() => ''));
       await page.unroute('**/api/answers', refuseWrite);
+
+      /*
+       * And the label. The box was there on every edit and read only when
+       * "Keep the old wording" was ticked, so a label typed for the version
+       * being edited — the employer's name, which is what picks a version
+       * for that employer — went nowhere. It opened reading "Updated"
+       * whatever the version was called, so where a version came from —
+       * "Typed on a form" — was not on screen either.
+       */
+      check('editing an answer shows the label its version has', labelShown === 'Typed on a form', labelShown);
+      await typedCard.locator('button', { hasText: 'Edit' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_label').fill('Helios Freight');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(1000);
+      const relabelled = ((await (await fetch(`${server.url}/api/store`)).json()).answers ?? [])
+        .find((a) => a.question === 'Earliest date you could start?');
+      const labels = (relabelled?.variants ?? []).map((v) => v.label);
+      check('and a label typed for it is the label it keeps', JSON.stringify(labels) === '["Helios Freight"]', JSON.stringify(labels));
+      await page.evaluate(() => document.querySelector('#modal')?.classList.add('hidden'));
 
       const refuseLetter = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
       await page.route('**/api/letters/**', refuseLetter);

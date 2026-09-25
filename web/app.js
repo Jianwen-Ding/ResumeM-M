@@ -7813,23 +7813,41 @@ async function removeAnswer(item, usedIn = 0) {
 
 async function editAnswer(item) {
   const v = item.variants.find((x) => x.id === item.default) ?? item.variants[0];
+  /*
+   * The label the version has, and the one it keeps.
+   *
+   * The box opened reading "Updated" whatever the version was called, and
+   * was read only when the old wording was kept as another version — so a
+   * label typed for the version being edited went nowhere. It is the
+   * employer's name that picks a version for that employer (see
+   * `matchAnswer`), and "Typed on a form" is how you can tell one the
+   * extension kept; neither was on screen, and the first could not be set.
+   */
   await formThatSaves(item.question, [
     { name: 'answer', label: 'Answer', value: v?.text ?? '', multiline: true, tall: true },
-    { name: 'label', label: 'Label for this version', value: 'Updated' },
+    { name: 'label', label: 'Label for this version', value: v?.label ?? '' },
     { name: 'asNew', label: 'Keep the old wording as another version', type: 'checkbox', value: false },
   ], '', async (answer) => {
     if (!answer.answer?.trim()) return 'An answer needs some words. To remove this one, use Delete.';
+    const label = answer.label?.trim() ?? '';
 
     if (answer.asNew) {
+      // A new version under the old one's name would be two of one name.
+      const named = label && label !== v?.label ? label : 'Updated';
       await api('/answers/save', {
         method: 'POST',
-        body: JSON.stringify({ itemId: item.id, question: item.question, answer: answer.answer, label: answer.label }),
+        body: JSON.stringify({ itemId: item.id, question: item.question, answer: answer.answer, label: named }),
       });
     } else {
       const answers = (await api('/store')).answers.map((a) =>
         a.id !== item.id
           ? a
-          : { ...a, variants: a.variants.map((x) => (x.id === v.id ? { ...x, text: answer.answer.trim() } : x)) },
+          : {
+              ...a,
+              variants: a.variants.map((x) =>
+                x.id === v.id ? { ...x, text: answer.answer.trim(), ...(label ? { label } : {}) } : x,
+              ),
+            },
       );
       await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
     }
