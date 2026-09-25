@@ -15,6 +15,7 @@ import {
 } from '../src/jobs/extract.js';
 import { detectLevel } from '../src/jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../src/jobs/match.js';
+import { fitResumes } from '../src/jobs/fit.js';
 import { resolveResume } from '../src/model/resolve.js';
 import { identity } from '../src/model/applications.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
@@ -464,6 +465,124 @@ describe('deriving a resume for a posting', () => {
   it('says nothing about skills where the base has no skills section', () => {
     const bare: StoreData = { ...data, resumes: [{ id: 'plain', label: 'Plain' }] };
     expect(derive('plain', bare).sections).toBeUndefined();
+  });
+});
+
+/*
+ * A vendor's suite and its products are the same experience. Reported on a
+ * Keysight posting asking for Atlassian Bamboo and Bitbucket, against a
+ * resume that talked about the Atlassian suite: nothing matched.
+ */
+describe('a suite and its products', () => {
+  const KEYSIGHT =
+    'Experience with CI/CD tooling such as Atlassian Bamboo and Bitbucket, plus Jenkins and Git. Familiar with Jira and Confluence.';
+  const withTools = (variants: { id: string; label: string; text: string }[]): StoreData => ({
+    ...data,
+    entries: [{ ...entry, bullets: [{ id: 'b_tools', default: variants[0]!.id, variants }] }, eduEntry],
+  });
+
+  it('reads the tools a posting names, and the suite its products belong to', () => {
+    const found = extractKeywords(KEYSIGHT);
+    for (const k of ['atlassian bamboo', 'bitbucket', 'jenkins', 'git', 'jira', 'confluence', 'atlassian']) expect(found, k).toContain(k);
+    // Products alone, with the vendor never named, still ask for the suite.
+    expect(extractKeywords('Experience with Bitbucket Pipelines and Jira.')).toContain('atlassian');
+    // Bamboo on its own is a plant, and nothing Atlassian is asked for.
+    expect(extractKeywords('Our office has bamboo flooring and a garden.')).toEqual([]);
+  });
+
+  it('matches a resume line about the suite to a posting naming its products', () => {
+    const store = withTools([
+      { id: 'v_plain', label: 'Plain', text: 'Built internal tools for the team' },
+      { id: 'v_suite', label: 'Suite', text: 'Ran planning and releases through the Atlassian suite' },
+    ]);
+    const result = matchVariants(store, base, { keywords: extractKeywords('Experience with Bitbucket Pipelines and Jira.'), threshold: 1 });
+    expect(result.choices.b_tools).toBe('v_suite');
+    expect(result.rationale.find((r) => r.key === 'b_tools')?.because).toContain('atlassian');
+  });
+
+  it('and a resume line naming a product to a posting asking for the suite', () => {
+    const store = withTools([
+      { id: 'v_plain', label: 'Plain', text: 'Built internal tools for the team' },
+      { id: 'v_jira', label: 'Jira', text: 'Tracked every release in Jira' },
+    ]);
+    const result = matchVariants(store, base, { keywords: ['atlassian'], threshold: 1 });
+    expect(result.choices.b_tools).toBe('v_jira');
+  });
+
+  it('reads the other suites the same way: AWS, Google Cloud and Microsoft Office', () => {
+    expect(extractKeywords('Experience with DynamoDB.')).toContain('aws');
+    const offers = (text: string, keyword: string) => {
+      const store = withTools([
+        { id: 'v_plain', label: 'Plain', text: 'Built internal tools for the team' },
+        { id: 'v_named', label: 'Named', text },
+      ]);
+      return matchVariants(store, base, { keywords: [keyword], threshold: 1 }).choices.b_tools === 'v_named';
+    };
+    expect(offers('Moved the batch jobs onto EC2 and Redshift', 'aws')).toBe(true);
+    expect(offers('Reported on usage from BigQuery', 'gcp')).toBe(true);
+    expect(offers('Presented the roadmap in PowerPoint', 'microsoft office')).toBe(true);
+    // "Excel" alone is a verb as often as a product.
+    expect(offers('Helped new hires excel at support', 'microsoft office')).toBe(false);
+  });
+});
+
+/*
+ * One thing, two spellings. A posting asking for PostgreSQL against a resume
+ * that says Postgres, or k8s against Kubernetes, matched nothing: each
+ * spelling was its own keyword, answered only by itself.
+ */
+describe('one thing written two ways', () => {
+  const withLine = (text: string, tags?: string[]): StoreData => ({
+    ...data,
+    entries: [
+      {
+        ...entry,
+        bullets: [
+          {
+            id: 'b_db',
+            default: 'v_plain',
+            variants: [
+              { id: 'v_plain', label: 'Plain', text: 'Built internal tools for the team' },
+              { id: 'v_named', label: 'Named', text, ...(tags ? { tags } : {}) },
+            ],
+          },
+        ],
+      },
+      eduEntry,
+    ],
+  });
+  const picks = (store: StoreData, posting: string) =>
+    matchVariants(store, base, { keywords: extractKeywords(posting), threshold: 1 }).choices.b_db === 'v_named';
+
+  it('reads every spelling as the one term', () => {
+    const found = extractKeywords('Experience with Postgres, k8s, Google Cloud, Amazon Web Services and MS Office.');
+    for (const k of ['postgresql', 'kubernetes', 'gcp', 'aws', 'microsoft office']) expect(found, k).toContain(k);
+    // Once, not twice: a posting saying both is asking for one thing.
+    expect(found).not.toContain('postgres');
+    expect(extractKeywords('PostgreSQL (Postgres) on Kubernetes (k8s).').sort()).toEqual(['kubernetes', 'postgresql']);
+  });
+
+  it('and not a short spelling inside another word', () => {
+    expect(extractKeywords('Part number AK8S-200 and the k8service flag.')).toEqual([]);
+    expect(extractKeywords('We are in the office five days a week.')).toEqual([]);
+  });
+
+  it('matches a resume line in one spelling to a posting in the other', () => {
+    expect(picks(withLine('Moved billing off a single Postgres primary'), 'Experience with PostgreSQL.')).toBe(true);
+    expect(picks(withLine('Tuned PostgreSQL vacuum settings'), 'Experience with Postgres.')).toBe(true);
+    expect(picks(withLine('Ran every service on k8s'), 'Experience with Kubernetes.')).toBe(true);
+    expect(picks(withLine('Ran every service on Kubernetes'), 'Deploys to k8s.')).toBe(true);
+    expect(picks(withLine('Served the models from Google Cloud'), 'Experience with GCP.')).toBe(true);
+    expect(picks(withLine('Cut the Amazon Web Services bill by a third'), 'Experience with AWS.')).toBe(true);
+    // A tag in one spelling counts for the other too.
+    expect(picks(withLine('Owned the primary database', ['postgres']), 'Experience with PostgreSQL.')).toBe(true);
+  });
+
+  it('counts both spellings in one posting once when fitting a resume', () => {
+    const store = withLine('Moved billing off a single Postgres primary');
+    const fit = fitResumes(store, ['postgres', 'postgresql', 'kafka'], [{ ...base, choices: { b_db: 'v_named' } }]);
+    expect(fit[0]?.because).toEqual(['postgres']);
+    expect(fit[0]?.share).toBeCloseTo(1 / 2);
   });
 });
 

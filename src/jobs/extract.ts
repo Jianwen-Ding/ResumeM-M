@@ -4,6 +4,8 @@
  * HTML arrives, including pages the extension could not parse.
  */
 
+import { redactIdentifiers } from './answers.js';
+
 export interface ExtractedJob {
   title?: string;
   company?: string;
@@ -73,7 +75,82 @@ const KEYWORD_VOCAB = [
   'marketing', 'seo', 'copywriting', 'social media', 'salesforce', 'crm',
   'logistics', 'supply chain', 'inventory', 'procurement',
   'cad', 'solidworks', 'autocad', 'matlab', 'simulink', 'labview',
+
+  /*
+   * The tools a team works in, which postings name as often as languages. A
+   * Keysight posting asking for Atlassian Bamboo and Bitbucket, Jenkins and
+   * Git came back with one keyword, `ci/cd`, and a resume talking about the
+   * Atlassian suite matched nothing. Bamboo only by its vendor's name, because
+   * on its own it is a plant.
+   */
+  'git', 'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'jenkins', 'teamcity', 'circleci',
+  'github actions', 'atlassian', 'atlassian bamboo', 'artifactory', 'ansible', 'prometheus', 'grafana',
+  'microsoft office',
 ];
+
+/**
+ * One thing, written more than one way.
+ *
+ * A posting asks for PostgreSQL and a resume says Postgres; a posting says
+ * k8s and a resume says Kubernetes. The words differ and the experience does
+ * not, and nothing matched: the two spellings were two keywords, each
+ * answered only by itself. So a posting naming any spelling here is read as
+ * asking for the first, and a resume line in any spelling answers it.
+ *
+ * Only spellings that mean nothing else. "JS" is left out: written as a word
+ * it is JavaScript, but `Node.js` and `Vue.js` split to the same word, and
+ * saying them is not saying JavaScript.
+ */
+export const ALIASES: Record<string, string[]> = {
+  postgresql: ['postgres'],
+  kubernetes: ['k8s'],
+  gcp: ['google cloud'],
+  aws: ['amazon web services'],
+  'microsoft office': ['ms office', 'office 365', 'microsoft 365'],
+};
+
+/**
+ * A vendor's suite, named by its products.
+ *
+ * A posting asks for the products — Bitbucket, Bamboo — and a resume says the
+ * suite: "used the Atlassian suite for planning and release". Either one is
+ * the same experience. So a posting naming any product is also taken to be
+ * asking for the suite, and a resume line naming any product answers a posting
+ * that asks for the suite. Only suites whose product names are not ordinary
+ * words, so nothing here fires on prose.
+ */
+export const SUITES: Record<string, string[]> = {
+  atlassian: ['jira', 'confluence', 'bitbucket', 'atlassian bamboo', 'trello', 'opsgenie', 'statuspage', 'sourcetree'],
+  aws: ['dynamodb', 'ec2', 'redshift', 'cloudformation', 'sagemaker'],
+  gcp: ['bigquery'],
+  // Not bare "Word" or "Excel": one is a word, and "you will excel" is a sentence.
+  'microsoft office': ['powerpoint', 'microsoft excel', 'microsoft word', 'ms excel', 'ms word'],
+};
+
+/** A term with its separators gone: "Google Cloud" → `googlecloud`, as match and fit key them. */
+const glue = (s: string) => s.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+
+/** Every spelling's glued form → the glued form of the term it spells. See `ALIASES`. */
+const SPELLS: Map<string, string> = new Map(
+  Object.entries(ALIASES).flatMap(([term, others]) => [term, ...others].map((s) => [glue(s), glue(term)] as [string, string])),
+);
+const SPELLINGS: Map<string, string[]> = new Map(Object.entries(ALIASES).map(([term, others]) => [glue(term), [term, ...others]]));
+const PRODUCTS: Map<string, string[]> = new Map(Object.entries(SUITES).map(([suite, products]) => [glue(suite), products]));
+
+/** The one glued form every spelling of a term shares: `postgres` → `postgresql`. */
+export function sameTerm(glued: string): string {
+  return SPELLS.get(glued) ?? glued;
+}
+
+/** Every way a keyword is written, itself included. See `ALIASES`. */
+export function spellingsOf(keyword: string): string[] {
+  return SPELLINGS.get(sameTerm(glue(keyword))) ?? [keyword];
+}
+
+/** The products of a suite, for a keyword that names one. See `SUITES`. */
+export function productsOf(keyword: string): string[] {
+  return PRODUCTS.get(sameTerm(glue(keyword))) ?? [];
+}
 
 function stripTags(html: string): string {
   return html
@@ -120,6 +197,17 @@ const NAMED_ENTITIES: Record<string, string> = {
   rsaquo: '›', lsaquo: '‹', raquo: '»', laquo: '«', ensp: ' ', emsp: ' ', thinsp: ' ',
 };
 
+/** Every entity in `text` decoded once, and nothing else about it changed. */
+function decodeEntities(text: string): string {
+  return text.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, name: string) => {
+    if (name[0] === '#') {
+      const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+    }
+    return Object.hasOwn(NAMED_ENTITIES, name.toLowerCase()) ? NAMED_ENTITIES[name.toLowerCase()]! : whole;
+  });
+}
+
 /**
  * A title or a name as a person reads it: every entity decoded, however many
  * times over it was escaped, and every kind of space made one plain space.
@@ -135,13 +223,7 @@ export function readableName(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
   let out = text;
   for (let i = 0; i < 5; i++) {
-    const next = out.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, name: string) => {
-      if (name[0] === '#') {
-        const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
-        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
-      }
-      return Object.hasOwn(NAMED_ENTITIES, name.toLowerCase()) ? NAMED_ENTITIES[name.toLowerCase()]! : whole;
-    });
+    const next = decodeEntities(out);
     if (next === out) break;
     out = next;
   }
@@ -170,8 +252,14 @@ const CHROME_TAGS = /<(nav|footer|aside|select|svg|template|iframe|noscript)\b[^
 /** `<select>` alone, for measuring the safety net's baseline. See `withoutChrome`. */
 const SELECT_TAG = /<select\b[^>]*>/gi;
 const CHROME_ROLES = /<([a-z][a-z0-9]*)\b[^>]*\brole\s*=\s*["'](?:navigation|banner|contentinfo|complementary|search)["'][^>]*>/gi;
+/*
+ * "Cookie" anywhere in the name, because the consent managers run it into
+ * the words around it — Cookiebot's `CybotCookiebotDialog`, a `cookieBanner`
+ * — and those were read as the posting. And the hosts of the ones that do
+ * not say it at all: Didomi, Quantcast, Osano.
+ */
 const CHROME_NAMES =
-  /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*\b(?:cookie|cookies|consent|gdpr|onetrust)\b[^"']*["'][^>]*>/gi;
+  /<([a-z][a-z0-9]*)\b[^>]*\b(?:id|class)\s*=\s*["'][^"']*(?:cookie|\b(?:consent|gdpr|onetrust|didomi-host|qc-cmp2-container|osano-cm-window)\b)[^"']*["'][^>]*>/gi;
 /*
  * Messaging and support chat, by the names the widgets give themselves: a
  * job board's messaging overlay (the applicant's own conversations, other
@@ -490,6 +578,15 @@ function hasShortStandaloneLine(html: string): boolean {
  * consent section were cut with the privacy text around them. Not "must" or
  * "required" on their own — every cookie banner says those.
  */
+/**
+ * A figure that is pay, in a block named for cookies: a currency beside a
+ * number, a percentage, an hourly or yearly rate. Not any digit — every IAB
+ * banner opens "We and our 842 partners", and "3rd party" and "13 months"
+ * are what cookie text says — which kept the whole banner for the AI.
+ */
+const COOKIE_FIGURE =
+  /\p{Sc}\s?\d|\d\s?\p{Sc}|\d\s?%|\b(?:USD|EUR|GBP|CHF|CAD|AUD|INR|SGD|JPY)\s?\d|\d\s?(?:USD|EUR|GBP|CHF|CAD|AUD|INR|SGD|JPY)\b|\d\s*(?:\/|per|an?)\s*(?:hr|hour|h|yr|year|annum|month)\b/iu;
+
 const COOKIE_UNSAFE_WORDS =
   /\bsalary\b|\bcompensation\b|\bvisa\b|\bsponsor\w*\b|\bremote\b|\bhybrid\b|\bbenefit\w*\b|\brequirements?\b|\bqualifications?\b|\bdeadline\b|\bclos(?:e|es|ing) (?:date|on)\b|\bcitizen\w*|\beligib\w*|\bauthori[sz]ed to work\b|\bwork (?:permit|authori[sz]ation)\b|\bright to work\b|\bclearance\b|\brelocat\w*|\bbackground checks?\b/i;
 
@@ -546,10 +643,13 @@ function keepAmbiguousElement(
   if (tag === 'select') return !isLongOptionList(outerHtml);
 
   if (opts.isCookieNamed) {
+    // A wrapper that holds the page's own heading is not a banner, whatever
+    // the site put on its class while the banner is up.
+    if (/<(?:h1|main)\b/i.test(outerHtml)) return true;
     const withoutLinksOrButtons = plainText(
       outerHtml.replace(/<(a|button)\b[^>]*>[\s\S]*?<\/\1>/gi, ' '),
     );
-    const safe = !DIGIT_CURRENCY_OR_PERCENT.test(withoutLinksOrButtons) && !COOKIE_UNSAFE_WORDS.test(withoutLinksOrButtons);
+    const safe = !COOKIE_FIGURE.test(withoutLinksOrButtons) && !COOKIE_UNSAFE_WORDS.test(withoutLinksOrButtons);
     return !safe;
   }
 
@@ -650,9 +750,17 @@ function elementEnd(html: string, open: RegExpExecArray): number {
  * A block that opens by saying it lists other openings: "Similar jobs",
  * "More roles at Acme". Read off the start of the block's own text only, so a
  * posting that mentions "other roles" in passing is never taken for one.
+ *
+ * With the names the boards give it as well: LinkedIn's "Jobs you may be
+ * interested in", Indeed's "Jobs you might like" and "Explore other jobs", a
+ * careers site's "You might also like". Under those, every card's salary and
+ * city reached the AI unmarked.
+ *
+ * Not "Other roles and responsibilities", which is a section of this job's
+ * own duties, and was labelled as another job's once it had two links in it.
  */
-const OTHER_POSTINGS_HEADING =
-  /^\W*(?:(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?|opportunities)\b|you may also like\b|people also viewed\b)/i;
+const OTHER_POSTINGS_NAME = String.raw`(?:(?:explore|see|view|browse)\s+)?(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?|opportunities)\b(?!\s*(?:and|&amp;|&)\s*(?:responsibilit|dut))|(?:jobs?|roles?|positions?)\s+you\s+(?:may|might)\s+(?:also\s+)?(?:be\s+interested\s+in|like)\b|you\s+(?:may|might)\s+also\s+like\b|people\s+also\s+viewed\b`;
+const OTHER_POSTINGS_HEADING = new RegExp(String.raw`^\W*(?:${OTHER_POSTINGS_NAME})`, 'i');
 const SIDE_REGION = /^<(?:aside\b|[a-z][a-z0-9]*\b[^>]*\brole\s*=\s*["']complementary["'])/i;
 const OTHER_POSTINGS_MARKER = '<p>[Other openings listed on this site — not this job:]</p>';
 
@@ -672,8 +780,7 @@ const OTHER_POSTINGS_MARKER = '<p>[Other openings listed on this site — not th
  * Never more than half the page, so a wrapper around the whole posting that
  * happens to start with a rail is not mistaken for one.
  */
-const OTHER_POSTINGS_ANYWHERE =
-  /\b(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?|opportunities)\b|\byou may also like\b|\bpeople also viewed\b/gi;
+const OTHER_POSTINGS_ANYWHERE = new RegExp(String.raw`\b(?:${OTHER_POSTINGS_NAME})`, 'gi');
 /** How far into an element its heading can sit, markup included. */
 const HEADING_WINDOW = 1500;
 
@@ -917,6 +1024,18 @@ function jsonLdFacts(obj: Record<string, unknown>): string[] {
  */
 const bare = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
+/**
+ * A JSON-LD description as text. LinkedIn and Greenhouse write the posting's
+ * markup into it escaped — "&lt;strong&gt;Requirements&lt;/strong&gt;" —
+ * and taking the tags out before reading the entities handed the AI and the
+ * save "<p><strong>Requirements</strong></p><ul><li>…", markup and all. So
+ * escaped markup is read as markup first, and what it escaped is read after.
+ */
+function jsonLdDescription(raw: string): string {
+  if (!/&lt;\/?[a-z][a-z0-9]*\b/i.test(raw)) return stripTags(raw);
+  return decodeEntities(stripTags(decodeEntities(raw)));
+}
+
 /** Walk JSON-LD, which is the only structured source most boards agree on. */
 function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] }) | undefined {
   const blocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
@@ -946,7 +1065,7 @@ function fromJsonLd(html: string): (Partial<ExtractedJob> & { facts: string[] })
           title: typeof obj.title === 'string' ? readableName(obj.title) : undefined,
           company: typeof org?.name === 'string' ? readableName(org.name) : undefined,
           location: [addr?.addressLocality, addr?.addressRegion].filter(Boolean).join(', ') || undefined,
-          description: typeof obj.description === 'string' ? stripTags(obj.description) : '',
+          description: typeof obj.description === 'string' ? jsonLdDescription(obj.description) : '',
           facts: jsonLdFacts(obj),
           source: 'json-ld',
         };
@@ -1069,6 +1188,17 @@ export function extractKeywords(text: string): string[] {
         break;
       }
     }
+  }
+  // Every spelling of one thing, read as the one. See `ALIASES`.
+  for (const [term, others] of Object.entries(ALIASES)) {
+    for (const other of others) {
+      const said = found.delete(other) || new RegExp(`(^|[^a-z0-9+#])${escapeTerm(other)}([^a-z0-9+#]|$)`).test(lower);
+      if (said) found.add(term);
+    }
+  }
+  // And the suite, when a product of it is asked for. See `SUITES`.
+  for (const [suite, products] of Object.entries(SUITES)) {
+    if (products.some((p) => found.has(p))) found.add(suite);
   }
   return [...found];
 }
@@ -1418,6 +1548,68 @@ function siteName(html: string): string | undefined {
   return undefined;
 }
 
+/*
+ * The equal-opportunity statement, which is the law's text rather than the
+ * job's. Greenhouse and Lever close every posting with it, and it went to the
+ * AI as part of the job: a paragraph naming race, religion, disability and
+ * veteran status, for a letter and answers to be tailored to.
+ *
+ * A sentence is the statement when it says "equal opportunity" or
+ * "affirmative action", or names three of the characteristics the law
+ * protects while talking about employment — a self-identification step's
+ * questions name them too, and stay. Unless it also states something about
+ * this job — pay, a visa, where the work is — which a posting sometimes says
+ * in the same breath. Taken out a sentence at a time, so the rest of its
+ * paragraph stays.
+ */
+const EEO_NAMED = /\bequal\s+(?:employment\s+)?opportunit(?:y|ies)\b|\baffirmative[\s-]+action\b/i;
+const PROTECTED_TRAIT =
+  /\b(?:race|colou?r|religion|creed|sex|sexual\s+orientation|gender(?:\s+(?:identity|expression))?|national\s+origin|ancestry|age|disabilit(?:y|ies)|veteran|marital\s+status|genetic\s+information|pregnancy)\b/gi;
+const ABOUT_EMPLOYMENT = /\b(?:employ\w*|applicants?|candidates?|discriminat\w*|without\s+regard|consideration)\b/i;
+const JOB_FACT_IN_PASSING =
+  /\p{Sc}\s?\d|\bsalary\b|\bvisas?\b|\bsponsor\w*|\bremote\b|\bhybrid\b|\bon-?site\b|\brelocat\w*|\bclearance\b|\bauthori[sz]ed to work\b|\bdeadline\b/iu;
+
+function isEqualOpportunityStatement(sentence: string): boolean {
+  if (JOB_FACT_IN_PASSING.test(sentence)) return false;
+  if (EEO_NAMED.test(sentence)) return true;
+  const traits = new Set((sentence.match(PROTECTED_TRAIT) ?? []).map((t) => t.toLowerCase().replace(/\s+/g, ' ')));
+  return traits.size >= 3 && ABOUT_EMPLOYMENT.test(sentence);
+}
+
+function withoutEqualOpportunityStatement(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const sentences = line.split(/(?<=[.!?])\s+/);
+      const kept = sentences.filter((s) => !isEqualOpportunityStatement(s));
+      return kept.length === sentences.length ? line : kept.join(' ');
+    })
+    .join('\n')
+    .replace(/\n\s*\n\s*\n+/g, '\n\n');
+}
+
+/*
+ * A person's email address and phone number, which are not the posting.
+ *
+ * LinkedIn's "Meet the hiring team" gives the recruiter's own address and
+ * direct line, a careers page signs off with the recruiter's, and a review
+ * step writes out the applicant's. All of them went into the description,
+ * and so into the save and every prompt written from it. Nothing the AI
+ * writes needs one. A mailbox the company keeps for applicants — careers@,
+ * jobs@, recruiting@ — is how to apply, and is left.
+ */
+const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
+const COMPANY_MAILBOX =
+  /^(?:careers?|jobs?|recruit\w*|talent\w*|hr|hiring|apply|applications?|people|accommodations?|accessibility|staffing|employment|resumes?|cv|info|hello|contact|privacy)$/i;
+const PHONE =
+  /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\b\d{3}[\s.-])\d{3}[\s.-]\d{4}\b|\+\d{1,3}(?:[\s.-]\(?\d{1,5}\)?){2,5}\b/g;
+
+function withoutPersonalContacts(text: string): string {
+  return text
+    .replace(EMAIL, (address) => (COMPANY_MAILBOX.test(address.split('@')[0] ?? '') ? address : '[redacted]'))
+    .replace(PHONE, '[redacted]');
+}
+
 export function extractJob(html: string, url?: string, said?: string): ExtractedJob {
   // Decoded before it is split or tested. See `readableName`.
   const pageTitle = readableName(said);
@@ -1537,6 +1729,14 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
         ? [facts.join('\n'), ldText, rest.join('\n')].filter(Boolean).join('\n\n')
         : [facts.join('\n'), text].filter(Boolean).join('\n\n');
   }
+  description = withoutEqualOpportunityStatement(description);
+  /*
+   * And no identifier, before this goes anywhere. The description is what the
+   * extension saves with the application, and `runAgent`'s redaction is only
+   * the door to the AI — a confirmation page's "Social Security Number
+   * 123-45-6789" was kept in the store as written. See `redactIdentifiers`.
+   */
+  description = withoutPersonalContacts(redactIdentifiers(description).text);
 
   return {
     title,

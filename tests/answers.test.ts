@@ -946,3 +946,214 @@ describe('identifier questions the bank never answers', () => {
     },
   );
 });
+
+describe('an identifier with a hint between its label and its value', () => {
+  /*
+   * A form's label carries the format it wants, and a review step writes the
+   * label out whole: "Date of Birth (MM/DD/YYYY): 04/02/1999", "Social
+   * Security Number *: 123456789". Only a colon, a dash or a space was allowed
+   * between the label and the value, so each of these went to the AI whole.
+   */
+  it.each([
+    ['Date of Birth (MM/DD/YYYY): 04/02/1999', '04/02/1999'],
+    ['Birth date (YYYY-MM-DD) 1999-04-02', '1999-04-02'],
+    ['Date of birth *: 04/02/1999', '04/02/1999'],
+    ['your date of birth, 04/02/1999, is on file', '04/02/1999'],
+    ['SSN (no dashes): 123456789', '123456789'],
+    ['Social Security Number *: 123456789', '123456789'],
+    ['SIN (Canada): 046 454 286', '046 454 286'],
+    ["Driver's license # (optional): D1234567", 'D1234567'],
+    ['Passport number (as shown): X12345678', 'X12345678'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'Social Security Number (last 4 digits): 6789',
+    'Passport (required for travel) 2 trips a year',
+    'Date of birth (you must be 18 or older)',
+  ])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
+  });
+});
+
+describe('a national ID number, where it is named', () => {
+  /*
+   * The labelled numbers were an American, a Canadian and a British set. A
+   * national ID by that name, India's Aadhaar, Singapore's NRIC, Brazil's CPF,
+   * Spain's DNI and NIE, Poland's PESEL, the Dutch BSN and the Swedish
+   * personnummer went to the AI as written — the CPF also because its dots
+   * ended the number after three digits.
+   */
+  it.each([
+    ['National ID: 12345678', '12345678'],
+    ['National ID number: A1234567', 'A1234567'],
+    ['National identity card number 850402-1234', '850402-1234'],
+    ['Government-issued ID #: 4410-2231-77', '4410-2231-77'],
+    ['Aadhaar: 1234 5678 9012', '1234 5678 9012'],
+    ['NRIC: S1234567D', 'S1234567D'],
+    ['CPF: 123.456.789-09', '123.456.789-09'],
+    ['DNI: 12345678Z', '12345678Z'],
+    ['NIE: X1234567L', 'X1234567L'],
+    ['PESEL 85040212345', '85040212345'],
+    ['BSN: 123456782', '123456782'],
+    ['Personnummer: 850402-1234', '850402-1234'],
+    ['Personal identity number 19850402-1234', '19850402-1234'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'A national ID is required for the background check',
+    'Bring a government-issued ID on day 1',
+    'Requisition ID: 2025-10-0045',
+  ])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
+  });
+});
+
+describe('a date of birth, however it is written', () => {
+  /*
+   * A labelled date of birth was caught as digits, as "April 2, 1999" and as
+   * "2 April 1999". Under "Birthday" or "Born", with the month cut short, or
+   * with the day said as "2nd", it went to the AI as written.
+   */
+  it.each([
+    ['Birthday: 04/02/1999', '04/02/1999'],
+    ['Born: 04/02/1999', '04/02/1999'],
+    ['Date of Birth: Apr. 2, 1999', 'Apr. 2, 1999'],
+    ['Date of birth: 2nd April 1999', '2nd April 1999'],
+    ['Date of birth - April 2nd, 1999', 'April 2nd, 1999'],
+    ['DOB: 2nd of April 1999', '2nd of April 1999'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each(['Founded in 2012, born out of a hackathon', 'Our birthday party is on Friday', 'Posted April 2nd, 2026'])(
+    'leaves %s alone',
+    (text) => {
+      expect(redactIdentifiers(text).text).toBe(text);
+    },
+  );
+});
+
+describe('an SSN written with dots or with en dashes', () => {
+  /*
+   * The 3-2-4 shape was caught with hyphens and spaces only. Typed with dots,
+   * or with the en dashes a word processor or a PDF's text puts in place of
+   * hyphens, it went to the AI whole — with its label or without.
+   */
+  it.each([
+    ['123.45.6789', '123.45.6789'],
+    ['SSN: 123.45.6789', '123.45.6789'],
+    ['SSN: 123–45–6789', '123–45–6789'],
+    ['my number is 123 – 45 – 6789', '6789'],
+  ])('takes out %s', (text, secret) => {
+    const out = redactIdentifiers(text);
+    expect(out.text).not.toContain(secret);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it.each(['Version 12.45.6789 of the SDK', 'Salary $120.000 – $150.000', 'Years 2019–2024', 'Call 617.555.0142'])('leaves %s alone', (text) => {
+    expect(redactIdentifiers(text).text).toBe(text);
+  });
+});
+
+describe('a card number from any of the networks', () => {
+  /*
+   * A card was known by Visa's, Mastercard's, Amex's and part of Discover's
+   * prefixes. A JCB card, a Diners Club card, a Discover card in its 644–649
+   * range and a UnionPay card went to the AI whole, Luhn digit and all.
+   */
+  it.each([
+    ['JCB', '3530 1113 3330 0000'],
+    ['Diners Club', '3056 930902 5904'],
+    ['Diners Club', '3852 0000 0232 37'],
+    ['Discover', '6445 6445 6445 6445'],
+    ['UnionPay', '6200 0000 0000 0005'],
+  ])('takes out a %s card', (_network, number) => {
+    const out = redactIdentifiers(`Card number: ${number}`);
+    expect(out.text).not.toContain(number);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it('leaves a long number that fails the check alone', () => {
+    expect(redactIdentifiers('Order 3530 1113 3330 0001 shipped').text).toBe('Order 3530 1113 3330 0001 shipped');
+  });
+});
+
+describe('the identifiers the extension refuses, refused here as well', () => {
+  /*
+   * JobHelper's remembering.js refuses a government ID by its short names,
+   * a visa, card or account number, and the secrets a security check asks
+   * for; the national numbers `redactIdentifiers` takes out by name were
+   * refused by neither. Each of these was saved to the bank by /answers/save
+   * and handed back by `matchAnswer` on the next form that asked.
+   */
+  it.each([
+    'Government ID',
+    'Govt. ID #',
+    "Gov't ID number",
+    'Government-issued ID number',
+    'State ID',
+    'Citizen ID',
+    'Personal identification number',
+    'Aadhaar number',
+    'Aadhar card number',
+    'NRIC / FIN',
+    'CPF',
+    'DNI',
+    'NIE',
+    'PESEL',
+    'BSN',
+    'Personnummer',
+    'Visa number',
+    'Card number',
+    'Account number',
+    'Unique Taxpayer Reference',
+    'Driver’s License Number',
+    "Mother's maiden name",
+    'Mother’s maiden name',
+    'Password',
+    'Security question answer',
+  ])('treats "%s" as an identifier', (q) => {
+    expect(isSensitiveQuestion(q)).toBe(true);
+    const bank = [{ id: 'a1', question: q, default: 'v', variants: [{ id: 'v', text: 'Kept by mistake.' }] }] as never;
+    expect(matchAnswer(q, bank).item).toBeUndefined();
+  });
+
+  it.each([
+    'Which finance tools have you used?',
+    'Do you have a fin-tech background?',
+    'What is your state of residence?',
+    'Tell us about a time you had to protect a customer account',
+    'Do you hold a work visa?',
+  ])('while "%s" is an ordinary question', (q) => {
+    expect(isSensitiveQuestion(q)).toBe(false);
+  });
+
+  /*
+   * And an answer the redaction would take out is not kept to be handed back.
+   * The bank refused an SSN by its dashes and a card by its check digit, and
+   * kept "DOB: 04/02/1999" or "Aadhaar: 1234 5678 9012" typed under an
+   * innocent question — the same text `redactIdentifiers` removes before
+   * anything else reads it.
+   */
+  it.each([
+    'DOB: 04/02/1999',
+    'Aadhaar: 1234 5678 9012',
+    'NRIC: S1234567D',
+    'Passport # X1234567',
+    'SSN 123456789',
+  ])('refuses the answer "%s"', (a) => {
+    expect(isSensitiveAnswer(a)).toBe(true);
+    const bank = [{ id: 'a1', question: 'Reference for the form', default: 'v', variants: [{ id: 'v', text: a }] }] as never;
+    expect(matchAnswer('Reference for the form', bank).item).toBeUndefined();
+  });
+});

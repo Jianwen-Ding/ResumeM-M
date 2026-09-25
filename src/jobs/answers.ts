@@ -397,9 +397,28 @@ const SENSITIVE_QUESTION = [
   /\bsocial\s*insurance(\s*(number|no\.?|#))?\b/i,
   /\bSIN\b/,
   /\bNI\s*(number|no\.?|#)/i,
-  /\bdriv(er'?s?|ing)\s*licen[cs]e\b/i,
+  // With a curly apostrophe too, the way a word processor writes "Driver’s".
+  /\bdriv(er['’]?s?|ing)\s*licen[cs]e\b/i,
   /\b(bank\s*account|routing\s*number|iban|sort\s*code)\b/i,
   /\b(credit|debit)\s*card\b/i,
+  /*
+   * What JobHelper's remembering.js refuses and this list did not know, and
+   * the national numbers `redactIdentifiers` takes out by name, which neither
+   * refused: a government ID however it is shortened, a state or citizen ID,
+   * India's Aadhaar, Singapore's NRIC and FIN, Brazil's CPF, Spain's DNI and
+   * NIE, Poland's PESEL, the Dutch BSN, the Swedish personnummer, a visa,
+   * card or account number, a taxpayer reference, and the answers to a
+   * security check. The short names in capitals, as forms write them,
+   * because "nie" and "dni" are words.
+   */
+  /\b(national|government|gov(?:ernmen|['’])?t\.?|state|citizen|personal)[\s-]*(issued[\s-]*)?(id|identity|identification)\b/i,
+  /\b(aadhaa?r|pesel|personnummer)\b/i,
+  /\b(NRIC|FIN|CPF|DNI|NIE|BSN)\b/,
+  /\b(visa|account|card)\s*(number|no\.?|#)/i,
+  /\btax\s*payer\b/i,
+  /\bpassword\b/i,
+  /\bsecurity\s*question\b/i,
+  /\bmother['’]?s\s*maiden\b/i,
 ];
 
 /**
@@ -417,15 +436,17 @@ const SENSITIVE_ANSWER = [
 ];
 
 /**
- * A card number, not any long number: a card issuer's prefix and a valid
- * Luhn check digit. A plain 13-to-19 digit rule refused ordinary answers —
+ * A card number, not any long number: a card network's prefix and a valid
+ * Luhn check digit. Every network's — JCB, Diners Club, UnionPay and the
+ * rest of Discover's went unrecognised when only four were known. A plain 13-to-19 digit rule refused ordinary answers —
  * a timestamp, an order number — which is a save that silently fails.
  */
 function containsCardNumber(answer: string): boolean {
   for (const run of answer.match(/\b(?:\d[ -]?){12,18}\d\b/g) ?? []) {
     const digits = run.replace(/\D/g, '');
     if (digits.length < 13 || digits.length > 19) continue;
-    if (!/^(?:4|5[1-5]|2[2-7]|3[47]|6(?:011|5))/.test(digits)) continue;
+    // Visa, Mastercard, Amex, Diners Club, JCB, Discover and UnionPay.
+    if (!/^(?:4|5[1-5]|2[2-7]|3[47]|3(?:0[0-5]|[689])|35(?:2[89]|[3-8])|6(?:011|2|4[4-9]|5))/.test(digits)) continue;
     let sum = 0;
     for (let i = 0; i < digits.length; i++) {
       let d = Number(digits[digits.length - 1 - i]);
@@ -452,6 +473,15 @@ function containsCardNumber(answer: string): boolean {
  * numbers only where they are labelled: a bare date is a date, and "passport
  * holder" is a phrase. Returns how many were taken out, so it can be said.
  */
+/*
+ * What a form puts between a label and its value, and a review step writes
+ * out with both: the format it wants, "(MM/DD/YYYY)", "(no dashes)", and the
+ * star that marks it required. With only a colon, a dash or a space allowed
+ * there, "Date of Birth (MM/DD/YYYY): 04/02/1999" and "Social Security
+ * Number *: 123456789" went to the AI whole.
+ */
+const LABEL_HINT = String.raw`(?:\s*\([^)\n]{0,40}\))?(?:\s*\*)?`;
+
 export function redactIdentifiers(text: string): { text: string; redacted: number } {
   let redacted = 0;
   const hide = (s: string, re: RegExp, keep?: (m: string, ...g: string[]) => string) =>
@@ -460,21 +490,27 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
       return keep ? keep(m, ...g) : '[redacted]';
     });
   let out = String(text ?? '');
-  out = hide(out, /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g);
+  // An SSN's 3-2-4, with dots, and with the en dashes a word processor or a
+  // PDF's text puts where the hyphens were, as well as hyphens and spaces.
+  out = hide(out, /\b\d{3}(?:\s?[-–.]\s?| )\d{2}(?:\s?[-–.]\s?| )\d{4}\b/g);
   out = hide(out, /\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}(?:\s?[A-Z0-9]{1,3})?\b/g);
   out = out.replace(/\b(?:\d[ -]?){12,18}\d\b/g, (run) => {
     if (!containsCardNumber(run)) return run;
     redacted++;
     return '[redacted]';
   });
+  /*
+   * Under "Birthday" and "Born" too, with the month cut short ("Apr. 2,
+   * 1999") and the day said as "2nd" — each of which went to the AI whole.
+   */
   out = hide(
     out,
-    /\b(date of birth|birth ?date|d\.?o\.?b\.?)(\s*[:\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+ \d{1,2},? \d{4}|\d{1,2} [A-Z][a-z]+ \d{4})/gi,
+    new RegExp(String.raw`\b(date of birth|birth ?date|birthday|born(?: on)?|d\.?o\.?b\.?)(${LABEL_HINT}\s*[:,\-]?\s*)(\d{1,4}[\/.\- ]\d{1,2}[\/.\- ]\d{1,4}|[A-Z][a-z]+\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4}|\d{1,2}(?:st|nd|rd|th)?(?: of)? [A-Z][a-z]+\.?,? \d{4})`, 'gi'),
     (_m, label, gap) => `${label}${gap}[redacted]`,
   );
   out = hide(
     out,
-    /\b(passport(?:\s+(?:no\.?|number|#))?)(\s*[:\-#]?\s*)([A-Z]{0,2}\d[A-Z0-9]{5,8})\b/gi,
+    new RegExp(String.raw`\b(passport(?:\s+(?:no\.?|number|#))?)(${LABEL_HINT}\s*[:\-#]?\s*)([A-Z]{0,2}\d[A-Z0-9]{5,8})\b`, 'gi'),
     (_m, label, gap) => `${label}${gap}[redacted]`,
   );
   /*
@@ -483,9 +519,15 @@ export function redactIdentifiers(text: string): { text: string; redacted: numbe
    * is an order number as often as anything, so only a number that follows
    * its own label, and only one with five digits or more in it — "SIN wave",
    * "a driver's license and a car" are words, and are left.
+   *
+   * And the national IDs by their own names — a national or government ID,
+   * India's Aadhaar, Singapore's NRIC, Brazil's CPF, Spain's DNI and NIE,
+   * Poland's PESEL, the Dutch BSN, the Swedish personnummer — which went to
+   * the AI as written. A dot joins the parts of one as a space or a dash
+   * does: "123.456.789-09" ended after three digits.
    */
   out = out.replace(
-    /\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin)(\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ \-][A-Z]?\d[A-Z0-9]*)*)/gi,
+    new RegExp(String.raw`\b(ssn|social\s+security(?:\s+(?:no\.?|number|#))?|social\s+insurance(?:\s+(?:no\.?|number))?|sin|national\s+insurance(?:\s+(?:no\.?|number))?|ni\s+(?:no\.?|number)|driv(?:er'?s?|ing)\s+licen[cs]e(?:\s+(?:no\.?|number|#))?|tax\s+(?:id|identification)(?:\s+(?:no\.?|number))?|itin|national\s+id(?:entity|entification)?(?:\s+card)?(?:\s+(?:no\.?|number|#))?|gov(?:ernmen)?t\.?[\s-]+(?:issued\s+)?id(?:\s+(?:no\.?|number|#))?|aadhaa?r(?:\s+(?:no\.?|number))?|nric|cpf|dni|nie|pesel|bsn|personnummer|personal\s+(?:identity|identification|id)\s+(?:no\.?|number|code))(${LABEL_HINT}\s*(?:is\s+)?[:\-#]?\s*)([A-Z]{0,5}\d[A-Z0-9]*(?:[ .\-][A-Z]?\d[A-Z0-9]*)*)`, 'gi'),
     (m, label: string, gap: string, value: string) => {
       if ((value.match(/\d/g) ?? []).length < 5) return m;
       redacted++;
@@ -517,8 +559,18 @@ export function redactDeep<T>(value: T): T {
   return walk(value) as T;
 }
 
+/*
+ * And anything `redactIdentifiers` would take out: a labelled date of birth,
+ * passport or national number is kept out of the bank as it is kept out of
+ * everything else. "DOB: 04/02/1999" typed under an innocent question was
+ * saved, and offered back on the next form.
+ */
 export function isSensitiveAnswer(answer: string): boolean {
-  return SENSITIVE_ANSWER.some((re) => re.test(answer)) || containsCardNumber(answer);
+  return (
+    SENSITIVE_ANSWER.some((re) => re.test(answer)) ||
+    containsCardNumber(answer) ||
+    redactIdentifiers(answer).redacted > 0
+  );
 }
 
 export function isSensitiveQuestion(question: string): boolean {

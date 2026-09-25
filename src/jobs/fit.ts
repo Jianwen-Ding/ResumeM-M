@@ -1,3 +1,4 @@
+import { productsOf, sameTerm, spellingsOf } from './extract.js';
 import type { ResolvedResume, ResumeSpec, StoreData } from '../model/types.js';
 import { resolveResume } from '../model/resolve.js';
 import type { Store } from '../model/store.js';
@@ -28,7 +29,8 @@ import type { Store } from '../model/store.js';
 
 /** Normalise a keyword the way `match.ts` does, so the two agree. */
 function norm(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+  // And every spelling of one thing as the one: "Postgres" is "PostgreSQL". See `ALIASES`.
+  return sameTerm(s.toLowerCase().replace(/[^a-z0-9+#]/g, ''));
 }
 
 /**
@@ -43,10 +45,15 @@ function spaced(s: string): string {
 }
 
 function mentions(text: string, keyword: string): boolean {
-  const written = spaced(keyword).trim();
-  if (written && text.includes(` ${written} `)) return true;
-  const glued = norm(keyword);
-  return Boolean(glued) && text.includes(` ${glued} `);
+  // In any of its spellings: "k8s" answers "Kubernetes". See `ALIASES`.
+  for (const said of spellingsOf(keyword)) {
+    const written = spaced(said).trim();
+    if (written && text.includes(` ${written} `)) return true;
+    const glued = said.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+    if (glued && text.includes(` ${glued} `)) return true;
+  }
+  // A suite asked for is answered by any of its products. See `SUITES`.
+  return productsOf(keyword).some((product) => text.includes(` ${spaced(product).trim()} `));
 }
 
 /**

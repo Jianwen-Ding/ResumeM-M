@@ -1316,3 +1316,217 @@ describe('facts beside a rail, in a long breadcrumb, or in a consent block', () 
     expect(banner).not.toContain('You must accept cookies');
   });
 });
+
+/*
+ * A rail of other openings under the names the boards give it.
+ *
+ * The label above knew "Similar jobs", "More roles" and "People also viewed".
+ * LinkedIn heads its rail "Jobs you may be interested in", Indeed "Jobs you
+ * might like" and "Explore other jobs", and a careers site "You might also
+ * like" — and each card's salary and city reached the AI unmarked, beside
+ * this job's own.
+ */
+describe('a list of other openings is labelled under the names boards give it', () => {
+  const MARK = '[Other openings listed on this site — not this job:]';
+  const main = '<main><h1>Backend Engineer</h1><p>You will own our billing APIs. Requires 3+ years of Python. Salary: $130,000–$160,000.</p></main>';
+  const filler = `<p>${'We build tools for teams that ship software every day and care about craft. '.repeat(6)}</p>`;
+  it.each([
+    ['LinkedIn', 'Jobs you may be interested in', '/jobs/view/4012345999/', '/jobs/view/4012346000/'],
+    ['Indeed', 'Jobs you might like', '/viewjob?jk=a1b2c3', '/viewjob?jk=d4e5f6'],
+    ['Indeed', 'Explore other jobs', '/q-backend-l-austin-jobs.html', '/cmp/Globex/jobs'],
+    ['a careers site', 'You might also like', '/careers/4411', '/careers/4412'],
+  ])('on %s, under "%s"', (_board, heading, first, second) => {
+    const html = `<html><body>${main}<section class="rail"><h2>${heading}</h2><ul>
+      <li><a href="${first}">Frontend Engineer</a><span>Globex · Austin, TX · $120K - $140K</span></li>
+      <li><a href="${second}">Data Engineer</a><span>Initech · Remote · $110K</span></li></ul></section>${filler}</body></html>`;
+    const out = extractJob(html, 'https://www.example.com/jobs/view/4012345678/').description;
+    expect(out).toContain(MARK);
+    expect(out.indexOf(MARK)).toBeLessThan(out.indexOf('$120K - $140K'));
+    expect(out.indexOf('$130,000–$160,000')).toBeLessThan(out.indexOf(MARK));
+  });
+});
+
+/*
+ * "Other roles and responsibilities" is this job's own section.
+ *
+ * It opens with "Other roles", which is how a rail of other openings names
+ * itself, and a section with two links in it — to a handbook, to the on-call
+ * rota — was labelled "not this job", so the AI was told the duties it was
+ * tailoring to belonged to some other posting.
+ */
+describe('a section of this job\'s duties is not labelled as other openings', () => {
+  const MARK = '[Other openings listed on this site — not this job:]';
+  const filler = `<p>${'You will build and run the services that move money between merchants and their banks. '.repeat(4)}</p>`;
+  it.each(['Other Roles and Responsibilities', 'Other roles &amp; responsibilities', 'Other Roles & Duties'])('under "%s"', (heading) => {
+    const html = `<html><body><main><h1>Program Analyst</h1>${filler}<section><h3>${heading}</h3><ul>
+      <li>Mentor junior analysts as the <a href="/handbook">handbook</a> sets out</li>
+      <li>Cover the <a href="/oncall">on-call rota</a> one week in six</li></ul></section></main></body></html>`;
+    const out = extractJob(html, 'https://careers.acme.example/jobs/4410').description;
+    expect(out).toContain('Mentor junior analysts');
+    expect(out).not.toContain(MARK);
+  });
+  it('while a rail headed "Other roles" is still labelled', () => {
+    const html = `<html><body><main><h1>Program Analyst</h1>${filler}</main><section><h3>Other roles</h3><ul>
+      <li><a href="/jobs/4411">Data Analyst</a> $70,000</li><li><a href="/jobs/4412">Budget Analyst</a> $72,000</li></ul></section></body></html>`;
+    expect(extractJob(html, 'https://careers.acme.example/jobs/4410').description).toContain(MARK);
+  });
+});
+
+/*
+ * A consent manager's banner, by the names the common ones give themselves.
+ *
+ * A block was taken for a cookie banner only when its id or class had
+ * "cookie" or "consent" as a word of its own, so Cookiebot's
+ * `CybotCookiebotDialog`, a `cookieBanner`, Didomi's and Quantcast's hosts
+ * were read as the posting. And one that was recognised was kept whole for
+ * any digit in it: the "We and our 842 partners" every IAB banner opens with,
+ * a "3rd party" cookie. A figure that is pay still keeps it.
+ */
+describe('a consent manager\'s banner is cut, by its own name and with its partner count', () => {
+  const body = (extra: string) => `<html><body>${NAV}<main>${postingBody()}</main>${extra}${FOOTER}</body></html>`;
+  const TCF = 'We and our 842 partners store and/or access information on a device, such as cookies.';
+  it.each([
+    ['Cookiebot', `<div id="CybotCookiebotDialog" class="CybotCookiebotDialogActive"><h2>This website uses cookies</h2><p>${TCF}</p><button>Allow all</button></div>`],
+    ['a camel-cased banner', `<div class="cookieBanner"><p>${TCF}</p><button>OK</button></div>`],
+    ['Didomi', `<div id="didomi-host"><div class="didomi-popup"><p>${TCF}</p></div></div>`],
+    ['Quantcast', `<div id="qc-cmp2-container"><div class="qc-cmp2-summary"><p>${TCF}</p></div></div>`],
+    ['OneTrust, with a 3rd party', '<div id="onetrust-consent-sdk"><p>We use 3rd party cookies to personalise ads.</p><button>Accept</button></div>'],
+  ])('%s', (_cmp, banner) => {
+    const out = extractJob(body(banner), 'https://careers.acme.example/jobs/4410').description;
+    expect(out).not.toContain('partners store');
+    expect(out).not.toContain('3rd party cookies');
+    expectPostingSurvives(out);
+  });
+  it('while pay said in a consent block is still kept', () => {
+    const out = withoutChrome(body('<div id="gdpr-notice"><p>By applying you agree to our notice. The Zurich variant of this role pays CHF 120,000.</p></div>'));
+    expect(out).toContain('CHF 120,000');
+  });
+  it('and a page wrapper the site names for its banner is not the banner', () => {
+    const html = `<html><body><div class="page has-cookie-banner"><main><h1>Support Engineer</h1>
+      <p>Own tier-two tickets and decide what wakes an engineer up at night.</p>${FILLER('Paragraph', 4)}</main></div>
+      <section><h2>About Acme</h2>${FILLER('About', 3)}</section></body></html>`;
+    expect(extractJob(html).description).toContain('decide what wakes an engineer up');
+  });
+});
+
+/*
+ * The equal-opportunity statement is the law's text, not the job's.
+ *
+ * Greenhouse and Lever close every posting with it, and it went to the AI as
+ * part of the job — a paragraph naming race, religion, disability and veteran
+ * status for a letter and answers to be tailored to. It is taken out a
+ * sentence at a time, so a visa line or a salary said in the same paragraph
+ * stays.
+ */
+describe('the equal-opportunity statement is not handed over as the job', () => {
+  const GREENHOUSE_EEO =
+    'Acme is an Equal Opportunity Employer. All qualified applicants will receive consideration for employment without regard to race, color, religion, sex, sexual orientation, gender identity, national origin, disability, or protected veteran status.';
+  const LEVER_EEO =
+    'We do not discriminate on the basis of race, religion, color, national origin, gender, sexual orientation, age, marital status, veteran status, or disability status.';
+  const html = `<html><body><main><h1>Senior Data Engineer</h1>
+    <h3>What you'll do</h3><ul><li>Build the pipelines that feed billing.</li><li>Own the warehouse's SLAs.</li></ul>
+    <h3>Salary range</h3><p>$150,000 - $190,000 a year</p>
+    <p>${'We are a team of forty engineers across three time zones who care about craft. '.repeat(3)}</p>
+    <div class="content-conclusion"><p>${GREENHOUSE_EEO}</p></div>
+    <div><p>${LEVER_EEO}</p></div>
+    <p>Acme is an equal opportunity employer. We cannot sponsor visas for this role.</p>
+    <p>As an equal opportunity employer we hire across the EU, and this role is remote.</p>
+    </main></body></html>`;
+  const { description } = extractJob(html, 'https://boards.greenhouse.io/acme/jobs/4012345', 'Senior Data Engineer');
+
+  it('leaves the statement out', () => {
+    expect(description).not.toContain('Acme is an Equal Opportunity Employer');
+    expect(description).not.toContain('Acme is an equal opportunity employer');
+    expect(description).not.toContain('without regard to race');
+    expect(description).not.toContain('do not discriminate');
+  });
+  it('and keeps the job around it, the visa line in the same paragraph too', () => {
+    for (const fact of ['Build the pipelines that feed billing.', '$150,000 - $190,000 a year', 'We cannot sponsor visas for this role.', 'this role is remote', 'forty engineers']) {
+      expect(description).toContain(fact);
+    }
+  });
+});
+
+/*
+ * An identifier on a page of the trail, taken out before the posting is kept.
+ *
+ * `redactIdentifiers` ran on the prompt, at the last door to the AI, and
+ * nowhere on the way into the store: the description built here is what the
+ * extension saves with the application, so a confirmation page's "your Social
+ * Security Number 123-45-6789 is on file" sat in the save as written.
+ */
+describe('an identifier on a page of the trail is not kept with the posting', () => {
+  it('takes it out of the description the store is given', () => {
+    const posting = `<html><body><main><h1>Payroll Specialist</h1><p>${'You will run payroll for four hundred people across three states, on time, every other Friday. '.repeat(3)}</p>
+      <p>Salary: $62,000 - $70,000. Requisition JR-0012345. Experience 2019-2024 with ADP preferred.</p></main></body></html>`;
+    const done = `<html><body><main><h1>Thank you, Jane</h1><p>We have your Social Security Number 123-45-6789 and your date of birth 04/02/1999 on file for the background check.</p></main></body></html>`;
+    const merged = mergeJobPages([
+      { url: 'https://acme.wd5.myworkdayjobs.com/External/job/Boston/Payroll-Specialist_JR-0012345', title: 'Payroll Specialist', html: posting },
+      { url: 'https://acme.wd5.myworkdayjobs.com/External/job/Boston/Payroll-Specialist_JR-0012345/apply/done', title: 'Thank you', html: done },
+    ]);
+    expect(merged.description).not.toContain('123-45-6789');
+    expect(merged.description).not.toContain('04/02/1999');
+    // And the numbers that are the posting's stay as they were.
+    expect(merged.description).toContain('Salary: $62,000 - $70,000. Requisition JR-0012345. Experience 2019-2024 with ADP preferred.');
+  });
+});
+
+/*
+ * A person's email and phone number are not the posting.
+ *
+ * LinkedIn's "Meet the hiring team" gives the recruiter's own address and
+ * direct line, and a review step writes out the applicant's; both went into
+ * the description, and so into the save and the AI's prompt. A mailbox the
+ * company keeps for applicants is how to apply, and stays.
+ */
+describe('a person\'s email and phone number are not kept with the posting', () => {
+  const html = `<html><body><main><h1>Backend Engineer</h1>
+    <p>${'You will build the billing APIs that every merchant on the platform calls, and keep them fast. '.repeat(3)}</p>
+    <p>Salary: $130,000 - $160,000, plus 401(k). Requisition 2025-10-0045. Experience 2019-2024 at a payments company preferred.</p>
+    <p>Questions about accommodations? Write to careers@acme.com.</p>
+    <div class="jobs-poster"><h2>Meet the hiring team</h2><p>Sarah Kim, Technical Recruiter</p>
+      <p>sarah.kim@acme.com · +1 (512) 555-0187</p><p>Mobile: 512.555.0199 · UK office +44 20 7946 0958</p></div>
+    <dl><dt>Email address</dt><dd>jane.doe+jobs@gmail.com</dd><dt>Phone</dt><dd>617-555-0142</dd></dl>
+    </main></body></html>`;
+  const { description } = extractJob(html, 'https://www.linkedin.com/jobs/view/4012345678/', 'Backend Engineer | Acme | LinkedIn');
+
+  it('leaves out the recruiter\'s and the applicant\'s', () => {
+    for (const contact of ['sarah.kim@acme.com', '(512) 555-0187', '512.555.0199', '7946 0958', 'jane.doe+jobs@gmail.com', '617-555-0142']) {
+      expect(description).not.toContain(contact);
+    }
+  });
+  it('and keeps the recruiter\'s name, the company\'s mailbox and the posting\'s own numbers', () => {
+    expect(description).toContain('Sarah Kim, Technical Recruiter');
+    expect(description).toContain('careers@acme.com');
+    expect(description).toContain('Salary: $130,000 - $160,000, plus 401(k). Requisition 2025-10-0045. Experience 2019-2024 at a payments company preferred.');
+  });
+});
+
+/*
+ * A JSON-LD description whose markup is written as entities.
+ *
+ * LinkedIn and Greenhouse put the posting's HTML into JSON-LD escaped —
+ * "&lt;strong&gt;Requirements&lt;/strong&gt;" — and the tags were taken out
+ * before the entities were read, so the AI and the save were handed the
+ * posting as "<p><strong>Requirements</strong></p><ul><li>…", markup and all.
+ */
+describe('a JSON-LD description written with its markup escaped', () => {
+  it('is read as the posting, not as markup', () => {
+    const ld = {
+      '@context': 'https://schema.org',
+      '@type': 'JobPosting',
+      title: 'Data Analyst',
+      hiringOrganization: { '@type': 'Organization', name: 'Acme' },
+      description:
+        '&lt;p&gt;&lt;strong&gt;Requirements&lt;/strong&gt;&lt;/p&gt;&lt;ul&gt;&lt;li&gt;Five years of SQL and Python in analytics&lt;/li&gt;&lt;li&gt;Tableau or Looker&lt;/li&gt;&lt;/ul&gt;' +
+        `&lt;p&gt;${'We are a small analytics team inside a large company, and we answer the questions finance asks. '.repeat(3)}&lt;/p&gt;` +
+        '&lt;p&gt;Salary: $90,000 &amp;ndash; $110,000 &amp;amp; equity&lt;/p&gt;',
+    };
+    const html = `<html><head><script type="application/ld+json">${JSON.stringify(ld)}</script></head><body><main><h1>Data Analyst</h1></main></body></html>`;
+    const { description } = extractJob(html, 'https://www.linkedin.com/jobs/view/4012345678/', 'Data Analyst | Acme | LinkedIn');
+    expect(description).not.toMatch(/<\/?(?:p|strong|ul|li)>/);
+    expect(description).toContain('- Five years of SQL and Python in analytics');
+    expect(description).toContain('- Tableau or Looker');
+    expect(description).toContain('Salary: $90,000 – $110,000 & equity');
+  });
+});
