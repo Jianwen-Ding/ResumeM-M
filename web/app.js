@@ -460,8 +460,21 @@ async function stepHistory(direction) {
      * re-applied exactly what had just been undone and the next auto-save
      * wrote it out again. From the outside, Ctrl+Z did nothing at all.
      */
+    const was = state.resumeId;
     clearEdits();
     await loadStore();
+
+    /*
+     * A step that took away the resume on screen — undoing "Save as
+     * variation" — left `loadStore` to pick one, and it picks the save's
+     * first base: not where the person was when they made the copy. Back to
+     * the one it was copied from, when that is still here.
+     */
+    if (was && state.resumeId !== was) {
+      const change = entry.changes.find((c) => c.docKey === `resume:${was}`);
+      const from = (change?.after ?? change?.before)?.copiedFrom;
+      if (from && state.store.resumes.some((r) => r.id === from)) state.resumeId = from;
+    }
 
     /*
      * Go to the resume that moved, so what happened is on screen.

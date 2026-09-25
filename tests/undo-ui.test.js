@@ -54,8 +54,14 @@ describe('undo in the builder', () => {
         result = data.resumes.find((r) => r.id === id);
       } else if (url.startsWith('/api/resumes/') && method === 'PUT') {
         const id = decodeURIComponent(url.split('?')[0].split('/').pop());
-        data.resumes = data.resumes.map((r) => (r.id === id ? { ...body, id } : r));
+        data.resumes = data.resumes.some((r) => r.id === id)
+          ? data.resumes.map((r) => (r.id === id ? { ...body, id } : r))
+          : [...data.resumes, { ...body, id }];
         result = data.resumes.find((r) => r.id === id);
+      } else if (url.startsWith('/api/resumes/') && method === 'DELETE') {
+        const id = decodeURIComponent(url.split('?')[0].split('/').pop());
+        data.resumes = data.resumes.filter((r) => r.id !== id);
+        result = { ok: true };
       } else if (url.startsWith('/api/entries/') && method === 'PUT') {
         data.entries = data.entries.some((e) => e.id === body.id)
           ? data.entries.map((e) => (e.id === body.id ? body : e))
@@ -370,6 +376,33 @@ describe('undo in the builder', () => {
     expect(spec('newgrad')).not.toEqual(afterEdit);
     expect(selector.value, 'the editor followed the change').toBe('newgrad');
     expect(document.querySelector('#status').textContent).toMatch(/new grad/i);
+  });
+
+  /*
+   * Undoing a "Save as variation" takes away the resume on screen, and the
+   * editor went wherever a save with no resume open goes — its first base —
+   * rather than back to the one the copy was made from, which is where the
+   * person was when they made it. The next edit then landed on a resume they
+   * had not been looking at.
+   */
+  it('goes back to the resume a copy was made from when the copy is undone', async () => {
+    // Not the one a save with nothing open falls back to, or this proves nothing.
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'intern';
+    selector.dispatchEvent(new Event('change'));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    document.querySelector('#btn-save-as').click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-content [name="label"]').value = 'A copy to take back';
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(selector.value).toBe('intern-variant'));
+
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(spec('intern-variant'), 'the copy is gone').toBeUndefined();
+    expect(selector.value, 'and the editor is back on the one it was copied from').toBe('intern');
   });
 
   /*
