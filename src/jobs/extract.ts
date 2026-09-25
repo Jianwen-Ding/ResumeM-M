@@ -4,6 +4,8 @@
  * HTML arrives, including pages the extension could not parse.
  */
 
+import { redactIdentifiers } from './answers.js';
+
 export interface ExtractedJob {
   title?: string;
   company?: string;
@@ -1603,6 +1605,13 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
         : [facts.join('\n'), text].filter(Boolean).join('\n\n');
   }
   description = withoutEqualOpportunityStatement(description);
+  /*
+   * And no identifier, before this goes anywhere. The description is what the
+   * extension saves with the application, and `runAgent`'s redaction is only
+   * the door to the AI — a confirmation page's "Social Security Number
+   * 123-45-6789" was kept in the store as written. See `redactIdentifiers`.
+   */
+  description = redactIdentifiers(description).text;
 
   return {
     title,

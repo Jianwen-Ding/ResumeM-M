@@ -1446,3 +1446,27 @@ describe('the equal-opportunity statement is not handed over as the job', () => 
     }
   });
 });
+
+/*
+ * An identifier on a page of the trail, taken out before the posting is kept.
+ *
+ * `redactIdentifiers` ran on the prompt, at the last door to the AI, and
+ * nowhere on the way into the store: the description built here is what the
+ * extension saves with the application, so a confirmation page's "your Social
+ * Security Number 123-45-6789 is on file" sat in the save as written.
+ */
+describe('an identifier on a page of the trail is not kept with the posting', () => {
+  it('takes it out of the description the store is given', () => {
+    const posting = `<html><body><main><h1>Payroll Specialist</h1><p>${'You will run payroll for four hundred people across three states, on time, every other Friday. '.repeat(3)}</p>
+      <p>Salary: $62,000 - $70,000. Requisition JR-0012345. Experience 2019-2024 with ADP preferred.</p></main></body></html>`;
+    const done = `<html><body><main><h1>Thank you, Jane</h1><p>We have your Social Security Number 123-45-6789 and your date of birth 04/02/1999 on file for the background check.</p></main></body></html>`;
+    const merged = mergeJobPages([
+      { url: 'https://acme.wd5.myworkdayjobs.com/External/job/Boston/Payroll-Specialist_JR-0012345', title: 'Payroll Specialist', html: posting },
+      { url: 'https://acme.wd5.myworkdayjobs.com/External/job/Boston/Payroll-Specialist_JR-0012345/apply/done', title: 'Thank you', html: done },
+    ]);
+    expect(merged.description).not.toContain('123-45-6789');
+    expect(merged.description).not.toContain('04/02/1999');
+    // And the numbers that are the posting's stay as they were.
+    expect(merged.description).toContain('Salary: $62,000 - $70,000. Requisition JR-0012345. Experience 2019-2024 with ADP preferred.');
+  });
+});
