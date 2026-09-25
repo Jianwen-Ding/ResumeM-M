@@ -192,14 +192,26 @@ describe('a command that will not stop when it is asked', () => {
    * `finally` the hung run never reached, so "it ends" and "it tidies up"
    * are the same fix and only one of them is obvious.
    */
+  /*
+   * In a temp folder of its own. Counted in the shared one, another test file
+   * running beside this made a scratch directory of its own in the second
+   * between the two counts, and the count went up with nothing leaked.
+   */
   it('and the scratch directory does not outlive it', async () => {
-    const before = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('rmm-ai-')).length;
-    await runAgent(
-      config({ enabled: true, command: process.execPath, args: IGNORES_SIGTERM, timeoutMs: 1000 }),
-      'x',
-    ).catch(() => undefined);
-    const after = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('rmm-ai-')).length;
-    expect(after).toBeLessThanOrEqual(before);
+    const own = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-agent-test-'));
+    const was = process.env.TMPDIR;
+    process.env.TMPDIR = own;
+    try {
+      await runAgent(
+        config({ enabled: true, command: process.execPath, args: IGNORES_SIGTERM, timeoutMs: 1000 }),
+        'x',
+      ).catch(() => undefined);
+      expect(fs.readdirSync(own).filter((f) => f.startsWith('rmm-ai-'))).toEqual([]);
+    } finally {
+      if (was === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = was;
+      fs.rmSync(own, { recursive: true, force: true });
+    }
   }, 30_000);
 });
 
