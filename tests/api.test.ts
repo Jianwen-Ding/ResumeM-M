@@ -329,6 +329,47 @@ describe('job analysis', () => {
       expect(change?.from).toEqual(['s_py', 's_go', 's_php']);
     });
 
+    /*
+     * A group in the second of two skills sections. The match read only the
+     * first section and skipped the group as not printed, and the list undo
+     * goes back to was read from the first section too — `null`, "print them
+     * all", for a group whose own section had cut it down.
+     */
+    it('reads a group in the second skills section against that section', async () => {
+      t.write('skills.yaml', [
+        ...(t.read('skills.yaml') as unknown[]),
+        {
+          id: 'sk_tools',
+          name: 'Tools',
+          items: [
+            { id: 's_k8s', text: 'Kubernetes', tags: ['kubernetes'] },
+            { id: 's_aws', text: 'AWS', tags: ['aws'] },
+            { id: 's_tf', text: 'Terraform', tags: ['terraform'] },
+            { id: 's_jenkins', text: 'Jenkins', tags: ['jenkins'] },
+          ],
+        },
+      ]);
+      t.store.saveResume({
+        id: 'two-skills',
+        label: 'Two skills sections',
+        sections: [
+          { kind: 'experience', entries: ['exp_acme'] },
+          { kind: 'skills', entries: [], groups: ['sk_lang'] },
+          { kind: 'skills', heading: 'Tools', entries: [], groups: ['sk_tools'], items: { sk_tools: ['s_k8s', 's_aws', 's_tf'] } },
+        ],
+      });
+
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'two-skills' })
+        .expect(200);
+
+      const change = (res.body.skillChanges as { groupId: string; from: string[] | null; to: string[] }[])
+        .find((c) => c.groupId === 'sk_tools');
+      expect(change?.to).toEqual(['s_k8s', 's_aws']);
+      expect(change?.from).toEqual(['s_k8s', 's_aws', 's_tf']);
+    });
+
     it('says nothing about skills when nothing was narrowed', async () => {
       const res = await request(app)
         .post('/api/extension/analyze')

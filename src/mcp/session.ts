@@ -32,7 +32,7 @@
  * not a limitation of this file.
  */
 
-import { inListOrder, type AiPlan } from '../jobs/aiPlan.js';
+import { inListOrder, sectionForEntry, type AiPlan } from '../jobs/aiPlan.js';
 import { pickBullet } from '../model/resolve.js';
 import type { Bullet, Entry, MaybeVariant, ResolvedResume, SkillGroup, StoreData } from '../model/types.js';
 
@@ -165,7 +165,7 @@ export class TailorSession {
    */
   describeResume(): string {
     const lines: string[] = [`${this.resume.label} — as it stands now`];
-    for (const section of this.resume.sections) {
+    for (const [at, section] of this.resume.sections.entries()) {
       lines.push('', `## ${section.heading}`);
       /*
        * With the plan's picks applied, as everything below applies its shows,
@@ -176,7 +176,7 @@ export class TailorSession {
         const picked = this.state.plan.skills[group.id];
         lines.push(`- ${group.name}: ${(picked ? this.pickedSkills(group.id, picked) : group.items).join(', ')}`);
       }
-      for (const entryId of this.orderedEntries(section.kind, section.entries.map((e) => e.id))) {
+      for (const entryId of this.orderedEntries(section.kind, section.entries.map((e) => e.id), at)) {
         const resolvedEntry = section.entries.find((e) => e.id === entryId);
         const entry = this.entries.get(entryId);
         /*
@@ -544,11 +544,34 @@ export class TailorSession {
    * Working out what the page looks like with the plan applied        *
    * ---------------------------------------------------------------- */
 
-  private orderedEntries(kind: string, current: string[]): string[] {
+  /**
+   * The resume's sections as `sectionForEntry` reads them, so the page read
+   * back to the model puts an entry it turned on where `applyInclusion` will.
+   * The spec's own where the save has it — its headings as written, and the
+   * lines it keeps for entries switched off — and the resolved ones otherwise.
+   */
+  private placing() {
+    const spec = this.data.resumes.find((r) => r.id === this.resume.id);
+    return this.resume.sections.map((s, i) => {
+      const own = spec?.sections?.[i];
+      return {
+        kind: s.kind,
+        heading: own ? own.heading : s.heading,
+        entries: s.entries.map((e) => e.id),
+        bullets: own?.bullets,
+      };
+    });
+  }
+
+  private orderedEntries(kind: string, current: string[], at?: number): string[] {
     const shown = current.filter((id) => !this.state.plan.disable.includes(id));
-    const added = this.state.plan.enable.filter(
-      (id) => this.entries.get(id)?.kind === kind && !shown.includes(id),
-    );
+    const sections = at === undefined ? [] : this.placing();
+    const added = this.state.plan.enable.filter((id) => {
+      const entry = this.entries.get(id);
+      if (entry?.kind !== kind || shown.includes(id)) return false;
+      // Under one section of its kind, not every one of them.
+      return at === undefined || sectionForEntry(sections, entry, this.data.resumes) === sections[at];
+    });
     // In the resume's own order, never a plan's: entries are not reordered.
     return [...shown, ...added];
   }

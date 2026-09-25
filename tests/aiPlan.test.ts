@@ -581,3 +581,83 @@ describe('a phrasing the model proposes', () => {
     expect(sanitizeSuggestions(null, data())).toEqual([]);
   });
 });
+
+/*
+ * Two sections of one kind.
+ *
+ * A resume can hold two `custom` sections — "Awards" and "Leadership" — and
+ * two skills sections. Everything that put something into a section, or read
+ * a group's list, took the first section of the kind: an entry the AI turned
+ * on went under Awards whichever it was, and one already under Leadership went
+ * under Awards as well and printed twice; a group in the second skills section
+ * was read against the first one's lists.
+ */
+describe('a resume with two sections of one kind', () => {
+  const custom = (id: string) => ({
+    id,
+    kind: 'custom' as const,
+    title: id,
+    bullets: [{ id: `b_${id}`, default: 'v_1', variants: [{ id: 'v_1', label: 'Only', text: `Did ${id}.` }] }],
+  });
+  const twoCustom = (lead: string[] = [], bullets?: Record<string, string[]>) => ({
+    ...SAMPLE_BASE,
+    id: 'two',
+    sections: [
+      ...(SAMPLE_BASE.sections ?? []),
+      { kind: 'custom' as const, heading: 'Awards', entries: ['c_award'] },
+      { kind: 'custom' as const, heading: 'Leadership', entries: lead, ...(bullets ? { bullets } : {}) },
+    ],
+  });
+  const withCustom = (): StoreData => {
+    const d = data();
+    return { ...d, entries: [...d.entries, custom('c_award'), custom('c_lead')] };
+  };
+  const listed = (sections: ReturnType<typeof applyInclusion>, heading: string) =>
+    sections?.find((s) => s.heading === heading)?.entries;
+
+  it('puts an entry the AI turns on under the heading another resume files it under', () => {
+    const d = withCustom();
+    // Another resume in the save lists it under Leadership.
+    const other = { id: 'other', label: 'Other', sections: [{ kind: 'custom' as const, heading: 'Leadership', entries: ['c_lead'] }] };
+    const store = { ...d, resumes: [...d.resumes, other] };
+    const sections = applyInclusion(twoCustom(), store, sanitizeAiPlan({ enable: ['c_lead'] }, store));
+    expect(listed(sections, 'Leadership')).toEqual(['c_lead']);
+    expect(listed(sections, 'Awards')).toEqual(['c_award']);
+  });
+
+  it('puts it back where this resume still keeps lines chosen for it', () => {
+    const d = withCustom();
+    const base = twoCustom([], { c_lead: ['b_c_lead'] });
+    const sections = applyInclusion(base, d, sanitizeAiPlan({ enable: ['c_lead'] }, d));
+    expect(listed(sections, 'Leadership')).toEqual(['c_lead']);
+    expect(listed(sections, 'Awards')).toEqual(['c_award']);
+  });
+
+  it('does not add an entry already on the page to the other section of its kind', () => {
+    const d = withCustom();
+    const sections = applyInclusion(twoCustom(['c_lead']), d, sanitizeAiPlan({ enable: ['c_lead'] }, d))!;
+    expect(listed(sections, 'Awards')).toEqual(['c_award']);
+    expect(listed(sections, 'Leadership')).toEqual(['c_lead']);
+    const spec = { ...twoCustom(), sections };
+    const printed = resolveResume(spec, { ...d, resumes: [...d.resumes, spec] }).sections.flatMap((s) =>
+      s.entries.map((e) => e.id),
+    );
+    expect(printed.filter((id) => id === 'c_lead')).toHaveLength(1);
+  });
+
+  it('orders an AI skills pick by the list of the section that prints the group', () => {
+    const d = data();
+    const tools = { id: 'sk_tools', name: 'Tools', items: [{ id: 's_k8s', text: 'Kubernetes' }, { id: 's_aws', text: 'AWS' }, { id: 's_tf', text: 'Terraform' }] };
+    const store = { ...d, skillGroups: [...d.skillGroups, tools] };
+    const base = {
+      ...SAMPLE_BASE,
+      sections: [
+        ...(SAMPLE_BASE.sections ?? []).filter((s) => s.kind !== 'skills'),
+        { kind: 'skills' as const, entries: [], groups: ['sk_lang'] },
+        { kind: 'skills' as const, heading: 'Tools', entries: [], groups: ['sk_tools'], items: { sk_tools: ['s_tf', 's_aws', 's_k8s'] } },
+      ],
+    };
+    // The second section lists Terraform first; the store lists it last.
+    expect(skillsInBaseOrder({ sk_tools: ['s_k8s', 's_tf'] }, base, store)).toEqual({ sk_tools: ['s_tf', 's_k8s'] });
+  });
+});

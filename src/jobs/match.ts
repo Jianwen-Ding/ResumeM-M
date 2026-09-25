@@ -1,7 +1,7 @@
 import type { ResumeSpec, StoreData, Variant } from '../model/types.js';
 import { isVariantField } from '../model/types.js';
 import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
-import { inListOrder } from './aiPlan.js';
+import { inListOrder, skillsSectionOf } from './aiPlan.js';
 import { ORDINARY_WORDS, productsOf, sameTerm, spellingsOf } from './extract.js';
 
 /**
@@ -317,9 +317,15 @@ export function matchVariants(data: StoreData, base: ResumeSpec, opts: MatchOpti
    * Kept in the base's own order, and never narrowed to fewer than two.
    */
   const skills: Record<string, string[]> = {};
-  const skillsSection = base.sections?.find((s) => s.kind === 'skills');
+  /*
+   * Each group read against the section that prints it. A resume can hold two
+   * skills sections, and taking the first of them skipped every group in the
+   * second as "not printed".
+   */
+  const hasSkills = (base.sections ?? []).some((s) => s.kind === 'skills');
   for (const g of data.skillGroups) {
-    if (skillsSection && !(skillsSection.groups ?? []).includes(g.id)) continue;
+    const skillsSection = skillsSectionOf(base.sections, g.id);
+    if (hasSkills && !skillsSection) continue;
     const shown = skillsSection?.items?.[g.id];
     const pool = shown
       ? shown.map((id) => g.items.find((i) => i.id === id)).filter((i): i is (typeof g.items)[number] => Boolean(i))

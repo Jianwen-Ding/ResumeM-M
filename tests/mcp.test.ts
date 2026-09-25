@@ -417,6 +417,42 @@ describe('reading the page back', () => {
     expect(s.describeResume()).not.toContain('[b_pipeline]');
   });
 
+  /*
+   * Two sections of one kind. An entry turned on was read back under every
+   * section of its kind — "Awards" and "Leadership" both — while the document
+   * puts it under one. The model reading its own move saw it twice.
+   */
+  it('reads an entry it turned on back under the one section it will print in', () => {
+    const data = store();
+    const custom = (id: string) => ({
+      id,
+      kind: 'custom' as const,
+      title: `Title of ${id}`,
+      bullets: [{ id: `b_${id}`, default: 'v_1', variants: [{ id: 'v_1', label: 'Only', text: `Did ${id}.` }] }],
+    });
+    data.entries = [...data.entries, custom('c_award'), custom('c_lead')];
+    const spec = {
+      id: 'two-custom',
+      label: 'Two custom',
+      tier: 'base' as const,
+      sections: [
+        { kind: 'custom', heading: 'Awards', entries: ['c_award'] },
+        { kind: 'custom', heading: 'Leadership', entries: [], bullets: { c_lead: ['b_c_lead'] } },
+      ],
+    };
+    data.resumes = [...data.resumes, spec as never];
+    const s = new TailorSession(data, resolveResume('two-custom', data), POSTING);
+    expect(s.show('c_lead').ok).toBe(true);
+
+    const text = s.describeResume();
+    expect(text.match(/\[c_lead\]/g) ?? []).toHaveLength(1);
+    expect(text.indexOf('[c_lead]')).toBeGreaterThan(text.indexOf('## Leadership'));
+    // And the document agrees.
+    const sections = applyInclusion(spec as never, data, s.state.plan);
+    expect(sections?.find((x) => x.heading === 'Leadership')?.entries).toEqual(['c_lead']);
+    expect(sections?.find((x) => x.heading === 'Awards')?.entries).toEqual(['c_award']);
+  });
+
   it('says a skills pick in the order the resume prints it', () => {
     const data = store();
     const spec = {

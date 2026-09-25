@@ -353,6 +353,43 @@ describe('analysing a posting with the AI switched on', () => {
    * section keeps the sort the base gave it rather than becoming `manual` —
    * which is how the old feature made an entry order stick.
    */
+  /*
+   * Two skills sections, and an AI run that hid a line.
+   *
+   * The narrowed `items` were copied onto the AI's sections by kind, so the
+   * first skills section was handed the second one's — and every list the
+   * first had cut down for itself went with it, printing every skill of a
+   * group the base had trimmed.
+   */
+  it('keeps each skills section’s own lists when the AI shows or hides something', async () => {
+    serve(JSON.stringify({ disable: ['b_testing'] }));
+    t.write('skills.yaml', [
+      ...(t.read('skills.yaml') as unknown[]),
+      { id: 'sk_soft', name: 'Soft', items: [{ id: 's_talk', text: 'Talking' }, { id: 's_write', text: 'Writing' }] },
+      { id: 'sk_tools', name: 'Tools', items: [{ id: 's_k8s', text: 'Kubernetes', tags: ['kubernetes'] }, { id: 's_tf', text: 'Terraform', tags: ['terraform'] }] },
+    ]);
+    t.write('resumes/two-skills.yaml', {
+      id: 'two-skills',
+      label: 'Two skills sections',
+      sections: [
+        { kind: 'experience', entries: ['exp_acme'] },
+        { kind: 'skills', entries: [], groups: ['sk_lang', 'sk_soft'], items: { sk_soft: ['s_talk'] } },
+        { kind: 'skills', heading: 'Tools', entries: [], groups: ['sk_tools'] },
+      ],
+    });
+
+    const res = await analyze({ html: JOB_HTML, baseResumeId: 'two-skills', tailor: 'ai' }).expect(200);
+    expect(res.body.aiUsed).toBe(true);
+    const skills = (res.body.spec.sections as { kind: string; items?: Record<string, string[]> }[]).filter(
+      (s) => s.kind === 'skills',
+    );
+    expect(skills).toHaveLength(2);
+    // The line the AI hid is hidden, so the AI's sections are the ones used.
+    expect(res.body.spec.sections[0].bullets.exp_acme).not.toContain('b_testing');
+    // And the base's trimmed Soft list is still the first section's.
+    expect(skills[0]!.items?.sk_soft).toEqual(['s_talk']);
+  });
+
   it('keeps the line order the model chose, and the resume’s own entry order', async () => {
     serve(JSON.stringify({
       entryOrder: { experience: ['exp_acme'] },

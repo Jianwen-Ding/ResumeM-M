@@ -37,7 +37,14 @@ import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
-import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder, skillsOnThePage } from '../jobs/aiPlan.js';
+import {
+  applyInclusion,
+  sanitizeAiPlan,
+  sanitizeSuggestions,
+  skillsInBaseOrder,
+  skillsOnThePage,
+  skillsSectionOf,
+} from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
@@ -455,9 +462,19 @@ function withNarrowedSkills(
   decided: SectionSpec[],
   derived: ResumeSpec['sections'],
 ): SectionSpec[] {
-  const items = new Map((derived ?? []).map((s) => [s.kind, s.items]));
+  /*
+   * Paired by place among the sections of one kind, not by kind alone. Both
+   * lists are copies of the same base's sections, in its order; keyed by kind,
+   * a resume with two skills sections handed the first one the second's
+   * `items`, and every list the first had trimmed for itself went — printing
+   * every skill of a group the base had cut down.
+   */
+  const nth = (list: readonly SectionSpec[], s: SectionSpec) =>
+    list.filter((x) => x.kind === s.kind).indexOf(s);
+  const from = derived ?? [];
   return decided.map((s) => {
-    const narrowed = items.get(s.kind);
+    const twin = from.filter((x) => x.kind === s.kind)[nth(decided, s)];
+    const narrowed = twin?.items;
     return narrowed ? { ...s, items: narrowed } : s;
   });
 }
@@ -2975,7 +2992,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * where it came from instead — see `employerFallback`.
        */
       /* What the base asks for on skills, which is what undoing a swap restores. */
-      const baseSkillItems = base.sections?.find((s) => s.kind === 'skills')?.items;
+      // Each group's own section's list: a resume can hold two skills sections.
+      const baseSkillItems = (groupId: string) => skillsSectionOf(base.sections, groupId)?.items?.[groupId];
 
       const spec = deriveSpec(base, specId, `${role} — ${employer}`, finalMatch, {
         url,
@@ -3190,7 +3208,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         skillChanges: Object.entries(finalMatch.skills).map(([groupId, to]) => ({
           groupId,
           groupName: data.skillGroups.find((g) => g.id === groupId)?.name ?? groupId,
-          from: baseSkillItems?.[groupId] ?? null,
+          from: baseSkillItems(groupId) ?? null,
           to,
         })),
         entryByBullet: Object.fromEntries(

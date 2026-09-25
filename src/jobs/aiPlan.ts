@@ -299,10 +299,10 @@ export function skillsInBaseOrder(
   base: ResumeSpec,
   data: StoreData,
 ): Record<string, string[]> {
-  const listed = base.sections?.find((s) => s.kind === 'skills')?.items ?? {};
   const out: Record<string, string[]> = {};
   for (const [groupId, ids] of Object.entries(skills)) {
-    const own = listed[groupId];
+    // The list of the section that prints the group, not the first one's.
+    const own = skillsSectionOf(base.sections, groupId)?.items?.[groupId];
     if (!own) {
       out[groupId] = ids;
       continue;
@@ -341,6 +341,56 @@ export function inListOrder(ids: string[], own: string[], store: string[]): stri
   return list;
 }
 
+/**
+ * The skills section that prints a group: the one whose `groups` names it.
+ *
+ * A resume can hold two skills sections — "Languages & Tools" and
+ * "Certifications", say — and every reader of a group's list used to take
+ * the first section of the kind, so a group in the second was read against a
+ * list that was not its own.
+ */
+export function skillsSectionOf<S extends Pick<SectionSpec, 'kind' | 'groups'>>(
+  sections: readonly S[] | undefined,
+  groupId: string,
+): S | undefined {
+  return (sections ?? []).find((s) => s.kind === 'skills' && (s.groups ?? []).includes(groupId));
+}
+
+/**
+ * Which section an entry being put on the page goes into.
+ *
+ * The only section of its kind nearly always. A resume can hold two `custom`
+ * sections — "Awards" and "Leadership" — and taking the first of the kind put
+ * a leadership entry under Awards, or, when it was already under Leadership,
+ * under Awards as well, so it printed twice. So, in order:
+ *
+ *   the section of its kind that already lists it — there is nothing to add;
+ *   the one that still holds lines chosen for it, which a section keeps when
+ *   the entry is switched off there;
+ *   the one headed the way the section is that lists it on another resume;
+ *   and only then the first of its kind.
+ */
+export function sectionForEntry<S extends Pick<SectionSpec, 'kind' | 'heading' | 'entries' | 'bullets'>>(
+  sections: readonly S[],
+  entry: { id: string; kind: string },
+  resumes: readonly ResumeSpec[] = [],
+): S | undefined {
+  const same = sections.filter((s) => s.kind === entry.kind);
+  if (same.length <= 1) return same[0];
+  const holding = same.find((s) => (s.entries ?? []).includes(entry.id));
+  if (holding) return holding;
+  const traced = same.find((s) => s.bullets && Object.hasOwn(s.bullets, entry.id));
+  if (traced) return traced;
+  for (const resume of resumes) {
+    for (const other of resume.sections ?? []) {
+      if (other.kind !== entry.kind || !(other.entries ?? []).includes(entry.id)) continue;
+      const named = same.find((s) => (s.heading ?? '') === (other.heading ?? ''));
+      if (named) return named;
+    }
+  }
+  return same[0];
+}
+
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
   // Bullets only: `entryOrder` is never applied, so it is not a reason to act.
   const reordering = Object.keys(plan.order).length > 0;
@@ -374,7 +424,8 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
   for (const id of plan.enable) {
     const entry = entryById.get(id);
     if (!entry) continue;
-    const section = sections.find((s) => s.kind === entry.kind);
+    // Not simply the first section of its kind; see `sectionForEntry`.
+    const section = sectionForEntry(sections, entry, data.resumes);
     // Store order, not reply order: where the store puts it.
     if (section) section.entries = inPlace(section.entries, id, data.entries.map((e) => e.id));
   }
