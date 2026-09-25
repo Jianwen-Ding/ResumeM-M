@@ -559,6 +559,32 @@ export function printedFingerprint(resolved: ResolvedResume): string {
   return createHash('sha1').update(JSON.stringify(printed)).digest('hex');
 }
 
+/**
+ * The alternate of the profile's name that is the legal one: the alternate
+ * whose label says "legal", or none, which resolves to the default.
+ */
+function legalNameChoice(profile: StoreData['profile']): Record<string, string> {
+  if (!isVariantField(profile.name)) return {};
+  const legal = profile.name.variants.find((v) => /\blegal\b/i.test(v.label ?? ''));
+  return legal ? { [PROFILE_NAME_KEY]: legal.id } : {};
+}
+
+/**
+ * The name a resume prints, as a form's preferred-name boxes ask for it —
+ * and nothing when it is the legal name, so a "Preferred name" box on a form
+ * is left for the person rather than given the same name twice.
+ */
+function preferredNameFields(printed: string, legal: string): Record<string, string> {
+  const name = String(printed ?? '').replace(/\s+/g, ' ').trim();
+  if (!name || name === String(legal ?? '').replace(/\s+/g, ' ').trim()) return {};
+  const words = name.split(' ');
+  return {
+    preferred_name: name,
+    preferred_first_name: words[0] ?? name,
+    ...(words.length > 1 ? { preferred_last_name: words.slice(1).join(' ') } : {}),
+  };
+}
+
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
@@ -3213,8 +3239,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * POST carrying the resume — which is also what the work history needs.
    */
   const autofillFor = (data: StoreData, choices: Record<string, string>, resume?: ResolvedResume) => {
-    // Resolved: a form field takes a name, not a set of them.
-    const p = resolveProfile(data.profile, {}, []);
+    /*
+     * Two names, and the form decides which box gets which.
+     *
+     * The legal name is the profile's own — its default, or the alternate
+     * whose label says "legal" — and the preferred one is the name the resume
+     * being sent prints. A form asking for a legal name gets the first; a
+     * plain "Name" gets the second unless the form has a box of its own for
+     * a preferred name, in which case the plain one is the legal box. That
+     * choice is made in the extension, which can see the form; this only says
+     * what both names are. See `preferredNameFields`.
+     */
+    const p = resolveProfile(data.profile, legalNameChoice(data.profile), []);
+    const printed = resolveProfile(data.profile, choices, []).name;
     return {
       fields: {
         full_name: p.name,
@@ -3242,6 +3279,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * is not plain.
          */
         ...derivedAutofill({ name: p.name, location: p.location }, data.entries, choices),
+        ...preferredNameFields(printed, p.name),
         ...(p.autofill ?? {}),
       },
       answers: data.answers.map((a) => ({

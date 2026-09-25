@@ -1143,6 +1143,40 @@ describe('autofill', () => {
   });
 
   /*
+   * Both names, and the form picks: the legal name as the ordinary fields,
+   * and the name the resume being sent prints as the preferred ones — only
+   * when the two differ, so a "Preferred name" box is not given the same
+   * name twice.
+   */
+  it('sends the legal name, and the resume\'s own name as the preferred one', async () => {
+    const profile = t.store.load().profile;
+    const named = (dflt: string, variants: { id: string; label: string; text: string }[]) =>
+      t.store.saveProfile({ ...profile, autofill: undefined, name: { default: dflt, variants } });
+    named('v_legal', [
+      { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+    ]);
+    const newgrad = t.store.load().resumes.find((r) => r.id === 'newgrad')!;
+    const choosing = (id: string) => ({ ...newgrad, id: 'job-helios', choices: { ...(newgrad.choices ?? {}), 'profile.name': id } });
+
+    const known = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_known') }).expect(200)).body.fields;
+    expect([known.full_name, known.first_name, known.last_name]).toEqual(['Jianwen Ding', 'Jianwen', 'Ding']);
+    expect([known.preferred_name, known.preferred_first_name, known.preferred_last_name]).toEqual(['Jason Ding', 'Jason', 'Ding']);
+
+    const legal = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_legal') }).expect(200)).body.fields;
+    expect(legal.full_name).toBe('Jianwen Ding');
+    expect(legal.preferred_name).toBeUndefined();
+
+    // And the alternate labelled legal is the legal name, whichever is the default.
+    named('v_known', [
+      { id: 'v_legal', label: 'Legal name', text: 'Jianwen Ding' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+    ]);
+    const byDefault = (await request(app).get('/api/autofill').expect(200)).body.fields;
+    expect([byDefault.full_name, byDefault.preferred_name]).toEqual(['Jianwen Ding', 'Jason Ding']);
+  });
+
+  /*
    * And its schools, for an Education section with an "Add another": every
    * education the resume being sent lists, in its order, with the wording it
    * chose — here the later graduation date — resolved exactly as the history
@@ -3796,9 +3830,11 @@ describe('pinning', () => {
     const resolved = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
     expect(resolved.profile.name).toBe('Jason Ding');
 
-    // The form-filling data the extension reads is a name, not a set of them.
+    // The form-filling data the extension reads is names, not a set of them:
+    // the one labelled legal, and the pinned one as the name used day to day.
     const autofill = (await request(app).get('/api/autofill').expect(200)).body;
-    expect(autofill.fields.full_name).toBe('Jason Ding');
+    expect(autofill.fields.full_name).toBe('Jianwen Ding');
+    expect(autofill.fields.preferred_name).toBe('Jason Ding');
   });
 
   it('says a name with no alternates has none to pin', async () => {
