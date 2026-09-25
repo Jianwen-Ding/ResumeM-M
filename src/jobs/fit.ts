@@ -1,3 +1,4 @@
+import { SUITES } from './extract.js';
 import type { ResolvedResume, ResumeSpec, StoreData } from '../model/types.js';
 import { resolveResume } from '../model/resolve.js';
 import type { Store } from '../model/store.js';
@@ -46,7 +47,9 @@ function mentions(text: string, keyword: string): boolean {
   const written = spaced(keyword).trim();
   if (written && text.includes(` ${written} `)) return true;
   const glued = norm(keyword);
-  return Boolean(glued) && text.includes(` ${glued} `);
+  if (glued && text.includes(` ${glued} `)) return true;
+  // A suite asked for is answered by any of its products. See `SUITES`.
+  return (SUITES[glued] ?? []).some((product) => text.includes(` ${spaced(product).trim()} `));
 }
 
 /**

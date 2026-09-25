@@ -467,6 +467,48 @@ describe('deriving a resume for a posting', () => {
   });
 });
 
+/*
+ * A vendor's suite and its products are the same experience. Reported on a
+ * Keysight posting asking for Atlassian Bamboo and Bitbucket, against a
+ * resume that talked about the Atlassian suite: nothing matched.
+ */
+describe('a suite and its products', () => {
+  const KEYSIGHT =
+    'Experience with CI/CD tooling such as Atlassian Bamboo and Bitbucket, plus Jenkins and Git. Familiar with Jira and Confluence.';
+  const withTools = (variants: { id: string; label: string; text: string }[]): StoreData => ({
+    ...data,
+    entries: [{ ...entry, bullets: [{ id: 'b_tools', default: variants[0]!.id, variants }] }, eduEntry],
+  });
+
+  it('reads the tools a posting names, and the suite its products belong to', () => {
+    const found = extractKeywords(KEYSIGHT);
+    for (const k of ['atlassian bamboo', 'bitbucket', 'jenkins', 'git', 'jira', 'confluence', 'atlassian']) expect(found, k).toContain(k);
+    // Products alone, with the vendor never named, still ask for the suite.
+    expect(extractKeywords('Experience with Bitbucket Pipelines and Jira.')).toContain('atlassian');
+    // Bamboo on its own is a plant, and nothing Atlassian is asked for.
+    expect(extractKeywords('Our office has bamboo flooring and a garden.')).toEqual([]);
+  });
+
+  it('matches a resume line about the suite to a posting naming its products', () => {
+    const store = withTools([
+      { id: 'v_plain', label: 'Plain', text: 'Built internal tools for the team' },
+      { id: 'v_suite', label: 'Suite', text: 'Ran planning and releases through the Atlassian suite' },
+    ]);
+    const result = matchVariants(store, base, { keywords: extractKeywords('Experience with Bitbucket Pipelines and Jira.'), threshold: 1 });
+    expect(result.choices.b_tools).toBe('v_suite');
+    expect(result.rationale.find((r) => r.key === 'b_tools')?.because).toContain('atlassian');
+  });
+
+  it('and a resume line naming a product to a posting asking for the suite', () => {
+    const store = withTools([
+      { id: 'v_plain', label: 'Plain', text: 'Built internal tools for the team' },
+      { id: 'v_jira', label: 'Jira', text: 'Tracked every release in Jira' },
+    ]);
+    const result = matchVariants(store, base, { keywords: ['atlassian'], threshold: 1 });
+    expect(result.choices.b_tools).toBe('v_jira');
+  });
+});
+
 describe('variant matching', () => {
   it('swaps to the variant the posting actually calls for', () => {
     const result = matchVariants(data, base, { keywords: ['kafka', 'streaming'] });

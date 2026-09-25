@@ -75,7 +75,31 @@ const KEYWORD_VOCAB = [
   'marketing', 'seo', 'copywriting', 'social media', 'salesforce', 'crm',
   'logistics', 'supply chain', 'inventory', 'procurement',
   'cad', 'solidworks', 'autocad', 'matlab', 'simulink', 'labview',
+
+  /*
+   * The tools a team works in, which postings name as often as languages. A
+   * Keysight posting asking for Atlassian Bamboo and Bitbucket, Jenkins and
+   * Git came back with one keyword, `ci/cd`, and a resume talking about the
+   * Atlassian suite matched nothing. Bamboo only by its vendor's name, because
+   * on its own it is a plant.
+   */
+  'git', 'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'jenkins', 'teamcity', 'circleci',
+  'github actions', 'atlassian', 'atlassian bamboo', 'artifactory', 'ansible', 'prometheus', 'grafana',
 ];
+
+/**
+ * A vendor's suite, named by its products.
+ *
+ * A posting asks for the products — Bitbucket, Bamboo — and a resume says the
+ * suite: "used the Atlassian suite for planning and release". Either one is
+ * the same experience. So a posting naming any product is also taken to be
+ * asking for the suite, and a resume line naming any product answers a posting
+ * that asks for the suite. Only suites whose product names are not ordinary
+ * words, so nothing here fires on prose.
+ */
+export const SUITES: Record<string, string[]> = {
+  atlassian: ['jira', 'confluence', 'bitbucket', 'atlassian bamboo', 'trello', 'opsgenie', 'statuspage', 'sourcetree'],
+};
 
 function stripTags(html: string): string {
   return html
@@ -1113,6 +1137,10 @@ export function extractKeywords(text: string): string[] {
         break;
       }
     }
+  }
+  // And the suite, when a product of it is asked for. See `SUITES`.
+  for (const [suite, products] of Object.entries(SUITES)) {
+    if (products.some((p) => found.has(p))) found.add(suite);
   }
   return [...found];
 }

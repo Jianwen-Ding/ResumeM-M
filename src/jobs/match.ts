@@ -2,7 +2,7 @@ import type { ResumeSpec, StoreData, Variant } from '../model/types.js';
 import { isVariantField } from '../model/types.js';
 import { ALL_LEVEL_TAGS, tagsForLevel, type LevelVerdict } from './level.js';
 import { inListOrder } from './aiPlan.js';
-import { ORDINARY_WORDS } from './extract.js';
+import { ORDINARY_WORDS, SUITES } from './extract.js';
 
 /**
  * Deterministic variant matching on tags and keyword overlap. This runs with
@@ -83,7 +83,9 @@ function mentions(text: string, keyword: string): boolean {
   const written = spaced(keyword).trim();
   if (written && text.includes(` ${written} `)) return true;
   const glued = norm(keyword);
-  return Boolean(glued) && text.includes(` ${glued} `);
+  if (glued && text.includes(` ${glued} `)) return true;
+  // A suite asked for is answered by any of its products. See `SUITES`.
+  return (SUITES[glued] ?? []).some((product) => text.includes(` ${spaced(product).trim()} `));
 }
 
 export interface MatchOptions {
