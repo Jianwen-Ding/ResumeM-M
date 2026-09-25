@@ -417,15 +417,17 @@ const SENSITIVE_ANSWER = [
 ];
 
 /**
- * A card number, not any long number: a card issuer's prefix and a valid
- * Luhn check digit. A plain 13-to-19 digit rule refused ordinary answers —
+ * A card number, not any long number: a card network's prefix and a valid
+ * Luhn check digit. Every network's — JCB, Diners Club, UnionPay and the
+ * rest of Discover's went unrecognised when only four were known. A plain 13-to-19 digit rule refused ordinary answers —
  * a timestamp, an order number — which is a save that silently fails.
  */
 function containsCardNumber(answer: string): boolean {
   for (const run of answer.match(/\b(?:\d[ -]?){12,18}\d\b/g) ?? []) {
     const digits = run.replace(/\D/g, '');
     if (digits.length < 13 || digits.length > 19) continue;
-    if (!/^(?:4|5[1-5]|2[2-7]|3[47]|6(?:011|5))/.test(digits)) continue;
+    // Visa, Mastercard, Amex, Diners Club, JCB, Discover and UnionPay.
+    if (!/^(?:4|5[1-5]|2[2-7]|3[47]|3(?:0[0-5]|[689])|35(?:2[89]|[3-8])|6(?:011|2|4[4-9]|5))/.test(digits)) continue;
     let sum = 0;
     for (let i = 0; i < digits.length; i++) {
       let d = Number(digits[digits.length - 1 - i]);

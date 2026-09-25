@@ -1064,3 +1064,26 @@ describe('an SSN written with dots or with en dashes', () => {
     expect(redactIdentifiers(text).text).toBe(text);
   });
 });
+
+describe('a card number from any of the networks', () => {
+  /*
+   * A card was known by Visa's, Mastercard's, Amex's and part of Discover's
+   * prefixes. A JCB card, a Diners Club card, a Discover card in its 644–649
+   * range and a UnionPay card went to the AI whole, Luhn digit and all.
+   */
+  it.each([
+    ['JCB', '3530 1113 3330 0000'],
+    ['Diners Club', '3056 930902 5904'],
+    ['Diners Club', '3852 0000 0232 37'],
+    ['Discover', '6445 6445 6445 6445'],
+    ['UnionPay', '6200 0000 0000 0005'],
+  ])('takes out a %s card', (_network, number) => {
+    const out = redactIdentifiers(`Card number: ${number}`);
+    expect(out.text).not.toContain(number);
+    expect(out.redacted).toBeGreaterThan(0);
+  });
+
+  it('leaves a long number that fails the check alone', () => {
+    expect(redactIdentifiers('Order 3530 1113 3330 0001 shipped').text).toBe('Order 3530 1113 3330 0001 shipped');
+  });
+});
