@@ -397,9 +397,28 @@ const SENSITIVE_QUESTION = [
   /\bsocial\s*insurance(\s*(number|no\.?|#))?\b/i,
   /\bSIN\b/,
   /\bNI\s*(number|no\.?|#)/i,
-  /\bdriv(er'?s?|ing)\s*licen[cs]e\b/i,
+  // With a curly apostrophe too, the way a word processor writes "Driver’s".
+  /\bdriv(er['’]?s?|ing)\s*licen[cs]e\b/i,
   /\b(bank\s*account|routing\s*number|iban|sort\s*code)\b/i,
   /\b(credit|debit)\s*card\b/i,
+  /*
+   * What JobHelper's remembering.js refuses and this list did not know, and
+   * the national numbers `redactIdentifiers` takes out by name, which neither
+   * refused: a government ID however it is shortened, a state or citizen ID,
+   * India's Aadhaar, Singapore's NRIC and FIN, Brazil's CPF, Spain's DNI and
+   * NIE, Poland's PESEL, the Dutch BSN, the Swedish personnummer, a visa,
+   * card or account number, a taxpayer reference, and the answers to a
+   * security check. The short names in capitals, as forms write them,
+   * because "nie" and "dni" are words.
+   */
+  /\b(national|government|gov(?:ernmen|['’])?t\.?|state|citizen|personal)[\s-]*(issued[\s-]*)?(id|identity|identification)\b/i,
+  /\b(aadhaa?r|pesel|personnummer)\b/i,
+  /\b(NRIC|FIN|CPF|DNI|NIE|BSN)\b/,
+  /\b(visa|account|card)\s*(number|no\.?|#)/i,
+  /\btax\s*payer\b/i,
+  /\bpassword\b/i,
+  /\bsecurity\s*question\b/i,
+  /\bmother['’]?s\s*maiden\b/i,
 ];
 
 /**
@@ -540,8 +559,18 @@ export function redactDeep<T>(value: T): T {
   return walk(value) as T;
 }
 
+/*
+ * And anything `redactIdentifiers` would take out: a labelled date of birth,
+ * passport or national number is kept out of the bank as it is kept out of
+ * everything else. "DOB: 04/02/1999" typed under an innocent question was
+ * saved, and offered back on the next form.
+ */
 export function isSensitiveAnswer(answer: string): boolean {
-  return SENSITIVE_ANSWER.some((re) => re.test(answer)) || containsCardNumber(answer);
+  return (
+    SENSITIVE_ANSWER.some((re) => re.test(answer)) ||
+    containsCardNumber(answer) ||
+    redactIdentifiers(answer).redacted > 0
+  );
 }
 
 export function isSensitiveQuestion(question: string): boolean {

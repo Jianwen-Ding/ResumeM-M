@@ -1087,3 +1087,73 @@ describe('a card number from any of the networks', () => {
     expect(redactIdentifiers('Order 3530 1113 3330 0001 shipped').text).toBe('Order 3530 1113 3330 0001 shipped');
   });
 });
+
+describe('the identifiers the extension refuses, refused here as well', () => {
+  /*
+   * JobHelper's remembering.js refuses a government ID by its short names,
+   * a visa, card or account number, and the secrets a security check asks
+   * for; the national numbers `redactIdentifiers` takes out by name were
+   * refused by neither. Each of these was saved to the bank by /answers/save
+   * and handed back by `matchAnswer` on the next form that asked.
+   */
+  it.each([
+    'Government ID',
+    'Govt. ID #',
+    "Gov't ID number",
+    'Government-issued ID number',
+    'State ID',
+    'Citizen ID',
+    'Personal identification number',
+    'Aadhaar number',
+    'Aadhar card number',
+    'NRIC / FIN',
+    'CPF',
+    'DNI',
+    'NIE',
+    'PESEL',
+    'BSN',
+    'Personnummer',
+    'Visa number',
+    'Card number',
+    'Account number',
+    'Unique Taxpayer Reference',
+    'Driver’s License Number',
+    "Mother's maiden name",
+    'Mother’s maiden name',
+    'Password',
+    'Security question answer',
+  ])('treats "%s" as an identifier', (q) => {
+    expect(isSensitiveQuestion(q)).toBe(true);
+    const bank = [{ id: 'a1', question: q, default: 'v', variants: [{ id: 'v', text: 'Kept by mistake.' }] }] as never;
+    expect(matchAnswer(q, bank).item).toBeUndefined();
+  });
+
+  it.each([
+    'Which finance tools have you used?',
+    'Do you have a fin-tech background?',
+    'What is your state of residence?',
+    'Tell us about a time you had to protect a customer account',
+    'Do you hold a work visa?',
+  ])('while "%s" is an ordinary question', (q) => {
+    expect(isSensitiveQuestion(q)).toBe(false);
+  });
+
+  /*
+   * And an answer the redaction would take out is not kept to be handed back.
+   * The bank refused an SSN by its dashes and a card by its check digit, and
+   * kept "DOB: 04/02/1999" or "Aadhaar: 1234 5678 9012" typed under an
+   * innocent question — the same text `redactIdentifiers` removes before
+   * anything else reads it.
+   */
+  it.each([
+    'DOB: 04/02/1999',
+    'Aadhaar: 1234 5678 9012',
+    'NRIC: S1234567D',
+    'Passport # X1234567',
+    'SSN 123456789',
+  ])('refuses the answer "%s"', (a) => {
+    expect(isSensitiveAnswer(a)).toBe(true);
+    const bank = [{ id: 'a1', question: 'Reference for the form', default: 'v', variants: [{ id: 'v', text: a }] }] as never;
+    expect(matchAnswer('Reference for the form', bank).item).toBeUndefined();
+  });
+});
