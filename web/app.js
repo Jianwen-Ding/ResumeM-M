@@ -6279,6 +6279,17 @@ async function openApplication(id) {
 }
 
 /**
+ * Why a write did not land, as the end of a sentence. The browser's own words
+ * for a server that did not answer are replaced; the server's reasons are
+ * sentences already, full stop and all.
+ */
+function whyNotSaved(err) {
+  return /failed to fetch|networkerror|load failed/i.test(err.message)
+    ? 'ResumeM-M could not be reached'
+    : err.message.replace(/[\s.]+$/, '');
+}
+
+/**
  * A form whose answer is saved, asked again until it is.
  *
  * These dialogs closed first and saved after, so a save the store refused —
@@ -6302,11 +6313,7 @@ async function formThatSaves(title, fields, note, save) {
       if (typeof again === 'string') return [again, note].filter(Boolean).join(' ');
       return undefined;
     } catch (err) {
-      // The browser's own words for a server that did not answer. The
-      // server's own reasons are sentences already, full stop and all.
-      const why = /failed to fetch|networkerror|load failed/i.test(err.message)
-        ? 'ResumeM-M could not be reached'
-        : err.message.replace(/[\s.]+$/, '');
+      const why = whyNotSaved(err);
       // Put down while it was saving: there is no dialog left to say it in.
       if (cancelled()) {
         setStatus(`Not saved — ${why}.`, true);
@@ -7694,20 +7701,25 @@ async function loadLetters() {
   );
 }
 
+/*
+ * Opening a letter and editing an answer go through `formThatSaves` for the
+ * reason it gives: they closed first and saved after, so a write that did
+ * not land took an hour's rewording with it and said nothing.
+ */
 async function editLetter(letter) {
-  const answer = await form(letter.title ?? 'Cover letter', [
+  await formThatSaves(letter.title ?? 'Cover letter', [
     { name: 'title', label: 'Title', value: letter.title ?? '' },
     { name: 'company', label: 'Company', value: letter.company ?? '' },
     { name: 'role', label: 'Role', value: letter.role ?? '' },
     { name: 'body', label: 'Body', value: letter.body ?? '', multiline: true, tall: true },
-  ]);
-  if (!answer) return;
-  await api(`/letters/${encodeURIComponent(letter.id)}`, {
-    method: 'PUT',
-    body: JSON.stringify({ ...letter, ...answer }),
+  ], '', async (answer) => {
+    await api(`/letters/${encodeURIComponent(letter.id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ ...letter, ...answer }),
+    });
+    setStatus('Letter saved');
+    loadLetters();
   });
-  setStatus('Letter saved');
-  loadLetters();
 }
 
 async function addLetter() {
@@ -7788,36 +7800,42 @@ async function removeAnswer(item, usedIn = 0) {
 
   // Through the whole list, which is the only way the bank is written: the
   // endpoint refuses anything that is not a list, so a filter is the edit.
-  const answers = (await api('/store')).answers.filter((a) => a.id !== item.id);
-  await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+  try {
+    const answers = (await api('/store')).answers.filter((a) => a.id !== item.id);
+    await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+  } catch (err) {
+    setStatus(`“${item.question}” was not deleted — ${whyNotSaved(err)}.`, true);
+    return;
+  }
   setStatus(`Deleted “${item.question}”`);
   loadLetters();
 }
 
 async function editAnswer(item) {
   const v = item.variants.find((x) => x.id === item.default) ?? item.variants[0];
-  const answer = await form(item.question, [
+  await formThatSaves(item.question, [
     { name: 'answer', label: 'Answer', value: v?.text ?? '', multiline: true, tall: true },
     { name: 'label', label: 'Label for this version', value: 'Updated' },
     { name: 'asNew', label: 'Keep the old wording as another version', type: 'checkbox', value: false },
-  ]);
-  if (!answer?.answer?.trim()) return;
+  ], '', async (answer) => {
+    if (!answer.answer?.trim()) return 'An answer needs some words. To remove this one, use Delete.';
 
-  if (answer.asNew) {
-    await api('/answers/save', {
-      method: 'POST',
-      body: JSON.stringify({ itemId: item.id, question: item.question, answer: answer.answer, label: answer.label }),
-    });
-  } else {
-    const answers = (await api('/store')).answers.map((a) =>
-      a.id !== item.id
-        ? a
-        : { ...a, variants: a.variants.map((x) => (x.id === v.id ? { ...x, text: answer.answer.trim() } : x)) },
-    );
-    await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
-  }
-  setStatus('Answer saved');
-  loadLetters();
+    if (answer.asNew) {
+      await api('/answers/save', {
+        method: 'POST',
+        body: JSON.stringify({ itemId: item.id, question: item.question, answer: answer.answer, label: answer.label }),
+      });
+    } else {
+      const answers = (await api('/store')).answers.map((a) =>
+        a.id !== item.id
+          ? a
+          : { ...a, variants: a.variants.map((x) => (x.id === v.id ? { ...x, text: answer.answer.trim() } : x)) },
+      );
+      await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+    }
+    setStatus('Answer saved');
+    loadLetters();
+  });
 }
 
 /* ------------------------------------------------------------------ *

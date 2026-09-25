@@ -2034,6 +2034,61 @@ async function main() {
       for (let i = errors.length - 1; i >= errorsBefore; i--) {
         if (/^400 \/api\/answers\/save$|status of 400/.test(errors[i])) errors.splice(i, 1);
       }
+
+      /*
+       * The other three dialogs on Letters & Answers: opening a letter and
+       * editing an answer closed first and saved after, and deleting an
+       * answer did not look at its reply. A write that did not land took the
+       * text with it and said nothing — an uncaught "Failed to fetch" in the
+       * console was the only trace.
+       */
+      await fetch(`${server.url}/api/answers/save`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question: 'Earliest date you could start?', answer: 'Two weeks after an offer', label: 'Typed on a form' }),
+      });
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      await page.locator('#tabs button[data-tab="letters"]').click();
+      const typedCard = page.locator('#answers .mini-card', { hasText: 'Earliest date you could start?' });
+      await typedCard.waitFor({ timeout: 10_000 });
+
+      const refuseWrite = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
+      await page.route('**/api/answers', refuseWrite);
+      await typedCard.locator('button', { hasText: 'Edit' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_answer').fill('Three weeks after an offer, having thought about it');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      check('an answer edited while the save fails keeps its dialog, saying why',
+        (await page.locator('#modal:not(.hidden)').count()) === 1 &&
+          /^Not saved — ResumeM-M could not be reached/.test(await page.locator('#modal-note').innerText().catch(() => '')) &&
+          (await page.locator('#f_answer').inputValue().catch(() => '')) === 'Three weeks after an offer, having thought about it',
+        await page.locator('#modal-note').innerText().catch(() => '(no dialog)'));
+      await page.locator('#modal-cancel').click().catch(() => undefined);
+
+      await typedCard.locator('button', { hasText: 'Delete' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      check('and a delete that fails says so, leaving the answer listed',
+        (await page.locator('#status.err').count()) > 0 && (await typedCard.count()) === 1,
+        await page.locator('#status').innerText().catch(() => ''));
+      await page.unroute('**/api/answers', refuseWrite);
+
+      const refuseLetter = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
+      await page.route('**/api/letters/**', refuseLetter);
+      await page.locator('#letters .mini-card').first().locator('button', { hasText: 'Open' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await page.locator('#f_body').fill('A letter reworked for an hour.');
+      await page.locator('#modal-ok').click();
+      await page.waitForTimeout(800);
+      check('and a letter edited while the save fails keeps its dialog, saying why',
+        (await page.locator('#modal:not(.hidden)').count()) === 1 &&
+          /^Not saved — ResumeM-M could not be reached/.test(await page.locator('#modal-note').innerText().catch(() => '')) &&
+          (await page.locator('#f_body').inputValue().catch(() => '')) === 'A letter reworked for an hour.',
+        await page.locator('#modal-note').innerText().catch(() => '(no dialog)'));
+      await page.locator('#modal-cancel').click().catch(() => undefined);
+      await page.unroute('**/api/letters/**', refuseLetter);
     }
 
     console.log('\nWhen the tracker cannot save');
