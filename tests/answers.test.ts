@@ -676,6 +676,10 @@ describe('a question asking for something the bank must never hold', () => {
     'What is your passport number?',
     'What is your home address?',
     'Please give your mailing address.',
+    'Address Line 1',
+    'Zip code',
+    'Postal Code',
+    'Apartment/Suite',
   ];
 
   it('recognises the questions this must refuse', () => {

@@ -384,7 +384,11 @@ const SENSITIVE_QUESTION = [
   /\bdate\s*of\s*birth\b/i,
   /\bdob\b/i,
   /\bpassport(\s*(number|no\.?|#))?\b/i,
-  /\b(home|mailing|residential|street)\s*address\b/i,
+  /\b(home|mailing|residential|street|postal)\s*address\b/i,
+  // And the address in parts, which is the same address a box at a time.
+  /\baddress\s*(line|[12])\b/i,
+  /\b(zip|postal)\s*(code)?\b|\bpostcode\b/i,
+  /\b(apartment|apt)\b/i,
   /\b(birth\s*date|birthday)\b/i,
   /\bnational\s*(id|identity|insurance)(\s*(number|no\.?|#))?\b/i,
   /\b(tax\s*(id|identification)|tin|itin)\b/i,
