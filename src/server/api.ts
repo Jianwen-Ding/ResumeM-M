@@ -3765,7 +3765,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * failure the folder exists to prevent: an upload that attaches last
        * week's resume, or nothing at all, with the card saying it is ready.
        */
-      res.json({ ...result, currentDir: current.dir, currentProblems: current.problems });
+      res.json({
+        ...result,
+        currentDir: current.dir,
+        currentProblems: current.problems,
+        /*
+         * And what this application's files are called there. `files` are
+         * the archive's names, which are always the plain ones; in the flat
+         * folder the plain name can belong to another application still being
+         * worked on (see `uniqueNames`), and a card naming it would be
+         * pointing the upload dialog at that application's resume.
+         */
+        currentFiles: current.files.filter((name) => current.belongsTo[name] === result.application.id),
+      });
     }),
   );
 

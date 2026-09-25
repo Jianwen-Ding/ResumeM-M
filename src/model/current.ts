@@ -267,9 +267,23 @@ function readSources(dir: string): Record<string, string> {
  * name. Without a `working` application — a plain listing of the tracker, with
  * no upload in progress — every one of them is suffixed, as before.
  */
+/*
+ * But not away from another application still being worked on.
+ *
+ * "The one being worked on" is one application only when one tab is open.
+ * With two applications in progress at once, each staging in turn, the plain
+ * name went to whichever staged last: tab A's card said its resume was
+ * `First-Last-Resume.pdf`, tab B staged, and the file under that name became
+ * B's — with A's card still naming it and the upload dialog over this folder
+ * still offering it for A's form. So a name already held by an application
+ * touched within `HOLD_MS` stays with it (`heldBy`), and the newcomer takes
+ * the suffix. One left alone longer than that hands the name on, which keeps
+ * the plain name for the ordinary case of applying to one job after another.
+ */
 function uniqueNames(
   claims: { name: string; app: Application }[],
   working?: string,
+  heldBy: Map<string, string> = new Map(),
 ): Map<string, string> {
   const groups = new Map<string, { name: string; app: Application }[]>();
   for (const claim of claims) {
@@ -302,11 +316,13 @@ function uniqueNames(
         return made.every(Boolean) && new Set(made).size === group.length;
       }) ?? ((a: Application) => forFilename(a.id));
 
+    // The plain name goes to the one in hand, unless another in progress
+    // already has it. See `working` and `heldBy` above.
+    const plainTo = heldBy.get(name) ?? working;
     for (const claim of group) {
-      // The plain name goes to the one in hand. See `working` above.
       out.set(
         `${claim.app.id} ${name}`,
-        claim.app.id === working ? name : `${stem}-${suffix(claim.app)}${ext}`,
+        claim.app.id === plainTo ? name : `${stem}-${suffix(claim.app)}${ext}`,
       );
     }
   }
@@ -330,6 +346,22 @@ function uniqueNames(
  * you paste into a portal's upload dialog instead of trudging back through
  * the save folder every time.
  */
+/**
+ * How long an application keeps the plain name against another one staged
+ * after it: the length of a sitting, the same two hours the browser
+ * extension keeps an application's pages together for.
+ */
+const HOLD_MS = 2 * 60 * 60 * 1000;
+
+/** Whether the tracker has heard from this application within `HOLD_MS`. */
+function recentlyTouched(app: Application, now = Date.now()): boolean {
+  const last = Math.max(
+    Date.parse(app.appliedAt ?? '') || 0,
+    ...(app.history ?? []).map((h) => Date.parse(h.at ?? '') || 0),
+  );
+  return last > 0 && now - last < HOLD_MS;
+}
+
 export function currentDir(store: Store): string {
   const dir = path.join(store.outDir(), CURRENT_DIR);
   fs.mkdirSync(dir, { recursive: true });
@@ -392,7 +424,17 @@ export function syncCurrent(
     }
   }
 
-  const renamed = uniqueNames(claims, working);
+  /*
+   * Which application each plain name was given to last time, where that one
+   * is still being worked on: its file is still the one under the name, and
+   * the tracker has heard from it within `HOLD_MS`. See `uniqueNames`.
+   */
+  const lastFrom = readSources(dir);
+  const heldBy = new Map<string, string>();
+  for (const claim of claims) {
+    if (lastFrom[claim.name] === claim.from && recentlyTouched(claim.app)) heldBy.set(claim.name, claim.app.id);
+  }
+  const renamed = uniqueNames(claims, working, heldBy);
   const wanted = new Map<string, string>(); // final name → where to copy it from
   // And whose it is, so the count at the bottom can be what actually landed
   // rather than what the tracker hoped for.
