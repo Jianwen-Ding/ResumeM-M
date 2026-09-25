@@ -702,9 +702,25 @@ function listSelection(bullet) {
   return state.listEdits?.[bullet.id] ?? saved[bullet.id] ?? bullet.items.map((i) => i.id);
 }
 
+/**
+ * The key a section's unsaved edits are filed under.
+ *
+ * Its kind, for the first section of that kind — which is every section
+ * nearly always — and its place among them for any after it. A resume can
+ * hold two `custom` sections, "Awards" and "Leadership", and keyed by kind
+ * alone they shared one overlay: switching an entry off under Awards wrote a
+ * list for "custom" that was then read, and saved, as Leadership's too.
+ */
+function sectionKey(section) {
+  const same = resolveSections().filter((s) => s.kind === section.kind);
+  let at = same.indexOf(section);
+  if (at < 0) at = same.findIndex((s) => (s.heading ?? '') === (section.heading ?? ''));
+  return at <= 0 ? section.kind : `${section.kind}:${at}`;
+}
+
 /** Which entries a section shows right now, including unsaved edits. */
 function entrySelection(section) {
-  return state.entryEdits?.[section.kind] ?? section.entries ?? [];
+  return state.entryEdits?.[sectionKey(section)] ?? section.entries ?? [];
 }
 
 /** Which bullets an entry shows right now, including unsaved edits. */
@@ -752,12 +768,13 @@ function currentSpec() {
      */
     for (const mine of resolveSections()) {
       const entries = entrySelection(mine);
+      const key = sectionKey(mine);
 
       const editedHere =
         mine.kind === 'skills'
           ? Boolean(state.skillEdits && (mine.groups ?? []).some((g) => g in state.skillEdits))
-          : Boolean(state.entryEdits && mine.kind in state.entryEdits) ||
-            Boolean(state.orderEdits && mine.kind in state.orderEdits) ||
+          : Boolean(state.entryEdits && key in state.entryEdits) ||
+            Boolean(state.orderEdits && key in state.orderEdits) ||
             Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits)) ||
             Boolean(state.bulletOrderEdits && entries.some((eid) => eid in state.bulletOrderEdits));
 
@@ -774,9 +791,9 @@ function currentSpec() {
       const next = { ...mine };
       // The entry list is written down when the user changed which entries
       // show. A bullet they hid is not a decision about the entry list.
-      if (state.entryEdits && mine.kind in state.entryEdits) next.entries = entries;
+      if (state.entryEdits && key in state.entryEdits) next.entries = entries;
       /* What decides the order, written down whenever it was chosen here. */
-      if (state.orderEdits && mine.kind in state.orderEdits) next.order = state.orderEdits[mine.kind];
+      if (state.orderEdits && key in state.orderEdits) next.order = state.orderEdits[key];
       const bullets = { ...(mine.bullets ?? {}) };
       for (const eid of entries) {
         if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
@@ -1811,7 +1828,7 @@ function setEntryIncluded(section, entry, checked) {
   else next.delete(entry.id);
   const ordered = current.filter((id) => next.has(id));
   for (const id of next) if (!ordered.includes(id)) ordered.push(id);
-  state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+  state.entryEdits = { ...(state.entryEdits ?? {}), [sectionKey(section)]: ordered };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1915,11 +1932,11 @@ function dropTarget(row, { kind, id, onDrop }) {
 
 /** How this section is ordered right now, including unsaved changes. */
 function sectionOrder(section) {
-  return state.orderEdits?.[section.kind] ?? section.order ?? 'manual';
+  return state.orderEdits?.[sectionKey(section)] ?? section.order ?? 'manual';
 }
 
 function setSectionOrder(section, order) {
-  state.orderEdits = { ...(state.orderEdits ?? {}), [section.kind]: order };
+  state.orderEdits = { ...(state.orderEdits ?? {}), [sectionKey(section)]: order };
   markDirty();
   render();
 }
@@ -2324,7 +2341,7 @@ function entryBlock(entry, section, choices) {
  * not move it on the resume it was copied from.
  */
 function setEntryOrder(section, ordered) {
-  state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+  state.entryEdits = { ...(state.entryEdits ?? {}), [sectionKey(section)]: ordered };
   /*
    * Dragging is an instruction, so it also turns the sort off.
    *
@@ -2335,7 +2352,7 @@ function setEntryOrder(section, ordered) {
    * anything: the arrangement stays in the list underneath.
    */
   if (sectionOrder(section) !== 'manual') {
-    state.orderEdits = { ...(state.orderEdits ?? {}), [section.kind]: 'manual' };
+    state.orderEdits = { ...(state.orderEdits ?? {}), [sectionKey(section)]: 'manual' };
     setStatus('Arranged by hand — the date sort for this section is off');
   }
   markDirty();
@@ -2901,7 +2918,7 @@ function renderEditor() {
         ? el('button', {
             className: 'link',
             textContent: '+ Add entry',
-            onclick: () => addEntry(section.kind),
+            onclick: () => addEntry(section.kind, section),
           })
         : null,
     ]);
@@ -3359,7 +3376,9 @@ async function reviewDraftedEntry(entry, repo, kind) {
   setStatus(`Added "${entry.title}" — every wording is unreviewed`);
 }
 
-async function addEntry(kind) {
+async function addEntry(kind, into) {
+  // Which section, when there are two of this kind: the one whose button it was.
+  const key = into ? sectionKey(into) : kind;
   const answer = await form(`New ${kind} entry`, [
     { name: 'title', label: kind === 'education' ? 'School' : kind === 'project' ? 'Project name' : 'Company', value: '' },
     { name: 'subtitle', label: FIELD_LABELS.subtitle, value: '' },
@@ -3435,14 +3454,21 @@ async function addEntry(kind) {
      */
     const root = resumeById(state.resumeId);
     const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
+    /*
+     * Into one section. Every section of the kind got it, so an entry added
+     * under Leadership also appeared under Awards.
+     */
+    const target = (root.sections ?? []).find((s) => s.kind === kind && sectionKey(s) === key) ??
+      (root.sections ?? []).find((s) => s.kind === kind);
     const sections = (root.sections ?? []).map((s) =>
-      s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
+      s === target ? { ...s, entries: [...(s.entries ?? []), id] } : s,
     );
-    if (!sections.some((s) => s.kind === kind)) {
+    if (!target) {
       sections.push({ kind, entries: [...rootEntries(kind), id] });
     }
-    if (state.entryEdits?.[kind] && !state.entryEdits[kind].includes(id)) {
-      state.entryEdits = { ...state.entryEdits, [kind]: [...state.entryEdits[kind], id] };
+    const overlay = target ? sectionKey(target) : kind;
+    if (state.entryEdits?.[overlay] && !state.entryEdits[overlay].includes(id)) {
+      state.entryEdits = { ...state.entryEdits, [overlay]: [...state.entryEdits[overlay], id] };
     }
     await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   });
