@@ -1358,6 +1358,52 @@ async function main() {
         } finally {
           await fetch(`${server.url}/api/resumes/job-picker-ridge-scratch?commit=0`, { method: 'DELETE' }).catch(() => undefined);
         }
+
+        /*
+         * And only the newest postings' resumes in the builder's picker, the
+         * rest a choice away. Asked for: "show a window of like 10 of the last
+         * application resumes then keep the rest accessible but only seeable
+         * under a dropdown menu".
+         */
+        const made = Array.from({ length: 12 }, (_, i) => `job-window-${i + 1}`);
+        for (const [i, id] of made.entries()) {
+          await fetch(`${server.url}/api/resumes/${id}?commit=0`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              label: `Window ${i + 1}`,
+              tier: 'temporary',
+              generatedFor: { company: `Window ${i + 1}`, role: 'Role', at: new Date(Date.UTC(2030, 0, i + 1)).toISOString() },
+              sections: [],
+            }),
+          });
+        }
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.locator('#tabs button[data-tab="resumes"]').click();
+          await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 20_000 });
+          const all = await (await fetch(`${server.url}/api/resumes`)).json();
+          const temporary = all.filter((r) => r.tier === 'temporary').length;
+          const read = () => page.$$eval('#resume-select option', (os) => os.map((o) => o.textContent));
+          const before = await read();
+          const shownTemp = before.filter((t) => all.some((r) => r.tier === 'temporary' && r.label === t)).length;
+          const row = before.find((t) => /^Show \d+ older postings?…$/.test(t)) ?? '';
+          check(
+            'the builder lists only the newest ten postings’ resumes, the rest behind one row',
+            shownTemp <= 11 && before.includes('Window 12') && !before.includes('Window 1') && row === `Show ${temporary - shownTemp} older postings…`,
+            JSON.stringify({ shownTemp, temporary, row }),
+          );
+          await page.selectOption('#resume-select', '__show_older__');
+          await page.waitForTimeout(300);
+          const after = await read();
+          check(
+            'and that row puts them all back',
+            made.every((_, i) => after.includes(`Window ${i + 1}`)) && !after.some((t) => /older posting/.test(t)),
+            `${after.length} options`,
+          );
+        } finally {
+          for (const id of made) await fetch(`${server.url}/api/resumes/${id}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
       } finally {
         await fetch(`${server.url}/api/workspace/${encodeURIComponent(draft.id)}`, { method: 'DELETE' }).catch(() => undefined);
         await page.locator('#tabs button[data-tab="resumes"]').click();

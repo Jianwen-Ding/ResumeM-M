@@ -148,6 +148,29 @@ const TIER_ORDER = ['base', 'extended', 'temporary'];
 /** A resume's tier, with the reading that never deletes anything: see tiers.ts. */
 const tierOf = (r) => r.tier ?? 'extended';
 
+/*
+ * Only the newest postings' resumes, and the rest a choice away.
+ *
+ * Asked for: "show a window of like 10 of the last application resumes then
+ * keep the rest accessible but only seeable under a dropdown menu". A
+ * temporary resume stays a week after its posting is done with, so every
+ * picker that lists them grew by one an application. The newest ten are
+ * shown, by when each was made for its posting; anything a picker must keep
+ * in view — the one open, the one an application holds — stays whatever its
+ * age; the rest wait behind a "Show N older…" row. See the JobHelper card's
+ * `RECENT_POSTINGS`, which does the same.
+ */
+const RECENT_POSTINGS = 10;
+const SHOW_OLDER = '__show_older__';
+const madeAt = (r) => r.generatedFor?.at ?? r.temporaryFrom ?? '';
+function olderPostings(resumes, keep = () => false) {
+  const built = resumes.filter((r) => tierOf(r) === 'temporary');
+  if (built.length <= RECENT_POSTINGS) return [];
+  const newest = [...built].sort((a, b) => String(madeAt(b)).localeCompare(String(madeAt(a))));
+  return newest.slice(RECENT_POSTINGS).filter((r) => !keep(r));
+}
+const showOlderRow = (n) => el('option', { value: SHOW_OLDER, textContent: `Show ${n} older posting${n === 1 ? '' : 's'}…` });
+
 /**
  * What the drafting buttons are actually drawing on, said beside them.
  *
@@ -6744,7 +6767,8 @@ function drawResumeChoices(select, draft) {
     (r.id === draft.resumeId || (r.generatedFor && same(r.generatedFor.company, draft.company) && same(r.generatedFor.role, draft.role)));
   const resumes = state.store.resumes ?? [];
   const own = resumes.filter(forThis);
-  const rest = resumes.filter((r) => !own.includes(r));
+  const older = draftAllPostings ? [] : olderPostings(resumes.filter((r) => !own.includes(r)), (r) => r.id === draft.resumeId);
+  const rest = resumes.filter((r) => !own.includes(r) && !older.includes(r));
   select.replaceChildren(
     /*
      * A placeholder when nothing is attached yet.
@@ -6758,8 +6782,12 @@ function drawResumeChoices(select, draft) {
     ...(own.length
       ? [el('optgroup', { label: 'For this application' }, own.map(option)), el('optgroup', { label: 'Everything else' }, rest.map(option))]
       : rest.map(option)),
+    ...(older.length ? [showOlderRow(older.length)] : []),
   );
 }
+
+/** Whether the Workspace picker has been asked for its older postings. See `RECENT_POSTINGS`. */
+let draftAllPostings = false;
 
 function renderDraft(draft) {
   const panel = $('#draft-editor');
@@ -7078,6 +7106,11 @@ function renderDraft(draft) {
   drawResumeChoices(resumeSelect, draft);
   resumeSelect.onchange = async () => {
     if (!resumeSelect.value) return;
+    if (resumeSelect.value === SHOW_OLDER) {
+      draftAllPostings = true;
+      drawResumeChoices(resumeSelect, draft);
+      return;
+    }
     draft.resumeId = resumeSelect.value;
     await save('Resume changed');
     // Attaching one is what unlocks building the files, and the button that
@@ -10255,7 +10288,9 @@ function render() {
     extended: 'Kept',
     temporary: 'Made for a posting — swept when it is done',
   };
-  const groups = TIER_ORDER.map((tier) => [LABELS[tier], state.store.resumes.filter((r) => tierOf(r) === tier)])
+  const older = state.allPostings ? [] : olderPostings(state.store.resumes, (r) => r.id === state.resumeId);
+  const listed = state.store.resumes.filter((r) => !older.includes(r));
+  const groups = TIER_ORDER.map((tier) => [LABELS[tier], listed.filter((r) => tierOf(r) === tier)])
     .filter(([, list]) => list.length > 0);
 
   select.replaceChildren(
@@ -10264,7 +10299,8 @@ function render() {
     // reads better as a plain list than as a list under a heading.
     ...(groups.length > 1
       ? groups.map(([label, list]) => el('optgroup', { label }, list.map(option)))
-      : state.store.resumes.map(option)),
+      : listed.map(option)),
+    ...(older.length ? [showOlderRow(older.length)] : []),
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
   drawWayBack();
@@ -10715,6 +10751,12 @@ async function boot() {
 
   $('#resume-select').onchange = async (e) => {
     const next = e.target.value;
+    // Not a resume: the rest of the list. See `RECENT_POSTINGS`.
+    if (next === SHOW_OLDER) {
+      state.allPostings = true;
+      render();
+      return;
+    }
     const moved = await leaveResume(() => {
       state.masterView = next === '__master__';
       if (!state.masterView) state.resumeId = next;
