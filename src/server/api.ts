@@ -43,7 +43,7 @@ import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
-import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
+import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
@@ -2664,13 +2664,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/extension/analyze',
     handler(async (req, res) => {
-      const { url, title, html, pages, baseResumeId, useAi, tailor } = req.body as {
+      const { url, title, html, pages, baseResumeId, baseIsDefault, useAi, tailor } = req.body as {
         url?: string;
         title?: string;
         html?: string;
         /** Every page of this application, oldest first. */
         pages?: PageSource[];
         baseResumeId?: string;
+        /**
+         * The extension's standing default rather than a resume chosen for
+         * this application. See `standingBase`.
+         */
+        baseIsDefault?: boolean;
         useAi?: boolean;
         /**
          * How much to change, if anything.
@@ -2761,7 +2766,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const role = job.title ?? 'Unknown role';
       const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
-      const baseId = baseForCopy(data.resumes, baseResumeId, specId);
+      /*
+       * A default never starts this posting from another posting's copy.
+       * "Made for this" is asked by name, the way the copy's id is made.
+       */
+      const thisPosting = tailoredResumeId(employer, role);
+      const asked = baseIsDefault
+        ? standingBase(
+            data.resumes,
+            baseResumeId,
+            (r) =>
+              r.id === specId ||
+              (Boolean(r.generatedFor?.company) &&
+                tailoredResumeId(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role') === thisPosting),
+          )
+        : baseResumeId;
+      const baseId = baseForCopy(data.resumes, asked, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) {

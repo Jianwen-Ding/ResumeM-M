@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { baseForCopy, baseResumes, byBaseFirst, defaultBaseId } from '../src/model/bases.js';
+import { baseForCopy, baseResumes, byBaseFirst, defaultBaseId, standingBase } from '../src/model/bases.js';
 import type { ResumeSpec } from '../src/model/types.js';
 
 const spec = (id: string, extra: Partial<ResumeSpec> = {}): ResumeSpec => ({ id, label: id, ...extra });
@@ -51,6 +51,39 @@ describe('which resume you start from', () => {
    */
   it('treats a resume with no tier as permanent, not as a base', () => {
     expect(baseResumes([spec('untiered')])).toEqual([]);
+  });
+});
+
+describe('a standing default that names a copy made for another posting', () => {
+  const resumes = [
+    spec('summer', { tier: 'base' }),
+    spec('kept', { tier: 'extended' }),
+    spec('job-keysight', { tier: 'temporary', copiedFrom: 'summer', generatedFor: { company: 'Keysight', role: 'Intern' } }),
+  ];
+  const forWaymo = (r: ResumeSpec) => r.generatedFor?.company === 'Waymo';
+  const forKeysight = (r: ResumeSpec) => r.generatedFor?.company === 'Keysight';
+
+  it('gives way to a base', () => {
+    expect(standingBase(resumes, 'job-keysight', forWaymo)).toBe('summer');
+  });
+
+  it('or to a kept resume where nothing is pinned', () => {
+    const unpinned = resumes.map((r) => (r.id === 'summer' ? spec('summer', { tier: 'extended', copiedFrom: 'x' }) : r));
+    expect(standingBase(unpinned, 'job-keysight', forWaymo)).toBe('kept');
+  });
+
+  it('stands for the posting it was made for', () => {
+    expect(standingBase(resumes, 'job-keysight', forKeysight)).toBe('job-keysight');
+  });
+
+  it('and leaves anything that is not temporary, or not there, alone', () => {
+    expect(standingBase(resumes, 'kept', forWaymo)).toBe('kept');
+    expect(standingBase(resumes, 'ghost', forWaymo)).toBe('ghost');
+    expect(standingBase(resumes, undefined, forWaymo)).toBeUndefined();
+  });
+
+  it('and keeps it where there is nothing else to start from', () => {
+    expect(standingBase([resumes[2]!], 'job-keysight', forWaymo)).toBe('job-keysight');
   });
 });
 

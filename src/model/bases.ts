@@ -112,6 +112,33 @@ export function baseForCopy(resumes: ResumeSpec[], wanted: string | undefined, c
 }
 
 /**
+ * The resume a standing default names, as a starting point for this posting.
+ *
+ * The extension keeps one default for every tab and every posting, and it
+ * used to be written by whichever card last changed its "Start from" picker.
+ * Choosing another application's tailored copy there, which the picker offers,
+ * made that copy the starting point of every posting after it. Measured on a
+ * user's store: a Waymo posting opened on "Engineering Software Developer,
+ * Intern | Keysight Technologies", a temporary resume built for and sent to
+ * Keysight, over the base they meant to use.
+ *
+ * A temporary resume belongs to the posting it was made for. Named by a
+ * default for any other posting, it gives way to the store's own default, as
+ * long as the store has a resume that is not temporary. A choice made for this
+ * application is not a default and does not come through here. See
+ * `/extension/analyze`.
+ */
+export function standingBase(
+  resumes: ResumeSpec[],
+  wanted: string | undefined,
+  madeForThis: (spec: ResumeSpec) => boolean,
+): string | undefined {
+  const named = wanted ? resumes.find((r) => r.id === wanted) : undefined;
+  if (!named || tierOf(named) !== 'temporary' || madeForThis(named)) return wanted;
+  return defaultBaseId(resumes.filter((r) => tierOf(r) !== 'temporary')) ?? wanted;
+}
+
+/**
  * The id a new tailored copy may take without writing over a resume that was
  * kept.
  *
