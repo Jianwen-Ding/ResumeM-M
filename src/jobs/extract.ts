@@ -655,8 +655,11 @@ function elementEnd(html: string, open: RegExpExecArray): number {
  * interested in", Indeed's "Jobs you might like" and "Explore other jobs", a
  * careers site's "You might also like". Under those, every card's salary and
  * city reached the AI unmarked.
+ *
+ * Not "Other roles and responsibilities", which is a section of this job's
+ * own duties, and was labelled as another job's once it had two links in it.
  */
-const OTHER_POSTINGS_NAME = String.raw`(?:(?:explore|see|view|browse)\s+)?(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?|opportunities)\b|(?:jobs?|roles?|positions?)\s+you\s+(?:may|might)\s+(?:also\s+)?(?:be\s+interested\s+in|like)\b|you\s+(?:may|might)\s+also\s+like\b|people\s+also\s+viewed\b`;
+const OTHER_POSTINGS_NAME = String.raw`(?:(?:explore|see|view|browse)\s+)?(?:similar|related|recommended|other|more)\s+(?:jobs?|roles?|positions?|postings?|openings?|opportunities)\b(?!\s*(?:and|&amp;|&)\s*(?:responsibilit|dut))|(?:jobs?|roles?|positions?)\s+you\s+(?:may|might)\s+(?:also\s+)?(?:be\s+interested\s+in|like)\b|you\s+(?:may|might)\s+also\s+like\b|people\s+also\s+viewed\b`;
 const OTHER_POSTINGS_HEADING = new RegExp(String.raw`^\W*(?:${OTHER_POSTINGS_NAME})`, 'i');
 const SIDE_REGION = /^<(?:aside\b|[a-z][a-z0-9]*\b[^>]*\brole\s*=\s*["']complementary["'])/i;
 const OTHER_POSTINGS_MARKER = '<p>[Other openings listed on this site — not this job:]</p>';

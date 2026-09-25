@@ -1345,3 +1345,29 @@ describe('a list of other openings is labelled under the names boards give it', 
     expect(out.indexOf('$130,000–$160,000')).toBeLessThan(out.indexOf(MARK));
   });
 });
+
+/*
+ * "Other roles and responsibilities" is this job's own section.
+ *
+ * It opens with "Other roles", which is how a rail of other openings names
+ * itself, and a section with two links in it — to a handbook, to the on-call
+ * rota — was labelled "not this job", so the AI was told the duties it was
+ * tailoring to belonged to some other posting.
+ */
+describe('a section of this job\'s duties is not labelled as other openings', () => {
+  const MARK = '[Other openings listed on this site — not this job:]';
+  const filler = `<p>${'You will build and run the services that move money between merchants and their banks. '.repeat(4)}</p>`;
+  it.each(['Other Roles and Responsibilities', 'Other roles &amp; responsibilities', 'Other Roles & Duties'])('under "%s"', (heading) => {
+    const html = `<html><body><main><h1>Program Analyst</h1>${filler}<section><h3>${heading}</h3><ul>
+      <li>Mentor junior analysts as the <a href="/handbook">handbook</a> sets out</li>
+      <li>Cover the <a href="/oncall">on-call rota</a> one week in six</li></ul></section></main></body></html>`;
+    const out = extractJob(html, 'https://careers.acme.example/jobs/4410').description;
+    expect(out).toContain('Mentor junior analysts');
+    expect(out).not.toContain(MARK);
+  });
+  it('while a rail headed "Other roles" is still labelled', () => {
+    const html = `<html><body><main><h1>Program Analyst</h1>${filler}</main><section><h3>Other roles</h3><ul>
+      <li><a href="/jobs/4411">Data Analyst</a> $70,000</li><li><a href="/jobs/4412">Budget Analyst</a> $72,000</li></ul></section></body></html>`;
+    expect(extractJob(html, 'https://careers.acme.example/jobs/4410').description).toContain(MARK);
+  });
+});
