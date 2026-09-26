@@ -104,30 +104,76 @@ function hasSignOff(body: string, name: string): boolean {
   return lines.some((line) => line.toLowerCase() === wanted.toLowerCase());
 }
 
+/**
+ * The contact details, and the two ways of setting them on two rows.
+ *
+ * Joined into one line and left to TeX, a line too long for the page broke
+ * wherever it ran out — after the LinkedIn address, say — leaving a long row
+ * over a stub. So the rows are chosen, not fallen into: one row when it fits;
+ * otherwise the ways to reach you (phone, email, where you are) above the
+ * places to look you up (the links), which is a break a reader understands;
+ * and if either of those is itself too wide, the split that leaves the two
+ * rows most nearly equal in length. Which of these fits is measured by TeX
+ * at the size the letter is set — see `header` — so this only offers them.
+ */
+export function contactRows<T extends { text: string; link: boolean }>(items: T[]): { reach: T[]; look: T[]; even: [T[], T[]] } {
+  const width = (row: T[]) => row.reduce((n, item, i) => n + item.text.length + (i ? 3 : 0), 0);
+  let cut = 1;
+  for (let at = 1; at < items.length; at++) {
+    if (Math.max(width(items.slice(0, at)), width(items.slice(at))) < Math.max(width(items.slice(0, cut)), width(items.slice(cut)))) cut = at;
+  }
+  return {
+    reach: items.filter((i) => !i.link),
+    look: items.filter((i) => i.link),
+    even: [items.slice(0, cut), items.slice(cut)],
+  };
+}
+
 /** The sender block: identical to the resume header, so the pair matches. */
-function header(p: ResolvedProfile, spacing: number): string {
-  const bits: string[] = [];
-  if (p.phone) bits.push(tex(p.phone));
-  if (p.email) bits.push(`\\href{mailto:${texHref(p.email)}}{\\underline{${tex(p.email)}}}`);
+function header(p: ResolvedProfile, layout: LayoutOptions): string {
+  const { spacing } = layout;
+  const items: { tex: string; text: string; link: boolean }[] = [];
+  if (p.phone) items.push({ tex: tex(p.phone), text: p.phone, link: false });
+  if (p.email) items.push({ tex: `\\href{mailto:${texHref(p.email)}}{\\underline{${tex(p.email)}}}`, text: p.email, link: false });
+  if (p.location) items.push({ tex: tex(p.location), text: p.location, link: false });
   for (const url of [p.linkedin, p.github, p.website]) {
     if (!url) continue;
     const full = /^https?:\/\//.test(url) ? url : `https://${url}`;
     const shown = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    bits.push(`\\href{${texHref(full)}}{\\underline{${tex(shown)}}}`);
+    items.push({ tex: `\\href{${texHref(full)}}{\\underline{${tex(shown)}}}`, text: shown, link: true });
   }
-  if (p.location) bits.push(tex(p.location));
+  const between = '\\kern0.45em\\textbar\\kern0.45em ';
+  const row = (of: typeof items) => of.map((i) => i.tex).join(between);
+  // A paragraph break, not `\\`: that looks ahead for a `[` and trips over
+  // the `\fi` the rows sit in front of.
+  // And without the gap between paragraphs, which is a letter's, not a row's.
+  const rowGap = `\\par\\vspace{-\\parskip}\\vspace{${(1.5 * spacing).toFixed(1)}pt}\\leavevmode`;
+  const { reach, look, even } = contactRows(items);
+
+  /*
+   * Measured, not guessed: each way of setting the details is put in a box
+   * and the first whose rows are no wider than the line is the one used.
+   * The even split is left free to break, for the details no two rows hold.
+   */
+  const twoEven = `${row(even[0])}${rowGap}\n    ${row(even[1])}`;
+  const contact =
+    items.length === 0
+      ? ''
+      : `\\setbox0=\\hbox{${row(items)}}%
+    \\ifdim\\wd0>\\linewidth
+      ${
+        reach.length && look.length
+          ? `\\setbox2=\\hbox{${row(reach)}}\\setbox4=\\hbox{${row(look)}}%
+      \\ifdim\\wd2>\\linewidth ${twoEven}\\else\\ifdim\\wd4>\\linewidth ${twoEven}\\else\\leavevmode\\box2${rowGap}\\box4\\fi\\fi`
+          : twoEven
+      }
+    \\else\\leavevmode\\box0\\fi`;
 
   // A rule under it, as the resume has under each heading: the letterhead
   // reads as a letterhead, and the letter starts below it.
-  /*
-   * The separator is one TeX may break at and drop. A letter's margins are
-   * wider than a resume's, so the contact line can run to two lines, and
-   * joined with a plain " | " the first of them ended on a stray bar.
-   */
-  const between = '\\discretionary{}{}{\\kern0.45em\\textbar\\kern0.45em}';
   return `\\begin{center}
     {\\Huge \\scshape ${tex(p.name)}} \\\\ \\vspace{${(3 * spacing).toFixed(2)}pt}\\small
-    ${bits.join(between)}
+    ${contact}
 \\end{center}
 \\vspace{-\\parskip}\\vspace{-${(6 * spacing).toFixed(1)}pt}
 \\noindent\\rule{\\textwidth}{0.4pt}`;
@@ -155,7 +201,7 @@ function paragraphs(body: string): string[] {
  * line. `\parskip` carries the gap between paragraphs so the spacing knob
  * still controls it.
  */
-function letterBody(letter: LetterContent, layout: LayoutOptions, setup = ''): string {
+function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', lead = 0): string {
   const p = letter.profile;
   const gap = (mult: number) => `\\vspace{${(mult * layout.spacing).toFixed(1)}pt}`;
 
@@ -164,8 +210,14 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = ''): s
     // paragraphs instead — most of a line, so the paragraphs read as
     // paragraphs at whatever size the letter was set.
     `\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{${(0.75 * layout.fontSizePt * layout.spacing).toFixed(1)}pt}`,
-    header(p, layout.spacing),
-    gap(10),
+    header(p, layout),
+    /*
+     * The letter starts a little way under the letterhead, and further for a
+     * short one: `lead` is the room a letter of a few lines leaves at the
+     * foot of the page, some of it spent here so the letter sits on the page
+     * rather than hanging off the top of it. See `compileLetter`.
+     */
+    `\\vspace{${(10 * layout.spacing + lead).toFixed(1)}pt}`,
     tex(letter.date ?? today()),
   ];
 
@@ -201,15 +253,15 @@ ${blocks.join('\n\n')}
 }
 
 /** Full .tex source for a cover letter: preamble plus body. */
-export function renderLetterLatex(letter: LetterContent, layout: LayoutOptions): string {
-  return `${stablePreamble(layout.paper)}\n${runtimeSetup(layout)}\n${letterBody(letter, layout)}`;
+export function renderLetterLatex(letter: LetterContent, layout: LayoutOptions, lead = 0): string {
+  return `${stablePreamble(layout.paper)}\n${runtimeSetup(layout)}\n${letterBody(letter, layout, '', lead)}`;
 }
 
 /**
  * Just the numbers and the body, for the precompiled-format preview path —
  * the same arrangement `renderLatexFastBody` uses for a resume.
  */
-export function renderLetterFastBody(letter: LetterContent, layout: LayoutOptions): string {
+export function renderLetterFastBody(letter: LetterContent, layout: LayoutOptions, lead = 0): string {
   // No `runtimeSetup`: the format carries the layout. See fastCompile.ts.
-  return letterBody(letter, layout);
+  return letterBody(letter, layout, '', lead);
 }

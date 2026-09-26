@@ -1101,13 +1101,13 @@ export async function compileLetter(
 
   type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };
   const wantFast = opts.mode === 'preview' && (await hasFastPath());
-  const attempt = async (at: LayoutOptions): Promise<Attempt> => {
-    const tex = renderLetterLatex(letter, at);
+  const attempt = async (at: LayoutOptions, lead = 0): Promise<Attempt> => {
+    const tex = renderLetterLatex(letter, at, lead);
     // The shortcut for the page as set only, as for a resume: its format
     // carries the layout, and every other attempt would dump one of its own.
     if (wantFast && at === base) {
       try {
-        const raw = await compileFastBody(renderLetterFastBody(letter, at), at.paper, at);
+        const raw = await compileFastBody(renderLetterFastBody(letter, at, lead), at.paper, at);
         return { layout: at, raw, m: measure(raw.aux, at, 1), tex, fast: true };
       } catch {
         // Fall back to the trusted engine.
@@ -1116,7 +1116,19 @@ export async function compileLetter(
     const raw = await compileOnce(tex, engine);
     return { layout: at, raw, m: measure(raw.aux, at, 1), tex, fast: false };
   };
-  const best = await fitSearch(base, await attempt(base), attempt, 6);
+  const fitted = await fitSearch(base, await attempt(base), (at) => attempt(at), 6);
+  /*
+   * And placed on it. Grown as far as a letter may go, a letter of a few
+   * lines still left the lower half of the page empty, under a date, a
+   * greeting and a sign-off packed against the letterhead. Some of that room
+   * — two-fifths, never more than two inches — goes above the date instead,
+   * so a short letter sits on the page. Only a letter with a third of the
+   * page to spare, and only if it still fits after: a full one is untouched.
+   */
+  const room = textHeightIn(fitted.layout) * PT_PER_IN - fitted.m.usedPt;
+  const spare = fitted.m.pages <= 1 && room > (textHeightIn(fitted.layout) * PT_PER_IN) / 3;
+  const placed = spare ? await attempt(fitted.layout, Math.min(room * 0.4, 144)).catch(() => undefined) : undefined;
+  const best = placed && placed.m.pages <= 1 ? placed : fitted;
   const { raw, tex } = best;
   const used = best.layout;
   const usedFast = best.fast;
