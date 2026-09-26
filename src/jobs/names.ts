@@ -213,7 +213,13 @@ export function isAudienceOnly(s: string | undefined): boolean {
  * `careers-markon`. Round a name, they say whose site it is; alone, they say
  * nothing at all.
  */
-const CAREERS_WORD = String.raw`(?:careers?|jobs?|job\s+(?:board|search|site|portal|opportunities|openings)|career\s+(?:site|portal|center|centre|opportunities|page|hub)|talent\s+(?:community|network|portal)|recruiting|recruitment|opportunities|openings|vacancies)`;
+/*
+ * The same page in the languages a careers site is served in. Qumulo's is
+ * "Vagas abertas" at /pt/, and it was filed as the employer: "open
+ * positions" is no more a name in Portuguese than in English.
+ */
+const ELSEWHERE_CAREERS = String.raw`vagas(?:\s+(?:abertas|dispon[ií]veis))?|carreiras?|trabalhe\s+conosco|empregos?|empleos?|ofertas\s+de\s+(?:empleo|trabajo)|trabaja\s+con\s+nosotros|vacantes|carreras?|emplois?|offres\s+d['’]emploi|carri[eè]res?|nous\s+rejoindre|stellenangebote|offene\s+stellen|karriere|jobangebote|posizioni\s+aperte|lavora\s+con\s+noi|carriere|vacatures|werken\s+bij|lediga\s+tjänster|karriär|ledige\s+stillinger|oferty\s+pracy|kariera`;
+const CAREERS_WORD = String.raw`(?:careers?|jobs?|job\s+(?:board|search|site|portal|opportunities|openings)|career\s+(?:site|portal|center|centre|opportunities|page|hub)|talent\s+(?:community|network|portal)|recruiting|recruitment|opportunities|openings|vacancies|${ELSEWHERE_CAREERS})`;
 const CAREERS_ONLY = new RegExp(
   String.raw`^(?:${CAREERS_WORD}|join\s+(?:us|our\s+team|the\s+team)|work\s+(?:with|for)\s+us|we(?:'re|’re|\s+are)\s+hiring|now\s+hiring)$`,
   'i',
