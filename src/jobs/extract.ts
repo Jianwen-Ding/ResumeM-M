@@ -9,6 +9,7 @@ import {
   cleanRole,
   employerLabel,
   hostOf,
+  isAudienceOnly,
   isFieldOfWork,
   isJobBoardHost,
   isJobBoardName,
@@ -1558,7 +1559,7 @@ export function unnamedRole(urls: (string | undefined)[]): string {
  * automatic row for any of them.
  */
 const A_LIST_OF_JOBS =
-  /\bnow hiring\b|\bhiring now\b|\b\d[\d,]*\+?\s+(?:[\w-]+\s+){0,3}jobs?\b|\bjobs?,\s*employment\b|\b(?:search|browse|all|view all|more)\s+jobs?\b|\bjob (?:search|results|alerts)\b/i;
+  /\bnow hiring\b|\bhiring now\b|\b\d[\d,]*\+?\s+(?:[\w-]+\s+){0,3}jobs?\b|\bjobs?,\s*employment\b|\b(?:search|browse|all|view all|more)\s+jobs?\b|\bjob (?:search|results|alerts)\b|\bjob openings?\b|\b(?:open|current|all)\s+(?:positions|roles|openings|opportunities|vacancies)\b|\bsearch results\b|\bjobs?\s+(?:at|in|near)\s+\S|\bjobs\s*$/i;
 
 /**
  * Does this read like the name of a job, rather than whatever a page had
@@ -1600,6 +1601,21 @@ export function looksLikeRoleTitle(role?: string): boolean {
    * those are gone.
    */
   if (/^((summer|fall|autumn|winter|spring|20\d\d|q[1-4]|h[12]|early|late|[-–—,/&]|and)\s*)+$/i.test(r)) return false;
+  /*
+   * A careers site naming itself: "Careers", "Intel Careers" — the name of
+   * Intel's Workday site — "Careers at Vireo". Each was filed as a role
+   * because it was the title of the page somebody was on. A role that merely
+   * ends in the word keeps it: "Director of Careers" is a job.
+   */
+  const careersOf = withoutCareersWords(r);
+  if (careersOf !== undefined && !ROLE_NOUN.test(careersOf)) return false;
+  /*
+   * Who a programme is for, and nothing about the work: "Intern and
+   * Graduate", which is careers.adobe.com's page for them, and "Internships".
+   * A real intake with no role noun still says what the work is — "Product
+   * Marketing, Early Career" — and is not refused here.
+   */
+  if (isAudienceOnly(r)) return false;
   return true;
 }
 
@@ -2371,10 +2387,71 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   // Everything else has to have somewhere to go.
   if (!actionable && kind !== 'listing' && kind !== 'discussion') kind = 'none';
 
+  /*
+   * And a page about many roles is a list of them, however much of one it
+   * reads like.
+   *
+   * A careers home, a board's search results and a job category all describe
+   * work in a posting's words, and each can pass for one role by accident —
+   * the title and the first heading are read together, and "Careers" above a
+   * hero reading "Software Developer" names a role. They were filed:
+   *
+   *   Epic       Careers
+   *   Intel      Intel Careers              (the name of Intel's Workday site)
+   *   Activision intern job openings        (a search)
+   *   Adobe      Intern and Graduate        (careers.adobe.com/us/en/intern-and-graduate)
+   *   Indeed     Now Hiring: 300 Software Intern Jobs
+   *
+   * What a single posting has that none of these has is one job declared: a
+   * JobPosting in its structured data, or a job's number in its address. A
+   * page with neither that counts jobs or links to several, and whose own
+   * title names no role, is a list; so is one that both counts them and links
+   * to them, whatever its title says. Only an actionable posting is looked
+   * at here — a page that was going to be quiet stays quiet, rather than
+   * becoming a list and getting a card.
+   */
+  if (kind === 'posting' && listsRoles(html, text, url)) {
+    kind = 'listing';
+    why.push('lists roles and declares none of its own');
+  }
+
   if (score < JOB_SHAPED) kind = 'none';
   return { kind, score, why };
 }
 
+/** "300 jobs", "1,204 jobs found", "Showing 1 - 20 of 57": a page counting what it lists. */
+const JOBS_COUNTED =
+  /\b\d[\d,]*\+?\s+(?:[a-z-]+\s+){0,3}?(?:jobs|openings|positions|roles|opportunities|vacancies|results)\b|\bshowing\s+\d+\s*(?:-|–|to)\s*\d+\s+of\s+\d+|\b(?:jobs|results)\s+found\b/i;
+
+/** How many other postings a page links to: each address naming a job, counted once. */
+function postingLinks(html: string, url?: string): number {
+  const seen = new Set<string>();
+  for (const href of hrefsIn(html)) {
+    let absolute: string;
+    try {
+      absolute = new URL(href, url ?? 'https://page.invalid/').href;
+    } catch {
+      continue;
+    }
+    if (url && absolute.split('#')[0] === url.split('#')[0]) continue;
+    const number = jobNumberIn(absolute);
+    if (number) seen.add(`#${number}`);
+    else if (looksLikeOtherPostingHref(absolute)) seen.add(absolute.split(/[?#]/)[0]!);
+  }
+  return seen.size;
+}
+
+/** A page that lists roles and declares none of its own. See the end of `classifyPage`. */
+function listsRoles(html: string, text: string, url?: string): boolean {
+  if (/"@type"\s*:\s*"?JobPosting/i.test(html)) return false;
+  if (jobNumberIn(url)) return false;
+  const title = readableName(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '') ?? '';
+  const role = readTitle(title, { employers: [], unnamed: false, onBoard: false }).role;
+  const namesNoRole = !role || !looksLikeRoleTitle(role);
+  const counted = JOBS_COUNTED.test(text);
+  const links = postingLinks(html, url);
+  return (namesNoRole && (counted || links >= 3)) || (counted && links >= 3);
+}
 
 /**
  * The bar for saying anything at all.

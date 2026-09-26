@@ -217,6 +217,7 @@ describe('"TalentAlly | Software Engineer" and "Indeed | Now Hiring: 300 Softwar
     const title = 'Now Hiring: 300 Software Intern Jobs';
     const job = extractJob(page(title, og('og:site_name', 'Indeed')), 'https://www.indeed.com/q-software-intern-jobs.html', title);
     expect(job.company).toBeUndefined();
+    expect(job.title).toBeUndefined();
   });
 });
 
