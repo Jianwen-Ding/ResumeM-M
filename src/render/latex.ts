@@ -237,7 +237,11 @@ export function unrenderableReason(
  * `https://example.com/a_b_c` are never read as markers: in every one of them
  * the underscore is glued to a letter or a `/` on the side that matters.
  */
-const MARKUP =
+/*
+ * Exported, and copied into web/markup.js: the editor reads a line by this
+ * same rule, and tests/markup-agreement.test.js holds the two together.
+ */
+export const MARKUP =
   /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s([{'"])\*(?=[^\s*.,;:!?)\]}])([^*]+)(?<=[^\s*([{])\*(?=[\s).,;:!?\]}'"-]|$)|(?<=^|[\s([{'"])_(?=[^\s_.,;:!?)\]}])([^_\n]+)(?<=[^\s_([{])_(?=[\s).,;:!?\]}'"-]|$)|`(.+?)`/g;
 
 /** Enough for bold inside a link inside italics; a guard, not a limit anyone meets. */
