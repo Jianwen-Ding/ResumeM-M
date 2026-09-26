@@ -682,7 +682,7 @@ function aboutTheLetter(out: LetterCompileResult | undefined): string[] {
     said.push(
       `The cover letter is ${out.pages} pages, about ${Math.abs(out.overflowLines)} ` +
         `${Math.abs(out.overflowLines) === 1 ? 'line' : 'lines'} past one. It is attached as it is — ` +
-        'a letter is not shrunk to fit, because the fix is cutting a sentence.',
+        'a letter is only brought in so far, because past that the fix is cutting a sentence.',
     );
   }
   return said;

@@ -1053,10 +1053,11 @@ export interface LetterCompileResult {
 /**
  * Compile a cover letter.
  *
- * Deliberately not run through the resume's auto-fit loop: shrinking a
- * letter's type to claw back two lines is the wrong fix — the fix is cutting a
- * sentence — so this compiles the layout as asked and reports honestly whether
- * it fit.
+ * On a letter's page, fitted by the resume's search: grown to fill the page,
+ * or brought in for a long letter, but only as far as `letterLayout` allows
+ * and never to a resume's margins. Shrinking a letter's type to claw back
+ * more than that is the wrong fix — the fix is cutting a sentence — so past
+ * it this reports honestly that the letter did not fit.
  */
 export async function compileLetter(
   letter: LetterContent,
