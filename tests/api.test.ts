@@ -1145,15 +1145,15 @@ describe('autofill', () => {
    */
   it('works the parts of a name and a location out for a profile with no extras', async () => {
     const profile = t.store.load().profile;
-    t.store.saveProfile({ ...profile, name: 'Jianwen Ding', location: 'Boston, MA', autofill: undefined });
+    t.store.saveProfile({ ...profile, name: 'Morgan Testwell', location: 'Boston, MA', autofill: undefined });
 
     const { fields } = (await request(app).get('/api/autofill').expect(200)).body;
-    expect(fields.first_name).toBe('Jianwen');
-    expect(fields.last_name).toBe('Ding');
+    expect(fields.first_name).toBe('Morgan');
+    expect(fields.last_name).toBe('Testwell');
     expect(fields.address_city).toBe('Boston');
     expect(fields.address_state).toBe('MA');
     // And still the whole ones, for the forms that ask that way.
-    expect(fields.full_name).toBe('Jianwen Ding');
+    expect(fields.full_name).toBe('Morgan Testwell');
     expect(fields.location).toBe('Boston, MA');
   });
 
@@ -1161,14 +1161,14 @@ describe('autofill', () => {
     const profile = t.store.load().profile;
     t.store.saveProfile({
       ...profile,
-      name: 'Jianwen Ding',
+      name: 'Morgan Testwell',
       autofill: { first_name: 'Jason' },
     });
 
     const { fields } = (await request(app).get('/api/autofill').expect(200)).body;
     expect(fields.first_name).toBe('Jason');
     // The half that was not overridden is still worked out.
-    expect(fields.last_name).toBe('Ding');
+    expect(fields.last_name).toBe('Testwell');
   });
 
   it('offers nothing for a name and a place it cannot read', async () => {
@@ -1253,27 +1253,27 @@ describe('autofill', () => {
     const named = (dflt: string, variants: { id: string; label: string; text: string }[]) =>
       t.store.saveProfile({ ...profile, autofill: undefined, name: { default: dflt, variants } });
     named('v_legal', [
-      { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
-      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+      { id: 'v_legal', label: 'Legal', text: 'Morgan Testwell' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Testwell' },
     ]);
     const newgrad = t.store.load().resumes.find((r) => r.id === 'newgrad')!;
     const choosing = (id: string) => ({ ...newgrad, id: 'job-helios', choices: { ...(newgrad.choices ?? {}), 'profile.name': id } });
 
     const known = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_known') }).expect(200)).body.fields;
-    expect([known.full_name, known.first_name, known.last_name]).toEqual(['Jianwen Ding', 'Jianwen', 'Ding']);
-    expect([known.preferred_name, known.preferred_first_name, known.preferred_last_name]).toEqual(['Jason Ding', 'Jason', 'Ding']);
+    expect([known.full_name, known.first_name, known.last_name]).toEqual(['Morgan Testwell', 'Morgan', 'Testwell']);
+    expect([known.preferred_name, known.preferred_first_name, known.preferred_last_name]).toEqual(['Jason Testwell', 'Jason', 'Testwell']);
 
     const legal = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_legal') }).expect(200)).body.fields;
-    expect(legal.full_name).toBe('Jianwen Ding');
+    expect(legal.full_name).toBe('Morgan Testwell');
     expect(legal.preferred_name).toBeUndefined();
 
     // And the alternate labelled legal is the legal name, whichever is the default.
     named('v_known', [
-      { id: 'v_legal', label: 'Legal name', text: 'Jianwen Ding' },
-      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+      { id: 'v_legal', label: 'Legal name', text: 'Morgan Testwell' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Testwell' },
     ]);
     const byDefault = (await request(app).get('/api/autofill').expect(200)).body.fields;
-    expect([byDefault.full_name, byDefault.preferred_name]).toEqual(['Jianwen Ding', 'Jason Ding']);
+    expect([byDefault.full_name, byDefault.preferred_name]).toEqual(['Morgan Testwell', 'Jason Testwell']);
   });
 
   /*
@@ -4163,8 +4163,8 @@ describe('pinning', () => {
         name: {
           default: 'v_legal',
           variants: [
-            { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
-            { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+            { id: 'v_legal', label: 'Legal', text: 'Morgan Testwell' },
+            { id: 'v_known', label: 'Known as', text: 'Jason Testwell' },
           ],
         },
         email: 'test@example.com',
@@ -4177,13 +4177,13 @@ describe('pinning', () => {
 
     // And the resume prints it, with no choice of its own.
     const resolved = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
-    expect(resolved.profile.name).toBe('Jason Ding');
+    expect(resolved.profile.name).toBe('Jason Testwell');
 
     // The form-filling data the extension reads is names, not a set of them:
     // the one labelled legal, and the pinned one as the name used day to day.
     const autofill = (await request(app).get('/api/autofill').expect(200)).body;
-    expect(autofill.fields.full_name).toBe('Jianwen Ding');
-    expect(autofill.fields.preferred_name).toBe('Jason Ding');
+    expect(autofill.fields.full_name).toBe('Morgan Testwell');
+    expect(autofill.fields.preferred_name).toBe('Jason Testwell');
   });
 
   it('says a name with no alternates has none to pin', async () => {

@@ -506,12 +506,12 @@ on a resume.
 
 ```
 out/applications/2026-09-16-streamly-software-engineer-intern/
-  Jianwen Ding Resume Streamly.pdf        ← named for upload, no renaming needed
-  Jianwen Ding Cover Letter Streamly.pdf  ← typeset to match the resume
-  Jianwen Ding Cover Letter Streamly.txt  ← same letter, for paste-in-a-box portals
-  source/resume.tex                       ← exactly what compiled
+  Morgan Testwell Resume Streamly.pdf        ← named for upload, no renaming needed
+  Morgan Testwell Cover Letter Streamly.pdf  ← typeset to match the resume
+  Morgan Testwell Cover Letter Streamly.txt  ← same letter, for paste-in-a-box portals
+  source/resume.tex                          ← exactly what compiled
   source/cover-letter.tex
-  source/resolved.yaml                    ← the choices, frozen
+  source/resolved.yaml                       ← the choices, frozen
 ```
 
 and records the application in `applications.yaml` with its status history. The

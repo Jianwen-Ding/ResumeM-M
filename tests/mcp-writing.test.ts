@@ -409,7 +409,7 @@ const RESUME_DOC: SourceDocument = {
   name: 'old-resume.pdf',
   kind: 'resume',
   text: [
-    'JIANWEN DING',
+    'MORGAN TESTWELL',
     'Vega Analytics — Backend Engineer, 2023–2024',
     'Built a Kafka-backed ingest pipeline handling 2M events a day.',
     'Cut median end-to-end latency from 900ms to 180ms.',

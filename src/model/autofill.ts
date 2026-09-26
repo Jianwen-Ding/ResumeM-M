@@ -15,7 +15,7 @@
  * `last_name`, `address_city`, `address_state` and `address_country` all
  * along — and the store had nothing to put in them. So the commonest four
  * boxes on the commonest form in the world came out empty, on a store holding
- * "Jianwen Ding" and "Boston, MA", unless the person went and typed the parts
+ * "Morgan Testwell" and "Boston, MA", unless the person went and typed the parts
  * out again as extras.
  *
  * Derived, never asserted: anything set by hand in `autofill` wins, so this
@@ -56,8 +56,8 @@ const tidy = (value: unknown): string => String(value ?? '').replace(/\s+/g, ' '
  *
  * Returns nothing rather than a guess wherever the split is not plain:
  *
- *   "Jianwen Ding"            -> Jianwen / Ding
- *   "Ding, Jianwen"           -> Jianwen / Ding      (the filed order)
+ *   "Morgan Testwell"         -> Morgan / Testwell
+ *   "Testwell, Morgan"        -> Morgan / Testwell   (the filed order)
  *   "Ludwig van Beethoven"    -> Ludwig / van Beethoven
  *   "Martin Luther King Jr."  -> Martin / King
  *   "Cher"                    -> nothing; one word is not two boxes

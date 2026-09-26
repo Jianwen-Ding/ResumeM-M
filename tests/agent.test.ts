@@ -573,8 +573,8 @@ describe('a CLI that prints a session rather than an answer', () => {
     ].join('\n');
 
   it('keeps the answer and nothing around it', () => {
-    const got = unwrapAgentFraming(session('Dear Helios,\n\nI build ingest pipelines.\n\nJianwen'));
-    expect(got).toBe('Dear Helios,\n\nI build ingest pipelines.\n\nJianwen');
+    const got = unwrapAgentFraming(session('Dear Helios,\n\nI build ingest pipelines.\n\nMorgan'));
+    expect(got).toBe('Dear Helios,\n\nI build ingest pipelines.\n\nMorgan');
   });
 
   /*
@@ -592,9 +592,9 @@ describe('a CLI that prints a session rather than an answer', () => {
       'I am writing about the data engineering role.',
       '',
       'Yours,',
-      'Jianwen',
+      'Morgan',
     ].join('\n');
-    const whole = session('Dear Helios,\n\nI build ingest pipelines.\n\nJianwen', quoted);
+    const whole = session('Dear Helios,\n\nI build ingest pipelines.\n\nMorgan', quoted);
 
     expect(trimToLetter(unwrapAgentFraming(whole))).not.toMatch(/Northwind/);
     expect(trimToLetter(unwrapAgentFraming(whole))).toMatch(/^Dear Helios,/);
@@ -652,7 +652,7 @@ describe('a CLI that prints a session rather than an answer', () => {
   });
 
   it('leaves an answer that is only an answer untouched', () => {
-    const plain = 'Dear Helios,\n\nI build ingest pipelines.\n\nJianwen';
+    const plain = 'Dear Helios,\n\nI build ingest pipelines.\n\nMorgan';
     expect(unwrapAgentFraming(plain)).toBe(plain);
     expect(unwrapAgentFraming('{"choices":{}}')).toBe('{"choices":{}}');
   });
@@ -865,7 +865,7 @@ describe('repairing an AI command that cannot work', () => {
 });
 
 describe('taking the letter out of what the model wrapped it in', () => {
-  const LETTER = 'Dear Anthropic,\n\nClaude runs at a scale where a slow join shows up for someone.\n\nSincerely,\nJianwen';
+  const LETTER = 'Dear Anthropic,\n\nClaude runs at a scale where a slow join shows up for someone.\n\nSincerely,\nMorgan';
 
   it('leaves a letter that starts where it should', () => {
     expect(trimToLetter(LETTER)).toBe(LETTER);

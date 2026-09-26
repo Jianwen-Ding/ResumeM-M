@@ -383,9 +383,9 @@ describe('alternates for the name', () => {
       name: {
         default: 'v_legal',
         variants: [
-          { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
-          { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
-          { id: 'v_short', label: 'Initialled', text: 'J. Ding' },
+          { id: 'v_legal', label: 'Legal', text: 'Morgan Testwell' },
+          { id: 'v_known', label: 'Known as', text: 'Jason Testwell' },
+          { id: 'v_short', label: 'Initialled', text: 'J. Testwell' },
         ],
       },
       email: 'test@example.com',
@@ -393,11 +393,11 @@ describe('alternates for the name', () => {
   });
 
   it('prints the pinned name when a resume says nothing', () => {
-    expect(resolveResume('base', withNames()).profile.name).toBe('Jianwen Ding');
+    expect(resolveResume('base', withNames()).profile.name).toBe('Morgan Testwell');
   });
 
   it('prints the one a resume asks for', () => {
-    expect(resolveResume('short', withNames()).profile.name).toBe('J. Ding');
+    expect(resolveResume('short', withNames()).profile.name).toBe('J. Testwell');
   });
 
   it('is not reported as a choice matching nothing in the store', () => {
@@ -409,7 +409,7 @@ describe('alternates for the name', () => {
     const data = withNames();
     data.resumes[1]!.choices = { 'profile.name': 'v_deleted' };
     const out = resolveResume('short', data);
-    expect(out.profile.name).toBe('Jianwen Ding');
+    expect(out.profile.name).toBe('Morgan Testwell');
     expect(out.warnings.join(' ')).toMatch(/v_deleted/);
   });
 
