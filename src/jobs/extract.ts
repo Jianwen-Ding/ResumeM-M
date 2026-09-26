@@ -1149,6 +1149,8 @@ export function companyFromUrl(url: string | undefined): string | undefined {
     [/([\w-]+)\.freshteam\.com/i, 1],
     [/([\w-]+)\.homerun\.co/i, 1],
     [/([\w-]+)\.jobylon\.com/i, 1],
+    // ADP Workforce Now's candidate site: `myjobs.adp.com/<client>/cx/...`.
+    [/myjobs\.adp\.com\/([^/?#]+)/i, 1],
   ];
   for (const [re, group] of patterns) {
     const m = re.exec(url);
@@ -1263,7 +1265,7 @@ export function extractKeywords(text: string): string[] {
  * which is honest, where a tidied "Greenhouse" would be a lie.
  */
 const NOT_THE_EMPLOYER =
-  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
+  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|myjobs\.adp|workforcenow\.adp|indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
 
 /**
  * The employer's name when nothing on the page gave one.
@@ -2120,7 +2122,7 @@ export interface PageVerdict {
   why: string[];
 }
 
-const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|successfactors|brassring)\b/i;
+const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|successfactors|brassring|myjobs\.adp|workforcenow\.adp)\b/i;
 const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y|ies)|apply|application|hiring|req|requisition)(\/|$|[?#])/i;
 const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
 const FORUM = /\b(news\.ycombinator|reddit|lobste\.rs|discourse|forum|stackexchange|quora|levels\.fyi|blind)\b/i;
@@ -2220,7 +2222,12 @@ export function classifyPage(html: string, url?: string): PageVerdict {
 
   if (/"@type"\s*:\s*"?JobPosting/i.test(html)) add(6, 'structured JobPosting data');
   if (ATS.test(link)) add(4, 'applicant tracking system');
-  if (BOARD.test(link)) add(3, 'job board');
+  /*
+   * By the host. The whole address said "LinkedIn" for any posting a board
+   * sent you to: ADP tags its links `?rb=LINKEDIN`, and Lever and Greenhouse
+   * carry the source the same way.
+   */
+  if (BOARD.test(hostOf(url))) add(3, 'job board');
   if (JOB_PATH.test(link)) add(2, 'job-shaped address');
   if (companyFromUrl(url)) add(2, 'company careers page');
 
@@ -2326,18 +2333,29 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   const heading = (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '')
     .concat(' ')
     .concat(/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1] ?? '');
-  const named = stripTags(heading).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
   /*
    * And the role word has to be the *end* of it, give or take a level.
    * "Platform Engineer" is a post; "Software Engineer salaries" is a page
    * about what posts pay, and merely containing the word was enough to let it
    * through.
    */
-  const namesARole =
-    !thread &&
-    named.split(/\s+/).length <= 8 &&
-    (ENDS_WITH_ROLE.test(named) || LEADS_WITH_ROLE.test(named)) &&
-    !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my)\b/i.test(named);
+  const aRole = (said: string) => {
+    const named = stripTags(said).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
+    return (
+      named.split(/\s+/).length <= 8 &&
+      (ENDS_WITH_ROLE.test(named) || LEADS_WITH_ROLE.test(named)) &&
+      !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my)\b/i.test(named)
+    );
+  };
+  /*
+   * Or what the page declares itself to be, when its title is the site's.
+   * ADP titles every posting "Career Site" and draws the role's name in a
+   * component with no <h1>, so a posting it serves named nothing here, had
+   * nowhere to apply, and was no job at all — the card never came up on it
+   * and the application started, nameless, on the form three steps later.
+   * Its `og:title` is the role: "Software Engineering Intern".
+   */
+  const namesARole = !thread && (aRole(heading) || aRole(metaContent(html, ['og:title']) ?? ''));
 
   const hasFields = /<(input|textarea|select)\b/i.test(html);
   /*

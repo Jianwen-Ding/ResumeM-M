@@ -437,7 +437,7 @@ const SITE_LABEL = /^(careers?|jobs?|apply|recruiting|hire|hiring|work|talent|jo
 /** A label that runs the careers words into the employer's name: `careersatdoordash`, `lifeatspotify`. */
 const RUN_IN = /^(?:careers?|jobs?|life|work|join)-?at-?(?=[a-z0-9]{3,}$)|^(?:careers?|jobs?)-(?=[a-z0-9]{3,}$)/i;
 const SYSTEM_HOST =
-  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|myworkdaysite|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn)\b/i;
+  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|myworkdaysite|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|myjobs\.adp|workforcenow\.adp)\b/i;
 
 /**
  * The employer's word in a host, as the host writes it: `careers.acme-corp.com`
