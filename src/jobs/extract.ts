@@ -1415,6 +1415,62 @@ export function roleFromUrl(url?: string): string | undefined {
 }
 
 /**
+ * Query parameters that say which posting this is — JobHelper's `JOB_PARAM`
+ * in `src/shared/trail.js`, less the ones that could name anything (`id`,
+ * `oid`, `pid`, `token`), exactly as its `jobNumbers` leaves them out.
+ */
+const JOB_PARAM =
+  /^(jk|vjk|jl|jid|job|jobid|job_id|jobreqid|career_job_req_id|opportunityid|gh_jid|jvi|requisitionid|reqid|req|postingid|posting_id|jobpostingid|applytojob|vacancyid|currentjobid)$/i;
+
+/** A job's number: five digits or more, and nothing but an id. The extension's `PATH_JOB_ID`. */
+const JOB_NUMBER = /^(?=(?:\D*\d){5})[a-z0-9_-]+$/i;
+
+/** The job number one address names: in a job parameter first, then as a whole segment of its path. */
+function jobNumberIn(url?: string): string | undefined {
+  if (!url) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  for (const [key, value] of parsed.searchParams) {
+    if (JOB_PARAM.test(key) && JOB_NUMBER.test(value)) return value;
+  }
+  const segments = parsed.pathname.split('/').filter(Boolean);
+  // Nearest the end, as `roleFromUrl` reads: the job is further out than the system.
+  return segments.reverse().find((seg) => JOB_NUMBER.test(seg));
+}
+
+/**
+ * What to call the role when no page of the application names it.
+ *
+ * "Unknown role", and on its own that was an identity: the tracker, the
+ * workspace, the folder and the tailored copy are all keyed on the company
+ * and the role, so two bare application forms at one employer — the
+ * ordinary case on a company's own careers host — were one application. The
+ * second form found the first one's row and workspace, was built into its
+ * folder, and its copy was written over the first one's.
+ *
+ * The address still says which job it is, by its number, and that is what
+ * tells the two apart: the posting at `/jobs/4012345` and the form at
+ * `/apply?gh_jid=4012345` agree on it, and are one job, which is the rule the
+ * extension joins pages by (`sharesAJobNumber`). Two numbers are two jobs.
+ * The oldest page that names one decides, so the pages of one application
+ * keep the name its first page gave it as more are added.
+ *
+ * No number, and it stays plainly "Unknown role" — the page address alone
+ * would make each step of one form its own application.
+ */
+export function unnamedRole(urls: (string | undefined)[]): string {
+  for (const url of urls) {
+    const number = jobNumberIn(url);
+    if (number) return `Unknown role (job ${number})`;
+  }
+  return 'Unknown role';
+}
+
+/**
  * A board's results page, which lists jobs and is not one.
  *
  * `Indeed — Now Hiring: 300 Software Intern Jobs` was a row in somebody's

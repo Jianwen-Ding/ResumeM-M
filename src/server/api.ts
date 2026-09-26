@@ -36,7 +36,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
-import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
+import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
 import {
   applyInclusion,
   sanitizeAiPlan,
@@ -2779,8 +2779,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       // Said the way the extension says it, so the tracker has one wording
       // for a page that names no job — and it says so, where "Role" read as
-      // if it were one.
-      const role = job.title ?? 'Unknown role';
+      // if it were one. With the job's number where the address gives one,
+      // or two such forms at one employer are one application: see
+      // `unnamedRole`.
+      const role = job.title ?? unnamedRole(trail.map((p) => p.url ?? (p === current ? url : undefined)));
       const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
       /*

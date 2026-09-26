@@ -275,3 +275,96 @@ describe('a posting that names no job', () => {
     expect(res.body.spec?.generatedFor).toMatchObject({ company: 'Activision', role: 'Unknown role' });
   });
 });
+
+/*
+ * Two bare application forms at one employer, neither naming its role.
+ *
+ * Identity is the company and the role, and both became "Acme" and "Unknown
+ * role" — so the second form was the first one's application: one tracker
+ * row, one workspace, one folder, and one tailored copy, the second build
+ * written over the first. The address still says which job each one is, by
+ * its number, and the pages of one job agree on it.
+ */
+describe('two postings that name no job, at one employer', () => {
+  const FORM = `<html><head><title>Apply</title></head><body><form>
+<label for="fn">First Name</label><input id="fn"><label for="ln">Last Name</label><input id="ln">
+<label for="em">Email</label><input id="em" type="email"><label for="rs">Resume</label><input id="rs" type="file">
+</form></body></html>`;
+
+  async function server() {
+    const { default: express } = await import('express');
+    const { default: request } = await import('supertest');
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+    t = makeTempStore({ config: { git: { autoCommit: false }, output: { dir: 'out' } } });
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+    const analyze = async (pages: string[]) =>
+      (
+        await request(app)
+          .post('/api/extension/analyze')
+          // As the extension sends it: the page in front of you, and every page of the application.
+          .send({ url: pages.at(-1), title: 'Apply', html: FORM, pages: pages.map((url) => ({ url, title: 'Apply', html: FORM })), baseResumeId: 'base', tailor: 'none' })
+          .expect(200)
+      ).body as { spec: { id: string; generatedFor: { company: string; role: string } }; application: { id: string } };
+    // What the extension does with a send: files it under the names the store settled.
+    const send = async (at: Awaited<ReturnType<typeof analyze>>, url: string) =>
+      (
+        await request(app)
+          .post('/api/extension/sent')
+          .send({ company: at.spec.generatedFor.company, role: at.spec.generatedFor.role, url })
+          .expect(200)
+      ).body as { application: { id: string } };
+    return { analyze, send };
+  }
+
+  it('are two applications when their addresses name two job numbers', async () => {
+    const { identity } = await import('../src/model/applications.js');
+    const { analyze, send } = await server();
+    const one = await analyze(['https://careers.acme.com/apply?gh_jid=4012345']);
+    const two = await analyze(['https://careers.acme.com/apply?gh_jid=4019876']);
+    expect(one.spec.generatedFor.company).toBe(two.spec.generatedFor.company);
+    // Still said to be unknown, in the words the extension uses — and which one.
+    expect(one.spec.generatedFor.role).toMatch(/^Unknown role\b.*4012345/);
+    expect(two.spec.generatedFor.role).toMatch(/^Unknown role\b.*4019876/);
+    expect(identity(one.spec.generatedFor.company, one.spec.generatedFor.role)).not.toBe(
+      identity(two.spec.generatedFor.company, two.spec.generatedFor.role),
+    );
+    // Not one tailored copy, and not one application.
+    expect(one.spec.id).not.toBe(two.spec.id);
+    const sent = await send(one, 'https://careers.acme.com/apply?gh_jid=4012345');
+    const after = await analyze(['https://careers.acme.com/apply?gh_jid=4019876']);
+    expect(after.application.id).not.toBe(sent.application.id);
+    // A number in the path is a number too.
+    const pathed = await analyze(['https://careers.acme.com/jobs/4033333/apply']);
+    expect(pathed.spec.id).not.toBe(one.spec.id);
+    expect(pathed.spec.id).not.toBe(two.spec.id);
+  });
+
+  it('are one application when the pages are one job’s', async () => {
+    const { analyze, send } = await server();
+    // The posting names its number in the path, the form in a parameter.
+    const posting = await analyze(['https://careers.acme.com/jobs/4012345']);
+    const form = await analyze(['https://careers.acme.com/apply?gh_jid=4012345&step=2']);
+    expect(form.spec.generatedFor).toMatchObject({ company: posting.spec.generatedFor.company, role: posting.spec.generatedFor.role });
+    expect(form.spec.id).toBe(posting.spec.id);
+    const sent = await send(posting, 'https://careers.acme.com/jobs/4012345');
+    expect((await analyze(['https://careers.acme.com/apply?gh_jid=4012345&step=2'])).application.id).toBe(sent.application.id);
+    // Taleo's posting and form are sibling files agreeing on `job=`; a trail of both is the same job again.
+    const detail = await analyze(['https://acme.taleo.net/careersection/2/jobdetail.ftl?job=12345']);
+    const trail = await analyze([
+      'https://acme.taleo.net/careersection/2/jobdetail.ftl?job=12345',
+      'https://acme.taleo.net/careersection/2/application.ftl?job=12345&lang=en',
+    ]);
+    expect(trail.spec.id).toBe(detail.spec.id);
+    expect(trail.spec.id).not.toBe(posting.spec.id);
+  });
+
+  it('and one that names no number stays plainly unknown', async () => {
+    const { analyze } = await server();
+    // `id` and `token` could name anything; a short number is a page, not a job.
+    const bare = await analyze(['https://careers.acme.com/apply?id=4012345&page=12']);
+    expect(bare.spec.generatedFor.role).toBe('Unknown role');
+  });
+});
