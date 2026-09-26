@@ -37,6 +37,7 @@ import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
+import { jobNumberIn } from '../jobs/names.js';
 import {
   applyInclusion,
   sanitizeAiPlan,
@@ -412,9 +413,10 @@ function sentBefore(
   applications: Application[],
   company: string | undefined,
   role: string | undefined,
+  url?: string,
 ): { id: string; at: string; status: ApplicationStatus } | undefined {
   if (!company?.trim() || !role?.trim()) return undefined;
-  const past = alreadySent(applications, company, role);
+  const past = alreadySent(applications, company, role, url);
   if (!past) return undefined;
   const went = (past.history ?? []).find((h) => h.status === 'applied');
   const at = went?.at ?? past.appliedAt;
@@ -2789,7 +2791,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // if it were one. With the job's number where the address gives one,
       // or two such forms at one employer are one application: see
       // `unnamedRole`.
-      const role = job.title ?? unnamedRole(trail.map((p) => p.url ?? (p === current ? url : undefined)));
+      const addresses = trail.map((p) => p.url ?? (p === current ? url : undefined));
+      const role = job.title ?? unnamedRole(addresses);
+      /*
+       * Which address says which job this is, for finding the application by
+       * its number when its employer was written another way — the oldest that
+       * names one, as `unnamedRole` reads them. See `sameJobAs`.
+       */
+      const jobAddress = addresses.find((u) => jobNumberIn(u)) ?? url;
       const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
       /*
@@ -3111,7 +3120,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * enough label for a resume and nowhere near good enough to tell
          * somebody they have done this already.
          */
-        applied: sentBefore(data.applications, job.company, job.title),
+        applied: sentBefore(data.applications, job.company, job.title, jobAddress),
         /*
          * And which application this page belongs to, from the first paint.
          *
@@ -3145,8 +3154,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           id:
             // Not a space left over from an application that is over: see
             // `draftForJob`.
-            draftForJob(store.loadDrafts(), data.applications, employer, role)?.id ??
-            findApplication(data.applications, employer, role)?.id ??
+            draftForJob(store.loadDrafts(), data.applications, employer, role, jobAddress)?.id ??
+            findApplication(data.applications, employer, role, jobAddress)?.id ??
             freshApplicationId(data.applications, employer, role),
           /*
            * And the resume made for it, so the card can put that one first in
@@ -3154,7 +3163,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
            * should always be on the very top … when looking at that very job
            * application". Absent until one has been built.
            */
-          resumeId: findApplication(data.applications, employer, role)?.resumeId,
+          resumeId: findApplication(data.applications, employer, role, jobAddress)?.resumeId,
         },
         score,
         kind: verdict.kind,
@@ -3506,7 +3515,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const apps = store.load().applications;
       const existing = body.id
         ? apps.find((a) => a.id === body.id)
-        : findApplication(apps, body.company, body.role);
+        : findApplication(apps, body.company, body.role, body.url);
 
       const now = new Date().toISOString();
       const status = body.status ?? existing?.status ?? 'applied';
@@ -3622,7 +3631,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           const drafts = store.loadDrafts();
           const space =
             drafts.find((d) => d.id === moved.id) ??
-            draftForJob(drafts, store.load().applications, moved.company, moved.role);
+            draftForJob(drafts, store.load().applications, moved.company, moved.role, moved.url);
           if (space && unsent && space.status === 'submitted') store.saveDraft({ ...space, status: 'drafting' });
           if (space && sent && space.status !== 'submitted') store.saveDraft({ ...space, status: 'submitted' });
         }
@@ -3718,7 +3727,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * application as `applied` while the one being worked on sat at
        * `applying` for ever. See `findApplication`.
        */
-      const tracked = findApplication(data.applications, body.company, body.role);
+      const tracked = findApplication(data.applications, body.company, body.role, body.url);
       // Not `applicationId`: a job applied for and closed earlier the same day
       // already holds the id today would make. See `freshApplicationId`.
       const id = tracked?.id ?? freshApplicationId(data.applications, body.company, body.role);
@@ -3759,7 +3768,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * not the version history; given a commit of its own, every send cost
          * a second git run.
          */
-        const draft = findDraft(store.loadDrafts(), body.company!, body.role!);
+        const draft = findDraft(store.loadDrafts(), body.company!, body.role!, body.url);
         if (draft && draft.status !== 'submitted') store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
         return recorded;
       });
@@ -3803,7 +3812,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * or a question that comes back a week later, both want the text rather
        * than the snapshot of it.
        */
-      const opened = findDraft(store.loadDrafts(), result.application.company, result.application.role);
+      const opened = findDraft(store.loadDrafts(), result.application.company, result.application.role, result.application.url);
       if (opened && result.application.status === 'applied' && opened.status !== 'submitted') {
         store.saveDraft({ ...opened, status: 'submitted', updatedAt: new Date().toISOString() });
       }
@@ -4057,8 +4066,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * under it below replaced the rejection with the repost.
        */
       const id =
-        draftForJob(store.loadDrafts(), data.applications, body.company, body.role)?.id ??
-        findApplication(data.applications, body.company, body.role)?.id ??
+        draftForJob(store.loadDrafts(), data.applications, body.company, body.role, body.url)?.id ??
+        findApplication(data.applications, body.company, body.role, body.url)?.id ??
         freshApplicationId(data.applications, body.company, body.role);
 
       // A posting-specific resume comes over with the draft; save it so the
@@ -4165,7 +4174,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         status:
           existing?.status === 'submitted'
             ? 'submitted'
-            : liveOneSent(data.applications, body.company, body.role)
+            : liveOneSent(data.applications, body.company, body.role, body.url)
               ? 'submitted'
               : (existing?.status ?? 'drafting'),
         coverLetter: existing?.coverLetter ?? {
@@ -4244,7 +4253,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
         const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
 
-        const tracked = findApplication(store.load().applications, draft.company, draft.role);
+        const tracked = findApplication(store.load().applications, draft.company, draft.role, draft.url);
         /*
          * In the draft's commit, not after it.
          *
@@ -4302,7 +4311,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * its own commit callback, synchronously too, so one of the two always
          * sees the other.
          */
-        if (draft.status !== 'submitted' && liveOneSent(store.load().applications, draft.company, draft.role)) {
+        if (draft.status !== 'submitted' && liveOneSent(store.load().applications, draft.company, draft.role, draft.url)) {
           draft.status = 'submitted';
         }
         const written = store.saveDraft(draft);

@@ -7,6 +7,7 @@ import type { Application, ApplicationStatus, ResolvedResume } from './types.js'
 import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
 import { syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
+import { cleanRole, employerKey, jobNumberIn } from '../jobs/names.js';
 
 /**
  * One hyphenated part of a filename.
@@ -312,12 +313,60 @@ export function employerName(company: string): string {
   }
 }
 
+/*
+ * One employer and one role, however each was written down.
+ *
+ * The tracker had the same job twice under spellings of one employer —
+ * "Red Hat", "Redhat" and "redhat.wd5.myworkdayjobs.com"; "Amazon.jobs" and
+ * "Amazon Web Services (AWS)" — and twice under one role with a page title's
+ * leftovers on it: "Gameplay Engineer Intern - Careers" beside "Gameplay
+ * Engineer Intern", "#Software Engineer" beside "Software Engineer". So the
+ * employer is compared by `employerKey` — letters and digits, no legal form,
+ * no careers words, a host read as the employer it belongs to — and the role
+ * with those leftovers off (`cleanRole`, which cuts nothing that is part of a
+ * title). Different roles stay different: "Software Engineer" and "Software
+ * Engineer Intern" are two keys.
+ */
+function employerPart(company: string): string {
+  return employerKey(company) || employerName(company);
+}
+
+function rolePart(role: string, company: string): string {
+  return cleanRole(role, company) ?? role;
+}
+
 export function identity(company: string, role: string): string {
-  const employer = employerName(company);
-  const key = `${slug(employer)}\u0000${slug(role)}`;
-  if (faithful(employer, role)) return key;
+  const employer = employerPart(company);
+  const job = rolePart(role, company);
+  const key = `${slug(employer)}\u0000${slug(job)}`;
+  if (faithful(employer, job)) return key;
   const tidy = (s: string) => s.normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
-  return `${key}\u0000${fingerprint(tidy(employer), tidy(role))}`;
+  return `${key}\u0000${fingerprint(tidy(employer), tidy(job))}`;
+}
+
+/*
+ * The same job, by its number, under two spellings of who it is with.
+ *
+ * Electronic Arts posts its studios' jobs on its own board, and one job there
+ * — 216245 — was a row as "Electronic Arts" and another as "Respawn
+ * Entertainment", because one page named the publisher and the other the
+ * studio. No rule about spelling makes those one employer, and none should.
+ * What makes them one application is that both pages are that job: the same
+ * role, at an address naming the same job number.
+ *
+ * Only as a second way to be the same, never a reason to be different — the
+ * posting on a board and the form on the employer's own system carry two
+ * numbers for one job, and that is the ordinary case. And only for a named
+ * role: "Unknown role (job N)" already carries its number in the name.
+ */
+function sameJobAs(company: string, role: string, url?: string): (row: { company: string; role: string; url?: string }) => boolean {
+  const key = identity(company, role);
+  const number = jobNumberIn(url);
+  const job = slug(rolePart(role, company));
+  const named = Boolean(job) && !/^unknown role\b/i.test(role.trim());
+  return (row) =>
+    identity(row.company, row.role) === key ||
+    (named && Boolean(number) && jobNumberIn(row.url) === number && slug(rolePart(row.role, row.company)) === job);
 }
 
 /**
@@ -395,9 +444,8 @@ export function describeLost(lost: { kind: string }[]): string | undefined {
  * folder, which carries only what is in flight, so the files it had just
  * built were nowhere a file picker would find them.
  */
-export function findApplication(apps: Application[], company: string, role: string): Application | undefined {
-  const key = identity(company, role);
-  const same = apps.filter((a) => identity(a.company, a.role) === key);
+export function findApplication(apps: Application[], company: string, role: string, url?: string): Application | undefined {
+  const same = apps.filter(sameJobAs(company, role, url));
   if (same.length === 0) return undefined;
 
   const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
@@ -455,22 +503,21 @@ export function freshApplicationId(apps: Application[], company: string, role: s
  * September — and it closed. See what you sent", dated the day they started
  * and pointing at nothing sent.
  */
-export function alreadySent(apps: Application[], company: string, role: string): Application | undefined {
-  const key = identity(company, role);
+export function alreadySent(apps: Application[], company: string, role: string, url?: string): Application | undefined {
   return apps
-    .filter((a) => identity(a.company, a.role) === key)
+    .filter(sameJobAs(company, role, url))
     .filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
 }
 
 /** The same question about a workspace, whose id is made the same way. */
-export function findDraft<T extends { id: string; company: string; role: string; status: string; updatedAt?: string }>(
+export function findDraft<T extends { id: string; company: string; role: string; status: string; updatedAt?: string; url?: string }>(
   drafts: T[],
   company: string,
   role: string,
+  url?: string,
 ): T | undefined {
-  const key = identity(company, role);
-  const same = drafts.filter((d) => identity(d.company, d.role) === key);
+  const same = drafts.filter(sameJobAs(company, role, url));
   if (same.length === 0) return undefined;
   const open = same.filter((d) => d.status !== 'submitted');
   return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
@@ -497,22 +544,24 @@ export function findDraft<T extends { id: string; company: string; role: string;
  * of its own counts as over too when every row this job has is finished — it
  * was sent, and the send it was for is behind it.
  */
-export function draftForJob<T extends { id: string; company: string; role: string; status: string; updatedAt?: string }>(
+export function draftForJob<T extends { id: string; company: string; role: string; status: string; updatedAt?: string; url?: string }>(
   drafts: T[],
   apps: Application[],
   company: string,
   role: string,
+  url?: string,
 ): T | undefined {
-  const live = findApplication(apps, company, role);
+  const live = findApplication(apps, company, role, url);
   const over = (d: T): boolean => {
     const row = apps.find((a) => a.id === d.id);
     if (row) return row.status === 'closed' && !closedAsStale(row);
-    return d.status === 'submitted' && !live && Boolean(alreadySent(apps, company, role));
+    return d.status === 'submitted' && !live && Boolean(alreadySent(apps, company, role, url));
   };
   return findDraft(
     drafts.filter((d) => !over(d)),
     company,
     role,
+    url,
   );
 }
 
@@ -525,8 +574,8 @@ export function draftForJob<T extends { id: string; company: string; role: strin
  * `submitted` because of the rejection, and sat under the sent ones in the
  * Workspace while it was being written. This asks it of the live row only.
  */
-export function liveOneSent(apps: Application[], company: string, role: string): boolean {
-  const live = findApplication(apps, company, role);
+export function liveOneSent(apps: Application[], company: string, role: string, url?: string): boolean {
+  const live = findApplication(apps, company, role, url);
   return Boolean(live) && live!.status !== 'interested' && live!.status !== 'applying' && !closedAsStale(live!);
 }
 
@@ -667,7 +716,7 @@ async function inBuildLane<T>(id: string, run: () => Promise<T>): Promise<T> {
  */
 export async function buildBundle(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data0 = store.load();
-  const existing = findApplication(data0.applications, req.company, req.role);
+  const existing = findApplication(data0.applications, req.company, req.role, req.url);
   return inBuildLane(
     existing?.id ?? freshApplicationId(data0.applications, req.company, req.role),
     () => buildBundleNow(store, req),
@@ -714,7 +763,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * already using, so rebuilding does not quietly rename the files somebody
    * has been dragging into a form.
    */
-  const already = findApplication(data.applications, req.company, req.role);
+  const already = findApplication(data.applications, req.company, req.role, req.url);
   const naming = req.naming ?? already?.naming;
   const [resumeName, letterName, answersName] = bundleFileNames(
     resolved.profile.name,
@@ -1139,7 +1188,7 @@ export function goneStale(
   const out: GoneStale[] = [];
   for (const app of apps) {
     if (app.status !== 'applying') continue;
-    const stamps = [app.history?.at(-1)?.at, app.appliedAt, findDraft(drafts, app.company, app.role)?.updatedAt]
+    const stamps = [app.history?.at(-1)?.at, app.appliedAt, findDraft(drafts, app.company, app.role, app.url)?.updatedAt]
       .map((at) => Date.parse(at ?? ''))
       .filter(Number.isFinite);
     // Nothing dated at all is nothing to measure from, and closing on no
