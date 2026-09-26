@@ -10900,7 +10900,26 @@ async function boot() {
   loadDocuments().catch(() => {});
   if (!project.current) { showTab('save'); return; }
   setupHistoryTab();
+  /*
+   * The tabs stay off until the store is here.
+   *
+   * `assetUI.init` turns them on as soon as it knows a save is open, which is
+   * one request before the save itself arrives, and every tab but Save &
+   * Files reads `state.store`. Clicked in that gap, History listed no
+   * resumes and said "Cannot read properties of null", and then the end of
+   * this function put the builder up over it, so the tab chosen was taken
+   * away too. On a slowed page that gap is a second or more after every
+   * reload. Save & Files needs no store and stays as `init` left it.
+   *
+   * Off rather than remembered and honoured afterwards: each tab's loader
+   * would have to run again once the store came, and a deep link would have
+   * to decide whether it or the click wins. If the store never loads they
+   * stay off, which is true: there is nothing on them that could work.
+   */
+  const waiting = [...document.querySelectorAll('#tabs button')].filter((b) => b.dataset.tab !== 'save' && !b.disabled);
+  for (const b of waiting) b.disabled = true;
   await loadStore();
+  for (const b of waiting) b.disabled = false;
   render();
 
   $('#resume-select').onchange = async (e) => {
