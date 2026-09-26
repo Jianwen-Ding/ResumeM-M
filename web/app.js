@@ -2946,6 +2946,60 @@ async function addAutofillField() {
 
 function renderEditor() {
   const editor = $('#editor');
+  const carry = holdTyping(editor);
+  drawEditor(editor);
+  carry();
+}
+
+/**
+ * Keep what is being typed into the editor when it is drawn again.
+ *
+ * `renderEditor` throws every control away and builds new ones, and a save
+ * coming back is one of the things that calls it. A date's save does it
+ * twice, once when the write returns and once after the store is read again
+ * for the words the server wrote. So a year being typed while an earlier date
+ * change was saving went into a box that was then replaced, cursor and all.
+ * The new box held the stored year, and leaving it saved nothing because
+ * nothing had changed in it. The editor walk lost a year that way on a slowed
+ * page.
+ *
+ * The same answer as `keepsValue` gives the settings, and as reopening an
+ * application in the Workspace now gives a letter: the box being typed in
+ * keeps the typing. Here it is found by its `data-keeps` name before the old
+ * controls go and handed on to the new one after, because by the time the
+ * new one is built the old one has already been taken out of the page.
+ *
+ * Only the focused box. One that was left has already had its change event,
+ * and so its save; one that was only clicked into takes whatever the redraw
+ * brings, which is how the server's answer reaches the screen. The value goes
+ * in after the focus, which puts the cursor at its end: a number box has no
+ * cursor position to read back, and the end is where a year is typed.
+ *
+ * Two things a browser does get in the way, and `datesControl` answers both
+ * from marks set here. Chromium fires change, then blur, at a focused box as
+ * it is removed, with whatever is in it: typing "20" towards 2026 and being
+ * redrawn saved the year 20, which is no year, so that end of the date was
+ * dropped. So the old box is marked `handedOn` first and ignores it. And no
+ * change event comes for a value put in by script, so the new box is marked
+ * `carried` and saves on blur if it is left without another key.
+ */
+function holdTyping(root) {
+  const box = document.activeElement;
+  const name = box?.dataset?.keeps;
+  if (!name || !root.contains(box)) return () => {};
+  const typed = box.value !== box.dataset.stored ? box.value : null;
+  box.dataset.handedOn = '';
+  return () => {
+    const next = [...root.querySelectorAll('[data-keeps]')].find((n) => n.dataset.keeps === name);
+    if (!next || next === box) return;
+    next.focus();
+    if (typed == null) return;
+    next.value = typed;
+    next.dataset.carried = '';
+  };
+}
+
+function drawEditor(editor) {
   editor.replaceChildren();
   if (!state.store) return;
   if (state.masterView) { renderMasterEditor(editor); return; }
@@ -3891,7 +3945,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
  * itself moved.
  */
 function dateEditor(entry) {
-  return datesControl(entry.period, (period) => saveEntryPeriod(entry, period));
+  return datesControl(entry.period, (period) => saveEntryPeriod(entry, period), `date:${entry.id}`);
 }
 
 /**
@@ -3902,7 +3956,7 @@ function dateEditor(entry) {
  * alternate of a field, where this side does. The controls are the same either
  * way, and so is what counts as a date.
  */
-function datesControl(from, onChange) {
+function datesControl(from, onChange, name) {
   const period = from ? structuredClone(from) : {};
   const wrap = el('div', { className: 'dates' });
 
@@ -3962,11 +4016,27 @@ function datesControl(from, onChange) {
       value: value().year ? String(value().year) : '',
       title: `${label} year`,
     });
+    /*
+     * Named, so a redraw while it is being typed in hands the typing on to
+     * the box that replaces it. See `holdTyping`. `stored` is what this box
+     * has already sent, or was drawn with.
+     */
+    if (name) year.dataset.keeps = `${name}:${which}`;
+    year.dataset.stored = year.value;
     year.onchange = () => {
+      // Being redrawn, with the typing going on to the new box. Not a year
+      // anybody finished typing.
+      if ('handedOn' in year.dataset) return;
+      year.dataset.stored = year.value;
       const n = Number(year.value);
       if (n >= 1900 && n <= 2100) period[which] = { ...value(), year: n };
       else delete period[which];
       commit();
+    };
+    // A year handed on from a box a redraw replaced gets no change event from
+    // the browser, having been put there by script. Leaving it saves it.
+    year.onblur = () => {
+      if ('carried' in year.dataset && year.value !== year.dataset.stored) year.onchange();
     };
 
     return el('span', { className: 'date-end' }, [
@@ -4031,7 +4101,7 @@ function variantDateEditor(entry, name, variantId, period) {
     const style = inferStyle(storeDateTexts());
     const text = formatPeriod(next, style);
     if (text) saveFieldText(entry, name, variantId, text);
-  });
+  }, `date:${entry.id}:${name}:${variantId}`);
 }
 
 /** Every date already written down, for working out how this store writes them. */
