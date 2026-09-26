@@ -78,6 +78,9 @@ describe('one role, with a page title’s leftovers on it or not', () => {
     apart(['Activision', 'Activision 2027 Summer Internships - Graphics Engineering'], ['Activision', 'Graphics Engineering']);
     apart(['Salesforce', 'Summer 2027 Intern - Software Engineer'], ['Salesforce', 'Summer 2027 Intern']);
     apart(['Acme', 'C++ Engineer'], ['Acme', 'C# Engineer']);
+    // A team after a spaced hyphen, even one named for the employer: two jobs at Apple.
+    apart(['Apple', 'iOS Engineer - Apple Music'], ['Apple', 'iOS Engineer - Apple Pay']);
+    apart(['Google', 'Research Scientist - Google DeepMind'], ['Google', 'Research Scientist - Google Research']);
     // While the employer's spelling still folds under them.
     same(['Activision', 'Activision 2027 Summer Internships - Graphics Engineering'], ['careers.activision.com', 'Activision 2027 Summer Internships - Graphics Engineering']);
   });

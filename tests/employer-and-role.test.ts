@@ -349,4 +349,22 @@ describe('a title is not cut at a " - " for being there', () => {
       expect(extractJob(page(title), 'http://127.0.0.1:9/postings/40123', title).title, title).toBe(title);
     }
   });
+
+  /*
+   * A team named for the employer is still a team. The posting's own title,
+   * in its structured data, came back "iOS Engineer" for both of these, and
+   * the two jobs were one tracker row.
+   */
+  it('and a team named for the employer, after a spaced hyphen', () => {
+    const url = 'https://jobs.apple.com/en-us/details/200512345/ios-engineer';
+    for (const title of ['iOS Engineer - Apple Music', 'iOS Engineer - Apple Pay']) {
+      const ld = `<script type="application/ld+json">${JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'JobPosting',
+        title,
+        hiringOrganization: { '@type': 'Organization', name: 'Apple' },
+      })}</script>`;
+      expect(extractJob(page(title, ld), url, title), title).toMatchObject({ title, company: 'Apple' });
+    }
+  });
 });

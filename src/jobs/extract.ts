@@ -1730,7 +1730,9 @@ function readTitle(
       out.careersOf ??= careersOf(site.careersOf);
       continue;
     }
-    if (segments.length > 1 && aName(s) && (namesEmployer(s, ctx.employers) || (last.strong && ctx.unnamed))) {
+    // The employer with words added only after a strong separator, as in `cleanRole`:
+    // after a spaced hyphen that is a team — "iOS Engineer - Apple Music".
+    if (segments.length > 1 && aName(s) && (namesEmployer(s, ctx.employers, { exact: !last.strong }) || (last.strong && ctx.unnamed))) {
       out.company ??= s;
       segments.pop();
       suffixGone = true;

@@ -558,8 +558,17 @@ export function cleanRole(role: string | undefined, ...employers: (string | unde
   if (segments.length === 0) return role.trim() || undefined;
   let peeled = false;
   while (segments.length > 1) {
-    const s = segments[segments.length - 1]!.text;
-    if (isJobIdSegment(s) || siteSegment(s) || namesEmployer(s, employers)) {
+    const last = segments[segments.length - 1]!;
+    const s = last.text;
+    /*
+     * The employer with words added — "Keysight Technologies" beside Keysight
+     * — only after a separator a company goes after. After a spaced hyphen it
+     * is as often the team the job is on: "iOS Engineer - Apple Music" and
+     * "iOS Engineer - Apple Pay" were both cut to "iOS Engineer", so two jobs
+     * at Apple were one tracker row and one workspace, and the posting's own
+     * title lost its team. There, only the employer exactly.
+     */
+    if (isJobIdSegment(s) || siteSegment(s) || namesEmployer(s, employers, { exact: !last.strong })) {
       segments.pop();
       peeled = true;
       continue;
