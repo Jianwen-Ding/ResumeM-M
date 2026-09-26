@@ -865,6 +865,22 @@ describe('both sets of tools, as tools', () => {
     expect(reply.result.content[0]?.text.length).toBeGreaterThan(0);
   });
 
+  /*
+   * "Not in the resume" is the tool's answer, not its failure. Sent as an
+   * error, Codex showed every unsupported claim as a failed call — a run
+   * checking its numbers read as a wall of "check_claim (failed)".
+   */
+  it('answers a claim the resume does not carry without calling it an error', async () => {
+    const reply = await callWriting('check_claim', { claim: 'shipped a quantum compiler for zebrafish' });
+    expect(reply.result.content[0]?.text).toMatch(/Do not write it/);
+    expect(reply.result.isError).toBeFalsy();
+  });
+
+  it('but a call with no claim in it is still an error', async () => {
+    const reply = await callWriting('check_claim', {});
+    expect(reply.result.isError).toBe(true);
+  });
+
   it('saves an answer to a question the form asked', async () => {
     const session = writing();
     const reply = await callWriting(

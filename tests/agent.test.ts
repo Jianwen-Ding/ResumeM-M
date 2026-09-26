@@ -10,6 +10,7 @@ import {
   rejectedApproval,
   runAgent,
   tidyUp,
+  toolCallsIn,
   trimToLetter,
   unwrapAgentFraming,
 } from '../src/ai/agent.js';
@@ -64,6 +65,71 @@ describe('a CLI that refuses the tools', () => {
     // "approval" alone is not it either: the message has to be about a tool.
     expect(deniedTools('your approval is pending for this account')).toBeUndefined();
   });
+});
+
+/*
+ * A Codex run that was working, and ran out of time.
+ *
+ * `codex exec` prints its settings before anything else — `approval: never`
+ * among them — and a line for every tool call. The refusal check asked for
+ * "approval" anywhere and "mcp" anywhere, so this transcript, with the tools
+ * answering call after call, was reported as the CLI refusing them, and the
+ * person was sent to change an approval setting that was already right.
+ */
+describe('a Codex run that used the tools and ran out of time', () => {
+  const WORKING = [
+    'OpenAI Codex v0.157.1',
+    '--------',
+    'workdir: /tmp/rmm-ai-x',
+    'model: gpt-5.5',
+    'approval: never',
+    'sandbox: read-only',
+    '--------',
+    'mcp: resume/read_posting started',
+    'mcp: resume/read_posting (completed)',
+    'mcp: resume/check_claim started',
+    'mcp: resume/check_claim (failed)',
+    'mcp: resume/find_my_letters started',
+    'mcp: resume/find_my_letters (completed)',
+    '',
+  ].join('\n');
+  const REFUSED = 'MCP tool call requires approval, but approval policy is never\nmcp: resume/read_resume started\n';
+
+  it('is not taken for a refusal because the settings mention approval', () => {
+    expect(deniedTools(WORKING)).toBeUndefined();
+  });
+
+  it('while the refusal itself still is, settings and all', () => {
+    expect(deniedTools(WORKING.split('mcp:')[0] + REFUSED)).toMatch(/would not let it use the resume tools/i);
+    expect(deniedTools('mcp: resume/save_letter (failed)\ntool call requires approval under the current policy')).toBeDefined();
+  });
+
+  it('counts the calls the server answered, whichever way it answered', () => {
+    expect(toolCallsIn(WORKING)).toBe(3);
+    expect(toolCallsIn('approval: never\nmcp: resume/read_posting started\n')).toBe(0);
+  });
+
+  it('is told it ran out of time while working, not that it never reached the tools', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-working-'));
+    const cli = path.join(dir, 'cli.cjs');
+    fs.writeFileSync(cli, `process.stderr.write(${JSON.stringify(WORKING)});\nsetInterval(() => {}, 1000);\n`, 'utf8');
+    // Nothing filed yet, as a writing session that has not saved its letter.
+    const tools = { wire: () => ({ args: [], out: path.join(dir, 'nothing-filed.json'), env: {} }), read: () => undefined };
+    const said = await runAgent(
+      config({ enabled: true, command: process.execPath, args: [cli, '{prompt}'], timeoutMs: 1500 }),
+      'p',
+      tools,
+    ).then(
+      () => '',
+      (err: Error) => err.message,
+    );
+    expect(said).toMatch(/ran for longer than/);
+    expect(said).toMatch(/It was working/);
+    expect(said).toMatch(/3 calls/);
+    expect(said).not.toMatch(/would not let it use the resume tools/i);
+    expect(said).not.toMatch(/never called any of the resume tools/i);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }, 30_000);
 });
 
 describe('clearing up after a run', () => {
