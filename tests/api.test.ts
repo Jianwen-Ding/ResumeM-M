@@ -2507,6 +2507,109 @@ describe('resume saves that carry their order', () => {
   });
 });
 
+/*
+ * A commit sent on the way out of the page, straight after the writes it
+ * covers.
+ *
+ * Nothing on a gone page waits for a reply, so the editor sends the commit
+ * without waiting for the save before it (see `flushEditsLeaving` in
+ * web/app.js), and the commit can reach the server first. It names the
+ * writes still out, as `?page=<page>&after=<n>,...`, and is held until they
+ * have been answered.
+ */
+describe('a commit that names the writes it follows', () => {
+  let committing: TempStore;
+  let live: express.Express;
+  let liveRepo: Repo;
+
+  beforeEach(async () => {
+    committing = makeTempStore({ config: { git: { autoCommit: true }, ai: { enabled: false }, output: { dir: 'out' } } });
+    liveRepo = Repo.forStore(committing.dir);
+    await liveRepo.ensure();
+    live = express();
+    live.use('/api', createApi({ store: committing.store, repo: liveRepo }));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    committing.cleanup();
+  });
+
+  const save = (label: string, order: string) =>
+    request(live).put(`/api/resumes/newgrad?commit=0&order=${order}`).send({ label, sections: [] }).expect(200);
+  const committedLabel = async () => {
+    const head = (await liveRepo.log(1))[0]!;
+    const detail = await liveRepo.commit(head.hash);
+    return /label: (.*)/.exec(detail?.diff ?? '')?.[1];
+  };
+
+  it('is held until the save it names has landed, and records it', async () => {
+    let answered = false;
+    const commit = request(live)
+      .post('/api/store/save?page=page-a&after=3')
+      .send({})
+      .expect(200)
+      .then((r) => {
+        answered = true;
+        return r;
+      });
+    // The commit is at the server first, and waits.
+    await new Promise((go) => setTimeout(go, 200));
+    expect(answered).toBe(false);
+
+    await save('Left on the way out', 'page-a:3');
+    const { body } = await commit;
+    expect(body.saved).toBe(true);
+    expect(body.files.map((f: { path: string }) => f.path)).toContain('resumes/newgrad.yaml');
+    expect(await committedLabel()).toBe('Left on the way out');
+    expect(await liveRepo.pending()).toEqual([]);
+  });
+
+  it('goes at once when what it names has already been answered, turned away or not', async () => {
+    await save('Second', 'page-a:2');
+    // Older than one already written: answered with what is stored, and done.
+    await save('First', 'page-a:1');
+    const started = Date.now();
+    const { body } = await request(live).post('/api/store/save?page=page-a&after=1,2').send({}).expect(200);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(body.saved).toBe(true);
+    expect(await committedLabel()).toBe('Second');
+  });
+
+  it('waits on its own page, not on the same number from another', async () => {
+    await save('Other tab', 'page-b:4');
+    let answered = false;
+    const commit = request(live)
+      .post('/api/store/save?page=page-a&after=4')
+      .send({})
+      .then(() => {
+        answered = true;
+      });
+    await new Promise((go) => setTimeout(go, 200));
+    expect(answered).toBe(false);
+    await save('This tab', 'page-a:4');
+    await commit;
+    expect(await committedLabel()).toBe('This tab');
+  });
+
+  // A write that never arrives, lost or sent before a restart, holds nothing for ever.
+  it('commits what is there after a few seconds when a named write never comes', async () => {
+    await request(live).put('/api/resumes/newgrad?commit=0').send({ label: 'On disk', sections: [] }).expect(200);
+    const started = Date.now();
+    const { body } = await request(live).post('/api/store/save?page=page-a&after=7').send({}).expect(200);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4900);
+    expect(body.saved).toBe(true);
+    expect(await committedLabel()).toBe('On disk');
+  }, 15_000);
+
+  it('commits at once when it names nothing, as every other caller sends it', async () => {
+    await request(live).put('/api/resumes/newgrad?commit=0').send({ label: 'Plain', sections: [] }).expect(200);
+    const started = Date.now();
+    await request(live).post('/api/store/save?page=page-a&after=').send({}).expect(200);
+    await request(live).post('/api/store/save').send({}).expect(200);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
 describe('workspace', () => {
   const open = (patch: Record<string, unknown> = {}) =>
     request(app)

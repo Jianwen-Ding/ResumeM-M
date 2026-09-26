@@ -291,6 +291,59 @@ function writeFailed(err) {
   render();
 }
 
+/*
+ * The browser's allowance for requests that outlive their page.
+ *
+ * `keepalive` is what lets a write survive the page going away, and a page
+ * gets 64KB of it: the bodies of all its keepalive requests still out,
+ * together. Past that the request is refused on the spot. It never reaches the
+ * server, and the promise rejects with `TypeError: Failed to fetch`, the same
+ * words a server that is down gets. Measured in Chromium: 63KB on its own
+ * went, 70KB on its own was refused; with 40KB held in flight, another 40KB
+ * was refused and 20KB went; and 30KB sent the moment a 40KB reply had come
+ * back was refused as well, since the browser gives the allowance back a
+ * little after the reply rather than with it.
+ *
+ * Leaving the page sends everything still owed at once (see
+ * `flushEditsLeaving`), and a Workspace draft carries the whole posting, which
+ * can be 40,000 characters on its own: the draft's save, which always had the
+ * flag, could not be saved at all past 64KB. So a keepalive write that would
+ * not fit beside the ones still out goes as a plain request, straight away,
+ * and one the browser refuses anyway (the allowance given back late) is sent
+ * again as a plain request. A plain request may not outlive the page, but it
+ * is the most that can be sent, and on a page that stays it is an ordinary
+ * save. Every write sent this way can be sent twice, and a server that is
+ * down is asked twice and fails twice.
+ *
+ * Except once the page is being unloaded. Chromium then rejects every request
+ * the page still has out, keepalive ones included, though those carry on to
+ * the server: sending again there sent every write on the way out twice. On
+ * the way out a write that does not fit is caught by the count above, before
+ * it is sent.
+ */
+const KEEPALIVE_BUDGET = 64 * 1024;
+let keepaliveInFlight = 0;
+/** Set from `pagehide` to `pageshow`: see `fetchKeptAlive`. */
+let pageUnloading = false;
+
+async function fetchKeptAlive(url, init) {
+  const plainly = () => fetch(url, { ...init, keepalive: false });
+  const size = typeof init.body === 'string' ? new Blob([init.body]).size : 0;
+  if (keepaliveInFlight + size > KEEPALIVE_BUDGET) return plainly();
+  keepaliveInFlight += size;
+  let failed;
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    failed = err;
+  } finally {
+    keepaliveInFlight -= size;
+  }
+  // Out here rather than in the `catch`, so a retry holds no allowance it is not using.
+  if (pageUnloading) throw failed;
+  return plainly();
+}
+
 async function api(path, options = {}) {
   /*
    * Undo is recorded here, and only here.
@@ -303,10 +356,31 @@ async function api(path, options = {}) {
   const docKey = undoing ? null : docKeyFor(path, options.method);
   const before = docKey ? readDoc(state.store, docKey) : null;
 
-  const res = await fetch(`/api${path}`, {
+  /*
+   * A write that is not committed yet says where it stands among this page's
+   * writes, so that a commit asked for on the way out can name the ones it
+   * has to follow. See `flushEditsLeaving`. The resume's auto-save puts its
+   * own `order` on, which the resume route also reads; the rest get theirs
+   * here.
+   */
+  const method = String(options.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && /[?&]commit=0(&|$)/.test(path) && !/[?&]order=/.test(path)) {
+    path = `${path}&order=${SAVE_PAGE}:${++saveOrder}`;
+  }
+  const order = new RegExp(`[?&]order=${SAVE_PAGE}:(\\d+)`).exec(path)?.[1];
+  if (order) unsettledOrders.add(Number(order));
+
+  const url = `/api${path}`;
+  const init = {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
-  });
+  };
+  let res;
+  try {
+    res = options.keepalive ? await fetchKeptAlive(url, init) : await fetch(url, init);
+  } finally {
+    if (order) unsettledOrders.delete(Number(order));
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
 
@@ -981,13 +1055,22 @@ let autoSaving = null;
  * way round. Each save carries `?order=<page>:<n>`, and the server does not
  * write a save of a resume older than one it has already written from the
  * same page. The replies can come back either way round too, so the newest
- * one to land is also the only one folded into the cached resume.
+ * one to land is also the only one folded into the cached resume. Every
+ * other write left for a later commit (`?commit=0`) takes the next `n` too,
+ * in `api`, so that the commit sent on the way out can name the ones it has
+ * to follow.
  */
 const SAVE_PAGE =
   globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 let saveOrder = 0;
 /** Resume id to the order of the newest of this page's saves that landed. */
 const landedOrder = new Map();
+/**
+ * The orders of this page's uncommitted writes still waiting on a reply. A
+ * commit asked for on the way out names them, and the server holds it until
+ * they have landed. See `flushEditsLeaving`.
+ */
+const unsettledOrders = new Set();
 
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
@@ -1123,8 +1206,12 @@ function scheduleCommit() {
 /**
  * Write and commit right now — before switching resumes, or on the way out of
  * the page. `keepalive` is what lets the last write survive the tab closing.
+ *
+ * Returns whether the inline saves it waited on landed. On the way out it
+ * waits on nothing; see `flushEditsLeaving`.
  */
 async function flushEdits({ leaving = false } = {}) {
+  if (leaving) return flushEditsLeaving();
   // The Workspace's typing too. Every path out of a page already calls this —
   // closing the tab, switching resumes, following a deep link — and the draft
   // was the one thing it did not cover.
@@ -1145,7 +1232,7 @@ async function flushEdits({ leaving = false } = {}) {
   const inline = await Promise.allSettled([...inlineSaves]);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
-  if (state.dirty) await autoSave({ leaving });
+  if (state.dirty) await autoSave();
   await autoSaving;
   clearTimeout(commitTimer);
   commitTimer = null;
@@ -1153,6 +1240,57 @@ async function flushEdits({ leaving = false } = {}) {
     await api('/store/save', { method: 'POST', body: JSON.stringify({}), keepalive: true }).catch(() => {});
   }
   return inline.every((r) => r.status === 'fulfilled');
+}
+
+/**
+ * On the way out of the page: every write still owed, sent now, none of them
+ * waiting on another.
+ *
+ * Nothing on a gone page runs, so a write asked for after a reply is not
+ * asked for at all once the page has gone first. `flushEdits` went through
+ * the writes in turn and waited on each: the Workspace's draft save, then
+ * every inline save, then the resume's save, then the commit. Measured in
+ * Chromium, with the draft's save held 3s and the resume's 600ms: an entry
+ * folded while the draft's save was out, and the tab then closed, never sent
+ * the resume's save, three closes of three. And the commit, with nothing
+ * else out, was never sent when the tab closed; on a reload the page's
+ * pending requests are cut short and it did go, but straight away, ahead of
+ * the save it was meant to follow, and committed without it, three reloads
+ * of three. The edit reached the disk and not the version history, until
+ * whatever next happened to commit.
+ *
+ * So each goes now, with `keepalive`, and the server puts them back in order:
+ *
+ *  - The resume's save, first: it is small, and first is where the browser's
+ *    64KB keepalive allowance is surest to have room (see `fetchKeptAlive`).
+ *    It does not wait for a save of the resume still out; `?order` settles
+ *    which of the two is written (see `autoSave`).
+ *  - The draft's save, which commits itself. A draft carries its posting and
+ *    can be large; when it does not fit beside the rest it goes as a plain
+ *    request, which is as good as it could do.
+ *  - Inline saves are already out: they were sent when the line was
+ *    committed, with `keepalive`. An entry's commits itself; the profile's is
+ *    uncommitted, like the resume's.
+ *  - The commit, last, naming the uncommitted writes of this page still
+ *    waiting on a reply (see `unsettledOrders`). It can reach the server
+ *    ahead of them, so the server holds it until they have landed, for a few
+ *    seconds at most.
+ */
+function flushEditsLeaving() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  if (state.dirty) autoSave({ leaving: true }).catch(() => {});
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+  if (draftSave.dirty) saveDraftNow().catch(() => {});
+  clearTimeout(commitTimer);
+  commitTimer = null;
+  if (state.store?.config?.git?.autoCommit) {
+    const after = [...unsettledOrders];
+    const query = after.length > 0 ? `?page=${SAVE_PAGE}&after=${after.join(',')}` : '';
+    api(`/store/save${query}`, { method: 'POST', body: JSON.stringify({}), keepalive: true }).catch(() => {});
+  }
+  return true;
 }
 
 /** Docs says "All changes saved"; so does this, in the same quiet way. */
@@ -1238,7 +1376,19 @@ async function saveEntry(entry, message, { paint = true } = {}) {
     // Something landed while this edit was being made: keep it, and put only
     // what this edit actually changed on top of it.
     const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
-    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
+    /*
+     * `keepalive`, like the resume's auto-save: an inline edit committed just
+     * before the page goes is still out when it does, and a browser cancels a
+     * plain request when its page unloads. Leaving no longer waits on it (see
+     * `flushEditsLeaving`), so it has to survive on its own. An entry is a
+     * few KB of the 64KB allowance, and `fetchKeptAlive` sends it plainly when
+     * that is spent.
+     */
+    const saved = await api(`/entries/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      keepalive: true,
+    });
     lane.server = saved?.id ? saved : body;
   });
 
@@ -2925,7 +3075,8 @@ async function addNameAlternate() {
 async function saveProfileName(name, message) {
   describeNext(message ?? 'the change');
   const profile = { ...state.store.profile, name };
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  // `keepalive` for the reason an entry's save has it: see `saveEntry`.
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
   state.store.profile = profile;
   setStatus(message);
   render();
@@ -2939,7 +3090,7 @@ async function saveProfileField(key, text) {
   const profile = { ...state.store.profile };
   if (text.trim()) profile[key] = undisplay(text);
   else delete profile[key];
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
   state.store.profile = profile;
   setStatus('Saved');
   render();
@@ -2954,7 +3105,7 @@ async function saveAutofillField(key, text) {
 
   const profile = { ...state.store.profile, autofill };
   if (Object.keys(autofill).length === 0) delete profile.autofill;
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
   state.store.profile = profile;
   setStatus('Saved');
   render();
@@ -11047,6 +11198,13 @@ async function boot() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushEdits({ leaving: true }).catch(() => {});
     else refreshOnReturn().catch(() => {});
+  });
+  // Whether a request that failed is worth sending again. See `fetchKeptAlive`.
+  window.addEventListener('pagehide', () => {
+    pageUnloading = true;
+  });
+  window.addEventListener('pageshow', () => {
+    pageUnloading = false;
   });
   // The preview keeps itself current; this is only for the rare "recompile it
   // anyway" — after changing the LaTeX engine, say.

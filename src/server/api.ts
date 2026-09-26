@@ -624,6 +624,71 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     return match ? { page: match[1]!, n: Number(match[2]) } : null;
   };
 
+  /*
+   * Which of a page's ordered writes have been answered, for a commit that
+   * has to follow them.
+   *
+   * On the way out of the page the editor cannot wait for a reply before its
+   * next request, since nothing on a gone page runs. So it sends the commit
+   * straight after the writes it has to cover (see `flushEditsLeaving` in
+   * web/app.js), and the commit can arrive first and record the store without
+   * them. Every write left for a later commit carries `?order=<page>:<n>`,
+   * and the commit names the ones still out as `?page=<page>&after=<n>,...`.
+   * `/store/save` holds such a commit until each of those has been answered,
+   * whether it was written, turned away as older than one already written, or
+   * refused; or until `COMMIT_AFTER_MS` has gone by, since a write that never
+   * arrives (the request lost, or sent to a server since restarted) must not
+   * hold the commit forever, and the commit then records what is there. In
+   * memory, a bounded number of pages and orders, since what it settles lasts
+   * one round trip.
+   */
+  const COMMIT_AFTER_MS = 5000;
+  const answered = new Map<string, { done: Set<number>; waiting: Set<() => void> }>();
+  const answersOf = (page: string) => {
+    let seen = answered.get(page);
+    if (!seen) {
+      seen = { done: new Set(), waiting: new Set() };
+      answered.set(page, seen);
+      // The oldest page first: a Map keeps the order its keys went in.
+      if (answered.size > 64) answered.delete(answered.keys().next().value!);
+    }
+    return seen;
+  };
+  api.use((req, res, next) => {
+    const order = req.method === 'GET' ? null : savedOrderOf(req.query.order);
+    if (order) {
+      let noted = false;
+      const note = () => {
+        if (noted) return;
+        noted = true;
+        const seen = answersOf(order.page);
+        seen.done.add(order.n);
+        if (seen.done.size > 512) seen.done.delete(seen.done.values().next().value!);
+        for (const wake of [...seen.waiting]) wake();
+      };
+      // `finish` once the reply is sent; `close` if the connection went first.
+      res.on('finish', note);
+      res.on('close', note);
+    }
+    next();
+  });
+  const allAnswered = (page: string, orders: number[]): Promise<void> =>
+    new Promise((settle) => {
+      const seen = answersOf(page);
+      const check = () => {
+        if (!orders.every((n) => seen.done.has(n))) return;
+        clearTimeout(timer);
+        seen.waiting.delete(check);
+        settle();
+      };
+      const timer = setTimeout(() => {
+        seen.waiting.delete(check);
+        settle();
+      }, COMMIT_AFTER_MS);
+      seen.waiting.add(check);
+      check();
+    });
+
   /**
    * A tailored copy the extension posts, kept off any resume somebody kept.
    * The copy's id is derived from the posting, so a copy promoted and edited
@@ -1459,6 +1524,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/store/save',
     handler(async (req, res) => {
       const { message, push } = req.body as { message?: string; push?: boolean };
+      // After the writes it names, when it names any. See `allAnswered`.
+      const page = typeof req.query.page === 'string' && /^[\w-]{1,64}$/.test(req.query.page) ? req.query.page : null;
+      const after = String(req.query.after ?? '')
+        .split(',')
+        .filter((n) => /^\d{1,15}$/.test(n))
+        .map(Number);
+      if (page && after.length > 0) await allAnswered(page, after);
       res.json(await saveStore(repo, { message, push: Boolean(push) }));
     }),
   );
