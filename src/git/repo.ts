@@ -381,7 +381,21 @@ export class Repo {
      * A repository that is not there yet is the one empty answer that is
      * true, and it is already handled above.
      */
-    const out = await this.git(['status', '--porcelain', '-uall', '-z', '--', ...where]);
+    /*
+     * `--no-optional-locks`, because this runs outside the queue in
+     * `commitAll`.
+     *
+     * Plain `git status` refreshes the index and writes it back under
+     * `.git/index.lock` whenever a file's timestamps have moved, and every
+     * save moves them. A commit whose `git add` starts while that lock is
+     * held fails: "Unable to create '.git/index.lock': File exists". The save
+     * panel, the start of every `saveStore` and the sweep all ask this, so a
+     * commit beside any of them could fail and leave an edit with no version
+     * of its own. Measured: three of these beside each of sixty commits, and
+     * 8 of the commits failed. Without the refresh the answer is the same,
+     * only git has to compare a few more files itself.
+     */
+    const out = await this.git(['--no-optional-locks', 'status', '--porcelain', '-uall', '-z', '--', ...where]);
 
     const records = out.split('\0');
     const changes: PendingChange[] = [];
