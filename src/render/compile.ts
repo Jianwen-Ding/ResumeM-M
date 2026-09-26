@@ -637,8 +637,15 @@ async function fitSearch<A extends Tried>(
     left--;
     return attempt(layout);
   };
-  // How full the page is, where 1 is exactly full.
-  const fill = (a: Tried) => a.m.usedPt / (textHeightIn(a.layout) * PT_PER_IN * base.maxPages);
+  /*
+   * The pages growing may fill: the ones the resume was written on, not
+   * `maxPages`. Allowed two, a resume that fitted on one was grown until
+   * three bullets and its skills spilled onto a second page that was
+   * otherwise empty — "fits", and exactly what growing is meant to avoid.
+   */
+  const pages = Math.min(first.m.pages, base.maxPages);
+  // How full those pages are, where 1 is exactly full.
+  const fill = (a: Tried) => a.m.usedPt / (textHeightIn(a.layout) * PT_PER_IN * pages);
   // Where between two tries the page should run out, kept off either end.
   const aim = (lo: number, hi: number, loFill: number, hiFill: number) => {
     const gap = hi - lo;
@@ -652,7 +659,7 @@ async function fitSearch<A extends Tried>(
     if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
     // On its page, and losing nothing off the side of it the page as written kept.
     const edge = widestPastEdge(first.raw.log);
-    const roomy = (a: Tried) => fitsAt(a) && widestPastEdge(a.raw.log) <= edge;
+    const roomy = (a: Tried) => a.m.pages <= pages && widestPastEdge(a.raw.log) <= edge;
     // In amounts of growth: 0 is as written, 1 the ceiling.
     let fit = { g: 0, a: first };
     const widest = await next(layoutAt(base, -1));

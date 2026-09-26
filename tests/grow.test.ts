@@ -197,6 +197,19 @@ describe.skipIf(!hasEngine)('a resume over two pages', () => {
     const endOfPageOne = (await pageLines(pdfPath, 1)).slice(-2).join('\n');
     expect(endOfPageOne).not.toMatch(/Brightline Systems \d|Software Engineer/);
   }, 90_000);
+
+  /*
+   * Five entries fit on one page as written. Allowed two, they were grown to
+   * the ceiling, and the last entry's bullets and the skills spilled onto a
+   * second page that was otherwise empty.
+   */
+  it('but one that fits on one page is grown on that page, not onto a second', async () => {
+    const asWritten = await compileResume(twoPager(5, { maxPages: 2, autoFit: false }));
+    expect(asWritten.pages).toBe(1);
+    const r = await compileResume(twoPager(5, { maxPages: 2 }));
+    expect(r.pages).toBe(1);
+    expect(r.grew).toBe(true);
+  }, 90_000);
 });
 
 describe('how large it may go, set like the floors', () => {
