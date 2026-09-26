@@ -967,11 +967,19 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     return { layout, raw, m: measure(raw.aux, layout, 1), tex, fast: false };
   };
   // 1. As authored — then larger if it has room, or smaller if it has to be.
-  const best = await fitSearch(base, await attempt(base), attempt, attemptsLeft);
+  const first = await attempt(base);
+  const best = await fitSearch(base, first, attempt, attemptsLeft);
 
-  const availablePt = textHeightIn(best.layout) * PT_PER_IN * base.maxPages;
-  const baselinePt = readBaseline(best.raw.log) ?? best.layout.fontSizePt * 1.2;
   const fits = best.m.pages <= base.maxPages;
+  /*
+   * Room counted on the pages it is held to. Auto-fit keeps a resume that
+   * fits as written on the pages it was written on, so a one-page resume
+   * allowed two was reported with about fifty lines of room — the whole of
+   * a second page it will not grow onto.
+   */
+  const heldTo = base.autoFit && first.m.pages <= base.maxPages ? Math.max(first.m.pages, best.m.pages) : base.maxPages;
+  const availablePt = textHeightIn(best.layout) * PT_PER_IN * heldTo;
+  const baselinePt = readBaseline(best.raw.log) ?? best.layout.fontSizePt * 1.2;
 
   // The compiled page count is ground truth; the height measurement is a
   // diagnostic derived from it. They can disagree by a few points at the

@@ -210,6 +210,21 @@ describe.skipIf(!hasEngine)('a resume over two pages', () => {
     expect(r.pages).toBe(1);
     expect(r.grew).toBe(true);
   }, 90_000);
+
+  /*
+   * And its room counted on that page. Allowed two, it reported about fifty
+   * lines of room — most of them on a second page it is not grown onto.
+   */
+  it('and reports the room on the page it is held to, as it would allowed only one', async () => {
+    const two = await compileResume(twoPager(3, { maxPages: 2 }));
+    const one = await compileResume(twoPager(3, { maxPages: 1 }));
+    expect(two.pages).toBe(1);
+    expect(two.layout).toEqual({ ...one.layout, maxPages: 2 });
+    expect(two.availablePt).toBe(one.availablePt);
+    expect(two.overflowPt).toBe(one.overflowPt);
+    expect(two.overflowLines).toBe(one.overflowLines);
+    expect(two.overflowLines).toBeLessThan(0);
+  }, 90_000);
 });
 
 describe.skipIf(!hasEngine)('a page nearly full as written', () => {
