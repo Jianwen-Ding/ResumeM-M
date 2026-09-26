@@ -91,9 +91,15 @@ function hasGreeting(body: string): boolean {
  * The name check had a worse version of the same fault: with an empty name the
  * pattern collapsed to `^\s*\s*$`, which matches the blank line between any
  * two paragraphs, so *every* multi-paragraph letter lost its sign-off.
+ *
+ * The list is the sign-offs people use. It was missing "Best wishes",
+ * "Respectfully", "Cheers" and others as common, and a letter closed with
+ * one of those and a first name — "Best wishes,\nMorgan" — was not seen as
+ * signed: it printed "Best wishes, Morgan" as a paragraph and then
+ * "Sincerely," and the name under it, signed twice.
  */
 const SIGN_OFF_LINE =
-  /^(sincerely|best|best regards|kind regards|warm regards|warmly|regards|yours|yours truly|yours sincerely|yours faithfully|thank you|many thanks|thanks)[,.]?$/i;
+  /^(sincerely|sincerely yours|best|best regards|best wishes|all the best|kind regards|kindest regards|warm regards|warmest regards|warm wishes|warmly|regards|respectfully|respectfully yours|cordially|cheers|with gratitude|with appreciation|with thanks|yours|yours truly|yours sincerely|yours faithfully|yours respectfully|thank you|thank you again|many thanks|thanks|thanks again)[,.]?$/i;
 
 /**
  * Where the closing the writer typed starts, as an index into `lines`, or -1.

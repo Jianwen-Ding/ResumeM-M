@@ -162,6 +162,14 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
     expect(got.slice(got.indexOf('September 26, 2026'), got.indexOf('Dear Hiring Team,'))).toEqual(['September 26, 2026', 'Re: Gameplay Intern']);
   }, 120_000);
 
+  it('signs once a letter closed with a sign-off it did not know and a first name', async () => {
+    for (const signOff of ['Best wishes,', 'Respectfully,', 'Cheers,']) {
+      const { lines: got } = await lines({ profile, company: 'Emberlight', role: 'Intern', date: 'September 26, 2026', body: `${P}\n\n${signOff}\nMorgan` });
+      expect(got.slice(-2)).toEqual([signOff, 'Morgan']);
+      expect(got).not.toContain('Sincerely,');
+    }
+  }, 180_000);
+
   it('and a long one still on one page', async () => {
     const { r } = await lines({ profile, company: 'Emberlight', role: 'Intern', body: Array.from({ length: 6 }, () => `${P} ${P}`).join('\n\n') });
     expect(r.pages).toBe(1);
