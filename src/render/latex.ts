@@ -340,6 +340,27 @@ function markup(s: string, depth: number): string {
   return out + tex(s.slice(last));
 }
 
+/**
+ * The words of a line with its markup taken off: what the PDF prints, as
+ * plain text. A link keeps its label, the way the page shows it.
+ *
+ * By the rule `inlineTex` sets it by, so a marker comes off exactly where the
+ * PDF would not print it — `_really_` loses its underscores, and
+ * `snake_case`, `morgan_testwell@example.com` and `*.log` keep theirs.
+ */
+export function plainText(input: string): string {
+  return plain(String(input ?? ''), MAX_NESTING);
+}
+
+function plain(s: string, depth: number): string {
+  if (depth <= 0) return s;
+  return s.replace(new RegExp(MARKUP.source, 'g'), (_whole, label, _url, strongem, bold, starItalic, underItalic, code) => {
+    if (code !== undefined) return code as string;
+    const inner = (label ?? strongem ?? bold ?? starItalic ?? underItalic) as string;
+    return plain(inner, depth - 1);
+  });
+}
+
 const PAPER = { letter: 'letterpaper', a4: 'a4paper' } as const;
 
 function n(x: number, places = 3): string {
