@@ -614,6 +614,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   const autoCommit = () => store.loadConfig().git.autoCommit;
 
   /**
+   * The newest editor save written of each resume, as `?order=<page>:<n>`.
+   * See the resume PUT. In memory, since the race it settles lasts one round
+   * trip; one entry per resume.
+   */
+  const lastSaveOrder = new Map<string, { page: string; n: number }>();
+  const savedOrderOf = (raw: unknown): { page: string; n: number } | null => {
+    const match = typeof raw === 'string' ? /^([\w-]{1,64}):(\d{1,15})$/.exec(raw) : null;
+    return match ? { page: match[1]!, n: Number(match[2]) } : null;
+  };
+
+  /**
    * A tailored copy the extension posts, kept off any resume somebody kept.
    * The copy's id is derived from the posting, so a copy promoted and edited
    * earlier holds it; a temporary copy takes the next free id instead of
@@ -1062,6 +1073,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * writes down exactly what that client meant.
        */
       const flat = spec.extends ? flattenOne(spec, store.loadResumes()) : spec;
+
+      /*
+       * `?order=<page>:<n>`: a save older than one already written from the
+       * same page is not written.
+       *
+       * The editor sends its saves of a resume one at a time, except on the
+       * way out of the page, where the latest edit is sent while the save
+       * ahead of it is still out (see `autoSave` in web/app.js). The two can
+       * arrive either way round, and the older one arriving second would
+       * write the resume back to before the edit. It is answered with what
+       * is stored, as every reply here is what was actually saved. Only saves
+       * from one page are compared: another tab, or the page after a reload,
+       * has its own count, and a save without `order` — the CLI, MCP, the
+       * extension, an older page — is written as it always was. Checked and
+       * recorded with nothing awaited between here and the write, which
+       * `withCommit` makes before its first await.
+       */
+      const order = savedOrderOf(req.query.order);
+      if (order) {
+        const last = lastSaveOrder.get(flat.id);
+        if (last && last.page === order.page && order.n <= last.n) {
+          res.json(store.loadResumes().find((r) => r.id === flat.id) ?? flat);
+          return;
+        }
+        lastSaveOrder.set(flat.id, order);
+      }
 
       // `?commit=0` writes without committing. The editor auto-saves as you
       // work, and a commit per keystroke would bury the history it feeds; it

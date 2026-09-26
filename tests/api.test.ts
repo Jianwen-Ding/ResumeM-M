@@ -2458,6 +2458,55 @@ describe('list bullets', () => {
   });
 });
 
+/*
+ * Two saves of one resume from the editor, arriving the wrong way round.
+ *
+ * On the way out of the page the editor sends its latest edit while the save
+ * ahead of it is still out (see `autoSave` in web/app.js), and either can
+ * reach the server first. Each carries `?order=<page>:<n>`; the older one
+ * arriving second must not write the resume back to before the edit.
+ */
+describe('resume saves that carry their order', () => {
+  const save = (label: string, order?: string) =>
+    request(app)
+      .put(`/api/resumes/newgrad?commit=0${order ? `&order=${order}` : ''}`)
+      .send({ label, sections: [] })
+      .expect(200);
+  const stored = () => t.store.loadResumes().find((r) => r.id === 'newgrad')?.label;
+
+  it('does not write a save older than one already written from the same page', async () => {
+    await save('Second', 'page-a:2');
+    const late = await save('First', 'page-a:1');
+    expect(stored()).toBe('Second');
+    // Answered with what is stored, as every reply of this route is.
+    expect(late.body.label).toBe('Second');
+    // Nor the same one twice.
+    await save('Again', 'page-a:2');
+    expect(stored()).toBe('Second');
+  });
+
+  it('writes a newer one, and one from another page, and one with no order', async () => {
+    await save('One', 'page-a:1');
+    await save('Two', 'page-a:2');
+    expect(stored()).toBe('Two');
+    // Another tab, or the page after a reload, counts from 1 again.
+    await save('Other page', 'page-b:1');
+    expect(stored()).toBe('Other page');
+    // The CLI, MCP and the extension send none.
+    await save('Unordered');
+    expect(stored()).toBe('Unordered');
+    // And an order that is not one is taken as none.
+    await save('Garbled', 'page-a');
+    expect(stored()).toBe('Garbled');
+  });
+
+  it('keeps each resume to its own count', async () => {
+    await save('Newgrad', 'page-a:5');
+    await request(app).put('/api/resumes/intern?commit=0&order=page-a:1').send({ label: 'Intern', sections: [] }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.label).toBe('Intern');
+  });
+});
+
 describe('workspace', () => {
   const open = (patch: Record<string, unknown> = {}) =>
     request(app)

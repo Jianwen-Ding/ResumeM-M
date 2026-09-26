@@ -49,6 +49,8 @@ afterEach(() => {
 describe('an edit made just before leaving the page', () => {
   let requests;
   let pageGone;
+  // A promise the next resume PUT's reply waits on, to hold a save in flight.
+  let holdPut;
 
   const fold = (id) => document.querySelector(`#editor .entry[data-drag-id="${id}"] .fold`);
   const resumePuts = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/resumes/'));
@@ -62,6 +64,7 @@ describe('an edit made just before leaving the page', () => {
     fixture.cleanup();
     requests = [];
     pageGone = false;
+    holdPut = null;
 
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
       const method = options.method ?? 'GET';
@@ -72,6 +75,11 @@ describe('an edit made just before leaving the page', () => {
       else if (url === '/api/ai/jobs') result = { jobs: [] };
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url.startsWith('/api/resumes/') && method === 'PUT') {
+        if (holdPut) {
+          const held = holdPut;
+          holdPut = null;
+          await held;
+        }
         const at = data.resumes.findIndex((r) => r.id === body.id);
         if (at >= 0) data.resumes[at] = body;
         result = body;
@@ -117,5 +125,54 @@ describe('an edit made just before leaving the page', () => {
     fold(id).click();
     await vi.waitFor(() => expect(resumePuts().at(-1)?.body.collapsed).toContain(id), { timeout: 3000 });
     expect(resumePuts().at(-1).keepalive).toBe(true);
+  });
+
+  /*
+   * An edit made while the save before it is still out, and then the page
+   * left.
+   *
+   * Saves of one resume go one at a time, so that the server writes them in
+   * the order they were made (see `autoSave`). But leaving the page puts the
+   * latest edit into that queue too, behind a save whose reply only comes
+   * after the page has gone, and nothing on a gone page runs. The edit was
+   * never sent. On the way out it is sent at once instead, and it carries
+   * where it stands among this page's saves, so that the server can drop the
+   * earlier one if that arrives later.
+   */
+  it('sends the latest edit on the way out, not behind a save still in flight', async () => {
+    const id = document.querySelector('#editor .entry:has(.fold)').dataset.dragId;
+    let release;
+    holdPut = new Promise((go) => {
+      release = go;
+    });
+    fold(id).click();
+    await vi.waitFor(() => expect(resumePuts().at(-1)?.body.collapsed).toContain(id), { timeout: 3000 });
+    const inFlight = resumePuts().at(-1);
+
+    // Unfolded while the fold's save is still out, and the page then left.
+    fold(id).click();
+    const before = resumePuts().length;
+    setTimeout(() => {
+      pageGone = true;
+    }, 0);
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await new Promise((go) => setTimeout(go, 20));
+    // The fold's reply, which comes back after the page has gone.
+    release();
+    await new Promise((go) => setTimeout(go, 20));
+
+    const leaving = resumePuts().slice(before);
+    expect(leaving.length).toBe(1);
+    expect(leaving[0].body.collapsed).not.toContain(id);
+    expect(leaving[0].afterPageGone).toBe(false);
+    expect(leaving[0].keepalive).toBe(true);
+    // In order after the save still out, for the server to keep them so.
+    const order = (put) => new URL(put.url, 'http://x').searchParams.get('order');
+    expect(order(inFlight)).toMatch(/^[\w-]+:\d+$/);
+    const [page, first] = order(inFlight).split(':');
+    const [samePage, second] = order(leaving[0]).split(':');
+    expect(samePage).toBe(page);
+    expect(Number(second)).toBeGreaterThan(Number(first));
   });
 });

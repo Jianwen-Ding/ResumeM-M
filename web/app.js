@@ -970,6 +970,25 @@ let autoSaveTimer = null;
 let commitTimer = null;
 let autoSaving = null;
 
+/*
+ * Where each save of a resume stands among this page's saves.
+ *
+ * Saves go one at a time (see `autoSave`), which keeps them in order at the
+ * server, except on the way out of the page: there the latest edit cannot
+ * wait for the reply to the save ahead of it, because that reply comes after
+ * the page has gone and nothing on a gone page runs. So that one is sent
+ * while the one ahead is still out, and the two can reach the server either
+ * way round. Each save carries `?order=<page>:<n>`, and the server does not
+ * write a save of a resume older than one it has already written from the
+ * same page. The replies can come back either way round too, so the newest
+ * one to land is also the only one folded into the cached resume.
+ */
+const SAVE_PAGE =
+  globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+let saveOrder = 0;
+/** Resume id to the order of the newest of this page's saves that landed. */
+const landedOrder = new Map();
+
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
   setSaveState('unsaved');
@@ -1000,18 +1019,26 @@ function scheduleAutoSave() {
  * finally goes carries everything ticked while it was waiting: one write for
  * the lot, rather than a queue of them.
  */
-async function autoSave() {
+async function autoSave({ leaving = false } = {}) {
   if (!state.dirty || !state.resumeId) return;
   setSaveState('saving');
 
   const ahead = autoSaving;
   const mine = (async () => {
-    // Never rejects, so one failed write does not wedge the ones behind it.
-    if (ahead) await ahead.catch(() => undefined);
+    /*
+     * Never rejects, so one failed write does not wedge the ones behind it.
+     *
+     * Not waited for on the way out of the page. Its reply comes after the
+     * page has gone, so this edit would never have been sent: an unfold made
+     * while the fold's save was still out, and the page then left, came back
+     * folded. It goes now, and `?order` keeps the two in order at the server.
+     */
+    if (ahead && !leaving) await ahead.catch(() => undefined);
     // The write ahead may have carried this edit already.
     if (!state.dirty || !state.resumeId) return;
 
     const spec = currentSpec();
+    const order = ++saveOrder;
     state.dirty = false; // further edits re-dirty it; this one is in flight
     try {
       /*
@@ -1031,11 +1058,14 @@ async function autoSave() {
        * 64KB a page may have in keepalive requests at once; the draft's save
        * sends more than this and has always had the flag.
        */
-      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0`, {
+      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}`, {
         method: 'PUT',
         body: JSON.stringify(spec),
         keepalive: true,
       });
+      // A newer save of this resume came back first; this one says nothing.
+      if (order < (landedOrder.get(spec.id) ?? 0)) return;
+      landedOrder.set(spec.id, order);
       // The store now holds what the editor shows, so the unsaved edits are
       // no longer overlays on top of it.
       const stored = state.store?.resumes?.find((r) => r.id === spec.id);
@@ -1043,6 +1073,8 @@ async function autoSave() {
       setSaveState('saved');
       scheduleCommit();
     } catch (err) {
+      // Nor does it failing, when a newer save carrying this edit has landed.
+      if (order < (landedOrder.get(spec.id) ?? 0)) return;
       state.dirty = true; // it did not land; try again on the next edit
       setSaveState('failed', err.message);
     }
@@ -1092,7 +1124,7 @@ function scheduleCommit() {
  * Write and commit right now — before switching resumes, or on the way out of
  * the page. `keepalive` is what lets the last write survive the tab closing.
  */
-async function flushEdits() {
+async function flushEdits({ leaving = false } = {}) {
   // The Workspace's typing too. Every path out of a page already calls this —
   // closing the tab, switching resumes, following a deep link — and the draft
   // was the one thing it did not cover.
@@ -1113,7 +1145,7 @@ async function flushEdits() {
   const inline = await Promise.allSettled([...inlineSaves]);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
-  if (state.dirty) await autoSave();
+  if (state.dirty) await autoSave({ leaving });
   await autoSaving;
   clearTimeout(commitTimer);
   commitTimer = null;
@@ -11013,7 +11045,7 @@ async function boot() {
   // the event that actually fires when a tab is closed or hidden; `unload`
   // does not, reliably.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flushEdits().catch(() => {});
+    if (document.visibilityState === 'hidden') flushEdits({ leaving: true }).catch(() => {});
     else refreshOnReturn().catch(() => {});
   });
   // The preview keeps itself current; this is only for the rare "recompile it
