@@ -37,11 +37,12 @@ async function lines(letter: Parameters<typeof compileLetter>[0]) {
     const { stdout } = await run('pdftotext', ['-layout', pdfPath, '-']);
     // Where each word is on the page, in points down from the top.
     const { stdout: boxes } = await run('pdftotext', ['-bbox', pdfPath, '-']);
-    const words = [...boxes.matchAll(/xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)"[^>]*>([^<]*)</g)].map((m) => ({
+    const words = [...boxes.matchAll(/xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)"[^>]*>([^<]*)</g)].map((m) => ({
       x: Number(m[1]),
       y: Number(m[2]),
       right: Number(m[3]),
-      text: m[4]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&'),
+      bottom: Number(m[4]),
+      text: m[5]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&'),
     }));
     const pageWidth = Number(/<page width="([\d.]+)"/.exec(boxes)?.[1]);
     return { r, lines: stdout.split('\n').map((l) => l.trim()).filter(Boolean), words, pageWidth };
@@ -142,6 +143,18 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
     // And the addresses still all there, over two lines each.
     expect(words.map((w) => w.text).join('')).toContain(url);
     expect(words.map((w) => w.text).join('')).toContain(bare);
+  }, 120_000);
+
+  it('keeps a long name on one line, a size or two down, and a longer one apart', async () => {
+    const long = await lines({ profile: { ...profile, name: 'Morgan Alexandra Testwell-Fitzgerald' }, body: P, date: 'September 26, 2026' });
+    expect(long.lines[0]).toBe('Morgan Alexandra Testwell-Fitzgerald');
+
+    // Too long even for that: wrapped, but at the name's own leading, the
+    // second line clear of the first.
+    const longer = await lines({ profile: { ...profile, name: 'Morgan Alexandra Wilhelmina Testwell-Fitzroy' }, body: P, date: 'September 26, 2026' });
+    const first = longer.words.find((w) => w.text === 'Morgan')!;
+    const second = longer.words.find((w) => w.y > first.y + 1)!;
+    expect(second.y).toBeGreaterThan(first.bottom);
   }, 120_000);
 
   it('and a long one still on one page', async () => {

@@ -200,10 +200,24 @@ function header(p: ResolvedProfile, layout: LayoutOptions): string {
       }
     \\else\\leavevmode\\box0\\fi`;
 
+  /*
+   * The name on one line. Left to wrap, a long one — "Morgan Alexandra
+   * Testwell-Fitzgerald" is enough — broke over two lines set at the leading
+   * of the small type under it, the capitals of one line all but touching
+   * the line above. So it steps down a size or three until it fits, and only a
+   * name too long even for that wraps, at its own leading.
+   */
+  const name = tex(p.name);
+  const nameLine = `\\setbox0=\\hbox{\\Huge \\scshape ${name}}%
+    \\ifdim\\wd0>\\linewidth \\setbox0=\\hbox{\\huge \\scshape ${name}}\\fi
+    \\ifdim\\wd0>\\linewidth \\setbox0=\\hbox{\\LARGE \\scshape ${name}}\\fi
+    \\ifdim\\wd0>\\linewidth \\setbox0=\\hbox{\\Large \\scshape ${name}}\\fi
+    \\ifdim\\wd0>\\linewidth \\parbox[b]{\\linewidth}{\\centering\\Large \\scshape ${name}}\\else\\leavevmode\\box0\\fi`;
+
   // A rule under it, as the resume has under each heading: the letterhead
   // reads as a letterhead, and the letter starts below it.
   return `\\begin{center}
-    {\\Huge \\scshape ${tex(p.name)}} \\\\ \\vspace{${(3 * spacing).toFixed(2)}pt}\\small
+    ${nameLine} \\\\ \\vspace{${(3 * spacing).toFixed(2)}pt}\\small
     ${contact}
 \\end{center}
 \\vspace{-\\parskip}\\vspace{-${(6 * spacing).toFixed(1)}pt}
