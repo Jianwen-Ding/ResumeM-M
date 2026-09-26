@@ -100,6 +100,11 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
     expect(y('Testwell') - y('regards,')).toBeGreaterThan(2 * (y('morgan.testwell@example.com') - y('Testwell')));
   }, 120_000);
 
+  it('signs a letter that ends on a sign-off with no name under it', async () => {
+    const { lines: got } = await lines({ profile, company: 'Emberlight', role: 'Intern', date: 'September 26, 2026', body: `${P}\n\nThank you,` });
+    expect(got.slice(-2)).toEqual(['Thank you,', 'Morgan Testwell']);
+  }, 120_000);
+
   it('and a long one still on one page', async () => {
     const { r } = await lines({ profile, company: 'Emberlight', role: 'Intern', body: Array.from({ length: 6 }, () => `${P} ${P}`).join('\n\n') });
     expect(r.pages).toBe(1);

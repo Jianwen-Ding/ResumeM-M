@@ -279,9 +279,14 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
   } else {
     // The writer's own closing, a line to a line, with the same room under
     // their sign-off as under the one the letter would have added.
+    // A sign-off with nothing under it ("Thank you,") still gets the name:
+    // taken as the whole closing, it sent the letter out unsigned.
     const [first, ...rest] = own.closing.map(inlineTex);
-    const signed = SIGN_OFF_LINE.test(own.closing[0]!) && rest.length > 0;
-    blocks.push(signed ? `${first} ${signature}${rest.join(' \\\\\n')}` : own.closing.map(inlineTex).join(' \\\\\n'));
+    if (SIGN_OFF_LINE.test(own.closing[0]!)) {
+      blocks.push(`${first} ${signature}${rest.length ? rest.join(' \\\\\n') : tex(p.name)}`);
+    } else {
+      blocks.push([first, ...rest].join(' \\\\\n'));
+    }
   }
 
   return `\\begin{document}
