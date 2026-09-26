@@ -296,6 +296,17 @@ describe('"Keysight Technologies, Inc. | Engineering Software Developer, Intern 
     expect(read('Research Scientist in Machine Learning | Keysight Technologies, Inc.').title).toBe(
       'Research Scientist in Machine Learning',
     );
+    // Nor is one that starts with a word a place can be: remote sensing is a field.
+    expect(read('Research Scientist in Remote Sensing | Keysight Technologies, Inc.').title).toBe('Research Scientist in Remote Sensing');
+    expect(read('Postdoctoral Researcher in Hybrid Quantum Systems | Keysight Technologies, Inc.').title).toBe(
+      'Postdoctoral Researcher in Hybrid Quantum Systems',
+    );
+    // While working remotely, said as a place, still comes off.
+    for (const where of ['Remote', 'Remote, US', 'Remote (US)', 'Hybrid - Santa Rosa, CA']) {
+      expect(read(`Engineering Software Developer, Intern in ${where} | Keysight Technologies, Inc.`).title, where).toBe(
+        'Engineering Software Developer, Intern',
+      );
+    }
   });
 });
 

@@ -298,7 +298,14 @@ export function looksLikeLocation(s: string | undefined): boolean {
   const t = String(s ?? '').trim();
   if (!t) return false;
   if (/^(?:multiple|various|several|many|all)\s+(?:locations|cities|sites|offices)$/i.test(t)) return true;
-  if (/^(?:remote|hybrid|on-?site|anywhere)\b/i.test(t)) return true;
+  /*
+   * "Remote", "Remote, US", "Hybrid - Boston, MA", "Remote (US)" — the word
+   * alone, or with where after it. Not the word starting a field: "Research
+   * Scientist in Remote Sensing" and "… in Hybrid Quantum Systems" were cut
+   * to "Research Scientist" and "Postdoctoral Researcher" for it.
+   */
+  if (/^(?:remote|hybrid|on-?site|anywhere)(?:$|\s*[-–—,(/|:])/i.test(t)) return true;
+  if (new RegExp(String.raw`^(?:remote|hybrid|on-?site)\s+(?:in\s+)?(?:${COUNTRIES})$`, 'i').test(t)) return true;
   if (/^[A-Z][\p{L}\s,.'-]*\b(?:metropolitan\s+area|metro\s+area|bay\s+area|area)$/u.test(t)) return true;
   if (new RegExp(`^(?:${COUNTRIES}|${STATE_NAMES})$`, 'i').test(t)) return true;
   return PLACE.test(t);
