@@ -6679,13 +6679,38 @@ async function openDraft(id) {
      * bit: the panel stays live and typeable while it runs, so anything
      * written during it was thrown away by the repaint at the end. Writing it
      * and re-reading costs one request and cannot paint over it.
+     *
+     * Unless it is this draft that is on screen. Then there is no repaint
+     * at all, unless the read has something new to show.
+     *
+     * Opening the Workspace opens the first application by itself, and a
+     * click on that same card opens it again, so this read often lands on a
+     * panel somebody has already clicked into. Drawn again, the box they were
+     * in was replaced and the cursor with it, and the rest of what they typed
+     * went nowhere. And if they had typed, the save and the read above took a
+     * round trip, and whatever was typed during it was drawn over with the
+     * copy just read. The editor walk, with the page slowed, kept "Dear
+     * Halcyon" of a whole sentence.
+     *
+     * A save sends the whole draft as it is on screen, so once it is flushed
+     * the screen is what the server has, and there is nothing to draw. Not
+     * flushed, the read is drawn only if it differs from what is on screen,
+     * as when a letter was drafted for it elsewhere. The save's own
+     * timestamp is not a difference anybody can see.
      */
-    if (draftSave.dirty) {
+    const onScreen = draftSave.current?.id === id ? draftSave.current : null;
+    if (onScreen && draftSave.dirty) {
       await flushDraftEdits();
-      draft = await api(`/workspace/${encodeURIComponent(id)}`);
-      if (openDraftId !== id) return;
+    } else if (onScreen && sameDraft(onScreen, draft)) {
+      // Nothing to draw.
+    } else {
+      if (draftSave.dirty) {
+        await flushDraftEdits();
+        draft = await api(`/workspace/${encodeURIComponent(id)}`);
+        if (openDraftId !== id) return;
+      }
+      renderDraft(draft);
     }
-    renderDraft(draft);
   } catch (err) {
     if (draftGone(err)) {
       // In the list that was drawn, and gone since: the same words, and the
@@ -6751,6 +6776,15 @@ function setDraftSaveState(mode, detail) {
         : mode === 'failed'
           ? `Not saved — ${detail ?? 'the server did not accept it'}`
           : 'Unsaved changes';
+}
+
+/**
+ * The same draft as far as anybody looking at it can tell: everything but
+ * `updatedAt`, which every save moves. See `openDraft`.
+ */
+function sameDraft(a, b) {
+  const seen = ({ updatedAt, ...rest }) => JSON.stringify(rest);
+  return seen(a) === seen(b);
 }
 
 /** What the editor says about a draft that is not in the workspace any more. */
