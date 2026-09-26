@@ -3547,6 +3547,40 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Correct what a tracker row says it is: the company and the role.
+   *
+   * The names come from the page, and a page does not always say them well —
+   * a season taken for the employer ("Summer 2027"), a job board ("LinkedIn"),
+   * a careers site's name, a title cut off at a dash. Checked against the job
+   * sites, 28 of one person's 72 rows needed one or the other, and the only
+   * thing the tracker offered was Remove. The row keeps its id, so the files,
+   * the snapshot and anything that points at it still find it; the space it
+   * opened in the Workspace is renamed with it.
+   */
+  api.patch(
+    '/applications/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as { company?: unknown; role?: unknown };
+      const company = typeof body.company === 'string' ? body.company.trim() : undefined;
+      const role = typeof body.role === 'string' ? body.role.trim() : undefined;
+      if (company === undefined && role === undefined) throw new Error('Say what the company or the role should be');
+      if (company === '' || role === '') throw new Error('A company and a role cannot be left empty');
+      const apps = store.load().applications;
+      const app = apps.find((a) => a.id === id);
+      if (!app) throw new Error(`No application "${id}"`);
+      const next = { ...app, ...(company !== undefined ? { company } : {}), ...(role !== undefined ? { role } : {}) };
+      await withCommit(repo, autoCommit(), `Rename application "${id}" to ${next.role} at ${next.company}`, () => {
+        const drafts = store.loadDrafts();
+        const space = drafts.find((d) => d.id === id) ?? draftForJob(drafts, apps, app.company, app.role);
+        store.saveApplications(apps.map((a) => (a.id === id ? next : a)));
+        if (space) store.saveDraft({ ...space, company: next.company, role: next.role });
+      });
+      res.json(next);
+    }),
+  );
+
   api.post(
     '/applications/:id/status',
     handler(async (req, res) => {

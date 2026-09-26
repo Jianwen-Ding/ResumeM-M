@@ -6119,6 +6119,44 @@ async function loadApplications() {
           : null,
       ].filter(Boolean)),
       el('td', {}, [
+        /*
+         * Put right what the page got wrong. The company and role come from
+         * the page, and a page does not always say them well — a season taken
+         * for the employer, a job board, a title cut off at a dash — and
+         * Remove was the only thing this row offered.
+         */
+        el('button', {
+          className: 'tiny',
+          textContent: 'Edit',
+          title: 'Correct the company or the role',
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            const values = await form(
+              'Correct this application',
+              [
+                { name: 'company', label: 'Company', value: a.company ?? '' },
+                { name: 'role', label: 'Role', value: a.role ?? '' },
+              ],
+              'The files and the record of what was sent stay where they are.',
+              async (v) => {
+                if (!String(v.company ?? '').trim() || !String(v.role ?? '').trim()) return 'A company and a role cannot be left empty.';
+                try {
+                  await api(`/applications/${encodeURIComponent(a.id)}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ company: v.company, role: v.role }),
+                  });
+                } catch (err) {
+                  return err.message;
+                }
+                return undefined;
+              },
+            );
+            if (!values) return;
+            setStatus('Application corrected');
+            if (openApplicationId === a.id) openApplication(a.id);
+            else loadApplications();
+          },
+        }),
         el('button', {
           className: 'tiny danger',
           textContent: 'Remove',

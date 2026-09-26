@@ -2323,6 +2323,42 @@ async function main() {
       await page.unroute('**/api/letters/**', refuseLetter);
     }
 
+    console.log('\nPutting right a row the page named wrongly');
+    {
+      const open = await page.evaluate(() => {
+        const m = document.querySelector('#modal');
+        if (!m || m.classList.contains('hidden')) return null;
+        m.classList.add('hidden');
+        return true;
+      });
+      void open;
+      await page.locator('#tabs button[data-tab="applications"]').click();
+      const row = page.locator('tr', { hasText: 'Halcyon' }).first();
+      await row.waitFor({ timeout: 20_000 });
+      const cells = async () => row.locator('td').evaluateAll((tds) => tds.map((td) => td.textContent.trim()));
+      const [, company, role] = await cells();
+      await row.locator('button', { hasText: 'Edit' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 5_000 });
+      await page.locator('#f_company').fill('Halcyon Robotics');
+      await page.locator('#f_role').fill(`${role} (corrected)`);
+      await page.locator('#modal-ok').click();
+      await page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      const fixed = page.locator('tr', { hasText: 'Halcyon Robotics' }).first();
+      const after = (await fixed.count()) ? await fixed.locator('td').evaluateAll((tds) => tds.map((td) => td.textContent.trim())) : [];
+      check('a row the page named wrongly can be corrected where it is listed',
+        after[1] === 'Halcyon Robotics' && after[2] === `${role} (corrected)`,
+        JSON.stringify(after.slice(0, 3)));
+      // And put back, for the checks below that look for it by its first name.
+      await fixed.locator('button', { hasText: 'Edit' }).click();
+      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 5_000 });
+      await page.locator('#f_company').fill(company);
+      await page.locator('#f_role').fill(role);
+      await page.locator('#modal-ok').click();
+      await page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
     console.log('\nWhen the tracker cannot save');
     {
       // As below in the overlap check: the apply flow just finished on a
