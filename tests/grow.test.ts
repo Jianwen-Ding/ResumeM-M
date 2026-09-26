@@ -212,6 +212,22 @@ describe.skipIf(!hasEngine)('a resume over two pages', () => {
   }, 90_000);
 });
 
+describe.skipIf(!hasEngine)('a contact line too long for one line', () => {
+  /*
+   * Phone, email and three links wrap, and more of them do once grown. The
+   * line broke after a separator and left "… github.com/morgantestwell |"
+   * with the bar hanging at its end.
+   */
+  it('wraps without a separator left hanging at either end of a line', async () => {
+    const dir = tempDir('rmm-contact-');
+    const pdfPath = path.join(dir, 'contact.pdf');
+    await compileResume(twoPager(1, { autoFit: false }), { pdfPath });
+    const lines = (await pageLines(pdfPath, 1)).slice(1, 3).map((l) => l.trim());
+    expect(lines[1]).toContain('morgantestwell.dev');
+    for (const line of lines) expect(line).not.toMatch(/^\||\|$/);
+  }, 60_000);
+});
+
 describe('how large it may go, set like the floors', () => {
   it('merges a save’s ceiling with this version’s, one knob at a time', () => {
     const layout = layoutFor(undefined, { growBounds: { maxFontSizePt: 11.5 } });

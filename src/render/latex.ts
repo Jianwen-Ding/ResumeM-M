@@ -499,6 +499,18 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 
 \\renewcommand\\labelitemii{$\\vcenter{\\hbox{\\tiny$\\bullet$}}$}
 
+% The " | " between contact details, as one piece of glue drawn with the bar
+% in its middle: the same width, stretch and shrink as a space either side of
+% it, but a line break there takes the whole separator away. Written as
+% " $|$ ", a contact line wrapped by a grown page's type and margins left a
+% "|" hanging at the end of its first line.
+\\newcommand{\\rmmsep}{%
+  \\setbox0\\hbox{$|$}%
+  \\dimen0=\\dimexpr\\wd0+2\\fontdimen2\\font\\relax
+  \\dimen2=\\dimexpr\\dimen0-2\\fontdimen4\\font\\relax
+  \\cleaders\\hbox to\\dimen2{\\hss\\box0\\hss}%
+  \\hskip\\dimen0 plus 2\\fontdimen3\\font minus 2\\fontdimen4\\font\\relax}
+
 \\newcommand{\\resumeSubHeadingListStart}{\\begin{itemize}[leftmargin=0.15in, label={}]}
 \\newcommand{\\resumeSubHeadingListEnd}{\\end{itemize}}
 % Never a page break between an entry's heading and its first bullet. A list
@@ -564,7 +576,7 @@ function header(r: ResolvedResume): string {
 
   return `\\begin{center}
     {\\Huge \\scshape ${tex(p.name)}} \\\\ \\vspace{${n(3 * r.layout.spacing, 2)}pt}\\small
-    ${bits.join(' $|$ ')}
+    ${bits.join('\\rmmsep ')}
 \\end{center}`;
 }
 
