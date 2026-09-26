@@ -9818,6 +9818,8 @@ let historyResumeId = null;
  */
 const HISTORY_PAGE = 30;
 let historyWanted = HISTORY_PAGE;
+/** Which timeline request is the latest; see `loadResumeHistory`. */
+let historyAsk = 0;
 
 /**
  * The friendly, Google-Docs-style view: every version *this one resume* has
@@ -9845,12 +9847,27 @@ async function loadResumeHistory() {
 
   timeline.replaceChildren(skeleton('versions', 4));
   showRestoreNote([]);
+  /*
+   * Drawn only if nothing has been asked since.
+   *
+   * Opening the tab asks for the resume on screen, and picking another one
+   * asks again straight after. Each answer resolves every version against the
+   * whole store, so the two take about as long as each other, and whichever
+   * came back last was drawn. When that was the first, the timeline showed
+   * the resume on screen under the name of the one picked, and its Restore
+   * buttons sent that resume's commits to restore the picked one. Looping
+   * those two steps against a real server, the older answer landed last in
+   * every round.
+   */
+  const ask = ++historyAsk;
   try {
     const { versions, more } = await api(
       `/resumes/${encodeURIComponent(historyResumeId)}/history?limit=${historyWanted}`,
     );
+    if (ask !== historyAsk) return;
     renderResumeTimeline(versions, Boolean(more));
   } catch (err) {
+    if (ask !== historyAsk) return;
     timeline.replaceChildren(el('div', { className: 'err', textContent: err.message }));
   }
 }

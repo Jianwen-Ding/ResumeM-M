@@ -33,6 +33,12 @@ describe('restoring a version', () => {
    * asks — held open, then released as a refusal.
    */
   let holdLineSave;
+  /**
+   * Per resume, set by the test that wants one timeline's answer held back
+   * (`held`) or different from the rest (`timelines`).
+   */
+  let held;
+  let timelines;
 
   const versions = [
     { hash: 'now000', date: '2026-09-18T10:00:00Z', message: 'Edited', changes: [] },
@@ -63,6 +69,8 @@ describe('restoring a version', () => {
     releaseSave = null;
     warnings = [];
     holdLineSave = null;
+    held = {};
+    timelines = {};
     vi.stubGlobal('confirm', () => true);
 
     vi.stubGlobal(
@@ -77,7 +85,11 @@ describe('restoring a version', () => {
         else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
         else if (String(url).includes('/history/') && String(url).endsWith('/restore')) {
           result = { id: 'newgrad', label: 'New grad', warnings };
-        } else if (String(url).includes('/history')) result = { versions };
+        } else if (String(url).includes('/history')) {
+          const of = decodeURIComponent(String(url).match(/\/resumes\/([^/]+)\/history/)?.[1] ?? '');
+          if (held[of]) await held[of];
+          result = { versions: timelines[of] ?? versions };
+        }
         else if (
           holdLineSave &&
           method === 'PUT' &&
@@ -154,6 +166,57 @@ describe('restoring a version', () => {
     await vi.waitFor(() => expect(restored()).toHaveLength(1));
     expect(restored()[0].url).toContain('/resumes/newgrad/');
     expect(restored()[0].url).not.toContain('/resumes/intern/');
+  });
+
+  /*
+   * The timeline of the resume picked, not of the one the tab opened on.
+   *
+   * Opening the tab asks for the history of the resume on screen, and
+   * picking another one asks again. Nothing tied an answer to the question
+   * it was for, so whichever came back last was drawn. Each answer resolves
+   * every version against the whole store, so the two take about as long as
+   * each other and either can be last. When the first was, the timeline
+   * showed the other resume's versions under the one picked. Its Restore
+   * buttons carried that resume's commits, and pressing one restored the
+   * picked resume from a commit never shown for it.
+   *
+   * Seen once in the editor walk as "1 versions" for a resume saved twice.
+   * The one open after a reload had a single version. Looping just those
+   * steps against a real server, the older answer landed last in 30 rounds
+   * out of 30, and 7 of the 30 never showed the right timeline at all.
+   */
+  it('draws the timeline of the resume picked, even when the one it opened on answers later', async () => {
+    const onScreen = document.querySelector('#resume-select').value;
+    let letGo;
+    held[onScreen] = new Promise((go) => (letGo = go));
+    timelines[onScreen] = [{ hash: 'screen0', date: '2026-09-18T10:00:00Z', message: 'On screen, once', changes: [] }];
+
+    document.querySelector('#tabs button[data-tab="history"]').click();
+    await vi.waitFor(() => expect(document.querySelector('#history-resume option')).not.toBeNull());
+    const picker = document.querySelector('#history-resume');
+    const other = [...picker.options].map((o) => o.value).find((id) => id !== onScreen);
+    expect(other).toBeTruthy();
+    timelines[other] = [
+      { hash: 'pick222', date: '2026-09-18T10:00:00Z', message: 'Picked, second', changes: [] },
+      { hash: 'pick111', date: '2026-09-10T10:00:00Z', message: 'Picked, first', changes: [] },
+    ];
+    picker.value = other;
+    picker.dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(document.querySelectorAll('#resume-timeline .version-card')).toHaveLength(2));
+
+    // Now the question asked first is answered.
+    letGo();
+    await new Promise((settle) => setTimeout(settle, 30));
+
+    const timeline = document.querySelector('#resume-timeline');
+    expect(timeline.querySelectorAll('.version-card')).toHaveLength(2);
+    expect(timeline.textContent).toContain('Picked, first');
+    expect(timeline.textContent).not.toContain('On screen, once');
+
+    // And the version restored is one this resume's timeline showed.
+    restoreButton().click();
+    await vi.waitFor(() => expect(restored()).toHaveLength(1));
+    expect(restored()[0].url).toContain(`/resumes/${other}/history/pick111/restore`);
   });
 
   /*
