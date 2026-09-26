@@ -551,6 +551,10 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 % Records where the first and last lines of content landed, so the fit checker
 % can say "over by three lines" rather than only "two pages".
 \\AtEndDocument{\\zsavepos{rmmend}}
+% And how far the last page could still be squeezed: its natural height and
+% the total shrink of its glue, which TeX spends before it breaks a page. A
+% page that measured 98% full as set still took type 4% larger.
+\\AtEndDocument{\\par\\penalty10000 \\edef\\rmmpage{\\the\\pagetotal\\space\\the\\pageshrink}\\typeout{RMM-PAGE: \\rmmpage}}
 \\AtBeginDocument{\\typeout{RMM-BASELINESKIP: \\the\\baselineskip}}
 `;
 }

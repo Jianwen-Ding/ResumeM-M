@@ -644,8 +644,19 @@ async function fitSearch<A extends Tried>(
    * otherwise empty — "fits", and exactly what growing is meant to avoid.
    */
   const pages = Math.min(first.m.pages, base.maxPages);
-  // How full those pages are, where 1 is exactly full.
-  const fill = (a: Tried) => a.m.usedPt / (textHeightIn(a.layout) * PT_PER_IN * pages);
+  /*
+   * How full those pages are, where 1 is exactly full — at the least height
+   * the last page's glue can shrink to, because TeX shrinks the gaps between
+   * items before it breaks a page. Measured as set, a page 98.7% full was
+   * left at 10.5pt when 10.92pt fitted it, and one short bullet more or less
+   * moved a resume between the two.
+   */
+  const fill = (a: Tried) => {
+    const perPage = textHeightIn(a.layout) * PT_PER_IN;
+    const last = readLastPage(a.raw.log);
+    const used = last ? (a.m.pages - 1) * perPage + last.totalPt - last.shrinkPt : a.m.usedPt;
+    return used / (perPage * pages);
+  };
   // Where between two tries the page should run out, kept off either end.
   const aim = (lo: number, hi: number, loFill: number, hiFill: number) => {
     const gap = hi - lo;
@@ -1034,6 +1045,13 @@ function tooWideWarnings(log: string): string[] {
       'whatever is past the edge is not in the PDF at all. This is usually one long unbroken ' +
       'thing: a link, a file path, a token. Shorten it, or put it behind a few words of link text.',
   ];
+}
+
+/** The last page's natural height and the total shrink of its glue, as `\\AtEndDocument` reported them. */
+function readLastPage(log: string): { totalPt: number; shrinkPt: number } | undefined {
+  const all = [...log.matchAll(/RMM-PAGE: ([\d.]+)pt ([\d.]+)pt/g)];
+  const m = all[all.length - 1];
+  return m ? { totalPt: Number(m[1]), shrinkPt: Number(m[2]) } : undefined;
 }
 
 function readBaseline(log: string): number | undefined {

@@ -212,6 +212,29 @@ describe.skipIf(!hasEngine)('a resume over two pages', () => {
   }, 90_000);
 });
 
+describe.skipIf(!hasEngine)('a page nearly full as written', () => {
+  const withExtra = (n: number) => {
+    const r = twoPager(5);
+    const last = r.sections[1]!.entries[4]!;
+    for (let k = 0; k < n; k++) last.bullets.push({ id: `x${k}`, variantId: 'v', text: `Mentored intern cohort ${k} on code review` });
+    return r;
+  };
+
+  /*
+   * TeX shrinks the gaps between items before it breaks a page, so a page
+   * measured 98% full as set still has room. Two short bullets more came out
+   * at 10.92pt; three, at 10.5pt — the whole growth gone for one line, on a
+   * page 10.92pt still fitted.
+   */
+  it('still grows, and one line more moves the type a little, not all the way back', async () => {
+    const two = await compileResume(withExtra(2));
+    const three = await compileResume(withExtra(3));
+    expect(three.pages).toBe(1);
+    expect(three.grew).toBe(true);
+    expect(two.layout.fontSizePt - three.layout.fontSizePt).toBeLessThan(0.2);
+  }, 120_000);
+});
+
 describe.skipIf(!hasEngine)('a contact line too long for one line', () => {
   /*
    * Phone, email and three links wrap, and more of them do once grown. The
