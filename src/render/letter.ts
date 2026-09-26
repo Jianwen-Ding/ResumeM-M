@@ -333,13 +333,13 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
     tex(letter.date ?? today()),
   ];
 
-  if (letter.company) {
-    blocks.push(
-      letter.role
-        ? `${lineTex(letter.company)} \\\\\n\\textit{Re: ${lineTex(letter.role)}}`
-        : lineTex(letter.company),
-    );
-  }
+  // The role on its own when the company is not known yet: it was dropped
+  // with the company, and the letter then named no job at all.
+  const addressee = [
+    letter.company ? lineTex(letter.company) : '',
+    letter.role ? `\\textit{Re: ${lineTex(letter.role)}}` : '',
+  ].filter(Boolean);
+  if (addressee.length) blocks.push(addressee.join(' \\\\\n'));
 
   const own = ownParts(letter.body ?? '', p.name);
   if (own.greeting) {

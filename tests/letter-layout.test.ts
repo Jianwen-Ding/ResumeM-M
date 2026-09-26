@@ -157,6 +157,11 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
     expect(second.y).toBeGreaterThan(first.bottom);
   }, 120_000);
 
+  it('names the role when the company is not known yet', async () => {
+    const { lines: got } = await lines({ profile, role: 'Gameplay Intern', body: P, date: 'September 26, 2026' });
+    expect(got.slice(got.indexOf('September 26, 2026'), got.indexOf('Dear Hiring Team,'))).toEqual(['September 26, 2026', 'Re: Gameplay Intern']);
+  }, 120_000);
+
   it('and a long one still on one page', async () => {
     const { r } = await lines({ profile, company: 'Emberlight', role: 'Intern', body: Array.from({ length: 6 }, () => `${P} ${P}`).join('\n\n') });
     expect(r.pages).toBe(1);
