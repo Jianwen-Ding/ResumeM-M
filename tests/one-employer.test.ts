@@ -14,7 +14,7 @@
  * apart.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { findApplication, identity } from '../src/model/applications.js';
+import { alreadySent, findApplication, identity } from '../src/model/applications.js';
 import type { Application } from '../src/model/types.js';
 import { makeTempStore, type TempStore } from './helpers.js';
 
@@ -109,6 +109,27 @@ describe('one job, by its number, under two names for who it is with', () => {
     expect(
       findApplication([row({ role: 'Unknown role (job 216245)' })], 'Respawn Entertainment', 'Unknown role (job 216245)', 'https://jobs.ea.com/x?jobId=216245'),
     ).toBeUndefined();
+  });
+
+  /*
+   * A number is one site's count. iCIMS numbers each employer's jobs from its
+   * own start, so two employers' "Software Engineer" can both be job 12345 —
+   * and the second was found as the first's row, and told it had been sent.
+   */
+  it('and not another employer’s job with the same number on another site', () => {
+    const apps = [
+      row({
+        id: '2026-09-01-acme-robotics-software-engineer',
+        company: 'Acme Robotics',
+        role: 'Software Engineer',
+        url: 'https://careers-acmerobotics.icims.com/jobs/12345/software-engineer/job',
+      }),
+    ];
+    const elsewhere = 'https://careers-globexcorp.icims.com/jobs/12345/software-engineer/job';
+    expect(findApplication(apps, 'Globex', 'Software Engineer', elsewhere)).toBeUndefined();
+    expect(alreadySent(apps, 'Globex', 'Software Engineer', elsewhere)).toBeUndefined();
+    // While that number on that employer's own site is still its row, whatever the page calls it.
+    expect(findApplication(apps, 'Acme', 'Software Engineer', 'https://careers-acmerobotics.icims.com/jobs/12345/software-engineer/login')?.id).toBe(apps[0]!.id);
   });
 });
 

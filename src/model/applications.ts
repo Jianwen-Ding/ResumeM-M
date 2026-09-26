@@ -7,7 +7,7 @@ import type { Application, ApplicationStatus, ResolvedResume } from './types.js'
 import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
 import { syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
-import { cleanRole, employerKey, jobNumberIn } from '../jobs/names.js';
+import { cleanRole, employerKey, hostOf, jobNumberIn } from '../jobs/names.js';
 
 /**
  * One hyphenated part of a filename.
@@ -358,15 +358,27 @@ export function identity(company: string, role: string): string {
  * posting on a board and the form on the employer's own system carry two
  * numbers for one job, and that is the ordinary case. And only for a named
  * role: "Unknown role (job N)" already carries its number in the name.
+ *
+ * And only on one site. A job's number is that site's count, not the world's:
+ * iCIMS, Taleo and Workday number each employer's jobs from its own start, so
+ * "Software Engineer", job 12345, at careers-acme.icims.com and at
+ * careers-globex.icims.com are two employers' jobs with one number — and the
+ * second was found as the first's row, told it had already been sent, and
+ * would have been filed into it. EA's two pages are both on jobs.ea.com.
  */
 function sameJobAs(company: string, role: string, url?: string): (row: { company: string; role: string; url?: string }) => boolean {
   const key = identity(company, role);
   const number = jobNumberIn(url);
+  const site = hostOf(url);
   const job = slug(rolePart(role, company));
   const named = Boolean(job) && !/^unknown role\b/i.test(role.trim());
   return (row) =>
     identity(row.company, row.role) === key ||
-    (named && Boolean(number) && jobNumberIn(row.url) === number && slug(rolePart(row.role, row.company)) === job);
+    (named &&
+      Boolean(number) &&
+      jobNumberIn(row.url) === number &&
+      hostOf(row.url) === site &&
+      slug(rolePart(row.role, row.company)) === job);
 }
 
 /**
