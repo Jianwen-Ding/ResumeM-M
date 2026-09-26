@@ -156,10 +156,15 @@ describe('the tools a session file is given', () => {
 
   const namesFor = (over: Partial<SessionFile> = {}) => build(fileOf(over)).tools.map((t) => t.name);
 
-  it('gives a tailoring session the tools that choose and rearrange', () => {
+  /*
+   * Rearranging lines, not entries: "AI should be able to rearrange bullet
+   * points but not entries ever".
+   */
+  it('gives a tailoring session the tools that choose and rearrange lines, and none for entries', () => {
     const names = namesFor({ kind: 'tailor' });
     expect(names).toContain('choose_wording');
     expect(names).toContain('reorder_bullets');
+    expect(names).not.toContain('reorder_entries');
     expect(names).not.toContain('save_letter');
     expect(names).not.toContain('propose_entry');
   });

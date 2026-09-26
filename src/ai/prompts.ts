@@ -784,8 +784,17 @@ export function tailorPrompt(
     'You are selecting, not writing. You may not edit this resume. Everything that ends up on the',
     'page must be text this person already wrote, chosen by id from the inventory below. The only',
     'moves available to you are: pick a different existing phrasing, pick which skills to list,',
-    'show or hide an entry or a bullet point, and put things in a different order. Ids that do not',
-    'appear below are discarded.',
+    'show or hide an entry or a bullet point, and put the bullet points of an entry in a different',
+    'order. Ids that do not appear below are discarded.',
+    '',
+    /*
+     * Never the entries. Asked for by the person this is for: "AI should be
+     * able to rearrange bullet points but not entries ever". Which entry comes
+     * first in a section is theirs, and a reply that names an order for one
+     * is refused — see `sanitizeAiPlan`.
+     */
+    'You may never change the order of the entries themselves. Every section keeps its entries in',
+    'the order this person arranged them, whatever else you choose.',
     '',
     'Be conservative. The starting resume is already good; most choices should stay as they are.',
     'Only change a choice when the posting gives a concrete reason — it names a technology, a domain,',
@@ -801,17 +810,13 @@ export function tailorPrompt(
      * told what reordering is *for*, it mostly leaves things alone, which is
      * the same shape as the conservatism above.
      */
-    'Ordering is the cheapest tailoring there is, and often the only one worth doing. A reader gives',
-    'the first bullet of an entry more attention than the last, and the first entry of a section more',
-    'than the one below it — so if this posting is about streaming ingest and the line about it is',
-    'fourth, move it up. Order by how directly each line answers *this* posting, not by how impressive',
-    'it is in general.',
+    'Ordering the bullet points is the cheapest tailoring there is, and often the only one worth',
+    'doing. A reader gives the first bullet of an entry more attention than the last — so if this',
+    'posting is about streaming ingest and the line about it is fourth, move it up. Order by how',
+    'directly each line answers *this* posting, not by how impressive it is in general.',
     '',
-    'Two limits. Do not reorder within an entry when the bullets read as a sequence — a project that',
-    'goes design, build, measure stops making sense scrambled. And do not move an entry out of reverse',
-    'chronological order: a reader takes that order as a fact about dates and will read a rearranged',
-    'one as a gap. Reordering entries is for two that are close in time, or for projects, where there',
-    'is no such expectation.',
+    'One limit. Do not reorder within an entry when the bullets read as a sequence — a project that',
+    'goes design, build, measure stops making sense scrambled.',
     '',
     'You only need to name what moves: anything you leave out keeps its place behind whatever you',
     'named. Naming nothing leaves the order exactly as it is, which is the right answer most of the',
@@ -856,7 +861,6 @@ function howToAnswerInJson(): string[] {
     '  "enable": ["<entryId or bulletId to show>", ...],',
     '  "disable": ["<entryId or bulletId to hide>", ...],',
     '  "order": { "<entryId>": ["<bulletId to put first>", "<next>", ...] },',
-    '  "entryOrder": { "experience|project|education|custom": ["<entryId to put first>", ...] },',
     '  "suggestions": [',
     '    { "bulletId": "<id>", "label": "<short label>", "text": "<new phrasing>", "why": "<what in the posting justifies it>" }',
     '  ],',
@@ -881,8 +885,8 @@ function howToUseTheTools(): string[] {
     '1. `read_posting` — what this is for.',
     '2. `read_resume` — what the page says now, with the id of every line on it.',
     '3. `read_inventory` — everything else this person has written that could go on it.',
-    '4. Make your changes, one call at a time: `choose_wording`, `reorder_bullets`,',
-    '   `reorder_entries`, `hide`, `show`, `choose_skills`.',
+    '4. Make your changes, one call at a time: `choose_wording`, `reorder_bullets`, `hide`,',
+    '   `show`, `choose_skills`. Nothing can change the order of the entries themselves.',
     '5. `read_resume` again to see what they did.',
     '6. `finish`, with two to four sentences on what drove them.',
     '',

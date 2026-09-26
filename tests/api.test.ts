@@ -329,6 +329,47 @@ describe('job analysis', () => {
       expect(change?.from).toEqual(['s_py', 's_go', 's_php']);
     });
 
+    /*
+     * A group in the second of two skills sections. The match read only the
+     * first section and skipped the group as not printed, and the list undo
+     * goes back to was read from the first section too — `null`, "print them
+     * all", for a group whose own section had cut it down.
+     */
+    it('reads a group in the second skills section against that section', async () => {
+      t.write('skills.yaml', [
+        ...(t.read('skills.yaml') as unknown[]),
+        {
+          id: 'sk_tools',
+          name: 'Tools',
+          items: [
+            { id: 's_k8s', text: 'Kubernetes', tags: ['kubernetes'] },
+            { id: 's_aws', text: 'AWS', tags: ['aws'] },
+            { id: 's_tf', text: 'Terraform', tags: ['terraform'] },
+            { id: 's_jenkins', text: 'Jenkins', tags: ['jenkins'] },
+          ],
+        },
+      ]);
+      t.store.saveResume({
+        id: 'two-skills',
+        label: 'Two skills sections',
+        sections: [
+          { kind: 'experience', entries: ['exp_acme'] },
+          { kind: 'skills', entries: [], groups: ['sk_lang'] },
+          { kind: 'skills', heading: 'Tools', entries: [], groups: ['sk_tools'], items: { sk_tools: ['s_k8s', 's_aws', 's_tf'] } },
+        ],
+      });
+
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'two-skills' })
+        .expect(200);
+
+      const change = (res.body.skillChanges as { groupId: string; from: string[] | null; to: string[] }[])
+        .find((c) => c.groupId === 'sk_tools');
+      expect(change?.to).toEqual(['s_k8s', 's_aws']);
+      expect(change?.from).toEqual(['s_k8s', 's_aws', 's_tf']);
+    });
+
     it('says nothing about skills when nothing was narrowed', async () => {
       const res = await request(app)
         .post('/api/extension/analyze')
@@ -419,6 +460,65 @@ describe('job analysis', () => {
       .expect(400);
     // Refused, in words; see "says in words that the resume it builds from is gone".
     expect(res.body.kind).toBe('no-base');
+  });
+
+  /*
+   * The extension's default is one setting shared by every tab, and a card
+   * used to write it whenever its picker changed. Pick another application's
+   * tailored copy once and every posting after that started from it: a Waymo
+   * posting opened on the resume made for, and sent to, Keysight.
+   */
+  describe("another posting's copy, named by the default", () => {
+    const keysight = () =>
+      t.store.saveResume({
+        id: 'job-keysight-engineering-software-developer-intern',
+        label: 'Engineering Software Developer, Intern | Keysight',
+        tier: 'temporary',
+        copiedFrom: 'intern',
+        generatedFor: { company: 'Keysight', role: 'Engineering Software Developer, Intern', at: '2026-09-20T10:00:00.000Z' },
+      });
+
+    it('is not where a different posting starts', async () => {
+      keysight();
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'job-keysight-engineering-software-developer-intern', baseIsDefault: true })
+        .expect(200);
+      expect(res.body.baseResumeId).toBe('newgrad');
+      expect(res.body.spec.copiedFrom).toBe('newgrad');
+    });
+
+    it('is still used when it was chosen for this application', async () => {
+      keysight();
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'job-keysight-engineering-software-developer-intern' })
+        .expect(200);
+      expect(res.body.baseResumeId).toBe('job-keysight-engineering-software-developer-intern');
+    });
+
+    it('and a default naming a resume somebody keeps is used as it is', async () => {
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'intern', baseIsDefault: true })
+        .expect(200);
+      expect(res.body.baseResumeId).toBe('intern');
+    });
+
+    it("and a copy made for this posting's employer and role is still this posting's", async () => {
+      t.store.saveResume({
+        id: 'streamly-earlier',
+        label: 'Data Platform Intern — Streamly, earlier',
+        tier: 'temporary',
+        copiedFrom: 'intern',
+        generatedFor: { company: 'Streamly', role: 'Data Platform Intern' },
+      });
+      const res = await request(app)
+        .post('/api/extension/analyze')
+        .send({ html: JOB_HTML, baseResumeId: 'streamly-earlier', baseIsDefault: true })
+        .expect(200);
+      expect(res.body.baseResumeId).toBe('streamly-earlier');
+    });
   });
 
   it('marks an ordinary page as not a posting', async () => {

@@ -37,8 +37,7 @@ export interface AiPlan {
   /** Entry and bullet ids to leave off. */
   disable: string[];
   /**
-   * A new order for the bullets inside an entry, and for the entries inside a
-   * section, keyed by entry id and by section kind.
+   * A new order for the bullets inside an entry, keyed by entry id.
    *
    * A permutation and nothing else. The set of things on the page is decided
    * by `enable` and `disable`; this only says which comes first. An id that
@@ -52,6 +51,16 @@ export interface AiPlan {
    * that was the whole vocabulary.
    */
   order: Record<string, string[]>;
+  /**
+   * Always empty: the AI never reorders entries. "AI should be able to
+   * rearrange bullet points but not entries ever." The order of the entries
+   * in a section is the person's — the date sort, or the one they dragged.
+   *
+   * The field stays so a plan keeps its shape (a session file or a reply that
+   * still carries one is read without breaking), but `sanitizeAiPlan` never
+   * fills it and notes in `rejected` a reply that asked, and `applyInclusion`
+   * ignores it whatever it holds.
+   */
   entryOrder: Record<string, string[]>;
   /** What was thrown away, so the caller can say the reply was partly junk. */
   rejected: string[];
@@ -165,7 +174,7 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
     }
   }
 
-  /* Ordering. A permutation of what is already there, never a way in. */
+  /* Ordering of an entry's bullets. A permutation of what is already there, never a way in. */
   for (const [entryId, ids] of Object.entries((raw.order as Record<string, unknown>) ?? {})) {
     const entry = entries.get(entryId);
     if (!entry || !Array.isArray(ids)) {
@@ -178,12 +187,15 @@ export function sanitizeAiPlan(parsed: unknown, data: StoreData): AiPlan {
     if (named.length > 0) plan.order[entryId] = named;
   }
 
-  for (const [kind, ids] of Object.entries((raw.entryOrder as Record<string, unknown>) ?? {})) {
-    if (!Array.isArray(ids)) continue;
-    const mine = new Set(data.entries.filter((e) => e.kind === kind).map((e) => e.id));
-    const named = dedupe(ids.filter((i): i is string => typeof i === 'string' && mine.has(i)));
-    if (named.length !== ids.length) plan.rejected.push(`entryOrder ${kind}: dropped ids that are not ${kind} entries`);
-    if (named.length > 0) plan.entryOrder[kind] = named;
+  /*
+   * The order of entries, refused. "AI should be able to rearrange bullet
+   * points but not entries ever": which job comes first is the person's. A
+   * reply that names one is told so in `rejected`, and `entryOrder` stays
+   * empty.
+   */
+  const askedEntryOrder = raw.entryOrder;
+  if (askedEntryOrder && typeof askedEntryOrder === 'object' && Object.keys(askedEntryOrder as object).length > 0) {
+    plan.rejected.push('entryOrder: entries are never reordered, so they keep the order this resume gives them');
   }
 
   return plan;
@@ -287,10 +299,10 @@ export function skillsInBaseOrder(
   base: ResumeSpec,
   data: StoreData,
 ): Record<string, string[]> {
-  const listed = base.sections?.find((s) => s.kind === 'skills')?.items ?? {};
   const out: Record<string, string[]> = {};
   for (const [groupId, ids] of Object.entries(skills)) {
-    const own = listed[groupId];
+    // The list of the section that prints the group, not the first one's.
+    const own = skillsSectionOf(base.sections, groupId)?.items?.[groupId];
     if (!own) {
       out[groupId] = ids;
       continue;
@@ -301,6 +313,27 @@ export function skillsInBaseOrder(
   return out;
 }
 
+/**
+ * The plan's skills picks for the groups this resume prints, and a refusal
+ * for the rest.
+ *
+ * A resume prints only the groups its skills section names, so a pick for
+ * any other group was written into the copy's `items`, sent back to the card
+ * as a skills change, and printed nowhere: the model chose, the plan said so,
+ * and the document did not change. The MCP session refuses the same pick as
+ * it is made; this is the same rule for a reply that came back as JSON.
+ */
+export function skillsOnThePage(plan: AiPlan, base: ResumeSpec): AiPlan {
+  const printed = new Set((base.sections ?? []).filter((s) => s.kind === 'skills').flatMap((s) => s.groups ?? []));
+  const skills: Record<string, string[]> = {};
+  const rejected = [...plan.rejected];
+  for (const [groupId, ids] of Object.entries(plan.skills)) {
+    if (printed.has(groupId)) skills[groupId] = ids;
+    else rejected.push(`skills ${groupId}: not on this resume`);
+  }
+  return { ...plan, skills, rejected };
+}
+
 /** `ids` in `own`'s order, and any `own` lacks beside their neighbour in `store`. */
 export function inListOrder(ids: string[], own: string[], store: string[]): string[] {
   let list = own.filter((id) => ids.includes(id));
@@ -308,8 +341,59 @@ export function inListOrder(ids: string[], own: string[], store: string[]): stri
   return list;
 }
 
+/**
+ * The skills section that prints a group: the one whose `groups` names it.
+ *
+ * A resume can hold two skills sections — "Languages & Tools" and
+ * "Certifications", say — and every reader of a group's list used to take
+ * the first section of the kind, so a group in the second was read against a
+ * list that was not its own.
+ */
+export function skillsSectionOf<S extends Pick<SectionSpec, 'kind' | 'groups'>>(
+  sections: readonly S[] | undefined,
+  groupId: string,
+): S | undefined {
+  return (sections ?? []).find((s) => s.kind === 'skills' && (s.groups ?? []).includes(groupId));
+}
+
+/**
+ * Which section an entry being put on the page goes into.
+ *
+ * The only section of its kind nearly always. A resume can hold two `custom`
+ * sections — "Awards" and "Leadership" — and taking the first of the kind put
+ * a leadership entry under Awards, or, when it was already under Leadership,
+ * under Awards as well, so it printed twice. So, in order:
+ *
+ *   the section of its kind that already lists it — there is nothing to add;
+ *   the one that still holds lines chosen for it, which a section keeps when
+ *   the entry is switched off there;
+ *   the one headed the way the section is that lists it on another resume;
+ *   and only then the first of its kind.
+ */
+export function sectionForEntry<S extends Pick<SectionSpec, 'kind' | 'heading' | 'entries' | 'bullets'>>(
+  sections: readonly S[],
+  entry: { id: string; kind: string },
+  resumes: readonly ResumeSpec[] = [],
+): S | undefined {
+  const same = sections.filter((s) => s.kind === entry.kind);
+  if (same.length <= 1) return same[0];
+  const holding = same.find((s) => (s.entries ?? []).includes(entry.id));
+  if (holding) return holding;
+  const traced = same.find((s) => s.bullets && Object.hasOwn(s.bullets, entry.id));
+  if (traced) return traced;
+  for (const resume of resumes) {
+    for (const other of resume.sections ?? []) {
+      if (other.kind !== entry.kind || !(other.entries ?? []).includes(entry.id)) continue;
+      const named = same.find((s) => (s.heading ?? '') === (other.heading ?? ''));
+      if (named) return named;
+    }
+  }
+  return same[0];
+}
+
 export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan): SectionSpec[] | undefined {
-  const reordering = Object.keys(plan.order).length > 0 || Object.keys(plan.entryOrder).length > 0;
+  // Bullets only: `entryOrder` is never applied, so it is not a reason to act.
+  const reordering = Object.keys(plan.order).length > 0;
   if (plan.enable.length === 0 && plan.disable.length === 0 && !reordering) return undefined;
 
   const sections = (base.sections ?? []).map((s) => ({
@@ -340,7 +424,8 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
   for (const id of plan.enable) {
     const entry = entryById.get(id);
     if (!entry) continue;
-    const section = sections.find((s) => s.kind === entry.kind);
+    // Not simply the first section of its kind; see `sectionForEntry`.
+    const section = sectionForEntry(sections, entry, data.resumes);
     // Store order, not reply order: where the store puts it.
     if (section) section.entries = inPlace(section.entries, id, data.entries.map((e) => e.id));
   }
@@ -370,34 +455,18 @@ export function applyInclusion(base: ResumeSpec, data: StoreData, plan: AiPlan):
   }
 
   /*
-   * And last, the order — after showing and hiding have settled what is on
-   * the page, because reordering a list that is about to lose an entry is
-   * work thrown away, and because `shown` has to materialise the default list
-   * before there is anything to permute.
+   * And last, the order of each entry's lines — after showing and hiding
+   * have settled what is on the page, because reordering a list that is
+   * about to lose a line is work thrown away, and because `shown` has to
+   * materialise the default list before there is anything to permute.
+   *
+   * Never the order of the entries themselves, whatever the plan carries:
+   * "AI should be able to rearrange bullet points but not entries ever". A
+   * section keeps its entries in the order, and the sort, the base gave it —
+   * `sanitizeAiPlan` never fills `entryOrder`, and this is the last door for
+   * a plan built some other way.
    */
   for (const s of sections) {
-    const wanted = plan.entryOrder[s.kind];
-    if (wanted) {
-      s.entries = reorder(s.entries, wanted);
-      /*
-       * And the sort steps aside, or the arrangement is thrown away between
-       * here and the page.
-       *
-       * `adoptDateOrder` turns the date sort on for very nearly every
-       * section, because it turns it on wherever it provably changes
-       * nothing — so a plan that rearranged entries wrote the new list into
-       * a section that then sorted by date and ignored it. The tool said it
-       * had moved them, the plan showed them moved, and the document did
-       * not, which is the worst shape this can take in something an agent is
-       * trusting.
-       *
-       * The editor has always done this: dragging an entry there turns the
-       * section's sort off in the same breath and says so on screen. This is
-       * the same decision, made in the same place, for the same reason.
-       */
-      s.order = 'manual';
-    }
-
     for (const entryId of s.entries) {
       const order = plan.order[entryId];
       if (!order) continue;

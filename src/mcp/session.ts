@@ -32,7 +32,7 @@
  * not a limitation of this file.
  */
 
-import { inListOrder, type AiPlan } from '../jobs/aiPlan.js';
+import { inListOrder, sectionForEntry, type AiPlan } from '../jobs/aiPlan.js';
 import { pickBullet } from '../model/resolve.js';
 import type { Bullet, Entry, MaybeVariant, ResolvedResume, SkillGroup, StoreData } from '../model/types.js';
 
@@ -79,6 +79,11 @@ export interface MoveResult {
 
 const ok = (text: string): MoveResult => ({ ok: true, text });
 const no = (text: string): MoveResult => ({ ok: false, text });
+
+/** What a request to reorder entries is told. See `TailorSession.orderEntries`. */
+const NO_ENTRY_REORDERING =
+  'Entries are never reordered: a section keeps its entries in the order this person arranged them. ' +
+  'The lines inside an entry can still be put in a different order, and entries can be shown or hidden.';
 
 /** The chosen phrasing of a field that may carry alternates. */
 function plain(field: MaybeVariant | undefined): string {
@@ -160,12 +165,18 @@ export class TailorSession {
    */
   describeResume(): string {
     const lines: string[] = [`${this.resume.label} — as it stands now`];
-    for (const section of this.resume.sections) {
+    for (const [at, section] of this.resume.sections.entries()) {
       lines.push('', `## ${section.heading}`);
+      /*
+       * With the plan's picks applied, as everything below applies its shows,
+       * hides and wordings. Without them a skills pick that had worked read
+       * back as the group unchanged.
+       */
       for (const group of section.skillGroups) {
-        lines.push(`- ${group.name}: ${group.items.join(', ')}`);
+        const picked = this.state.plan.skills[group.id];
+        lines.push(`- ${group.name}: ${(picked ? this.pickedSkills(group.id, picked) : group.items).join(', ')}`);
       }
-      for (const entryId of this.orderedEntries(section.kind, section.entries.map((e) => e.id))) {
+      for (const entryId of this.orderedEntries(section.kind, section.entries.map((e) => e.id), at)) {
         const resolvedEntry = section.entries.find((e) => e.id === entryId);
         const entry = this.entries.get(entryId);
         /*
@@ -400,31 +411,34 @@ export class TailorSession {
     );
   }
 
-  /** Put a section's entries in a different order. */
-  orderEntries(kind: string, entryIds: string[]): MoveResult {
-    const mine = [...this.entries.values()].filter((e) => e.kind === kind).map((e) => e.id);
-    if (mine.length === 0) {
-      const kinds = [...new Set([...this.entries.values()].map((e) => e.kind))];
-      return no(`There is no "${kind}" section. The sections are: ${some(kinds)}.`);
-    }
-    const named = [...new Set(entryIds.filter((id) => mine.includes(id)))];
-    // Named back, as `order` and `skills` name theirs: a typo, or an entry
-    // from another section, was dropped with a success and no word of it, so
-    // the model had no reason to think any of its order had been ignored.
-    const strangers = entryIds.filter((id) => !mine.includes(id));
-    if (named.length === 0) return no(`None of those are ${kind} entries. They are: ${some(mine)}.`);
-    this.state.plan.entryOrder[kind] = named;
-    const rest = mine.filter((id) => !named.includes(id));
-    return ok(
-      `${kind} will read: ${[...named, ...rest].join(', ')}.` +
-        (strangers.length ? ` Ignored, because they are not ${kind} entries: ${some(strangers)}.` : ''),
-    );
+  /*
+   * Putting a section's entries in a different order, refused. "AI should be
+   * able to rearrange bullet points but not entries ever": which entry comes
+   * first is the person's. The tool that called this is gone; this answers a
+   * client that still asks, and leaves nothing in the plan.
+   */
+  orderEntries(_kind: string, _entryIds: string[]): MoveResult {
+    return no(NO_ENTRY_REORDERING);
   }
 
   /** Choose which items of a skills group to print. */
   skills(groupId: string, itemIds: string[]): MoveResult {
     const group = this.groups.get(groupId);
     if (!group) return no(`There is no skills group "${groupId}". Groups: ${some([...this.groups.keys()])}.`);
+
+    /*
+     * Somewhere to put it, as `setShown` asks of an entry. The resume prints
+     * only the groups its skills section names, so a pick for any other was
+     * answered "will read", carried in the plan, and never printed.
+     */
+    const onPage = this.resume.sections.some((sec) => sec.skillGroups.some((g) => g.id === groupId));
+    if (!onPage) {
+      const listed = this.resume.sections.flatMap((sec) => sec.skillGroups.map((g) => g.id));
+      return no(
+        `${groupId} is not on this resume, so there is nothing to choose its skills for. ` +
+          (listed.length ? `The groups it prints are: ${some(listed)}.` : 'It prints no skills groups.'),
+      );
+    }
 
     const known = group.items.filter((i) => itemIds.includes(i.id)).map((i) => i.id);
     const strangers = itemIds.filter((id) => !group.items.some((i) => i.id === id));
@@ -441,14 +455,20 @@ export class TailorSession {
      * and this says what that will read.
      */
     this.state.plan.skills[groupId] = known;
-    const printed = this.resume.sections.flatMap((s) => s.skillGroups).find((g) => g.id === groupId)?.items ?? [];
-    const own = printed.map((t) => group.items.find((i) => i.text === t)?.id).filter((id): id is string => Boolean(id));
-    const ordered = inListOrder(known, own, group.items.map((i) => i.id));
-    const text = ordered.map((id) => group.items.find((i) => i.id === id)!.text);
+    const text = this.pickedSkills(groupId, known);
     return ok(
       `${group.name} will read: ${text.join(', ')}.` +
         (strangers.length ? ` Ignored, because they are not in this group: ${some(strangers)}.` : ''),
     );
+  }
+
+  /** What a group will print with these of its items picked, in the resume's own order. */
+  private pickedSkills(groupId: string, known: string[]): string[] {
+    const group = this.groups.get(groupId);
+    if (!group) return [];
+    const printed = this.resume.sections.flatMap((s) => s.skillGroups).find((g) => g.id === groupId)?.items ?? [];
+    const own = printed.map((t) => group.items.find((i) => i.text === t)?.id).filter((id): id is string => Boolean(id));
+    return inListOrder(known, own, group.items.map((i) => i.id)).map((id) => group.items.find((i) => i.id === id)!.text);
   }
 
   /**
@@ -504,9 +524,9 @@ export class TailorSession {
     parts.push(choices.length ? `Phrasings chosen: ${choices.map(([k, v]) => `${k}→${v}`).join(', ')}` : 'No phrasing changed.');
     parts.push(plan.enable.length ? `Shown: ${plan.enable.join(', ')}` : 'Nothing newly shown.');
     parts.push(plan.disable.length ? `Left off: ${plan.disable.join(', ')}` : 'Nothing hidden.');
+    // Lines only: entries are never reordered, so there is no entry order to report.
     const orders = Object.entries(plan.order).map(([k, v]) => `${k}: ${v.join(' → ')}`);
-    const entryOrders = Object.entries(plan.entryOrder).map(([k, v]) => `${k}: ${v.join(' → ')}`);
-    parts.push([...orders, ...entryOrders].length ? `Reordered: ${[...orders, ...entryOrders].join('; ')}` : 'Order unchanged.');
+    parts.push(orders.length ? `Reordered: ${orders.join('; ')}` : 'Order unchanged.');
     const skills = Object.entries(plan.skills);
     if (skills.length) parts.push(`Skills: ${skills.map(([k, v]) => `${k} → ${v.join(', ')}`).join('; ')}`);
     if (suggestions.length) parts.push(`Suggested phrasings, awaiting a person: ${suggestions.length}`);
@@ -524,16 +544,36 @@ export class TailorSession {
    * Working out what the page looks like with the plan applied        *
    * ---------------------------------------------------------------- */
 
-  private orderedEntries(kind: string, current: string[]): string[] {
+  /**
+   * The resume's sections as `sectionForEntry` reads them, so the page read
+   * back to the model puts an entry it turned on where `applyInclusion` will.
+   * The spec's own where the save has it — its headings as written, and the
+   * lines it keeps for entries switched off — and the resolved ones otherwise.
+   */
+  private placing() {
+    const spec = this.data.resumes.find((r) => r.id === this.resume.id);
+    return this.resume.sections.map((s, i) => {
+      const own = spec?.sections?.[i];
+      return {
+        kind: s.kind,
+        heading: own ? own.heading : s.heading,
+        entries: s.entries.map((e) => e.id),
+        bullets: own?.bullets,
+      };
+    });
+  }
+
+  private orderedEntries(kind: string, current: string[], at?: number): string[] {
     const shown = current.filter((id) => !this.state.plan.disable.includes(id));
-    const added = this.state.plan.enable.filter(
-      (id) => this.entries.get(id)?.kind === kind && !shown.includes(id),
-    );
-    const all = [...shown, ...added];
-    const wanted = this.state.plan.entryOrder[kind];
-    if (!wanted) return all;
-    const named = wanted.filter((id) => all.includes(id));
-    return [...named, ...all.filter((id) => !named.includes(id))];
+    const sections = at === undefined ? [] : this.placing();
+    const added = this.state.plan.enable.filter((id) => {
+      const entry = this.entries.get(id);
+      if (entry?.kind !== kind || shown.includes(id)) return false;
+      // Under one section of its kind, not every one of them.
+      return at === undefined || sectionForEntry(sections, entry, this.data.resumes) === sections[at];
+    });
+    // In the resume's own order, never a plan's: entries are not reordered.
+    return [...shown, ...added];
   }
 
   private shownBullets(entry: Entry, current: string[]): string[] {

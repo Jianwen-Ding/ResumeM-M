@@ -626,8 +626,16 @@ describe('restoring a version', () => {
       .expect(200);
 
     expect(t.store.getResume('base')?.choices?.b_pipeline).toBe('v_kafka');
-    // And it says so, rather than reporting a rollback that did not happen.
-    expect(restored.body.warnings.join(' ')).toMatch(/shares with others/i);
+    /*
+     * And the version comes back whole. That version inherited the wording
+     * from the base as it was then; resumes stand alone now, so it is folded
+     * against the base *of that commit* and prints what it printed — no
+     * longer a rollback that half happened, so nothing to warn about. See
+     * "restores a version from before flattening as a resume that stands
+     * alone".
+     */
+    expect(restored.body.choices?.b_pipeline).not.toBe('v_kafka');
+    expect(restored.body.warnings).toEqual([]);
   });
 
   it('leaves every other variation of that base exactly as it was', async () => {
@@ -686,5 +694,47 @@ describe('restoring a version', () => {
     expect(now.temporaryFrom).toBeUndefined();
     const expiring = await request(app).get('/api/resumes/expiring').expect(200);
     expect(expiring.body.due.map((d: { id: string }) => d.id)).not.toContain('job-acme');
+  });
+
+  /*
+   * A version from before resumes were flattened is a thin file: `extends:
+   * base` and a handful of choices, with everything else coming from the base
+   * as it was then. Restore wrote that file back as it was, so the resume
+   * inherited again — from the base as it is *now*, not the one the version
+   * printed with — and went on following every later edit of that base, the
+   * one thing a flattened store promises cannot happen.
+   */
+  it('restores a version from before flattening as a resume that stands alone', async () => {
+    const original = (await history())[0]!.hash;
+    expect(t.store.loadResumesAsWritten().find((r) => r.id === 'newgrad')?.extends, 'the old version inherits').toBe('base');
+    t.store.migrateResumes();
+
+    // The base drops its project, after that version was written.
+    const base = t.store.getResume('base')!;
+    const without = (kind: string) => (s: { kind: string }) => (s.kind === kind ? { ...s, entries: [] } : s);
+    await request(app)
+      .put('/api/resumes/base')
+      .send({ ...base, sections: base.sections!.map(without('project')) })
+      .expect(200);
+
+    await request(app).post(`/api/resumes/newgrad/history/${original}/restore`).expect(200);
+
+    const printed = async () =>
+      (await request(app).get('/api/resumes/newgrad/resolved').expect(200)).body.sections.flatMap(
+        (s: { entries: { id: string }[] }) => s.entries.map((e) => e.id),
+      );
+    const onDisk = t.store.loadResumesAsWritten().find((r) => r.id === 'newgrad')!;
+    expect(onDisk.extends, 'the restored file does not inherit').toBeUndefined();
+    expect(onDisk.copiedFrom).toBe('base');
+    // What that version printed, project and all.
+    expect(await printed()).toEqual(['edu_neu', 'exp_acme', 'proj_thing']);
+
+    // And the base's next edit is the base's alone.
+    const later = t.store.getResume('base')!;
+    await request(app)
+      .put('/api/resumes/base')
+      .send({ ...later, sections: later.sections!.map(without('experience')) })
+      .expect(200);
+    expect(await printed()).toEqual(['edu_neu', 'exp_acme', 'proj_thing']);
   });
 });

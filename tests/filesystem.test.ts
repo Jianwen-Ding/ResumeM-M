@@ -808,4 +808,84 @@ describe('two applications in flight, one upload dialog', () => {
     expect(syncCurrent(t.store).files).toContain('Test-Person-Resume.pdf');
     expect(syncCurrent(t.store, undefined, 'a1').files).toContain('Test-Person-Resume.pdf');
   });
+
+  /*
+   * Two applications worked on at once, in two tabs.
+   *
+   * The plain name went to whichever application was staged last. So tab A
+   * staged Acme and its card said "Test-Person-Resume.pdf is ready in
+   * out/current"; tab B staged Beta, and the file under that name became
+   * Beta's resume — while tab A's card went on naming it, and the upload
+   * dialog open over the folder went on offering it for Acme's form. A plain
+   * listing of the tracker, or a status change in either tab, then took the
+   * name away from both.
+   */
+  const touched = (app: ReturnType<typeof bundleFor>, at: Date) => ({
+    ...app,
+    history: [{ at: at.toISOString(), status: 'applying' as const, note: 'Bundle created' }],
+  });
+
+  it('does not hand the plain name from one application being worked on to another', () => {
+    const now = new Date();
+    t.write('applications.yaml', [
+      touched(bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'), now),
+      touched(bundleFor('a2', 'Beta', 'Platform Engineer', 'Test-Person-Resume.pdf'), now),
+    ]);
+    const plain = () => fs.readFileSync(path.join(t.store.outDir(), 'current', 'Test-Person-Resume.pdf'), 'utf8');
+
+    // Tab A stages Acme.
+    syncCurrent(t.store, undefined, 'a1');
+    expect(plain()).toBe('%PDF a1\n');
+
+    // Tab B stages Beta, with Acme still open in tab A.
+    const second = syncCurrent(t.store, undefined, 'a2');
+    expect(plain()).toBe('%PDF a1\n');
+    expect(second.belongsTo['Test-Person-Resume.pdf']).toBe('a1');
+    const beta = second.files.filter((f) => second.belongsTo[f] === 'a2');
+    expect(beta).toEqual(['Test-Person-Resume-Platform-Engineer.pdf']);
+    expect(fs.readFileSync(path.join(second.dir, beta[0]!), 'utf8')).toBe('%PDF a2\n');
+
+    // And a listing, or a status change, renames nothing under either tab.
+    const listed = syncCurrent(t.store);
+    expect(listed.belongsTo['Test-Person-Resume.pdf']).toBe('a1');
+    expect(listed.belongsTo['Test-Person-Resume-Platform-Engineer.pdf']).toBe('a2');
+  });
+
+  it('hands it on once the application holding it has gone quiet', () => {
+    const hoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    t.write('applications.yaml', [
+      touched(bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'), hoursAgo),
+      touched(bundleFor('a2', 'Beta', 'Platform Engineer', 'Test-Person-Resume.pdf'), new Date()),
+    ]);
+    syncCurrent(t.store, undefined, 'a1');
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
+  });
+
+  /*
+   * Plain names as often as that allows. Asked for: "I'd rather have plain
+   * names more often". The hold is for two tabs at once, not for the posting
+   * before this one.
+   */
+  it('hands it on after twenty minutes, not two hours', () => {
+    const halfAnHourAgo = new Date(Date.now() - 30 * 60 * 1000);
+    t.write('applications.yaml', [
+      touched(bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'), halfAnHourAgo),
+      touched(bundleFor('a2', 'Beta', 'Platform Engineer', 'Test-Person-Resume.pdf'), new Date()),
+    ]);
+    syncCurrent(t.store, undefined, 'a1');
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
+  });
+
+  it('keeps it for an application just filed as sent, whose files are still to be attached', () => {
+    const now = new Date();
+    t.write('applications.yaml', [
+      { ...touched(bundleFor('a1', 'Acme', '2027 Intern Software Engineer', 'Test-Person-Resume.pdf'), now), status: 'applied' as const },
+      touched(bundleFor('a2', 'Beta', 'Platform Engineer', 'Test-Person-Resume.pdf'), now),
+    ]);
+    syncCurrent(t.store, undefined, 'a1');
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(folder.belongsTo['Test-Person-Resume.pdf']).toBe('a1');
+  });
 });

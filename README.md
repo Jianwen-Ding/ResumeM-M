@@ -410,7 +410,7 @@ its own and fall back to the one above when it does not:
 
 | | |
 | --- | --- |
-| Tailoring a resume | Choosing which of your wordings suit a posting, and what order they go in |
+| Tailoring a resume | Choosing which of your wordings suit a posting, and what order an entry's lines go in. Never the order of the entries |
 | Writing letters and answers | Drafting in your voice |
 | Reviewing what you wrote | Reading a resume, a letter or an answer and saying what is weak |
 | Drafting new entries and wordings | Reading a repository or a note. The one that runs while you wait |
@@ -425,9 +425,9 @@ tailoring pass gets a small tool server instead of being asked for one large
 JSON object:
 
     read_posting      read_resume       read_inventory
-    choose_wording    reorder_bullets   reorder_entries
-    hide              show              choose_skills
-    suggest_wording   review_changes    finish
+    choose_wording    reorder_bullets   hide
+    show              choose_skills     suggest_wording
+    review_changes    finish
 
 The difference is where mistakes are caught. A JSON reply is checked once, at
 the end, and everything wrong in it is dropped in silence — an id the model
@@ -438,7 +438,8 @@ this entry are b_pipeline, b_testing" while the model can still act on it. It
 can also read the page back after each move and see what it actually did.
 
 Nothing about what it is allowed to do changes. Every tool names things that
-already exist; `suggest_wording` takes text and puts it in the same quarantine
+already exist, and none of them moves an entry — the lines inside one can be
+reordered, but a section's entries keep the order you gave them; `suggest_wording` takes text and puts it in the same quarantine
 the JSON path does, where a person accepts or declines it.
 
 The server runs inside the same empty scratch directory the CLI is confined to

@@ -37,13 +37,20 @@ import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
 import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
-import { applyInclusion, sanitizeAiPlan, sanitizeSuggestions, skillsInBaseOrder } from '../jobs/aiPlan.js';
+import {
+  applyInclusion,
+  sanitizeAiPlan,
+  sanitizeSuggestions,
+  skillsInBaseOrder,
+  skillsOnThePage,
+  skillsSectionOf,
+} from '../jobs/aiPlan.js';
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { advance, alreadySent, buildBundle, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
-import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId } from '../model/bases.js';
+import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
@@ -429,22 +436,23 @@ function sentBefore(
  * place. `deriveSpec` copies the base's sections and narrows the skills lists
  * to what the posting asked for; `applyInclusion` copies the *same* base's
  * sections and applies what the AI decided — what is shown, what is hidden,
- * and what order it goes in. So the AI's version already carries everything
- * the base had, and the only thing it is missing is the narrowed `items`.
+ * and what order the lines inside an entry go in. So the AI's version already
+ * carries everything the base had, and the only thing it is missing is the
+ * narrowed `items`.
  *
  * It used to be written the other way round — the AI's sections first and
  * `deriveSpec`'s spread over the top, with `entries` and `bullets` named
  * afterwards to put them back. `order` and `bulletOrder` were not named, and
- * they are precisely what `applyInclusion` sets to `manual` to say the AI
- * arranged this itself. `Store.load()` runs `adoptDateOrder` over every
- * resume, so the base carries a date sort for very nearly every section, and
- * the spread restored it: `manual` became `newest` and the arrangement was
- * restacked into date order on the way to the page.
+ * `bulletOrder` is precisely what `applyInclusion` sets to `manual` to say
+ * the AI arranged an entry's lines itself. Whatever the base carried under
+ * those names the spread put back over the AI's — `order` above all, since
+ * `Store.load()` runs `adoptDateOrder` and gives very nearly every section a
+ * date sort — so an arrangement the tool had reported as made was restacked
+ * on the way to the page.
  *
- * Silently, and the tool had already told the model it worked — "experience
- * will read: exp_old, exp_new" — which is the shape of failure that the
- * comments in `applyInclusion` say the `manual` flags exist to prevent. They
- * did their job; this call site undid it one line later.
+ * (The AI no longer reorders entries at all — "AI should be able to
+ * rearrange bullet points but not entries ever" — so a section's `order` is
+ * now always the base's, and comes through here untouched.)
  *
  * Naming the one field that actually differs, rather than spreading a whole
  * object and patching up whatever it broke, is what stops the next field
@@ -454,9 +462,19 @@ function withNarrowedSkills(
   decided: SectionSpec[],
   derived: ResumeSpec['sections'],
 ): SectionSpec[] {
-  const items = new Map((derived ?? []).map((s) => [s.kind, s.items]));
+  /*
+   * Paired by place among the sections of one kind, not by kind alone. Both
+   * lists are copies of the same base's sections, in its order; keyed by kind,
+   * a resume with two skills sections handed the first one the second's
+   * `items`, and every list the first had trimmed for itself went — printing
+   * every skill of a group the base had cut down.
+   */
+  const nth = (list: readonly SectionSpec[], s: SectionSpec) =>
+    list.filter((x) => x.kind === s.kind).indexOf(s);
+  const from = derived ?? [];
   return decided.map((s) => {
-    const narrowed = items.get(s.kind);
+    const twin = from.filter((x) => x.kind === s.kind)[nth(decided, s)];
+    const narrowed = twin?.items;
     return narrowed ? { ...s, items: narrowed } : s;
   });
 }
@@ -467,7 +485,8 @@ function decidedAnything(state: SessionState): boolean {
     Object.keys(plan.choices).length > 0 ||
     Object.keys(plan.skills).length > 0 ||
     Object.keys(plan.order).length > 0 ||
-    Object.keys(plan.entryOrder).length > 0 ||
+    // Not `entryOrder`: the AI cannot reorder entries, so a plan holding only
+    // one decided nothing.
     plan.enable.length > 0 ||
     plan.disable.length > 0 ||
     suggestions.length > 0 ||
@@ -2662,13 +2681,18 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/extension/analyze',
     handler(async (req, res) => {
-      const { url, title, html, pages, baseResumeId, useAi, tailor } = req.body as {
+      const { url, title, html, pages, baseResumeId, baseIsDefault, useAi, tailor } = req.body as {
         url?: string;
         title?: string;
         html?: string;
         /** Every page of this application, oldest first. */
         pages?: PageSource[];
         baseResumeId?: string;
+        /**
+         * The extension's standing default rather than a resume chosen for
+         * this application. See `standingBase`.
+         */
+        baseIsDefault?: boolean;
         useAi?: boolean;
         /**
          * How much to change, if anything.
@@ -2759,7 +2783,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const role = job.title ?? 'Unknown role';
       const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
-      const baseId = baseForCopy(data.resumes, baseResumeId, specId);
+      /*
+       * A default never starts this posting from another posting's copy.
+       * "Made for this" is asked by name, the way the copy's id is made.
+       */
+      const thisPosting = tailoredResumeId(employer, role);
+      const asked = baseIsDefault
+        ? standingBase(
+            data.resumes,
+            baseResumeId,
+            (r) =>
+              r.id === specId ||
+              (Boolean(r.generatedFor?.company) &&
+                tailoredResumeId(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role') === thisPosting),
+          )
+        : baseResumeId;
+      const baseId = baseForCopy(data.resumes, asked, specId);
       if (!baseId) throw new Error('The store has no resumes to start from');
       const base = data.resumes.find((r) => r.id === baseId);
       if (!base) {
@@ -2938,7 +2977,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // The AI selects; it never writes a resume. Everything it returns is
       // checked against the store, and anything that is not a real id it could
       // have chosen from is discarded. See jobs/aiPlan.ts.
-      const plan = aiParsed ? sanitizeAiPlan(aiParsed, data) : null;
+      const plan = aiParsed ? skillsOnThePage(sanitizeAiPlan(aiParsed, data), base) : null;
       const finalMatch = plan
         ? {
             ...match,
@@ -2953,7 +2992,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * where it came from instead — see `employerFallback`.
        */
       /* What the base asks for on skills, which is what undoing a swap restores. */
-      const baseSkillItems = base.sections?.find((s) => s.kind === 'skills')?.items;
+      // Each group's own section's list: a resume can hold two skills sections.
+      const baseSkillItems = (groupId: string) => skillsSectionOf(base.sections, groupId)?.items?.[groupId];
 
       const spec = deriveSpec(base, specId, `${role} — ${employer}`, finalMatch, {
         url,
@@ -3099,6 +3139,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             draftForJob(store.loadDrafts(), data.applications, employer, role)?.id ??
             findApplication(data.applications, employer, role)?.id ??
             freshApplicationId(data.applications, employer, role),
+          /*
+           * And the resume made for it, so the card can put that one first in
+           * its picker: "temporary resumes created for a job application
+           * should always be on the very top … when looking at that very job
+           * application". Absent until one has been built.
+           */
+          resumeId: findApplication(data.applications, employer, role)?.resumeId,
         },
         score,
         kind: verdict.kind,
@@ -3161,7 +3208,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         skillChanges: Object.entries(finalMatch.skills).map(([groupId, to]) => ({
           groupId,
           groupName: data.skillGroups.find((g) => g.id === groupId)?.name ?? groupId,
-          from: baseSkillItems?.[groupId] ?? null,
+          from: baseSkillItems(groupId) ?? null,
           to,
         })),
         entryByBullet: Object.fromEntries(
@@ -3736,7 +3783,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * failure the folder exists to prevent: an upload that attaches last
        * week's resume, or nothing at all, with the card saying it is ready.
        */
-      res.json({ ...result, currentDir: current.dir, currentProblems: current.problems });
+      res.json({
+        ...result,
+        currentDir: current.dir,
+        currentProblems: current.problems,
+        /*
+         * And what this application's files are called there. `files` are
+         * the archive's names, which are always the plain ones; in the flat
+         * folder the plain name can belong to another application still being
+         * worked on (see `uniqueNames`), and a card naming it would be
+         * pointing the upload dialog at that application's resume.
+         */
+        currentFiles: current.files.filter((name) => current.belongsTo[name] === result.application.id),
+      });
     }),
   );
 
@@ -4403,7 +4462,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             }),
           );
           try {
-            plan = sanitizeAiPlan(extractJson(agent.output), data);
+            plan = skillsOnThePage(sanitizeAiPlan(extractJson(agent.output), data), base);
           } catch {
             plan = null; // a malformed reply must not sink the deterministic match
           }
@@ -5187,11 +5246,40 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       };
 
       const text = await readAt(path.posix.join('resumes', `${id}.yaml`));
-      const restored = text === undefined ? undefined : (YAML.parse(withoutBom(text)) as ResumeSpec | null);
-      if (!restored) {
+      const asWritten = text === undefined ? undefined : (YAML.parse(withoutBom(text)) as ResumeSpec | null);
+      if (!asWritten) {
         throw new Error(`Could not read "${id}" as it was at ${hash.slice(0, 8)}`);
       }
-      restored.id = id; // the filename remains the source of truth for the id
+      asWritten.id = id; // the filename remains the source of truth for the id
+
+      /*
+       * A version from before resumes were flattened, folded against the
+       * resumes of *its* commit.
+       *
+       * That file is `extends: base` and a handful of choices, and what it
+       * printed came from the base as it was then. Written back as it was, it
+       * inherited again: `loadResumes` folds on read, against the base as it
+       * is now — so the version came back without whatever the base had
+       * since dropped, and from then on followed every later edit of the
+       * base, the one thing a flattened store promises cannot happen. Folded
+       * here, it is the whole document that version printed, standing alone,
+       * with the base named in `copiedFrom` as every folded resume has it.
+       */
+      let restored = asWritten;
+      if (asWritten.extends) {
+        const then: ResumeSpec[] = [];
+        for (const [file, objectId] of tree) {
+          const named = /^resumes\/([^/]+)\.ya?ml$/.exec(file);
+          if (!named) continue;
+          try {
+            const spec = YAML.parse(withoutBom(await repo.blob(objectId))) as ResumeSpec | null;
+            if (spec && typeof spec === 'object') then.push({ ...spec, id: named[1]! });
+          } catch {
+            // A resume at that commit that cannot be read is one fewer to fold against.
+          }
+        }
+        restored = flattenOne(asWritten, then);
+      }
 
       /*
        * The tier stays the one the resume has now.

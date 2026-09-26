@@ -87,20 +87,20 @@ describe('a tailoring move that is checked when it is made', () => {
   });
 
   /*
-   * Named back, as reordering bullets and choosing skills name theirs. A typo
-   * or an entry from another section was dropped with a success and no word
-   * of it.
+   * Named back, as reordering bullets names its own. A typo, or an item from
+   * another group, was dropped with a success and no word of it, so the model
+   * had no reason to think any of its pick had been ignored.
    */
-  it('says which entries it ignored when putting a section in order', () => {
-    const r = session().orderEntries('experience', ['exp_acme', 'proj_thing', 'exp_typo']);
+  it('says which items it ignored when choosing a group’s skills', () => {
+    const r = session().skills('sk_lang', ['s_go', 'b_pipeline', 's_typo']);
     expect(r.ok).toBe(true);
-    expect(r.text).toContain('Ignored, because they are not experience entries');
-    expect(r.text).toContain('proj_thing');
-    expect(r.text).toContain('exp_typo');
+    expect(r.text).toContain('Ignored, because they are not in this group');
+    expect(r.text).toContain('b_pipeline');
+    expect(r.text).toContain('s_typo');
   });
 
   it('says nothing about ignoring when nothing was', () => {
-    expect(session().orderEntries('experience', ['exp_acme']).text).not.toContain('Ignored');
+    expect(session().skills('sk_lang', ['s_go']).text).not.toContain('Ignored');
   });
 
   it('never lets a wrong move leave anything behind', () => {
@@ -108,6 +108,8 @@ describe('a tailoring move that is checked when it is made', () => {
     s.choose('b_pipeline', 'v_invented');
     s.hide('b_invented');
     s.order('exp_nowhere', ['b_pipeline']);
+    // And an entry order is always a wrong move, however real its ids.
+    s.orderEntries('experience', ['exp_acme']);
     expect(s.state.plan).toEqual({
       choices: {},
       skills: {},
@@ -162,10 +164,35 @@ describe('showing, hiding and rearranging', () => {
     expect(r.text).toContain('b_thing');
   });
 
-  it('names the sections when asked for one that does not exist', () => {
-    const r = session().orderEntries('publications', ['exp_acme']);
+  /*
+   * The lines inside an entry, yes; the entries of a section, never. "AI
+   * should be able to rearrange bullet points but not entries ever." The tool
+   * is gone; a client that still calls the session is told no, told what it
+   * can do instead, and leaves nothing in the plan.
+   */
+  it('refuses to put a section’s entries in a different order', () => {
+    const s = session();
+    const r = s.orderEntries('experience', ['exp_acme']);
     expect(r.ok).toBe(false);
-    expect(r.text).toContain('experience');
+    expect(r.text).toContain('Entries are never reordered');
+    // Pointing at the moves it does have.
+    expect(r.text).toMatch(/lines inside an entry can still be put in a different order/);
+    expect(s.state.plan.entryOrder).toEqual({});
+  });
+
+  it('refuses whatever section is named', () => {
+    const s = session();
+    for (const kind of ['experience', 'project', 'education', 'publications']) {
+      expect(s.orderEntries(kind, ['exp_acme', 'proj_thing']).ok, kind).toBe(false);
+    }
+    expect(s.state.plan.entryOrder).toEqual({});
+  });
+
+  it('still reorders the lines of an entry after refusing its section', () => {
+    const s = session();
+    s.orderEntries('experience', ['exp_acme']);
+    expect(s.order('exp_acme', ['b_testing']).ok).toBe(true);
+    expect(s.state.plan.order).toEqual({ exp_acme: ['b_testing'] });
   });
 
   it('prints skills in the person’s order, not the order it was given them', () => {
@@ -289,6 +316,39 @@ describe('showing an entry the resume has no section for', () => {
 });
 
 describe('reading the page back', () => {
+  /*
+   * A skills pick, read back. `describeResume` applied the plan's shows,
+   * hides, orders and wordings and not its skills, so after "Languages will
+   * read: Python, Go" the page the model checked still listed all four — a
+   * move that worked, read back as one that did nothing.
+   */
+  it('shows a skills pick taking effect', () => {
+    const s = session();
+    expect(s.describeResume()).toContain('- Languages: Python, Go, TypeScript, PHP');
+    expect(s.skills('sk_lang', ['s_go', 's_py']).text).toContain('Python, Go.');
+    expect(s.describeResume()).toContain('- Languages: Python, Go');
+    expect(s.describeResume()).not.toContain('- Languages: Python, Go, TypeScript');
+  });
+
+  /*
+   * And a group the resume does not list has nowhere to go, the way an entry
+   * with no section of its kind has nowhere to go. `skills` answered "will
+   * read" for one, the plan carried it, and the compiled resume — which
+   * prints only the groups its skills section names — never showed it.
+   */
+  it('refuses a skills pick for a group this resume does not print', () => {
+    const data = store();
+    data.resumes = [
+      ...data.resumes,
+      { id: 'noskills', label: 'No skills', tier: 'base', sections: [{ kind: 'skills', entries: [], groups: [] }] } as never,
+    ];
+    const s = new TailorSession(data, resolveResume('noskills', data), POSTING);
+    const r = s.skills('sk_lang', ['s_go']);
+    expect(r.ok).toBe(false);
+    expect(r.text).toContain('not on this resume');
+    expect(s.state.plan.skills.sk_lang).toBeUndefined();
+  });
+
   it('shows the resume with the ids the tools take', () => {
     const text = session().describeResume();
     expect(text).toContain('[b_pipeline]');
@@ -355,6 +415,42 @@ describe('reading the page back', () => {
     const sections = applyInclusion(spec as never, data, s.state.plan);
     expect(sections?.find((x) => x.kind === 'experience')?.bullets?.exp_acme).toEqual(['b_testing']);
     expect(s.describeResume()).not.toContain('[b_pipeline]');
+  });
+
+  /*
+   * Two sections of one kind. An entry turned on was read back under every
+   * section of its kind — "Awards" and "Leadership" both — while the document
+   * puts it under one. The model reading its own move saw it twice.
+   */
+  it('reads an entry it turned on back under the one section it will print in', () => {
+    const data = store();
+    const custom = (id: string) => ({
+      id,
+      kind: 'custom' as const,
+      title: `Title of ${id}`,
+      bullets: [{ id: `b_${id}`, default: 'v_1', variants: [{ id: 'v_1', label: 'Only', text: `Did ${id}.` }] }],
+    });
+    data.entries = [...data.entries, custom('c_award'), custom('c_lead')];
+    const spec = {
+      id: 'two-custom',
+      label: 'Two custom',
+      tier: 'base' as const,
+      sections: [
+        { kind: 'custom', heading: 'Awards', entries: ['c_award'] },
+        { kind: 'custom', heading: 'Leadership', entries: [], bullets: { c_lead: ['b_c_lead'] } },
+      ],
+    };
+    data.resumes = [...data.resumes, spec as never];
+    const s = new TailorSession(data, resolveResume('two-custom', data), POSTING);
+    expect(s.show('c_lead').ok).toBe(true);
+
+    const text = s.describeResume();
+    expect(text.match(/\[c_lead\]/g) ?? []).toHaveLength(1);
+    expect(text.indexOf('[c_lead]')).toBeGreaterThan(text.indexOf('## Leadership'));
+    // And the document agrees.
+    const sections = applyInclusion(spec as never, data, s.state.plan);
+    expect(sections?.find((x) => x.heading === 'Leadership')?.entries).toEqual(['c_lead']);
+    expect(sections?.find((x) => x.heading === 'Awards')?.entries).toEqual(['c_award']);
   });
 
   it('says a skills pick in the order the resume prints it', () => {
@@ -492,7 +588,8 @@ const tools = (): ToolDefinition[] => tailorTools(session());
  * them were not — and the handler is every line an agent's call passes
  * through before reaching the session. `reorder_entries` is the reason this
  * block exists: it spent weeks reporting success and moving nothing, and no
- * test ever sent it through the path an agent uses.
+ * test ever sent it through the path an agent uses. (It is gone now: the AI
+ * may reorder an entry's lines, never the entries.)
  */
 describe('every tailoring tool, as an agent calls it', () => {
   const call = (name: string, args: Record<string, unknown>, list = tools()) =>
@@ -506,9 +603,14 @@ describe('every tailoring tool, as an agent calls it', () => {
     expect(reply.result.content[0]?.text).toContain('b_testing');
   });
 
-  it('puts a section’s entries in a different order', async () => {
+  /*
+   * No tool reorders entries. A model that remembers the old one and calls it
+   * anyway is told it does not exist and what does, as any unknown tool is.
+   */
+  it('has no tool that puts a section’s entries in a different order', async () => {
     const reply = await call('reorder_entries', { section: 'experience', entries: ['exp_acme'] });
-    expect(reply.result.isError).toBeFalsy();
+    expect(reply.result.isError).toBe(true);
+    expect(reply.result.content[0]?.text).toContain('reorder_bullets');
   });
 
   it('says which argument was wrong when the ids are not a list', async () => {
@@ -590,6 +692,8 @@ describe('speaking MCP', () => {
     expect(names).toContain('choose_wording');
     expect(names).toContain('reorder_bullets');
     expect(names).toContain('finish');
+    // Lines can be reordered; entries never.
+    expect(names).not.toContain('reorder_entries');
     for (const t of reply.result.tools) {
       expect(t.description.length).toBeGreaterThan(40);
       expect(t.inputSchema).toHaveProperty('type', 'object');
@@ -940,6 +1044,9 @@ const tool = (name, args) => call('tools/call', { name, arguments: args });
 
   await tool('choose_wording', { target: 'b_pipeline', variant: 'v_kafka' });
   await tool('reorder_bullets', { entry: 'exp_acme', bullets: ['b_testing'] });
+  // A model that remembers the old entry tool: refused, and nothing moves.
+  const entries = await tool('reorder_entries', { section: 'experience', entries: ['exp_acme'] });
+  if (!entries.result.isError) throw new Error('an entry reorder was accepted');
   await tool('hide', { id: 'proj_thing' });
   await tool('finish', { reasoning: 'The posting is about streaming ingest.' });
 
@@ -987,6 +1094,7 @@ describe('a run that does its work through the tools', () => {
     expect(state.reasoning).toContain('streaming ingest');
     expect(state.plan.choices).toEqual({ b_pipeline: 'v_kafka' });
     expect(state.plan.order).toEqual({ exp_acme: ['b_testing'] });
+    expect(state.plan.entryOrder).toEqual({});
     expect(state.plan.disable).toEqual(['proj_thing']);
 
     fs.rmSync(dir, { recursive: true, force: true });

@@ -564,7 +564,7 @@ export const AI_TASKS = [
   {
     key: 'tailor',
     label: 'Tailoring a resume',
-    note: 'Choosing which of your wordings suit a posting, and what order they go in.',
+    note: 'Choosing which of your wordings suit a posting, and what order an entry’s lines go in. Never the order of the entries.',
   },
   {
     key: 'write',

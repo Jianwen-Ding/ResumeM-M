@@ -1061,8 +1061,19 @@ export class Store {
     for (const spec of resumes) {
       const to = renames.get(spec.id);
       const copiedFrom = moved(spec.copiedFrom);
-      if (!to && copiedFrom === spec.copiedFrom) continue;
-      this.saveResume({ ...spec, id: to ?? spec.id, ...(copiedFrom ? { copiedFrom } : {}) });
+      /*
+       * And an `extends`, which a save not yet folded can still carry. Left on
+       * the old id, the base it names is gone and the fold drops everything
+       * the resume inherited from it.
+       */
+      const inherits = moved(spec.extends);
+      if (!to && copiedFrom === spec.copiedFrom && inherits === spec.extends) continue;
+      this.saveResume({
+        ...spec,
+        id: to ?? spec.id,
+        ...(copiedFrom ? { copiedFrom } : {}),
+        ...(inherits ? { extends: inherits } : {}),
+      });
     }
     for (const from of renames.keys()) {
       for (const ext of Store.RESUME_SPELLINGS) {

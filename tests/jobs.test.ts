@@ -19,6 +19,7 @@ import { fitResumes } from '../src/jobs/fit.js';
 import { resolveResume } from '../src/model/resolve.js';
 import { identity } from '../src/model/applications.js';
 import { DEFAULT_CONFIG, type Entry, type ResumeSpec, type StoreData } from '../src/model/types.js';
+import { makeTempStore } from './helpers.js';
 
 const JSON_LD_PAGE = `<html><head><title>SWE Intern at Streamly</title>
 <script type="application/ld+json">
@@ -1651,5 +1652,43 @@ describe('a site that names itself with its address', () => {
 
   it('and one that is only a word about the page is not a company at all', () => {
     expect(extractJob(page('Careers'), URL).company).not.toBe('Careers');
+  });
+});
+
+/*
+ * A group in the second of two skills sections is printed, and the keyword
+ * match read only the first section — so it skipped the group as "not on the
+ * page" and never narrowed it.
+ */
+describe('the keyword match with two skills sections', () => {
+  it('narrows a group the second skills section prints', () => {
+    const t = makeTempStore();
+    try {
+      const d = t.store.load();
+      const tools = {
+        id: 'sk_tools',
+        name: 'Tools',
+        items: [
+          { id: 's_k8s', text: 'Kubernetes', tags: ['kubernetes'] },
+          { id: 's_aws', text: 'AWS', tags: ['aws'] },
+          { id: 's_tf', text: 'Terraform', tags: ['terraform'] },
+          { id: 's_jenkins', text: 'Jenkins', tags: ['jenkins'] },
+        ],
+      };
+      const store = { ...d, skillGroups: [...d.skillGroups, tools] };
+      const base = {
+        id: 'two',
+        label: 'Two skills sections',
+        sections: [
+          { kind: 'skills' as const, entries: [], groups: ['sk_lang'] },
+          { kind: 'skills' as const, heading: 'Tools', entries: [], groups: ['sk_tools'] },
+        ],
+      };
+      const result = matchVariants(store, base, { keywords: ['kubernetes', 'aws', 'python', 'go'] });
+      expect(result.skills.sk_tools).toEqual(['s_k8s', 's_aws']);
+      expect(result.skills.sk_lang).toEqual(['s_py', 's_go']);
+    } finally {
+      t.cleanup();
+    }
   });
 });

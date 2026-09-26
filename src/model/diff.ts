@@ -266,11 +266,14 @@ export function diffResumes(
    * Order within a section is part of the document too.
    *
    * This was `out.length === 0 &&` — "only worth mentioning when nothing else
-   * changed" — which was defensible while reordering was something a person
-   * did on its own. The AI reorders now, in the same pass in which it turns
-   * entries on and off, so the one combination the suppression hides is the
-   * commonest one there is: every tailoring pass that moved an entry *and*
-   * changed one reported only the change.
+   * changed". But a move is a change to the page whatever else happened in
+   * the same version, and a person who dragged an entry up and reworded
+   * another in one sitting was told only about the rewording. Reported on its
+   * own, always.
+   *
+   * Not something tailoring does: the AI may reorder the lines inside an
+   * entry (see `diffBullets`), but never the entries of a section, so a move
+   * reported here is the person's.
    */
   const bOrder = [...bEntries.keys()].filter((id) => aEntries.has(id));
   const aOrder = [...aEntries.keys()].filter((id) => bEntries.has(id));

@@ -125,6 +125,26 @@ describe('renaming the tailored copies a save already holds', () => {
   });
 
   /*
+   * A save old enough to still hold `extends` can hold one naming a copy this
+   * renames. Left pointing at the old id, the resume's base is gone: the fold
+   * says it "recorded a base … that the save does not have" and the resume
+   * loses everything it inherited.
+   */
+  it('takes an `extends` naming it along too, in a save not yet folded', () => {
+    t = saveWithOldIds();
+    fs.writeFileSync(
+      path.join(t.dir, 'resumes', 'job-acme-c-engineer-v3.yaml'),
+      YAML.stringify({ id: 'job-acme-c-engineer-v3', label: 'Inherits', extends: 'job-acme-c-engineer' }),
+      'utf8',
+    );
+    const want = tailoredResumeId('Acme', 'C++ Engineer');
+    t.store.migrateTailoredIds();
+
+    const written = t.store.loadResumesAsWritten().find((r) => r.id === 'job-acme-c-engineer-v3');
+    expect(written?.extends).toBe(want);
+  });
+
+  /*
    * A resume somebody named themselves is theirs. The predicate is "is this
    * the id the old scheme would have produced for the names it records" — not
    * "does it start with job-" — so a hand-named copy keeps its name.

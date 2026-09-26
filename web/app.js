@@ -148,6 +148,29 @@ const TIER_ORDER = ['base', 'extended', 'temporary'];
 /** A resume's tier, with the reading that never deletes anything: see tiers.ts. */
 const tierOf = (r) => r.tier ?? 'extended';
 
+/*
+ * Only the newest postings' resumes, and the rest a choice away.
+ *
+ * Asked for: "show a window of like 10 of the last application resumes then
+ * keep the rest accessible but only seeable under a dropdown menu". A
+ * temporary resume stays a week after its posting is done with, so every
+ * picker that lists them grew by one an application. The newest ten are
+ * shown, by when each was made for its posting; anything a picker must keep
+ * in view — the one open, the one an application holds — stays whatever its
+ * age; the rest wait behind a "Show N older…" row. See the JobHelper card's
+ * `RECENT_POSTINGS`, which does the same.
+ */
+const RECENT_POSTINGS = 10;
+const SHOW_OLDER = '__show_older__';
+const madeAt = (r) => r.generatedFor?.at ?? r.temporaryFrom ?? '';
+function olderPostings(resumes, keep = () => false) {
+  const built = resumes.filter((r) => tierOf(r) === 'temporary');
+  if (built.length <= RECENT_POSTINGS) return [];
+  const newest = [...built].sort((a, b) => String(madeAt(b)).localeCompare(String(madeAt(a))));
+  return newest.slice(RECENT_POSTINGS).filter((r) => !keep(r));
+}
+const showOlderRow = (n) => el('option', { value: SHOW_OLDER, textContent: `Show ${n} older posting${n === 1 ? '' : 's'}…` });
+
 /**
  * What the drafting buttons are actually drawing on, said beside them.
  *
@@ -702,9 +725,25 @@ function listSelection(bullet) {
   return state.listEdits?.[bullet.id] ?? saved[bullet.id] ?? bullet.items.map((i) => i.id);
 }
 
+/**
+ * The key a section's unsaved edits are filed under.
+ *
+ * Its kind, for the first section of that kind — which is every section
+ * nearly always — and its place among them for any after it. A resume can
+ * hold two `custom` sections, "Awards" and "Leadership", and keyed by kind
+ * alone they shared one overlay: switching an entry off under Awards wrote a
+ * list for "custom" that was then read, and saved, as Leadership's too.
+ */
+function sectionKey(section) {
+  const same = resolveSections().filter((s) => s.kind === section.kind);
+  let at = same.indexOf(section);
+  if (at < 0) at = same.findIndex((s) => (s.heading ?? '') === (section.heading ?? ''));
+  return at <= 0 ? section.kind : `${section.kind}:${at}`;
+}
+
 /** Which entries a section shows right now, including unsaved edits. */
 function entrySelection(section) {
-  return state.entryEdits?.[section.kind] ?? section.entries ?? [];
+  return state.entryEdits?.[sectionKey(section)] ?? section.entries ?? [];
 }
 
 /** Which bullets an entry shows right now, including unsaved edits. */
@@ -752,12 +791,13 @@ function currentSpec() {
      */
     for (const mine of resolveSections()) {
       const entries = entrySelection(mine);
+      const key = sectionKey(mine);
 
       const editedHere =
         mine.kind === 'skills'
           ? Boolean(state.skillEdits && (mine.groups ?? []).some((g) => g in state.skillEdits))
-          : Boolean(state.entryEdits && mine.kind in state.entryEdits) ||
-            Boolean(state.orderEdits && mine.kind in state.orderEdits) ||
+          : Boolean(state.entryEdits && key in state.entryEdits) ||
+            Boolean(state.orderEdits && key in state.orderEdits) ||
             Boolean(state.bulletEdits && entries.some((eid) => eid in state.bulletEdits)) ||
             Boolean(state.bulletOrderEdits && entries.some((eid) => eid in state.bulletOrderEdits));
 
@@ -774,9 +814,9 @@ function currentSpec() {
       const next = { ...mine };
       // The entry list is written down when the user changed which entries
       // show. A bullet they hid is not a decision about the entry list.
-      if (state.entryEdits && mine.kind in state.entryEdits) next.entries = entries;
+      if (state.entryEdits && key in state.entryEdits) next.entries = entries;
       /* What decides the order, written down whenever it was chosen here. */
-      if (state.orderEdits && mine.kind in state.orderEdits) next.order = state.orderEdits[mine.kind];
+      if (state.orderEdits && key in state.orderEdits) next.order = state.orderEdits[key];
       const bullets = { ...(mine.bullets ?? {}) };
       for (const eid of entries) {
         if (state.bulletEdits?.[eid]) bullets[eid] = state.bulletEdits[eid];
@@ -1811,7 +1851,7 @@ function setEntryIncluded(section, entry, checked) {
   else next.delete(entry.id);
   const ordered = current.filter((id) => next.has(id));
   for (const id of next) if (!ordered.includes(id)) ordered.push(id);
-  state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+  state.entryEdits = { ...(state.entryEdits ?? {}), [sectionKey(section)]: ordered };
 }
 
 /* ------------------------------------------------------------------ *
@@ -1915,11 +1955,11 @@ function dropTarget(row, { kind, id, onDrop }) {
 
 /** How this section is ordered right now, including unsaved changes. */
 function sectionOrder(section) {
-  return state.orderEdits?.[section.kind] ?? section.order ?? 'manual';
+  return state.orderEdits?.[sectionKey(section)] ?? section.order ?? 'manual';
 }
 
 function setSectionOrder(section, order) {
-  state.orderEdits = { ...(state.orderEdits ?? {}), [section.kind]: order };
+  state.orderEdits = { ...(state.orderEdits ?? {}), [sectionKey(section)]: order };
   markDirty();
   render();
 }
@@ -2324,7 +2364,7 @@ function entryBlock(entry, section, choices) {
  * not move it on the resume it was copied from.
  */
 function setEntryOrder(section, ordered) {
-  state.entryEdits = { ...(state.entryEdits ?? {}), [section.kind]: ordered };
+  state.entryEdits = { ...(state.entryEdits ?? {}), [sectionKey(section)]: ordered };
   /*
    * Dragging is an instruction, so it also turns the sort off.
    *
@@ -2335,7 +2375,7 @@ function setEntryOrder(section, ordered) {
    * anything: the arrangement stays in the list underneath.
    */
   if (sectionOrder(section) !== 'manual') {
-    state.orderEdits = { ...(state.orderEdits ?? {}), [section.kind]: 'manual' };
+    state.orderEdits = { ...(state.orderEdits ?? {}), [sectionKey(section)]: 'manual' };
     setStatus('Arranged by hand — the date sort for this section is off');
   }
   markDirty();
@@ -2582,7 +2622,7 @@ function skillsBlock(section) {
 
   frag.append(
     el('div', { className: 'add-row' }, [
-      el('button', { className: 'link', textContent: '+ Add skill group', onclick: addSkillGroup }),
+      el('button', { className: 'link', textContent: '+ Add skill group', onclick: () => addSkillGroup(section) }),
     ]),
   );
   return frag;
@@ -2901,7 +2941,7 @@ function renderEditor() {
         ? el('button', {
             className: 'link',
             textContent: '+ Add entry',
-            onclick: () => addEntry(section.kind),
+            onclick: () => addEntry(section.kind, section),
           })
         : null,
     ]);
@@ -3359,7 +3399,9 @@ async function reviewDraftedEntry(entry, repo, kind) {
   setStatus(`Added "${entry.title}" — every wording is unreviewed`);
 }
 
-async function addEntry(kind) {
+async function addEntry(kind, into) {
+  // Which section, when there are two of this kind: the one whose button it was.
+  const key = into ? sectionKey(into) : kind;
   const answer = await form(`New ${kind} entry`, [
     { name: 'title', label: kind === 'education' ? 'School' : kind === 'project' ? 'Project name' : 'Company', value: '' },
     { name: 'subtitle', label: FIELD_LABELS.subtitle, value: '' },
@@ -3435,14 +3477,21 @@ async function addEntry(kind) {
      */
     const root = resumeById(state.resumeId);
     const rootEntries = (id2) => (root.sections ?? []).find((s) => s.kind === id2)?.entries ?? [];
+    /*
+     * Into one section. Every section of the kind got it, so an entry added
+     * under Leadership also appeared under Awards.
+     */
+    const target = (root.sections ?? []).find((s) => s.kind === kind && sectionKey(s) === key) ??
+      (root.sections ?? []).find((s) => s.kind === kind);
     const sections = (root.sections ?? []).map((s) =>
-      s.kind === kind ? { ...s, entries: [...(s.entries ?? []), id] } : s,
+      s === target ? { ...s, entries: [...(s.entries ?? []), id] } : s,
     );
-    if (!sections.some((s) => s.kind === kind)) {
+    if (!target) {
       sections.push({ kind, entries: [...rootEntries(kind), id] });
     }
-    if (state.entryEdits?.[kind] && !state.entryEdits[kind].includes(id)) {
-      state.entryEdits = { ...state.entryEdits, [kind]: [...state.entryEdits[kind], id] };
+    const overlay = target ? sectionKey(target) : kind;
+    if (state.entryEdits?.[overlay] && !state.entryEdits[overlay].includes(id)) {
+      state.entryEdits = { ...state.entryEdits, [overlay]: [...state.entryEdits[overlay], id] };
     }
     await saveResumeSpec({ ...root, sections }, `Added ${id}`);
   });
@@ -4547,7 +4596,14 @@ async function removeSkill(group, item) {
   scheduleRender();
 }
 
-async function addSkillGroup() {
+async function addSkillGroup(into) {
+  /*
+   * Which skills section, when there are two: the one whose button it was.
+   * By place, because the store is reloaded before the resume is written and
+   * the section object is a different one by then. The group went into every
+   * skills section, and printed once under each heading.
+   */
+  const at = into ? (resumeById(state.resumeId)?.sections ?? []).indexOf(into) : -1;
   const answer = await form('New skill group', [
     { name: 'name', label: 'Group name, e.g. Languages', value: '' },
     { name: 'items', label: 'Skills, comma separated', value: '' },
@@ -4587,8 +4643,9 @@ async function addSkillGroup() {
 
     // The open resume's own sections, for the reason given in addEntry.
     const root = resumeById(state.resumeId);
-    const sections = (root.sections ?? []).map((s) =>
-      s.kind === 'skills' ? { ...s, groups: [...(s.groups ?? []), id] } : s,
+    const target = root.sections?.[at]?.kind === 'skills' ? at : (root.sections ?? []).findIndex((s) => s.kind === 'skills');
+    const sections = (root.sections ?? []).map((s, i) =>
+      i === target ? { ...s, groups: [...(s.groups ?? []), id] } : s,
     );
     if (!sections.some((s) => s.kind === 'skills')) {
       sections.push({ kind: 'skills', entries: [], groups: [id] });
@@ -6702,6 +6759,24 @@ async function flushDraftEdits() {
  * at all, until the draft happened to be reopened. See the Workspace tab.
  */
 function drawResumeChoices(select, draft) {
+  const option = (r) => el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId });
+  /*
+   * The ones made for this application first, under a heading of their own.
+   *
+   * "Temporary resumes created for a job application should always be on the
+   * very top … when looking at that very job application." This was the
+   * store's order, so the resume tailored for this posting sat wherever its
+   * file happened to fall. Made for it means temporary, and either the one
+   * this application holds or one generated for this company and role.
+   */
+  const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+  const forThis = (r) =>
+    tierOf(r) === 'temporary' &&
+    (r.id === draft.resumeId || (r.generatedFor && same(r.generatedFor.company, draft.company) && same(r.generatedFor.role, draft.role)));
+  const resumes = state.store.resumes ?? [];
+  const own = resumes.filter(forThis);
+  const older = draftAllPostings ? [] : olderPostings(resumes.filter((r) => !own.includes(r)), (r) => r.id === draft.resumeId);
+  const rest = resumes.filter((r) => !own.includes(r) && !older.includes(r));
   select.replaceChildren(
     /*
      * A placeholder when nothing is attached yet.
@@ -6712,11 +6787,15 @@ function drawResumeChoices(select, draft) {
      * An empty choice is the honest thing to show when no choice has been made.
      */
     ...(draft.resumeId ? [] : [el('option', { value: '', textContent: '— choose a resume —' })]),
-    ...state.store.resumes.map((r) =>
-      el('option', { value: r.id, textContent: r.label, selected: r.id === draft.resumeId }),
-    ),
+    ...(own.length
+      ? [el('optgroup', { label: 'For this application' }, own.map(option)), el('optgroup', { label: 'Everything else' }, rest.map(option))]
+      : rest.map(option)),
+    ...(older.length ? [showOlderRow(older.length)] : []),
   );
 }
+
+/** Whether the Workspace picker has been asked for its older postings. See `RECENT_POSTINGS`. */
+let draftAllPostings = false;
 
 function renderDraft(draft) {
   const panel = $('#draft-editor');
@@ -7035,6 +7114,11 @@ function renderDraft(draft) {
   drawResumeChoices(resumeSelect, draft);
   resumeSelect.onchange = async () => {
     if (!resumeSelect.value) return;
+    if (resumeSelect.value === SHOW_OLDER) {
+      draftAllPostings = true;
+      drawResumeChoices(resumeSelect, draft);
+      return;
+    }
     draft.resumeId = resumeSelect.value;
     await save('Resume changed');
     // Attaching one is what unlocks building the files, and the button that
@@ -10212,7 +10296,9 @@ function render() {
     extended: 'Kept',
     temporary: 'Made for a posting — swept when it is done',
   };
-  const groups = TIER_ORDER.map((tier) => [LABELS[tier], state.store.resumes.filter((r) => tierOf(r) === tier)])
+  const older = state.allPostings ? [] : olderPostings(state.store.resumes, (r) => r.id === state.resumeId);
+  const listed = state.store.resumes.filter((r) => !older.includes(r));
+  const groups = TIER_ORDER.map((tier) => [LABELS[tier], listed.filter((r) => tierOf(r) === tier)])
     .filter(([, list]) => list.length > 0);
 
   select.replaceChildren(
@@ -10221,7 +10307,8 @@ function render() {
     // reads better as a plain list than as a list under a heading.
     ...(groups.length > 1
       ? groups.map(([label, list]) => el('optgroup', { label }, list.map(option)))
-      : state.store.resumes.map(option)),
+      : listed.map(option)),
+    ...(older.length ? [showOlderRow(older.length)] : []),
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
   drawWayBack();
@@ -10672,6 +10759,12 @@ async function boot() {
 
   $('#resume-select').onchange = async (e) => {
     const next = e.target.value;
+    // Not a resume: the rest of the list. See `RECENT_POSTINGS`.
+    if (next === SHOW_OLDER) {
+      state.allPostings = true;
+      render();
+      return;
+    }
     const moved = await leaveResume(() => {
       state.masterView = next === '__master__';
       if (!state.masterView) state.resumeId = next;
