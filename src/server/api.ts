@@ -619,8 +619,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * trip; one entry per resume.
    */
   const lastSaveOrder = new Map<string, { page: string; n: number }>();
-  /** The same for each Workspace draft. See the draft PUT. */
+  /** The same for each Workspace draft, and each entry. See their PUTs. */
   const lastDraftOrder = new Map<string, { page: string; n: number }>();
+  const lastEntryOrder = new Map<string, { page: string; n: number }>();
   const savedOrderOf = (raw: unknown): { page: string; n: number } | null => {
     const match = typeof raw === 'string' ? /^([\w-]{1,64}):(\d{1,15})$/.exec(raw) : null;
     return match ? { page: match[1]!, n: Number(match[2]) } : null;
@@ -1243,6 +1244,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         } as Entry,
         store,
       );
+
+      /*
+       * `?order=<page>:<n>`, as on the resume PUT: a save older than one
+       * already written from the same page is not written.
+       *
+       * The editor saves an entry one write at a time, except on the way out
+       * of the page, where an inline edit still queued behind a save of the
+       * same entry is sent beside it (see `sendEntryEditsLeaving` in
+       * web/app.js). It carries that save's edit too, so the older arriving
+       * second would only take the newer edit away. It is answered with what
+       * is stored. Only saves from one page are compared, and a write without
+       * `order` is written as it always was. Checked and recorded with
+       * nothing awaited before the write.
+       */
+      const order = savedOrderOf(req.query.order);
+      if (order) {
+        const last = lastEntryOrder.get(id);
+        if (last && last.page === order.page && order.n <= last.n) {
+          res.json(stored ?? entry);
+          return;
+        }
+        lastEntryOrder.set(id, order);
+      }
 
       await withCommit(repo, autoCommit(), `Update entry "${entry.id}"`, () => store.saveEntry(entry));
       res.json(entry);

@@ -2508,6 +2508,39 @@ describe('resume saves that carry their order', () => {
 });
 
 /*
+ * And for an entry. On the way out of the page an inline edit still queued
+ * behind a save of the same entry is sent beside it, carrying that save's
+ * edit too (see `sendEntryEditsLeaving` in web/app.js).
+ */
+describe('entry saves that carry their order', () => {
+  const entry = () => t.store.load().entries.find((e) => e.id === 'exp_acme')!;
+  const save = (title: string, order?: string) =>
+    request(app)
+      .put(`/api/entries/exp_acme${order ? `?order=${order}` : ''}`)
+      .send({ ...entry(), title })
+      .expect(200);
+
+  it('does not write a save older than one already written from the same page', async () => {
+    await save('Both edits', 'page-a:4');
+    const late = await save('First edit only', 'page-a:3');
+    expect(entry().title).toBe('Both edits');
+    expect(late.body.title).toBe('Both edits');
+    await save('Again', 'page-a:4');
+    expect(entry().title).toBe('Both edits');
+  });
+
+  it('writes a newer one, one from another page, and one with no order', async () => {
+    await save('One', 'page-a:1');
+    await save('Two', 'page-a:2');
+    expect(entry().title).toBe('Two');
+    await save('Other page', 'page-b:1');
+    expect(entry().title).toBe('Other page');
+    await save('Unordered');
+    expect(entry().title).toBe('Unordered');
+  });
+});
+
+/*
  * The same for a Workspace draft. Its saves go one at a time, except on the
  * way out of the page, where the latest goes beside the one still out (see
  * `saveDraftNow` in web/app.js). Each carries the whole draft.

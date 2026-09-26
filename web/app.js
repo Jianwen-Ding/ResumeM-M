@@ -1280,7 +1280,9 @@ async function flushEdits({ leaving = false } = {}) {
  *    two is written (see `saveDraftNow`).
  *  - Inline saves are already out: they were sent when the line was
  *    committed, with `keepalive`. An entry's commits itself; the profile's is
- *    uncommitted, like the resume's.
+ *    uncommitted, like the resume's. All but a second edit of one entry
+ *    queued behind the first's save, which goes now, with the first in it
+ *    (see `sendEntryEditsLeaving`).
  *  - The commit, last, naming the uncommitted writes of this page still
  *    waiting on a reply (see `unsettledOrders`). It can reach the server
  *    ahead of them, so the server holds it until they have landed, for a few
@@ -1290,6 +1292,7 @@ function flushEditsLeaving() {
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
   if (state.dirty) autoSave({ leaving: true }).catch(() => {});
+  sendEntryEditsLeaving();
   clearTimeout(draftSave.timer);
   draftSave.timer = null;
   if (draftSave.dirty) saveDraftNow(undefined, { leaving: true }).catch(() => {});
@@ -1332,7 +1335,7 @@ function setSaveState(mode, detail) {
  * Waiting for each write and rebasing the next onto it is what stops the
  * second edit from carrying the first one away with it.
  */
-const entryWrites = new Map(); // id → { queue, server, pending }
+const entryWrites = new Map(); // id → { queue, server, pending, waiting, running, sent, landedOrder }
 
 /**
  * Run something that changes one entry in that entry's lane.
@@ -1343,15 +1346,48 @@ const entryWrites = new Map(); // id → { queue, server, pending }
  * A delete that overtakes a PUT still sitting in the lane gets recreated by it
  * — `PUT /entries/:id` has no existence check — as an orphan no resume
  * references, and a phrasing added beside a queued write is deleted by it.
+ *
+ * `whole` marks a whole-entry save from `saveEntry`, the one kind of write
+ * that may leave the queue early, on the way out of the page. See
+ * `sendEntryEditsLeaving`.
  */
-async function inEntryLane(id, run) {
-  const lane = entryWrites.get(id) ?? { queue: Promise.resolve(), server: null, pending: 0 };
+async function inEntryLane(id, run, { whole = false } = {}) {
+  const lane = entryWrites.get(id) ?? {
+    queue: Promise.resolve(),
+    server: null,
+    pending: 0,
+    /** Writes not started yet, in the order they were asked for. */
+    waiting: [],
+    /** Writes started and not answered yet. */
+    running: new Set(),
+    /** What the newest whole-entry save sent. */
+    sent: null,
+    /** The order of the newest whole-entry save that landed. */
+    landedOrder: 0,
+  };
   entryWrites.set(id, lane);
   lane.pending++;
 
+  /*
+   * Started once, by whichever comes first: its turn in the queue, or the page
+   * going (see `sendEntryEditsLeaving`). An async function runs up to its
+   * first `await` straight away, so on the way out the request is asked for
+   * before this returns.
+   */
+  const job = { whole, started: null };
+  job.start = (leaving = false) => {
+    if (!job.started) {
+      lane.waiting.splice(lane.waiting.indexOf(job), 1);
+      lane.running.add(job);
+      job.started = (async () => run(lane, { leaving }))().finally(() => lane.running.delete(job));
+    }
+    return job.started;
+  };
+  lane.waiting.push(job);
+
   // `queue` never rejects, so one failed write does not wedge the ones behind
   // it — each is still worth attempting on its own.
-  const mine = lane.queue.then(() => run(lane));
+  const mine = lane.queue.then(() => job.start());
   lane.queue = mine.then(
     () => {},
     () => {},
@@ -1376,31 +1412,92 @@ async function inEntryLane(id, run) {
   }
 }
 
+/**
+ * On the way out of the page: the inline edits of an entry still waiting in
+ * its lane, sent now.
+ *
+ * A second edit of one entry, made while the first's save was still out,
+ * waited behind that save, and its reply comes after the page has gone.
+ * Nothing on a gone page runs, so the second edit was never sent: fix a
+ * sentence, fix the next one while the first is saving, reload, and the
+ * second fix is gone. leaving-autosave.test.js reproduces it.
+ *
+ * Sent at once instead, it can reach the server ahead of the save still out,
+ * and that one, arriving second, would write the entry back to before it. So
+ * each whole-entry save carries `?order=<page>:<n>`, and the entry PUT does
+ * not write one older than one already written from this page (see the entry
+ * PUT in src/server/api.ts). And what it sends has the first edit in it. The
+ * second was made on a screen that still showed the entry from before the
+ * first (the screen refreshes only when a save comes back), so sent as it is
+ * it would carry the old text for the first edit, and the save that wins would
+ * lose one of the two. It is rebased onto what the save still out sent, as the
+ * queue would have rebased it onto that save's reply.
+ *
+ * Only whole-entry saves, and only while nothing else is ahead of them in the
+ * lane. A delete, a new entry or an added phrasing is a different write,
+ * without an `order` to put it back in place, and jumping it is what the lane
+ * is there to prevent. Those still wait, as before.
+ */
+function sendEntryEditsLeaving() {
+  for (const lane of entryWrites.values()) {
+    if ([...lane.running].some((job) => !job.whole)) continue;
+    for (const job of [...lane.waiting]) {
+      if (!job.whole) break;
+      // Its own caller hears how it went; this only keeps it from being unhandled meanwhile.
+      job.start(true).catch(() => {});
+    }
+  }
+}
+
 async function saveEntry(entry, message, { paint = true } = {}) {
   describeNext(message ?? 'the change');
   const id = entry.id;
   // What this edit was derived from: the store as the client last saw it.
   const base = state.store?.entries?.find((e) => e.id === id) ?? null;
 
-  await inEntryLane(id, async (lane) => {
-    // Something landed while this edit was being made: keep it, and put only
-    // what this edit actually changed on top of it.
-    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
-    /*
-     * `keepalive`, like the resume's auto-save: an inline edit committed just
-     * before the page goes is still out when it does, and a browser cancels a
-     * plain request when its page unloads. Leaving no longer waits on it (see
-     * `flushEditsLeaving`), so it has to survive on its own. An entry is a
-     * few KB of the 64KB allowance, and `fetchKeptAlive` sends it plainly when
-     * that is spent.
-     */
-    const saved = await api(`/entries/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      body: JSON.stringify(body),
-      keepalive: true,
-    });
-    lane.server = saved?.id ? saved : body;
-  });
+  await inEntryLane(
+    id,
+    async (lane, { leaving }) => {
+      /*
+       * Something landed while this edit was being made: keep it, and put only
+       * what this edit actually changed on top of it. On the way out, what the
+       * save still out sent stands in for its reply, which will not come in
+       * time. See `sendEntryEditsLeaving`.
+       */
+      const theirs = leaving ? (lane.sent ?? lane.server) : lane.server;
+      const body = theirs && base && !same(theirs, base) ? rebase(base, entry, theirs) : entry;
+      const order = ++saveOrder;
+      /*
+       * Not cleared once it lands: a save leaves the queue early only while
+       * every write running in the lane is one of these, and each of those
+       * set it as it went, so it is always what the newest of them sent.
+       */
+      lane.sent = body;
+      /*
+       * `keepalive`, like the resume's auto-save: an inline edit committed just
+       * before the page goes is still out when it does, and a browser cancels a
+       * plain request when its page unloads. Leaving no longer waits on it (see
+       * `flushEditsLeaving`), so it has to survive on its own. An entry is a
+       * few KB of the 64KB allowance, and `fetchKeptAlive` sends it plainly when
+       * that is spent.
+       */
+      const saved = await api(`/entries/${encodeURIComponent(id)}?order=${SAVE_PAGE}:${order}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+        keepalive: true,
+      });
+      /*
+       * A newer save of this entry came back first; this one says nothing.
+       * Left to, it would be what the next edit in the lane is rebased onto,
+       * and that edit would take the newer one away.
+       */
+      if (order > lane.landedOrder) {
+        lane.landedOrder = order;
+        lane.server = saved?.id ? saved : body;
+      }
+    },
+    { whole: true },
+  );
 
   setStatus(message ?? `Saved ${id}`);
   if (paint) render();

@@ -54,6 +54,9 @@ describe('an edit made just before leaving the page', () => {
   // Other requests held the same way: the next one each `match` accepts.
   let holds;
   let drafts;
+  // The stand-in server's store.
+  let data;
+  // The stand-in server's store.
   // The store's auto-commit setting, as the page is booted with it.
   let autoCommit = false;
   // How long after a reply the stand-in browser gives keepalive allowance back.
@@ -62,10 +65,14 @@ describe('an edit made just before leaving the page', () => {
   const fold = (id) => document.querySelector(`#editor .entry[data-drag-id="${id}"] .fold`);
   const resumePuts = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/resumes/'));
 
-  /** Hold the next request `match` accepts until the returned function is called. */
-  const hold = (match) => {
+  /**
+   * Hold the next request `match` accepts until the returned function is
+   * called. With `reply`, the request is handled at once and only its reply
+   * is held.
+   */
+  const hold = (match, { reply = false } = {}) => {
     let release;
-    holds.push({ match, held: new Promise((go, fail) => (release = (err) => (err ? fail(err) : go()))) });
+    holds.push({ match, reply, held: new Promise((go, fail) => (release = (err) => (err ? fail(err) : go()))) });
     // Given an error, the request fails with it instead.
     return (err) => release(err);
   };
@@ -85,7 +92,7 @@ describe('an edit made just before leaving the page', () => {
     document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
     location.hash = '#resumes';
     const fixture = makeTempStore();
-    const data = fixture.store.load();
+    data = fixture.store.load();
     fixture.cleanup();
     requests = [];
     pageGone = false;
@@ -110,6 +117,7 @@ describe('an edit made just before leaving the page', () => {
      * See `fetchKeptAlive` in web/app.js.
      */
     let keptAlive = 0;
+    const entryOrders = new Map();
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
       const method = options.method ?? 'GET';
       const body = options.body ? JSON.parse(options.body) : null;
@@ -127,7 +135,7 @@ describe('an edit made just before leaving the page', () => {
       }
     }));
     const answer = async (url, method, body) => {
-      const at = holds.findIndex((h) => h.match(url, method));
+      const at = holds.findIndex((h) => !h.reply && h.match(url, method));
       if (at >= 0) await holds.splice(at, 1)[0].held;
       let result = {};
       if (url === '/api/store') result = { ...data, config: { ...data.config, git: { ...data.config.git, autoCommit } } };
@@ -140,9 +148,21 @@ describe('an edit made just before leaving the page', () => {
         result = body;
       } else if (url.startsWith('/api/workspace/')) result = drafts[decodeURIComponent(url.split('?')[0].split('/').pop())];
       else if (url.startsWith('/api/entries/') && method === 'PUT') {
-        const i = data.entries.findIndex((e) => e.id === body.id);
-        if (i >= 0) data.entries[i] = body;
-        result = body;
+        /*
+         * As the server does with `?order=<page>:<n>` (see the entry PUT in
+         * src/server/api.ts): a save older than one already written from the
+         * same page is answered with what is stored, and not written.
+         */
+        const id = decodeURIComponent(url.split('?')[0].split('/').pop());
+        const [page, n] = (new URL(url, 'http://x').searchParams.get('order') ?? '').split(':');
+        const last = entryOrders.get(id);
+        const i = data.entries.findIndex((e) => e.id === id);
+        if (page && last?.page === page && Number(n) <= last.n) result = data.entries[i];
+        else {
+          if (page) entryOrders.set(id, { page, n: Number(n) });
+          if (i >= 0) data.entries[i] = body;
+          result = body;
+        }
       } else if (url.startsWith('/api/store/save')) result = { saved: true, files: [] };
       else if (url.startsWith('/api/profile') && method === 'PUT') {
         data.profile = body;
@@ -158,6 +178,8 @@ describe('an edit made just before leaving the page', () => {
         if (i >= 0) data.resumes[i] = body;
         result = body;
       }
+      const late = holds.findIndex((h) => h.reply && h.match(url, method));
+      if (late >= 0) await holds.splice(late, 1)[0].held;
       return { ok: true, json: async () => structuredClone(result) };
     };
 
@@ -315,6 +337,152 @@ describe('an edit made just before leaving the page', () => {
     expect(leaving[0].keepalive).toBe(true);
     // And the line's own save, which a plain request would lose with the page.
     expect(entryPut.keepalive).toBe(true);
+  });
+
+  /*
+   * Two inline edits to one entry, the second made while the first's save is
+   * still out, and then the page left.
+   *
+   * An entry's saves go one at a time (see `inEntryLane`), so the second
+   * waited behind the first, and the first's reply comes after the page has
+   * gone: the second edit was never sent. On the way out it is sent at once,
+   * on top of what the first save sent (the screen it was made from still
+   * showed the entry before the first edit), and ordered after it, so the
+   * server keeps both whichever arrives first.
+   */
+  it('sends a second inline edit of one entry on the way out, with the first in it', async () => {
+    const release = hold((url, method) => method === 'PUT' && url.startsWith('/api/entries/'));
+    const entryPuts = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/entries/'));
+    const entry = [...document.querySelectorAll('#editor .entry')].find((e) => e.querySelectorAll('.bullet .editable').length >= 2);
+    const id = entry.dataset.dragId;
+    const edit = (line, text) => {
+      line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      line.textContent = text;
+      line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    };
+    const [one, two] = entry.querySelectorAll('.bullet .editable');
+    edit(one, 'Cut p95 latency by 40%');
+    await vi.waitFor(() => expect(entryPuts().length).toBe(1));
+    const [first] = entryPuts();
+    edit(two, 'Wrote the on-call runbook');
+    await new Promise((go) => setTimeout(go, 50));
+    await leave();
+    release();
+    await new Promise((go) => setTimeout(go, 50));
+
+    const texts = (put) => put.body.bullets.flatMap((b) => b.variants.map((v) => v.text));
+    const leaving = entryPuts().filter((r) => !r.afterPageGone).slice(1);
+    expect(leaving.length).toBe(1);
+    expect(leaving[0].keepalive).toBe(true);
+    expect(texts(leaving[0])).toEqual(expect.arrayContaining(['Cut p95 latency by 40%', 'Wrote the on-call runbook']));
+    const order = (put) => new URL(put.url, 'http://x').searchParams.get('order');
+    const [page, n1] = order(first).split(':');
+    const [samePage, n2] = order(leaving[0]).split(':');
+    expect(samePage).toBe(page);
+    expect(Number(n2)).toBeGreaterThan(Number(n1));
+    // And the stand-in server, which turns the older save away as the real one does, has both.
+    const stored = data.entries.find((e) => e.id === id);
+    expect(stored.bullets.flatMap((b) => b.variants.map((v) => v.text))).toEqual(
+      expect.arrayContaining(['Cut p95 latency by 40%', 'Wrote the on-call runbook']),
+    );
+    // Sent once: the lane does not send it again behind the first's reply.
+    expect(entryPuts().filter((r) => r.afterPageGone).length).toBe(0);
+  });
+
+  /*
+   * And the replies can come back either way round. The page was only hidden
+   * and is still here: the save sent on the way out landed and answered, and
+   * the first save's reply comes after it. Only the newest reply is what the
+   * next edit in the lane is rebased onto, or the next edit would be built on
+   * the entry from before the second, and take the second away.
+   */
+  it('rebases the next edit onto the newest save, when an older reply comes back last', async () => {
+    const release = hold((url, method) => method === 'PUT' && url.startsWith('/api/entries/'), { reply: true });
+    const entryPuts = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/entries/'));
+    const entry = [...document.querySelectorAll('#editor .entry')].find((e) => e.querySelectorAll('.bullet .editable').length >= 2);
+    const id = entry.dataset.dragId;
+    const edit = (line, text) => {
+      line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      line.textContent = text;
+      line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    };
+    const [one, two] = entry.querySelectorAll('.bullet .editable');
+    edit(one, 'Cut p95 latency by 40%');
+    await vi.waitFor(() => expect(entryPuts().length).toBe(1));
+    edit(two, 'Wrote the on-call runbook');
+    await new Promise((go) => setTimeout(go, 50));
+    await leave();
+    expect(entryPuts().length).toBe(2);
+    // Back on the page, a third edit, queued behind the two.
+    edit(one, 'Cut p95 latency by 45%');
+    await new Promise((go) => setTimeout(go, 50));
+    release();
+    await vi.waitFor(() => expect(entryPuts().length).toBe(3));
+    const texts = (put) => put.body.bullets.flatMap((b) => b.variants.map((v) => v.text));
+    expect(texts(entryPuts()[2])).toEqual(expect.arrayContaining(['Cut p95 latency by 45%', 'Wrote the on-call runbook']));
+    await vi.waitFor(() =>
+      expect(data.entries.find((e) => e.id === id).bullets.flatMap((b) => b.variants.map((v) => v.text))).toEqual(
+        expect.arrayContaining(['Cut p95 latency by 45%', 'Wrote the on-call runbook']),
+      ),
+    );
+    await new Promise((go) => setTimeout(go, 100));
+  });
+
+  /*
+   * But not past a write of another kind. A delete still out has no `order`
+   * to put an edit sent beside it back in place, and an entry PUT reaching the
+   * server after the delete recreates the entry as an orphan. The edit waits
+   * behind it, as it always did.
+   */
+  it('keeps an inline edit queued behind a delete of its entry where it is', async () => {
+    const release = hold((url, method) => method === 'DELETE' && url.startsWith('/api/entries/'));
+    const entryPuts = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/entries/'));
+    const entry = [...document.querySelectorAll('#editor .entry')].find((e) => e.querySelector('.bullet .editable'));
+    entry.querySelector('.entry-actions button.danger').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    document.querySelector('#modal-ok').click();
+    await vi.waitFor(() => expect(requests.some((r) => r.method === 'DELETE' && r.url.startsWith('/api/entries/'))).toBe(true));
+    const line = entry.querySelector('.bullet .editable');
+    line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    line.textContent = 'Cut p95 latency by 40%';
+    line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((go) => setTimeout(go, 50));
+    await leave();
+    expect(entryPuts().filter((r) => !r.afterPageGone)).toEqual([]);
+    // Let the lane run out before the stand-in fetch is taken away.
+    release();
+    await vi.waitFor(() => expect(entryPuts().length).toBe(1));
+    await new Promise((go) => setTimeout(go, 100));
+  });
+
+  // Nor past one still waiting its turn, behind a save of the entry still out.
+  it('keeps an inline edit queued behind a queued delete of its entry where it is', async () => {
+    const release = hold((url, method) => method === 'PUT' && url.startsWith('/api/entries/'));
+    const entryPuts = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/entries/'));
+    const entry = [...document.querySelectorAll('#editor .entry')].find((e) => e.querySelectorAll('.bullet .editable').length >= 2);
+    const [one, two] = entry.querySelectorAll('.bullet .editable');
+    const edit = (line, text) => {
+      line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      line.textContent = text;
+      line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    };
+    edit(one, 'Cut p95 latency by 40%');
+    await vi.waitFor(() => expect(entryPuts().length).toBe(1));
+    entry.querySelector('.entry-actions button.danger').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+    document.querySelector('#modal-ok').click();
+    await new Promise((go) => setTimeout(go, 50));
+    edit(two, 'Wrote the on-call runbook');
+    await new Promise((go) => setTimeout(go, 50));
+    await leave();
+    expect(entryPuts().filter((r) => !r.afterPageGone).length).toBe(1);
+    release();
+    await vi.waitFor(() => expect(requests.some((r) => r.method === 'DELETE')).toBe(true));
+    await vi.waitFor(() => expect(entryPuts().length).toBe(2));
+    // The delete went before the edit queued behind it, as the lane asked.
+    const del = requests.findIndex((r) => r.method === 'DELETE');
+    expect(del).toBeLessThan(requests.indexOf(entryPuts()[1]));
+    await new Promise((go) => setTimeout(go, 100));
   });
 
   /*
