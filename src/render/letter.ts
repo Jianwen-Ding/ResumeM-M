@@ -251,8 +251,13 @@ function paragraphs(body: string): string[] {
     };
     for (const line of block.split('\n')) {
       if (!line.trim()) continue;
+      const heading = HEADING.exec(line);
       const item = LIST_ITEM.exec(line);
-      if (item) {
+      if (heading) {
+        endProse();
+        endList();
+        out.push(`\\textbf{${proseTex(heading[1]!)}}`);
+      } else if (item) {
         endProse();
         items.push({ label: item[2] ? `${item[2]}${item[3]}` : '\\textbullet', text: item[4]! });
       } else if (items.length) {
@@ -267,6 +272,13 @@ function paragraphs(body: string): string[] {
   }
   return out;
 }
+
+/**
+ * A markdown heading, "## Why Emberlight", which a model writing a letter
+ * sometimes adds. It printed with its hashes. Set as a bold line instead,
+ * as "**Why Emberlight**" on a line of its own already was.
+ */
+const HEADING = /^\s{0,3}#{1,6}\s+(.*?\S)(?:\s+#+)?\s*$/;
 
 /**
  * A list the writer typed as one: "- ", "* ", "• " or "1. " at the start of

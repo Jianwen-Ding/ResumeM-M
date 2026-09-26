@@ -170,6 +170,12 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
     }
   }, 180_000);
 
+  it('sets a markdown heading as a line of its own, without its hashes', async () => {
+    const { lines: got } = await lines({ profile, company: 'Emberlight', role: 'Intern', date: 'September 26, 2026', body: `## Why Emberlight\n${P}` });
+    expect(got).toContain('Why Emberlight');
+    expect(got.join('\n')).not.toContain('#');
+  }, 120_000);
+
   it('and a long one still on one page', async () => {
     const { r } = await lines({ profile, company: 'Emberlight', role: 'Intern', body: Array.from({ length: 6 }, () => `${P} ${P}`).join('\n\n') });
     expect(r.pages).toBe(1);
