@@ -95,13 +95,44 @@ function hasGreeting(body: string): boolean {
 const SIGN_OFF_LINE =
   /^(sincerely|best|best regards|kind regards|warm regards|warmly|regards|yours|yours truly|yours sincerely|yours faithfully|thank you|many thanks|thanks)[,.]?$/i;
 
-function hasSignOff(body: string, name: string): boolean {
-  const lines = body.trimEnd().split('\n').slice(-4).map((l) => l.trim());
-  if (lines.some((line) => SIGN_OFF_LINE.test(line))) return true;
+/**
+ * Where the closing the writer typed starts, as an index into `lines`, or -1.
+ *
+ * The last sign-off line of the last four, else a line that is the name: so
+ * "Thank you.\n\nBest,\nMorgan" closes at "Best,", not at "Thank you.".
+ */
+function closingAt(lines: string[], name: string): number {
+  const from = Math.max(0, lines.length - 4);
+  const tail = lines.slice(from).map((l) => l.trim());
+  for (let i = tail.length - 1; i >= 0; i--) if (SIGN_OFF_LINE.test(tail[i]!)) return from + i;
 
-  const wanted = name.trim();
-  if (!wanted) return false;
-  return lines.some((line) => line.toLowerCase() === wanted.toLowerCase());
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return -1;
+  const at = tail.findIndex((line) => line.toLowerCase() === wanted);
+  return at < 0 ? -1 : from + at;
+}
+
+/**
+ * The greeting and closing the writer typed, taken off the body and kept as
+ * lines.
+ *
+ * They were left in the body, where a single newline is a wrap — so
+ * "Best,\nMorgan Testwell" printed as "Best, Morgan Testwell" on one line,
+ * and "Dear Hiring Manager,\nI am writing…" ran the greeting into the first
+ * sentence. A greeting is its own line and a closing is a block of lines, as
+ * they are when the letter adds them itself.
+ */
+function ownParts(body: string, name: string): { greeting?: string; body: string; closing?: string[] } {
+  let lines = body.replace(/\r\n?/g, '\n').trim().split('\n');
+  let greeting: string | undefined;
+  if (hasGreeting(body)) {
+    greeting = lines[0]!.trim();
+    lines = lines.slice(1);
+  }
+  const at = closingAt(lines, name);
+  if (at < 0) return { greeting, body: lines.join('\n') };
+  const closing = lines.slice(at).map((l) => l.trim()).filter(Boolean);
+  return { greeting, body: lines.slice(0, at).join('\n'), closing };
 }
 
 /**
@@ -229,18 +260,28 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
     );
   }
 
-  const bodyText = letter.body ?? '';
-  if (!hasGreeting(bodyText)) {
+  const own = ownParts(letter.body ?? '', p.name);
+  if (own.greeting) {
+    blocks.push(inlineTex(own.greeting));
+  } else {
     const greeting = letter.greeting ?? (letter.company ? `Dear ${letter.company} Hiring Team,` : 'Dear Hiring Team,');
     blocks.push(tex(greeting));
   }
 
-  const written = paragraphs(bodyText);
-  blocks.push(written.length === 0 ? '\\textit{(nothing written yet)}' : written.map(inlineTex).join('\n\n'));
+  const written = paragraphs(own.body);
+  if (written.length) blocks.push(written.map(inlineTex).join('\n\n'));
+  else if (!own.greeting && !own.closing) blocks.push('\\textit{(nothing written yet)}');
 
-  if (!hasSignOff(bodyText, p.name)) {
-    // Room under the sign-off where a signature would go.
-    blocks.push(`${tex(letter.signOff ?? 'Sincerely,')} \\\\[${(2.2 * layout.fontSizePt * layout.spacing).toFixed(1)}pt]\n${tex(p.name)}`);
+  // Room under the sign-off where a signature would go.
+  const signature = `\\\\[${(2.2 * layout.fontSizePt * layout.spacing).toFixed(1)}pt]\n`;
+  if (!own.closing) {
+    blocks.push(`${tex(letter.signOff ?? 'Sincerely,')} ${signature}${tex(p.name)}`);
+  } else {
+    // The writer's own closing, a line to a line, with the same room under
+    // their sign-off as under the one the letter would have added.
+    const [first, ...rest] = own.closing.map(inlineTex);
+    const signed = SIGN_OFF_LINE.test(own.closing[0]!) && rest.length > 0;
+    blocks.push(signed ? `${first} ${signature}${rest.join(' \\\\\n')}` : own.closing.map(inlineTex).join(' \\\\\n'));
   }
 
   return `\\begin{document}

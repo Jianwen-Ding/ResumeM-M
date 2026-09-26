@@ -87,6 +87,19 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
     expect(short.date - short.rule).toBeGreaterThan(full.date - full.rule + 72);
   }, 180_000);
 
+  it('keeps the greeting and the closing the writer typed on their own lines', async () => {
+    const { lines: got, words } = await lines({
+      profile, company: 'Emberlight', role: 'Intern', date: 'September 26, 2026',
+      body: `Dear Hiring Manager,\n${P}\n\nBest regards,\nMorgan Testwell\nmorgan.testwell@example.com`,
+    });
+    expect(got).toContain('Dear Hiring Manager,');
+    expect(got).toContain('Best regards,');
+    expect(got.slice(-2)).toEqual(['Morgan Testwell', 'morgan.testwell@example.com']);
+    // With room to sign under the sign-off, as under the one the letter adds.
+    const y = (text: string) => words.filter((w) => w.text === text).at(-1)?.y ?? NaN;
+    expect(y('Testwell') - y('regards,')).toBeGreaterThan(2 * (y('morgan.testwell@example.com') - y('Testwell')));
+  }, 120_000);
+
   it('and a long one still on one page', async () => {
     const { r } = await lines({ profile, company: 'Emberlight', role: 'Intern', body: Array.from({ length: 6 }, () => `${P} ${P}`).join('\n\n') });
     expect(r.pages).toBe(1);
