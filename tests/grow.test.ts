@@ -345,6 +345,73 @@ describe.skipIf(!hasEngine)('an entry heading too long for its row', () => {
   }, 90_000);
 });
 
+describe.skipIf(!hasEngine)('a page too wide at the ceiling, with room left on it', () => {
+  const withProject = (bulletText?: string) => {
+    const r = twoPager(2);
+    if (bulletText) r.sections[1]!.entries[0]!.bullets[0]!.text = bulletText;
+    r.sections.splice(2, 0, {
+      kind: 'project',
+      heading: 'Projects',
+      skillGroups: [],
+      entries: [
+        {
+          id: 'p0',
+          kind: 'project',
+          title: 'Telemetry Ingestion Service Rewrite With Regional Failover',
+          subtitle: 'TypeScript, Go, Kafka, PostgreSQL, Kubernetes, Terraform',
+          dates: 'Jan. 2023 -- Aug. 2024',
+          location: 'Boston, MA',
+          bullets: [{ id: 'pb0', variantId: 'v', text: 'Cut p99 latency from 900ms to 180ms with a regional failover design' }],
+        },
+      ],
+    });
+    return r;
+  };
+  const headingLines = (lines: string[]) =>
+    lines.findIndex((l, i) => i > lines.findIndex((m) => /Telemetry Ingestion/.test(m)) && /•/.test(l)) -
+    lines.findIndex((l) => /Telemetry Ingestion/.test(l));
+
+  /*
+   * At the ceiling the project heading wraps onto a third line, and the
+   * search gave up after two tries at the same mix of type and margins: the
+   * page kept its 10.5pt type with a third of it empty.
+   */
+  it('grows the type into the width the margins give back, and wraps no heading further', async () => {
+    const dir = tempDir('rmm-wide-');
+    const r = withProject();
+    const written = path.join(dir, 'written.pdf');
+    const grown = path.join(dir, 'grown.pdf');
+    await compileResume({ ...r, layout: { ...r.layout, autoFit: false } }, { pdfPath: written });
+    const fitted = await compileResume(r, { pdfPath: grown });
+    expect(fitted.pages).toBe(1);
+    expect(fitted.layout.fontSizePt).toBeGreaterThan(11);
+    expect(headingLines(await pageLines(grown, 1))).toBe(headingLines(await pageLines(written, 1)));
+    expect(fitted.warnings.filter((w) => /right-hand edge/.test(w))).toEqual([]);
+  }, 120_000);
+
+  /*
+   * A link already past the edge as written is the author's to shorten. It
+   * held the type at 10.5pt, though larger type at the same margins sets it
+   * no further over.
+   */
+  it('and a line already past the edge as written does not stop it, as long as it goes no further', async () => {
+    const link = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz/edit';
+    const r = withProject(`Design doc: ${link}`);
+    const over = (warnings: string[]) => {
+      const w = warnings.find((x) => /right-hand edge/.test(x));
+      return w ? { lines: /(\d+) lines run/.exec(w)?.[1] ?? '1', widest: Number(/widest by (\d+)pt/.exec(w)?.[1]) } : undefined;
+    };
+    const asWritten = over((await compileResume({ ...r, layout: { ...r.layout, autoFit: false } })).warnings);
+    expect(asWritten).toBeDefined();
+    const fitted = await compileResume(r);
+    expect(fitted.pages).toBe(1);
+    expect(fitted.layout.fontSizePt).toBeGreaterThan(11);
+    const now = over(fitted.warnings)!;
+    expect(now.lines).toBe(asWritten!.lines);
+    expect(now.widest).toBeLessThanOrEqual(asWritten!.widest + 1);
+  }, 120_000);
+});
+
 describe('how large it may go, set like the floors', () => {
   it('merges a save’s ceiling with this version’s, one knob at a time', () => {
     const layout = layoutFor(undefined, { growBounds: { maxFontSizePt: 11.5 } });

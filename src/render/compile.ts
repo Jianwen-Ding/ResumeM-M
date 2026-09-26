@@ -623,7 +623,8 @@ interface Tried {
  * doc's link in it that set cleanly as written was grown until the link ran
  * 30pt off the paper. Growing is a nicety; losing text is the one thing this
  * must not do, so a layout that runs further past the edge than the one as
- * written counts as not fitting.
+ * written counts as not fitting. When that is what stops it, the margins give
+ * their width back and the type goes on growing into it.
  */
 async function fitSearch<A extends Tried>(
   base: LayoutOptions,
@@ -669,24 +670,57 @@ async function fitSearch<A extends Tried>(
   if (fitsAt(first)) {
     if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
     // On its page, and losing nothing off the side of it the page as written kept.
-    const edge = widestPastEdge(first.raw.log);
+    const edges = pastEdge(first.raw.log).sort((x, y) => y - x);
     // Nor wrapping a heading row onto more lines than the page as written
     // did: larger type would otherwise buy itself two- and three-line titles.
     const wrapped = wrappedRows(first.raw.log);
-    const roomy = (a: Tried) =>
-      a.m.pages <= pages && widestPastEdge(a.raw.log) <= edge && wrappedRows(a.raw.log) <= wrapped;
-    // In amounts of growth: 0 is as written, 1 the ceiling.
-    let fit = { g: 0, a: first };
-    const widest = await next(layoutAt(base, -1));
-    if (roomy(widest)) {
-      fit = { g: 1, a: widest };
-    } else {
-      let over = { g: 1, a: widest };
-      for (let tries = 0; tries < 2 && left > 0 && over.g - fit.g > 0.04; tries++) {
-        const g = aim(fit.g, over.g, fill(fit.a), fill(over.a));
-        const a = await next(layoutAt(base, -g));
-        if (roomy(a)) fit = { g, a };
-        else over = { g, a };
+    const wide = (a: Tried) => !noFurtherPastEdge(a.raw.log, edges) || wrappedRows(a.raw.log) > wrapped;
+    const tall = (a: Tried) => a.m.pages > pages;
+    const roomy = (a: Tried) => !tall(a) && !wide(a);
+    /*
+     * Growth in two amounts, 0 as written and 1 the ceiling: `g` for the type
+     * and the line spacing that goes with it, `h` for the margins. They move
+     * together unless the width says otherwise.
+     */
+    const at = (g: number, h: number): LayoutOptions => ({ ...layoutAt(base, -g), marginIn: layoutAt(base, -h).marginIn });
+    /*
+     * Closer to the edge between a try that fitted and one that did not.
+     * Aimed by the heights when the page ran out; halved when only the width
+     * did, which the heights say nothing about.
+     */
+    type Point = { x: number; a: A };
+    const narrow = async (along: (x: number) => LayoutOptions, fit: Point, over: Point, tries: number) => {
+      for (let i = 0; i < tries && left > 0 && over.x - fit.x > 0.04; i++) {
+        const x = tall(over.a) ? aim(fit.x, over.x, fill(fit.a), fill(over.a)) : (fit.x + over.x) / 2;
+        const a = await next(along(x));
+        if (roomy(a)) fit = { x, a };
+        else over = { x, a };
+      }
+      return { fit, over };
+    };
+    let fit: Point = { x: 0, a: first };
+    const widest = await next(at(1, 1));
+    let over: Point = { x: 1, a: widest };
+    if (roomy(widest)) fit = over;
+    // Everything grows evenly to where the page runs out, as long as it is
+    // the page that runs out.
+    else if (tall(widest)) ({ fit, over } = await narrow((g) => at(g, g), fit, over, 2));
+    /*
+     * The width stopped it with the page still not full: a heading wrapped
+     * onto another line, or a line ran further past the edge. That used to
+     * end the search with the type as written — one long project heading
+     * kept a page a third empty at 10.5pt. Both the type and the margins take
+     * width, so the margins give theirs back first, and the type grows into
+     * what they leave.
+     */
+    if (fit.a !== widest && wide(over.a) && !tall(over.a) && left > 0 && fill(fit.a) < NEARLY_FULL) {
+      const bigType = await next(at(1, 0));
+      if (roomy(bigType)) {
+        ({ fit } = await narrow((h) => at(1, h), { x: 0, a: bigType }, { x: 1, a: widest }, 2));
+      } else {
+        // At the margins as written, `at(fit.x, 0)` is no wider than `fit`
+        // and no taller, so the type's search starts from there.
+        ({ fit } = await narrow((g) => at(g, 0), fit, { x: 1, a: bigType }, 3));
       }
     }
 
@@ -1053,10 +1087,22 @@ function pastEdge(log: string): number[] {
   return [...log.matchAll(TOO_WIDE)].map((m) => Number(m[1])).filter((pt) => pt >= NOTICEABLE_PT);
 }
 
-/** How far past the edge the worst of those lines runs, in points; 0 when none does. */
-function widestPastEdge(log: string): number {
-  return Math.max(0, ...pastEdge(log));
+/**
+ * Whether no line runs further past the edge than the page as written had one
+ * run: no more such lines, and the widest no wider than the widest was, the
+ * next no wider than the next, and so on (`before` sorted widest first).
+ *
+ * Measured, not a yes-or-no. A link already off the side as written is the
+ * author's to shorten, and must not stop the page growing so long as growing
+ * does not push it further — nor excuse a second line going over.
+ */
+function noFurtherPastEdge(log: string, before: readonly number[]): boolean {
+  const now = pastEdge(log).sort((x, y) => y - x);
+  return now.length <= before.length && now.every((pt, i) => pt <= before[i]! + EDGE_SLACK_PT);
 }
+
+/** Noise in the width TeX reports for the same line at another size. */
+const EDGE_SLACK_PT = 0.5;
 
 /** Lines added by wrapping heading rows too long for one line (see `\rmmside`). */
 function wrappedRows(log: string): number {
