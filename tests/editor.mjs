@@ -2152,6 +2152,32 @@ async function main() {
         return true;
       });
       if (open) console.log('    (a dialog was open and was closed)');
+
+      /*
+       * Until a dialog's save has come back, rather than for a guessed time.
+       *
+       * These checks slept 400 to 1200ms after pressing OK and then read the
+       * dialog or the store, and a loaded machine takes longer than that: run
+       * with the page's CPU slowed and each request held a little, three read
+       * a dialog still saying "Saving…" and one a label not yet saved. Back
+       * is the dialog gone, which `form` does only once the save has landed,
+       * or up again with OK pressable and `said` above it. One that never
+       * gets there is read as it stands after ten seconds, and fails as it
+       * always did.
+       */
+      const saveCameBack = (said) =>
+        page
+          .waitForFunction(
+            (pattern) =>
+              document.querySelector('#modal').classList.contains('hidden') ||
+              (!document.querySelector('#modal-ok').disabled &&
+                new RegExp(pattern).test(document.querySelector('#modal-note').textContent)),
+            said.source,
+            { timeout: 10_000, polling: 50 },
+          )
+          .catch(() => {});
+      const closes = () => page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
+
       await page.locator('#tabs button[data-tab="applications"]').click();
       let refused = 0;
       await page.route('**/api/applications', (route) => {
@@ -2164,12 +2190,12 @@ async function main() {
       await page.locator('#f_company').fill('Wrenfield Analytics');
       await page.locator('#f_role').fill('Data Engineer');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(800);
+      await saveCameBack(/^Not saved/);
       const note = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
       check('a save that fails brings the dialog back, saying why', /^Not saved — ResumeM-M could not be reached\. What you typed is still here/.test(note), note);
       check('with what was typed still in it', (await page.locator('#f_company').inputValue().catch(() => '')) === 'Wrenfield Analytics');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(1200);
+      await closes();
       await page.unroute('**/api/applications');
       const apps = (await (await fetch(`${server.url}/api/applications`)).json()).applications ?? [];
       check('and pressing OK again saves it', apps.some((a) => a.company === 'Wrenfield Analytics'));
@@ -2178,7 +2204,7 @@ async function main() {
       await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
       await page.locator('#f_company').fill('Only a company');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(400);
+      await saveCameBack(/needs a company and a role/);
       const needs = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
       check('and a box the save needs, left empty, is asked for rather than dropped', /needs a company and a role/.test(needs), needs);
       await page.locator('#modal-cancel').click();
@@ -2193,7 +2219,11 @@ async function main() {
       await page.locator('#tabs button[data-tab="letters"]').click();
       let letGo;
       const held = new Promise((go) => (letGo = go));
+      // Read once the save is on its way: its request has reached the hold.
+      let underWay;
+      const reached = new Promise((go) => (underWay = go));
       const hold = async (route) => {
+        underWay();
         await held;
         return route.abort('connectionrefused');
       };
@@ -2203,7 +2233,7 @@ async function main() {
       await page.locator('#f_question').fill('What drew you to logistics software?');
       await page.locator('#f_answer').fill('Freight is where software meets the physical world.');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(400);
+      await Promise.race([reached, new Promise((go) => setTimeout(go, 10_000).unref())]);
       const whileSaving = await page.evaluate(() => ({
         open: !document.querySelector('#modal').classList.contains('hidden'),
         title: document.querySelector('#modal-title')?.textContent ?? '',
@@ -2215,7 +2245,7 @@ async function main() {
         JSON.stringify(whileSaving));
       check('and cannot be sent twice while it is', whileSaving.okDisabled);
       letGo();
-      await page.waitForTimeout(800);
+      await saveCameBack(/^Not saved/);
       await page.unroute('**/api/answers/save', hold);
       const late = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
       check('and when it then fails, the answer typed is still there, with the reason',
@@ -2235,13 +2265,18 @@ async function main() {
       await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
       await page.locator('#f_question').fill('What is your social security number?');
       await page.locator('#f_answer').fill('I would rather give that to a person');
+      const refusal = page
+        .waitForResponse((r) => r.url().endsWith('/api/answers/save') && r.request().method() === 'POST', { timeout: 10_000 })
+        .catch(() => undefined);
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(800);
+      await saveCameBack(/^Not saved/);
       const refusedNote = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
       check('a reason the server gives is said once, with one full stop',
         /^Not saved — This looks like/.test(refusedNote) && !/\.\./.test(refusedNote), refusedNote);
       await page.locator('#modal-cancel').click();
-      // The refusal just checked, by name.
+      // The refusal just checked, by name — once it has been heard, so it is
+      // not left to fail "nothing threw" at the end.
+      await refusal;
       for (let i = errors.length - 1; i >= errorsBefore; i--) {
         if (/^400 \/api\/answers\/save$|status of 400/.test(errors[i])) errors.splice(i, 1);
       }
@@ -2270,7 +2305,7 @@ async function main() {
       const labelShown = await page.locator('#f_label').inputValue();
       await page.locator('#f_answer').fill('Three weeks after an offer, having thought about it');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(800);
+      await saveCameBack(/^Not saved/);
       check('an answer edited while the save fails keeps its dialog, saying why',
         (await page.locator('#modal:not(.hidden)').count()) === 1 &&
           /^Not saved — ResumeM-M could not be reached/.test(await page.locator('#modal-note').innerText().catch(() => '')) &&
@@ -2281,7 +2316,13 @@ async function main() {
       await typedCard.locator('button', { hasText: 'Delete' }).click();
       await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(800);
+      // The confirmation closes at once; the delete is over when it says how it went.
+      await page
+        .waitForFunction(() => /not deleted|^Deleted/.test(document.querySelector('#status')?.textContent ?? ''), null, {
+          timeout: 10_000,
+          polling: 50,
+        })
+        .catch(() => {});
       check('and a delete that fails says so, leaving the answer listed',
         (await page.locator('#status.err').count()) > 0 && (await typedCard.count()) === 1,
         await page.locator('#status').innerText().catch(() => ''));
@@ -2300,7 +2341,7 @@ async function main() {
       await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
       await page.locator('#f_label').fill('Helios Freight');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(1000);
+      await closes();
       const relabelled = ((await (await fetch(`${server.url}/api/store`)).json()).answers ?? [])
         .find((a) => a.question === 'Earliest date you could start?');
       const labels = (relabelled?.variants ?? []).map((v) => v.label);
@@ -2313,7 +2354,7 @@ async function main() {
       await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
       await page.locator('#f_body').fill('A letter reworked for an hour.');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(800);
+      await saveCameBack(/^Not saved/);
       check('and a letter edited while the save fails keeps its dialog, saying why',
         (await page.locator('#modal:not(.hidden)').count()) === 1 &&
           /^Not saved — ResumeM-M could not be reached/.test(await page.locator('#modal-note').innerText().catch(() => '')) &&
