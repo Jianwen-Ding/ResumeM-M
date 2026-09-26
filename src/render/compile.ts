@@ -833,7 +833,35 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
 
   // Before the fit loop, not inside it: a character the engine cannot set fails
   // identically on all eight attempts, and the answer is never to shrink.
-  assertRenderable(renderLatex(resume));
+  /*
+   * And quoted from what they wrote, not from the .tex: see `unrenderableReason`.
+   * A resume's snippet came from its LaTeX, so an emoji in a bullet was
+   * reported near `really} fast launch 🚀 for snake\_case\_n` — braces and
+   * backslashes nobody typed. The line or field holding the character is
+   * searched instead: every bullet, every entry's heading lines, every skill,
+   * the section headings and the profile.
+   */
+  const p = resume.profile;
+  assertRenderable(renderLatex(resume), 'resume', [
+    ...resume.sections.flatMap((section) => [
+      ...section.entries.flatMap((entry) => [
+        ...entry.bullets.map((bullet) => bullet.text),
+        entry.title,
+        entry.subtitle,
+        entry.location,
+        entry.dates,
+      ]),
+      ...section.skillGroups.flatMap((group) => [group.name, ...group.items]),
+      section.heading,
+    ]),
+    p.name,
+    p.phone,
+    p.email,
+    p.location,
+    p.linkedin,
+    p.github,
+    p.website,
+  ]);
 
   // The fast path is only ever a preview convenience. If it is unavailable, or
   // errors on this particular document, every attempt silently falls back to
