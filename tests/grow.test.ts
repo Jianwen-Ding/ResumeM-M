@@ -7,11 +7,14 @@
  * whole sheet. Asked for: "as large fonts and margins as possible without
  * leaking onto another page".
  */
+import { execFile } from 'node:child_process';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { compileLetter, compileResume, detectEngine } from '../src/render/compile.js';
 import { letterLayout } from '../src/render/letter.js';
 import { DEFAULT_LAYOUT, layoutFor, type ResolvedResume } from '../src/model/types.js';
-import { makeTempStore } from './helpers.js';
+import { makeTempStore, tempDir } from './helpers.js';
 
 const hasEngine = await detectEngine().then(() => true).catch(() => false);
 
@@ -122,6 +125,78 @@ describe.skipIf(!hasEngine)('a resume with room to spare', () => {
     expect(r.grew).toBe(false);
     expect(r.layout.fontSizePt).toBeLessThanOrEqual(DEFAULT_LAYOUT.fontSizePt);
   }, 120_000);
+});
+
+/*
+ * A resume allowed two pages, as `maxPages: 2` permits. Its own profile and
+ * entries, so where the page breaks is decided here and not by the helper's.
+ */
+const run = promisify(execFile);
+const twoPager = (entries: number, layout: Partial<typeof DEFAULT_LAYOUT> = {}): ResolvedResume => {
+  const long = (i: number) =>
+    `Led the telemetry ingestion service ${i}, cutting p99 latency from 900ms to 180ms while raising throughput fourfold across three regions and documenting the rollout plan`;
+  const short = (i: number) => `Designed the telemetry ingestion service ${i}, cutting p99 latency from 900ms to 180ms`;
+  const entry = (i: number, bullets: string[]) => ({
+    id: `e${i}`,
+    kind: 'experience' as const,
+    title: `Brightline Systems ${i}`,
+    dates: 'Jul. 2024 -- Dec. 2024',
+    subtitle: i === 90 ? 'B.S. Computer Science' : 'Software Engineer',
+    location: 'Boston, MA',
+    bullets: bullets.map((text, j) => ({ id: `b${i}_${j}`, variantId: 'v', text })),
+  });
+  return {
+    id: 'two',
+    label: 'Two',
+    profile: {
+      name: 'Morgan Testwell',
+      email: 'morgan.testwell@example.com',
+      phone: '(555) 010-0199',
+      linkedin: 'linkedin.com/in/morgan-testwell',
+      github: 'github.com/morgantestwell',
+      website: 'morgantestwell.dev',
+    },
+    sections: [
+      { kind: 'education', heading: 'Education', entries: [entry(90, [])], skillGroups: [] },
+      {
+        kind: 'experience',
+        heading: 'Experience',
+        entries: Array.from({ length: entries }, (_, i) => entry(i, [long(i * 10), short(i * 10 + 1), long(i * 10 + 2)])),
+        skillGroups: [],
+      },
+      {
+        kind: 'skills',
+        heading: 'Technical Skills',
+        entries: [],
+        skillGroups: [
+          { id: 'g0', name: 'Languages', items: ['TypeScript', 'Go', 'Python', 'SQL'] },
+          { id: 'g1', name: 'Tools', items: ['Kubernetes', 'Terraform', 'PostgreSQL', 'Kafka'] },
+        ],
+      },
+    ],
+    layout: { ...DEFAULT_LAYOUT, ...layout },
+    warnings: [],
+  } as ResolvedResume;
+};
+
+async function pageLines(pdfPath: string, page: number): Promise<string[]> {
+  const { stdout } = await run('pdftotext', ['-layout', '-f', String(page), '-l', String(page), pdfPath, '-']);
+  return stdout.split('\n').filter((l) => l.trim());
+}
+
+describe.skipIf(!hasEngine)('a resume over two pages', () => {
+  /*
+   * Grown to its ceiling, eight entries ended page one on "Brightline
+   * Systems 4 / Software Engineer" and set all three of its bullets overleaf.
+   */
+  it('never ends a page on an entry’s heading, with its bullets overleaf', async () => {
+    const dir = tempDir('rmm-two-');
+    const pdfPath = path.join(dir, 'two.pdf');
+    const r = await compileResume(twoPager(8, { maxPages: 2 }), { pdfPath });
+    expect(r.pages).toBe(2);
+    const endOfPageOne = (await pageLines(pdfPath, 1)).slice(-2).join('\n');
+    expect(endOfPageOne).not.toMatch(/Brightline Systems \d|Software Engineer/);
+  }, 90_000);
 });
 
 describe('how large it may go, set like the floors', () => {

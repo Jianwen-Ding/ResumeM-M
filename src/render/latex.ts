@@ -501,7 +501,11 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 
 \\newcommand{\\resumeSubHeadingListStart}{\\begin{itemize}[leftmargin=0.15in, label={}]}
 \\newcommand{\\resumeSubHeadingListEnd}{\\end{itemize}}
-\\newcommand{\\resumeItemListStart}{\\begin{itemize}}
+% Never a page break between an entry's heading and its first bullet. A list
+% invites one just before it (\\@beginparpenalty is negative), so a resume
+% running onto a second page could end page one on "Company / Role" with
+% every bullet under it overleaf.
+\\newcommand{\\resumeItemListStart}{\\begin{itemize}[beginpenalty=10000]}
 \\newcommand{\\resumeItemListEnd}{\\end{itemize}\\vspace{-5\\rmmunit}}
 
 % Records where the first and last lines of content landed, so the fit checker
