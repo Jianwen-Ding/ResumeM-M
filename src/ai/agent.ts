@@ -389,7 +389,15 @@ export async function runAgent(
        * nothing decided. "Raise ai.timeoutMs" was the one thing that would
        * not have helped.
        */
-      const toolless = wiring !== null && !fs.existsSync(wiring.out);
+      /*
+       * The CLI's own transcript counts as well. A writing session files
+       * nothing until the letter is saved, so a run that spent three minutes
+       * reading and checking claims — every call answered, in the output for
+       * anyone to see — has no file yet, and was told it never reached the
+       * tools at all.
+       */
+      const called = toolCallsIn(`${e.stdout ?? ''}\n${e.stderr ?? ''}`);
+      const toolless = wiring !== null && !fs.existsSync(wiring.out) && called === 0;
       /*
        * When the CLI said why, say that instead of guessing.
        *
@@ -405,7 +413,10 @@ export async function runAgent(
           ? `It never called any of the resume tools, so the time went somewhere else — raising ` +
             `ai.timeoutMs will not help until it can reach them. "What the AI is doing" shows what ` +
             `it did instead.`
-          : `Raise ai.timeoutMs in config.yaml if it needs longer.`;
+          : called > 0
+            ? `It was working — the resume tools answered ${called} ${called === 1 ? 'call' : 'calls'} — and ` +
+              `needed longer than that. Raise the AI timeout in Settings (ai.timeoutMs) to give it more time.`
+            : `Raise ai.timeoutMs in config.yaml if it needs longer.`;
 
       watching?.ended(
         'timeout',
@@ -514,6 +525,13 @@ export function rejectedApproval(output: string, approval: string[]): boolean {
 }
 
 /**
+ * The line a CLI prints when it turns down a call to a tool: Codex's is "MCP
+ * tool call requires approval, but approval policy is never". See
+ * `deniedTools`.
+ */
+const REFUSED_CALL = /(?:tool call|\bmcp\b)[^\n]{0,80}\brequires approval\b|\brequires approval\b[^\n]{0,80}\bapproval policy\b/i;
+
+/**
  * Was the run stopped from using the tools it was given?
  *
  * Returns the sentence to say, or undefined when this is not what happened.
@@ -522,15 +540,36 @@ export function rejectedApproval(output: string, approval: string[]): boolean {
  * out, and the useful thing to say is the same either way.
  */
 export function deniedTools(stderr: string): string | undefined {
-  const lower = stderr.toLowerCase();
-  if (!/approval|approve/.test(lower)) return undefined;
-  if (!/\bmcp\b|tool call/.test(lower)) return undefined;
+  /*
+   * The refusal itself, not the two words it is made of.
+   *
+   * This asked for "approval" anywhere and "mcp" anywhere, and every Codex run
+   * has both: `codex exec` prints its settings first, `approval: never` among
+   * them, and then a line per tool call, `mcp: resume/read_posting started`.
+   * So every Codex run that failed or ran out of time was reported as the CLI
+   * refusing the tools, including one whose transcript showed the tools
+   * answering call after call until the clock ran out. It sent the person to
+   * change an approval setting that was already right.
+   */
+  if (!REFUSED_CALL.test(stderr)) return undefined;
   return (
     'The CLI would not let it use the resume tools: it asked to call one and its own approval ' +
     'policy refused, because a run with nobody watching has nobody to ask. The tools are how this ' +
     'tailoring is done, so nothing could be decided. Allow the tool calls in the CLI\u2019s own ' +
     'settings, or switch to a command that permits them.'
   );
+}
+
+/**
+ * How many calls to our own tool server the CLI's transcript shows answered.
+ *
+ * Codex prints one line as a call starts and one as it ends: `mcp:
+ * resume/read_posting (completed)`, or `(failed)` when the tool said no.
+ * Either way the server answered, so both count. Zero for a CLI that prints
+ * no such lines, which leaves the caller where it was.
+ */
+export function toolCallsIn(output: string): number {
+  return (output.match(/\bmcp: resume\/[\w-]+ \((?:completed|failed)\)/g) ?? []).length;
 }
 
 export function explainSilence(command: string, stderr: string, args: string[] = []): string {

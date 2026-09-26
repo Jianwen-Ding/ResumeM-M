@@ -18,7 +18,7 @@ const LETTER = [
   'I am writing about the software engineering internship. I have spent the last two years building data pipelines and I would like to keep doing that somewhere the data actually matters.',
   '',
   'Sincerely,',
-  'Jianwen Ding',
+  'Morgan Testwell',
 ].join('\n');
 
 describe('reading whatever file turns up', () => {
@@ -92,10 +92,10 @@ describe('reading whatever file turns up', () => {
       'Dear Northwind,',
       'Your posting mentions Kafka, which I have run in anger for about eighteen',
       'months, including the week it stopped working entirely.',
-      'Sincerely, Jianwen Ding',
+      'Sincerely, Morgan Testwell',
     ];
     expect(reflow(lines)).toBe(
-      'Dear Northwind,\n\nYour posting mentions Kafka, which I have run in anger for about eighteen months, including the week it stopped working entirely.\n\nSincerely, Jianwen Ding',
+      'Dear Northwind,\n\nYour posting mentions Kafka, which I have run in anger for about eighteen months, including the week it stopped working entirely.\n\nSincerely, Morgan Testwell',
     );
   });
 
@@ -165,7 +165,7 @@ describe('sorting blocks without a model', () => {
     expect(items).toHaveLength(1);
     expect(items[0]?.kind).toBe('letter');
     expect(items[0]?.text).toContain('Sincerely,');
-    expect(items[0]?.text).toContain('Jianwen Ding');
+    expect(items[0]?.text).toContain('Morgan Testwell');
     expect(items[0]?.by).toBe('rules');
     // A label you could find again in a list of thirty, not the opening line.
     expect(items[0]?.title).toBe('Letter to Streamly');
@@ -389,7 +389,7 @@ function compilePdf(dir: string): void {
 
 describe('reading a file and sorting it, in one call', () => {
   const FILE = Buffer.from(
-    'Dear Streamly,\n\nI am writing about the internship, having spent two years on pipelines that mostly stayed up.\n\nSincerely,\nJianwen Ding\n',
+    'Dear Streamly,\n\nI am writing about the internship, having spent two years on pipelines that mostly stayed up.\n\nSincerely,\nMorgan Testwell\n',
   );
 
   /** A stand-in CLI: whatever is passed on argv is what it "replies". */
@@ -433,7 +433,7 @@ describe('reading a file and sorting it, in one call', () => {
   const PAPERWORK = Buffer.from(
     'Dear Streamly,\n\nI am writing about the internship, having spent two years on pipelines that mostly stayed up.\n\n' +
       'SSN: 123-45-6789. Date of birth: 02/03/1999. Passport No. X1234567. Card 4111 1111 1111 1111. IBAN GB82 WEST 1234 5698 7654 32.\n' +
-      'Call me on 617-555-0100. I am a passport holder of two countries.\n\nSincerely,\nJianwen Ding\n',
+      'Call me on 617-555-0100. I am a passport holder of two countries.\n\nSincerely,\nMorgan Testwell\n',
   );
   const SECRETS = ['123-45-6789', '02/03/1999', 'X1234567', '4111 1111 1111 1111', 'GB82 WEST'];
 
@@ -550,7 +550,7 @@ describe('files that are not shaped like the examples', () => {
 });
 
 describe('a model that answers badly', () => {
-  const blocks = segment('Dear Streamly,\n\nI am applying for the internship, which I would like very much.\n\nSincerely,\nJianwen Ding');
+  const blocks = segment('Dear Streamly,\n\nI am applying for the internship, which I would like very much.\n\nSincerely,\nMorgan Testwell');
 
   it('ignores a reply whose items are not a list', () => {
     const items = readIngestPlan('{"items":"all of them"}', 'f.txt', blocks);

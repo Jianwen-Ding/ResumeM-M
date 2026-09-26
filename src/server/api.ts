@@ -23,6 +23,7 @@ import {
   phraseFeedbackPrompt,
   shortenPrompt,
   tailorPrompt,
+  type FeedbackContext,
   type TailorContext,
 } from '../ai/prompts.js';
 import { listModels } from '../ai/models.js';
@@ -36,7 +37,8 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
-import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, type PageSource } from '../jobs/extract.js';
+import { classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
+import { jobNumberIn } from '../jobs/names.js';
 import {
   applyInclusion,
   sanitizeAiPlan,
@@ -412,9 +414,10 @@ function sentBefore(
   applications: Application[],
   company: string | undefined,
   role: string | undefined,
+  url?: string,
 ): { id: string; at: string; status: ApplicationStatus } | undefined {
   if (!company?.trim() || !role?.trim()) return undefined;
-  const past = alreadySent(applications, company, role);
+  const past = alreadySent(applications, company, role, url);
   if (!past) return undefined;
   const went = (past.history ?? []).find((h) => h.status === 'applied');
   const at = went?.at ?? past.appliedAt;
@@ -609,6 +612,85 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.use(express.json({ limit: '32mb' }));
 
   const autoCommit = () => store.loadConfig().git.autoCommit;
+
+  /**
+   * The newest editor save written of each resume, as `?order=<page>:<n>`.
+   * See the resume PUT. In memory, since the race it settles lasts one round
+   * trip; one entry per resume.
+   */
+  const lastSaveOrder = new Map<string, { page: string; n: number }>();
+  /** The same for each Workspace draft, and each entry. See their PUTs. */
+  const lastDraftOrder = new Map<string, { page: string; n: number }>();
+  const lastEntryOrder = new Map<string, { page: string; n: number }>();
+  const savedOrderOf = (raw: unknown): { page: string; n: number } | null => {
+    const match = typeof raw === 'string' ? /^([\w-]{1,64}):(\d{1,15})$/.exec(raw) : null;
+    return match ? { page: match[1]!, n: Number(match[2]) } : null;
+  };
+
+  /*
+   * Which of a page's ordered writes have been answered, for a commit that
+   * has to follow them.
+   *
+   * On the way out of the page the editor cannot wait for a reply before its
+   * next request, since nothing on a gone page runs. So it sends the commit
+   * straight after the writes it has to cover (see `flushEditsLeaving` in
+   * web/app.js), and the commit can arrive first and record the store without
+   * them. Every write left for a later commit carries `?order=<page>:<n>`,
+   * and the commit names the ones still out as `?page=<page>&after=<n>,...`.
+   * `/store/save` holds such a commit until each of those has been answered,
+   * whether it was written, turned away as older than one already written, or
+   * refused; or until `COMMIT_AFTER_MS` has gone by, since a write that never
+   * arrives (the request lost, or sent to a server since restarted) must not
+   * hold the commit forever, and the commit then records what is there. In
+   * memory, a bounded number of pages and orders, since what it settles lasts
+   * one round trip.
+   */
+  const COMMIT_AFTER_MS = 5000;
+  const answered = new Map<string, { done: Set<number>; waiting: Set<() => void> }>();
+  const answersOf = (page: string) => {
+    let seen = answered.get(page);
+    if (!seen) {
+      seen = { done: new Set(), waiting: new Set() };
+      answered.set(page, seen);
+      // The oldest page first: a Map keeps the order its keys went in.
+      if (answered.size > 64) answered.delete(answered.keys().next().value!);
+    }
+    return seen;
+  };
+  api.use((req, res, next) => {
+    const order = req.method === 'GET' ? null : savedOrderOf(req.query.order);
+    if (order) {
+      let noted = false;
+      const note = () => {
+        if (noted) return;
+        noted = true;
+        const seen = answersOf(order.page);
+        seen.done.add(order.n);
+        if (seen.done.size > 512) seen.done.delete(seen.done.values().next().value!);
+        for (const wake of [...seen.waiting]) wake();
+      };
+      // `finish` once the reply is sent; `close` if the connection went first.
+      res.on('finish', note);
+      res.on('close', note);
+    }
+    next();
+  });
+  const allAnswered = (page: string, orders: number[]): Promise<void> =>
+    new Promise((settle) => {
+      const seen = answersOf(page);
+      const check = () => {
+        if (!orders.every((n) => seen.done.has(n))) return;
+        clearTimeout(timer);
+        seen.waiting.delete(check);
+        settle();
+      };
+      const timer = setTimeout(() => {
+        seen.waiting.delete(check);
+        settle();
+      }, COMMIT_AFTER_MS);
+      seen.waiting.add(check);
+      check();
+    });
 
   /**
    * A tailored copy the extension posts, kept off any resume somebody kept.
@@ -1060,6 +1142,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const flat = spec.extends ? flattenOne(spec, store.loadResumes()) : spec;
 
+      /*
+       * `?order=<page>:<n>`: a save older than one already written from the
+       * same page is not written.
+       *
+       * The editor sends its saves of a resume one at a time, except on the
+       * way out of the page, where the latest edit is sent while the save
+       * ahead of it is still out (see `autoSave` in web/app.js). The two can
+       * arrive either way round, and the older one arriving second would
+       * write the resume back to before the edit. It is answered with what
+       * is stored, as every reply here is what was actually saved. Only saves
+       * from one page are compared: another tab, or the page after a reload,
+       * has its own count, and a save without `order` — the CLI, MCP, the
+       * extension, an older page — is written as it always was. Checked and
+       * recorded with nothing awaited between here and the write, which
+       * `withCommit` makes before its first await.
+       */
+      const order = savedOrderOf(req.query.order);
+      if (order) {
+        const last = lastSaveOrder.get(flat.id);
+        if (last && last.page === order.page && order.n <= last.n) {
+          res.json(store.loadResumes().find((r) => r.id === flat.id) ?? flat);
+          return;
+        }
+        lastSaveOrder.set(flat.id, order);
+      }
+
       // `?commit=0` writes without committing. The editor auto-saves as you
       // work, and a commit per keystroke would bury the history it feeds; it
       // commits once the editing stops, through /store/save.
@@ -1136,6 +1244,29 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         } as Entry,
         store,
       );
+
+      /*
+       * `?order=<page>:<n>`, as on the resume PUT: a save older than one
+       * already written from the same page is not written.
+       *
+       * The editor saves an entry one write at a time, except on the way out
+       * of the page, where an inline edit still queued behind a save of the
+       * same entry is sent beside it (see `sendEntryEditsLeaving` in
+       * web/app.js). It carries that save's edit too, so the older arriving
+       * second would only take the newer edit away. It is answered with what
+       * is stored. Only saves from one page are compared, and a write without
+       * `order` is written as it always was. Checked and recorded with
+       * nothing awaited before the write.
+       */
+      const order = savedOrderOf(req.query.order);
+      if (order) {
+        const last = lastEntryOrder.get(id);
+        if (last && last.page === order.page && order.n <= last.n) {
+          res.json(stored ?? entry);
+          return;
+        }
+        lastEntryOrder.set(id, order);
+      }
 
       await withCommit(repo, autoCommit(), `Update entry "${entry.id}"`, () => store.saveEntry(entry));
       res.json(entry);
@@ -1419,6 +1550,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/store/save',
     handler(async (req, res) => {
       const { message, push } = req.body as { message?: string; push?: boolean };
+      // After the writes it names, when it names any. See `allAnswered`.
+      const page = typeof req.query.page === 'string' && /^[\w-]{1,64}$/.test(req.query.page) ? req.query.page : null;
+      const after = String(req.query.after ?? '')
+        .split(',')
+        .filter((n) => /^\d{1,15}$/.test(n))
+        .map(Number);
+      if (page && after.length > 0) await allAnswered(page, after);
       res.json(await saveStore(repo, { message, push: Boolean(push) }));
     }),
   );
@@ -1800,6 +1938,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         usedPt: result.usedPt,
         availablePt: result.availablePt,
         adjustments: result.adjustments,
+        /*
+         * Which way those went. A resume with room to spare is set larger now,
+         * and its adjustments read exactly like shrinking ones — "font 10.5pt
+         * → 12pt" — so the editor heads them "Enlarged to fill the page" or
+         * "Squeezed to fit" off this. It was left out of the response, and
+         * every resume auto-fit had enlarged was shown as squeezed.
+         */
+        grew: result.grew ?? false,
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         warnings: result.warnings,
@@ -2008,7 +2154,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * last built.
          */
         let tex: string | undefined;
-        let fit: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] } | undefined;
+        let fit: FeedbackContext['fit'];
         try {
           const compiled = await compileResume(resolved, {
             // A preview too — the critic wants a typeset page to look at, not
@@ -2022,6 +2168,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             fits: compiled.fits,
             overflowLines: compiled.overflowLines,
             adjustments: compiled.adjustments,
+            grew: compiled.grew,
           };
         } catch {
           // No LaTeX installed, or a resume that will not compile: the
@@ -2353,9 +2500,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (save && body.trim()) {
         saved = {
           id: letterId(job.company, job.jobTitle),
-          // Named for where it came from when the page never said who is
-          // hiring — see `employerFallback`.
-          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerFallback(job.url)}`,
+          // Named for the employer the address belongs to when the page never
+          // said who is hiring, and never for the address — see `employerOrUnknown`.
+          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerOrUnknown(job.url)}`,
           company: job.company,
           role: job.jobTitle,
           createdAt: new Date().toISOString(),
@@ -2759,7 +2906,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * `baseForCopy`. It was computed further down, which is why this path
        * never had the guard the Workspace's tailor already had.
        */
-      const employer = job.company ?? employerFallback(url);
+      /*
+       * And never a hostname. `employerFallback` hands one back where the host
+       * is a system's or a board's, and it was filed as the employer:
+       * "redhat.wd5.myworkdayjobs.com", "careers.activision.com". The first
+       * page of the application whose address reads as a name answers — this
+       * page's first, as before — and otherwise it is said to be unknown.
+       */
+      const employer = job.company ?? employerOrUnknown(url, ...trail.map((p) => p.url));
       /*
        * One pair of names, used for all three things that depend on them.
        *
@@ -2779,8 +2933,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       // Said the way the extension says it, so the tracker has one wording
       // for a page that names no job — and it says so, where "Role" read as
-      // if it were one.
-      const role = job.title ?? 'Unknown role';
+      // if it were one. With the job's number where the address gives one,
+      // or two such forms at one employer are one application: see
+      // `unnamedRole`.
+      const addresses = trail.map((p) => p.url ?? (p === current ? url : undefined));
+      const role = job.title ?? unnamedRole(addresses);
+      /*
+       * Which address says which job this is, for finding the application by
+       * its number when its employer was written another way — the oldest that
+       * names one, as `unnamedRole` reads them. See `sameJobAs`.
+       */
+      const jobAddress = addresses.find((u) => jobNumberIn(u)) ?? url;
       const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
 
       /*
@@ -2988,8 +3151,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       /*
        * "Apply — Unknown" was the label in the resume picker for every bare
-       * application form, and there is more than one of those. Named for
-       * where it came from instead — see `employerFallback`.
+       * application form, and there is more than one of those. Named for the
+       * employer the address belongs to instead — see `employerOrUnknown`.
        */
       /* What the base asks for on skills, which is what undoing a swap restores. */
       // Each group's own section's list: a resume can hold two skills sections.
@@ -3102,7 +3265,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * enough label for a resume and nowhere near good enough to tell
          * somebody they have done this already.
          */
-        applied: sentBefore(data.applications, job.company, job.title),
+        applied: sentBefore(data.applications, job.company, job.title, jobAddress),
         /*
          * And which application this page belongs to, from the first paint.
          *
@@ -3136,8 +3299,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           id:
             // Not a space left over from an application that is over: see
             // `draftForJob`.
-            draftForJob(store.loadDrafts(), data.applications, employer, role)?.id ??
-            findApplication(data.applications, employer, role)?.id ??
+            draftForJob(store.loadDrafts(), data.applications, employer, role, jobAddress)?.id ??
+            findApplication(data.applications, employer, role, jobAddress)?.id ??
             freshApplicationId(data.applications, employer, role),
           /*
            * And the resume made for it, so the card can put that one first in
@@ -3145,7 +3308,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
            * should always be on the very top … when looking at that very job
            * application". Absent until one has been built.
            */
-          resumeId: findApplication(data.applications, employer, role)?.resumeId,
+          resumeId: findApplication(data.applications, employer, role, jobAddress)?.resumeId,
         },
         score,
         kind: verdict.kind,
@@ -3497,7 +3660,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const apps = store.load().applications;
       const existing = body.id
         ? apps.find((a) => a.id === body.id)
-        : findApplication(apps, body.company, body.role);
+        : findApplication(apps, body.company, body.role, body.url);
 
       const now = new Date().toISOString();
       const status = body.status ?? existing?.status ?? 'applied';
@@ -3545,6 +3708,49 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Correct what a tracker row says it is: the company and the role.
+   *
+   * The names come from the page, and a page does not always say them well —
+   * a season taken for the employer ("Summer 2027"), a job board ("LinkedIn"),
+   * a careers site's name, a title cut off at a dash. Checked against the job
+   * sites, 28 of one person's 72 rows needed one or the other, and the only
+   * thing the tracker offered was Remove. The row keeps its id, so the files,
+   * the snapshot and anything that points at it still find it; the space it
+   * opened in the Workspace is renamed with it.
+   */
+  api.patch(
+    '/applications/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const body = (req.body ?? {}) as { company?: unknown; role?: unknown };
+      const company = typeof body.company === 'string' ? body.company.trim() : undefined;
+      const role = typeof body.role === 'string' ? body.role.trim() : undefined;
+      if (company === undefined && role === undefined) throw new Error('Say what the company or the role should be');
+      if (company === '' || role === '') throw new Error('A company and a role cannot be left empty');
+      const apps = store.load().applications;
+      const app = apps.find((a) => a.id === id);
+      if (!app) throw new Error(`No application "${id}"`);
+      const next = { ...app, ...(company !== undefined ? { company } : {}), ...(role !== undefined ? { role } : {}) };
+      await withCommit(repo, autoCommit(), `Rename application "${id}" to ${next.role} at ${next.company}`, () => {
+        const drafts = store.loadDrafts();
+        /*
+         * With the row's address, as every route that files, sends or moves a
+         * row looks for its space. A space opened under another spelling of
+         * the employer — EA's job 216245 as "Respawn Entertainment" beside a
+         * row reading "Electronic Arts" — is this job only by its number, and
+         * went unrenamed. Under the old role it then stopped being this job
+         * by its number too (see `sameJobAs`), so moving the row never found
+         * its space again.
+         */
+        const space = drafts.find((d) => d.id === id) ?? draftForJob(drafts, apps, app.company, app.role, app.url);
+        store.saveApplications(apps.map((a) => (a.id === id ? next : a)));
+        if (space) store.saveDraft({ ...space, company: next.company, role: next.role });
+      });
+      res.json(next);
+    }),
+  );
+
   api.post(
     '/applications/:id/status',
     handler(async (req, res) => {
@@ -3579,7 +3785,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           const drafts = store.loadDrafts();
           const space =
             drafts.find((d) => d.id === moved.id) ??
-            draftForJob(drafts, store.load().applications, moved.company, moved.role);
+            draftForJob(drafts, store.load().applications, moved.company, moved.role, moved.url);
           if (space && unsent && space.status === 'submitted') store.saveDraft({ ...space, status: 'drafting' });
           if (space && sent && space.status !== 'submitted') store.saveDraft({ ...space, status: 'submitted' });
         }
@@ -3675,7 +3881,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * application as `applied` while the one being worked on sat at
        * `applying` for ever. See `findApplication`.
        */
-      const tracked = findApplication(data.applications, body.company, body.role);
+      const tracked = findApplication(data.applications, body.company, body.role, body.url);
       // Not `applicationId`: a job applied for and closed earlier the same day
       // already holds the id today would make. See `freshApplicationId`.
       const id = tracked?.id ?? freshApplicationId(data.applications, body.company, body.role);
@@ -3716,7 +3922,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * not the version history; given a commit of its own, every send cost
          * a second git run.
          */
-        const draft = findDraft(store.loadDrafts(), body.company!, body.role!);
+        const draft = findDraft(store.loadDrafts(), body.company!, body.role!, body.url);
         if (draft && draft.status !== 'submitted') store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
         return recorded;
       });
@@ -3760,7 +3966,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * or a question that comes back a week later, both want the text rather
        * than the snapshot of it.
        */
-      const opened = findDraft(store.loadDrafts(), result.application.company, result.application.role);
+      const opened = findDraft(store.loadDrafts(), result.application.company, result.application.role, result.application.url);
       if (opened && result.application.status === 'applied' && opened.status !== 'submitted') {
         store.saveDraft({ ...opened, status: 'submitted', updatedAt: new Date().toISOString() });
       }
@@ -4014,8 +4220,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * under it below replaced the rejection with the repost.
        */
       const id =
-        draftForJob(store.loadDrafts(), data.applications, body.company, body.role)?.id ??
-        findApplication(data.applications, body.company, body.role)?.id ??
+        draftForJob(store.loadDrafts(), data.applications, body.company, body.role, body.url)?.id ??
+        findApplication(data.applications, body.company, body.role, body.url)?.id ??
         freshApplicationId(data.applications, body.company, body.role);
 
       // A posting-specific resume comes over with the draft; save it so the
@@ -4122,7 +4328,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         status:
           existing?.status === 'submitted'
             ? 'submitted'
-            : liveOneSent(data.applications, body.company, body.role)
+            : liveOneSent(data.applications, body.company, body.role, body.url)
               ? 'submitted'
               : (existing?.status ?? 'drafting'),
         coverLetter: existing?.coverLetter ?? {
@@ -4201,7 +4407,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
         const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
 
-        const tracked = findApplication(store.load().applications, draft.company, draft.role);
+        const tracked = findApplication(store.load().applications, draft.company, draft.role, draft.url);
         /*
          * In the draft's commit, not after it.
          *
@@ -4259,7 +4465,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * its own commit callback, synchronously too, so one of the two always
          * sees the other.
          */
-        if (draft.status !== 'submitted' && liveOneSent(store.load().applications, draft.company, draft.role)) {
+        if (draft.status !== 'submitted' && liveOneSent(store.load().applications, draft.company, draft.role, draft.url)) {
           draft.status = 'submitted';
         }
         const written = store.saveDraft(draft);
@@ -4279,6 +4485,30 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // draft, not asking which draft a job has.
       const existing = store.getDraft(id);
       if (!existing) throw new Error(`No draft "${id}"`);
+
+      /*
+       * `?order=<page>:<n>`, as on the resume PUT: a save older than one
+       * already written from the same page is not written.
+       *
+       * The editor sends a draft's saves one at a time, except on the way out
+       * of the page, where the latest is sent beside the one still out (see
+       * `saveDraftNow` in web/app.js). Either can arrive first, and each
+       * carries the whole draft, so the older arriving second would put the
+       * letter back to what it said before. It is answered with what is
+       * stored. Only saves from one page are compared, and a write without
+       * `order` (the extension, a generation, an older page) is written as it
+       * always was. Checked and recorded with nothing awaited before the
+       * write.
+       */
+      const order = savedOrderOf(req.query.order);
+      if (order) {
+        const last = lastDraftOrder.get(id);
+        if (last && last.page === order.page && order.n <= last.n) {
+          res.json(existing);
+          return;
+        }
+        lastDraftOrder.set(id, order);
+      }
 
       const patch = req.body as Partial<Draft>;
       const merged: Draft = {

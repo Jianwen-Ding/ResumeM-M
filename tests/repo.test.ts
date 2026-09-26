@@ -615,7 +615,7 @@ describe('folders that exist only between two renames', () => {
 /*
  * The flat folder of files being sent is rebuilt from the tracker whenever
  * anything changes, and `git add -- .` walking it mid-rebuild failed the whole
- * add — "unable to stat 'out/current/Jianwen-Ding-Resume.pdf'", twelve times
+ * add — "unable to stat 'out/current/Morgan-Testwell-Resume.pdf'", twelve times
  * on one test server in a single sweep, each one a save the version history
  * silently never recorded.
  */

@@ -261,6 +261,40 @@ describe('Repo.pending', () => {
     write('resumes/new grad.yaml', 'id: newgrad\nlabel: x\n');
     expect(await repo.pending()).toEqual([{ path: 'resumes/new grad.yaml', state: 'modified' }]);
   });
+
+  /*
+   * Asking what is unsaved must not take the lock a commit needs.
+   *
+   * `git status` refreshes the index and writes it back under
+   * `.git/index.lock` whenever a file's timestamps have moved, and a `git add`
+   * that starts while it holds the lock fails outright: "Unable to create
+   * '.git/index.lock': File exists". `pending` runs outside the queue that
+   * keeps commits apart: the editor's save panel, the start of every
+   * `saveStore`, the sweep. So a commit that ran beside one of them failed,
+   * and an edit had no version of its own. With three `pending` calls beside
+   * each of sixty commits, 8 of the commits failed that way.
+   *
+   * Timing is not something a test can hold still, so this checks the cause:
+   * with a file's timestamps moved and its text unchanged, `pending` leaves
+   * the index file exactly as it was.
+   */
+  it('reads what is pending without rewriting the index, so a commit beside it is not locked out', async () => {
+    write('a.yaml', 'one\n');
+    write('b.yaml', 'two\n');
+    await saveStore(repo);
+    // Same text, new timestamps: what makes `git status` refresh the index.
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(path.join(root, 'a.yaml'), later, later);
+    write('b.yaml', 'two changed\n');
+
+    const index = path.join(root, '.git', 'index');
+    const before = fs.statSync(index);
+    expect(await repo.pending()).toEqual([{ path: 'b.yaml', state: 'modified' }]);
+    const after = fs.statSync(index);
+
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
 });
 
 

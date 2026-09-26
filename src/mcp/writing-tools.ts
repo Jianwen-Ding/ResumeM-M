@@ -121,9 +121,16 @@ export function writingTools(session: WritingSession): ToolDefinition[] {
         properties: { claim: { type: 'string', description: 'What you are about to say they did.' } },
         required: ['claim'],
       },
+      /*
+       * Its answer, whichever way it goes. "Not in the resume" is what this
+       * tool is for, not a failure of it: sent as an error, a CLI showed every
+       * unsupported claim as a failed call — a run checking its numbers read
+       * as a wall of "check_claim (failed)" — and a model may take an error
+       * as something to try again rather than a claim to leave out.
+       */
       run: (args) => {
         const claim = str(args, 'claim');
-        return isResult(claim) ? claim : from(session.checkClaim(claim));
+        return isResult(claim) ? claim : text(session.checkClaim(claim).text);
       },
     },
     {

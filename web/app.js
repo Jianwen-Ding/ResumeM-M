@@ -291,6 +291,59 @@ function writeFailed(err) {
   render();
 }
 
+/*
+ * The browser's allowance for requests that outlive their page.
+ *
+ * `keepalive` is what lets a write survive the page going away, and a page
+ * gets 64KB of it: the bodies of all its keepalive requests still out,
+ * together. Past that the request is refused on the spot. It never reaches the
+ * server, and the promise rejects with `TypeError: Failed to fetch`, the same
+ * words a server that is down gets. Measured in Chromium: 63KB on its own
+ * went, 70KB on its own was refused; with 40KB held in flight, another 40KB
+ * was refused and 20KB went; and 30KB sent the moment a 40KB reply had come
+ * back was refused as well, since the browser gives the allowance back a
+ * little after the reply rather than with it.
+ *
+ * Leaving the page sends everything still owed at once (see
+ * `flushEditsLeaving`), and a Workspace draft carries the whole posting, which
+ * can be 40,000 characters on its own: the draft's save, which always had the
+ * flag, could not be saved at all past 64KB. So a keepalive write that would
+ * not fit beside the ones still out goes as a plain request, straight away,
+ * and one the browser refuses anyway (the allowance given back late) is sent
+ * again as a plain request. A plain request may not outlive the page, but it
+ * is the most that can be sent, and on a page that stays it is an ordinary
+ * save. Every write sent this way can be sent twice, and a server that is
+ * down is asked twice and fails twice.
+ *
+ * Except once the page is being unloaded. Chromium then rejects every request
+ * the page still has out, keepalive ones included, though those carry on to
+ * the server: sending again there sent every write on the way out twice. On
+ * the way out a write that does not fit is caught by the count above, before
+ * it is sent.
+ */
+const KEEPALIVE_BUDGET = 64 * 1024;
+let keepaliveInFlight = 0;
+/** Set from `pagehide` to `pageshow`: see `fetchKeptAlive`. */
+let pageUnloading = false;
+
+async function fetchKeptAlive(url, init) {
+  const plainly = () => fetch(url, { ...init, keepalive: false });
+  const size = typeof init.body === 'string' ? new Blob([init.body]).size : 0;
+  if (keepaliveInFlight + size > KEEPALIVE_BUDGET) return plainly();
+  keepaliveInFlight += size;
+  let failed;
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    failed = err;
+  } finally {
+    keepaliveInFlight -= size;
+  }
+  // Out here rather than in the `catch`, so a retry holds no allowance it is not using.
+  if (pageUnloading) throw failed;
+  return plainly();
+}
+
 async function api(path, options = {}) {
   /*
    * Undo is recorded here, and only here.
@@ -303,10 +356,39 @@ async function api(path, options = {}) {
   const docKey = undoing ? null : docKeyFor(path, options.method);
   const before = docKey ? readDoc(state.store, docKey) : null;
 
-  const res = await fetch(`/api${path}`, {
+  /*
+   * A write that is not committed yet says where it stands among this page's
+   * writes, so that a commit asked for on the way out can name the ones it
+   * has to follow. See `flushEditsLeaving`. The resume's auto-save puts its
+   * own `order` on, which the resume route also reads; the rest get theirs
+   * here.
+   */
+  const method = String(options.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && /[?&]commit=0(&|$)/.test(path) && !/[?&]order=/.test(path)) {
+    path = `${path}&order=${SAVE_PAGE}:${++saveOrder}`;
+  }
+  /*
+   * Only the uncommitted ones are waited on. A Workspace draft's save carries
+   * an `order` too, to be kept in order among the draft's own saves (see
+   * `saveDraftNow`), but it commits itself, and a commit that waited on it
+   * would wait for nothing it covers: up to the server's five seconds for a
+   * large draft sent plainly and cut short by the page unloading.
+   */
+  const uncommitted = /[?&]commit=0(&|$)/.test(path);
+  const order = uncommitted ? new RegExp(`[?&]order=${SAVE_PAGE}:(\\d+)`).exec(path)?.[1] : undefined;
+  if (order) unsettledOrders.add(Number(order));
+
+  const url = `/api${path}`;
+  const init = {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
-  });
+  };
+  let res;
+  try {
+    res = options.keepalive ? await fetchKeptAlive(url, init) : await fetch(url, init);
+  } finally {
+    if (order) unsettledOrders.delete(Number(order));
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
 
@@ -429,6 +511,18 @@ async function undoGroup(label, watch, run) {
     }
   }
 }
+/**
+ * Every resume, for a step whose write the store carries into all of them.
+ *
+ * Deleting an entry or a skills group takes it out of every resume that
+ * listed it (`forgetInResumes`, in the same write), so those resumes are part
+ * of what the step changed. Watched from before the delete: the lanes reload
+ * the store after it lands, so even the open resume read after that is
+ * already the pruned one. Ones the delete did not touch come out of the step
+ * as unchanged and cost nothing.
+ */
+const everyResume = () => (state.store?.resumes ?? []).map((r) => `resume:${r.id}`);
+
 /** What the write in flight should be called, set by the action that starts it. */
 let undoLabel = 'change';
 /** Name the next write, so the menu can say "Undo delete group". */
@@ -958,6 +1052,34 @@ let autoSaveTimer = null;
 let commitTimer = null;
 let autoSaving = null;
 
+/*
+ * Where each save of a resume stands among this page's saves.
+ *
+ * Saves go one at a time (see `autoSave`), which keeps them in order at the
+ * server, except on the way out of the page: there the latest edit cannot
+ * wait for the reply to the save ahead of it, because that reply comes after
+ * the page has gone and nothing on a gone page runs. So that one is sent
+ * while the one ahead is still out, and the two can reach the server either
+ * way round. Each save carries `?order=<page>:<n>`, and the server does not
+ * write a save of a resume older than one it has already written from the
+ * same page. The replies can come back either way round too, so the newest
+ * one to land is also the only one folded into the cached resume. Every
+ * other write left for a later commit (`?commit=0`) takes the next `n` too,
+ * in `api`, so that the commit sent on the way out can name the ones it has
+ * to follow.
+ */
+const SAVE_PAGE =
+  globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+let saveOrder = 0;
+/** Resume id to the order of the newest of this page's saves that landed. */
+const landedOrder = new Map();
+/**
+ * The orders of this page's uncommitted writes still waiting on a reply. A
+ * commit asked for on the way out names them, and the server holds it until
+ * they have landed. See `flushEditsLeaving`.
+ */
+const unsettledOrders = new Set();
+
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
   setSaveState('unsaved');
@@ -988,24 +1110,53 @@ function scheduleAutoSave() {
  * finally goes carries everything ticked while it was waiting: one write for
  * the lot, rather than a queue of them.
  */
-async function autoSave() {
+async function autoSave({ leaving = false } = {}) {
   if (!state.dirty || !state.resumeId) return;
   setSaveState('saving');
 
   const ahead = autoSaving;
   const mine = (async () => {
-    // Never rejects, so one failed write does not wedge the ones behind it.
-    if (ahead) await ahead.catch(() => undefined);
+    /*
+     * Never rejects, so one failed write does not wedge the ones behind it.
+     *
+     * Not waited for on the way out of the page. Its reply comes after the
+     * page has gone, so this edit would never have been sent: an unfold made
+     * while the fold's save was still out, and the page then left, came back
+     * folded. It goes now, and `?order` keeps the two in order at the server.
+     */
+    if (ahead && !leaving) await ahead.catch(() => undefined);
     // The write ahead may have carried this edit already.
     if (!state.dirty || !state.resumeId) return;
 
     const spec = currentSpec();
+    const order = ++saveOrder;
     state.dirty = false; // further edits re-dirty it; this one is in flight
     try {
-      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0`, {
+      /*
+       * `keepalive`, or leaving the page takes the edit with it.
+       *
+       * Hiding the page runs `flushEdits`, which starts this save straight
+       * away, and a browser cancels a plain request when its page unloads.
+       * So an unfold made just before a reload was sent and then dropped:
+       * in Chromium with the API held 600ms the PUT failed with
+       * net::ERR_ABORTED on three reloads of three, and the entry came back
+       * folded. The commit `flushEdits` sends after it already had the flag,
+       * which committed a save that never arrived.
+       *
+       * On every save, not only the one on the way out: a save the auto-save
+       * wait started can still be out when the page goes, and then
+       * `flushEdits` has nothing left to send. A resume is well under the
+       * 64KB a page may have in keepalive requests at once; the draft's save
+       * sends more than this and has always had the flag.
+       */
+      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}`, {
         method: 'PUT',
         body: JSON.stringify(spec),
+        keepalive: true,
       });
+      // A newer save of this resume came back first; this one says nothing.
+      if (order < (landedOrder.get(spec.id) ?? 0)) return;
+      landedOrder.set(spec.id, order);
       // The store now holds what the editor shows, so the unsaved edits are
       // no longer overlays on top of it.
       const stored = state.store?.resumes?.find((r) => r.id === spec.id);
@@ -1013,6 +1164,8 @@ async function autoSave() {
       setSaveState('saved');
       scheduleCommit();
     } catch (err) {
+      // Nor does it failing, when a newer save carrying this edit has landed.
+      if (order < (landedOrder.get(spec.id) ?? 0)) return;
       state.dirty = true; // it did not land; try again on the next edit
       setSaveState('failed', err.message);
     }
@@ -1061,8 +1214,12 @@ function scheduleCommit() {
 /**
  * Write and commit right now — before switching resumes, or on the way out of
  * the page. `keepalive` is what lets the last write survive the tab closing.
+ *
+ * Returns whether the inline saves it waited on landed. On the way out it
+ * waits on nothing; see `flushEditsLeaving`.
  */
-async function flushEdits() {
+async function flushEdits({ leaving = false } = {}) {
+  if (leaving) return flushEditsLeaving();
   // The Workspace's typing too. Every path out of a page already calls this —
   // closing the tab, switching resumes, following a deep link — and the draft
   // was the one thing it did not cover.
@@ -1091,6 +1248,62 @@ async function flushEdits() {
     await api('/store/save', { method: 'POST', body: JSON.stringify({}), keepalive: true }).catch(() => {});
   }
   return inline.every((r) => r.status === 'fulfilled');
+}
+
+/**
+ * On the way out of the page: every write still owed, sent now, none of them
+ * waiting on another.
+ *
+ * Nothing on a gone page runs, so a write asked for after a reply is not
+ * asked for at all once the page has gone first. `flushEdits` went through
+ * the writes in turn and waited on each: the Workspace's draft save, then
+ * every inline save, then the resume's save, then the commit. Measured in
+ * Chromium, with the draft's save held 3s and the resume's 600ms: an entry
+ * folded while the draft's save was out, and the tab then closed, never sent
+ * the resume's save, three closes of three. And the commit, with nothing
+ * else out, was never sent when the tab closed; on a reload the page's
+ * pending requests are cut short and it did go, but straight away, ahead of
+ * the save it was meant to follow, and committed without it, three reloads
+ * of three. The edit reached the disk and not the version history, until
+ * whatever next happened to commit.
+ *
+ * So each goes now, with `keepalive`, and the server puts them back in order:
+ *
+ *  - The resume's save, first: it is small, and first is where the browser's
+ *    64KB keepalive allowance is surest to have room (see `fetchKeptAlive`).
+ *    It does not wait for a save of the resume still out; `?order` settles
+ *    which of the two is written (see `autoSave`).
+ *  - The draft's save, which commits itself. A draft carries its posting and
+ *    can be large; when it does not fit beside the rest it goes as a plain
+ *    request, which is as good as it could do. Like the resume's, it does not
+ *    wait for a save of the draft still out; `?order` settles which of the
+ *    two is written (see `saveDraftNow`).
+ *  - Inline saves are already out: they were sent when the line was
+ *    committed, with `keepalive`. An entry's commits itself; the profile's is
+ *    uncommitted, like the resume's. All but a second edit of one entry
+ *    queued behind the first's save, which goes now, with the first in it
+ *    (see `sendEntryEditsLeaving`).
+ *  - The commit, last, naming the uncommitted writes of this page still
+ *    waiting on a reply (see `unsettledOrders`). It can reach the server
+ *    ahead of them, so the server holds it until they have landed, for a few
+ *    seconds at most.
+ */
+function flushEditsLeaving() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  if (state.dirty) autoSave({ leaving: true }).catch(() => {});
+  sendEntryEditsLeaving();
+  clearTimeout(draftSave.timer);
+  draftSave.timer = null;
+  if (draftSave.dirty) saveDraftNow(undefined, { leaving: true }).catch(() => {});
+  clearTimeout(commitTimer);
+  commitTimer = null;
+  if (state.store?.config?.git?.autoCommit) {
+    const after = [...unsettledOrders];
+    const query = after.length > 0 ? `?page=${SAVE_PAGE}&after=${after.join(',')}` : '';
+    api(`/store/save${query}`, { method: 'POST', body: JSON.stringify({}), keepalive: true }).catch(() => {});
+  }
+  return true;
 }
 
 /** Docs says "All changes saved"; so does this, in the same quiet way. */
@@ -1122,7 +1335,7 @@ function setSaveState(mode, detail) {
  * Waiting for each write and rebasing the next onto it is what stops the
  * second edit from carrying the first one away with it.
  */
-const entryWrites = new Map(); // id → { queue, server, pending }
+const entryWrites = new Map(); // id → { queue, server, pending, waiting, running, sent, landedOrder }
 
 /**
  * Run something that changes one entry in that entry's lane.
@@ -1133,15 +1346,48 @@ const entryWrites = new Map(); // id → { queue, server, pending }
  * A delete that overtakes a PUT still sitting in the lane gets recreated by it
  * — `PUT /entries/:id` has no existence check — as an orphan no resume
  * references, and a phrasing added beside a queued write is deleted by it.
+ *
+ * `whole` marks a whole-entry save from `saveEntry`, the one kind of write
+ * that may leave the queue early, on the way out of the page. See
+ * `sendEntryEditsLeaving`.
  */
-async function inEntryLane(id, run) {
-  const lane = entryWrites.get(id) ?? { queue: Promise.resolve(), server: null, pending: 0 };
+async function inEntryLane(id, run, { whole = false } = {}) {
+  const lane = entryWrites.get(id) ?? {
+    queue: Promise.resolve(),
+    server: null,
+    pending: 0,
+    /** Writes not started yet, in the order they were asked for. */
+    waiting: [],
+    /** Writes started and not answered yet. */
+    running: new Set(),
+    /** What the newest whole-entry save sent. */
+    sent: null,
+    /** The order of the newest whole-entry save that landed. */
+    landedOrder: 0,
+  };
   entryWrites.set(id, lane);
   lane.pending++;
 
+  /*
+   * Started once, by whichever comes first: its turn in the queue, or the page
+   * going (see `sendEntryEditsLeaving`). An async function runs up to its
+   * first `await` straight away, so on the way out the request is asked for
+   * before this returns.
+   */
+  const job = { whole, started: null };
+  job.start = (leaving = false) => {
+    if (!job.started) {
+      lane.waiting.splice(lane.waiting.indexOf(job), 1);
+      lane.running.add(job);
+      job.started = (async () => run(lane, { leaving }))().finally(() => lane.running.delete(job));
+    }
+    return job.started;
+  };
+  lane.waiting.push(job);
+
   // `queue` never rejects, so one failed write does not wedge the ones behind
   // it — each is still worth attempting on its own.
-  const mine = lane.queue.then(() => run(lane));
+  const mine = lane.queue.then(() => job.start());
   lane.queue = mine.then(
     () => {},
     () => {},
@@ -1166,19 +1412,92 @@ async function inEntryLane(id, run) {
   }
 }
 
+/**
+ * On the way out of the page: the inline edits of an entry still waiting in
+ * its lane, sent now.
+ *
+ * A second edit of one entry, made while the first's save was still out,
+ * waited behind that save, and its reply comes after the page has gone.
+ * Nothing on a gone page runs, so the second edit was never sent: fix a
+ * sentence, fix the next one while the first is saving, reload, and the
+ * second fix is gone. leaving-autosave.test.js reproduces it.
+ *
+ * Sent at once instead, it can reach the server ahead of the save still out,
+ * and that one, arriving second, would write the entry back to before it. So
+ * each whole-entry save carries `?order=<page>:<n>`, and the entry PUT does
+ * not write one older than one already written from this page (see the entry
+ * PUT in src/server/api.ts). And what it sends has the first edit in it. The
+ * second was made on a screen that still showed the entry from before the
+ * first (the screen refreshes only when a save comes back), so sent as it is
+ * it would carry the old text for the first edit, and the save that wins would
+ * lose one of the two. It is rebased onto what the save still out sent, as the
+ * queue would have rebased it onto that save's reply.
+ *
+ * Only whole-entry saves, and only while nothing else is ahead of them in the
+ * lane. A delete, a new entry or an added phrasing is a different write,
+ * without an `order` to put it back in place, and jumping it is what the lane
+ * is there to prevent. Those still wait, as before.
+ */
+function sendEntryEditsLeaving() {
+  for (const lane of entryWrites.values()) {
+    if ([...lane.running].some((job) => !job.whole)) continue;
+    for (const job of [...lane.waiting]) {
+      if (!job.whole) break;
+      // Its own caller hears how it went; this only keeps it from being unhandled meanwhile.
+      job.start(true).catch(() => {});
+    }
+  }
+}
+
 async function saveEntry(entry, message, { paint = true } = {}) {
   describeNext(message ?? 'the change');
   const id = entry.id;
   // What this edit was derived from: the store as the client last saw it.
   const base = state.store?.entries?.find((e) => e.id === id) ?? null;
 
-  await inEntryLane(id, async (lane) => {
-    // Something landed while this edit was being made: keep it, and put only
-    // what this edit actually changed on top of it.
-    const body = lane.server && base && !same(lane.server, base) ? rebase(base, entry, lane.server) : entry;
-    const saved = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
-    lane.server = saved?.id ? saved : body;
-  });
+  await inEntryLane(
+    id,
+    async (lane, { leaving }) => {
+      /*
+       * Something landed while this edit was being made: keep it, and put only
+       * what this edit actually changed on top of it. On the way out, what the
+       * save still out sent stands in for its reply, which will not come in
+       * time. See `sendEntryEditsLeaving`.
+       */
+      const theirs = leaving ? (lane.sent ?? lane.server) : lane.server;
+      const body = theirs && base && !same(theirs, base) ? rebase(base, entry, theirs) : entry;
+      const order = ++saveOrder;
+      /*
+       * Not cleared once it lands: a save leaves the queue early only while
+       * every write running in the lane is one of these, and each of those
+       * set it as it went, so it is always what the newest of them sent.
+       */
+      lane.sent = body;
+      /*
+       * `keepalive`, like the resume's auto-save: an inline edit committed just
+       * before the page goes is still out when it does, and a browser cancels a
+       * plain request when its page unloads. Leaving no longer waits on it (see
+       * `flushEditsLeaving`), so it has to survive on its own. An entry is a
+       * few KB of the 64KB allowance, and `fetchKeptAlive` sends it plainly when
+       * that is spent.
+       */
+      const saved = await api(`/entries/${encodeURIComponent(id)}?order=${SAVE_PAGE}:${order}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+        keepalive: true,
+      });
+      /*
+       * A newer save of this entry came back first; this one says nothing.
+       * Left to, it would be what the next edit in the lane is rebased onto,
+       * and that edit would take the newer one away.
+       */
+      if (order > lane.landedOrder) {
+        lane.landedOrder = order;
+        lane.server = saved?.id ? saved : body;
+      }
+    },
+    { whole: true },
+  );
 
   setStatus(message ?? `Saved ${id}`);
   if (paint) render();
@@ -2863,7 +3182,8 @@ async function addNameAlternate() {
 async function saveProfileName(name, message) {
   describeNext(message ?? 'the change');
   const profile = { ...state.store.profile, name };
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  // `keepalive` for the reason an entry's save has it: see `saveEntry`.
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
   state.store.profile = profile;
   setStatus(message);
   render();
@@ -2877,7 +3197,7 @@ async function saveProfileField(key, text) {
   const profile = { ...state.store.profile };
   if (text.trim()) profile[key] = undisplay(text);
   else delete profile[key];
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
   state.store.profile = profile;
   setStatus('Saved');
   render();
@@ -2892,7 +3212,7 @@ async function saveAutofillField(key, text) {
 
   const profile = { ...state.store.profile, autofill };
   if (Object.keys(autofill).length === 0) delete profile.autofill;
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile) });
+  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
   state.store.profile = profile;
   setStatus('Saved');
   render();
@@ -2916,6 +3236,60 @@ async function addAutofillField() {
 
 function renderEditor() {
   const editor = $('#editor');
+  const carry = holdTyping(editor);
+  drawEditor(editor);
+  carry();
+}
+
+/**
+ * Keep what is being typed into the editor when it is drawn again.
+ *
+ * `renderEditor` throws every control away and builds new ones, and a save
+ * coming back is one of the things that calls it. A date's save does it
+ * twice, once when the write returns and once after the store is read again
+ * for the words the server wrote. So a year being typed while an earlier date
+ * change was saving went into a box that was then replaced, cursor and all.
+ * The new box held the stored year, and leaving it saved nothing because
+ * nothing had changed in it. The editor walk lost a year that way on a slowed
+ * page.
+ *
+ * The same answer as `keepsValue` gives the settings, and as reopening an
+ * application in the Workspace now gives a letter: the box being typed in
+ * keeps the typing. Here it is found by its `data-keeps` name before the old
+ * controls go and handed on to the new one after, because by the time the
+ * new one is built the old one has already been taken out of the page.
+ *
+ * Only the focused box. One that was left has already had its change event,
+ * and so its save; one that was only clicked into takes whatever the redraw
+ * brings, which is how the server's answer reaches the screen. The value goes
+ * in after the focus, which puts the cursor at its end: a number box has no
+ * cursor position to read back, and the end is where a year is typed.
+ *
+ * Two things a browser does get in the way, and `datesControl` answers both
+ * from marks set here. Chromium fires change, then blur, at a focused box as
+ * it is removed, with whatever is in it: typing "20" towards 2026 and being
+ * redrawn saved the year 20, which is no year, so that end of the date was
+ * dropped. So the old box is marked `handedOn` first and ignores it. And no
+ * change event comes for a value put in by script, so the new box is marked
+ * `carried` and saves on blur if it is left without another key.
+ */
+function holdTyping(root) {
+  const box = document.activeElement;
+  const name = box?.dataset?.keeps;
+  if (!name || !root.contains(box)) return () => {};
+  const typed = box.value !== box.dataset.stored ? box.value : null;
+  box.dataset.handedOn = '';
+  return () => {
+    const next = [...root.querySelectorAll('[data-keeps]')].find((n) => n.dataset.keeps === name);
+    if (!next || next === box) return;
+    next.focus();
+    if (typed == null) return;
+    next.value = typed;
+    next.dataset.carried = '';
+  };
+}
+
+function drawEditor(editor) {
   editor.replaceChildren();
   if (!state.store) return;
   if (state.masterView) { renderMasterEditor(editor); return; }
@@ -3547,10 +3921,10 @@ async function editEntry(entry) {
 
 async function removeEntry(entry) {
   if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
-  // The entry and the resume that pointed at it are one thing the user did, so
-  // they are one press of Ctrl+Z — not two, with an orphaned reference in
-  // between that no action ever produces.
-  await undoGroup(`delete ${entryName(entry)}`, [], async () => {
+  // The entry and the resumes that pointed at it are one thing the user did,
+  // so they are one press of Ctrl+Z — not two, with an orphaned reference in
+  // between that no action ever produces. All of them: see `everyResume`.
+  await undoGroup(`delete ${entryName(entry)}`, everyResume(), async () => {
     /*
      * In the lane, so a whole-entry write still queued behind it goes first.
      * `PUT /entries/:id` has no existence check, so a delete that overtook one
@@ -3653,7 +4027,10 @@ async function tickBulletHere(entryId, id) {
 
 async function removeBullet(entry, bullet) {
   if (!(await confirmModal(`Delete “${bulletName(entry, bullet)}”?`, `All ${plural(bullet.variants.length, 'phrasing')} of it are removed from the save.`))) return;
-  await saveEntry({ ...entry, bullets: (entry.bullets ?? []).filter((b) => b.id !== bullet.id) }, `Deleted ${bullet.id}`);
+  // With the resumes the store takes it out of, so its undo puts it back in them. See `everyResume`.
+  await undoGroup(`delete ${bulletName(entry, bullet)}`, everyResume(), () =>
+    saveEntry({ ...entry, bullets: (entry.bullets ?? []).filter((b) => b.id !== bullet.id) }, `Deleted ${bullet.id}`),
+  );
   scheduleRender();
 }
 
@@ -3858,7 +4235,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
  * itself moved.
  */
 function dateEditor(entry) {
-  return datesControl(entry.period, (period) => saveEntryPeriod(entry, period));
+  return datesControl(entry.period, (period) => saveEntryPeriod(entry, period), `date:${entry.id}`);
 }
 
 /**
@@ -3869,7 +4246,7 @@ function dateEditor(entry) {
  * alternate of a field, where this side does. The controls are the same either
  * way, and so is what counts as a date.
  */
-function datesControl(from, onChange) {
+function datesControl(from, onChange, name) {
   const period = from ? structuredClone(from) : {};
   const wrap = el('div', { className: 'dates' });
 
@@ -3929,11 +4306,27 @@ function datesControl(from, onChange) {
       value: value().year ? String(value().year) : '',
       title: `${label} year`,
     });
+    /*
+     * Named, so a redraw while it is being typed in hands the typing on to
+     * the box that replaces it. See `holdTyping`. `stored` is what this box
+     * has already sent, or was drawn with.
+     */
+    if (name) year.dataset.keeps = `${name}:${which}`;
+    year.dataset.stored = year.value;
     year.onchange = () => {
+      // Being redrawn, with the typing going on to the new box. Not a year
+      // anybody finished typing.
+      if ('handedOn' in year.dataset) return;
+      year.dataset.stored = year.value;
       const n = Number(year.value);
       if (n >= 1900 && n <= 2100) period[which] = { ...value(), year: n };
       else delete period[which];
       commit();
+    };
+    // A year handed on from a box a redraw replaced gets no change event from
+    // the browser, having been put there by script. Leaving it saves it.
+    year.onblur = () => {
+      if ('carried' in year.dataset && year.value !== year.dataset.stored) year.onchange();
     };
 
     return el('span', { className: 'date-end' }, [
@@ -3998,7 +4391,7 @@ function variantDateEditor(entry, name, variantId, period) {
     const style = inferStyle(storeDateTexts());
     const text = formatPeriod(next, style);
     if (text) saveFieldText(entry, name, variantId, text);
-  });
+  }, `date:${entry.id}:${name}:${variantId}`);
 }
 
 /** Every date already written down, for working out how this store writes them. */
@@ -4178,7 +4571,9 @@ async function removeBulletVariant(entry, bullet, variant) {
       ...variantFallout(bullet.id, variant.id, true, '(nothing)'),
     ].join(' '));
     if (!ok) return;
-    await saveEntry({ ...entry, bullets: entry.bullets.filter((b) => b.id !== bullet.id) }, 'Line deleted');
+    await undoGroup('delete a line', everyResume(), () =>
+      saveEntry({ ...entry, bullets: entry.bullets.filter((b) => b.id !== bullet.id) }, 'Line deleted'),
+    );
     if (state.choices[bullet.id]) {
       const { [bullet.id]: _gone, ...rest } = state.choices;
       state.choices = rest;
@@ -4217,7 +4612,8 @@ async function removeBulletVariant(entry, bullet, variant) {
           },
     ),
   };
-  await saveEntry(next, 'Phrasing deleted');
+  // The store moves the resumes that had pinned it; see `everyResume`.
+  await undoGroup('delete a phrasing', everyResume(), () => saveEntry(next, 'Phrasing deleted'));
   /*
    * A resume that had chosen this wording now names one that is not there.
    * `resolveResume` says so and falls back to the default, which is the right
@@ -4276,7 +4672,7 @@ async function removeFieldAlternate(entry, name, variant) {
     ].join(' '));
     if (!gone) return;
     const { [name]: _dropped, ...without } = entry;
-    await saveEntry(without, `${label} deleted`);
+    await undoGroup(`delete the ${label}`, everyResume(), () => saveEntry(without, `${label} deleted`));
     if (state.choices[key]) {
       const { [key]: _stale, ...rest } = state.choices;
       state.choices = rest;
@@ -4296,13 +4692,16 @@ async function removeFieldAlternate(entry, name, variant) {
   );
   if (!ok) return;
 
-  await saveEntry(
-    {
-      ...entry,
-      // Something has to be the default; see the note in removeBulletVariant.
-      [name]: { ...field, variants: remaining, default: field.default === variant.id ? remaining[0].id : field.default },
-    },
-    'Alternate deleted',
+  // The store moves the resumes that had pinned it; see `everyResume`.
+  await undoGroup(`delete an alternate ${label}`, everyResume(), () =>
+    saveEntry(
+      {
+        ...entry,
+        // Something has to be the default; see the note in removeBulletVariant.
+        [name]: { ...field, variants: remaining, default: field.default === variant.id ? remaining[0].id : field.default },
+      },
+      'Alternate deleted',
+    ),
   );
   if (state.choices[key] === variant.id) {
     const { [key]: _gone, ...rest } = state.choices;
@@ -4478,7 +4877,8 @@ async function removeListItem(entry, bullet, item) {
       b.id !== bullet.id ? b : { ...b, items: b.items.filter((i) => i.id !== item.id) },
     ),
   };
-  await saveEntry(next, `Removed ${item.text}`);
+  // And out of the resumes that chose it; see `everyResume`.
+  await undoGroup(`delete ${item.text}`, everyResume(), () => saveEntry(next, `Removed ${item.text}`));
   scheduleRender();
 }
 
@@ -4588,8 +4988,11 @@ async function tickSkillHere(gid, id, text) {
 }
 
 async function removeSkill(group, item) {
-  await inSkillsLane((groups) =>
-    groups.map((g) => (g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) })),
+  // And out of the resumes that chose it, which its undo puts back. See `everyResume`.
+  await undoGroup(`delete ${item.text}`, everyResume(), () =>
+    inSkillsLane((groups) =>
+      groups.map((g) => (g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) })),
+    ),
   );
   setStatus(`Removed ${item.text}`);
   render();
@@ -4664,7 +5067,7 @@ async function removeSkillGroup(group) {
    * state no action produces: `resolveResume` then warns "Skills group
    * "sk_lang" does not exist." on every compile from then on.
    */
-  await undoGroup(`delete the group "${group.name}"`, [], async () => {
+  await undoGroup(`delete the group "${group.name}"`, everyResume(), async () => {
     await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
     const root = resumeById(state.resumeId);
     const sections = (root.sections ?? []).map((s) =>
@@ -5185,14 +5588,19 @@ function fitSummary(fit, result, { master, fitting = false } = {}) {
   if (fitting) {
     // Said while the second compile runs, so the half-second of truth on
     // screen is not mistaken for the final answer.
-    fit.append(el('div', { className: 'squeezed working', textContent: 'Squeezing it onto one page…' }));
+    fit.append(
+      el('div', {
+        className: 'squeezed working',
+        textContent: result.fits ? 'Setting it as large as the page allows…' : 'Squeezing it onto one page…',
+      }),
+    );
     return;
   }
 
   if (result.adjustments?.length) {
     fit.append(
       el('div', { className: 'squeezed' }, [
-        el('strong', { textContent: 'Squeezed to fit' }),
+        el('strong', { textContent: result.grew ? 'Enlarged to fill the page' : 'Squeezed to fit' }),
         el('span', { textContent: ` — ${result.adjustments.join(', ')}` }),
       ]),
     );
@@ -5234,9 +5642,16 @@ async function renderPreview() {
     showPdf($('#preview-pane'), asWritten.pdfUrl);
     showWarnings(asWritten);
 
-    // It fits as authored, or nothing is allowed to shrink it. Either way this
-    // is the answer, and there is no second compile to pay for.
-    if (master || asWritten.fits || !autoFitOn()) {
+    /*
+     * Nothing is allowed to change it, or it is the master document. Either
+     * way this is the answer, and there is no second compile to pay for.
+     *
+     * A resume that fits is not the end of it any more: auto-fit sets one
+     * with room to spare as large as the page allows, so the fitted compile
+     * runs for it too, and swaps in. On a page already full the server
+     * answers that from what it has just compiled.
+     */
+    if (master || !autoFitOn()) {
       setLive('ok');
       fitSummary(fit, asWritten, { master });
       return;
@@ -6094,6 +6509,44 @@ async function loadApplications() {
           : null,
       ].filter(Boolean)),
       el('td', {}, [
+        /*
+         * Put right what the page got wrong. The company and role come from
+         * the page, and a page does not always say them well — a season taken
+         * for the employer, a job board, a title cut off at a dash — and
+         * Remove was the only thing this row offered.
+         */
+        el('button', {
+          className: 'tiny',
+          textContent: 'Edit',
+          title: 'Correct the company or the role',
+          onclick: async (ev) => {
+            ev.stopPropagation();
+            const values = await form(
+              'Correct this application',
+              [
+                { name: 'company', label: 'Company', value: a.company ?? '' },
+                { name: 'role', label: 'Role', value: a.role ?? '' },
+              ],
+              'The files and the record of what was sent stay where they are.',
+              async (v) => {
+                if (!String(v.company ?? '').trim() || !String(v.role ?? '').trim()) return 'A company and a role cannot be left empty.';
+                try {
+                  await api(`/applications/${encodeURIComponent(a.id)}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ company: v.company, role: v.role }),
+                  });
+                } catch (err) {
+                  return err.message;
+                }
+                return undefined;
+              },
+            );
+            if (!values) return;
+            setStatus('Application corrected');
+            if (openApplicationId === a.id) openApplication(a.id);
+            else loadApplications();
+          },
+        }),
         el('button', {
           className: 'tiny danger',
           textContent: 'Remove',
@@ -6604,13 +7057,38 @@ async function openDraft(id) {
      * bit: the panel stays live and typeable while it runs, so anything
      * written during it was thrown away by the repaint at the end. Writing it
      * and re-reading costs one request and cannot paint over it.
+     *
+     * Unless it is this draft that is on screen. Then there is no repaint
+     * at all, unless the read has something new to show.
+     *
+     * Opening the Workspace opens the first application by itself, and a
+     * click on that same card opens it again, so this read often lands on a
+     * panel somebody has already clicked into. Drawn again, the box they were
+     * in was replaced and the cursor with it, and the rest of what they typed
+     * went nowhere. And if they had typed, the save and the read above took a
+     * round trip, and whatever was typed during it was drawn over with the
+     * copy just read. The editor walk, with the page slowed, kept "Dear
+     * Halcyon" of a whole sentence.
+     *
+     * A save sends the whole draft as it is on screen, so once it is flushed
+     * the screen is what the server has, and there is nothing to draw. Not
+     * flushed, the read is drawn only if it differs from what is on screen,
+     * as when a letter was drafted for it elsewhere. The save's own
+     * timestamp is not a difference anybody can see.
      */
-    if (draftSave.dirty) {
+    const onScreen = draftSave.current?.id === id ? draftSave.current : null;
+    if (onScreen && draftSave.dirty) {
       await flushDraftEdits();
-      draft = await api(`/workspace/${encodeURIComponent(id)}`);
-      if (openDraftId !== id) return;
+    } else if (onScreen && sameDraft(onScreen, draft)) {
+      // Nothing to draw.
+    } else {
+      if (draftSave.dirty) {
+        await flushDraftEdits();
+        draft = await api(`/workspace/${encodeURIComponent(id)}`);
+        if (openDraftId !== id) return;
+      }
+      renderDraft(draft);
     }
-    renderDraft(draft);
   } catch (err) {
     if (draftGone(err)) {
       // In the list that was drawn, and gone since: the same words, and the
@@ -6659,9 +7137,14 @@ const draftSave = {
   /** Set by `renderDraft` so the flush paths can reach the open draft. */
   current: null,
   timer: null,
-  /** The write in flight, so anything leaving the page can await it. */
+  /**
+   * The newest save queued, so anything leaving the page can await it. Each
+   * waits for the one before, so awaiting this one awaits them all.
+   */
   pending: null,
   dirty: false,
+  /** Draft id to the order of the newest of this page's saves that landed. See `saveDraftNow`. */
+  landed: new Map(),
 };
 
 function setDraftSaveState(mode, detail) {
@@ -6678,33 +7161,81 @@ function setDraftSaveState(mode, detail) {
           : 'Unsaved changes';
 }
 
+/**
+ * The same draft as far as anybody looking at it can tell: everything but
+ * `updatedAt`, which every save moves. See `openDraft`.
+ */
+function sameDraft(a, b) {
+  const seen = ({ updatedAt, ...rest }) => JSON.stringify(rest);
+  return seen(a) === seen(b);
+}
+
 /** What the editor says about a draft that is not in the workspace any more. */
 const DRAFT_GONE = 'That application is no longer in the workspace.';
 
 /** Whether a workspace request failed because its draft has gone. The server's words for it. */
 const draftGone = (err) => /^No draft "/.test(err?.message ?? '');
 
-/** Write the open draft now. Safe to call when there is nothing to write. */
-async function saveDraftNow(message) {
+/**
+ * Write the open draft now. Safe to call when there is nothing to write.
+ *
+ * One at a time, behind the save of the draft already out, as the resume's
+ * saves go (see `autoSave`). Each save sends the whole draft, and nothing held
+ * the next one back: on a server slower than the 900ms the typing waits, the
+ * save before was still out when the next went, the two were in flight
+ * together, and the server wrote whichever reached it last. When that was the
+ * older one, the letter on disk went back to what it said a sentence ago,
+ * under a chip reading "All changes saved". draft-save-order.test.js holds
+ * the first save, types on past the wait, and lets the first arrive second.
+ *
+ * The draft is read when the save goes, not when it is asked for, so a save
+ * that waited carries everything typed meanwhile, and a save behind it finds
+ * nothing left to send.
+ *
+ * Except on the way out of the page. The reply to the save ahead comes after
+ * the page has gone, and nothing on a gone page runs, so waiting for it would
+ * never send this one. There it goes at once, beside the one still out, and
+ * each save carries `?order=<page>:<n>` from the same count as the resume's.
+ * The server does not write a save of a draft older than one it has already
+ * written from this page, so the older arriving second is turned away (see
+ * the draft PUT in src/server/api.ts). The replies can come back either way
+ * round too, so an older one failing after a newer one landed marks nothing
+ * unsaved.
+ */
+async function saveDraftNow(message, { leaving = false } = {}) {
   const draft = draftSave.current;
   if (!draft) return;
   clearTimeout(draftSave.timer);
   draftSave.timer = null;
   if (!draftSave.dirty && !message) return;
 
-  draftSave.dirty = false;
   setDraftSaveState('saving');
-  const write = api(`/workspace/${encodeURIComponent(draft.id)}`, {
-    method: 'PUT',
-    body: JSON.stringify(draft),
-    keepalive: true,
-  })
+  const ahead = draftSave.pending;
+  let order = 0;
+  const write = (async () => {
+    // Caught, so one failed save does not wedge the ones behind it.
+    if (ahead && !leaving) await ahead.catch(() => undefined);
+    const onScreen = draftSave.current === draft;
+    // The save ahead carried this edit already. One asked for with a message
+    // is a step of its own, a choice made in the panel, and still goes.
+    if (onScreen && !draftSave.dirty && !message) return;
+    if (onScreen) draftSave.dirty = false; // further typing re-dirties it; this is in flight
+    order = ++saveOrder;
+    await api(`/workspace/${encodeURIComponent(draft.id)}?order=${SAVE_PAGE}:${order}`, {
+      method: 'PUT',
+      body: JSON.stringify(draft),
+      keepalive: true,
+    });
+    if (order > (draftSave.landed.get(draft.id) ?? 0)) draftSave.landed.set(draft.id, order);
+  })()
     .then(() => {
       // Only clear the chip if nothing has been typed since this write began.
       if (!draftSave.dirty) setDraftSaveState('saved');
       if (message) setStatus(message);
     })
     .catch((err) => {
+      // A newer save of this draft landed first, and carried this one's edit.
+      if (order < (draftSave.landed.get(draft.id) ?? 0)) return;
       draftSave.dirty = true;
       if (draftGone(err)) {
         /*
@@ -8684,7 +9215,9 @@ function pageDefaults(config) {
     el('div', {
       className: 'hint',
       style: 'margin-bottom:12px',
-      textContent: 'Auto-fit may still shrink a resume within its limits to keep it on one page.',
+      textContent:
+        'Auto-fit sets a resume with room to spare larger, up to 12pt and 0.75in margins, and shrinks one ' +
+        'that runs over, within its limits, to keep it on one page.',
     }),
   ]);
 }
@@ -9741,6 +10274,8 @@ let historyResumeId = null;
  */
 const HISTORY_PAGE = 30;
 let historyWanted = HISTORY_PAGE;
+/** Which timeline request is the latest; see `loadResumeHistory`. */
+let historyAsk = 0;
 
 /**
  * The friendly, Google-Docs-style view: every version *this one resume* has
@@ -9768,12 +10303,27 @@ async function loadResumeHistory() {
 
   timeline.replaceChildren(skeleton('versions', 4));
   showRestoreNote([]);
+  /*
+   * Drawn only if nothing has been asked since.
+   *
+   * Opening the tab asks for the resume on screen, and picking another one
+   * asks again straight after. Each answer resolves every version against the
+   * whole store, so the two take about as long as each other, and whichever
+   * came back last was drawn. When that was the first, the timeline showed
+   * the resume on screen under the name of the one picked, and its Restore
+   * buttons sent that resume's commits to restore the picked one. Looping
+   * those two steps against a real server, the older answer landed last in
+   * every round.
+   */
+  const ask = ++historyAsk;
   try {
     const { versions, more } = await api(
       `/resumes/${encodeURIComponent(historyResumeId)}/history?limit=${historyWanted}`,
     );
+    if (ask !== historyAsk) return;
     renderResumeTimeline(versions, Boolean(more));
   } catch (err) {
+    if (ask !== historyAsk) return;
     timeline.replaceChildren(el('div', { className: 'err', textContent: err.message }));
   }
 }
@@ -10754,7 +11304,26 @@ async function boot() {
   loadDocuments().catch(() => {});
   if (!project.current) { showTab('save'); return; }
   setupHistoryTab();
+  /*
+   * The tabs stay off until the store is here.
+   *
+   * `assetUI.init` turns them on as soon as it knows a save is open, which is
+   * one request before the save itself arrives, and every tab but Save &
+   * Files reads `state.store`. Clicked in that gap, History listed no
+   * resumes and said "Cannot read properties of null", and then the end of
+   * this function put the builder up over it, so the tab chosen was taken
+   * away too. On a slowed page that gap is a second or more after every
+   * reload. Save & Files needs no store and stays as `init` left it.
+   *
+   * Off rather than remembered and honoured afterwards: each tab's loader
+   * would have to run again once the store came, and a deep link would have
+   * to decide whether it or the click wins. If the store never loads they
+   * stay off, which is true: there is nothing on them that could work.
+   */
+  const waiting = [...document.querySelectorAll('#tabs button')].filter((b) => b.dataset.tab !== 'save' && !b.disabled);
+  for (const b of waiting) b.disabled = true;
   await loadStore();
+  for (const b of waiting) b.disabled = false;
   render();
 
   $('#resume-select').onchange = async (e) => {
@@ -10778,8 +11347,15 @@ async function boot() {
   // the event that actually fires when a tab is closed or hidden; `unload`
   // does not, reliably.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flushEdits().catch(() => {});
+    if (document.visibilityState === 'hidden') flushEdits({ leaving: true }).catch(() => {});
     else refreshOnReturn().catch(() => {});
+  });
+  // Whether a request that failed is worth sending again. See `fetchKeptAlive`.
+  window.addEventListener('pagehide', () => {
+    pageUnloading = true;
+  });
+  window.addEventListener('pageshow', () => {
+    pageUnloading = false;
   });
   // The preview keeps itself current; this is only for the rare "recompile it
   // anyway" — after changing the LaTeX engine, say.

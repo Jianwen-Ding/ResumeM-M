@@ -12,6 +12,7 @@ import {
   jobPostingScore,
   mergeJobPages,
   roleFromUrl,
+  workdayEmployer,
 } from '../src/jobs/extract.js';
 import { detectLevel } from '../src/jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../src/jobs/match.js';
@@ -186,7 +187,10 @@ describe('a page titled with an auth or step word', () => {
   it('does not take "Login" as the role on iCIMS\'s sign-in page', () => {
     const job = signIn('Login | Careers Markon');
     expect(job.title).toBeUndefined();
-    expect(job.company).toBe('Careers Markon');
+    // The tenant is `careers-markon`, and "Careers" is the portal's word, not
+    // the employer's: Atlassian's `careers-americas` was filed as "Careers
+    // Americas". The employer is Markon.
+    expect(job.company).toBe('Markon');
   });
 
   it.each([
@@ -1628,7 +1632,10 @@ describe('an employer named the way Workday books it', () => {
   });
 
   it('and one that would be left naming nobody is left as it was', () => {
-    expect(extractJob(posting('2100 Careers'), WD).company).toBe('2100 Careers');
+    expect(workdayEmployer('2100 Careers', WD)).toBe('2100 Careers');
+    // Where the posting's own data names nobody but a careers word, the tenant
+    // in the address does: `nvidia.wd5` is NVIDIA.
+    expect(extractJob(posting('2100 Careers'), WD).company).toBe('NVIDIA');
   });
 });
 

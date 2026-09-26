@@ -133,8 +133,12 @@ export interface FeedbackContext {
   focus?: string;
   /** The exact LaTeX that produced the PDF, when it has been compiled. */
   tex?: string;
-  /** What the compiler said about fitting the page. */
-  fit?: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] };
+  /**
+   * What the compiler said about fitting the page. `grew` when the
+   * adjustments made it larger, to fill a page it had room on, rather than
+   * smaller to fit.
+   */
+  fit?: { pages: number; fits: boolean; overflowLines: number; adjustments: string[]; grew?: boolean };
 }
 
 export function feedbackPrompt(data: StoreData, resume: ResolvedResume, context: FeedbackContext | string = {}): string {
@@ -635,7 +639,17 @@ function compiledEvidence(tex?: string, fit?: FeedbackContext['fit'], master = f
         : fit.fits
         ? `It fits on ${fit.pages} page(s), with about ${Math.abs(fit.overflowLines)} lines of room to spare.`
         : `It does NOT fit: ${fit.pages} pages, about ${fit.overflowLines} lines too long.`,
-      !master && fit.adjustments.length > 0 ? `Auto-fit had to: ${fit.adjustments.join('; ')}.` : '',
+      /*
+       * Which way auto-fit went. A resume with room to spare is set larger to
+       * fill its page, and "Auto-fit had to: font 10.5pt → 12pt" told the
+       * critic a short resume was a tight one — the opposite of the advice it
+       * needs, which is that there is room for more.
+       */
+      !master && fit.adjustments.length > 0
+        ? fit.grew
+          ? `It had room to spare as written, so auto-fit set it larger to fill the page: ${fit.adjustments.join('; ')}.`
+          : `Auto-fit had to: ${fit.adjustments.join('; ')}.`
+        : '',
     );
   }
 

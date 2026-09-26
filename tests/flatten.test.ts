@@ -40,10 +40,13 @@ afterEach(() => temp.cleanup());
 /** Everything that reaches the page, as one comparable value. */
 function printed(spec: ResumeSpec, data: StoreData) {
   const r = resolveResume(spec, data);
+  // `growBounds` came after these were recorded, so the oracle cannot have
+  // it. It is how large auto-fit may go, not anything the fold decides.
+  const { growBounds: _growBounds, ...layout } = r.layout;
   return {
     label: r.label,
     profile: r.profile,
-    layout: r.layout,
+    layout,
     sections: r.sections,
   };
 }

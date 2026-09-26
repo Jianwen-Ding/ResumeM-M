@@ -247,3 +247,85 @@ describe('a link followed while the save is failing', () => {
     await vi.waitFor(() => expect(window.location.hash).toBe('#resumes/intern'));
   });
 });
+
+/*
+ * A tab clicked while the save is still loading.
+ *
+ * The tabs came alive as soon as the page knew a save was open, which is one
+ * request before the save itself arrives. Clicked in between, History asked
+ * for the resumes of a store that was not there yet: it listed none and put
+ * an error in the status line. Then the page finished loading and put the
+ * builder up over it, as it does last thing on the way up, so the tab that
+ * had been chosen was taken away as well. The editor walk hit this on a
+ * slowed page after a reload and had to wait for the builder before
+ * clicking anything.
+ *
+ * Every tab but Save & Files reads the store, so they stay off until it is
+ * here. The request is simply held, which makes the window as wide as the
+ * test likes.
+ */
+describe('a tab clicked while the save is still loading', () => {
+  let data;
+  let release;
+  let asked;
+
+  const tab = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`);
+  const showing = () => document.querySelector('.tab.active')?.id;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '';
+
+    const fixture = makeTempStore();
+    data = fixture.store.load();
+    fixture.cleanup();
+
+    const held = new Promise((done) => {
+      release = done;
+    });
+    asked = false;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        let result = {};
+        if (url === '/api/store') {
+          asked = true;
+          await held;
+          result = data;
+        } else if (url === '/api/ai/jobs') result = { jobs: [] };
+        else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
+        else if (/^\/api\/resumes\/[^/]+\/history/.test(url)) {
+          result = { versions: [{ hash: 'abc123', date: '2026-09-26T08:00:00Z', message: 'Edited', changes: [] }], more: false };
+        }
+        return { ok: true, json: async () => structuredClone(result) };
+      }),
+    );
+
+    await import('../web/app.js');
+    // The save is open and its store has been asked for, and not answered.
+    await vi.waitFor(() => expect(asked).toBe(true));
+  });
+
+  it('cannot be chosen until the save has loaded, and then works', async () => {
+    tab('history').click();
+    await new Promise((go) => setTimeout(go, 20));
+    expect(tab('history').disabled).toBe(true);
+    expect(showing()).toBe('tab-save');
+    // Save & Files needs no store and stays reachable.
+    expect(tab('save').disabled).toBe(false);
+
+    release();
+    await vi.waitFor(() => expect(showing()).toBe('tab-resumes'));
+    expect(tab('history').disabled).toBe(false);
+
+    tab('history').click();
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('#history-resume option').length).toBe(data.resumes.length),
+    );
+    await vi.waitFor(() => expect(document.querySelector('.version-card')).not.toBeNull());
+    expect(showing()).toBe('tab-history');
+    expect(document.querySelector('#status.err')).toBeNull();
+  });
+});

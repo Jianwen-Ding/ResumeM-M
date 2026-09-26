@@ -22,13 +22,13 @@ interface Reply {
 
 const REPO: Record<string, unknown> = {
   name: 'streamly',
-  html_url: 'https://github.com/jianwen/streamly',
+  html_url: 'https://github.com/morgantestwell/streamly',
   description: 'A pipeline that keeps events in order.',
   homepage: 'https://streamly.example',
   topics: ['streaming', 'typescript'],
   stargazers_count: 42,
   pushed_at: '2026-05-01T12:00:00Z',
-  owner: { login: 'jianwen' },
+  owner: { login: 'morgantestwell' },
 };
 
 function reply({ status = 200, body, text, headers }: Reply): Response {
@@ -57,32 +57,32 @@ function github(parts: { repo?: Reply; readme?: Reply; languages?: Reply } = {})
 const call = (calls: Call[], suffix: string) => calls.find((c) => c.url.endsWith(suffix));
 
 describe('reading the link people actually paste', () => {
-  const owner = 'jianwen';
+  const owner = 'morgantestwell';
   const name = 'streamly';
 
   it.each([
-    'https://github.com/jianwen/streamly',
-    'https://github.com/jianwen/streamly/',
-    'https://github.com/jianwen/streamly.git',
-    'https://github.com/jianwen/streamly.git/',
-    'http://github.com/jianwen/streamly',
-    'https://www.github.com/jianwen/streamly',
-    'https://github.com/jianwen/streamly/tree/main/src/ingest',
-    'https://github.com/jianwen/streamly/blob/main/README.md',
-    'https://github.com/jianwen/streamly/issues/12',
-    'https://github.com/jianwen/streamly?tab=readme-ov-file',
-    'https://github.com/jianwen/streamly#install',
-    'github.com/jianwen/streamly',
-    'git@github.com:jianwen/streamly.git',
-    'git@github.com:jianwen/streamly',
-    'ssh://git@github.com/jianwen/streamly.git',
-    '  https://github.com/jianwen/streamly  ',
+    'https://github.com/morgantestwell/streamly',
+    'https://github.com/morgantestwell/streamly/',
+    'https://github.com/morgantestwell/streamly.git',
+    'https://github.com/morgantestwell/streamly.git/',
+    'http://github.com/morgantestwell/streamly',
+    'https://www.github.com/morgantestwell/streamly',
+    'https://github.com/morgantestwell/streamly/tree/main/src/ingest',
+    'https://github.com/morgantestwell/streamly/blob/main/README.md',
+    'https://github.com/morgantestwell/streamly/issues/12',
+    'https://github.com/morgantestwell/streamly?tab=readme-ov-file',
+    'https://github.com/morgantestwell/streamly#install',
+    'github.com/morgantestwell/streamly',
+    'git@github.com:morgantestwell/streamly.git',
+    'git@github.com:morgantestwell/streamly',
+    'ssh://git@github.com/morgantestwell/streamly.git',
+    '  https://github.com/morgantestwell/streamly  ',
   ])('reads %s', (input) => {
     expect(parseRepoUrl(input)).toEqual({ host: 'github.com', owner, name });
   });
 
   it('keeps a host that is not github', () => {
-    expect(parseRepoUrl('https://gitlab.com/jianwen/streamly')).toEqual({
+    expect(parseRepoUrl('https://gitlab.com/morgantestwell/streamly')).toEqual({
       host: 'gitlab.com',
       owner,
       name: 'streamly',
@@ -95,19 +95,19 @@ describe('reading the link people actually paste', () => {
   });
 
   it('keeps a dot in the repository name and only strips a trailing .git', () => {
-    expect(parseRepoUrl('https://github.com/jianwen/resume.js.git')?.name).toBe('resume.js');
+    expect(parseRepoUrl('https://github.com/morgantestwell/resume.js.git')?.name).toBe('resume.js');
   });
 
   it.each([
     ['nothing at all', ''],
     ['whitespace', '   '],
     ['a bare host', 'https://github.com'],
-    ['a user page', 'https://github.com/jianwen'],
-    ['a user page with a slash', 'https://github.com/jianwen/'],
+    ['a user page', 'https://github.com/morgantestwell'],
+    ['a user page with a slash', 'https://github.com/morgantestwell/'],
     ['a sentence', 'the streaming project I built last year'],
     ['a word', 'streamly'],
-    ['an email', 'mailto:jianwen@example.com'],
-    ['another protocol', 'ftp://github.com/jianwen/streamly'],
+    ['an email', 'mailto:morgan.testwell@example.com'],
+    ['another protocol', 'ftp://github.com/morgantestwell/streamly'],
     ['a missing owner', 'https://github.com//streamly'],
   ])('refuses %s', (_why, input) => {
     expect(parseRepoUrl(input)).toBeNull();
@@ -121,12 +121,12 @@ describe('collecting the facts', () => {
       languages: { body: { CSS: 10, TypeScript: 12_345, Shell: 900 } },
     });
 
-    const facts = await readRepo('https://github.com/jianwen/streamly/tree/main/src', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly/tree/main/src', { fetchImpl: impl });
 
     expect(facts).toEqual({
-      url: 'https://github.com/jianwen/streamly',
+      url: 'https://github.com/morgantestwell/streamly',
       host: 'github.com',
-      owner: 'jianwen',
+      owner: 'morgantestwell',
       name: 'streamly',
       description: 'A pipeline that keeps events in order.',
       homepage: 'https://streamly.example',
@@ -138,21 +138,21 @@ describe('collecting the facts', () => {
     });
 
     expect(calls.map((c) => c.url)).toEqual([
-      'https://api.github.com/repos/jianwen/streamly',
-      'https://api.github.com/repos/jianwen/streamly/readme',
-      'https://api.github.com/repos/jianwen/streamly/languages',
+      'https://api.github.com/repos/morgantestwell/streamly',
+      'https://api.github.com/repos/morgantestwell/streamly/readme',
+      'https://api.github.com/repos/morgantestwell/streamly/languages',
     ]);
   });
 
   it('asks for the readme as raw text rather than base64 json', async () => {
     const { impl, calls } = github({ readme: { text: '# Streamly' } });
-    await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     expect(call(calls, '/readme')?.headers.accept).toBe('application/vnd.github.raw');
   });
 
   it('identifies itself on every call', async () => {
     const { impl, calls } = github();
-    await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     for (const made of calls) {
       expect(made.headers['user-agent']).toBeTruthy();
       expect(made.headers.accept).toBeTruthy();
@@ -163,7 +163,7 @@ describe('collecting the facts', () => {
     const { impl } = github({
       repo: { body: { ...REPO, description: null, homepage: '', topics: [], pushed_at: null } },
     });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     expect(facts).not.toHaveProperty('description');
     expect(facts).not.toHaveProperty('homepage');
     expect(facts).not.toHaveProperty('topics');
@@ -172,12 +172,12 @@ describe('collecting the facts', () => {
 
   it('prefers the name github gives back, so a rename does not mislabel it', async () => {
     const { impl } = github({
-      repo: { body: { ...REPO, name: 'Streamly', owner: { login: 'JianWen' }, html_url: 'https://github.com/JianWen/Streamly' } },
+      repo: { body: { ...REPO, name: 'Streamly', owner: { login: 'MorganTestwell' }, html_url: 'https://github.com/MorganTestwell/Streamly' } },
     });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
-    expect(facts.owner).toBe('JianWen');
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
+    expect(facts.owner).toBe('MorganTestwell');
     expect(facts.name).toBe('Streamly');
-    expect(facts.url).toBe('https://github.com/JianWen/Streamly');
+    expect(facts.url).toBe('https://github.com/MorganTestwell/Streamly');
   });
 });
 
@@ -187,7 +187,7 @@ describe('a repository with no readme', () => {
       readme: { status: 404, body: { message: 'Not Found' } },
       languages: { body: { Go: 5 } },
     });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     expect(facts.readme).toBeUndefined();
     expect(facts.name).toBe('streamly');
     expect(facts.languages).toEqual(['Go']);
@@ -195,13 +195,13 @@ describe('a repository with no readme', () => {
 
   it('is also not an error when the readme is empty or only badges', async () => {
     const { impl } = github({ readme: { text: '\n[![ci](https://img.shields.io/x.svg)](https://ci)\n\n' } });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     expect(facts.readme).toBeUndefined();
   });
 
   it('leaves languages out when the repository has none', async () => {
     const { impl } = github({ languages: { body: {} } });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     expect(facts).not.toHaveProperty('languages');
   });
 });
@@ -209,8 +209,8 @@ describe('a repository with no readme', () => {
 describe('when it cannot be read', () => {
   it('says so plainly when there is no such repository', async () => {
     const { impl, calls } = github({ repo: { status: 404, body: { message: 'Not Found' } } });
-    await expect(readRepo('https://github.com/jianwen/ghost', { fetchImpl: impl })).rejects.toThrow(
-      /No repository at https:\/\/github\.com\/jianwen\/ghost, or it is private/,
+    await expect(readRepo('https://github.com/morgantestwell/ghost', { fetchImpl: impl })).rejects.toThrow(
+      /No repository at https:\/\/github\.com\/morgantestwell\/ghost, or it is private/,
     );
     // The readme and languages are never asked for once the repo is missing.
     expect(calls).toHaveLength(1);
@@ -224,7 +224,7 @@ describe('when it cannot be read', () => {
         headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1800000000' },
       },
     });
-    const error = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl }).catch((e: Error) => e);
+    const error = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl }).catch((e: Error) => e);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(/rate limit/i);
     expect((error as Error).message).toMatch(/token raises the limit/i);
@@ -232,17 +232,17 @@ describe('when it cannot be read', () => {
 
   it('does not call a 403 a rate limit when it is not one', async () => {
     const { impl } = github({ repo: { status: 403, body: { message: 'Forbidden' } } });
-    await expect(readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl })).rejects.toThrow(/403/);
+    await expect(readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl })).rejects.toThrow(/403/);
   });
 
   it('reports any other status with the number in it', async () => {
     const { impl } = github({ repo: { status: 500, body: { message: 'boom' } } });
-    await expect(readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl })).rejects.toThrow(/500/);
+    await expect(readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl })).rejects.toThrow(/500/);
   });
 
   it('refuses a host it does not know rather than guessing its api', async () => {
     const { impl, calls } = github();
-    await expect(readRepo('https://gitlab.com/jianwen/streamly', { fetchImpl: impl })).rejects.toThrow(
+    await expect(readRepo('https://gitlab.com/morgantestwell/streamly', { fetchImpl: impl })).rejects.toThrow(
       /gitlab\.com is not supported/,
     );
     expect(calls).toHaveLength(0);
@@ -257,14 +257,14 @@ describe('when it cannot be read', () => {
 describe('the token', () => {
   it('is sent on every request when one is given', async () => {
     const { impl, calls } = github({ readme: { text: '# Streamly' }, languages: { body: { Go: 1 } } });
-    await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl, token: 'ghp_secret' });
+    await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl, token: 'ghp_secret' });
     expect(calls).toHaveLength(3);
     for (const made of calls) expect(made.headers.authorization).toBe('Bearer ghp_secret');
   });
 
   it('is absent when none is given', async () => {
     const { impl, calls } = github({ readme: { text: '# Streamly' }, languages: { body: { Go: 1 } } });
-    await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     for (const made of calls) expect(made.headers.authorization).toBeUndefined();
   });
 });
@@ -281,7 +281,7 @@ describe('the readme, trimmed for a prompt', () => {
     ].join('\n');
 
     const { impl } = github({ readme: { text } });
-    const readme = (await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl })).readme!;
+    const readme = (await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl })).readme!;
 
     expect(readme).toContain('# Streamly');
     expect(readme).toContain('Streamly keeps events in order across a restart.');
@@ -310,7 +310,7 @@ describe('the readme, trimmed for a prompt', () => {
     const long = Array.from({ length: 600 }, (_, i) => `Line ${i} of a very long readme file.`).join('\n');
     const { impl } = github({ readme: { text: long } });
 
-    const readme = (await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl, readmeLimit: 500 }))
+    const readme = (await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl, readmeLimit: 500 }))
       .readme!;
 
     expect(readme.length).toBeLessThanOrEqual(500);
@@ -321,13 +321,13 @@ describe('the readme, trimmed for a prompt', () => {
 
   it('leaves a readme under the limit exactly as it is', async () => {
     const { impl } = github({ readme: { text: '# Streamly\n\nShort and done.' } });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl, readmeLimit: 500 });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl, readmeLimit: 500 });
     expect(facts.readme).toBe('# Streamly\n\nShort and done.');
   });
 
   it('defaults the limit to something a prompt can carry', async () => {
     const { impl } = github({ readme: { text: 'x\n'.repeat(40_000) } });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     expect(facts.readme!.length).toBeLessThanOrEqual(20_000);
   });
 });
@@ -335,14 +335,14 @@ describe('the readme, trimmed for a prompt', () => {
 describe('languages', () => {
   it('come back most-used first', async () => {
     const { impl } = github({ languages: { body: { CSS: 10, TypeScript: 12_345, HTML: 500, Shell: 500 } } });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     // HTML before Shell: equal bytes tie-break by name, so the order is stable.
     expect(facts.languages).toEqual(['TypeScript', 'HTML', 'Shell', 'CSS']);
   });
 
   it('survive a languages call that fails', async () => {
     const { impl } = github({ languages: { status: 500, body: { message: 'boom' } } });
-    const facts = await readRepo('https://github.com/jianwen/streamly', { fetchImpl: impl });
+    const facts = await readRepo('https://github.com/morgantestwell/streamly', { fetchImpl: impl });
     expect(facts.languages).toBeUndefined();
     expect(facts.name).toBe('streamly');
   });

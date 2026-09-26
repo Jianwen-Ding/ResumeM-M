@@ -1145,15 +1145,15 @@ describe('autofill', () => {
    */
   it('works the parts of a name and a location out for a profile with no extras', async () => {
     const profile = t.store.load().profile;
-    t.store.saveProfile({ ...profile, name: 'Jianwen Ding', location: 'Boston, MA', autofill: undefined });
+    t.store.saveProfile({ ...profile, name: 'Morgan Testwell', location: 'Boston, MA', autofill: undefined });
 
     const { fields } = (await request(app).get('/api/autofill').expect(200)).body;
-    expect(fields.first_name).toBe('Jianwen');
-    expect(fields.last_name).toBe('Ding');
+    expect(fields.first_name).toBe('Morgan');
+    expect(fields.last_name).toBe('Testwell');
     expect(fields.address_city).toBe('Boston');
     expect(fields.address_state).toBe('MA');
     // And still the whole ones, for the forms that ask that way.
-    expect(fields.full_name).toBe('Jianwen Ding');
+    expect(fields.full_name).toBe('Morgan Testwell');
     expect(fields.location).toBe('Boston, MA');
   });
 
@@ -1161,14 +1161,14 @@ describe('autofill', () => {
     const profile = t.store.load().profile;
     t.store.saveProfile({
       ...profile,
-      name: 'Jianwen Ding',
+      name: 'Morgan Testwell',
       autofill: { first_name: 'Jason' },
     });
 
     const { fields } = (await request(app).get('/api/autofill').expect(200)).body;
     expect(fields.first_name).toBe('Jason');
     // The half that was not overridden is still worked out.
-    expect(fields.last_name).toBe('Ding');
+    expect(fields.last_name).toBe('Testwell');
   });
 
   it('offers nothing for a name and a place it cannot read', async () => {
@@ -1253,27 +1253,27 @@ describe('autofill', () => {
     const named = (dflt: string, variants: { id: string; label: string; text: string }[]) =>
       t.store.saveProfile({ ...profile, autofill: undefined, name: { default: dflt, variants } });
     named('v_legal', [
-      { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
-      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+      { id: 'v_legal', label: 'Legal', text: 'Morgan Testwell' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Testwell' },
     ]);
     const newgrad = t.store.load().resumes.find((r) => r.id === 'newgrad')!;
     const choosing = (id: string) => ({ ...newgrad, id: 'job-helios', choices: { ...(newgrad.choices ?? {}), 'profile.name': id } });
 
     const known = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_known') }).expect(200)).body.fields;
-    expect([known.full_name, known.first_name, known.last_name]).toEqual(['Jianwen Ding', 'Jianwen', 'Ding']);
-    expect([known.preferred_name, known.preferred_first_name, known.preferred_last_name]).toEqual(['Jason Ding', 'Jason', 'Ding']);
+    expect([known.full_name, known.first_name, known.last_name]).toEqual(['Morgan Testwell', 'Morgan', 'Testwell']);
+    expect([known.preferred_name, known.preferred_first_name, known.preferred_last_name]).toEqual(['Jason Testwell', 'Jason', 'Testwell']);
 
     const legal = (await request(app).post('/api/autofill').send({ resumeId: 'newgrad', spec: choosing('v_legal') }).expect(200)).body.fields;
-    expect(legal.full_name).toBe('Jianwen Ding');
+    expect(legal.full_name).toBe('Morgan Testwell');
     expect(legal.preferred_name).toBeUndefined();
 
     // And the alternate labelled legal is the legal name, whichever is the default.
     named('v_known', [
-      { id: 'v_legal', label: 'Legal name', text: 'Jianwen Ding' },
-      { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+      { id: 'v_legal', label: 'Legal name', text: 'Morgan Testwell' },
+      { id: 'v_known', label: 'Known as', text: 'Jason Testwell' },
     ]);
     const byDefault = (await request(app).get('/api/autofill').expect(200)).body.fields;
-    expect([byDefault.full_name, byDefault.preferred_name]).toEqual(['Jianwen Ding', 'Jason Ding']);
+    expect([byDefault.full_name, byDefault.preferred_name]).toEqual(['Morgan Testwell', 'Jason Testwell']);
   });
 
   /*
@@ -1947,7 +1947,9 @@ describe.skipIf(!latex)('letter rendering', { timeout: 180_000 }, () => {
       .post('/api/render/letter')
       .send({ body: 'I would like to work on ingest.', company: 'Streamly', role: 'Intern', resumeId: 'newgrad' })
       .expect(200);
-    expect(res.body.warnings).toEqual([]);
+    // Less the note about a TeX install with no scalable font, which is about
+    // the machine, not the letter: it is said of every document set on it.
+    expect(res.body.warnings.filter((w: string) => !/scalable T1 font/.test(w))).toEqual([]);
   });
 });
 
@@ -2039,6 +2041,22 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
   it('says nothing lost about a resume that asks only for what exists', async () => {
     const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
     expect(res.body.lost).toEqual([]);
+  });
+
+  /*
+   * Enlarged, and said to be.
+   *
+   * A resume with room to spare is set larger now, and its adjustments read
+   * like shrinking ones: "font 10.5pt → 12pt". The editor heads them
+   * "Enlarged to fill the page" off `grew` — which this response did not
+   * carry, so every resume auto-fit had made larger was printed as "Squeezed
+   * to fit".
+   */
+  it('says when auto-fit made the resume larger rather than smaller', async () => {
+    const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    expect(res.body.fits).toBe(true);
+    expect(res.body.adjustments.join(' ')).toMatch(/font 10\.5pt → /);
+    expect(res.body.grew).toBe(true);
   });
 
   it('compiles the master document', async () => {
@@ -2437,6 +2455,237 @@ describe('list bullets', () => {
 
     const res = await request(app).get('/api/resumes/newgrad/resolved').expect(200);
     expect(res.body.warnings.join(' ')).toMatch(/c_ghost/);
+  });
+});
+
+/*
+ * Two saves of one resume from the editor, arriving the wrong way round.
+ *
+ * On the way out of the page the editor sends its latest edit while the save
+ * ahead of it is still out (see `autoSave` in web/app.js), and either can
+ * reach the server first. Each carries `?order=<page>:<n>`; the older one
+ * arriving second must not write the resume back to before the edit.
+ */
+describe('resume saves that carry their order', () => {
+  const save = (label: string, order?: string) =>
+    request(app)
+      .put(`/api/resumes/newgrad?commit=0${order ? `&order=${order}` : ''}`)
+      .send({ label, sections: [] })
+      .expect(200);
+  const stored = () => t.store.loadResumes().find((r) => r.id === 'newgrad')?.label;
+
+  it('does not write a save older than one already written from the same page', async () => {
+    await save('Second', 'page-a:2');
+    const late = await save('First', 'page-a:1');
+    expect(stored()).toBe('Second');
+    // Answered with what is stored, as every reply of this route is.
+    expect(late.body.label).toBe('Second');
+    // Nor the same one twice.
+    await save('Again', 'page-a:2');
+    expect(stored()).toBe('Second');
+  });
+
+  it('writes a newer one, and one from another page, and one with no order', async () => {
+    await save('One', 'page-a:1');
+    await save('Two', 'page-a:2');
+    expect(stored()).toBe('Two');
+    // Another tab, or the page after a reload, counts from 1 again.
+    await save('Other page', 'page-b:1');
+    expect(stored()).toBe('Other page');
+    // The CLI, MCP and the extension send none.
+    await save('Unordered');
+    expect(stored()).toBe('Unordered');
+    // And an order that is not one is taken as none.
+    await save('Garbled', 'page-a');
+    expect(stored()).toBe('Garbled');
+  });
+
+  it('keeps each resume to its own count', async () => {
+    await save('Newgrad', 'page-a:5');
+    await request(app).put('/api/resumes/intern?commit=0&order=page-a:1').send({ label: 'Intern', sections: [] }).expect(200);
+    expect(t.store.loadResumes().find((r) => r.id === 'intern')?.label).toBe('Intern');
+  });
+});
+
+/*
+ * And for an entry. On the way out of the page an inline edit still queued
+ * behind a save of the same entry is sent beside it, carrying that save's
+ * edit too (see `sendEntryEditsLeaving` in web/app.js).
+ */
+describe('entry saves that carry their order', () => {
+  const entry = () => t.store.load().entries.find((e) => e.id === 'exp_acme')!;
+  const save = (title: string, order?: string) =>
+    request(app)
+      .put(`/api/entries/exp_acme${order ? `?order=${order}` : ''}`)
+      .send({ ...entry(), title })
+      .expect(200);
+
+  it('does not write a save older than one already written from the same page', async () => {
+    await save('Both edits', 'page-a:4');
+    const late = await save('First edit only', 'page-a:3');
+    expect(entry().title).toBe('Both edits');
+    expect(late.body.title).toBe('Both edits');
+    await save('Again', 'page-a:4');
+    expect(entry().title).toBe('Both edits');
+  });
+
+  it('writes a newer one, one from another page, and one with no order', async () => {
+    await save('One', 'page-a:1');
+    await save('Two', 'page-a:2');
+    expect(entry().title).toBe('Two');
+    await save('Other page', 'page-b:1');
+    expect(entry().title).toBe('Other page');
+    await save('Unordered');
+    expect(entry().title).toBe('Unordered');
+  });
+});
+
+/*
+ * The same for a Workspace draft. Its saves go one at a time, except on the
+ * way out of the page, where the latest goes beside the one still out (see
+ * `saveDraftNow` in web/app.js). Each carries the whole draft.
+ */
+describe('draft saves that carry their order', () => {
+  const openDraft = async (company = 'Streamly') => {
+    const { body } = await request(app)
+      .post('/api/workspace')
+      .send({ company, role: 'Data Platform Intern', resumeId: 'intern', coverLetterRequired: true, questions: [] })
+      .expect(200);
+    return body.draft as { id: string; coverLetter: { required: boolean; body: string } };
+  };
+  const save = (draft: { id: string }, letter: string, order?: string) =>
+    request(app)
+      .put(`/api/workspace/${draft.id}${order ? `?order=${order}` : ''}`)
+      .send({ ...draft, coverLetter: { required: true, body: letter, edited: true } })
+      .expect(200);
+  const letterOf = (draft: { id: string }) => t.store.getDraft(draft.id)?.coverLetter.body;
+
+  it('does not write a save older than one already written from the same page', async () => {
+    const draft = await openDraft();
+    await save(draft, 'Dear Streamly, I build data pipelines.', 'page-a:2');
+    const late = await save(draft, 'Dear Streamly,', 'page-a:1');
+    expect(letterOf(draft)).toBe('Dear Streamly, I build data pipelines.');
+    // Answered with what is stored.
+    expect(late.body.coverLetter.body).toBe('Dear Streamly, I build data pipelines.');
+    await save(draft, 'Again', 'page-a:2');
+    expect(letterOf(draft)).toBe('Dear Streamly, I build data pipelines.');
+  });
+
+  it('writes a newer one, one from another page, one with no order, and keeps drafts apart', async () => {
+    const draft = await openDraft();
+    await save(draft, 'One', 'page-a:1');
+    await save(draft, 'Two', 'page-a:2');
+    expect(letterOf(draft)).toBe('Two');
+    await save(draft, 'Other page', 'page-b:1');
+    expect(letterOf(draft)).toBe('Other page');
+    await save(draft, 'Unordered');
+    expect(letterOf(draft)).toBe('Unordered');
+    const other = await openDraft('Halcyon');
+    await save(other, 'Halcyon', 'page-a:1');
+    expect(letterOf(other)).toBe('Halcyon');
+  });
+});
+
+/*
+ * A commit sent on the way out of the page, straight after the writes it
+ * covers.
+ *
+ * Nothing on a gone page waits for a reply, so the editor sends the commit
+ * without waiting for the save before it (see `flushEditsLeaving` in
+ * web/app.js), and the commit can reach the server first. It names the
+ * writes still out, as `?page=<page>&after=<n>,...`, and is held until they
+ * have been answered.
+ */
+describe('a commit that names the writes it follows', () => {
+  let committing: TempStore;
+  let live: express.Express;
+  let liveRepo: Repo;
+
+  beforeEach(async () => {
+    committing = makeTempStore({ config: { git: { autoCommit: true }, ai: { enabled: false }, output: { dir: 'out' } } });
+    liveRepo = Repo.forStore(committing.dir);
+    await liveRepo.ensure();
+    live = express();
+    live.use('/api', createApi({ store: committing.store, repo: liveRepo }));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    committing.cleanup();
+  });
+
+  const save = (label: string, order: string) =>
+    request(live).put(`/api/resumes/newgrad?commit=0&order=${order}`).send({ label, sections: [] }).expect(200);
+  const committedLabel = async () => {
+    const head = (await liveRepo.log(1))[0]!;
+    const detail = await liveRepo.commit(head.hash);
+    return /label: (.*)/.exec(detail?.diff ?? '')?.[1];
+  };
+
+  it('is held until the save it names has landed, and records it', async () => {
+    let answered = false;
+    const commit = request(live)
+      .post('/api/store/save?page=page-a&after=3')
+      .send({})
+      .expect(200)
+      .then((r) => {
+        answered = true;
+        return r;
+      });
+    // The commit is at the server first, and waits.
+    await new Promise((go) => setTimeout(go, 200));
+    expect(answered).toBe(false);
+
+    await save('Left on the way out', 'page-a:3');
+    const { body } = await commit;
+    expect(body.saved).toBe(true);
+    expect(body.files.map((f: { path: string }) => f.path)).toContain('resumes/newgrad.yaml');
+    expect(await committedLabel()).toBe('Left on the way out');
+    expect(await liveRepo.pending()).toEqual([]);
+  });
+
+  it('goes at once when what it names has already been answered, turned away or not', async () => {
+    await save('Second', 'page-a:2');
+    // Older than one already written: answered with what is stored, and done.
+    await save('First', 'page-a:1');
+    const started = Date.now();
+    const { body } = await request(live).post('/api/store/save?page=page-a&after=1,2').send({}).expect(200);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(body.saved).toBe(true);
+    expect(await committedLabel()).toBe('Second');
+  });
+
+  it('waits on its own page, not on the same number from another', async () => {
+    await save('Other tab', 'page-b:4');
+    let answered = false;
+    const commit = request(live)
+      .post('/api/store/save?page=page-a&after=4')
+      .send({})
+      .then(() => {
+        answered = true;
+      });
+    await new Promise((go) => setTimeout(go, 200));
+    expect(answered).toBe(false);
+    await save('This tab', 'page-a:4');
+    await commit;
+    expect(await committedLabel()).toBe('This tab');
+  });
+
+  // A write that never arrives, lost or sent before a restart, holds nothing for ever.
+  it('commits what is there after a few seconds when a named write never comes', async () => {
+    await request(live).put('/api/resumes/newgrad?commit=0').send({ label: 'On disk', sections: [] }).expect(200);
+    const started = Date.now();
+    const { body } = await request(live).post('/api/store/save?page=page-a&after=7').send({}).expect(200);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4900);
+    expect(body.saved).toBe(true);
+    expect(await committedLabel()).toBe('On disk');
+  }, 15_000);
+
+  it('commits at once when it names nothing, as every other caller sends it', async () => {
+    await request(live).put('/api/resumes/newgrad?commit=0').send({ label: 'Plain', sections: [] }).expect(200);
+    const started = Date.now();
+    await request(live).post('/api/store/save?page=page-a&after=').send({}).expect(200);
+    await request(live).post('/api/store/save').send({}).expect(200);
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });
 
@@ -3914,8 +4163,8 @@ describe('pinning', () => {
         name: {
           default: 'v_legal',
           variants: [
-            { id: 'v_legal', label: 'Legal', text: 'Jianwen Ding' },
-            { id: 'v_known', label: 'Known as', text: 'Jason Ding' },
+            { id: 'v_legal', label: 'Legal', text: 'Morgan Testwell' },
+            { id: 'v_known', label: 'Known as', text: 'Jason Testwell' },
           ],
         },
         email: 'test@example.com',
@@ -3928,13 +4177,13 @@ describe('pinning', () => {
 
     // And the resume prints it, with no choice of its own.
     const resolved = (await request(app).get('/api/resumes/base/resolved').expect(200)).body;
-    expect(resolved.profile.name).toBe('Jason Ding');
+    expect(resolved.profile.name).toBe('Jason Testwell');
 
     // The form-filling data the extension reads is names, not a set of them:
     // the one labelled legal, and the pinned one as the name used day to day.
     const autofill = (await request(app).get('/api/autofill').expect(200)).body;
-    expect(autofill.fields.full_name).toBe('Jianwen Ding');
-    expect(autofill.fields.preferred_name).toBe('Jason Ding');
+    expect(autofill.fields.full_name).toBe('Morgan Testwell');
+    expect(autofill.fields.preferred_name).toBe('Jason Testwell');
   });
 
   it('says a name with no alternates has none to pin', async () => {

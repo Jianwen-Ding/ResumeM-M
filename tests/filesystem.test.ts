@@ -737,8 +737,8 @@ describe('an application whose files are not where the tracker says', () => {
  *
  * What was wrong is that it was added to *all* of them, including the one
  * being uploaded. Reported from a real portal, with two jobs open:
- * `Jianwen-Ding-Resume-2027-Intern-Software-Engineer.pdf`, by somebody whose
- * setting says `type` and who had asked for `Jianwen-Ding-Resume.pdf`. The
+ * `Morgan-Testwell-Resume-2027-Intern-Software-Engineer.pdf`, by somebody whose
+ * setting says `type` and who had asked for `Morgan-Testwell-Resume.pdf`. The
  * other application in the folder is not that person's problem at the moment
  * they press upload, and the rule already said as much in its own words —
  * "the person uploading knows what they are applying to, and a longer name is

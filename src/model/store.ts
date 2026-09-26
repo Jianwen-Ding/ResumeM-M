@@ -863,6 +863,9 @@ export class Store {
               ...(patch.layout.fitBounds || current.layout?.fitBounds
                 ? { fitBounds: { ...current.layout?.fitBounds, ...patch.layout.fitBounds } }
                 : {}),
+              ...(patch.layout.growBounds || current.layout?.growBounds
+                ? { growBounds: { ...current.layout?.growBounds, ...patch.layout.growBounds } }
+                : {}),
             },
           }
         : {}),

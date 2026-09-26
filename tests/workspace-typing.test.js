@@ -92,11 +92,11 @@ describe('typing in the Workspace', () => {
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/workspace') result = { drafts: Object.values(drafts) };
       else if (url.startsWith('/api/workspace/') && options.method === 'PUT') {
-        const id = decodeURIComponent(url.split('/').pop());
+        const id = decodeURIComponent(url.split('?')[0].split('/').pop());
         drafts[id] = body;
         result = body;
       } else if (url.startsWith('/api/workspace/')) {
-        result = drafts[decodeURIComponent(url.split('/').pop())];
+        result = drafts[decodeURIComponent(url.split('?')[0].split('/').pop())];
       }
       return { ok: true, json: async () => structuredClone(result) };
     }));

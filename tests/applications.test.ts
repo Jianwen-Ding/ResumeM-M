@@ -25,39 +25,39 @@ describe('file naming', () => {
    * attachment already knows which company they are.
    */
   it('names files the way portals expect, so nothing is renamed by hand', () => {
-    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Resume')).toBe(
-      'Jianwen-Ding-Software-Engineer-Resume.pdf',
+    expect(bundleFileName('Morgan Testwell', 'Software Engineer', 'Resume')).toBe(
+      'Morgan-Testwell-Software-Engineer-Resume.pdf',
     );
-    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Cover Letter')).toBe(
-      'Jianwen-Ding-Software-Engineer-Cover-Letter.pdf',
+    expect(bundleFileName('Morgan Testwell', 'Software Engineer', 'Cover Letter')).toBe(
+      'Morgan-Testwell-Software-Engineer-Cover-Letter.pdf',
     );
-    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Answers', { extension: '.md' })).toBe(
-      'Jianwen-Ding-Software-Engineer-Answers.md',
+    expect(bundleFileName('Morgan Testwell', 'Software Engineer', 'Answers', { extension: '.md' })).toBe(
+      'Morgan-Testwell-Software-Engineer-Answers.md',
     );
   });
 
   it('omits the job title when there is not one', () => {
-    expect(bundleFileName('Jianwen Ding', undefined, 'Resume')).toBe('Jianwen-Ding-Resume.pdf');
-    expect(bundleFileName('Jianwen Ding', '   ', 'Resume')).toBe('Jianwen-Ding-Resume.pdf');
+    expect(bundleFileName('Morgan Testwell', undefined, 'Resume')).toBe('Morgan-Testwell-Resume.pdf');
+    expect(bundleFileName('Morgan Testwell', '   ', 'Resume')).toBe('Morgan-Testwell-Resume.pdf');
   });
 
   it('strips punctuation a filesystem would object to', () => {
-    expect(bundleFileName('Jianwen Ding', 'Engineer, II / Platform', 'Resume')).toBe(
-      'Jianwen-Ding-Engineer-II-Platform-Resume.pdf',
+    expect(bundleFileName('Morgan Testwell', 'Engineer, II / Platform', 'Resume')).toBe(
+      'Morgan-Testwell-Engineer-II-Platform-Resume.pdf',
     );
   });
 
   it('never produces a double hyphen or one hanging off an end', () => {
-    expect(bundleFileName('  Jianwen   Ding ', ' -- Senior  Engineer -- ', 'Resume')).toBe(
-      'Jianwen-Ding-Senior-Engineer-Resume.pdf',
+    expect(bundleFileName('  Morgan   Testwell ', ' -- Senior  Engineer -- ', 'Resume')).toBe(
+      'Morgan-Testwell-Senior-Engineer-Resume.pdf',
     );
   });
 
   it('adds the company only where two names would otherwise clash', () => {
     // Not part of the shape: it appears when `out/current` would hold two
     // files with one name, and nowhere else.
-    expect(bundleFileName('Jianwen Ding', 'Software Engineer', 'Resume', { disambiguator: 'Acme Co.' })).toBe(
-      'Jianwen-Ding-Software-Engineer-Resume-Acme-Co.pdf',
+    expect(bundleFileName('Morgan Testwell', 'Software Engineer', 'Resume', { disambiguator: 'Acme Co.' })).toBe(
+      'Morgan-Testwell-Software-Engineer-Resume-Acme-Co.pdf',
     );
   });
 });
@@ -79,25 +79,25 @@ describe('naming one application\'s documents', () => {
   const three = [{ kind: 'Resume' as const }, { kind: 'Cover Letter' as const }, { kind: 'Answers' as const, extension: '.md' }];
 
   it('adds the job title when that is what was asked for', () => {
-    expect(bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'title-type')).toEqual([
-      'Jianwen-Ding-Software-Engineer-Resume.pdf',
-      'Jianwen-Ding-Software-Engineer-Cover-Letter.pdf',
-      'Jianwen-Ding-Software-Engineer-Answers.md',
+    expect(bundleFileNames('Morgan Testwell', 'Software Engineer', three, 'title-type')).toEqual([
+      'Morgan-Testwell-Software-Engineer-Resume.pdf',
+      'Morgan-Testwell-Software-Engineer-Cover-Letter.pdf',
+      'Morgan-Testwell-Software-Engineer-Answers.md',
     ]);
   });
 
   it('and leaves it out again', () => {
-    expect(bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'type')).toEqual([
-      'Jianwen-Ding-Resume.pdf',
-      'Jianwen-Ding-Cover-Letter.pdf',
-      'Jianwen-Ding-Answers.md',
+    expect(bundleFileNames('Morgan Testwell', 'Software Engineer', three, 'type')).toEqual([
+      'Morgan-Testwell-Resume.pdf',
+      'Morgan-Testwell-Cover-Letter.pdf',
+      'Morgan-Testwell-Answers.md',
     ]);
   });
 
   it('takes a name typed by hand, for one document and not the rest', () => {
     expect(
-      bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'type', { Resume: 'resume' }),
-    ).toEqual(['resume.pdf', 'Jianwen-Ding-Cover-Letter.pdf', 'Jianwen-Ding-Answers.md']);
+      bundleFileNames('Morgan Testwell', 'Software Engineer', three, 'type', { Resume: 'resume' }),
+    ).toEqual(['resume.pdf', 'Morgan-Testwell-Cover-Letter.pdf', 'Morgan-Testwell-Answers.md']);
   });
 
   /*
@@ -107,8 +107,8 @@ describe('naming one application\'s documents', () => {
    * far end for a reason nobody can see.
    */
   it('keeps the extension the document actually has', () => {
-    expect(bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Resume: 'resume.docx' })[0]).toBe('resume-docx.pdf');
-    expect(bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Answers: 'notes' })[2]).toBe('notes.md');
+    expect(bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { Resume: 'resume.docx' })[0]).toBe('resume-docx.pdf');
+    expect(bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { Answers: 'notes' })[2]).toBe('notes.md');
   });
 
   /*
@@ -117,14 +117,14 @@ describe('naming one application\'s documents', () => {
    * through the same rules every other part of a name does.
    */
   it('cannot be talked into leaving the folder', () => {
-    const out = bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Resume: '../../.ssh/authorized_keys' })[0]!;
+    const out = bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { Resume: '../../.ssh/authorized_keys' })[0]!;
     expect(out).not.toMatch(/[/\\]/);
     expect(out).not.toMatch(/\.\./);
     expect(out.endsWith('.pdf')).toBe(true);
   });
 
   it('falls back to the shape when what was typed sanitises away to nothing', () => {
-    expect(bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { Resume: '///' })[0]).toBe('Jianwen-Ding-Resume.pdf');
+    expect(bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { Resume: '///' })[0]).toBe('Morgan-Testwell-Resume.pdf');
   });
 
   /*
@@ -136,8 +136,8 @@ describe('naming one application\'s documents', () => {
    */
   it('refuses a typed name that another document in the same application already has', () => {
     expect(() =>
-      bundleFileNames('Jianwen Ding', 'SWE', three, 'type', { 'Cover Letter': 'Jianwen-Ding-Resume' }),
-    ).toThrow(/Jianwen-Ding-Resume\.pdf/);
+      bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { 'Cover Letter': 'Morgan-Testwell-Resume' }),
+    ).toThrow(/Morgan-Testwell-Resume\.pdf/);
   });
 
   /*
@@ -147,9 +147,9 @@ describe('naming one application\'s documents', () => {
    * nothing to refuse.
    */
   it('and still disambiguates the shapes, which nobody typed', () => {
-    const [resume, letter] = bundleFileNames('Jianwen Ding', 'Software Engineer', three, 'title');
+    const [resume, letter] = bundleFileNames('Morgan Testwell', 'Software Engineer', three, 'title');
     expect(resume).not.toBe(letter);
-    expect(resume).toBe('Jianwen-Ding-Software-Engineer-Resume.pdf');
+    expect(resume).toBe('Morgan-Testwell-Software-Engineer-Resume.pdf');
   });
 });
 
@@ -1492,6 +1492,25 @@ describe('saying what the store no longer has', () => {
     } finally {
       tight.cleanup();
     }
+  });
+
+  /*
+   * And says nothing of the kind about a resume set larger.
+   *
+   * One with room to spare is set as large as its page allows, and its
+   * adjustments read like shrinking ones — "font 10.5pt → 12pt" — so the
+   * bundle of every short resume went out with "The resume was squeezed to
+   * fit" beside it.
+   */
+  it.skipIf(!latex)('does not call a resume auto-fit made larger squeezed', { timeout: 180_000 }, async () => {
+    const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'intern' });
+    expect(result.fits).toBe(true);
+    // It was made larger, or this is not the case under test.
+    const tex = fs.readFileSync(path.join(result.dir, 'source', 'resume.tex'), 'utf8');
+    const size = Number(/\\changefontsizes\[[\d.]+pt\]\{([\d.]+)pt\}/.exec(tex)?.[1]);
+    expect(size).toBeGreaterThan(10.5);
+    const said = result.warnings.join(' | ');
+    expect(said, said).not.toMatch(/squeezed/i);
   });
 
   it.skipIf(!latex)('says nothing when the store has everything it asked for', { timeout: 180_000 }, async () => {

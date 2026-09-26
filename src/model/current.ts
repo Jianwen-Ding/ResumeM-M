@@ -31,7 +31,7 @@ export const CURRENT_DIR = 'current';
  * to keep a history of — and the rebuilding is what raced the commits. `git
  * add -- .` listed a PDF, the folder was synced under it, and the stat that
  * followed failed the whole add: "unable to stat
- * 'out/current/Jianwen-Ding-Resume.pdf'", twelve times on one test server in
+ * 'out/current/Morgan-Testwell-Resume.pdf'", twelve times on one test server in
  * a single run, each one a save the version history silently never recorded.
  * The same race `Repo.IGNORED` closes for scratch files, in a folder whose
  * files are replaced far more often.
@@ -255,8 +255,8 @@ function readSources(dir: string): Record<string, string> {
  * `working` is the one exception, and it is the case that matters most. Added
  * to *all* of them, the suffix reached the application you are uploading right
  * now: with two jobs open, the file the portal showed was
- * `Jianwen-Ding-Resume-2027-Intern-Software-Engineer.pdf` — reported as
- * exactly that, by somebody who had asked for `Jianwen-Ding-Resume.pdf` and
+ * `Morgan-Testwell-Resume-2027-Intern-Software-Engineer.pdf` — reported as
+ * exactly that, by somebody who had asked for `Morgan-Testwell-Resume.pdf` and
  * whose setting says `type`. Nothing about the other application in the folder
  * is that person's problem at the moment they press upload, and the rule above
  * says so in its own words.

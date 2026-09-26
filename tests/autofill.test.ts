@@ -23,11 +23,11 @@ import type { Entry, ResolvedResume } from '../src/model/types.js';
 
 describe('splitting a name into the two boxes a form has', () => {
   it('takes the first and last word', () => {
-    expect(splitName('Jianwen Ding')).toEqual({ first: 'Jianwen', last: 'Ding' });
+    expect(splitName('Morgan Testwell')).toEqual({ first: 'Morgan', last: 'Testwell' });
   });
 
   it('reads the filed order when it is written with a comma', () => {
-    expect(splitName('Ding, Jianwen')).toEqual({ first: 'Jianwen', last: 'Ding' });
+    expect(splitName('Testwell, Morgan')).toEqual({ first: 'Morgan', last: 'Testwell' });
   });
 
   it('keeps a lower-case particle with the surname it belongs to', () => {
@@ -53,7 +53,7 @@ describe('splitting a name into the two boxes a form has', () => {
     expect(splitName('')).toBeUndefined();
     expect(splitName('   ')).toBeUndefined();
     // A list, or a name with something after it: not a split this can read.
-    expect(splitName('Ding, Jianwen, PhD')).toBeUndefined();
+    expect(splitName('Testwell, Morgan, PhD')).toBeUndefined();
   });
 
   it('does not leave the given name empty by eating every particle', () => {
@@ -129,9 +129,9 @@ describe('splitting a location into the boxes a form has', () => {
 
 describe('what the profile implies altogether', () => {
   it('fills the four boxes an ATS form asks for', () => {
-    expect(derivedAutofill({ name: 'Jianwen Ding', location: 'Boston, MA' })).toEqual({
-      first_name: 'Jianwen',
-      last_name: 'Ding',
+    expect(derivedAutofill({ name: 'Morgan Testwell', location: 'Boston, MA' })).toEqual({
+      first_name: 'Morgan',
+      last_name: 'Testwell',
       address_city: 'Boston',
       address_state: 'MA',
     });
