@@ -4492,3 +4492,48 @@ describe('the questions a writing run is handed', () => {
     expect(out[3]).toEqual({ id: 'q4', question: 'Anything else?', answer: '' });
   });
 });
+
+/*
+ * The files a card is handed for the form in front of it.
+ *
+ * "The default should always be <Firstname>-<Lastname>-<Form type>. Don't
+ * ever have it changed unless I specify." Every application in flight wants
+ * `Test-Person-Resume.pdf` in the one shared folder, so one of them has to be
+ * called something else there — and that one was the card's own, the name it
+ * showed and the name the file carried into the form.
+ */
+describe('GET /attachments with two applications in flight', () => {
+  const bundle = (id: string, company: string, role: string) => {
+    const dir = path.join(t.store.outDir(), 'applications', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Test-Person-Resume.pdf'), `%PDF ${id}\n`, 'utf8');
+    return { id, company, role, status: 'applying', snapshotDir: `applications/${id}`, history: [{ at: new Date().toISOString(), status: 'applying', note: 'Bundle created' }] };
+  };
+  const two = () => t.write('applications.yaml', [bundle('a1', 'Acme', 'Platform Engineer'), bundle('a2', 'Beta', 'Data Engineer')]);
+  const resumeOf = (body: { attachments: { name: string; inFolder: string; url: string }[] }) =>
+    body.attachments.find((a) => /Resume/.test(a.name))!;
+
+  it('offers each application its resume under the plain name, whatever the folder calls it', async () => {
+    two();
+    await request(app).get('/api/attachments?application=a1&claim=1').expect(200);
+    const res = await request(app).get('/api/attachments?application=a2').expect(200);
+    const mine = resumeOf(res.body);
+    expect(mine.name).toBe('Test-Person-Resume.pdf');
+    // In the folder it had to be told apart, and the bytes are still its own.
+    expect(mine.inFolder).toBe('Test-Person-Resume-Data-Engineer.pdf');
+    const file = await request(app).get(mine.url).expect(200);
+    expect(String(file.body.toString?.() ?? file.text)).toContain('%PDF a2');
+  });
+
+  it('takes the plain names in the folder only when asked to', async () => {
+    two();
+    await request(app).get('/api/attachments?application=a1&claim=1').expect(200);
+    // Another card warming its chips renames nothing.
+    await request(app).get('/api/attachments?application=a2').expect(200);
+    const folder = path.join(t.store.outDir(), 'current', 'Test-Person-Resume.pdf');
+    expect(fs.readFileSync(folder, 'utf8')).toBe('%PDF a1\n');
+    // Pressed in the other tab, it goes there.
+    await request(app).get('/api/attachments?application=a2&claim=1').expect(200);
+    expect(fs.readFileSync(folder, 'utf8')).toBe('%PDF a2\n');
+  });
+});

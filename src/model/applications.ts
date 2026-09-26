@@ -1065,7 +1065,10 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
      * in-flight applications would otherwise clash, because this is the one
      * being uploaded. See `uniqueNames`.
      */
-    syncCurrent(store, undefined, application.id);
+    // Not claiming the plain names: a build is often a tab rebuilding in
+    // the background as its letter saves, and taking them then renamed the
+    // file another tab had just copied the path to. See `uniqueNames`.
+    syncCurrent(store);
 
     return {
       application,

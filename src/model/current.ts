@@ -122,6 +122,13 @@ export interface CurrentFolder {
    * the application in front of it.
    */
   belongsTo: Record<string, string>;
+  /**
+   * What each file is called where it was built — `First-Last-Resume.pdf`
+   * — whatever the folder had to call it to keep two applications apart.
+   * The name the card offers and the name a dragged or attached file carries:
+   * "the default should always be <Firstname>-<Lastname>-<Form type>".
+   */
+  builtAs: Record<string, string>;
   /** In-flight applications whose files are in the folder. */
   applications: number;
   /**
@@ -647,6 +654,7 @@ export function syncCurrent(
      * takes an id from the caller.
      */
     belongsTo: Object.fromEntries(files.map((name) => [name, owner.get(name) ?? ''])),
+    builtAs: Object.fromEntries(files.map((name) => [name, path.basename(wanted.get(name) ?? name)])),
     // What is actually here, not what the tracker says should be: a row whose
     // bundle folder has gone is named in `problems` above rather than counted.
     applications: new Set(files.map((name) => owner.get(name)).filter((id) => id && id !== STANDING)).size,

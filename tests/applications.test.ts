@@ -994,12 +994,13 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
     const current = syncCurrent(t.store);
     expect(current.applications).toBe(2);
     // Same role at two companies is the one clash the shape cannot separate,
-    // so the company is added — to the one not in hand. The one built last is
-    // the one being uploaded, and always keeps the plain name; a listing
-    // afterwards renames nothing. See `uniqueNames`.
+    // so the company is added — to the one built second. A build takes no
+    // plain name from anyone; only copying the path, opening the folder or
+    // Attach does, for the application they were pressed for. See
+    // `uniqueNames`.
     expect(current.files).toContain('Test-Person-Resume.pdf');
-    expect(current.belongsTo['Test-Person-Resume.pdf']).toMatch(/northwind/);
-    expect(current.files).toContain('Test-Person-Resume-Streamly.pdf');
+    expect(current.belongsTo['Test-Person-Resume.pdf']).toMatch(/streamly/);
+    expect(current.files).toContain('Test-Person-Resume-Northwind.pdf');
     // All in one place, not one folder per application. (The dotfile is the
     // manifest of what this folder put here; it is not one of your uploads.)
     expect(visible(current.dir).length).toBe(current.files.length);
@@ -1253,10 +1254,10 @@ describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_0
      */
     const resumes = current.files.filter((f) => /Resume/.test(f));
     expect(resumes).toHaveLength(2);
-    // The one built last is in hand and keeps the plain name; see
-    // `uniqueNames`.
+    // The first keeps the plain name it was given: a build does not take it;
+    // see `uniqueNames`.
     expect(resumes).toContain('Test-Person-Resume.pdf');
-    expect(resumes).toContain('Test-Person-Resume-Software-Engineer.pdf');
+    expect(resumes).toContain('Test-Person-Resume-Product-Manager.pdf');
 
     // And the answers are two files, holding different answers.
     const answers = current.files.filter((f) => f.endsWith('.md'));
@@ -1369,7 +1370,7 @@ describe.skipIf(!latex)('putting the job title in file names', { timeout: 180_00
     const resumes = syncCurrent(t.store).files.filter((f) => f.endsWith('.pdf'));
     expect(resumes).toHaveLength(2);
     expect(resumes).toContain('Test-Person-Resume.pdf');
-    expect(resumes).toContain('Test-Person-Resume-Software-Engineer.pdf');
+    expect(resumes).toContain('Test-Person-Resume-Product-Manager.pdf');
   });
 
   it('separates one role at two companies when the title is on', async () => {
@@ -1380,7 +1381,7 @@ describe.skipIf(!latex)('putting the job title in file names', { timeout: 180_00
     const resumes = syncCurrent(t.store).files.filter((f) => f.endsWith('.pdf'));
     expect(resumes).toHaveLength(2);
     expect(resumes).toContain('Test-Person-Software-Engineer-Resume.pdf');
-    expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Acme.pdf');
+    expect(resumes).toContain('Test-Person-Software-Engineer-Resume-Globex.pdf');
   });
 });
 

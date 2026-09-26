@@ -1003,12 +1003,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const wanted = String(req.query.application ?? '').trim();
       /*
-       * Named as the one being worked on, so it keeps the plain filename
-       * where two in-flight applications would clash — this endpoint exists
-       * to hand files to a form that is open in front of somebody. See
-       * `uniqueNames`.
+       * Named as the one being worked on — given the plain filenames in the
+       * shared folder — only when somebody asked for that: copied the folder
+       * path, opened it, pressed Attach. See `uniqueNames`. A card warming
+       * its chips in a background tab is not that, and taking the names on
+       * every warm let one tab rename the file another had just copied the
+       * path to. Either way the files are offered under the names they were
+       * built with (`builtAs`), so the card shows and hands over
+       * `First-Last-Resume.pdf` whatever the folder calls its copy.
        */
-      const folder = syncCurrent(store, undefined, wanted || undefined);
+      const claim = req.query.claim === '1' || req.query.claim === 'true';
+      const folder = syncCurrent(store, undefined, claim && wanted ? wanted : undefined);
       const attachments = folder.files
         .filter((name) => {
           const whose = folder.belongsTo[name] ?? '';
@@ -1019,7 +1024,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           return Boolean(wanted) && whose === wanted;
         })
         .map((name) => ({
-          name,
+          name: folder.builtAs?.[name] ?? name,
+          inFolder: name,
           standing: folder.belongsTo[name] === STANDING,
           url: `/current/${encodeURIComponent(name)}`,
         }));
@@ -3972,9 +3978,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       // The same files also go to the flat folder, which is the one a portal's
-      // file picker should be pointed at — the archive is for later. This one
-      // keeps the plain name; see `uniqueNames`.
-      const current = syncCurrent(store, undefined, result.application.id);
+      // file picker should be pointed at — the archive is for later. Without
+      // taking the plain names there: that is for what somebody does — copying
+      // the path, opening the folder, Attach — not for a build, which a tab
+      // in the background makes as its letter saves. See `uniqueNames`.
+      const current = syncCurrent(store);
       if (autoCommit()) {
         await commitQuietly(repo, `Apply: ${result.application.company} — ${result.application.role}`);
       }
@@ -4000,7 +4008,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * worked on (see `uniqueNames`), and a card naming it would be
          * pointing the upload dialog at that application's resume.
          */
-        currentFiles: current.files.filter((name) => current.belongsTo[name] === result.application.id),
+        currentFiles: current.files
+          .filter((name) => current.belongsTo[name] === result.application.id)
+          // Under the names they were built with, which is what the card
+          // shows and hands over: "always <Firstname>-<Lastname>-<Form type>".
+          .map((name) => current.builtAs[name] ?? name),
       });
     }),
   );
