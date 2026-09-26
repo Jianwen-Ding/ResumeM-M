@@ -1014,9 +1014,27 @@ async function autoSave() {
     const spec = currentSpec();
     state.dirty = false; // further edits re-dirty it; this one is in flight
     try {
+      /*
+       * `keepalive`, or leaving the page takes the edit with it.
+       *
+       * Hiding the page runs `flushEdits`, which starts this save straight
+       * away, and a browser cancels a plain request when its page unloads.
+       * So an unfold made just before a reload was sent and then dropped:
+       * in Chromium with the API held 600ms the PUT failed with
+       * net::ERR_ABORTED on three reloads of three, and the entry came back
+       * folded. The commit `flushEdits` sends after it already had the flag,
+       * which committed a save that never arrived.
+       *
+       * On every save, not only the one on the way out: a save the auto-save
+       * wait started can still be out when the page goes, and then
+       * `flushEdits` has nothing left to send. A resume is well under the
+       * 64KB a page may have in keepalive requests at once; the draft's save
+       * sends more than this and has always had the flag.
+       */
       await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0`, {
         method: 'PUT',
         body: JSON.stringify(spec),
+        keepalive: true,
       });
       // The store now holds what the editor shows, so the unsaved edits are
       // no longer overlays on top of it.
