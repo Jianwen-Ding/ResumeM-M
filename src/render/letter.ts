@@ -222,7 +222,7 @@ function paragraphs(body: string): string[] {
     let prose: string[] = [];
     let items: { label: string; text: string }[] = [];
     const endProse = () => {
-      if (prose.length) out.push(inlineTex(prose.join(' ')));
+      if (prose.length) out.push(proseTex(prose.join(' ')));
       prose = [];
     };
     const endList = () => {
@@ -264,8 +264,30 @@ const LIST_ITEM = /^\s*(?:([-*+•–])|(\d{1,3})([.)]))\s+(\S.*)$/;
 
 function listTex(items: { label: string; text: string }[]): string {
   return items
-    .map((i) => `\\hangindent=2em\\hangafter=0\\leavevmode\\llap{${i.label}\\hspace{0.5em}}${inlineTex(i.text.trim())}`)
+    .map((i) => `\\hangindent=2em\\hangafter=0\\leavevmode\\llap{${i.label}\\hspace{0.5em}}${proseTex(i.text.trim())}`)
     .join('\\par\\vspace{-\\parskip}\n');
+}
+
+/**
+ * A line of the letter, with somewhere to break a pasted address.
+ *
+ * A URL is one word to TeX, and one longer than the line ran past the right
+ * margin — "https://…/benchmarks/latencyresults2026/summary.html" set half
+ * off the text block, over "My work is at" left alone on the line above.
+ * A bare address — with its scheme or without, "docs.google.com/d/…" — may
+ * now break after a `/`, `.`, `?`, `&`, `=`, `_` or `#`, as a browser's
+ * address bar does, at a small cost so a space is still the break TeX would
+ * rather take. Only a bare one: a markdown link's target goes into `\href`
+ * as it is.
+ */
+const BARE_URL = /\]\((?:[^()]|\([^()]*\))*\)|(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S*/gi;
+const BREAK = '\uE000';
+
+function proseTex(text: string): string {
+  const marked = text.replace(BARE_URL, (url) =>
+    url.startsWith('](') ? url : url.replace(/((?<!:\/)\/(?!\/)|[.?&=_#])(?=\S)/g, `$1${BREAK}`),
+  );
+  return inlineTex(marked).replaceAll(BREAK, '\\penalty100{}');
 }
 
 /**

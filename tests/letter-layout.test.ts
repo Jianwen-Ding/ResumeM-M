@@ -37,8 +37,14 @@ async function lines(letter: Parameters<typeof compileLetter>[0]) {
     const { stdout } = await run('pdftotext', ['-layout', pdfPath, '-']);
     // Where each word is on the page, in points down from the top.
     const { stdout: boxes } = await run('pdftotext', ['-bbox', pdfPath, '-']);
-    const words = [...boxes.matchAll(/xMin="([\d.]+)" yMin="([\d.]+)"[^>]*>([^<]*)</g)].map((m) => ({ x: Number(m[1]), y: Number(m[2]), text: m[3]! }));
-    return { r, lines: stdout.split('\n').map((l) => l.trim()).filter(Boolean), words };
+    const words = [...boxes.matchAll(/xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)"[^>]*>([^<]*)</g)].map((m) => ({
+      x: Number(m[1]),
+      y: Number(m[2]),
+      right: Number(m[3]),
+      text: m[4]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&'),
+    }));
+    const pageWidth = Number(/<page width="([\d.]+)"/.exec(boxes)?.[1]);
+    return { r, lines: stdout.split('\n').map((l) => l.trim()).filter(Boolean), words, pageWidth };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -121,6 +127,21 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
     const wrapped = words.find((w) => w.y > words.find((v) => v.text === 'university')!.y + 10)!;
     expect(Math.abs(wrapped.x - x('At'))).toBeLessThan(1);
     expect(x('At') - x('Here')).toBeGreaterThan(10);
+  }, 120_000);
+
+  it('breaks a pasted address rather than running it off the right margin', async () => {
+    const url = 'https://morgantestwell.dev/projects/inputpipelinerewrite/benchmarks/latencyresults2026/summary.html';
+    const bare = 'docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh/edit?usp=sharing&ouid=1234567890';
+    const { words, pageWidth } = await lines({
+      profile, company: 'Emberlight', role: 'Intern', date: 'September 26, 2026',
+      body: `My work is at ${url} which shows the numbers.\n\nThe write-up is at ${bare} if you want it.\n\n${P}`,
+    });
+    const left = Math.min(...words.map((w) => w.x));
+    // Nothing past the right margin, which is as wide as the left one.
+    expect(Math.max(...words.map((w) => w.right))).toBeLessThanOrEqual(pageWidth - left + 1);
+    // And the addresses still all there, over two lines each.
+    expect(words.map((w) => w.text).join('')).toContain(url);
+    expect(words.map((w) => w.text).join('')).toContain(bare);
   }, 120_000);
 
   it('and a long one still on one page', async () => {

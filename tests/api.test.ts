@@ -1921,16 +1921,17 @@ describe.skipIf(!latex)('letter rendering', { timeout: 180_000 }, () => {
    * do, on the document where it actually happens.
    *
    * The preamble sets `\raggedright`, so TeX cannot stretch a line to
-   * swallow an unbreakable token. A Google Docs link pasted into a letter is
-   * set past the margin and whatever is past the paper edge is not in the
-   * PDF at all — the reader gets `…ouid=1234` where `…ouid=1234567890` was
-   * typed. The resume path has warned about this from the start;
+   * swallow an unbreakable token. A long path pasted into a letter is set
+   * past the margin and whatever is past the paper edge is not in the PDF at
+   * all — the reader gets half of what was typed. The resume path has warned about this from the start;
    * `compileLetter` computed nothing and `LetterCompileResult` had nowhere
    * to put it, so the letter was compiled, attached and sent in silence.
    */
   it('says when a line runs off the edge of the page', async () => {
+    // A pasted address now breaks at its slashes (see `proseTex` in
+    // letter.ts); a Windows path still does not break anywhere.
     const link =
-      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh/edit?usp=sharing&ouid=1234567890';
+      'C:\\Users\\PersonT\\Documents\\Applications2026\\StreamlyDataPlatform\\PortfolioSamples\\IngestPipelineBenchmarks.pdf';
     const res = await request(app)
       .post('/api/render/letter')
       .send({ body: `Here is the portfolio: ${link}`, company: 'Streamly', role: 'Intern', resumeId: 'newgrad' })
@@ -3840,8 +3841,10 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
    * at least draws the page.
    */
   it('names a cover letter whose link runs off the page, in the folder it files', async () => {
+    // A pasted address now breaks at its slashes (see `proseTex` in
+    // letter.ts); a Windows path still does not break anywhere.
     const link =
-      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh/edit?usp=sharing&ouid=1234567890';
+      'C:\\Users\\PersonT\\Documents\\Applications2026\\StreamlyDataPlatform\\PortfolioSamples\\IngestPipelineBenchmarks.pdf';
     const res = await request(app)
       .post('/api/applications/bundle')
       .send({
