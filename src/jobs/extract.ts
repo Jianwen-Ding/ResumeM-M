@@ -2412,7 +2412,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * at here — a page that was going to be quiet stays quiet, rather than
    * becoming a list and getting a card.
    */
-  if (kind === 'posting' && listsRoles(html, text, url)) {
+  if (kind === 'posting' && listsRoles(html, url)) {
     kind = 'listing';
     why.push('lists roles and declares none of its own');
   }
@@ -2421,9 +2421,31 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   return { kind, score, why };
 }
 
-/** "300 jobs", "1,204 jobs found", "Showing 1 - 20 of 57": a page counting what it lists. */
+/*
+ * "300 jobs", "1,204 jobs found", "Showing 1 - 20 of 57": a page counting what
+ * it lists.
+ *
+ * Not a length of time. "3+ years in similar roles" and "2 years in backend
+ * roles" are what a posting asks for, and they read as a count of roles: a
+ * posting with a title like "Careers" over its role, which is what many
+ * careers sites give every page, was called a list for its own requirements.
+ */
 const JOBS_COUNTED =
-  /\b\d[\d,]*\+?\s+(?:[a-z-]+\s+){0,3}?(?:jobs|openings|positions|roles|opportunities|vacancies|results)\b|\bshowing\s+\d+\s*(?:-|–|to)\s*\d+\s+of\s+\d+|\b(?:jobs|results)\s+found\b/i;
+  /\b\d[\d,]*\+?\s+(?:(?!(?:years?|yrs?|months?|weeks?)\b)[a-z-]+\s+){0,3}?(?:jobs|openings|positions|roles|opportunities|vacancies|results)\b|\bshowing\s+\d+\s*(?:-|–|to)\s*\d+\s+of\s+\d+|\b(?:jobs|results)\s+found\b/i;
+
+/**
+ * The page without the blocks that list other openings — a posting's "Similar
+ * jobs" rail, "More roles at Acme" — as `labelOtherPostings` finds them.
+ */
+function withoutOtherPostings(html: string): string {
+  let out = labelOtherPostings(html);
+  for (let at = out.indexOf(OTHER_POSTINGS_MARKER); at >= 0; at = out.indexOf(OTHER_POSTINGS_MARKER)) {
+    const open = /<([a-z][a-z0-9]*)\b[^>]*>$/i.exec(out.slice(0, at));
+    const end = open ? elementEnd(out, open) : -1;
+    out = open && end > at ? `${out.slice(0, open.index)} ${out.slice(end)}` : `${out.slice(0, at)}${out.slice(at + OTHER_POSTINGS_MARKER.length)}`;
+  }
+  return out;
+}
 
 /** How many other postings a page links to: each address naming a job, counted once. */
 function postingLinks(html: string, url?: string): number {
@@ -2444,14 +2466,21 @@ function postingLinks(html: string, url?: string): number {
 }
 
 /** A page that lists roles and declares none of its own. See the end of `classifyPage`. */
-function listsRoles(html: string, text: string, url?: string): boolean {
+function listsRoles(html: string, url?: string): boolean {
   if (/"@type"\s*:\s*"?JobPosting/i.test(html)) return false;
   if (jobNumberIn(url)) return false;
   const title = readableName(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '') ?? '';
   const role = readTitle(title, { employers: [], unnamed: false, onBoard: false }).role;
   const namesNoRole = !role || !looksLikeRoleTitle(role);
-  const counted = JOBS_COUNTED.test(text);
-  const links = postingLinks(html, url);
+  /*
+   * Counted and linked outside a rail of other openings. A single posting on
+   * a careers site's own pages — a role's name in its address, no number, no
+   * JobPosting data — commonly ends with "Similar jobs" and "View all 24
+   * open positions", and those alone made it a list of the jobs beside it.
+   */
+  const own = withoutOtherPostings(html);
+  const counted = JOBS_COUNTED.test(stripTags(own).slice(0, 120_000));
+  const links = postingLinks(own, url);
   return (namesNoRole && (counted || links >= 3)) || (counted && links >= 3);
 }
 

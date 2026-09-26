@@ -180,3 +180,47 @@ describe('a row the store is asked to file on its own, for a page that lists job
     expect((await request(app).get('/api/applications').expect(200)).body.applications).toEqual([]);
   });
 });
+
+/*
+ * And a single posting is not a list for what is on the page beside it.
+ *
+ * A posting on a careers site's own pages often declares nothing a machine
+ * reads — its role's name in its address, no number, no JobPosting data — and
+ * many such sites title every page "Careers". Two things on it read as a
+ * list: its own requirements ("3+ years in similar roles" counts roles), and
+ * the "Similar jobs" rail and "View all 24 open positions" it ends with. Each
+ * made the posting a listing, and the extension files no application for one.
+ */
+describe('a single posting on a careers site’s own pages', () => {
+  const URL = 'https://northwind.example/careers/senior-platform-engineer';
+  const posting = (title: string, requirement: string, after = '') =>
+    `<html><head><title>${title}</title></head><body>
+<h1>Senior Platform Engineer</h1>
+<h2>About the role</h2><p>You will own the platform that runs our services. Responsibilities include designing,
+building and operating infrastructure, and mentoring engineers.</p>
+<h2>Qualifications</h2><ul><li>${requirement}</li><li>Experience with Kubernetes and Terraform</li></ul>
+<h2>Benefits</h2><p>Competitive salary and compensation, health, dental and vision coverage, 401k match.</p>
+<a href="/careers/senior-platform-engineer/apply">Apply now</a>${after}</body></html>`;
+
+  it('is not a list for the years its requirements ask for', () => {
+    for (const requirement of ['3+ years in similar roles', '2 years in backend roles']) {
+      for (const title of ['Careers', 'Northwind Careers']) {
+        expect(classifyPage(posting(title, requirement), URL).kind, `${title}: ${requirement}`).toBe('posting');
+      }
+    }
+  });
+
+  it('nor for the similar jobs it links to at the end', () => {
+    const rail = `<section><h3>Similar jobs</h3><ul>
+<li><a href="/careers/staff-backend-engineer-payments">Staff Backend Engineer</a></li>
+<li><a href="/careers/site-reliability-engineer-infrastructure">Site Reliability Engineer</a></li>
+<li><a href="/careers/senior-data-platform-engineer">Senior Data Platform Engineer</a></li>
+</ul></section><p><a href="/careers">View all 24 open positions</a></p>`;
+    const verdict = classifyPage(posting('Senior Platform Engineer | Northwind', '5+ years building distributed systems', rail), URL);
+    expect(verdict.kind, verdict.why.join('; ')).toBe('posting');
+
+    // While a page that is a list, with the same links, still is one.
+    const home = listing('Careers at Northwind', 'Open roles', `<p>24 open positions</p>${rail.replace(/<\/?section>|<h3>Similar jobs<\/h3>/g, '')}`);
+    expect(classifyPage(home, 'https://northwind.example/careers').kind).not.toBe('posting');
+  });
+});
