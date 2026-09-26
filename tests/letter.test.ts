@@ -131,4 +131,23 @@ describe.skipIf(!latex)('compiling a cover letter', { timeout: 180_000 }, () => 
       /^This cover letter contains/,
     );
   });
+
+  /*
+   * And quotes what they wrote around it. The snippet came from the .tex, so
+   * an emoji closing the letter was shown near "Thanks for reading 🚀
+   * Sincerely, \\[25." — the sign-off and the signature gap's markup, which
+   * nobody typed and nobody can find in their letter.
+   */
+  it('quotes the person\u2019s own text around the character, not the LaTeX', async () => {
+    const said = await compileLetter(letter('I would love to join the team. Thanks for reading 🚀'), DEFAULT_LAYOUT).catch(
+      (err: Error) => err.message,
+    );
+    expect(said).toContain('near: "Thanks for reading 🚀".');
+    expect(said).not.toMatch(/Sincerely|\\\[/);
+
+    const inCompany = await compileLetter(letter('I would like to work on ingest.', { company: 'Emberlight 株式会社' }), DEFAULT_LAYOUT).catch(
+      (err: Error) => err.message,
+    );
+    expect(inCompany).toContain('near: "Emberlight 株式会社"');
+  });
 });

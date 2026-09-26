@@ -459,8 +459,12 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
  * knows how to show — the log body carries the same text, so a UI that renders
  * the log instead of the message still says something useful.
  */
-function assertRenderable(tex: string, what: 'resume' | 'cover letter' = 'resume'): void {
-  const reason = unrenderableReason(tex, what);
+function assertRenderable(
+  tex: string,
+  what: 'resume' | 'cover letter' = 'resume',
+  own: readonly (string | undefined)[] = [],
+): void {
+  const reason = unrenderableReason(tex, what, own);
   if (reason) throw new LatexError(reason, reason);
 }
 
@@ -1124,7 +1128,25 @@ export async function compileLetter(
    * an emoji pasted into a cover letter — sending the reader to the wrong
    * document, which on a save with a dozen resumes in it is an afternoon.
    */
-  assertRenderable(renderLetterLatex(letter, base), 'cover letter');
+  /*
+   * And quoted from what they wrote, not from the .tex: see `unrenderableReason`.
+   */
+  const p = letter.profile;
+  assertRenderable(renderLetterLatex(letter, base), 'cover letter', [
+    letter.body,
+    letter.company,
+    letter.role,
+    letter.greeting,
+    letter.signOff,
+    letter.date,
+    p.name,
+    p.phone,
+    p.email,
+    p.location,
+    p.linkedin,
+    p.github,
+    p.website,
+  ]);
 
   type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };
   const wantFast = opts.mode === 'preview' && (await hasFastPath());

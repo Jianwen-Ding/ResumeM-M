@@ -106,10 +106,29 @@ export function unsupportedCharacters(text: string): UnsupportedCharacter[] {
   return [...found.values()];
 }
 
-/** The message shown when a document cannot be set, or undefined when it can. */
-export function unrenderableReason(text: string, what: 'resume' | 'cover letter' = 'resume'): string | undefined {
+/**
+ * The message shown when a document cannot be set, or undefined when it can.
+ *
+ * `own` is the text the person wrote, field by field, when the caller has it.
+ * The check has to run on the .tex — that is what the engine is given — but
+ * the snippet it quoted came from there too, so an emoji at the end of a
+ * letter was reported near `Thanks for reading 🚀 Sincerely, \\[25.`,
+ * half of it markup the person never typed and cannot find. Quoted from the
+ * field that holds the character instead, it is their own sentence.
+ */
+export function unrenderableReason(
+  text: string,
+  what: 'resume' | 'cover letter' = 'resume',
+  own: readonly (string | undefined)[] = [],
+): string | undefined {
   const bad = unsupportedCharacters(text);
   if (bad.length === 0) return undefined;
+  const first = bad[0]!;
+  const near =
+    own
+      .filter((field): field is string => typeof field === 'string' && field.includes(first.char))
+      .map((field) => unsupportedCharacters(field).find((c) => c.char === first.char)?.context)
+      .find(Boolean) ?? first.context;
 
   const shown = bad.slice(0, 6).map((b) => `${b.char} (${b.codePoint})`).join(', ');
   const more = bad.length > 6 ? `, and ${bad.length - 6} more` : '';
@@ -117,7 +136,7 @@ export function unrenderableReason(text: string, what: 'resume' | 'cover letter'
     `This ${what} contains ${bad.length} character${bad.length === 1 ? '' : 's'} the LaTeX ` +
     `engine cannot typeset: ${shown}${more}. It sets Latin scripts only, so text in ` +
     `Chinese, Japanese, Korean, Cyrillic, Greek, Arabic or Hebrew — and emoji — cannot go ` +
-    `in the PDF. First occurrence near: "${bad[0]!.context}".`
+    `in the PDF. First occurrence near: "${near}".`
   );
 }
 
