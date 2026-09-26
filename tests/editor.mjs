@@ -2067,6 +2067,14 @@ async function main() {
 
     const complete = page.locator('#draft-editor button', { hasText: /Build files and record it|Complete/ });
     if ((await complete.count()) > 0) {
+      /*
+       * What the upload folder already held. A save with other applications
+       * in flight has their files there from the start, so "any file" was
+       * true before the button was pressed.
+       */
+      const already = new Set(
+        ((await (await fetch(`${server.url}/api/applications`)).json().catch(() => ({}))).current?.files ?? []),
+      );
       await complete.first().click();
       /*
        * Waited for by asking the tracker, not by reading the panel. What the
@@ -2085,11 +2093,13 @@ async function main() {
           // The flat upload folder is reported alongside the tracker, which is
           // where the Applications tab reads it from too.
           const tracked = await (await fetch(`${server.url}/api/applications`)).json().catch(() => ({}));
-          if ((tracked.current?.files ?? []).length) return tracked.current.files;
+          const added = (tracked.current?.files ?? []).filter((f) => !already.has(f));
+          if (added.some((f) => /-Resume(-[\w-]+)?\.pdf$/.test(f)) && added.some((f) => /-Cover-Letter(-[\w-]+)?\.pdf$/.test(f))) return added;
           await page.waitForTimeout(500);
         }
         return [];
       });
+      // The plain name all the same: the others in flight were last touched long ago. See `HOLD_MS`.
       check('the resume is there, named for the person', files.some((f) => /-Resume\.pdf$/.test(f)), files.join(', ') || '(none)');
       check('so is the cover letter that was written', files.some((f) => /-Cover-Letter\.pdf$/.test(f)), files.join(', '));
 
