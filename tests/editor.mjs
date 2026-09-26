@@ -2177,6 +2177,24 @@ async function main() {
           )
           .catch(() => {});
       const closes = () => page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
+      /*
+       * Until a dialog is up and has taken focus, before anything is typed.
+       * `focusModal` puts the cursor in the dialog's first box a timer-tick
+       * after it opens. A box filled before that tick can lose the text to
+       * that first box if the tick lands between the fill's focus and its
+       * typing. Seen in one run in six: "Helios Freight", meant for the
+       * edited answer's label, went onto the end of the answer, and the
+       * label check failed. Seen again once in 25 rounds of just these steps.
+       */
+      const dialogUp = async () => {
+        await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+        await page
+          .waitForFunction(() => document.querySelector('#modal-content')?.contains(document.activeElement), null, {
+            timeout: 10_000,
+            polling: 50,
+          })
+          .catch(() => {});
+      };
 
       await page.locator('#tabs button[data-tab="applications"]').click();
       let refused = 0;
@@ -2186,7 +2204,7 @@ async function main() {
         return route.abort('connectionrefused');
       });
       await page.locator('#btn-add-app').click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_company').fill('Wrenfield Analytics');
       await page.locator('#f_role').fill('Data Engineer');
       await page.locator('#modal-ok').click();
@@ -2201,7 +2219,7 @@ async function main() {
       check('and pressing OK again saves it', apps.some((a) => a.company === 'Wrenfield Analytics'));
 
       await page.locator('#btn-add-app').click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_company').fill('Only a company');
       await page.locator('#modal-ok').click();
       await saveCameBack(/needs a company and a role/);
@@ -2229,7 +2247,7 @@ async function main() {
       };
       await page.route('**/api/answers/save', hold);
       await page.locator('#btn-add-answer').click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_question').fill('What drew you to logistics software?');
       await page.locator('#f_answer').fill('Freight is where software meets the physical world.');
       await page.locator('#modal-ok').click();
@@ -2262,7 +2280,7 @@ async function main() {
        */
       const errorsBefore = errors.length;
       await page.locator('#btn-add-answer').click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_question').fill('What is your social security number?');
       await page.locator('#f_answer').fill('I would rather give that to a person');
       const refusal = page
@@ -2301,7 +2319,7 @@ async function main() {
       const refuseWrite = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
       await page.route('**/api/answers', refuseWrite);
       await typedCard.locator('button', { hasText: 'Edit' }).click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       const labelShown = await page.locator('#f_label').inputValue();
       await page.locator('#f_answer').fill('Three weeks after an offer, having thought about it');
       await page.locator('#modal-ok').click();
@@ -2338,7 +2356,7 @@ async function main() {
        */
       check('editing an answer shows the label its version has', labelShown === 'Typed on a form', labelShown);
       await typedCard.locator('button', { hasText: 'Edit' }).click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_label').fill('Helios Freight');
       await page.locator('#modal-ok').click();
       await closes();
@@ -2351,7 +2369,7 @@ async function main() {
       const refuseLetter = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
       await page.route('**/api/letters/**', refuseLetter);
       await page.locator('#letters .mini-card').first().locator('button', { hasText: 'Open' }).click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_body').fill('A letter reworked for an hour.');
       await page.locator('#modal-ok').click();
       await saveCameBack(/^Not saved/);
