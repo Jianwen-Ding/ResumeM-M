@@ -213,14 +213,59 @@ function header(p: ResolvedProfile, layout: LayoutOptions): string {
 /**
  * Turn typed prose into paragraphs. Blank lines separate them; a single
  * newline inside a paragraph is a wrap, not a break, which is how every text
- * editor and every word processor treats it.
+ * editor and every word processor treats it — except in a list, see
+ * `LIST_ITEM`. Returned as TeX.
  */
 function paragraphs(body: string): string[] {
-  return body
-    .replace(/\r\n/g, '\n')
-    .split(/\n\s*\n/)
-    .map((p) => p.trim().replace(/\n/g, ' '))
-    .filter(Boolean);
+  const out: string[] = [];
+  for (const block of body.replace(/\r\n?/g, '\n').split(/\n\s*\n/)) {
+    let prose: string[] = [];
+    let items: { label: string; text: string }[] = [];
+    const endProse = () => {
+      if (prose.length) out.push(inlineTex(prose.join(' ')));
+      prose = [];
+    };
+    const endList = () => {
+      if (items.length) out.push(listTex(items));
+      items = [];
+    };
+    for (const line of block.split('\n')) {
+      if (!line.trim()) continue;
+      const item = LIST_ITEM.exec(line);
+      if (item) {
+        endProse();
+        items.push({ label: item[2] ? `${item[2]}${item[3]}` : '\\textbullet', text: item[4]! });
+      } else if (items.length) {
+        // A line under an item without a marker of its own carries it on.
+        items[items.length - 1]!.text += ` ${line.trim()}`;
+      } else {
+        prose.push(line.trim());
+      }
+    }
+    endProse();
+    endList();
+  }
+  return out;
+}
+
+/**
+ * A list the writer typed as one: "- ", "* ", "• " or "1. " at the start of
+ * a line.
+ *
+ * Read as prose, a line break inside a paragraph is a wrap, so a list came
+ * out as one run-on paragraph — "- Rebuilt the input pipeline - Shipped two
+ * games - Wrote a profiler", with the dashes left in the middle of it. It is
+ * the first thing a model writing a letter reaches for, and people paste
+ * them from their own notes. Each item is its own line, the marker hung in
+ * the margin and the wrapped lines under the text, and the items are not
+ * pulled apart by the gap that separates paragraphs.
+ */
+const LIST_ITEM = /^\s*(?:([-*+•–])|(\d{1,3})([.)]))\s+(\S.*)$/;
+
+function listTex(items: { label: string; text: string }[]): string {
+  return items
+    .map((i) => `\\hangindent=2em\\hangafter=0\\leavevmode\\llap{${i.label}\\hspace{0.5em}}${inlineTex(i.text.trim())}`)
+    .join('\\par\\vspace{-\\parskip}\n');
 }
 
 /**
@@ -269,7 +314,7 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
   }
 
   const written = paragraphs(own.body);
-  if (written.length) blocks.push(written.map(inlineTex).join('\n\n'));
+  if (written.length) blocks.push(written.join('\n\n'));
   else if (!own.greeting && !own.closing) blocks.push('\\textit{(nothing written yet)}');
 
   // Room under the sign-off where a signature would go.

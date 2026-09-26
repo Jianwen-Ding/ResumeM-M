@@ -37,7 +37,7 @@ async function lines(letter: Parameters<typeof compileLetter>[0]) {
     const { stdout } = await run('pdftotext', ['-layout', pdfPath, '-']);
     // Where each word is on the page, in points down from the top.
     const { stdout: boxes } = await run('pdftotext', ['-bbox', pdfPath, '-']);
-    const words = [...boxes.matchAll(/yMin="([\d.]+)"[^>]*>([^<]*)</g)].map((m) => ({ y: Number(m[1]), text: m[2]! }));
+    const words = [...boxes.matchAll(/xMin="([\d.]+)" yMin="([\d.]+)"[^>]*>([^<]*)</g)].map((m) => ({ x: Number(m[1]), y: Number(m[2]), text: m[3]! }));
     return { r, lines: stdout.split('\n').map((l) => l.trim()).filter(Boolean), words };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -103,6 +103,24 @@ describe.skipIf(!hasLatex())('a letter on its page', () => {
   it('signs a letter that ends on a sign-off with no name under it', async () => {
     const { lines: got } = await lines({ profile, company: 'Emberlight', role: 'Intern', date: 'September 26, 2026', body: `${P}\n\nThank you,` });
     expect(got.slice(-2)).toEqual(['Thank you,', 'Morgan Testwell']);
+  }, 120_000);
+
+  it('sets a list the writer typed as a list, not as one run-on paragraph', async () => {
+    const { lines: got, words } = await lines({
+      profile, company: 'Emberlight', role: 'Intern', date: 'September 26, 2026',
+      body: `Here is what I bring:\n- ${P}\n- **Shipped** two student games\n\n1. First thing\n2. Second thing\n\n${P}`,
+    });
+    expect(got).toContain('Here is what I bring:');
+    // The bullet is whatever the font maps it to; the item is its own line.
+    expect(got.some((l) => /^(\S\s+)?Shipped two student games$/.test(l))).toBe(true);
+    expect(got).toContain('1. First thing');
+    expect(got).toContain('2. Second thing');
+    expect(got.join(' ')).not.toMatch(/ - /);
+    // The marker in the margin, the item's own lines under its text.
+    const x = (text: string) => words.find((w) => w.text === text)?.x ?? NaN;
+    const wrapped = words.find((w) => w.y > words.find((v) => v.text === 'university')!.y + 10)!;
+    expect(Math.abs(wrapped.x - x('At'))).toBeLessThan(1);
+    expect(x('At') - x('Here')).toBeGreaterThan(10);
   }, 120_000);
 
   it('and a long one still on one page', async () => {
