@@ -659,7 +659,11 @@ async function fitSearch<A extends Tried>(
     if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
     // On its page, and losing nothing off the side of it the page as written kept.
     const edge = widestPastEdge(first.raw.log);
-    const roomy = (a: Tried) => a.m.pages <= pages && widestPastEdge(a.raw.log) <= edge;
+    // Nor wrapping a heading row onto more lines than the page as written
+    // did: larger type would otherwise buy itself two- and three-line titles.
+    const wrapped = wrappedRows(first.raw.log);
+    const roomy = (a: Tried) =>
+      a.m.pages <= pages && widestPastEdge(a.raw.log) <= edge && wrappedRows(a.raw.log) <= wrapped;
     // In amounts of growth: 0 is as written, 1 the ceiling.
     let fit = { g: 0, a: first };
     const widest = await next(layoutAt(base, -1));
@@ -1013,6 +1017,11 @@ function pastEdge(log: string): number[] {
 /** How far past the edge the worst of those lines runs, in points; 0 when none does. */
 function widestPastEdge(log: string): number {
   return Math.max(0, ...pastEdge(log));
+}
+
+/** Lines added by wrapping heading rows too long for one line (see `\rmmside`). */
+function wrappedRows(log: string): number {
+  return [...log.matchAll(/RMM-ROW-LINES: (\d+)/g)].reduce((sum, m) => sum + Number(m[1]) - 1, 0);
 }
 
 function tooWideWarnings(log: string): string[] {

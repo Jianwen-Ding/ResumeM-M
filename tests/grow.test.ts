@@ -228,6 +228,100 @@ describe.skipIf(!hasEngine)('a contact line too long for one line', () => {
   }, 60_000);
 });
 
+describe.skipIf(!hasEngine)('an entry heading too long for its row', () => {
+  const long = (entries: Record<string, string>[], layout: Partial<typeof DEFAULT_LAYOUT> = {}) => {
+    const r = twoPager(1, layout);
+    r.sections = [
+      {
+        kind: 'experience',
+        heading: 'Experience',
+        skillGroups: [],
+        entries: entries.map((e, i) => ({
+          id: `l${i}`,
+          kind: (e.kind ?? 'experience') as 'experience',
+          title: e.title!,
+          subtitle: e.subtitle,
+          dates: e.dates,
+          location: e.location,
+          bullets: [{ id: `lb${i}`, variantId: 'v', text: 'Cut p99 latency from 900ms to 180ms' }],
+        })),
+      },
+    ];
+    return r;
+  };
+
+  /*
+   * A long employer and a long location, on different rows: each row fits on
+   * its own, but the table sized its left column by the one and its right by
+   * the other, and set the dates and location off the edge of the page.
+   */
+  it('keeps every part of it on the page', async () => {
+    const dir = tempDir('rmm-row-');
+    const pdfPath = path.join(dir, 'row.pdf');
+    const r = await compileResume(
+      long(
+        [
+          {
+            title: 'Brightline Systems International Holdings, Distributed Reliability Engineering',
+            subtitle: 'Engineer',
+            dates: 'September 2019 -- Present',
+            location: 'Cambridge, Massachusetts, United States (Hybrid)',
+          },
+          {
+            title: 'Brightline Systems International Holdings, Distributed Infrastructure and Reliability Engineering Division',
+            subtitle: 'Senior Staff Software Engineer',
+            dates: 'Jan. 2018 -- Aug. 2019',
+            location: 'Boston, MA',
+          },
+          {
+            kind: 'project',
+            title: 'Telemetry Ingestion Service Rewrite With Regional Failover',
+            subtitle: 'TypeScript, Go, Kafka, PostgreSQL, Kubernetes, Terraform',
+            dates: 'Jan. 2023 -- Aug. 2024',
+            location: 'Boston, MA',
+          },
+        ],
+        { autoFit: false },
+      ),
+      { pdfPath },
+    );
+    expect(r.warnings.filter((w) => /right-hand edge/.test(w))).toEqual([]);
+    const text = (await pageLines(pdfPath, 1)).join(' ').replace(/\s+/g, ' ');
+    for (const part of [
+      'September 2019', 'Cambridge, Massachusetts, United States (Hybrid)',
+      'Engineering Division', 'Jan. 2018', 'Aug. 2019', 'Terraform', 'Aug. 2024 | Boston, MA',
+    ]) {
+      expect(text).toContain(part);
+    }
+  }, 60_000);
+
+  /*
+   * Wrapped as written, and grown: the larger type set the same project
+   * heading on three lines instead of two.
+   */
+  it('and is not wrapped onto more lines by growing', async () => {
+    const r = long([
+      {
+        kind: 'project',
+        title: 'Telemetry Ingestion Service Rewrite With Regional Failover',
+        subtitle: 'TypeScript, Go, Kafka, PostgreSQL, Kubernetes, Terraform',
+        dates: 'Jan. 2023 -- Aug. 2024',
+        location: 'Boston, MA',
+      },
+    ]);
+    const dir = tempDir('rmm-row-');
+    const headingLines = async (layout: Partial<typeof DEFAULT_LAYOUT>) => {
+      const pdfPath = path.join(dir, `${layout.autoFit}.pdf`);
+      await compileResume({ ...r, layout: { ...r.layout, ...layout } }, { pdfPath });
+      const lines = await pageLines(pdfPath, 1);
+      const from = lines.findIndex((l) => /Telemetry Ingestion/.test(l));
+      return lines.findIndex((l) => /•/.test(l)) - from;
+    };
+    expect(await headingLines({ autoFit: false })).toBe(2);
+    expect(await headingLines({ autoFit: true })).toBe(2);
+  }, 90_000);
+});
+
 describe('how large it may go, set like the floors', () => {
   it('merges a save’s ceiling with this version’s, one knob at a time', () => {
     const layout = layoutFor(undefined, { growBounds: { maxFontSizePt: 11.5 } });

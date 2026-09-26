@@ -482,18 +482,46 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
   }%
 }
 
+% One side of a heading row, #1 = l or r, set against the other side of the
+% same row: #2 is the row's left content, #3 its right.
+%
+% In a plain l/r table each column is as wide as its widest cell in any row,
+% so a long employer name and a long location — on different rows, each row
+% fitting on its own — added up to more than the page, and the dates and the
+% location were set off the right-hand edge and lost. Each side is set in a
+% zero-width box instead, pinned to its own edge, exactly where the table put
+% it. Only a row whose own two sides would come within 1em of each other is
+% wrapped: the right side keeps its width up to 40% of the row, the left
+% takes the rest, and either that is still too long wraps within its share.
+% Says how many lines a wrapped side took, so growing can refuse to wrap more.
+% (Through \\edef: \\typeout reads \\prevgraf too late, and always says 0.)
+\\newcommand{\\rmmlines}{\\par\\edef\\rmmn{\\the\\prevgraf}\\typeout{RMM-ROW-LINES: \\rmmn}}
+\\newcommand{\\rmmside}[3]{%
+  \\setbox0\\hbox{#2}\\setbox2\\hbox{#3}%
+  \\dimen0=0.97\\textwidth
+  \\ifdim\\dimexpr\\wd0+\\wd2+1em\\relax>\\dimen0
+    \\dimen2=\\wd2
+    \\ifdim\\dimen2>0.4\\dimen0 \\dimen2=0.4\\dimen0 \\fi
+    \\ifdim\\wd0<\\dimexpr\\dimen0-\\dimen2-1em\\relax \\dimen2=\\dimexpr\\dimen0-\\wd0-1em\\relax \\fi
+    \\dimen4=\\dimexpr\\dimen0-\\dimen2-1em\\relax
+    \\if l#1\\makebox[0pt][l]{\\parbox[t]{\\dimen4}{\\raggedright#2\\rmmlines}}%
+    \\else\\makebox[0pt][r]{\\parbox[t]{\\dimen2}{\\raggedleft#3\\rmmlines}}\\fi
+  \\else
+    \\if l#1\\makebox[0pt][l]{\\box0}\\else\\makebox[0pt][r]{\\box2}\\fi
+  \\fi}
+
 \\newcommand{\\resumeSubheading}[4]{%
   \\vspace{-2\\rmmunit}\\item
     \\begin{tabular*}{0.97\\textwidth}[t]{l@{\\extracolsep{\\fill}}r}
-      \\textbf{#1} & #2 \\\\
-      \\textit{\\small#3} & \\textit{\\small #4} \\\\
+      \\rmmside l{\\textbf{#1}}{#2} & \\rmmside r{\\textbf{#1}}{#2} \\\\
+      \\rmmside l{\\textit{\\small#3}}{\\textit{\\small #4}} & \\rmmside r{\\textit{\\small#3}}{\\textit{\\small #4}} \\\\
     \\end{tabular*}\\vspace{-7\\rmmunit}%
 }
 
 \\newcommand{\\resumeProjectHeading}[2]{%
     \\item
     \\begin{tabular*}{0.97\\textwidth}{l@{\\extracolsep{\\fill}}r}
-      \\small#1 & #2 \\\\
+      \\rmmside l{\\small#1}{#2} & \\rmmside r{\\small#1}{#2} \\\\
     \\end{tabular*}\\vspace{-7\\rmmunit}%
 }
 
@@ -609,7 +637,7 @@ ${lines}
       // Projects use the one-line heading form, like the original template.
       if (e.kind === 'project') {
         const left = e.subtitle
-          ? `\\textbf{${lineTex(e.title)}} $|$ \\emph{${lineTex(e.subtitle)}}`
+          ? `\\textbf{${lineTex(e.title)}}\\rmmsep \\emph{${lineTex(e.subtitle)}}`
           : `\\textbf{${lineTex(e.title)}}`;
         /*
          * And the location, which this branch used to drop on the floor.
