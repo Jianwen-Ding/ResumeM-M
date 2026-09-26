@@ -168,6 +168,130 @@ async function main() {
     if (r.status() >= 400) errors.push(`${r.status()} ${new URL(r.url()).pathname}`);
   });
 
+  /*
+   * Waits on the thing a check is about, not on a guessed time.
+   *
+   * `saveCameBack`, `closes` and `dialogUp` were written for "A dialog whose
+   * save fails" and live here now that every section uses them. The rest are
+   * for the other sections, which slept 300 to 3500ms and then read the
+   * screen or the store. A loaded machine takes longer than that.
+   *
+   * Every wait gives up after ten seconds without throwing, and the check
+   * after it then reads things as they stand. So a condition that never
+   * comes fails its check as it always did, only later.
+   *
+   * Until a dialog's save has come back:
+   *
+   * These checks slept 400 to 1200ms after pressing OK and then read the
+   * dialog or the store, and a loaded machine takes longer than that: run
+   * with the page's CPU slowed and each request held a little, three read
+   * a dialog still saying "Saving…" and one a label not yet saved. Back
+   * is the dialog gone, which `form` does only once the save has landed,
+   * or up again with OK pressable and `said` above it. One that never
+   * gets there is read as it stands after ten seconds, and fails as it
+   * always did.
+   */
+  const saveCameBack = (said) =>
+    page
+      .waitForFunction(
+        ([source, flags]) =>
+          document.querySelector('#modal').classList.contains('hidden') ||
+          (!document.querySelector('#modal-ok').disabled &&
+            new RegExp(source, flags).test(document.querySelector('#modal-note').textContent)),
+        [said.source, said.flags],
+        { timeout: 10_000, polling: 50 },
+      )
+      .catch(() => {});
+  const closes = () => page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
+  /*
+   * Until a dialog is up and has taken focus, before anything is typed.
+   * `focusModal` puts the cursor in the dialog's first box a timer-tick
+   * after it opens. A box filled before that tick can lose the text to
+   * that first box if the tick lands between the fill's focus and its
+   * typing. Seen in one run in six: "Helios Freight", meant for the
+   * edited answer's label, went onto the end of the answer, and the
+   * label check failed. Seen again once in 25 rounds of just these steps.
+   */
+  const dialogUp = async () => {
+    await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+    await page
+      .waitForFunction(() => document.querySelector('#modal-content')?.contains(document.activeElement), null, {
+        timeout: 10_000,
+        polling: 50,
+      })
+      .catch(() => {});
+  };
+
+  /* Until `ask` (run here, not in the page) answers truthy, polled. */
+  const pollFor = async (ask, ms = 10_000) => {
+    const by = Date.now() + ms;
+    for (;;) {
+      const now = await ask().catch(() => false);
+      if (now || Date.now() >= by) return now;
+      await new Promise((go) => setTimeout(go, 100));
+    }
+  };
+  /* Until `holds` is true in the page. */
+  const onPage = (holds, arg = null) =>
+    page.waitForFunction(holds, arg, { timeout: 10_000, polling: 50 }).then(() => true, () => false);
+  /*
+   * Until the builder's picker shows `name` as the resume open.
+   *
+   * Saving a variation and renaming one both close their dialog first, then
+   * save, reload the store and redraw the picker. So they are over when the
+   * picker says so, not when the dialog goes or the server has it. Read any
+   * sooner, the page was still on the resume before: with requests held
+   * 1.5s, "Naming a variation" was run against the base resume, renamed it
+   * to its own name and was not refused.
+   */
+  const pickerSays = (name) =>
+    onPage((name) => document.querySelector('#resume-select option:checked')?.textContent === name, name);
+
+  /*
+   * Until the page has stopped talking to the server about `about`: nothing
+   * matching it in flight, and nothing new started for `quietMs`.
+   *
+   * For checks that something did *not* happen, where there is no event to
+   * wait for. A guessed sleep there passes whenever the machine is slower
+   * than the guess, which is when the thing it guards against is most likely
+   * to happen. Waiting for the requests to finish gives it the chance to.
+   */
+  const inFlight = new Map();
+  const started = [];
+  page.on('request', (r) => {
+    inFlight.set(r, r.url());
+    started.push({ url: r.url(), at: Date.now() });
+    if (started.length > 500) started.shift();
+  });
+  page.on('requestfinished', (r) => inFlight.delete(r));
+  page.on('requestfailed', (r) => inFlight.delete(r));
+  const matches = (about, url) => about.test(new URL(url).pathname);
+  /*
+   * A reload, over once the page has put up the tab it starts on.
+   *
+   * The tabs come alive before the save is loaded, and the last thing the
+   * page does on its way up is show the builder, or whatever tab the address
+   * names. A tab clicked before then is taken away again. On a slow page the
+   * History tab was clicked with no save loaded yet, so it listed no resumes,
+   * and then the builder was put over it. The Save tab is the one the page
+   * starts on, so any other tab showing means that step is done.
+   */
+  const reloaded = async () => {
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page
+      .waitForFunction(() => {
+        const tab = document.querySelector('.tab.active');
+        return tab && tab.id !== 'tab-save';
+      }, null, { timeout: 30_000, polling: 50 })
+      .catch(() => {});
+  };
+  const settled = (about, quietMs = 400) =>
+    pollFor(async () => {
+      if ([...inFlight.values()].some((u) => matches(about, u))) return false;
+      const last = Math.max(0, ...started.filter((s) => matches(about, s.url)).map((s) => s.at));
+      return Date.now() - last >= quietMs;
+    });
+
   try {
     /* -------------------------------------------------------------- *
      * Opening it                                                      *
@@ -245,7 +369,11 @@ async function main() {
       if (!(await undo.isDisabled())) {
         const wasChecked = await boxes.first().isChecked();
         await undo.click();
-        await page.waitForTimeout(2500);
+        // Until the box has flipped back, which is what the undo is for.
+        await onPage(
+          (was) => document.querySelector('#editor input[type=checkbox]:not([disabled])')?.checked !== was,
+          wasChecked,
+        );
         const nowChecked = await page.locator('#editor input[type=checkbox]:not([disabled])').first().isChecked();
         check('and pressing it puts the selection back', nowChecked !== wasChecked, `${wasChecked} → ${nowChecked}`);
       }
@@ -253,6 +381,19 @@ async function main() {
 
     /** The ids the editor is showing, in the order it is showing them. */
     const shown = (selector) => page.$$eval(selector, (rows) => rows.map((r) => r.dataset.dragId));
+    /*
+     * Until `later` is drawn after `earlier` among `selector`. A move is on
+     * screen once the editor has redrawn, and on a slow page that comes after
+     * any guessed pause.
+     */
+    const movedOnScreen = (selector, later, earlier) =>
+      onPage(
+        ({ selector, later, earlier }) => {
+          const ids = [...document.querySelectorAll(selector)].map((r) => r.dataset.dragId);
+          return ids.includes(later) && ids.indexOf(later) > ids.indexOf(earlier);
+        },
+        { selector, later, earlier },
+      );
 
     /*
      * The one invariant underneath all of these: the list on the screen is
@@ -364,7 +505,18 @@ async function main() {
         await year.waitFor({ timeout: 10_000 });
         await year.fill(moved);
         await year.blur();
-        await page.waitForTimeout(3000);
+        /*
+         * Until the save holds the new year, which the checks read, and the
+         * page has finished with it. A date's save reloads the store and
+         * redraws the entry once the write is in. The next year typed while
+         * that is under way goes into a box the redraw then replaces, and is
+         * never saved.
+         */
+        await pollFor(async () => {
+          const e = (await (await fetch(`${server.url}/api/store`)).json()).entries?.find((x) => x.id === target.id);
+          return String(e?.period?.start?.year) === moved && String(e?.dates ?? '').includes(moved);
+        });
+        await settled(/^\/api\/(entries|store)/);
 
         const after = await (await fetch(`${server.url}/api/store`)).json();
         const now = (after.entries ?? []).find((e) => e.id === target.id);
@@ -384,9 +536,9 @@ async function main() {
           const backwards = String(now.period.end.year + 2);
           await year.fill(backwards);
           await year.blur();
-          await page.waitForTimeout(3000);
 
           const note = page.locator(`#editor .entry[data-drag-id="${target.id}"] .dates .date-wrong`);
+          await note.waitFor({ timeout: 10_000 }).catch(() => {});
           check('a range that ends before it starts says so beside the dates',
             (await note.count()) === 1, await note.innerText().catch(() => '(absent)'));
 
@@ -407,7 +559,13 @@ async function main() {
             warned ? '' : (await page.locator('#warnings').innerText().catch(() => '')) || '(no warnings)');
 
           // Nothing was refused and nothing rewritten — the date it was
-          // given is the date it kept.
+          // given is the date it kept. Read once the save has it, which the
+          // warning above does not promise: it can come from the screen.
+          await pollFor(async () =>
+            String((await (await fetch(`${server.url}/api/store`)).json()).entries.find((e) => e.id === target.id)?.period?.start?.year) === backwards,
+          );
+          // And finished with on the page, before the next year is typed. See above.
+          await settled(/^\/api\/(entries|store)/);
           const bad = await (await fetch(`${server.url}/api/store`)).json();
           check('and the date it was given is the date it kept',
             String(bad.entries.find((e) => e.id === target.id)?.period?.start?.year) === backwards);
@@ -416,7 +574,12 @@ async function main() {
           // with a known-bad date in it.
           await year.fill(String(wasYear));
           await year.blur();
-          await page.waitForTimeout(2500);
+          await note.waitFor({ state: 'detached', timeout: 10_000 }).catch(() => {});
+          // And saved, so the rest of the run starts from the date it had.
+          await pollFor(async () =>
+            String((await (await fetch(`${server.url}/api/store`)).json()).entries.find((e) => e.id === target.id)?.period?.start?.year) === String(wasYear),
+          );
+          await settled(/^\/api\/(entries|store)/);
           check('and fixing it clears the note',
             (await page.locator(`#editor .entry[data-drag-id="${target.id}"] .dates .date-wrong`).count()) === 0);
         }
@@ -485,7 +648,7 @@ async function main() {
         const was = await shown('#editor > [data-drag-id]');
         const dropped = await dragOnto(first, second, 'entry', 'after');
         check('an entry can be picked up', dropped);
-        await page.waitForTimeout(1200);
+        await movedOnScreen('#editor > [data-drag-id]', first, second);
 
         const now = await shown('#editor > [data-drag-id]');
         check('and dropping it moves it on the screen, not only in the file',
@@ -538,7 +701,7 @@ async function main() {
        * against the old merge is what showed the difference: the check
        * below passed on the broken build until the reload was added.
        */
-      await page.reload({ waitUntil: 'domcontentloaded' });
+      await reloaded();
       await page.locator('#tabs button[data-tab="resumes"]').click();
       await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
 
@@ -559,7 +722,7 @@ async function main() {
         const rows = `#editor .entry[data-drag-id="${inEntry}"] [data-drag-id]`;
         const was = await shown(rows);
         await dragOnto(first, second, 'bullet', 'after');
-        await page.waitForTimeout(1200);
+        await movedOnScreen(rows, first, second);
 
         const now = await shown(rows);
         check('dragging a line moves it where you dropped it',
@@ -581,7 +744,7 @@ async function main() {
          * disagreed and the screen was the wrong one.
          */
         await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
-        await page.reload({ waitUntil: 'domcontentloaded' });
+        await reloaded();
         await page.locator('#tabs button[data-tab="resumes"]').click();
         await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
 
@@ -607,7 +770,7 @@ async function main() {
         if (await box.count()) {
           await box.click();
           await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="resumes"]').click();
           await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
 
@@ -632,7 +795,10 @@ async function main() {
         const last = before[before.length - 1];
         await page.locator(`#editor [data-drag-id="${last}"] .grip`).first().focus();
         await page.keyboard.press('Alt+ArrowUp');
-        await page.waitForTimeout(1200);
+        await onPage(
+          ({ last, was }) => [...document.querySelectorAll('#editor > [data-drag-id]')].map((r) => r.dataset.dragId).indexOf(last) < was,
+          { last, was: before.indexOf(last) },
+        );
         const after = await shown('#editor > [data-drag-id]');
         check('Alt with an arrow moves an entry without a mouse',
           after.indexOf(last) < before.indexOf(last),
@@ -654,7 +820,7 @@ async function main() {
         });
         const linesBefore = await page.locator(`#editor .entry[data-drag-id="${id}"] .bullet-row, #editor .entry[data-drag-id="${id}"] .bullet`).count();
         await fold.click();
-        await page.waitForTimeout(600);
+        await page.locator(`#editor .entry[data-drag-id="${id}"].folded`).waitFor({ timeout: 10_000 }).catch(() => {});
 
         check('folding an entry hides its lines',
           (await page.locator(`#editor .entry[data-drag-id="${id}"].folded`).count()) === 1);
@@ -668,17 +834,34 @@ async function main() {
          * you are done with is a fact about the document, and it should
          * still be true on another machine.
          */
+        /*
+         * The chip says "saved" before the fold's save has started as well as
+         * after it has finished, so on a slow page it answered at once and the
+         * save was read before the fold was in it. Until the save has it.
+         */
         await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
         const openId = await page.locator('#resume-select').inputValue();
+        await pollFor(async () =>
+          ((await (await fetch(`${server.url}/api/resumes`)).json()).find((r) => r.id === openId)?.collapsed ?? []).includes(id),
+        );
         const saved = await (await fetch(`${server.url}/api/resumes`)).json();
         check('and folding is remembered with the resume, not the browser',
           (saved.find((r) => r.id === openId)?.collapsed ?? []).includes(id),
           JSON.stringify(saved.find((r) => r.id === openId)?.collapsed ?? []));
 
         await page.locator(`#editor .entry[data-drag-id="${id}"] .fold`).click();
-        await page.waitForTimeout(600);
+        await page.locator(`#editor .entry[data-drag-id="${id}"].folded`).waitFor({ state: 'detached', timeout: 10_000 }).catch(() => {});
         check('and unfolding brings them back',
           (await page.locator(`#editor .entry[data-drag-id="${id}"].folded`).count()) === 0);
+        /*
+         * And saved before the next section reloads. A slow page reloaded
+         * with the unfold still unsaved, and the entry came back folded. The
+         * editor draws no lines for a folded entry, so "the editor and the
+         * document agree" failed much later for a fold nobody had asked for.
+         */
+        await pollFor(async () =>
+          !((await (await fetch(`${server.url}/api/resumes`)).json()).find((r) => r.id === openId)?.collapsed ?? []).includes(id),
+        );
       } else {
         check('an entry can be folded away', false, 'no fold control');
       }
@@ -732,14 +915,14 @@ async function main() {
           }),
         });
         try {
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="resumes"]').click();
           await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
           await page.locator('#resume-select').selectOption(scratch);
           await page.locator('.skill-chip').first().waitFor({ timeout: 30_000 });
 
           await page.getByRole('button', { name: '+ Add skill' }).first().click();
-          await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+          await dialogUp();
           await page.locator('#f_text').fill('Zig');
           await page.locator('#modal-ok').click();
 
@@ -815,7 +998,7 @@ async function main() {
           }),
         });
         try {
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="resumes"]').click();
           await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
           await page.locator('#resume-select').selectOption(scratch);
@@ -877,7 +1060,7 @@ async function main() {
           }),
         });
         try {
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="resumes"]').click();
           await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
           await page.locator('#resume-select').selectOption(scratch);
@@ -944,7 +1127,7 @@ async function main() {
         const chip = (text) => page.locator('.skill-chip', { hasText: text }).first();
         await put([a, b]);
         try {
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="resumes"]').click();
           await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
           await page.locator('#resume-select').selectOption(scratch);
@@ -1003,7 +1186,7 @@ async function main() {
           }),
         });
         try {
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="resumes"]').click();
           await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
           await page.locator('#resume-select').selectOption(scratch);
@@ -1011,7 +1194,7 @@ async function main() {
           await box.first().waitFor({ timeout: 30_000 });
 
           await box.getByRole('button', { name: '+ Add bullet' }).first().click();
-          await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+          await dialogUp();
           await page.locator('#f_text').fill(line);
           /*
            * Watched from before the press, not sampled once it appears: the
@@ -1037,7 +1220,14 @@ async function main() {
 
           const added = box.locator('.bullet', { hasText: line });
           await added.first().waitFor({ timeout: 30_000 });
-          await page.waitForTimeout(500);
+          /*
+           * Read once both writes behind the addition have come back and the
+           * page has stopped writing, rather than half a second after the line
+           * shows. A line drawn off between the two writes is drawn off
+           * during the round trip, and on a slow machine that outlasted the
+           * half second, so the watch was stopped before it could see it.
+           */
+          await settled(/^\/api\/(entries|resumes)\//);
           const off = await added.first().evaluate((n) => n.classList.contains('off'));
           const flashed = await page.evaluate(() => {
             window.__offWatch.disconnect();
@@ -1125,7 +1315,7 @@ async function main() {
         return now === want;
       };
       try {
-        await page.reload({ waitUntil: 'domcontentloaded' });
+        await reloaded();
         await page.locator('#tabs button[data-tab="resumes"]').click();
         await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
         await page.locator('#resume-select').selectOption(open);
@@ -1169,7 +1359,7 @@ async function main() {
 
       await make(tooLong, { marginIn: 2.6, autoFit: false, maxPages: 1 });
       try {
-        await page.reload({ waitUntil: 'domcontentloaded' });
+        await reloaded();
         await page.locator('#tabs button[data-tab="resumes"]').click();
         await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
 
@@ -1240,7 +1430,7 @@ async function main() {
       const squeezed = 'editor-squeezed';
       await make(squeezed, { marginIn: 2.1, autoFit: true, maxPages: 1 });
       try {
-        await page.reload({ waitUntil: 'domcontentloaded' });
+        await reloaded();
         await page.locator('#tabs button[data-tab="resumes"]').click();
         await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
         await page.locator('#resume-select').selectOption(squeezed);
@@ -1274,7 +1464,7 @@ async function main() {
       }
 
       // Back to a resume the rest of the run can work with.
-      await page.reload({ waitUntil: 'domcontentloaded' });
+      await reloaded();
       await page.locator('#tabs button[data-tab="resumes"]').click();
       await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
     }
@@ -1291,7 +1481,9 @@ async function main() {
        * it read `Inherits from "newgrad"` about a resume called "New grad".
        */
       await page.locator('#btn-save-as').click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      // Up and focused: where the cursor lands is one of the checks, and it
+      // lands a timer-tick after the dialog shows.
+      await dialogUp();
 
       const note = (await page.locator('#modal-note').innerText()).trim();
       check('the note names the parent as you call it', !/"[a-z0-9-]+"/.test(note), note);
@@ -1306,7 +1498,7 @@ async function main() {
       await page.locator('#f_label').fill('Kafka-heavy variation');
       await page.locator('#f_id').fill('');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(2500);
+      await pickerSays('Kafka-heavy variation');
 
       const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
       const made = resumes.find((r) => r.label === 'Kafka-heavy variation');
@@ -1326,11 +1518,11 @@ async function main() {
       const other = before.find((r) => r.label && r.label !== 'Kafka-heavy variation');
 
       await page.locator('#btn-save-as').click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_label').fill(other.label.toUpperCase());
       await page.locator('#f_id').fill('a-file-nobody-has');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(600);
+      await saveCameBack(/already exists/i);
       const note = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
       check('saving a variation under a taken name is refused, in words', /already exists/i.test(note), note);
       await page.locator('#modal-cancel').click();
@@ -1338,16 +1530,17 @@ async function main() {
       check('and nothing was saved over it', after.length === before.length && after.find((r) => r.id === other.id)?.label === other.label);
 
       await page.locator('#btn-rename-resume').click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+      await dialogUp();
       await page.locator('#f_label').fill(other.label);
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(600);
+      await saveCameBack(/already exists/i);
       const refused = (await page.locator('#modal-note').innerText().catch(() => '')).trim();
       check('renaming to a name another resume has is refused, in words', /already exists/i.test(refused), refused);
 
       await page.locator('#f_label').fill('Kafka-heavy, renamed');
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(1500);
+      // Renaming, too, closes its dialog before it saves. See `pickerSays`.
+      await pickerSays('Kafka-heavy, renamed');
       const renamed = (await listed()).find((r) => r.label === 'Kafka-heavy, renamed');
       check('and a name nobody has renames it', Boolean(renamed), renamed?.id ?? 'not renamed');
       check('keeping the file it was saved as', renamed?.id === 'kafka-heavy-variation', renamed?.id ?? '');
@@ -1381,12 +1574,17 @@ async function main() {
 
         await page.locator('#tabs button[data-tab="resumes"]').click();
         await page.locator('#btn-rename-resume').click();
-        await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+        await dialogUp();
         await page.locator('#f_label').fill('Kafka-heavy, renamed again');
         await page.locator('#modal-ok').click();
-        await page.waitForTimeout(1500);
+        // The Workspace draws its picker from the page's copy of the store
+        // when the tab is opened, so not before that copy has the new name.
+        await pickerSays('Kafka-heavy, renamed again');
         await page.locator('#tabs button[data-tab="workspace"]').click();
-        await page.waitForTimeout(800);
+        await onPage(() => {
+          const s = document.querySelector('#draft-editor select');
+          return s?.options[s.selectedIndex]?.textContent === 'Kafka-heavy, renamed again';
+        });
         const sends = await page
           .$eval('#draft-editor select', (s) => s.options[s.selectedIndex]?.textContent ?? '')
           .catch(() => '(no picker)');
@@ -1408,7 +1606,7 @@ async function main() {
           }),
         });
         try {
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="workspace"]').click();
           await page.locator('.draft-card', { hasText: 'Picker Ridge' }).first().click();
           await page.locator('#draft-editor .where', { hasText: 'Picker Ridge' }).waitFor({ timeout: 20_000 });
@@ -1447,7 +1645,7 @@ async function main() {
           });
         }
         try {
-          await page.reload({ waitUntil: 'domcontentloaded' });
+          await reloaded();
           await page.locator('#tabs button[data-tab="resumes"]').click();
           await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 20_000 });
           const all = await (await fetch(`${server.url}/api/resumes`)).json();
@@ -1462,7 +1660,7 @@ async function main() {
             JSON.stringify({ shownTemp, temporary, row }),
           );
           await page.selectOption('#resume-select', '__show_older__');
-          await page.waitForTimeout(300);
+          await onPage(() => ![...document.querySelectorAll('#resume-select option')].some((o) => /older posting/.test(o.textContent)));
           const after = await read();
           check(
             'and that row puts them all back',
@@ -1499,7 +1697,7 @@ async function main() {
           rows.map((r) => r.dataset.dragId),
         );
       const backToResume = async () => {
-        await page.reload({ waitUntil: 'domcontentloaded' });
+        await reloaded();
         await page.locator('#tabs button[data-tab="resumes"]').click();
         await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
       };
@@ -1551,7 +1749,11 @@ async function main() {
           return true;
         }, { a: before[0], b: before[1] });
         check('a line in the master can be picked up', dropped);
-        await page.waitForTimeout(3500);
+        // Until the save has the new order, which is what the check reads.
+        await pollFor(async () => {
+          const ids = ((await (await fetch(`${server.url}/api/store`)).json()).entries.find((e) => e.id === target)?.bullets ?? []).map((b) => b.id);
+          return ids.indexOf(before[0]) > ids.indexOf(before[1]);
+        });
 
         // The master writes the entry itself, because the order is the
         // store's rather than any one resume's.
@@ -1590,7 +1792,7 @@ async function main() {
           if (await back.count()) {
             await back.click();
             await page.locator('#save-state.saved').waitFor({ timeout: 30_000 });
-            await page.reload({ waitUntil: 'domcontentloaded' });
+            await reloaded();
             await page.locator('#tabs button[data-tab="resumes"]').click();
             await page.locator('#editor .entry').first().waitFor({ timeout: 30_000 });
 
@@ -1650,7 +1852,7 @@ async function main() {
       await put('The second name it had');
       await commit('Second version');
 
-      await page.reload({ waitUntil: 'domcontentloaded' });
+      await reloaded();
       await page.locator('#tabs button[data-tab="history"]').click();
       await page.locator('#history-resume').waitFor({ timeout: 20_000 });
       await page.locator('#history-resume').selectOption(id);
@@ -1687,8 +1889,29 @@ async function main() {
           asked = d.message();
           d.accept();
         });
+        /*
+         * Over once the timeline has been read again after the restore and
+         * drawn. The restore POSTs, reloads the store, then asks for this
+         * resume's history, and the checks below read the save and that
+         * redrawn timeline. The old timeline listed the version restored
+         * from too, so it cannot stand in for the new one: the history asked
+         * for after the POST has come back is the one that counts.
+         */
+        let restoreAnswered = false;
+        const heardRestore = (r) => {
+          if (/\/history\/[^/]+\/restore$/.test(new URL(r.url()).pathname)) restoreAnswered = true;
+        };
+        page.on('response', heardRestore);
+        const redrawn = page
+          .waitForResponse(
+            (r) => restoreAnswered && new URL(r.url()).pathname === `/api/resumes/${id}/history` && r.request().method() === 'GET',
+            { timeout: 15_000 },
+          )
+          .catch(() => undefined);
         await page.locator('#resume-timeline .version-card:not(.current) button', { hasText: 'Restore' }).first().click();
-        await page.waitForTimeout(3500);
+        await redrawn;
+        page.off('response', heardRestore);
+        await onPage(() => !document.querySelector('#resume-timeline .skeleton') && document.querySelector('#resume-timeline .version-card'));
 
         check('it asks before replacing what you have', /restore this version/i.test(asked), asked.slice(0, 80));
         check('and promises the current one is not lost', /history is kept|get back/i.test(asked), asked.slice(0, 120));
@@ -1709,7 +1932,6 @@ async function main() {
          * cards here asserted a commit the environment suppresses, which is a
          * fact about the test rig rather than about the product.
          */
-        await page.waitForTimeout(1000);
         const names = await page.locator('#resume-timeline').innerText();
         check('the version restored from is still in the history',
           names.includes('The second name it had'), names.replace(/\n/g, ' ').slice(0, 120));
@@ -1723,7 +1945,7 @@ async function main() {
        * offer, not to hide it.
        */
       await page.locator('#btn-raw-history').click();
-      await page.waitForTimeout(1500);
+      await page.locator('#raw-history').waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {});
       check('the raw log is still one click away',
         (await page.locator('#raw-history').isVisible()) === true);
 
@@ -1801,7 +2023,7 @@ async function main() {
         source: 'by hand',
       });
       try {
-        await page.reload({ waitUntil: 'domcontentloaded' });
+        await reloaded();
         await page.locator('#tabs button[data-tab="workspace"]').click();
         await page.locator('.draft-card', { hasText: 'Mallory Systems' }).first().click();
         await page.locator('#draft-editor .where', { hasText: 'Mallory Systems' }).waitFor({ timeout: 20_000 });
@@ -1828,7 +2050,7 @@ async function main() {
        * red over an empty panel, which is also the "nothing threw" check.
        */
       check('the address still names a discarded application', page.url().includes('#workspace/'), page.url());
-      await page.reload({ waitUntil: 'domcontentloaded' });
+      await reloaded();
       const said = await page
         .locator('#status', { hasText: 'no longer in the workspace' })
         .waitFor({ timeout: 15_000 })
@@ -1879,7 +2101,7 @@ async function main() {
         return route.fallback();
       };
       try {
-        await page.reload({ waitUntil: 'domcontentloaded' });
+        await reloaded();
         await page.locator('#tabs button[data-tab="workspace"]').click();
         await page.locator('.draft-card', { hasText: 'Ostrander Mills' }).first().click();
         await page.locator('#draft-editor .where', { hasText: 'Ostrander Mills' }).waitFor({ timeout: 20_000 });
@@ -1887,7 +2109,9 @@ async function main() {
         await page.route(/\/api\/workspace\/[^/]+$/, slow);
         await page.locator('.draft-card', { hasText: 'Quillon Freight' }).first().click();
         await page.locator('#draft-editor .where', { hasText: 'Quillon Freight' }).waitFor({ timeout: 20_000 });
-        await page.waitForTimeout(1000);
+        // A second read would come of the address changing; given its chance
+        // by waiting until no read is out and none has started for a while.
+        await settled(/^\/api\/workspace\//);
         await page.unroute(/\/api\/workspace\/[^/]+$/, slow);
         const mine = reads.filter((p) => p.endsWith(`/${encodeURIComponent(quiet.id)}`)).length;
         check('opening a draft reads it once, not again when the address changes', mine === 1, `${mine} reads`);
@@ -1917,7 +2141,8 @@ async function main() {
           .then(() => true, () => false);
         const says = await page.locator('#status').innerText().catch(() => '');
         check('and a card for one that has gone says so too, rather than its id', gone && !/No draft "/.test(says), says);
-        await page.waitForTimeout(800);
+        // Every refused read in by now, so the clean-up below excuses them all.
+        await settled(/^\/api\/workspace\//);
       } finally {
         await page.unroute(/\/api\/workspace\/[^/]+$/, slow).catch(() => undefined);
         await drop(quiet);
@@ -1955,7 +2180,7 @@ async function main() {
     }, server.url);
     check('an application can be opened', Boolean(created?.id), created?.id);
 
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await reloaded();
     await page.locator('#tabs button[data-tab="workspace"]').click();
     await timed('it appears in the workspace', 30_000, () =>
       page.locator('.draft-card', { hasText: 'Halcyon' }).first().waitFor({ timeout: 30_000 }),
@@ -2002,7 +2227,7 @@ async function main() {
       );
     });
 
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await reloaded();
     await page.locator('#tabs button[data-tab="workspace"]').click();
     await page.locator('.draft-card', { hasText: 'Halcyon' }).first().click();
     await page.locator('#draft-editor .letter').waitFor({ timeout: 20_000 });
@@ -2152,49 +2377,6 @@ async function main() {
         return true;
       });
       if (open) console.log('    (a dialog was open and was closed)');
-
-      /*
-       * Until a dialog's save has come back, rather than for a guessed time.
-       *
-       * These checks slept 400 to 1200ms after pressing OK and then read the
-       * dialog or the store, and a loaded machine takes longer than that: run
-       * with the page's CPU slowed and each request held a little, three read
-       * a dialog still saying "Saving…" and one a label not yet saved. Back
-       * is the dialog gone, which `form` does only once the save has landed,
-       * or up again with OK pressable and `said` above it. One that never
-       * gets there is read as it stands after ten seconds, and fails as it
-       * always did.
-       */
-      const saveCameBack = (said) =>
-        page
-          .waitForFunction(
-            (pattern) =>
-              document.querySelector('#modal').classList.contains('hidden') ||
-              (!document.querySelector('#modal-ok').disabled &&
-                new RegExp(pattern).test(document.querySelector('#modal-note').textContent)),
-            said.source,
-            { timeout: 10_000, polling: 50 },
-          )
-          .catch(() => {});
-      const closes = () => page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
-      /*
-       * Until a dialog is up and has taken focus, before anything is typed.
-       * `focusModal` puts the cursor in the dialog's first box a timer-tick
-       * after it opens. A box filled before that tick can lose the text to
-       * that first box if the tick lands between the fill's focus and its
-       * typing. Seen in one run in six: "Helios Freight", meant for the
-       * edited answer's label, went onto the end of the answer, and the
-       * label check failed. Seen again once in 25 rounds of just these steps.
-       */
-      const dialogUp = async () => {
-        await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
-        await page
-          .waitForFunction(() => document.querySelector('#modal-content')?.contains(document.activeElement), null, {
-            timeout: 10_000,
-            polling: 50,
-          })
-          .catch(() => {});
-      };
 
       await page.locator('#tabs button[data-tab="applications"]').click();
       let refused = 0;
@@ -2396,13 +2578,27 @@ async function main() {
       await row.waitFor({ timeout: 20_000 });
       const cells = async () => row.locator('td').evaluateAll((tds) => tds.map((td) => td.textContent.trim()));
       const [, company, role] = await cells();
+      /*
+       * Until some row of the tracker reads `company` and `role`. The table
+       * is redrawn after the dialog's save comes back, so a guessed pause
+       * after the dialog closed read the old row on a slow page.
+       */
+      const listedAs = (company, role) =>
+        onPage(
+          ({ company, role }) =>
+            [...document.querySelectorAll('tr')].some((tr) => {
+              const td = [...tr.querySelectorAll('td')].map((x) => x.textContent.trim());
+              return td[1] === company && td[2] === role;
+            }),
+          { company, role },
+        );
       await row.locator('button', { hasText: 'Edit' }).click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 5_000 });
+      await dialogUp();
       await page.locator('#f_company').fill('Halcyon Robotics');
       await page.locator('#f_role').fill(`${role} (corrected)`);
       await page.locator('#modal-ok').click();
-      await page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
-      await page.waitForTimeout(800);
+      await closes();
+      await listedAs('Halcyon Robotics', `${role} (corrected)`);
       const fixed = page.locator('tr', { hasText: 'Halcyon Robotics' }).first();
       const after = (await fixed.count()) ? await fixed.locator('td').evaluateAll((tds) => tds.map((td) => td.textContent.trim())) : [];
       check('a row the page named wrongly can be corrected where it is listed',
@@ -2410,12 +2606,12 @@ async function main() {
         JSON.stringify(after.slice(0, 3)));
       // And put back, for the checks below that look for it by its first name.
       await fixed.locator('button', { hasText: 'Edit' }).click();
-      await page.locator('#modal:not(.hidden)').waitFor({ timeout: 5_000 });
+      await dialogUp();
       await page.locator('#f_company').fill(company);
       await page.locator('#f_role').fill(role);
       await page.locator('#modal-ok').click();
-      await page.locator('#modal').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => {});
-      await page.waitForTimeout(500);
+      await closes();
+      await listedAs(company, role);
     }
 
     console.log('\nWhen the tracker cannot save');
@@ -2436,16 +2632,34 @@ async function main() {
       const sel = row.locator('select');
       const before = await sel.inputValue();
 
+      /*
+       * Each failure below is over when the status line says so and the
+       * tracker has stopped asking the server: the dropdown is put back and
+       * then repainted from a reload, and the checks read what that leaves.
+       * The line is emptied before each step, so what an earlier step said
+       * cannot answer for this one. It waited for any text in it and then
+       * 500 to 1500ms more.
+       */
+      const blank = () =>
+        page.evaluate(() => {
+          const s = document.querySelector('#status');
+          s.textContent = '';
+          s.className = 'status';
+        });
+      const failureSaid = async () => {
+        await onPage(() => {
+          const s = document.querySelector('#status');
+          return s.classList.contains('err') && s.textContent.trim() !== '';
+        });
+        await settled(/^\/api\/applications/);
+      };
+
       await page.route('**/api/applications/**/status', (route) => route.abort('connectionrefused'));
       const nextIndex = (await sel.locator('option').evaluateAll((opts, cur) =>
         Math.max(0, opts.findIndex((o) => o.value !== cur)), before));
+      await blank();
       await sel.selectOption({ index: nextIndex });
-      await page.waitForFunction(
-        () => /./.test(document.querySelector('#status')?.textContent ?? ''),
-        null,
-        { timeout: 10_000, polling: 100 },
-      ).catch(() => {});
-      await page.waitForTimeout(500);
+      await failureSaid();
 
       check('a status change that fails to save says so',
         (await page.locator('#status.err').count()) > 0,
@@ -2459,8 +2673,9 @@ async function main() {
       // saved status still has to be what the dropdown shows.
       const gone = (route) => route.abort('connectionrefused');
       await page.route('**/api/applications**', gone);
+      await blank();
       await sel.selectOption({ index: nextIndex });
-      await page.waitForTimeout(800);
+      await failureSaid();
       check('and with the server gone entirely, it still shows the saved status',
         (await sel.inputValue()) === before,
         `stayed on screen as ${await sel.inputValue()}, saved value is ${before}`);
@@ -2472,8 +2687,9 @@ async function main() {
       });
       await row.locator('button', { hasText: 'Remove' }).click();
       await page.locator('#modal:not(.hidden)').waitFor({ timeout: 5_000 });
+      await blank();
       await page.locator('#modal-ok').click();
-      await page.waitForTimeout(1500);
+      await failureSaid();
 
       check('a delete that fails to save says so, too',
         (await page.locator('#status.err').count()) > 0,
@@ -2527,7 +2743,9 @@ async function main() {
       if (open !== null) console.log(`    (a dialog was open and was closed: ${JSON.stringify(open)})`);
       await page.locator('#tabs button[data-tab="applications"]').click();
       await page.locator('#apps-wrap tbody tr').first().waitFor({ timeout: 20_000 });
-      await page.waitForTimeout(400);
+      // The row being measured for, drawn and laid out, not only the first.
+      await page.locator('#apps-wrap tbody tr', { hasText: 'Reddit' }).first().waitFor({ timeout: 20_000 }).catch(() => {});
+      await page.evaluate(() => new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go))));
     });
 
     const split = await page.evaluate(() => {
