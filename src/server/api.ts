@@ -36,7 +36,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
-import { classifyPage, employerFallback, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
+import { classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
 import {
   applyInclusion,
   sanitizeAiPlan,
@@ -2353,9 +2353,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (save && body.trim()) {
         saved = {
           id: letterId(job.company, job.jobTitle),
-          // Named for where it came from when the page never said who is
-          // hiring — see `employerFallback`.
-          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerFallback(job.url)}`,
+          // Named for the employer the address belongs to when the page never
+          // said who is hiring, and never for the address — see `employerOrUnknown`.
+          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerOrUnknown(job.url)}`,
           company: job.company,
           role: job.jobTitle,
           createdAt: new Date().toISOString(),
@@ -2759,7 +2759,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * `baseForCopy`. It was computed further down, which is why this path
        * never had the guard the Workspace's tailor already had.
        */
-      const employer = job.company ?? employerFallback(url);
+      /*
+       * And never a hostname. `employerFallback` hands one back where the host
+       * is a system's or a board's, and it was filed as the employer:
+       * "redhat.wd5.myworkdayjobs.com", "careers.activision.com". The first
+       * page of the application whose address reads as a name answers — this
+       * page's first, as before — and otherwise it is said to be unknown.
+       */
+      const employer = job.company ?? employerOrUnknown(url, ...trail.map((p) => p.url));
       /*
        * One pair of names, used for all three things that depend on them.
        *
@@ -2990,8 +2997,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       /*
        * "Apply — Unknown" was the label in the resume picker for every bare
-       * application form, and there is more than one of those. Named for
-       * where it came from instead — see `employerFallback`.
+       * application form, and there is more than one of those. Named for the
+       * employer the address belongs to instead — see `employerOrUnknown`.
        */
       /* What the base asks for on skills, which is what undoing a swap restores. */
       // Each group's own section's list: a resume can hold two skills sections.
