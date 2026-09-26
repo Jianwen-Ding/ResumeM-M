@@ -1562,6 +1562,13 @@ const A_LIST_OF_JOBS =
   /\bnow hiring\b|\bhiring now\b|\b\d[\d,]*\+?\s+(?:[\w-]+\s+){0,3}jobs?\b|\bjobs?,\s*employment\b|\b(?:search|browse|all|view all|more)\s+jobs?\b|\bjob (?:search|results|alerts)\b|\bjob openings?\b|\b(?:open|current|all)\s+(?:positions|roles|openings|opportunities|vacancies)\b|\bsearch results\b|\bjobs?\s+(?:at|in|near)\s+\S|\bjobs\s*$/i;
 
 /**
+ * What is left of a role once a careers word is off it, when that is still a
+ * post: "Head of" (Recruiting), "Partner", "Advisor". See `looksLikeRoleTitle`.
+ */
+const A_POST =
+  /\b(?:of|for)$|\b(?:head|vp|chief|officer|partner|advis[eo]r|coach|counsell?or|editor|writer|sourcer|generalist|representative|assistant|executive|leader|president)\b/i;
+
+/**
  * Does this read like the name of a job, rather than whatever a page had
  * lying around where a title should be?
  *
@@ -1606,9 +1613,16 @@ export function looksLikeRoleTitle(role?: string): boolean {
    * Intel's Workday site — "Careers at Vireo". Each was filed as a role
    * because it was the title of the page somebody was on. A role that merely
    * ends in the word keeps it: "Director of Careers" is a job.
+   *
+   * So is one whose field the careers word is: "Head of Recruiting",
+   * "Recruiting Partner", "Career Advisor", "Careers Adviser". Those were
+   * refused too, because what is left of them — "Head of", "Partner",
+   * "Advisor" — has none of `ROLE_NOUN`'s words, which are an engineer's.
+   * What is left of a site's name is a name. What is left of these is a
+   * post: it ends on "of", or it names one.
    */
   const careersOf = withoutCareersWords(r);
-  if (careersOf !== undefined && !ROLE_NOUN.test(careersOf)) return false;
+  if (careersOf !== undefined && !ROLE_NOUN.test(careersOf) && !A_POST.test(careersOf)) return false;
   /*
    * Who a programme is for, and nothing about the work: "Intern and
    * Graduate", which is careers.adobe.com's page for them, and "Internships".

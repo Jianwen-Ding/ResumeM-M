@@ -135,6 +135,15 @@ describe('"Adobe | Intern and Graduate" — who a programme is for is not a role
     expect(looksLikeAnApplication('Intern Co', 'Intern')).toBe(true);
     // A role that ends in the word is a role: this is a job.
     expect(looksLikeRoleTitle('Director of Careers')).toBe(true);
+    // And so is one whose field the word is, wherever it stands.
+    for (const title of ['Head of Recruiting', 'VP of Recruitment', 'Recruiting Partner', 'Career Advisor', 'Careers Adviser', 'Career Coach']) {
+      expect(looksLikeRoleTitle(title), title).toBe(true);
+      expect(looksLikeAnApplication('Acme', title), title).toBe(true);
+    }
+    // While a careers site's own name is still not one.
+    for (const title of ['Careers', 'Intel Careers', 'Careers at Vireo', 'Careers Markon', 'Jobs at Acme']) {
+      expect(looksLikeRoleTitle(title), title).toBe(false);
+    }
   });
 });
 
