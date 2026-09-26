@@ -367,7 +367,15 @@ async function api(path, options = {}) {
   if (method !== 'GET' && /[?&]commit=0(&|$)/.test(path) && !/[?&]order=/.test(path)) {
     path = `${path}&order=${SAVE_PAGE}:${++saveOrder}`;
   }
-  const order = new RegExp(`[?&]order=${SAVE_PAGE}:(\\d+)`).exec(path)?.[1];
+  /*
+   * Only the uncommitted ones are waited on. A Workspace draft's save carries
+   * an `order` too, to be kept in order among the draft's own saves (see
+   * `saveDraftNow`), but it commits itself, and a commit that waited on it
+   * would wait for nothing it covers: up to the server's five seconds for a
+   * large draft sent plainly and cut short by the page unloading.
+   */
+  const uncommitted = /[?&]commit=0(&|$)/.test(path);
+  const order = uncommitted ? new RegExp(`[?&]order=${SAVE_PAGE}:(\\d+)`).exec(path)?.[1] : undefined;
   if (order) unsettledOrders.add(Number(order));
 
   const url = `/api${path}`;
@@ -1267,7 +1275,9 @@ async function flushEdits({ leaving = false } = {}) {
  *    which of the two is written (see `autoSave`).
  *  - The draft's save, which commits itself. A draft carries its posting and
  *    can be large; when it does not fit beside the rest it goes as a plain
- *    request, which is as good as it could do.
+ *    request, which is as good as it could do. Like the resume's, it does not
+ *    wait for a save of the draft still out; `?order` settles which of the
+ *    two is written (see `saveDraftNow`).
  *  - Inline saves are already out: they were sent when the line was
  *    committed, with `keepalive`. An entry's commits itself; the profile's is
  *    uncommitted, like the resume's.
@@ -1282,7 +1292,7 @@ function flushEditsLeaving() {
   if (state.dirty) autoSave({ leaving: true }).catch(() => {});
   clearTimeout(draftSave.timer);
   draftSave.timer = null;
-  if (draftSave.dirty) saveDraftNow().catch(() => {});
+  if (draftSave.dirty) saveDraftNow(undefined, { leaving: true }).catch(() => {});
   clearTimeout(commitTimer);
   commitTimer = null;
   if (state.store?.config?.git?.autoCommit) {
@@ -7030,9 +7040,14 @@ const draftSave = {
   /** Set by `renderDraft` so the flush paths can reach the open draft. */
   current: null,
   timer: null,
-  /** The write in flight, so anything leaving the page can await it. */
+  /**
+   * The newest save queued, so anything leaving the page can await it. Each
+   * waits for the one before, so awaiting this one awaits them all.
+   */
   pending: null,
   dirty: false,
+  /** Draft id to the order of the newest of this page's saves that landed. See `saveDraftNow`. */
+  landed: new Map(),
 };
 
 function setDraftSaveState(mode, detail) {
@@ -7064,27 +7079,66 @@ const DRAFT_GONE = 'That application is no longer in the workspace.';
 /** Whether a workspace request failed because its draft has gone. The server's words for it. */
 const draftGone = (err) => /^No draft "/.test(err?.message ?? '');
 
-/** Write the open draft now. Safe to call when there is nothing to write. */
-async function saveDraftNow(message) {
+/**
+ * Write the open draft now. Safe to call when there is nothing to write.
+ *
+ * One at a time, behind the save of the draft already out, as the resume's
+ * saves go (see `autoSave`). Each save sends the whole draft, and nothing held
+ * the next one back: on a server slower than the 900ms the typing waits, the
+ * save before was still out when the next went, the two were in flight
+ * together, and the server wrote whichever reached it last. When that was the
+ * older one, the letter on disk went back to what it said a sentence ago,
+ * under a chip reading "All changes saved". draft-save-order.test.js holds
+ * the first save, types on past the wait, and lets the first arrive second.
+ *
+ * The draft is read when the save goes, not when it is asked for, so a save
+ * that waited carries everything typed meanwhile, and a save behind it finds
+ * nothing left to send.
+ *
+ * Except on the way out of the page. The reply to the save ahead comes after
+ * the page has gone, and nothing on a gone page runs, so waiting for it would
+ * never send this one. There it goes at once, beside the one still out, and
+ * each save carries `?order=<page>:<n>` from the same count as the resume's.
+ * The server does not write a save of a draft older than one it has already
+ * written from this page, so the older arriving second is turned away (see
+ * the draft PUT in src/server/api.ts). The replies can come back either way
+ * round too, so an older one failing after a newer one landed marks nothing
+ * unsaved.
+ */
+async function saveDraftNow(message, { leaving = false } = {}) {
   const draft = draftSave.current;
   if (!draft) return;
   clearTimeout(draftSave.timer);
   draftSave.timer = null;
   if (!draftSave.dirty && !message) return;
 
-  draftSave.dirty = false;
   setDraftSaveState('saving');
-  const write = api(`/workspace/${encodeURIComponent(draft.id)}`, {
-    method: 'PUT',
-    body: JSON.stringify(draft),
-    keepalive: true,
-  })
+  const ahead = draftSave.pending;
+  let order = 0;
+  const write = (async () => {
+    // Caught, so one failed save does not wedge the ones behind it.
+    if (ahead && !leaving) await ahead.catch(() => undefined);
+    const onScreen = draftSave.current === draft;
+    // The save ahead carried this edit already. One asked for with a message
+    // is a step of its own, a choice made in the panel, and still goes.
+    if (onScreen && !draftSave.dirty && !message) return;
+    if (onScreen) draftSave.dirty = false; // further typing re-dirties it; this is in flight
+    order = ++saveOrder;
+    await api(`/workspace/${encodeURIComponent(draft.id)}?order=${SAVE_PAGE}:${order}`, {
+      method: 'PUT',
+      body: JSON.stringify(draft),
+      keepalive: true,
+    });
+    if (order > (draftSave.landed.get(draft.id) ?? 0)) draftSave.landed.set(draft.id, order);
+  })()
     .then(() => {
       // Only clear the chip if nothing has been typed since this write began.
       if (!draftSave.dirty) setDraftSaveState('saved');
       if (message) setStatus(message);
     })
     .catch((err) => {
+      // A newer save of this draft landed first, and carried this one's edit.
+      if (order < (draftSave.landed.get(draft.id) ?? 0)) return;
       draftSave.dirty = true;
       if (draftGone(err)) {
         /*

@@ -2508,6 +2508,52 @@ describe('resume saves that carry their order', () => {
 });
 
 /*
+ * The same for a Workspace draft. Its saves go one at a time, except on the
+ * way out of the page, where the latest goes beside the one still out (see
+ * `saveDraftNow` in web/app.js). Each carries the whole draft.
+ */
+describe('draft saves that carry their order', () => {
+  const openDraft = async (company = 'Streamly') => {
+    const { body } = await request(app)
+      .post('/api/workspace')
+      .send({ company, role: 'Data Platform Intern', resumeId: 'intern', coverLetterRequired: true, questions: [] })
+      .expect(200);
+    return body.draft as { id: string; coverLetter: { required: boolean; body: string } };
+  };
+  const save = (draft: { id: string }, letter: string, order?: string) =>
+    request(app)
+      .put(`/api/workspace/${draft.id}${order ? `?order=${order}` : ''}`)
+      .send({ ...draft, coverLetter: { required: true, body: letter, edited: true } })
+      .expect(200);
+  const letterOf = (draft: { id: string }) => t.store.getDraft(draft.id)?.coverLetter.body;
+
+  it('does not write a save older than one already written from the same page', async () => {
+    const draft = await openDraft();
+    await save(draft, 'Dear Streamly, I build data pipelines.', 'page-a:2');
+    const late = await save(draft, 'Dear Streamly,', 'page-a:1');
+    expect(letterOf(draft)).toBe('Dear Streamly, I build data pipelines.');
+    // Answered with what is stored.
+    expect(late.body.coverLetter.body).toBe('Dear Streamly, I build data pipelines.');
+    await save(draft, 'Again', 'page-a:2');
+    expect(letterOf(draft)).toBe('Dear Streamly, I build data pipelines.');
+  });
+
+  it('writes a newer one, one from another page, one with no order, and keeps drafts apart', async () => {
+    const draft = await openDraft();
+    await save(draft, 'One', 'page-a:1');
+    await save(draft, 'Two', 'page-a:2');
+    expect(letterOf(draft)).toBe('Two');
+    await save(draft, 'Other page', 'page-b:1');
+    expect(letterOf(draft)).toBe('Other page');
+    await save(draft, 'Unordered');
+    expect(letterOf(draft)).toBe('Unordered');
+    const other = await openDraft('Halcyon');
+    await save(other, 'Halcyon', 'page-a:1');
+    expect(letterOf(other)).toBe('Halcyon');
+  });
+});
+
+/*
  * A commit sent on the way out of the page, straight after the writes it
  * covers.
  *

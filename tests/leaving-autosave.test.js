@@ -135,10 +135,10 @@ describe('an edit made just before leaving the page', () => {
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/workspace') result = { drafts: Object.values(drafts) };
       else if (url.startsWith('/api/workspace/') && method === 'PUT') {
-        const id = decodeURIComponent(url.split('/').pop());
+        const id = decodeURIComponent(url.split('?')[0].split('/').pop());
         drafts[id] = body;
         result = body;
-      } else if (url.startsWith('/api/workspace/')) result = drafts[decodeURIComponent(url.split('/').pop())];
+      } else if (url.startsWith('/api/workspace/')) result = drafts[decodeURIComponent(url.split('?')[0].split('/').pop())];
       else if (url.startsWith('/api/entries/') && method === 'PUT') {
         const i = data.entries.findIndex((e) => e.id === body.id);
         if (i >= 0) data.entries[i] = body;
@@ -447,6 +447,61 @@ describe('an edit made just before leaving the page', () => {
     expect(resumePuts().at(-1).keepalive).toBe(true);
   });
 
+  /*
+   * A draft typed on while its last save is still out, and then the page left.
+   *
+   * A draft's saves go one at a time now, so the server writes them in the
+   * order they were made (see `saveDraftNow`). On the way out that queue is
+   * skipped, as the resume's is: the save ahead replies after the page has
+   * gone, and the latest letter behind it would never be sent. It goes at once,
+   * ordered after the one still out, for the server to keep them so.
+   */
+  it('sends the latest draft on the way out, not behind a save of it still in flight', async () => {
+    await openDraft();
+    const release = hold((url, method) => method === 'PUT' && url.startsWith('/api/workspace/'));
+    typeLetter('Dear Streamly,');
+    await vi.waitFor(() => expect(draftPuts().length).toBe(1), { timeout: 3000 });
+    const [inFlight] = draftPuts();
+    typeLetter('Dear Streamly, I build data pipelines.');
+    await leave();
+    release();
+    await new Promise((go) => setTimeout(go, 20));
+
+    const leaving = draftPuts().slice(1);
+    expect(leaving.length).toBe(1);
+    expect(leaving[0].body.coverLetter.body).toBe('Dear Streamly, I build data pipelines.');
+    expect(leaving[0].afterPageGone).toBe(false);
+    expect(leaving[0].keepalive).toBe(true);
+    const order = (put) => new URL(put.url, 'http://x').searchParams.get('order');
+    const [page, first] = order(inFlight).split(':');
+    const [samePage, second] = order(leaving[0]).split(':');
+    expect(samePage).toBe(page);
+    expect(Number(second)).toBeGreaterThan(Number(first));
+  });
+
+  /*
+   * And the two replies can come back either way round. The page was only
+   * hidden and is back: the newer save landed, and the older one failing
+   * afterwards does not mark the letter unsaved, since what it carried is on
+   * the server.
+   */
+  it('marks nothing unsaved when the older draft save fails after the newer landed', async () => {
+    await openDraft();
+    const releaseFirst = hold((url, method) => method === 'PUT' && url.startsWith('/api/workspace/'));
+    typeLetter('Dear Streamly,');
+    await vi.waitFor(() => expect(draftPuts().length).toBe(1), { timeout: 3000 });
+    typeLetter('Dear Streamly, I build data pipelines.');
+    await leave();
+    expect(drafts['streamly-intern'].coverLetter.body).toBe('Dear Streamly, I build data pipelines.');
+    // The first fails, and so does the plain retry `fetchKeptAlive` sends.
+    const releaseRetry = hold((url, method) => method === 'PUT' && url.startsWith('/api/workspace/'));
+    releaseFirst(new TypeError('Failed to fetch'));
+    await vi.waitFor(() => expect(draftPuts().length).toBe(3));
+    releaseRetry(new TypeError('Failed to fetch'));
+    await new Promise((go) => setTimeout(go, 20));
+    expect(document.querySelector('#draft-save-state').textContent).toBe('All changes saved');
+  });
+
   describe('with auto-commit on', () => {
     beforeAll(() => {
       autoCommit = true;
@@ -535,6 +590,28 @@ describe('an edit made just before leaving the page', () => {
       const asked = new URL(sent[0].url, 'http://x').searchParams;
       expect(asked.get('page')).toBe(page);
       expect(asked.get('after').split(',')).toEqual([n]);
+    });
+
+    /*
+     * A draft's save carries an order too, among the draft's own saves, but
+     * it commits itself. The commit does not wait on it: a large draft sent
+     * plainly and cut short by the unload would hold it the server's whole
+     * five seconds, for nothing it covers.
+     */
+    it('does not name a draft save, which commits itself', async () => {
+      await openDraft();
+      const release = hold((url, method) => method === 'PUT' && url.startsWith('/api/workspace/'));
+      typeLetter('Dear Streamly,');
+      await leave();
+      release();
+      await new Promise((go) => setTimeout(go, 20));
+
+      const [put] = draftPuts();
+      expect(orderOf(put)).toMatch(/^[\w-]+:\d+$/);
+      const sent = commits();
+      expect(sent.length).toBe(1);
+      expect(sent[0].afterPageGone).toBe(false);
+      expect(new URL(sent[0].url, 'http://x').searchParams.get('after')).toBeNull();
     });
   });
 });

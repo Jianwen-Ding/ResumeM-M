@@ -619,6 +619,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    * trip; one entry per resume.
    */
   const lastSaveOrder = new Map<string, { page: string; n: number }>();
+  /** The same for each Workspace draft. See the draft PUT. */
+  const lastDraftOrder = new Map<string, { page: string; n: number }>();
   const savedOrderOf = (raw: unknown): { page: string; n: number } | null => {
     const match = typeof raw === 'string' ? /^([\w-]{1,64}):(\d{1,15})$/.exec(raw) : null;
     return match ? { page: match[1]!, n: Number(match[2]) } : null;
@@ -4459,6 +4461,30 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // draft, not asking which draft a job has.
       const existing = store.getDraft(id);
       if (!existing) throw new Error(`No draft "${id}"`);
+
+      /*
+       * `?order=<page>:<n>`, as on the resume PUT: a save older than one
+       * already written from the same page is not written.
+       *
+       * The editor sends a draft's saves one at a time, except on the way out
+       * of the page, where the latest is sent beside the one still out (see
+       * `saveDraftNow` in web/app.js). Either can arrive first, and each
+       * carries the whole draft, so the older arriving second would put the
+       * letter back to what it said before. It is answered with what is
+       * stored. Only saves from one page are compared, and a write without
+       * `order` (the extension, a generation, an older page) is written as it
+       * always was. Checked and recorded with nothing awaited before the
+       * write.
+       */
+      const order = savedOrderOf(req.query.order);
+      if (order) {
+        const last = lastDraftOrder.get(id);
+        if (last && last.page === order.page && order.n <= last.n) {
+          res.json(existing);
+          return;
+        }
+        lastDraftOrder.set(id, order);
+      }
 
       const patch = req.body as Partial<Draft>;
       const merged: Draft = {
