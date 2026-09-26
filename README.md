@@ -216,7 +216,7 @@ bullets:
         note: For when the resume is one line over. Same claim, tighter.
 ```
 
-`**bold**`, `*italic*`, `` `code` ``, and `[text](url)` are supported in any
+`**bold**`, `*italic*` (or `_italic_`), `` `code` ``, and `[text](url)` are supported in any
 text field. Everything else is escaped, so `R&D` and `50%` are safe to type.
 
 An emphasis marker has to sit against the word it emphasises, so asterisks

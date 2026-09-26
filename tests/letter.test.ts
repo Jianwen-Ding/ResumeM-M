@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { compileLetter } from '../src/render/compile.js';
 import { renderLetterFastBody, renderLetterLatex } from '../src/render/letter.js';
+import { inlineTex } from '../src/render/latex.js';
 import { DEFAULT_LAYOUT, type ResolvedProfile } from '../src/model/types.js';
 import { hasLatex } from './helpers.js';
 
@@ -91,6 +92,36 @@ describe('the cover letter template', () => {
     expect(fast).toContain('\\begin{document}');
     // The fit checker's markers must survive in both.
     expect(fast).toContain('\\zsavepos{rmmstart}');
+  });
+});
+
+/*
+ * `_italic_` printed its underscores — "I am \_really\_ keen" — while
+ * `*italic*` beside it was set in italics. Same terms as the asterisk: an
+ * underscore glued to a letter or a slash is never a marker, so the ones in
+ * names, identifiers, addresses and links print as they always did.
+ */
+describe('underscores for italics', () => {
+  it('sets _this_ in italics in a letter, as *this* is', () => {
+    const tex = renderLetterLatex(letter('I am _really_ keen on the (_ingest_) work, and *also* this.'), DEFAULT_LAYOUT);
+    expect(tex).toContain('I am \\textit{really} keen on the (\\textit{ingest}) work, and \\textit{also} this.');
+    expect(tex).not.toContain('\\_really\\_');
+  });
+
+  it('leaves every underscore that is not a marker as it was', () => {
+    for (const [typed, set] of [
+      ['snake_case_names', 'snake\\_case\\_names'],
+      ['__init__ and MAX_VALUE', '\\_\\_init\\_\\_ and MAX\\_VALUE'],
+      ['morgan_testwell@example.com', 'morgan\\_testwell@example.com'],
+      ['a _ b and _private and foo_bar_ baz', 'a \\_ b and \\_private and foo\\_bar\\_ baz'],
+      ['https://example.com/_next_/a_b', 'https://example.com/\\_next\\_/a\\_b'],
+    ]) {
+      expect(inlineTex(typed!), typed).toBe(set);
+    }
+    // And a bare link in a letter still breaks where it did, underscores and all.
+    expect(renderLetterLatex(letter('See https://x.com/a_b_c now.'), DEFAULT_LAYOUT)).toContain(
+      'https://x.\\penalty100{}com/\\penalty100{}a\\_\\penalty100{}b\\_\\penalty100{}c',
+    );
   });
 });
 

@@ -226,8 +226,19 @@ export function unrenderableReason(
  * markdown spelling nobody checks after typing, because in every editor
  * that renders it, it looks right.
  */
+/*
+ * **And `_italic_`, on the same terms as `*italic*`.** A model writing a
+ * letter reaches for underscores as often as asterisks, and they printed as
+ * typed: "I am \_really\_ keen". The rules above are what keep it off the
+ * underscores that are not emphasis — an opening `_` must follow a space, an
+ * opening bracket or quote, or the start of the text, and a closing one must
+ * be followed by one of the same few characters — so `snake_case_names`,
+ * `__init__`, `morgan_testwell@example.com` and the `_` inside
+ * `https://example.com/a_b_c` are never read as markers: in every one of them
+ * the underscore is glued to a letter or a `/` on the side that matters.
+ */
 const MARKUP =
-  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s([{'"])\*(?=[^\s*.,;:!?)\]}])([^*]+)(?<=[^\s*([{])\*(?=[\s).,;:!?\]}'"-]|$)|`(.+?)`/g;
+  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s([{'"])\*(?=[^\s*.,;:!?)\]}])([^*]+)(?<=[^\s*([{])\*(?=[\s).,;:!?\]}'"-]|$)|(?<=^|[\s([{'"])_(?=[^\s_.,;:!?)\]}])([^_\n]+)(?<=[^\s_([{])_(?=[\s).,;:!?\]}'"-]|$)|`(.+?)`/g;
 
 /** Enough for bold inside a link inside italics; a guard, not a limit anyone meets. */
 const MAX_NESTING = 4;
@@ -302,7 +313,8 @@ function markup(s: string, depth: number): string {
 
   while ((m = re.exec(s)) !== null) {
     out += tex(s.slice(last, m.index));
-    const [whole, label, url, strongem, bold, italic, code] = m;
+    const [whole, label, url, strongem, bold, starItalic, underItalic, code] = m;
+    const italic = starItalic ?? underItalic;
 
     if (label !== undefined) {
       out += `\\href{${texHref(url!)}}{\\underline{${markup(label, depth - 1)}}}`;
