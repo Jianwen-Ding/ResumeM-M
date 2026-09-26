@@ -96,6 +96,7 @@ async function serve() {
     });
   });
 
+  const projects = path.join(dir, '..', `rmm-editor-projects-${port}.json`);
   const child = spawn('npx', ['tsx', 'src/server/index.ts'], {
     cwd: root,
     // With a list of saves of its own, never the one in the home directory.
@@ -105,10 +106,64 @@ async function serve() {
       PORT: String(port),
       RMM_AUTOCOMMIT: '0',
       RMM_AI: '0',
-      RMM_PROJECTS_FILE: path.join(dir, '..', `rmm-editor-projects-${port}.json`),
+      RMM_PROJECTS_FILE: projects,
     },
     stdio: 'ignore',
+    // A process group of its own, so that all of it can be stopped. See below.
+    detached: true,
   });
+
+  /*
+   * Stopping it means stopping the whole tree, not the process spawned.
+   *
+   * `child` is npx, which shows as `npm exec`, and the server is four
+   * processes under it: npx runs `sh -c tsx …`, tsx starts node with its
+   * loader, and that node starts esbuild. `child.kill()` signalled npx alone,
+   * and nothing passes the signal down, so every walk left tsx, the server
+   * and esbuild running, handed to init, still listening on their port and
+   * holding the scratch store open. Measured: after a walk that passed 140/140, three of them were
+   * still there; after one whose browser failed to start, all five, npx too,
+   * because that path threw past the `finally` and never called `close`.
+   *
+   * `detached` makes npx the leader of a new process group, which everything
+   * it starts joins, so a signal to the group (the negative pid) reaches
+   * every one of them. And `stop` is also run on the way out of the process
+   * however that happens — `process.exit` below, a throw nobody catches, a
+   * Ctrl-C — because a detached group no longer gets the terminal's Ctrl-C by
+   * itself. There it has to be synchronous, so it is SIGKILL: a scratch
+   * server has nothing worth shutting down gracefully.
+   */
+  const group = -child.pid;
+  const signal = (name) => {
+    try {
+      process.kill(group, name);
+      return true;
+    } catch {
+      return false; // ESRCH: nobody left in the group.
+    }
+  };
+  const running = () => signal(0);
+  const stop = () => {
+    signal('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(projects, { force: true });
+  };
+  const interrupted = (name) => () => {
+    stop();
+    process.exit(128 + os.constants.signals[name]);
+  };
+  const onSignal = Object.fromEntries(['SIGINT', 'SIGTERM', 'SIGHUP'].map((name) => [name, interrupted(name)]));
+  process.on('exit', stop);
+  for (const [name, handler] of Object.entries(onSignal)) process.on(name, handler);
+  // Politely first, then not; and only done once every one of them has gone.
+  const close = async () => {
+    signal('SIGTERM');
+    for (let waited = 0; running() && waited < 5000; waited += 100) await new Promise((go) => setTimeout(go, 100));
+    stop();
+    for (let waited = 0; running() && waited < 5000; waited += 50) await new Promise((go) => setTimeout(go, 50));
+    process.off('exit', stop);
+    for (const [name, handler] of Object.entries(onSignal)) process.off(name, handler);
+  };
 
   /*
    * And it has to be *ours*. Between the probe closing and the server
@@ -117,31 +172,31 @@ async function serve() {
    */
   const url = `http://127.0.0.1:${port}`;
   let mine = false;
-  for (let attempt = 0; attempt < 60 && !mine; attempt++) {
-    try {
-      const res = await fetch(`${url}/health`);
-      const health = res.ok ? await res.json() : {};
-      if (health.projectOpen && health.dataDir === dir) mine = true;
-      else if (health.projectOpen) {
-        throw new Error(
-          `Something else is already on port ${port}, serving ${health.dataDir}. ` +
-            'Refusing to run against a store this test did not create.',
-        );
+  try {
+    for (let attempt = 0; attempt < 60 && !mine; attempt++) {
+      try {
+        const res = await fetch(`${url}/health`);
+        const health = res.ok ? await res.json() : {};
+        if (health.projectOpen && health.dataDir === dir) mine = true;
+        else if (health.projectOpen) {
+          throw new Error(
+            `Something else is already on port ${port}, serving ${health.dataDir}. ` +
+              'Refusing to run against a store this test did not create.',
+          );
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Something else')) throw err;
+        // Not up yet.
       }
-    } catch (err) {
-      if (err instanceof Error && err.message.startsWith('Something else')) throw err;
-      // Not up yet.
+      if (!mine) await new Promise((go) => setTimeout(go, 500));
     }
-    if (!mine) await new Promise((go) => setTimeout(go, 500));
+    if (!mine) throw new Error(`The test server never came up on ${url}.`);
+  } catch (err) {
+    // Ours, even if it is not the one answering on the port.
+    await close();
+    throw err;
   }
-  if (!mine) throw new Error(`The test server never came up on ${url}.`);
-  return {
-    url,
-    close: async () => {
-      child.kill();
-      fs.rmSync(dir, { recursive: true, force: true });
-    },
-  };
+  return { url, close };
 }
 
 async function main() {
@@ -149,6 +204,7 @@ async function main() {
   const health = await (await fetch(`${server.url}/health`)).json().catch(() => ({}));
   if (!health.projectOpen) {
     console.error(`${server.url} has no save open; nothing here can run.`);
+    await server.close();
     process.exit(2);
   }
 
@@ -2783,8 +2839,12 @@ async function main() {
 
     check('nothing threw along the way', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {
-    await browser.close();
-    await server.close();
+    // The server goes even if the browser will not close.
+    try {
+      await browser.close();
+    } finally {
+      await server.close();
+    }
   }
 
   console.log('\nTimings');
