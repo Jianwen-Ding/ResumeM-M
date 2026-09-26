@@ -69,6 +69,73 @@ describe('correcting what a tracker row says it is', () => {
     expect(t.store.load().applications.find((a) => a.id === '2026-09-25-salesforce-summer-2027-intern')?.role).toBe('Summer 2027 Intern - Software Engineer');
   });
 
+  /*
+   * A space that is this row's job only by its number.
+   *
+   * EA's job 216245 is "Electronic Arts" on one of its pages and "Respawn
+   * Entertainment", the studio, on another. A space opened on the studio's
+   * page and a row filed from EA's — by a send, or by hand, on another day —
+   * carry two ids and two employers, and what makes them one application is
+   * the address: the same role at jobs.ea.com, job 216245 (see `sameJobAs`).
+   * Every route that files, sends or moves a row finds the space that way.
+   * Correcting the row's role has to rename that space too: left behind
+   * under the old role, it is not the same job by its number either, and
+   * nothing that moves the row ever finds its space again.
+   */
+  it('renames the space that is this job only by its number, and no other', async () => {
+    t = makeTempStore({ config: { git: { autoCommit: false }, output: { dir: 'out' } } });
+    const write = (rel: string, data: unknown) => {
+      fs.mkdirSync(path.dirname(path.join(t.dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(t.dir, rel), YAML.stringify(data), 'utf8');
+    };
+    const row = '2026-09-25-electronic-arts-gameplay-engineer';
+    const space = '2026-09-24-respawn-entertainment-gameplay-engineer';
+    const another = '2026-09-24-respawn-entertainment-gameplay-engineer-2';
+    write('applications.yaml', [
+      {
+        id: row,
+        company: 'Electronic Arts',
+        role: 'Gameplay Engineer',
+        url: 'https://jobs.ea.com/en_US/careers/ApplicationMethods?jobId=216245',
+        status: 'applying',
+        appliedAt: '2026-09-25T00:00:00.000Z',
+      },
+    ]);
+    write(`drafts/${space}.yaml`, {
+      id: space,
+      company: 'Respawn Entertainment',
+      role: 'Gameplay Engineer',
+      url: 'https://jobs.ea.com/en_US/careers/JobDetail/Gameplay-Engineer/216245',
+      status: 'drafting',
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    });
+    // The same title at the studio, but another of EA's jobs: not this row's.
+    write(`drafts/${another}.yaml`, {
+      id: another,
+      company: 'Respawn Entertainment',
+      role: 'Gameplay Engineer',
+      url: 'https://jobs.ea.com/en_US/careers/JobDetail/Gameplay-Engineer/216299',
+      status: 'drafting',
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    });
+    const client = await app();
+    // It is this row's space, as the other routes find it.
+    const { draftForJob } = await import('../src/model/applications.js');
+    const [tracked] = t.store.load().applications;
+    expect(draftForJob(t.store.loadDrafts(), [tracked!], tracked!.company, tracked!.role, tracked!.url)?.id).toBe(space);
+
+    // The role was a title cut off at a dash: "Gameplay Engineer - Intern".
+    await client.patch(`/api/applications/${row}`).send({ role: 'Gameplay Engineer Intern' }).expect(200);
+    const drafts = t.store.loadDrafts();
+    expect(drafts.find((d) => d.id === space)).toMatchObject({ company: 'Electronic Arts', role: 'Gameplay Engineer Intern' });
+    expect(drafts.find((d) => d.id === another)).toMatchObject({ company: 'Respawn Entertainment', role: 'Gameplay Engineer' });
+
+    // And the row and its space still move together.
+    await client.post(`/api/applications/${row}/status`).send({ status: 'applied' }).expect(200);
+    expect(t.store.loadDrafts().find((d) => d.id === space)?.status).toBe('submitted');
+    expect(t.store.loadDrafts().find((d) => d.id === another)?.status).toBe('drafting');
+  });
+
   it('refuses to leave either one empty, or a row that is not there', async () => {
     seed();
     const client = await app();

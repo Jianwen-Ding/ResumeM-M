@@ -3599,7 +3599,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const next = { ...app, ...(company !== undefined ? { company } : {}), ...(role !== undefined ? { role } : {}) };
       await withCommit(repo, autoCommit(), `Rename application "${id}" to ${next.role} at ${next.company}`, () => {
         const drafts = store.loadDrafts();
-        const space = drafts.find((d) => d.id === id) ?? draftForJob(drafts, apps, app.company, app.role);
+        /*
+         * With the row's address, as every route that files, sends or moves a
+         * row looks for its space. A space opened under another spelling of
+         * the employer — EA's job 216245 as "Respawn Entertainment" beside a
+         * row reading "Electronic Arts" — is this job only by its number, and
+         * went unrenamed. Under the old role it then stopped being this job
+         * by its number too (see `sameJobAs`), so moving the row never found
+         * its space again.
+         */
+        const space = drafts.find((d) => d.id === id) ?? draftForJob(drafts, apps, app.company, app.role, app.url);
         store.saveApplications(apps.map((a) => (a.id === id ? next : a)));
         if (space) store.saveDraft({ ...space, company: next.company, role: next.role });
       });
