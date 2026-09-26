@@ -1083,6 +1083,74 @@ async function main() {
       }
     }
 
+    /*
+     * The store takes a deleted entry out of every resume that listed it, in
+     * the same write. The undo step held only the entry and the resume on
+     * screen, so Ctrl+Z brought the entry back and left every other resume
+     * without it.
+     */
+    console.log('\nDeleting an entry two resumes list, and taking it back');
+    {
+      const id = 'exp_editor_cascade';
+      const [open, other] = ['editor-cascade-open', 'editor-cascade-other'];
+      const put = (path, body) =>
+        fetch(`${server.url}/api${path}?commit=0`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      await put(`/entries/${id}`, {
+        id,
+        kind: 'experience',
+        title: 'Cascade Test Co.',
+        dates: 'Jan. 2020 -- Feb. 2020',
+        bullets: [{ id: 'b_cascade', default: 'v_1', variants: [{ id: 'v_1', label: 'Only', text: 'Checked an undo reaches every resume' }] }],
+      });
+      for (const [rid, label] of [[open, 'Cascade open'], [other, 'Cascade other']]) {
+        await put(`/resumes/${rid}`, { label, sections: [{ kind: 'experience', entries: [id], bullets: { [id]: ['b_cascade'] } }] });
+      }
+      const lists = async (rid) => {
+        const resumes = await (await fetch(`${server.url}/api/resumes`)).json();
+        const found = (Array.isArray(resumes) ? resumes : (resumes.resumes ?? [])).find((r) => r.id === rid);
+        const section = found?.sections?.find((x) => x.kind === 'experience');
+        return Boolean(section?.entries?.includes(id) && section?.bullets?.[id]?.includes('b_cascade'));
+      };
+      const exists = async () => (await (await fetch(`${server.url}/api/store`)).json()).entries.some((e) => e.id === id);
+      const until = async (ask, want, ms = 20_000) => {
+        let now = await ask();
+        for (let waited = 0; waited < ms && now !== want; waited += 300) {
+          await new Promise((r) => setTimeout(r, 300));
+          now = await ask();
+        }
+        return now === want;
+      };
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
+        await page.locator('#resume-select').selectOption(open);
+        const box = page.locator(`#editor .entry[data-drag-id="${id}"]`);
+        await box.first().waitFor({ timeout: 30_000 });
+
+        await box.first().getByRole('button', { name: 'Delete', exact: true }).first().click();
+        await page.locator('#modal:not(.hidden)').waitFor({ timeout: 10_000 });
+        await page.locator('#modal-ok').click();
+        const deleted = (await until(exists, false)) && (await until(() => lists(other), false));
+        check('the delete takes the entry out of the other resume too', deleted);
+
+        await page.locator('#btn-undo').click();
+        const back = await until(exists, true);
+        check('one undo puts the entry back', back);
+        check('in the resume on screen', await until(() => lists(open), true));
+        check('and in the other resume the delete had taken it out of', await until(() => lists(other), true));
+      } finally {
+        for (const rid of [open, other]) {
+          await fetch(`${server.url}/api/resumes/${rid}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+        }
+        await fetch(`${server.url}/api/entries/${id}?commit=0`, { method: 'DELETE' }).catch(() => undefined);
+      }
+    }
+
     console.log('\nGoing over one page');
     {
       /*

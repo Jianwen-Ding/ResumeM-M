@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import { makeTempStore } from './helpers.ts';
+import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from '../src/model/forget.ts';
 
 vi.mock('../web/preview.js', () => ({ createPreview: () => ({ show: async () => {} }) }));
 vi.mock('../web/assets.js', () => ({
@@ -20,9 +21,23 @@ afterEach(() => {
  * and the three things wrong with it were all about what counts as one step and
  * where the key applies.
  */
+/** Set by a block that needs the save arranged before the editor opens it. */
+let arrange = () => {};
+
 describe('undo in the builder', () => {
   let data;
   let requests;
+
+  /*
+   * What the store does to every resume when something they point at is
+   * deleted — `forgetInResumes`, with the store's own functions — so a step
+   * that leaves those resumes out is seen to.
+   */
+  const cascade = (wasEntries, wasGroups) => {
+    const after = indexStore(data.entries, data.skillGroups ?? []);
+    const moved = findMovedWordings(indexStore(wasEntries, wasGroups ?? []), after);
+    data.resumes = data.resumes.map((r) => forgetMissing(r, after, moved));
+  };
 
   beforeEach(async () => {
     vi.resetModules();
@@ -32,6 +47,7 @@ describe('undo in the builder', () => {
     const fixture = makeTempStore();
     data = fixture.store.load();
     fixture.cleanup();
+    arrange(data);
     requests = [];
 
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
@@ -63,16 +79,24 @@ describe('undo in the builder', () => {
         data.resumes = data.resumes.filter((r) => r.id !== id);
         result = { ok: true };
       } else if (url.startsWith('/api/entries/') && method === 'PUT') {
-        data.entries = data.entries.some((e) => e.id === body.id)
-          ? data.entries.map((e) => (e.id === body.id ? body : e))
-          : [...data.entries, body];
+        const was = data.entries;
+        const old = was.find((e) => e.id === body.id);
+        data.entries = old ? was.map((e) => (e.id === body.id ? body : e)) : [...was, body];
+        // A line or a wording gone reaches the resumes. See `saveEntry`.
+        if (old && entryLosesIds(old, body)) cascade(was, data.skillGroups);
         result = body;
       } else if (url.split('?')[0] === '/api/skills' && method === 'PUT') {
+        const was = data.skillGroups ?? [];
         data.skillGroups = body;
+        // And a group or a skill. See `saveSkillGroups`.
+        if (skillsLoseIds(was, body)) cascade(data.entries, was);
         result = body;
       } else if (url.startsWith('/api/entries/') && method === 'DELETE') {
         const id = decodeURIComponent(url.split('?')[0].split('/').pop());
-        data.entries = data.entries.filter((e) => e.id !== id);
+        const was = data.entries;
+        data.entries = was.filter((e) => e.id !== id);
+        // And an entry, out of every resume that listed it. See `deleteEntry`.
+        cascade(was, data.skillGroups);
         result = { ok: true };
       }
       return { ok: true, json: async () => structuredClone(result) };
@@ -436,5 +460,156 @@ describe('undo in the builder', () => {
       spec('newgrad').sections.find((s) => s.kind === 'skills')?.groups,
       'and the resume lists it again',
     ).toContain(group.id);
+  });
+
+  /*
+   * A delete reaches every resume, and so does its undo.
+   *
+   * The store takes a deleted entry or skills group out of every resume that
+   * listed it (`forgetInResumes`), in the same write. The step recorded only
+   * the document deleted and the resume open, so Ctrl+Z put those two back
+   * and left every other resume without the entry — changed by the delete,
+   * silently, and not by its undo.
+   */
+  it('puts a deleted entry back in the other resumes that listed it, too', async () => {
+    const entry = data.entries.find((e) => e.id === 'exp_acme');
+    const listing = (id) => spec(id).sections.some((s) => (s.entries ?? []).includes(entry.id));
+    expect(listing('newgrad') && listing('intern') && listing('base'), 'three resumes list it').toBe(true);
+    const others = { intern: structuredClone(spec('intern')), base: structuredClone(spec('base')) };
+
+    const row = [...document.querySelectorAll('#editor .entry')].find((e) => e.textContent.includes(entry.title));
+    const del = [...(row ?? document).querySelectorAll('button')].find((b) => b.textContent === 'Delete');
+    expect(del, 'the entry\'s Delete').toBeTruthy();
+    del.click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(data.entries.some((e) => e.id === entry.id)).toBe(false));
+    expect(listing('intern') || listing('base'), 'the delete reached the other resumes').toBe(false);
+
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(data.entries.some((e) => e.id === entry.id), 'the entry is back').toBe(true);
+    expect(listing('newgrad'), 'in the open resume').toBe(true);
+    expect(spec('intern'), 'and the other resumes are as they were').toEqual(others.intern);
+    expect(spec('base')).toEqual(others.base);
+
+    // And redo takes it out of all of them again.
+    document.querySelector('#btn-redo').click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(data.entries.some((e) => e.id === entry.id)).toBe(false);
+    expect(listing('newgrad') || listing('intern') || listing('base')).toBe(false);
+  });
+
+  it('puts a deleted skills group back in the other resumes that listed it, too', async () => {
+    const group = data.skillGroups[0];
+    const listing = (id) => (spec(id).sections.find((s) => s.kind === 'skills')?.groups ?? []).includes(group.id);
+    expect(listing('newgrad') && listing('intern') && listing('base'), 'three resumes list it').toBe(true);
+    const others = { intern: structuredClone(spec('intern')), base: structuredClone(spec('base')) };
+
+    const del = [...document.querySelectorAll('#editor button, #editor .link')].find((b) =>
+      /delete group/i.test(b.textContent ?? ''),
+    );
+    del.click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(data.skillGroups.some((g) => g.id === group.id)).toBe(false));
+    expect(listing('intern') || listing('base'), 'the delete reached the other resumes').toBe(false);
+
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(data.skillGroups.some((g) => g.id === group.id), 'the group is back').toBe(true);
+    expect(listing('newgrad'), 'in the open resume').toBe(true);
+    expect(spec('intern'), 'and the other resumes are as they were').toEqual(others.intern);
+    expect(spec('base')).toEqual(others.base);
+  });
+
+  /*
+   * And the smaller deletes, which reach the resumes the same way: a line a
+   * resume chose, a wording a resume pinned — which the store moves to the
+   * nearest wording left — and a skill a resume chose. Each was one write
+   * recorded as one document, so Ctrl+Z put the line, the wording or the
+   * skill back and left every resume that had it without it, or on another
+   * wording.
+   */
+  describe('the smaller deletes the store carries into other resumes', () => {
+    beforeAll(() => {
+      arrange = (d) => {
+        d.skillGroups = d.skillGroups.map((g) => (g.id === 'sk_lang' ? { ...g, items: [...g.items, { id: 's_zig', text: 'Zig' }] } : g));
+        // Every resume on the short wording, so the one open can delete it.
+        for (const r of d.resumes) r.choices = { ...r.choices, b_pipeline: 'v_short' };
+        const intern = d.resumes.find((r) => r.id === 'intern');
+        intern.sections = intern.sections.map((sec) =>
+          sec.kind === 'experience'
+            ? { ...sec, bullets: { exp_acme: ['b_pipeline', 'b_testing'] } }
+            : sec.kind === 'skills'
+              ? { ...sec, items: { sk_lang: d.skillGroups[0].items.map((i) => i.id) } }
+              : sec,
+        );
+      };
+    });
+    afterAll(() => {
+      arrange = () => {};
+    });
+
+    const confirmAndSettle = async () => {
+      await vi.advanceTimersByTimeAsync(50);
+      document.querySelector('#modal-ok')?.click();
+      await vi.advanceTimersByTimeAsync(3000);
+    };
+    const undoAndSettle = async () => {
+      await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+      undoBtn().click();
+      await vi.advanceTimersByTimeAsync(3000);
+    };
+    const control = (pattern, scope = document.querySelector('#editor')) =>
+      [...scope.querySelectorAll('button, .link, [title]')].find((b) => pattern.test(`${b.textContent} ${b.title ?? ''}`));
+
+    it('a line', async () => {
+      const intern = structuredClone(spec('intern'));
+      const row = [...document.querySelectorAll('#editor .bullet-row, #editor .bullet')].find((r) => /coverage/i.test(r.textContent));
+      const remove = row && [...row.querySelectorAll('button')].find((b) => /^(remove|delete)/i.test(b.textContent.trim()));
+      expect(remove, 'the line\'s Remove').toBeTruthy();
+      remove.click();
+      await confirmAndSettle();
+      await vi.waitFor(() => expect(spec('intern').sections.find((x) => x.kind === 'experience').bullets.exp_acme).toEqual(['b_pipeline']));
+
+      await undoAndSettle();
+      expect(data.entries.find((e) => e.id === 'exp_acme').bullets.some((b) => b.id === 'b_testing'), 'the line is back').toBe(true);
+      expect(spec('intern'), 'and the resume that chose it has it again').toEqual(intern);
+    });
+
+    it('a wording', async () => {
+      const others = { intern: structuredClone(spec('intern')), base: structuredClone(spec('base')) };
+      const row = [...document.querySelectorAll('#editor .bullet-row, #editor .bullet')].find((r) => /Built a pipeline/.test(r.textContent));
+      const del = row && control(/^Delete phrasing/, row);
+      expect(del, 'the wording\'s Delete phrasing').toBeTruthy();
+      del.click();
+      await confirmAndSettle();
+      const hasShort = () => data.entries.find((e) => e.id === 'exp_acme').bullets[0].variants.some((v) => v.id === 'v_short');
+      await vi.waitFor(() => expect(hasShort()).toBe(false));
+      expect(spec('intern').choices.b_pipeline, 'the store moved the other resumes to another wording').not.toBe('v_short');
+
+      // The open resume's own pin comes off in a save of its own; undo that, then the delete.
+      for (let i = 0; i < 3 && !hasShort(); i++) await undoAndSettle();
+      expect(hasShort(), 'the wording is back').toBe(true);
+      expect(spec('intern'), 'and the resumes that had pinned it are on it again').toEqual(others.intern);
+      expect(spec('base')).toEqual(others.base);
+    });
+
+    it('a skill', async () => {
+      const intern = structuredClone(spec('intern'));
+      const remove = [...document.querySelectorAll('#editor button')].find((b) => b.getAttribute('aria-label') === 'Delete "Zig" from the save' || b.ariaLabel === 'Delete "Zig" from the save');
+      expect(remove, 'Zig\'s remove').toBeTruthy();
+      remove.click();
+      await confirmAndSettle();
+      await vi.waitFor(() => expect(data.skillGroups[0].items.some((i) => i.id === 's_zig')).toBe(false));
+      expect(spec('intern').sections.find((x) => x.kind === 'skills').items.sk_lang, 'the delete reached the resume').not.toContain('s_zig');
+
+      await undoAndSettle();
+      expect(data.skillGroups[0].items.some((i) => i.id === 's_zig'), 'the skill is back').toBe(true);
+      expect(spec('intern'), 'and the resume that chose it has it again').toEqual(intern);
+    });
   });
 });

@@ -429,6 +429,18 @@ async function undoGroup(label, watch, run) {
     }
   }
 }
+/**
+ * Every resume, for a step whose write the store carries into all of them.
+ *
+ * Deleting an entry or a skills group takes it out of every resume that
+ * listed it (`forgetInResumes`, in the same write), so those resumes are part
+ * of what the step changed. Watched from before the delete: the lanes reload
+ * the store after it lands, so even the open resume read after that is
+ * already the pruned one. Ones the delete did not touch come out of the step
+ * as unchanged and cost nothing.
+ */
+const everyResume = () => (state.store?.resumes ?? []).map((r) => `resume:${r.id}`);
+
 /** What the write in flight should be called, set by the action that starts it. */
 let undoLabel = 'change';
 /** Name the next write, so the menu can say "Undo delete group". */
@@ -3547,10 +3559,10 @@ async function editEntry(entry) {
 
 async function removeEntry(entry) {
   if (!(await confirmModal(`Delete ${entryName(entry)}?`, 'The entry and all of its phrasings are removed from the save. Resumes referencing it will warn until you remove the reference.'))) return;
-  // The entry and the resume that pointed at it are one thing the user did, so
-  // they are one press of Ctrl+Z — not two, with an orphaned reference in
-  // between that no action ever produces.
-  await undoGroup(`delete ${entryName(entry)}`, [], async () => {
+  // The entry and the resumes that pointed at it are one thing the user did,
+  // so they are one press of Ctrl+Z — not two, with an orphaned reference in
+  // between that no action ever produces. All of them: see `everyResume`.
+  await undoGroup(`delete ${entryName(entry)}`, everyResume(), async () => {
     /*
      * In the lane, so a whole-entry write still queued behind it goes first.
      * `PUT /entries/:id` has no existence check, so a delete that overtook one
@@ -3653,7 +3665,10 @@ async function tickBulletHere(entryId, id) {
 
 async function removeBullet(entry, bullet) {
   if (!(await confirmModal(`Delete “${bulletName(entry, bullet)}”?`, `All ${plural(bullet.variants.length, 'phrasing')} of it are removed from the save.`))) return;
-  await saveEntry({ ...entry, bullets: (entry.bullets ?? []).filter((b) => b.id !== bullet.id) }, `Deleted ${bullet.id}`);
+  // With the resumes the store takes it out of, so its undo puts it back in them. See `everyResume`.
+  await undoGroup(`delete ${bulletName(entry, bullet)}`, everyResume(), () =>
+    saveEntry({ ...entry, bullets: (entry.bullets ?? []).filter((b) => b.id !== bullet.id) }, `Deleted ${bullet.id}`),
+  );
   scheduleRender();
 }
 
@@ -4178,7 +4193,9 @@ async function removeBulletVariant(entry, bullet, variant) {
       ...variantFallout(bullet.id, variant.id, true, '(nothing)'),
     ].join(' '));
     if (!ok) return;
-    await saveEntry({ ...entry, bullets: entry.bullets.filter((b) => b.id !== bullet.id) }, 'Line deleted');
+    await undoGroup('delete a line', everyResume(), () =>
+      saveEntry({ ...entry, bullets: entry.bullets.filter((b) => b.id !== bullet.id) }, 'Line deleted'),
+    );
     if (state.choices[bullet.id]) {
       const { [bullet.id]: _gone, ...rest } = state.choices;
       state.choices = rest;
@@ -4217,7 +4234,8 @@ async function removeBulletVariant(entry, bullet, variant) {
           },
     ),
   };
-  await saveEntry(next, 'Phrasing deleted');
+  // The store moves the resumes that had pinned it; see `everyResume`.
+  await undoGroup('delete a phrasing', everyResume(), () => saveEntry(next, 'Phrasing deleted'));
   /*
    * A resume that had chosen this wording now names one that is not there.
    * `resolveResume` says so and falls back to the default, which is the right
@@ -4276,7 +4294,7 @@ async function removeFieldAlternate(entry, name, variant) {
     ].join(' '));
     if (!gone) return;
     const { [name]: _dropped, ...without } = entry;
-    await saveEntry(without, `${label} deleted`);
+    await undoGroup(`delete the ${label}`, everyResume(), () => saveEntry(without, `${label} deleted`));
     if (state.choices[key]) {
       const { [key]: _stale, ...rest } = state.choices;
       state.choices = rest;
@@ -4296,13 +4314,16 @@ async function removeFieldAlternate(entry, name, variant) {
   );
   if (!ok) return;
 
-  await saveEntry(
-    {
-      ...entry,
-      // Something has to be the default; see the note in removeBulletVariant.
-      [name]: { ...field, variants: remaining, default: field.default === variant.id ? remaining[0].id : field.default },
-    },
-    'Alternate deleted',
+  // The store moves the resumes that had pinned it; see `everyResume`.
+  await undoGroup(`delete an alternate ${label}`, everyResume(), () =>
+    saveEntry(
+      {
+        ...entry,
+        // Something has to be the default; see the note in removeBulletVariant.
+        [name]: { ...field, variants: remaining, default: field.default === variant.id ? remaining[0].id : field.default },
+      },
+      'Alternate deleted',
+    ),
   );
   if (state.choices[key] === variant.id) {
     const { [key]: _gone, ...rest } = state.choices;
@@ -4478,7 +4499,8 @@ async function removeListItem(entry, bullet, item) {
       b.id !== bullet.id ? b : { ...b, items: b.items.filter((i) => i.id !== item.id) },
     ),
   };
-  await saveEntry(next, `Removed ${item.text}`);
+  // And out of the resumes that chose it; see `everyResume`.
+  await undoGroup(`delete ${item.text}`, everyResume(), () => saveEntry(next, `Removed ${item.text}`));
   scheduleRender();
 }
 
@@ -4588,8 +4610,11 @@ async function tickSkillHere(gid, id, text) {
 }
 
 async function removeSkill(group, item) {
-  await inSkillsLane((groups) =>
-    groups.map((g) => (g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) })),
+  // And out of the resumes that chose it, which its undo puts back. See `everyResume`.
+  await undoGroup(`delete ${item.text}`, everyResume(), () =>
+    inSkillsLane((groups) =>
+      groups.map((g) => (g.id !== group.id ? g : { ...g, items: g.items.filter((i) => i.id !== item.id) })),
+    ),
   );
   setStatus(`Removed ${item.text}`);
   render();
@@ -4664,7 +4689,7 @@ async function removeSkillGroup(group) {
    * state no action produces: `resolveResume` then warns "Skills group
    * "sk_lang" does not exist." on every compile from then on.
    */
-  await undoGroup(`delete the group "${group.name}"`, [], async () => {
+  await undoGroup(`delete the group "${group.name}"`, everyResume(), async () => {
     await inSkillsLane((groups) => groups.filter((g) => g.id !== group.id));
     const root = resumeById(state.resumeId);
     const sections = (root.sections ?? []).map((s) =>
