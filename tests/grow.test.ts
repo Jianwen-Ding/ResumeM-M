@@ -84,6 +84,25 @@ describe.skipIf(!hasEngine)('a resume with room to spare', () => {
     expect(r.layout.spacing).toBeGreaterThan(DEFAULT_LAYOUT.spacing + grown * (maxSpacing - DEFAULT_LAYOUT.spacing) + 0.01);
   }, 90_000);
 
+  /*
+   * Larger type and wider margins take room from every line, and a link TeX
+   * cannot break is set past the right-hand edge, where it is not in the PDF.
+   * This one fits across the page as written and ran 30pt off it once grown.
+   */
+  it('but never until a line it could set runs off the side of the page', async () => {
+    const link = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit?usp=sharing';
+    const r = resume(2);
+    r.sections[0]!.entries[0]!.bullets[0] = { id: 'link', variantId: 'v', text: `Design doc: ${link}` };
+    const offTheSide = (warnings: string[]) => warnings.filter((w) => /right-hand edge/.test(w));
+
+    const asWritten = await compileResume({ ...r, layout: { ...r.layout, autoFit: false } });
+    expect(offTheSide(asWritten.warnings)).toEqual([]);
+
+    const fitted = await compileResume(r);
+    expect(fitted.fits).toBe(true);
+    expect(offTheSide(fitted.warnings)).toEqual([]);
+  }, 90_000);
+
   it('stays as written when told it may not grow', async () => {
     const still = { maxFontSizePt: DEFAULT_LAYOUT.fontSizePt, maxSpacing: DEFAULT_LAYOUT.spacing, maxMarginIn: DEFAULT_LAYOUT.marginIn };
     const r = await compileResume(resume(2, { growBounds: still }));

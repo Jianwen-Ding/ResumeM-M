@@ -586,6 +586,7 @@ function canGrow(base: LayoutOptions): boolean {
 interface Tried {
   layout: LayoutOptions;
   m: Measurement;
+  raw: { log: string };
 }
 
 /**
@@ -609,6 +610,15 @@ interface Tried {
  * little larger and every one-line bullet wraps onto two, so a resume can
  * stop growing with a quarter of the page still empty. Spacing never changes
  * where a line breaks, so it can take up what is left without that jump.
+ *
+ * And a grown page has to be no wider than the one as written, as well as no
+ * taller. Larger type and wider margins both take room from every line, and
+ * a line TeX has nowhere to break — a link, a path — is set past the
+ * right-hand edge, where it is not in the PDF at all. A resume with a design
+ * doc's link in it that set cleanly as written was grown until the link ran
+ * 30pt off the paper. Growing is a nicety; losing text is the one thing this
+ * must not do, so a layout that runs further past the edge than the one as
+ * written counts as not fitting.
  */
 async function fitSearch<A extends Tried>(
   base: LayoutOptions,
@@ -635,17 +645,20 @@ async function fitSearch<A extends Tried>(
 
   if (fitsAt(first)) {
     if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
+    // On its page, and losing nothing off the side of it the page as written kept.
+    const edge = widestPastEdge(first.raw.log);
+    const roomy = (a: Tried) => fitsAt(a) && widestPastEdge(a.raw.log) <= edge;
     // In amounts of growth: 0 is as written, 1 the ceiling.
     let fit = { g: 0, a: first };
     const widest = await next(layoutAt(base, -1));
-    if (fitsAt(widest)) {
+    if (roomy(widest)) {
       fit = { g: 1, a: widest };
     } else {
       let over = { g: 1, a: widest };
       for (let tries = 0; tries < 2 && left > 0 && over.g - fit.g > 0.04; tries++) {
         const g = aim(fit.g, over.g, fill(fit.a), fill(over.a));
         const a = await next(layoutAt(base, -g));
-        if (fitsAt(a)) fit = { g, a };
+        if (roomy(a)) fit = { g, a };
         else over = { g, a };
       }
     }
@@ -655,10 +668,10 @@ async function fitSearch<A extends Tried>(
     if (left <= 0 || ceiling - from < 0.01 || fill(fit.a) >= NEARLY_FULL) return fit.a;
     const spaced = (spacing: number) => ({ ...fit.a.layout, spacing: round(spacing, 3) });
     const loosest = await next(spaced(ceiling));
-    if (fitsAt(loosest)) return loosest;
+    if (roomy(loosest)) return loosest;
     if (left <= 0) return fit.a;
     const between = await next(spaced(aim(from, ceiling, fill(fit.a), fill(loosest))));
-    return fitsAt(between) ? between : fit.a;
+    return roomy(between) ? between : fit.a;
   }
 
   // 2. Everything at its floor. If even this overflows, no amount of
@@ -981,11 +994,17 @@ function fontWarnings(log: string): string[] {
 const TOO_WIDE = /^Overfull \\hbox \(([\d.]+)pt too wide\)/gm;
 const NOTICEABLE_PT = 2;
 
+function pastEdge(log: string): number[] {
+  return [...log.matchAll(TOO_WIDE)].map((m) => Number(m[1])).filter((pt) => pt >= NOTICEABLE_PT);
+}
+
+/** How far past the edge the worst of those lines runs, in points; 0 when none does. */
+function widestPastEdge(log: string): number {
+  return Math.max(0, ...pastEdge(log));
+}
+
 function tooWideWarnings(log: string): string[] {
-  const worst = [...log.matchAll(TOO_WIDE)]
-    .map((m) => Number(m[1]))
-    .filter((pt) => pt >= NOTICEABLE_PT)
-    .sort((a, b) => b - a);
+  const worst = pastEdge(log).sort((a, b) => b - a);
   if (worst.length === 0) return [];
 
   const many = worst.length > 1 ? `${worst.length} lines run` : 'A line runs';
