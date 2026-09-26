@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import type { LayoutOptions, ResolvedResume } from '../model/types.js';
+import { DEFAULT_LAYOUT, type LayoutOptions, type ResolvedResume } from '../model/types.js';
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
 import { renderLatex, unrenderableReason } from './latex.js';
-import { renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
+import { letterLayout, renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
 
 const run = promisify(execFile);
 
@@ -30,10 +30,12 @@ export interface FitReport {
   overflowPt: number;
   /** Overflow expressed in lines of body text — the number you can act on. */
   overflowLines: number;
-  /** Layout actually used, after any auto-fit shrinking. */
+  /** Layout actually used, after any auto-fit shrinking or growing. */
   layout: LayoutOptions;
   /** What auto-fit had to do. Empty when the resume fit as authored. */
   adjustments: string[];
+  /** True when those adjustments made it larger, to fill a page it had room on. */
+  grew?: boolean;
 }
 
 export interface CompileResult extends FitReport {
@@ -547,8 +549,23 @@ function describe(base: LayoutOptions, used: LayoutOptions): string[] {
  * author asked for) to 1 (every knob at its floor). Typeset height decreases
  * monotonically in `t`, which is what makes a binary search valid — and what
  * lets a hopeless resume be rejected in two compiles instead of fourteen.
+ *
+ * Below 0 it runs the other way, to -1 (every knob at its ceiling, from
+ * `growBounds`): the same family continued, so a resume with room to spare is
+ * searched for exactly as one without is. A knob the author already set past
+ * its ceiling, or under its floor, stays where they put it.
  */
 function layoutAt(base: LayoutOptions, t: number): LayoutOptions {
+  if (t < 0) {
+    const { maxFontSizePt, maxSpacing, maxMarginIn } = base.growBounds ?? DEFAULT_LAYOUT.growBounds;
+    const grow = (from: number, to: number) => from + (to - from) * -t;
+    return {
+      ...base,
+      fontSizePt: round(grow(base.fontSizePt, Math.max(maxFontSizePt, base.fontSizePt)), 2),
+      spacing: round(grow(base.spacing, Math.max(maxSpacing, base.spacing)), 3),
+      marginIn: round(grow(base.marginIn, Math.max(maxMarginIn, base.marginIn)), 3),
+    };
+  }
   const { minFontSizePt, minSpacing, minMarginIn } = base.fitBounds;
   const lerp = (from: number, to: number) => from + (to - from) * t;
   return {
@@ -558,6 +575,118 @@ function layoutAt(base: LayoutOptions, t: number): LayoutOptions {
     marginIn: round(lerp(base.marginIn, Math.min(minMarginIn, base.marginIn)), 3),
   };
 }
+
+/** Whether there is any room above the layout as written to grow into. */
+function canGrow(base: LayoutOptions): boolean {
+  const g = base.growBounds ?? DEFAULT_LAYOUT.growBounds;
+  return g.maxFontSizePt > base.fontSizePt || g.maxSpacing > base.spacing || g.maxMarginIn > base.marginIn;
+}
+
+/** One compile, as the search below sees it. */
+interface Tried {
+  layout: LayoutOptions;
+  m: Measurement;
+}
+
+/**
+ * The layout to ship: as written if it fits and has no room to grow, the
+ * largest that still fits if it does, the least shrinking that fits if it
+ * does not.
+ *
+ * `attempt(layout)` compiles one layout, and is handed `first` — the layout
+ * as written, already compiled. `budget` is how many more compiles the
+ * search may spend.
+ *
+ * Growing is a search for the edge from the other side, and it has to be
+ * cheap, because most resumes fit as written and every one of them now pays
+ * for it. So a page already nearly full is left alone, the ceiling is tried
+ * first — a short resume takes all of it, in one compile — and otherwise each
+ * next compile is aimed where the measured heights say the page runs out,
+ * rather than halving blindly. Each guess is kept inside the middle of the
+ * interval, so a bad aim still makes progress.
+ *
+ * Then the line spacing on its own. Type grows in steps, not smoothly: a
+ * little larger and every one-line bullet wraps onto two, so a resume can
+ * stop growing with a quarter of the page still empty. Spacing never changes
+ * where a line breaks, so it can take up what is left without that jump.
+ */
+async function fitSearch<A extends Tried>(
+  base: LayoutOptions,
+  first: A,
+  attempt: (layout: LayoutOptions) => Promise<A>,
+  budget: number,
+): Promise<A> {
+  const fitsAt = (a: Tried) => a.m.pages <= base.maxPages;
+  let left = budget;
+  const next = (layout: LayoutOptions) => {
+    left--;
+    return attempt(layout);
+  };
+  // How full the page is, where 1 is exactly full.
+  const fill = (a: Tried) => a.m.usedPt / (textHeightIn(a.layout) * PT_PER_IN * base.maxPages);
+  // Where between two tries the page should run out, kept off either end.
+  const aim = (lo: number, hi: number, loFill: number, hiFill: number) => {
+    const gap = hi - lo;
+    const aimed = hiFill > loFill ? lo + (gap * (0.99 - loFill)) / (hiFill - loFill) : lo + gap / 2;
+    return Math.min(hi - gap * 0.15, Math.max(lo + gap * 0.15, aimed));
+  };
+
+  if (!base.autoFit || left <= 0) return first;
+
+  if (fitsAt(first)) {
+    if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
+    // In amounts of growth: 0 is as written, 1 the ceiling.
+    let fit = { g: 0, a: first };
+    const widest = await next(layoutAt(base, -1));
+    if (fitsAt(widest)) {
+      fit = { g: 1, a: widest };
+    } else {
+      let over = { g: 1, a: widest };
+      for (let tries = 0; tries < 2 && left > 0 && over.g - fit.g > 0.04; tries++) {
+        const g = aim(fit.g, over.g, fill(fit.a), fill(over.a));
+        const a = await next(layoutAt(base, -g));
+        if (fitsAt(a)) fit = { g, a };
+        else over = { g, a };
+      }
+    }
+
+    const ceiling = Math.max((base.growBounds ?? DEFAULT_LAYOUT.growBounds).maxSpacing, fit.a.layout.spacing);
+    const from = fit.a.layout.spacing;
+    if (left <= 0 || ceiling - from < 0.01 || fill(fit.a) >= NEARLY_FULL) return fit.a;
+    const spaced = (spacing: number) => ({ ...fit.a.layout, spacing: round(spacing, 3) });
+    const loosest = await next(spaced(ceiling));
+    if (fitsAt(loosest)) return loosest;
+    if (left <= 0) return fit.a;
+    const between = await next(spaced(aim(from, ceiling, fill(fit.a), fill(loosest))));
+    return fitsAt(between) ? between : fit.a;
+  }
+
+  // 2. Everything at its floor. If even this overflows, no amount of
+  //    searching helps — report the honest tightest number and stop.
+  const tightest = await next(layoutAt(base, 1));
+  if (!fitsAt(tightest)) return tightest;
+  // 3. Somewhere in between fits. Find the least shrinking that does.
+  let lo = 0; // known not to fit
+  let hi = 1; // known to fit
+  let best = tightest;
+  while (left > 0 && hi - lo > 0.06) {
+    const mid = (lo + hi) / 2;
+    const a = await next(layoutAt(base, mid));
+    if (fitsAt(a)) {
+      hi = mid;
+      best = a;
+    } else {
+      lo = mid;
+    }
+  }
+  return best;
+}
+
+/**
+ * Full enough not to grow. Past this the gain is a fraction of a point of
+ * type, and the compiles to find it are what every edit waits for.
+ */
+const NEARLY_FULL = 0.97;
 
 export interface CompileOptions {
   pdfPath?: string;
@@ -687,9 +816,8 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };
   let attemptsLeft = maxAttempts;
 
-  const attempt = async (t: number): Promise<Attempt> => {
+  const attempt = async (layout: LayoutOptions): Promise<Attempt> => {
     attemptsLeft--;
-    const layout = t === 0 ? base : layoutAt(base, t);
     const tex = renderLatex({ ...resume, layout });
 
     /*
@@ -699,7 +827,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
      * attempt is the one that matters for a live preview and is almost always
      * the answer; the shrinking steps go to the trusted engine.
      */
-    if (wantFast && t === 0) {
+    if (wantFast && layout === base) {
       try {
         /*
          * Held too, under a key of its own.
@@ -736,33 +864,8 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     const raw = await compileOnce(tex, engine);
     return { layout, raw, m: measure(raw.aux, layout, 1), tex, fast: false };
   };
-  const fitsAt = (a: Attempt) => a.m.pages <= base.maxPages;
-
-  // 1. As authored. Almost always the answer, and always the preferred one.
-  let best = await attempt(0);
-  if (!fitsAt(best) && base.autoFit) {
-    // 2. Everything at its floor. If even this overflows, no amount of
-    //    searching helps — report the honest tightest number and stop.
-    const tightest = await attempt(1);
-    if (!fitsAt(tightest)) {
-      best = tightest;
-    } else {
-      // 3. Somewhere in between fits. Find the least shrinking that does.
-      let lo = 0; // known not to fit
-      let hi = 1; // known to fit
-      best = tightest;
-      while (attemptsLeft > 0 && hi - lo > 0.06) {
-        const mid = (lo + hi) / 2;
-        const a = await attempt(mid);
-        if (fitsAt(a)) {
-          hi = mid;
-          best = a;
-        } else {
-          lo = mid;
-        }
-      }
-    }
-  }
+  // 1. As authored — then larger if it has room, or smaller if it has to be.
+  const best = await fitSearch(base, await attempt(base), attempt, attemptsLeft);
 
   const availablePt = textHeightIn(best.layout) * PT_PER_IN * base.maxPages;
   const baselinePt = readBaseline(best.raw.log) ?? best.layout.fontSizePt * 1.2;
@@ -795,6 +898,9 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
      * shrinking is what could not save it.
      */
     adjustments: fits ? describe(base, best.layout) : [],
+    grew:
+      fits &&
+      (best.layout.fontSizePt > base.fontSizePt || best.layout.spacing > base.spacing || best.layout.marginIn > base.marginIn),
   };
 
   if (opts.strict && !report.fits) throw new OverflowError(resume, report);
@@ -958,7 +1064,11 @@ export async function compileLetter(
     throw new LatexError(reason, reason);
   }
 
-  const tex = renderLetterLatex(letter, layout);
+  /*
+   * Set on a letter's page and fitted to it: grown to fill the page, or
+   * brought in a little for a long one. See `letterLayout`.
+   */
+  const base = letterLayout(layout);
   /*
    * Named as a letter, because that is what somebody is looking at.
    *
@@ -967,25 +1077,34 @@ export async function compileLetter(
    * an emoji pasted into a cover letter — sending the reader to the wrong
    * document, which on a save with a dozen resumes in it is an afternoon.
    */
-  assertRenderable(tex, 'cover letter');
+  assertRenderable(renderLetterLatex(letter, base), 'cover letter');
 
-  let raw: RawCompile | undefined;
-  let usedFast = false;
-
-  if (opts.mode === 'preview' && (await hasFastPath())) {
-    try {
-      raw = await compileFastBody(renderLetterFastBody(letter, layout), layout.paper, layout);
-      usedFast = true;
-    } catch {
-      raw = undefined; // fall back to the trusted engine
+  type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };
+  const wantFast = opts.mode === 'preview' && (await hasFastPath());
+  const attempt = async (at: LayoutOptions): Promise<Attempt> => {
+    const tex = renderLetterLatex(letter, at);
+    // The shortcut for the page as set only, as for a resume: its format
+    // carries the layout, and every other attempt would dump one of its own.
+    if (wantFast && at === base) {
+      try {
+        const raw = await compileFastBody(renderLetterFastBody(letter, at), at.paper, at);
+        return { layout: at, raw, m: measure(raw.aux, at, 1), tex, fast: true };
+      } catch {
+        // Fall back to the trusted engine.
+      }
     }
-  }
-  if (!raw) raw = await compileOnce(tex, engine);
+    const raw = await compileOnce(tex, engine);
+    return { layout: at, raw, m: measure(raw.aux, at, 1), tex, fast: false };
+  };
+  const best = await fitSearch(base, await attempt(base), attempt, 6);
+  const { raw, tex } = best;
+  const used = best.layout;
+  const usedFast = best.fast;
 
-  const m = measure(raw.aux, layout, 1);
-  const availablePt = textHeightIn(layout) * PT_PER_IN * Math.max(1, layout.maxPages);
-  const baselinePt = readBaseline(raw.log) ?? layout.fontSizePt * 1.2;
-  const fits = m.pages <= Math.max(1, layout.maxPages);
+  const m = best.m;
+  const availablePt = textHeightIn(used) * PT_PER_IN * Math.max(1, used.maxPages);
+  const baselinePt = readBaseline(raw.log) ?? used.fontSizePt * 1.2;
+  const fits = m.pages <= Math.max(1, used.maxPages);
   const overflowPt = fits ? Math.min(m.usedPt - availablePt, 0) : Math.max(m.usedPt - availablePt, 0);
 
   if (opts.pdfPath) {

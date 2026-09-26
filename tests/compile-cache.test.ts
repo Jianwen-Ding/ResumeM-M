@@ -45,7 +45,11 @@ function resume(title: string): ResolvedResume {
         ],
       },
     ],
-    layout: { ...DEFAULT_LAYOUT },
+    // No room to grow, so each build is one compile and files one entry.
+    layout: {
+      ...DEFAULT_LAYOUT,
+      growBounds: { maxFontSizePt: DEFAULT_LAYOUT.fontSizePt, maxSpacing: DEFAULT_LAYOUT.spacing, maxMarginIn: DEFAULT_LAYOUT.marginIn },
+    },
     warnings: [],
   };
 }

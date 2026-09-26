@@ -42,7 +42,7 @@ describe('a preview of a resume that is too long', () => {
   const fitLine = () => document.querySelector('#fit');
   const squeezed = () => document.querySelector('#fit .squeezed');
 
-  function boot({ fitsAsWritten, fitsAfterSqueezing = true }) {
+  function boot({ fitsAsWritten, fitsAfterSqueezing = true, grown = false }) {
     asked = [];
     const fixture = makeTempStore();
     const data = fixture.store.load();
@@ -75,7 +75,17 @@ describe('a preview of a resume that is too long', () => {
         return {
           ok: true,
           json: async () =>
-            fitsAfterSqueezing
+            grown
+              ? {
+                  pages: 1,
+                  fits: true,
+                  grew: true,
+                  overflowLines: -1,
+                  adjustments: ['font 10.5pt → 11.5pt', 'margins 0.45in → 0.6in'],
+                  warnings: [],
+                  pdfUrl: '/pdf/fitted.pdf',
+                }
+              : fitsAfterSqueezing
               ? {
                   pages: 1,
                   fits: true,
@@ -104,15 +114,24 @@ describe('a preview of a resume that is too long', () => {
     releaseFitted = undefined;
   });
 
-  it('compiles once, and says nothing about squeezing, when it already fits', async () => {
-    boot({ fitsAsWritten: true });
+  /*
+   * A resume that fits is set as large as the page allows, so the fitted
+   * compile runs for it too. What is on screen meanwhile is the page as
+   * written, and the line under it says what is coming, not that anything is
+   * being squeezed.
+   */
+  it('shows a resume that fits as written, then asks for it set as large as the page allows', async () => {
+    boot({ fitsAsWritten: true, grown: true });
     await import('../web/app.js');
     await vi.waitFor(() => expect(fitLine()?.textContent).toContain('Fits on one page'));
+    expect(asked).toEqual(['as-written', 'auto']);
+    expect(squeezed()?.textContent).toContain('as large as the page allows');
+    expect(squeezed()?.textContent).not.toContain('Squeezing');
 
-    // The second compile is the expensive one. A document that fits must never
-    // pay for it.
-    expect(asked).toEqual(['as-written']);
-    expect(squeezed()).toBeNull();
+    releaseFitted();
+    await vi.waitFor(() => expect(squeezed()?.textContent).toContain('Enlarged to fill the page'));
+    expect(squeezed()?.textContent).toContain('font 10.5pt → 11.5pt');
+    expect(squeezed()?.textContent).not.toContain('Squeezed');
   });
 
   /*

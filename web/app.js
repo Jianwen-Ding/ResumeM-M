@@ -5210,14 +5210,19 @@ function fitSummary(fit, result, { master, fitting = false } = {}) {
   if (fitting) {
     // Said while the second compile runs, so the half-second of truth on
     // screen is not mistaken for the final answer.
-    fit.append(el('div', { className: 'squeezed working', textContent: 'Squeezing it onto one page…' }));
+    fit.append(
+      el('div', {
+        className: 'squeezed working',
+        textContent: result.fits ? 'Setting it as large as the page allows…' : 'Squeezing it onto one page…',
+      }),
+    );
     return;
   }
 
   if (result.adjustments?.length) {
     fit.append(
       el('div', { className: 'squeezed' }, [
-        el('strong', { textContent: 'Squeezed to fit' }),
+        el('strong', { textContent: result.grew ? 'Enlarged to fill the page' : 'Squeezed to fit' }),
         el('span', { textContent: ` — ${result.adjustments.join(', ')}` }),
       ]),
     );
@@ -5259,9 +5264,16 @@ async function renderPreview() {
     showPdf($('#preview-pane'), asWritten.pdfUrl);
     showWarnings(asWritten);
 
-    // It fits as authored, or nothing is allowed to shrink it. Either way this
-    // is the answer, and there is no second compile to pay for.
-    if (master || asWritten.fits || !autoFitOn()) {
+    /*
+     * Nothing is allowed to change it, or it is the master document. Either
+     * way this is the answer, and there is no second compile to pay for.
+     *
+     * A resume that fits is not the end of it any more: auto-fit sets one
+     * with room to spare as large as the page allows, so the fitted compile
+     * runs for it too, and swaps in. On a page already full the server
+     * answers that from what it has just compiled.
+     */
+    if (master || !autoFitOn()) {
       setLive('ok');
       fitSummary(fit, asWritten, { master });
       return;
@@ -8747,7 +8759,9 @@ function pageDefaults(config) {
     el('div', {
       className: 'hint',
       style: 'margin-bottom:12px',
-      textContent: 'Auto-fit may still shrink a resume within its limits to keep it on one page.',
+      textContent:
+        'Auto-fit sets a resume with room to spare larger, up to 12pt and 0.75in margins, and shrinks one ' +
+        'that runs over, within its limits, to keep it on one page.',
     }),
   ]);
 }

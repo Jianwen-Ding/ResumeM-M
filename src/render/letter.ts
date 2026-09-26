@@ -30,6 +30,35 @@ export interface LetterContent {
   signOff?: string;
 }
 
+/**
+ * The page a letter is set on, from the page its resume is set on.
+ *
+ * It was the resume's page exactly: 10.5pt type inside 0.45in margins, which
+ * is a resume's compromise between legible and complete. On a letter, which
+ * is a few paragraphs of prose, it made lines of 120 characters across the
+ * whole sheet and left the bottom half of the page empty. A letter is read,
+ * not scanned, so it gets a letter's page: at least 11pt, an inch of margin,
+ * lines a little apart. It keeps the resume's type if that is larger, and its
+ * paper, so the pair still matches.
+ *
+ * Then it is fitted like a resume: grown to fill the page it has — up to
+ * 12pt and an inch and a quarter — or, for a long letter, brought in only so
+ * far, never to a resume's margins. A letter still too long at that is too
+ * long, and says so.
+ */
+export function letterLayout(page: LayoutOptions): LayoutOptions {
+  return {
+    ...page,
+    fontSizePt: Math.max(page.fontSizePt, 11),
+    marginIn: Math.max(page.marginIn, 1),
+    spacing: Math.max(page.spacing, 1.05),
+    autoFit: true,
+    maxPages: 1,
+    growBounds: { maxFontSizePt: 12, maxSpacing: 1.2, maxMarginIn: 1.25 },
+    fitBounds: { minFontSizePt: Math.min(page.fontSizePt, 10.5), minSpacing: Math.min(page.spacing, 1), minMarginIn: 0.75 },
+  };
+}
+
 function today(): string {
   return new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 }
@@ -88,10 +117,20 @@ function header(p: ResolvedProfile, spacing: number): string {
   }
   if (p.location) bits.push(tex(p.location));
 
+  // A rule under it, as the resume has under each heading: the letterhead
+  // reads as a letterhead, and the letter starts below it.
+  /*
+   * The separator is one TeX may break at and drop. A letter's margins are
+   * wider than a resume's, so the contact line can run to two lines, and
+   * joined with a plain " | " the first of them ended on a stray bar.
+   */
+  const between = '\\discretionary{}{}{\\kern0.45em\\textbar\\kern0.45em}';
   return `\\begin{center}
     {\\Huge \\scshape ${tex(p.name)}} \\\\ \\vspace{${(3 * spacing).toFixed(2)}pt}\\small
-    ${bits.join(' $|$ ')}
-\\end{center}`;
+    ${bits.join(between)}
+\\end{center}
+\\vspace{-\\parskip}\\vspace{-${(6 * spacing).toFixed(1)}pt}
+\\noindent\\rule{\\textwidth}{0.4pt}`;
 }
 
 /**
@@ -122,10 +161,11 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = ''): s
 
   const blocks: string[] = [
     // A letter is block-set: no first-line indents, a visible gap between
-    // paragraphs instead.
-    `\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{${(6 * layout.spacing).toFixed(1)}pt}`,
+    // paragraphs instead — most of a line, so the paragraphs read as
+    // paragraphs at whatever size the letter was set.
+    `\\setlength{\\parindent}{0pt}\n\\setlength{\\parskip}{${(0.75 * layout.fontSizePt * layout.spacing).toFixed(1)}pt}`,
     header(p, layout.spacing),
-    gap(14),
+    gap(10),
     tex(letter.date ?? today()),
   ];
 
@@ -147,7 +187,8 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = ''): s
   blocks.push(written.length === 0 ? '\\textit{(nothing written yet)}' : written.map(inlineTex).join('\n\n'));
 
   if (!hasSignOff(bodyText, p.name)) {
-    blocks.push(gap(10), `${tex(letter.signOff ?? 'Sincerely,')} \\\\[${(10 * layout.spacing).toFixed(1)}pt]\n${tex(p.name)}`);
+    // Room under the sign-off where a signature would go.
+    blocks.push(`${tex(letter.signOff ?? 'Sincerely,')} \\\\[${(2.2 * layout.fontSizePt * layout.spacing).toFixed(1)}pt]\n${tex(p.name)}`);
   }
 
   return `\\begin{document}

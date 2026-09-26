@@ -14,6 +14,16 @@ const bullet = (i: number): ResolvedBullet => ({
   text: `Built subsystem ${i}, cutting latency from 900ms to 180ms and raising throughput`,
 });
 
+/*
+ * A page auto-fit may not grow. A resume that fits with room to spare is now
+ * set larger, by the trusted engine, so the compile it ships is not the fast
+ * one; these are about the fast one, which is what the editor's first pass
+ * shows.
+ */
+const NO_ROOM = {
+  growBounds: { maxFontSizePt: DEFAULT_LAYOUT.fontSizePt, maxSpacing: DEFAULT_LAYOUT.spacing, maxMarginIn: DEFAULT_LAYOUT.marginIn },
+};
+
 function resume(entryCount: number, overrides: Partial<ResolvedResume['layout']> = {}): ResolvedResume {
   return {
     id: 'test',
@@ -87,7 +97,7 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
   });
 
   it('is used, and reported as used, through the preview mode', async () => {
-    const result = await compileResume(resume(1), { mode: 'preview' });
+    const result = await compileResume(resume(1, NO_ROOM), { mode: 'preview' });
     expect(result.fastPath).toBe(true);
     expect(result.fits).toBe(true);
   });
@@ -167,7 +177,7 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
   it('falls back per-attempt, not for the whole compile, once the guard clears', async () => {
     // A resume that fits comfortably at ordinary margins should still use the
     // fast path even though *some* pathological layout elsewhere would not.
-    const fine = resume(1);
+    const fine = resume(1, NO_ROOM);
     const result = await compileResume(fine, { mode: 'preview' });
     expect(result.fastPath).toBe(true);
   });

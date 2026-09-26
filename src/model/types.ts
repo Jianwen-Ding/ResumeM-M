@@ -358,6 +358,13 @@ export interface LayoutOptions {
    */
   autoFit: boolean;
   fitBounds: { minFontSizePt: number; minSpacing: number; minMarginIn: number };
+  /**
+   * How large auto-fit may go when the page has room. A resume that fits with
+   * space left over is set as large as these allow and still fit — larger
+   * type, looser lines, wider margins — rather than leaving the bottom of the
+   * page empty. Also only when `autoFit` is on.
+   */
+  growBounds: { maxFontSizePt: number; maxSpacing: number; maxMarginIn: number };
   /** Hard page ceiling. The whole point of the tool is that this is 1. */
   maxPages: number;
 }
@@ -385,6 +392,13 @@ export const DEFAULT_LAYOUT: LayoutOptions = {
    * rule — but it has to say so rather than have it happen quietly.
    */
   fitBounds: { minFontSizePt: 10, minSpacing: 0.92, minMarginIn: 0.4 },
+  /*
+   * How large it may go. 12pt is the largest body size in common advice for a
+   * resume. ×1.15 opens the lines without turning the page into a list of
+   * floating fragments. 0.75in is a generous margin that still leaves a full
+   * page's width of text.
+   */
+  growBounds: { maxFontSizePt: 12, maxSpacing: 1.15, maxMarginIn: 0.75 },
   maxPages: 1,
 };
 
@@ -831,8 +845,9 @@ export const DEFAULT_CONFIG: StoreConfig = {
  * inheritance worth removing: a value written down because the type demanded
  * it, and frozen at whatever it happened to be that day.
  */
-export type LayoutDefaults = Partial<Omit<LayoutOptions, 'fitBounds'>> & {
+export type LayoutDefaults = Partial<Omit<LayoutOptions, 'fitBounds' | 'growBounds'>> & {
   fitBounds?: Partial<LayoutOptions['fitBounds']>;
+  growBounds?: Partial<LayoutOptions['growBounds']>;
 };
 
 /**
@@ -855,6 +870,11 @@ export function layoutFor(
       ...DEFAULT_LAYOUT.fitBounds,
       ...(saveWide?.fitBounds ?? {}),
       ...(own?.fitBounds ?? {}),
+    },
+    growBounds: {
+      ...DEFAULT_LAYOUT.growBounds,
+      ...(saveWide?.growBounds ?? {}),
+      ...(own?.growBounds ?? {}),
     },
   };
 }
