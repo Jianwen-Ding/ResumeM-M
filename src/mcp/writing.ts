@@ -33,6 +33,7 @@ import type { MoveResult, TailorPosting } from './session.js';
 import { questionSimilarity } from '../jobs/answers.js';
 import { DEFAULT_LETTER_WORDS, letterWordCap, ownLetterLength, statedWordLimit, wordCount } from '../ai/length.js';
 import { countsAsTheirs } from '../ai/voice.js';
+import { placeholderIn } from '../model/placeholders.js';
 
 const ok = (text: string): MoveResult => ({ ok: true, text });
 const no = (text: string): MoveResult => ({ ok: false, text });
@@ -103,51 +104,13 @@ const FUNCTION_WORDS = new Set([
 /*
  * A gap the writer meant to come back to, in whatever bracket they reached for.
  *
- * One check, for the letter and the answers alike. There were two, and both
- * leaked. The letter's read `<[a-z ]+>` with no `i` flag, so `<Company Name>`
- * — a capitalised placeholder, which is how anybody writes one — went
- * straight through; the answers had no angle-bracket rule at all, which
- * matters because the shared instructions hand the model `your team's
- * <product>` as the very shape to avoid, so that is the shape it reproduces
- * when it cannot fill something in.
- *
- * Deliberately not every bracket. `<name@example.com>` is a real way to write
- * an address and `[1]` is not a placeholder, so a match needs a letter, has
- * to stay on one line, and has to be short: this is looking for a word or two
- * in a slot, not for punctuation.
- *
- * And deliberately not code. Asking only "is there a letter between the
- * brackets" refused `buffer[i]`, `items[key]`, `List<String>` and
- * `Promise<void>`, then told the model to fill in a placeholder that is not
- * one — which it can only comply with by taking the real detail out. On
- * "describe something you built", where the detail is the whole point, the
- * guard was quietly making every answer worse.
- *
- * What separates them is position rather than content. A slot sits where a
- * *word* would sit, so something else always comes first: a space, a newline,
- * the start of the text, an opening quote. An index or a type parameter is
- * glued to the name it belongs to — the `[` of `buffer[i]` follows `r`, and
- * the `<` of `List<String>` follows `t`. `\B` will not do the job here: it is
- * about the boundary between the two characters, and `[` is a non-word
- * character either way, so it is true for both. The lookbehind names the
- * thing directly.
+ * One check, for the letter and the answers alike — and the same one the
+ * letter build warns with and the routes that take a draft without the tools
+ * flag with. See `src/model/placeholders.ts` for what counts: a slot sits
+ * where a word would, so `buffer[i]`, `List<String>`, `[1]` and an address
+ * in angle brackets are not refused, and `[Company Name]`, `<Product>`,
+ * `{company}`, `{{role}}` and "XX years" are.
  */
-const NOT_GLUED = String.raw`(?<![\w)\]])`;
-const PLACEHOLDER = [
-  new RegExp(String.raw`${NOT_GLUED}\[[^\]\n]{0,40}[A-Za-z][^\]\n]{0,40}\]`),
-  new RegExp(String.raw`${NOT_GLUED}<[A-Za-z][A-Za-z ._'-]{0,40}>`),
-  /\{\{[^}\n]{0,60}\}\}/,
-  /\bTODO\b/,
-];
-
-/** The first placeholder in some text, or '' when there is none. */
-function placeholderIn(text: string): string {
-  for (const rule of PLACEHOLDER) {
-    const found = rule.exec(text);
-    if (found) return found[0];
-  }
-  return '';
-}
 
 /** Why it was not saved, naming the gap so the model knows which one. */
 function unfilled(gap: string): string {

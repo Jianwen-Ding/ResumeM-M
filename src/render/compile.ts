@@ -8,6 +8,7 @@ import { DEFAULT_LAYOUT, type LayoutOptions, type ResolvedResume } from '../mode
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
 import { renderLatex, unrenderableReason } from './latex.js';
 import { letterLayout, renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
+import { namePlaceholders, placeholdersIn } from '../model/placeholders.js';
 
 const run = promisify(execFile);
 
@@ -1023,6 +1024,32 @@ function readBaseline(log: string): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
+/**
+ * A template slot left in the letter — "[Your Name]", "[Company Name]",
+ * "{company}", "XX years" — which prints exactly as written.
+ *
+ * A model drafting a letter writes these when it cannot fill something in,
+ * and people keep them from templates they started from. The letter compiled,
+ * fit on its page and was attached with "Dear [Hiring Manager]," at the top,
+ * and nothing said so. Named rather than refused, as a line past the edge is:
+ * the text is theirs to change, and a bracket this reads wrongly as a slot
+ * should not stop a letter being built.
+ */
+export function placeholderWarnings(letter: LetterContent): string[] {
+  const found = placeholdersIn(
+    [letter.company, letter.role, letter.greeting, letter.body, letter.signOff, letter.date]
+      .filter((part): part is string => typeof part === 'string')
+      .join('\n\n'),
+  );
+  if (found.length === 0) return [];
+  const one = found.length === 1;
+  return [
+    `The letter still has ${one ? 'a placeholder' : `${found.length} placeholders`} in it — ` +
+      `${namePlaceholders(found)} — ${one ? 'which prints' : 'which print'} exactly as written. ` +
+      `Fill ${one ? 'it' : 'them'} in, or take the sentence out.`,
+  ];
+}
+
 export interface LetterCompileResult {
   pdfPath?: string;
   texPath?: string;
@@ -1153,7 +1180,7 @@ export async function compileLetter(
     texPath: opts.texPath,
     tex,
     engine,
-    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log)],
+    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log), ...placeholderWarnings(letter)],
     pages: m.pages,
     fits,
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

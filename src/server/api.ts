@@ -85,6 +85,7 @@ import type {
   WritingSample,
 } from '../model/types.js';
 import { compileLetter, compileResume, OverflowError } from '../render/compile.js';
+import { namePlaceholders, placeholdersIn } from '../model/placeholders.js';
 import { Jobs } from './jobs.js';
 
 interface DescribedChange {
@@ -535,6 +536,17 @@ function writingTools(
 
 /** Where the compiled MCP entry point sits relative to this file. */
 const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
+
+/**
+ * What to say beside an AI draft that still has template slots in it, naming
+ * them — so it is not presented as finished. See `placeholdersIn`.
+ */
+function placeholderNote(what: string, found: string[]): string {
+  return (
+    `${what} still has ${found.length === 1 ? 'a placeholder' : `${found.length} placeholders`} in it — ` +
+    `${namePlaceholders(found)}. It is not finished: fill ${found.length === 1 ? 'it' : 'them'} in, or take the sentence out.`
+  );
+}
 
 /** Text a caller sent, trimmed — or nothing, for anything else or blank. */
 function sentText(v: unknown): string | undefined {
@@ -2502,8 +2514,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const written = (result.tools as { letter?: string } | undefined)?.letter?.trim();
       const body = written || (result.executed ? trimToLetter(result.output) : '');
+      /*
+       * A draft with "[Company Name]" in it is not a finished letter. The
+       * writing tools refuse one; a run without them handed it back as the
+       * draft, and `save` filed it among the letters the next one is written
+       * from. Flagged, and not saved.
+       */
+      const placeholders = placeholdersIn(body);
+      const unfinished = placeholders.length > 0 ? placeholderNote('This letter', placeholders) : undefined;
       let saved: CoverLetter | undefined;
-      if (save && body.trim()) {
+      if (save && body.trim() && !unfinished) {
         saved = {
           id: letterId(job.company, job.jobTitle),
           // Named for the employer the address belongs to when the page never
@@ -2524,6 +2544,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         ...result,
         body,
         saved,
+        placeholders,
+        ...(unfinished ? { unfinished } : {}),
         // Always useful, and the whole answer when the AI is off.
         priorLetters: prior.map((l) => ({
           id: l.id,
@@ -2743,7 +2765,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         res.json({ output: '', executed: false, source: 'prompt', prompt: result.output, match });
         return;
       }
-      res.json({ ...result, source: 'ai', match });
+      // The same flag the letter carries: an answer with "[Company]" in it
+      // is not one to paste into a form.
+      const placeholders = placeholdersIn(result.output);
+      res.json({
+        ...result,
+        source: 'ai',
+        match,
+        placeholders,
+        ...(placeholders.length ? { unfinished: placeholderNote('This answer', placeholders) } : {}),
+      });
     }),
   );
 
@@ -4860,7 +4891,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             );
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = trimToLetter(agent.output);
-              letterNotes.push('Cover letter drafted in your voice.');
+              // Not "drafted" when it still has slots in it: say which.
+              const gaps = placeholdersIn(draft.coverLetter.body);
+              letterNotes.push(gaps.length ? placeholderNote('The cover letter draft', gaps) : 'Cover letter drafted in your voice.');
             } else if (!agent.executed && prior[0]) {
               /*
                * Only when the AI did not run. This branch used to catch an AI
@@ -5015,6 +5048,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           target.source = produced.source;
           target.fromAnswerId = produced.fromAnswerId;
           target.needsReview = produced.needsReview;
+          // An answer the AI left a slot in, named where it landed — see
+          // `placeholdersIn`. Only one that was kept: one typed over is gone.
+          const gaps = produced.source === 'ai' ? placeholdersIn(produced.answer) : [];
+          if (gaps.length) notes.push(placeholderNote(`The answer to "${produced.question.length > 80 ? `${produced.question.slice(0, 79)}…` : produced.question}"`, gaps));
         }
         if (kept) {
           notes.push(
