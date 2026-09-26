@@ -23,6 +23,7 @@ import {
   phraseFeedbackPrompt,
   shortenPrompt,
   tailorPrompt,
+  type FeedbackContext,
   type TailorContext,
 } from '../ai/prompts.js';
 import { listModels } from '../ai/models.js';
@@ -1802,6 +1803,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         usedPt: result.usedPt,
         availablePt: result.availablePt,
         adjustments: result.adjustments,
+        /*
+         * Which way those went. A resume with room to spare is set larger now,
+         * and its adjustments read exactly like shrinking ones — "font 10.5pt
+         * → 12pt" — so the editor heads them "Enlarged to fill the page" or
+         * "Squeezed to fit" off this. It was left out of the response, and
+         * every resume auto-fit had enlarged was shown as squeezed.
+         */
+        grew: result.grew ?? false,
         engine: result.fastPath ? `${result.engine} (fast preview)` : result.engine,
         fastPath: result.fastPath,
         warnings: result.warnings,
@@ -2010,7 +2019,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * last built.
          */
         let tex: string | undefined;
-        let fit: { pages: number; fits: boolean; overflowLines: number; adjustments: string[] } | undefined;
+        let fit: FeedbackContext['fit'];
         try {
           const compiled = await compileResume(resolved, {
             // A preview too — the critic wants a typeset page to look at, not
@@ -2024,6 +2033,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             fits: compiled.fits,
             overflowLines: compiled.overflowLines,
             adjustments: compiled.adjustments,
+            grew: compiled.grew,
           };
         } catch {
           // No LaTeX installed, or a resume that will not compile: the

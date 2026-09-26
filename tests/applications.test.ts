@@ -1494,6 +1494,25 @@ describe('saying what the store no longer has', () => {
     }
   });
 
+  /*
+   * And says nothing of the kind about a resume set larger.
+   *
+   * One with room to spare is set as large as its page allows, and its
+   * adjustments read like shrinking ones — "font 10.5pt → 12pt" — so the
+   * bundle of every short resume went out with "The resume was squeezed to
+   * fit" beside it.
+   */
+  it.skipIf(!latex)('does not call a resume auto-fit made larger squeezed', { timeout: 180_000 }, async () => {
+    const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'intern' });
+    expect(result.fits).toBe(true);
+    // It was made larger, or this is not the case under test.
+    const tex = fs.readFileSync(path.join(result.dir, 'source', 'resume.tex'), 'utf8');
+    const size = Number(/\\changefontsizes\[[\d.]+pt\]\{([\d.]+)pt\}/.exec(tex)?.[1]);
+    expect(size).toBeGreaterThan(10.5);
+    const said = result.warnings.join(' | ');
+    expect(said, said).not.toMatch(/squeezed/i);
+  });
+
   it.skipIf(!latex)('says nothing when the store has everything it asked for', { timeout: 180_000 }, async () => {
     const result = await buildBundle(t.store, { company: 'Meridian', role: 'Platform Engineer', resumeId: 'intern' });
     expect(result.missing).toBeUndefined();

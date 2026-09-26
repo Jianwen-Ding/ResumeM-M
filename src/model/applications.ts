@@ -642,9 +642,15 @@ export interface BundleResult {
  * `fits: false` with a page count beside it, and `adjustments` is empty there
  * by design — nothing was adjusted *successfully*, and "Squeezed to fit" over
  * a document still two pages long was its own bug once.
+ *
+ * And not a resume auto-fit made larger. One with room to spare is set as
+ * large as its page allows, and its adjustments read like shrinking ones —
+ * "font 10.5pt → 12pt" — so every short resume was sent with "The resume was
+ * squeezed to fit" beside it. Larger type is not what this warns about, and
+ * the editor has already shown that page as "Enlarged to fill the page".
  */
 function aboutTheResume(out: FitReport): string[] {
-  if (!out.fits || out.adjustments.length === 0) return [];
+  if (!out.fits || out.grew || out.adjustments.length === 0) return [];
   return [`The resume was squeezed to fit: ${out.adjustments.join(', ')}.`];
 }
 

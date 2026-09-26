@@ -2043,6 +2043,22 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     expect(res.body.lost).toEqual([]);
   });
 
+  /*
+   * Enlarged, and said to be.
+   *
+   * A resume with room to spare is set larger now, and its adjustments read
+   * like shrinking ones: "font 10.5pt → 12pt". The editor heads them
+   * "Enlarged to fill the page" off `grew` — which this response did not
+   * carry, so every resume auto-fit had made larger was printed as "Squeezed
+   * to fit".
+   */
+  it('says when auto-fit made the resume larger rather than smaller', async () => {
+    const res = await request(app).post('/api/render').send({ resumeId: 'newgrad' }).expect(200);
+    expect(res.body.fits).toBe(true);
+    expect(res.body.adjustments.join(' ')).toMatch(/font 10\.5pt → /);
+    expect(res.body.grew).toBe(true);
+  });
+
   it('compiles the master document', async () => {
     const res = await request(app).post('/api/render').send({ master: true }).expect(200);
     expect(res.body.pdfUrl).toMatch(/^\/pdf\/\.previews\/master-[0-9a-f]{8}\.pdf$/);

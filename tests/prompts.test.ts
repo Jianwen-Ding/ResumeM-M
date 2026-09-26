@@ -155,6 +155,22 @@ describe('feedback understands the master and derived resumes', () => {
     expect(prompt).not.toContain('Auto-fit had to:');
     expect(prompt).toContain('Never invent experience');
   });
+
+  /*
+   * A resume with room to spare is set larger to fill its page, and its
+   * adjustments read like shrinking ones. Given as "Auto-fit had to: font
+   * 10.5pt → 12pt", they told the critic a short resume was a tight one.
+   */
+  it('tells the critic a resume set larger had room, not that auto-fit had to squeeze it', () => {
+    const fit = { pages: 1, fits: true, overflowLines: -1, adjustments: ['font 10.5pt → 12pt', 'margins 0.45in → 0.75in'] };
+    const grown = feedbackPrompt(data, resolved, { fit: { ...fit, grew: true } });
+    expect(grown).not.toContain('Auto-fit had to:');
+    expect(grown).toContain('room to spare as written');
+    expect(grown).toContain('font 10.5pt → 12pt');
+    // While one it really squeezed is still said to have been.
+    const squeezed = feedbackPrompt(data, resolved, { fit: { ...fit, adjustments: ['font 10.5pt → 10pt'] } });
+    expect(squeezed).toContain('Auto-fit had to: font 10.5pt → 10pt.');
+  });
 });
 
 describe('tailor prompt', () => {
