@@ -271,6 +271,15 @@ describe('rebasing one edit onto another', () => {
     expect(rebase(base, ours, theirs).tags).toEqual(['backend', 'kubernetes']);
   });
 
+  it('does not bring back one the other write removed, either', () => {
+    // A resume's lines: switched off one each, on two copies of one entry.
+    const base = { ...entry(), tags: ['b_one', 'b_two', 'b_three'] };
+    const ours = { ...base, tags: ['b_one', 'b_three'] };
+    const theirs = { ...base, tags: ['b_two', 'b_three'] };
+
+    expect(rebase(base, ours, theirs).tags).toEqual(['b_three']);
+  });
+
   it('never produces a list with one thing in it twice', () => {
     const base = entry();
     const ours = entry();

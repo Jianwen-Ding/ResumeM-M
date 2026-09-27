@@ -285,6 +285,7 @@ function showWhatIsLeft(gone, { dropped = false } = {}) {
   clearTimeout(renderTimer);
   renderToken++;
   clearEdits();
+  rebasedOnto = null;
   setSaveState('saved');
   if (/^#resumes\//.test(location.hash)) {
     const here = state.masterView
@@ -448,6 +449,8 @@ async function fetchKeptAlive(url, init) {
  */
 let writesSent = 0;
 let writesOut = 0;
+/** A reply to the version of the resume it says was written: see `api`. */
+const savedVersions = new WeakMap();
 
 async function api(path, options = {}) {
   /*
@@ -459,7 +462,11 @@ async function api(path, options = {}) {
    * without a list of actions that goes stale the moment a button is added.
    */
   const docKey = undoing ? null : docKeyFor(path, options.method);
-  const before = docKey ? readDoc(state.store, docKey) : null;
+  // `undoFrom`: what the document was before this write, when the copy held
+  // here already has the write in it. See `rebaseRefusedSave`.
+  const { undoFrom, ...sending } = options;
+  options = sending;
+  const before = docKey ? (undoFrom !== undefined ? undoFrom : readDoc(state.store, docKey)) : null;
 
   /*
    * A write that is not committed yet says where it stands among this page's
@@ -503,7 +510,11 @@ async function api(path, options = {}) {
     if (writes) writesOut--;
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(body.error ?? `${res.status} ${res.statusText}`), { status: res.status });
+  // With the reply, which for a refused save says what is there now.
+  if (!res.ok) throw Object.assign(new Error(body.error ?? `${res.status} ${res.statusText}`), { status: res.status, body });
+  // Which write of a resume a save made, where the server says. See `autoSave`.
+  const tag = res.headers?.get?.('ETag');
+  if (tag && !tag.startsWith('W/') && body && typeof body === 'object') savedVersions.set(body, tag.replace(/"/g, ''));
 
   /*
    * Recorded here, from the response, rather than from the store on the next
@@ -1231,70 +1242,105 @@ async function autoSave({ leaving = false } = {}) {
      * folded. It goes now, and `?order` keeps the two in order at the server.
      */
     if (ahead && !leaving) await ahead.catch(() => undefined);
-    // The write ahead may have carried this edit already.
-    if (!state.dirty || !state.resumeId) return;
+    // Again after a refusal, rebased: see `rebaseRefusedSave`.
+    for (let refused = 0; ; refused++) {
+      // The write ahead may have carried this edit already.
+      if (!state.dirty || !state.resumeId) return;
 
-    const spec = currentSpec();
-    const order = ++saveOrder;
-    state.dirty = false; // further edits re-dirty it; this one is in flight
-    try {
+      const spec = currentSpec();
       /*
-       * `keepalive`, or leaving the page takes the edit with it.
+       * Written only over the write of the resume this edit was made on
+       * (`basedOn`), which the server says with every read of the store and
+       * every save. JobHelper's card files its copy whole with every stage,
+       * and a stage landing while an edit here waited was written away by the
+       * edit's save, or the save by the stage. Refused, the edit is rebased
+       * onto what is there (see `rebaseRefusedSave`) and sent again.
        *
-       * Hiding the page runs `flushEdits`, which starts this save straight
-       * away, and a browser cancels a plain request when its page unloads.
-       * So an unfold made just before a reload was sent and then dropped:
-       * in Chromium with the API held 600ms the PUT failed with
-       * net::ERR_ABORTED on three reloads of three, and the entry came back
-       * folded. The commit `flushEdits` sends after it already had the flag,
-       * which committed a save that never arrived.
-       *
-       * On every save, not only the one on the way out: a save the auto-save
-       * wait started can still be out when the page goes, and then
-       * `flushEdits` has nothing left to send. A resume is well under the
-       * 64KB a page may have in keepalive requests at once; the draft's save
-       * sends more than this and has always had the flag.
+       * Not on the way out of the page: a save still out ahead of this one has
+       * not said which write it made, and a refusal would come back to a page
+       * that is gone, taking the edit with it. Those write as they always did.
        */
-      // `existing=1`: over the resume as it is, never a new one. A save of a
-      // resume deleted elsewhere would otherwise put it back. See `resumeGone`.
-      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}&existing=1`, {
-        method: 'PUT',
-        body: JSON.stringify(spec),
-        keepalive: true,
-      });
-      // A newer save of this resume came back first; this one says nothing.
-      if (order < (landedOrder.get(spec.id) ?? 0)) return;
-      landedOrder.set(spec.id, order);
-      // The store now holds what the editor shows, so the unsaved edits are
-      // no longer overlays on top of it.
-      const stored = state.store?.resumes?.find((r) => r.id === spec.id);
-      if (stored) Object.assign(stored, spec);
-      setSaveState('saved');
-      scheduleCommit();
-    } catch (err) {
-      // Nor does it failing, when a newer save carrying this edit has landed.
-      if (order < (landedOrder.get(spec.id) ?? 0)) return;
-      if (err.status === 404) {
-        await resumeGone(spec).catch(() => setSaveState('failed', err.message));
+      const onto =
+        rebasedOnto?.id === spec.id
+          ? rebasedOnto
+          : { id: spec.id, base: resumeById(spec.id), version: state.store?.versions?.[spec.id] };
+      const basedOn = leaving ? undefined : onto.version;
+      const base = structuredClone(onto.base ?? null);
+      const order = ++saveOrder;
+      state.dirty = false; // further edits re-dirty it; this one is in flight
+      try {
+        /*
+         * `keepalive`, or leaving the page takes the edit with it.
+         *
+         * Hiding the page runs `flushEdits`, which starts this save straight
+         * away, and a browser cancels a plain request when its page unloads.
+         * So an unfold made just before a reload was sent and then dropped:
+         * in Chromium with the API held 600ms the PUT failed with
+         * net::ERR_ABORTED on three reloads of three, and the entry came back
+         * folded. The commit `flushEdits` sends after it already had the flag,
+         * which committed a save that never arrived.
+         *
+         * On every save, not only the one on the way out: a save the auto-save
+         * wait started can still be out when the page goes, and then
+         * `flushEdits` has nothing left to send. A resume is well under the
+         * 64KB a page may have in keepalive requests at once; the draft's save
+         * sends more than this and has always had the flag.
+         */
+        // `existing=1`: over the resume as it is, never a new one. A save of a
+        // resume deleted elsewhere would otherwise put it back. See `resumeGone`.
+        const on = basedOn ? `&basedOn=${encodeURIComponent(basedOn)}` : '';
+        const reply = await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}&existing=1${on}`, {
+          method: 'PUT',
+          body: JSON.stringify(spec),
+          keepalive: true,
+          // Undone to what the server had, not to the rebased copy shown.
+          ...(onto === rebasedOnto ? { undoFrom: structuredClone(onto.base) } : {}),
+        });
+        // A newer save of this resume came back first; this one says nothing.
+        if (order < (landedOrder.get(spec.id) ?? 0)) return;
+        landedOrder.set(spec.id, order);
+        if (rebasedOnto?.id === spec.id) rebasedOnto = null;
+        // The write it made, for the next save to be based on.
+        if (state.store) {
+          state.store.versions ??= {};
+          const made = savedVersions.get(reply);
+          if (made) state.store.versions[spec.id] = made;
+          else delete state.store.versions[spec.id];
+        }
+        // The store now holds what the editor shows, so the unsaved edits are
+        // no longer overlays on top of it.
+        const stored = state.store?.resumes?.find((r) => r.id === spec.id);
+        if (stored) Object.assign(stored, spec);
+        setSaveState('saved');
+        scheduleCommit();
         return;
-      }
-      state.dirty = true; // it did not land; try again on the next edit
-      if (!unreachable(err)) {
-        setSaveState('failed', err.message);
+      } catch (err) {
+        // Nor does it failing, when a newer save carrying this edit has landed.
+        if (order < (landedOrder.get(spec.id) ?? 0)) return;
+        if (err.status === 409 && err.body?.current && refused < 3 && rebaseRefusedSave(spec, base, err.body)) continue;
+        if (err.status === 404) {
+          await resumeGone(spec).catch(() => setSaveState('failed', err.message));
+          return;
+        }
+        state.dirty = true; // it did not land; try again on the next edit
+        if (!unreachable(err)) {
+          setSaveState('failed', err.message);
+          return;
+        }
+        /*
+         * The server is not there to refuse it: stopped, or restarting. Waiting
+         * for the next edit left the chip at "Not saved" with nothing on the way
+         * to change it, over an edit that never saved once the server was back.
+         * So it is asked again on a timer, which an edit made meanwhile replaces.
+         */
+        setSaveState('failed', 'can’t reach the server. Retrying…');
+        if (!autoSaveTimer) {
+          autoSaveTimer = setTimeout(() => {
+            autoSaveTimer = null;
+            autoSave();
+          }, UNREACHABLE_RETRY_MS);
+        }
         return;
-      }
-      /*
-       * The server is not there to refuse it: stopped, or restarting. Waiting
-       * for the next edit left the chip at "Not saved" with nothing on the way
-       * to change it, over an edit that never saved once the server was back.
-       * So it is asked again on a timer, which an edit made meanwhile replaces.
-       */
-      setSaveState('failed', 'can’t reach the server. Retrying…');
-      if (!autoSaveTimer) {
-        autoSaveTimer = setTimeout(() => {
-          autoSaveTimer = null;
-          autoSave();
-        }, UNREACHABLE_RETRY_MS);
       }
     }
   })();
@@ -1307,6 +1353,54 @@ async function autoSave({ leaving = false } = {}) {
     // one would be dropped from the chain.
     if (autoSaving === mine) autoSaving = null;
   }
+}
+
+/**
+ * An edit rebased onto a save made elsewhere and not written yet: the resume
+ * it is about, what the server has (`base`) and which write that is. Its
+ * content is this page's copy of the resume until the save lands. See
+ * `rebaseRefusedSave`.
+ */
+let rebasedOnto = null;
+
+/**
+ * A save of the resume refused because it was written elsewhere since this
+ * page read it: JobHelper's card filing its copy, another tab, a restore.
+ *
+ * The edit is not dropped and does not win whole. It is rebased onto what is
+ * there now, as an entry's lane rebases the next edit onto the save ahead of
+ * it (`rebase`): what the edit changed goes on top, and what it did not touch
+ * stays as the other write left it. Everything on screen goes with it, since
+ * edits made while the refused save was out were made on the same copy. The
+ * rebased resume is drawn, said, and sent again based on the write it was
+ * rebased onto. False when the resume is no longer the one on screen, and the
+ * refusal is reported as a failed save instead.
+ */
+function rebaseRefusedSave(spec, base, { current, version }) {
+  const stored = resumeById(spec.id);
+  if (state.masterView || state.resumeId !== spec.id || !stored) return false;
+  /*
+   * Sections have no ids, and `rebase` matches a list by id or not at all:
+   * unmatched, the edit's whole list of sections won, with the other write's
+   * copy of every section in it. Keyed for the merge the way their overlays
+   * are (`sectionKey`), by kind and place among that kind.
+   */
+  const keyed = (r) =>
+    r?.sections
+      ? { ...r, sections: r.sections.map((s, i, all) => ({ ...s, id: `${s.kind}:${all.slice(0, i).filter((o) => o.kind === s.kind).length}` })) }
+      : r;
+  const rebased = rebase(keyed(base ?? current), keyed(currentSpec()), keyed(current));
+  const merged = rebased.sections ? { ...rebased, sections: rebased.sections.map(({ id: _key, ...s }) => s) } : rebased;
+  for (const key of Object.keys(stored)) delete stored[key];
+  Object.assign(stored, structuredClone(merged));
+  // Folded into the resume above, so they are not laid over it again.
+  clearEdits();
+  rebasedOnto = { id: spec.id, base: structuredClone(current), version };
+  state.dirty = true;
+  render();
+  scheduleRender();
+  setStatus('This resume was changed elsewhere while your edit was saving. Your edit was kept, on top of that change.');
+  return true;
 }
 
 /**
@@ -11354,6 +11448,18 @@ async function readStoreUncrossed() {
 
 /** Take a store read from the server as the editor's own. */
 function adoptStore(fresh) {
+  /*
+   * A rebased edit not written yet is only in this page's copy of its resume
+   * (see `rebaseRefusedSave`), and a read made meanwhile would put the
+   * server's back in its place, taking the edit off the screen and out of
+   * the save that is about to go.
+   */
+  if (rebasedOnto) {
+    const at = (fresh.resumes ?? []).findIndex((r) => r.id === rebasedOnto.id);
+    const mine = state.store?.resumes?.find((r) => r.id === rebasedOnto.id);
+    if (at >= 0 && mine) fresh.resumes[at] = mine;
+    else rebasedOnto = null;
+  }
   state.store = fresh;
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
     /*
