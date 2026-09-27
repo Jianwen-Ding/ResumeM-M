@@ -10827,6 +10827,16 @@ function modalFocusable() {
 }
 
 /**
+ * Where the keyboard was when the dialog opened: the button that opened it,
+ * for `hideModal` to put it back on.
+ *
+ * Closing a dialog put focus nowhere — on <body> — whether it was Escape,
+ * Cancel or a successful Save, so a keyboard user who had just renamed a
+ * resume started again from the top of the page.
+ */
+let modalOpener = null;
+
+/**
  * Land the keyboard somewhere inside the dialog that was just opened, rather
  * than leaving it wherever it already was.
  *
@@ -10840,8 +10850,43 @@ function modalFocusable() {
  * failing that, the first focusable thing in the dialog.
  */
 function focusModal() {
+  const at = document.activeElement;
+  // A dialog opened in place of another one keeps the first one's way back.
+  if (!$('#modal').contains(at)) modalOpener = at && at !== document.body ? at : null;
   const typed = $('#modal-content').querySelector('input[type=text], textarea');
   setTimeout(() => (typed ?? modalFocusable()[0])?.focus(), 0);
+}
+
+/** Somewhere the keyboard can land: in the page, on screen, and switched on. */
+function canFocus(node) {
+  if (!node?.isConnected || node.disabled) return false;
+  for (let at = node; at?.nodeType === 1; at = at.parentElement) {
+    if (at.hidden || getComputedStyle(at).display === 'none') return false;
+  }
+  return true;
+}
+
+/**
+ * Back where the dialog came from. When that button is no longer on screen —
+ * a narrow More menu shuts once something in it is chosen, and Delete goes
+ * with the last variation but one — the nearest thing to it in the toolbar:
+ * More, which is where the item was, or failing that the resume picker.
+ */
+function returnFocus(from) {
+  const toolbar = $('#tab-resumes .sticky-toolbar');
+  const to = canFocus(from)
+    ? from
+    : from && toolbar?.contains(from)
+      ? [$('#btn-more'), $('#resume-select')].find(canFocus)
+      : null;
+  to?.focus({ preventScroll: true });
+}
+
+function hideModal() {
+  $('#modal').classList.add('hidden');
+  const from = modalOpener;
+  modalOpener = null;
+  returnFocus(from);
 }
 
 function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false, cancelLabel = 'Cancel' } = {}) {
@@ -10859,11 +10904,11 @@ function showModal(title, content, { note = '', okLabel = 'Close', showCancel = 
   focusModal();
   return new Promise((resolve) => {
     $('#modal-ok').onclick = () => {
-      $('#modal').classList.add('hidden');
+      hideModal();
       resolve(true);
     };
     $('#modal-cancel').onclick = () => {
-      $('#modal').classList.add('hidden');
+      hideModal();
       resolve(false);
     };
   });
@@ -10940,7 +10985,7 @@ function form(title, fields, note, submit) {
     const close = (value) => {
       closed = true;
       $('#modal-ok').disabled = false;
-      $('#modal').classList.add('hidden');
+      hideModal();
       resolve(value);
     };
     $('#modal-ok').onclick = async () => {
@@ -11009,6 +11054,9 @@ function render() {
   $('#btn-rename-resume').hidden = state.masterView;
   // Not on the master, which is not a variation.
   $('#btn-delete-resume').hidden = state.masterView || (state.store.resumes ?? []).length < 2;
+  // Delete goes once one resume is left, and focus was put back on it when
+  // its dialog closed. Not left on a button that is no longer there.
+  if (document.activeElement?.hidden) returnFocus(document.activeElement);
   /*
    * The label only, not the whole button.
    *
@@ -11039,31 +11087,42 @@ function render() {
  * A cycle rather than three buttons. There are three tiers and two of the
  * moves are rare — you mark a base once and leave it, and you promote a
  * temporary resume you turned out to want — so three controls in a toolbar
- * would be two pieces of permanent furniture for one occasional act. The
- * button says what the resume *is*; its title says what pressing it does.
+ * would be two pieces of permanent furniture for one occasional act.
+ *
+ * The button says what pressing it does; the quiet label beside it (#tier-state)
+ * says what the resume is. The button used to say "☆ Kept", which reads as a
+ * status — in the narrow More menu, a row reading "☆ Kept" among "Rename…"
+ * and "Delete variation" gave no hint that pressing it made the resume a base,
+ * and only the hover text, which a touch screen never shows, said so.
  */
 const TIER_LOOK = {
   base: {
     label: '★ Base',
-    className: 'tiny pinned',
+    className: 'tier-state pinned',
+    about: 'New resumes and tailored drafts start from this one.',
     next: 'extended',
-    title: 'New resumes and tailored drafts start from this one. Click to keep it without starting from it.',
+    action: 'Stop using as a base',
+    title: 'Keep it in this save, but stop starting new resumes and tailored drafts from it.',
     said: 'Now a base',
     undo: 'making this a base',
   },
   extended: {
     label: '☆ Kept',
-    className: 'tiny',
+    className: 'tier-state',
+    about: 'Kept in this save and never swept.',
     next: 'base',
-    title: 'Kept in this save and never swept. Click to make it one of the ones you build from.',
+    action: 'Make this a base',
+    title: 'Make it one of the resumes that new ones and tailored drafts start from.',
     said: 'Kept',
     undo: 'keeping this resume',
   },
   temporary: {
     label: '⌛ Temporary',
-    className: 'tiny temporary',
+    className: 'tier-state temporary',
+    about: 'Made for one posting, and swept a week after that posting is done.',
     next: 'extended',
-    title: 'Made for one posting, and swept a week after that posting is done. Click to keep it.',
+    action: 'Keep this resume',
+    title: 'Keep it in this save, so the sweep never deletes it.',
     said: 'Now temporary',
     undo: 'making this temporary',
   },
@@ -11075,8 +11134,14 @@ function renderBaseButton() {
   const spec = state.store.resumes.find((r) => r.id === state.resumeId);
   const look = TIER_LOOK[spec?.tier ?? 'extended'];
 
-  btn.textContent = look.label;
-  btn.className = look.className;
+  const shown = $('#tier-state');
+  if (shown) {
+    shown.textContent = look.label;
+    shown.className = look.className;
+    shown.title = look.about;
+    shown.hidden = state.masterView || !spec;
+  }
+  btn.textContent = look.action;
   btn.title = look.title;
   btn.disabled = !spec;
   btn.onclick = async () => {

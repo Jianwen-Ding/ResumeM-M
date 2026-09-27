@@ -57,7 +57,8 @@
           <button id="btn-focus" type="button" class="tiny narrow-only" aria-pressed="false" title="Show only the entry you are working in; the others fold to their headings until clicked">Focus</button>
           <button id="btn-more" type="button" class="tiny narrow-only" aria-expanded="false" aria-haspopup="true" aria-controls="toolbar-more" title="The rest of this toolbar">More</button>
           <div id="toolbar-more" class="toolbar-more" role="group" aria-label="More for this resume">
-            <button id="btn-base" class="tiny" title="What this resume is: a base, kept, or temporary"></button>
+            <span id="tier-state" class="tier-state"></span>
+            <button id="btn-base" class="tiny" aria-describedby="tier-state"></button>
             <button id="btn-tips" type="button" class="tiny narrow-only" aria-expanded="false" aria-controls="resume-view-note" title="How this editor works">How it works</button>
             <button id="btn-save-as">Save as variation…</button>
             <button id="btn-rename-resume" class="tiny" title="Change the name this resume is shown by">Rename…</button>

@@ -728,12 +728,6 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .chip.voice-flag.on { background: var(--accent-soft); border-color: transparent; color: #174ea6; }
 .chip.voice-flag.on:hover { background: #d2e3fc; }
 .chip.voice-flag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button.tiny.pinned {
-  background: var(--accent-soft);
-  border-color: #c6d4f2;
-  color: #174ea6;
-  font-weight: 550;
-}
 
 .note { color: var(--muted); font-size: 12px; margin-top: 4px; font-style: italic; }
 
@@ -1839,15 +1833,18 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 
 
 /*
- * A resume on its way out. Amber rather than red: it is not an error, and it
- * is not urgent — it says "this will go by itself unless you keep it", and
+ * What the resume is — base, kept, or temporary — said quietly beside the
+ * button that changes it (#btn-base, which says what pressing it does). Not a
+ * button: it looked like one when it was one, and read as a status either way.
+ *
+ * A resume on its way out is amber rather than red: it is not an error, and
+ * it is not urgent — it says "this will go by itself unless you keep it", and
  * the button beside it is how you keep it.
  */
-.tiny.temporary {
-  border-color: #e0a800;
-  color: #8a6400;
-  background: #fff8e6;
-}
+.tier-state { color: var(--muted); font-size: var(--t-sm); white-space: nowrap; }
+.tier-state[hidden] { display: none; }
+.tier-state.pinned { color: #174ea6; font-weight: 550; }
+.tier-state.temporary { color: #8a6400; }
 
 /*
  * What the AI has been running.
@@ -1970,7 +1967,9 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
    though Undo and Redo sit after the More group in the markup (they stay on
    the bar when More is a menu). */
 #resume-select { order: -2; }
-#btn-base { order: -1; }
+/* What the resume is sits with the other things the bar says about it, by
+   the picker; the button that changes it leads the actions. */
+#tier-state { order: -1; }
 #toolbar-more > .grow, #btn-add-entry { order: 1; }
 
 .segmented {
@@ -2090,6 +2089,8 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   #toolbar-more > button.danger:hover { background: rgba(217, 48, 37, .08); }
   #toolbar-more > button[aria-expanded="true"] { background: var(--accent-soft); color: #174ea6; }
   #toolbar-more > button:disabled:hover { background: none; }
+  /* What the resume is, as a quiet line over the button that changes it. */
+  #toolbar-more > #tier-state { padding: 4px 16px 0; }
   /* What the resume is and the how-to, then what can be done with it. */
   .toolbar-more > #btn-save-as { border-top: 1px solid var(--line-soft); margin-top: 4px; }
   .toolbar-more .grow { display: none; }
