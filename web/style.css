@@ -2112,3 +2112,16 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 @media (max-width: 420px) {
   #live-state { font-size: 0; gap: 0; padding: 4px 8px; }
 }
+
+/*
+ * Inside the extension's side panel, one row of header: the panel's own bar
+ * already names the resume, and says when a different save is open, so the
+ * app's name and the save chip give up their room to the tabs. The AI chip
+ * keeps its place as its mark.
+ */
+@media (max-width: 640px) {
+  .embedded h1, .embedded #project-chip { display: none; }
+  .embedded nav { order: 0; flex: 1 1 0; }
+  .embedded #ai-peek-chip { font-size: 0; padding: 4px 10px; min-height: 32px; margin-left: 0; }
+  .embedded #ai-peek-chip::before { content: "\2726"; font-size: 13px; }
+}

@@ -18,9 +18,11 @@ import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePerio
 import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 import { markupFragment, plainMarkup } from './markup.js';
 import { setupCompact } from './compact.js';
+import { setupEmbed } from './embed.js';
 let activeProject;
-/** The narrow layout's switches. See compact.js. */
+/** The narrow layout's switches, and the side panel's line to this page. See compact.js, embed.js. */
 let compact = null;
+let embed = null;
 let assetUI;
 const inlineSaves = new Set();
 
@@ -1314,6 +1316,7 @@ function setSaveState(mode, detail) {
         : mode === 'failed'
           ? `Not saved — ${detail ?? 'the server did not accept it'}`
           : 'Unsaved changes';
+  embed?.announce();
 }
 
 /* ------------------------------------------------------------------ *
@@ -10885,6 +10888,7 @@ function render() {
     : 'Select source content for this resume. Shared wording edits also update the master and other resumes that use it.';
   renderBaseButton();
   renderEditor();
+  embed?.announce();
 }
 
 /**
@@ -11051,6 +11055,83 @@ async function loadFromDraft() {
     }
   }
   render();
+}
+
+/**
+ * What the side panel is told about this page. See embed.js.
+ *
+ * `exists` separately from the id: the id stays on a resume deleted from
+ * under it until something else is opened, and the panel says so rather than
+ * showing a resume that is no longer in the save.
+ */
+function embedState() {
+  const id = state.masterView ? null : state.resumeId;
+  const resume = id ? resumeById(id) : null;
+  return {
+    resumeId: id,
+    label: resume?.label ?? null,
+    exists: Boolean(resume),
+    master: Boolean(state.masterView),
+    save: /\b(saving|saved|unsaved|failed)\b/.exec($('#save-state')?.className ?? '')?.[1] ?? 'saved',
+    tab: document.querySelector('#tabs button.active')?.dataset.tab ?? null,
+    view: compact?.view ?? 'edit',
+    focus: compact?.focus ?? false,
+    saveDir: activeProject ?? null,
+  };
+}
+
+/**
+ * A line still being typed in, finished as though it had been left.
+ *
+ * An inline edit is only saved when it loses focus (see `editableLine`), so
+ * it is not yet among the saves `flushEdits` waits for — and the side panel
+ * moves the editor on while the person's hands are in the other tab, which
+ * is exactly when a line is left mid-edit. Leaving it here puts its save in
+ * the queue that is waited on, before anything moves.
+ */
+function commitTyping() {
+  const box = document.activeElement;
+  if (box && box !== document.body && (box.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(box.tagName))) box.blur();
+}
+
+/**
+ * The side panel following its tab onto another resume.
+ *
+ * Through `applyHash`, the door a link from the extension already uses, so it
+ * writes what is pending and refuses to move while it cannot — and answers
+ * whether it moved, which a hash change alone never tells the page that made
+ * it. A resume not in the save is refused here, before anything moves.
+ */
+async function openFromPanel(id) {
+  const held = () => Boolean(state.store?.resumes?.some((r) => r.id === id));
+  // A copy the card has only just built is in the save and not yet in the
+  // copy of it this page holds.
+  if (!held()) await refreshFromPanel().catch(() => undefined);
+  if (!held()) return 'missing';
+  const here = !state.masterView && state.resumeId === id && $('#tab-resumes')?.classList.contains('active');
+  if (here) return 'moved';
+  commitTyping();
+  window.history.replaceState(null, '', `#resumes/${encodeURIComponent(id)}`);
+  await applyHash();
+  return !state.masterView && state.resumeId === id ? 'moved' : 'unsaved';
+}
+
+/**
+ * The save changed underneath, and the side panel noticed first.
+ *
+ * `refreshOnReturn` takes a new copy of the resume on screen when nothing
+ * here is unsaved. The list of resumes is the other half: a copy the card
+ * has just built for a posting, or one deleted elsewhere, belongs in the
+ * dropdown without a reload.
+ */
+async function refreshFromPanel() {
+  const listed = () => (state.store?.resumes ?? []).map((r) => `${r.id}\u0000${r.label}`).join('\u0001');
+  const before = listed();
+  await refreshOnReturn();
+  // `refreshOnReturn` leaves the list alone on the master view and while
+  // something is unsaved; the list itself is safe to take on the master.
+  if (state.masterView && !state.dirty) await loadStore();
+  if (!state.dirty && listed() !== before) render();
 }
 
 /** Switch tabs programmatically, so a deep link lands in the right place. */
@@ -11323,7 +11404,18 @@ async function boot() {
   for (const b of waiting) b.disabled = false;
   compact = setupCompact({
     onPreviewShown: () => previews.get($('#preview-pane'))?.redraw(),
+    onChange: () => embed?.announce(),
     onZoom: (zoom) => previews.get($('#preview-pane'))?.setZoom(zoom),
+  });
+  embed = setupEmbed({
+    getState: embedState,
+    open: openFromPanel,
+    flush: () => {
+      commitTyping();
+      return flushEdits();
+    },
+    refresh: refreshFromPanel,
+    compact,
   });
   render();
 
