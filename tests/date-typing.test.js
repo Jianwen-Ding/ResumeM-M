@@ -15,16 +15,6 @@ vi.mock('../web/assets.js', () => ({
   }),
 }));
 
-/* See boot-wiring.test.js: every listener a boot adds comes off after it. */
-const registered = [];
-for (const on of [window, document]) {
-  const real = on.addEventListener.bind(on);
-  on.addEventListener = (type, fn, opts) => {
-    registered.push([on, type, fn, opts]);
-    real(type, fn, opts);
-  };
-}
-
 /*
  * Chromium fires `change`, if the box has been typed in since it was focused
  * or last changed, and then `blur` at a focused box that is taken out of the
@@ -50,7 +40,6 @@ Element.prototype.replaceChildren = function (...nodes) {
 };
 
 afterEach(() => {
-  for (const [on, type, fn, opts] of registered.splice(0)) on.removeEventListener(type, fn, opts);
   vi.unstubAllGlobals();
 });
 
