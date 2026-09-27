@@ -452,6 +452,39 @@ async function fetchKeptAlive(url, init) {
  */
 let writesSent = 0;
 let writesOut = 0;
+/**
+ * The requests sent as POST that write nothing `GET /store` reads, and so are
+ * not counted as writes above.
+ *
+ * A compile is a POST — it carries the unsaved spec — and so are the AI's
+ * proposals, and the preview is compiling nearly all the time: counted, a
+ * read coming back to the tab while it compiled was thrown away, and the
+ * screen stayed on the store from before whatever was saved elsewhere until
+ * something else read it again. The compile moves no revision, so nothing
+ * asked again.
+ *
+ * Listed by route rather than marked where each is sent, because whether a
+ * request writes is a fact about the route, the same from every caller, and
+ * so that what is not listed is counted: a new write left off this list
+ * costs a refresh, where one left unmarked at its call would bring the
+ * crossed read back and put a save back undone. Only what the server's
+ * handler for it never saves: the git commit and push, which change no file
+ * the store is read from, are here; a Workspace `generate` or `tailor`,
+ * which save the draft, are not.
+ */
+const READS_BY_POST = new Set([
+  '/render',
+  '/render/letter',
+  '/ai/feedback',
+  '/ai/read-material',
+  '/ai/draft-entry',
+  '/ai/draft-phrasing',
+  '/voice/ingest',
+  '/config/test-ai',
+  '/store/save',
+  '/config/store/push',
+]);
+const writesStore = (method, path) => method !== 'GET' && !(method === 'POST' && READS_BY_POST.has(path.split('?')[0]));
 /** A reply to the version of the resume it says was written: see `api`. */
 const savedVersions = new WeakMap();
 
@@ -499,8 +532,8 @@ async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
   };
   // Counted, so a read of the whole store can tell a write crossed it. See
-  // `readStoreUncrossed`.
-  const writes = method !== 'GET';
+  // `readStoreUncrossed`. A compile is not one: see `READS_BY_POST`.
+  const writes = writesStore(method, path);
   if (writes) {
     writesSent++;
     writesOut++;
