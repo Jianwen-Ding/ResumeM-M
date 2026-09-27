@@ -17,7 +17,10 @@ import { insertNextTo, moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
 import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 import { markupFragment, plainMarkup } from './markup.js';
+import { setupCompact } from './compact.js';
 let activeProject;
+/** The narrow layout's switches. See compact.js. */
+let compact = null;
 let assetUI;
 const inlineSaves = new Set();
 
@@ -11318,6 +11321,10 @@ async function boot() {
   for (const b of waiting) b.disabled = true;
   await loadStore();
   for (const b of waiting) b.disabled = false;
+  compact = setupCompact({
+    onPreviewShown: () => previews.get($('#preview-pane'))?.redraw(),
+    onZoom: (zoom) => previews.get($('#preview-pane'))?.setZoom(zoom),
+  });
   render();
 
   $('#resume-select').onchange = async (e) => {

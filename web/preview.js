@@ -34,6 +34,11 @@ export function createPreview(container) {
   let token = 0;
   let current = null; // the document on screen, kept until its replacement is ready
   let currentUrl = null;
+  /** The width the pages on screen were drawn for; 0 when drawn while hidden. */
+  let drawnFor = 0;
+  let resizeTimer = null;
+  /** 'fit' to the pane's width, or a scale — 1 is the page at its real size. */
+  let zoom = 'fit';
 
   /** Render every page of `doc` offscreen at the width available. */
   async function renderAll(doc, width) {
@@ -43,7 +48,7 @@ export function createPreview(container) {
       const unscaled = page.getViewport({ scale: 1 });
       // Fit the pane's width, then account for the display's pixel density so
       // small type stays legible.
-      const scale = Math.min((width || unscaled.width) / unscaled.width, MAX_SCALE);
+      const scale = zoom === 'fit' ? Math.min((width || unscaled.width) / unscaled.width, MAX_SCALE) : zoom;
       const viewport = page.getViewport({ scale: scale * Math.min(window.devicePixelRatio || 1, 2) });
 
       const canvas = document.createElement('canvas');
@@ -60,7 +65,7 @@ export function createPreview(container) {
     return canvases;
   }
 
-  return {
+  const preview = {
     /**
      * Show a PDF. Resolves once it is on screen; the previous one stays
      * visible until then, and a call that is superseded by a newer one is
@@ -68,7 +73,8 @@ export function createPreview(container) {
      */
     async show(url) {
       const mine = ++token;
-      const width = pages.clientWidth || container.clientWidth || 600;
+      const seen = pages.clientWidth || container.clientWidth;
+      const width = seen || 600;
 
       const doc = await pdfjs.getDocument({ url, isEvalSupported: false }).promise;
       if (mine !== token) {
@@ -85,10 +91,27 @@ export function createPreview(container) {
       // One swap, fully drawn: this is the frame where the page changes.
       pages.replaceChildren(...canvases);
       container.classList.add('loaded');
+      drawnFor = seen;
 
       current?.destroy();
       current = doc;
       currentUrl = url;
+    },
+
+    /**
+     * Fit the page to the pane, or show it at a scale of its own and let the
+     * pane scroll. A side panel is a third of a page wide, and a page fitted
+     * to that is 7px type: the whole layout at a glance, and nothing you can
+     * proofread.
+     */
+    async setZoom(next) {
+      zoom = next === 'fit' || !(next > 0) ? 'fit' : Math.min(next, MAX_SCALE);
+      pages.classList.toggle('zoomed', zoom !== 'fit');
+      await this.redraw();
+    },
+
+    get zoom() {
+      return zoom;
     },
 
     /** Re-render what is already shown, for a pane that changed width. */
@@ -121,4 +144,25 @@ export function createPreview(container) {
       currentUrl = null;
     },
   };
+
+  /*
+   * Drawn again when the pane changes width.
+   *
+   * The pages are drawn at the width the pane had when they were compiled,
+   * with that height fixed in pixels — so a pane that was hidden (the narrow
+   * layout shows one column at a time) drew a 600px page into nothing, and
+   * shown again it was squeezed to the pane's width with its old height: a
+   * page a third as wide and just as tall. A window resized, or a side panel
+   * dragged wider, did the same. Only for a real change, and once it settles.
+   */
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => {
+      const width = pages.clientWidth;
+      if (!currentUrl || zoom !== 'fit' || width === 0 || Math.abs(width - drawnFor) < 8) return;
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => preview.redraw().catch(() => {}), 120);
+    }).observe(pages);
+  }
+
+  return preview;
 }

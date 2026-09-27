@@ -1949,3 +1949,166 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 }
 .jobs-chip.peek:hover { color: var(--accent); border-color: var(--accent); }
 .jobs-chip.peek:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---- Narrow: the builder at the width of a side panel ----
+ *
+ * The browser extension shows this editor in a panel 320–500px wide, and a
+ * narrow window is the same case. Everything here is under one query and
+ * none of it applies wide; the switches it answers to are set by compact.js.
+ *
+ * Density rather than removal: the same controls, closer together, with
+ * nothing smaller than a comfortable 32px to press, and the type left at the
+ * sizes the wide layout reads at.
+ */
+.toolbar-more { display: contents; }
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+  background: var(--panel);
+  gap: 2px;
+}
+.segmented button {
+  border: 0;
+  padding: 4px 12px;
+  font-size: var(--t-sm);
+  color: var(--muted);
+  background: none;
+}
+.segmented button[aria-pressed="true"] { background: var(--accent-soft); color: #174ea6; }
+button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea6; }
+/* After the rules above, which give these a display of their own. */
+.narrow-only { display: none; }
+
+@media (max-width: 640px) {
+  /* The header: two short rows that scroll away, rather than one wide row
+     that sticks and pushes the page sideways. The tabs scroll within
+     themselves. */
+  header {
+    position: static;
+    height: auto;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    padding: 6px 10px;
+  }
+  h1 { font-size: var(--t-base); }
+  nav {
+    order: 10;
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    gap: 2px;
+  }
+  nav::-webkit-scrollbar { display: none; }
+  nav button { padding: 6px 11px; flex: none; min-height: 32px; }
+  #project-chip { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
+  .jobs-chip { padding: 4px 10px; }
+  .status { flex: 1 1 100%; max-width: none; text-align: left; order: 11; }
+  .status:empty { display: none; }
+
+  .tab { padding: 8px 8px 32px; }
+
+  /* The toolbar: the row that stays on screen is the resume, whether it has
+     saved, and the switches; the rest is behind More. */
+  .sticky-toolbar {
+    top: 0;
+    gap: 6px;
+    padding: 6px 0;
+    margin: 0 -8px 6px;
+    padding-left: 8px;
+    padding-right: 8px;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .sticky-toolbar::before, .sticky-toolbar::after { content: ""; flex-basis: 100%; height: 0; }
+  .sticky-toolbar::before { order: 4; }
+  .sticky-toolbar::after { order: 19; }
+  .narrow-only { display: inline-flex; }
+  #resume-select { order: 1; flex: 1 1 120px; min-width: 0; max-width: none; min-height: 32px; }
+  #narrow-view { order: 2; }
+  #btn-more { order: 3; }
+  #save-state { order: 5; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; }
+  #live-state { order: 6; }
+  #btn-focus { order: 7; }
+  #btn-base, #toolbar-more > * { order: 20; }
+  #toolbar-more > #btn-undo, #toolbar-more > #btn-redo { order: 8; }
+  .sticky-toolbar:not(.more-open) #btn-base,
+  .sticky-toolbar:not(.more-open) #toolbar-more > :not(#btn-undo):not(#btn-redo) { display: none; }
+  .sticky-toolbar button, .segmented { min-height: 32px; }
+  .segmented button { min-height: 26px; }
+  .toolbar-more .grow { display: none; }
+
+  /* One column at a time. The other is hidden, not removed, so nothing in it
+     is lost by looking; the toolbar stays in both. */
+  body:not([data-view="preview"]) .pane-right { display: none; }
+  body[data-view="preview"] .pane-left > :not(.sticky-toolbar) { display: none; }
+  .split { gap: 0; }
+  .pane-right { height: auto; }
+  .resume-preview-column > .preview-frame { height: calc(100vh - 150px); min-height: 280px; flex: none; }
+  .pdf-pages { padding: 6px; }
+  .pdf-pages.zoomed { align-items: flex-start; }
+  .pdf-pages.zoomed .pdf-page { max-width: none; }
+  .preview-zoom {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 4;
+    background: var(--panel);
+    box-shadow: var(--shadow-sm);
+  }
+  .preview-zoom:hover { background: var(--panel); }
+
+  /* Focus: the entry being worked in, whole; every other one its heading. */
+  body.focus-mode #editor .entry:not(.focus-active):not(.off) > :not(.entry-head):not(.head) { display: none; }
+  body.focus-mode #editor .entry:not(.focus-active):not(.off) { padding-top: 8px; padding-bottom: 8px; cursor: pointer; }
+  body.focus-mode #editor .entry:not(.focus-active):not(.off) :is(.entry-head, .head) { margin-bottom: 0; }
+  body.focus-mode #resume-view-note, body.focus-mode .editor-interaction-hint { display: none; }
+
+  .hint { font-size: var(--t-sm); }
+  .fit { padding: 8px 10px; }
+
+  /* Entries: the heading wraps instead of crushing the name into a column
+     one word wide. Its actions go on the line under the name and stay
+     there: shown on hover they would move the entry every time the pointer
+     crossed it, and a panel is as often touched or tabbed through. */
+  .entry { padding: 10px; }
+  .entry-head { flex-wrap: wrap; row-gap: 2px; }
+  .entry-head .title { flex: 1 1 55%; min-width: 0; overflow-wrap: anywhere; }
+  .entry-head .grow { display: none; }
+  .entry-actions { opacity: 1; margin-left: auto; }
+  .meta-row { gap: 4px 8px; }
+  /* A section's name, its order and "+ Add entry" wrap under each other
+     rather than pushing the page sideways at 320px. */
+  .section-heading { flex-wrap: wrap; row-gap: 2px; margin: 14px 0 6px; }
+  .section-heading .rule { flex: 1 1 24px; }
+  .section-heading select { max-width: 100%; min-width: 0; }
+  .profile-grid { grid-template-columns: 1fr; }
+
+  /* The other tabs' two-column grids, one column by now: a grid column is
+     as wide as its widest word unless told otherwise, and the Workspace and
+     Letters tabs pushed the whole page 100px sideways at 320px. */
+  .split-even, .workspace-split, .apps-split, .history-split, .assets-layout { grid-template-columns: minmax(0, 1fr); }
+  .split-even > *, .workspace-split > *, .apps-split > *, .history-split > *, .assets-layout > * { min-width: 0; }
+  /* Rows of a heading and its buttons wrap; lists of cards, pickers holding
+     a whole resume's name, shrink to the column they are in. */
+  .block-head, .mini-card .row1 { flex-wrap: wrap; }
+  .card-list { grid-template-columns: minmax(0, 1fr); }
+  .toolbar select, .draft-editor select { max-width: 100%; min-width: 0; }
+  /* The tracker scrolls sideways inside itself; its words stay whole. */
+  #apps-wrap td { overflow-wrap: break-word; }
+
+  /* Dialogs fit the panel, and their buttons wrap rather than run off it. */
+  .modal-body { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .modal-body > h2 { padding: 12px 14px 8px; }
+  .modal-scroll { padding: 10px 14px; }
+  .modal-actions { flex-wrap: wrap; padding: 9px 14px; }
+  .modal-actions .hint { flex: 1 1 100%; }
+}
+
+/* The live dot without its word, where the word is what squeezed "All
+   changes saved" down to its first letter. The title still says it. */
+@media (max-width: 420px) {
+  #live-state { font-size: 0; gap: 0; padding: 4px 8px; }
+}
