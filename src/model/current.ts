@@ -96,6 +96,37 @@ const FAILED = '\u0000failed';
 class NotOurs extends Error {}
 
 /**
+ * Whether a file the manifest does not claim is one this folder put there.
+ *
+ * The manifest is written after the copies, so a server stopped between the
+ * two — or a manifest restored from before them — leaves this folder's own
+ * copies unclaimed, and the guard then refused them as the person's for ever:
+ * measured, `Jane-Doe-Resume.pdf` held by an unclaimed copy of an earlier
+ * build, and every later application's resume refused, missing from the
+ * folder and from the card. A file byte for byte the same as one of the
+ * bundles' own copies of that document is not somebody's polished resume; it
+ * is ours, and is replaced. Anything else stays theirs.
+ */
+function builtHere(store: Store, file: string, from: string): boolean {
+  try {
+    const size = fs.statSync(file).size;
+    const base = path.basename(from);
+    const bundles = path.join(store.outDir(), 'applications');
+    const mine = fs.readFileSync(file);
+    for (const entry of fs.readdirSync(bundles, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(bundles, entry.name, base);
+      const at = fs.statSync(candidate, { throwIfNoEntry: false });
+      if (!at?.isFile() || at.size !== size) continue;
+      if (fs.readFileSync(candidate).equals(mine)) return true;
+    }
+  } catch {
+    // Unreadable: not provably ours, so it stays the person's.
+  }
+  return false;
+}
+
+/**
  * What this folder put here last time.
  *
  * Without it, "rebuilt from the tracker" meant deleting every name that is not
@@ -555,7 +586,7 @@ export function syncCurrent(
        * be attributed to anybody, and refusing every name would turn a
        * missing file into a folder that has stopped working.
        */
-      if (at && tracked && !claimed.has(name) && cameFrom[name] === undefined) {
+      if (at && tracked && !claimed.has(name) && cameFrom[name] === undefined && !builtHere(store, to, from)) {
         throw new NotOurs('a file of your own already has that name here, so it was left alone');
       }
       /*
