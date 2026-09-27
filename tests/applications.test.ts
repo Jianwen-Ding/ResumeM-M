@@ -474,9 +474,12 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
 
       let settled = false;
       const building = buildBundle(t.store, req);
-      void building.then(() => {
+      // Either way it ends: this one is refused (see below), and a `then`
+      // with no second half is a rejection nobody handles.
+      const ended = () => {
         settled = true;
-      });
+      };
+      void building.then(ended, ended);
 
       const staging = path.join(t.store.outDir(), 'applications');
       for (let i = 0; i < 2000 && !settled; i++) {
