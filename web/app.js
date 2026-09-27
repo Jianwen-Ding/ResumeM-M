@@ -263,14 +263,22 @@ function clearEdits() {
  * ------------------------------------------------------------------ */
 
 let statusTimer;
+/**
+ * A word in the header. One line there, cut short with an ellipsis when it is
+ * long, so a long name in "Renamed to …" or a long error does not squeeze the
+ * tabs; the whole sentence is its title, and all of it is still the text a
+ * screen reader is given (the element is a live region). Narrow, it floats at
+ * the bottom instead, where it can wrap without moving the toolbar.
+ */
 function setStatus(text, isError = false) {
   const s = $('#status');
   s.textContent = text;
+  s.title = text;
   s.className = isError ? 'status err' : 'status';
   clearTimeout(statusTimer);
   if (text && !isError) {
     statusTimer = setTimeout(() => {
-      if (s.textContent === text) s.textContent = '';
+      if (s.textContent === text) s.textContent = s.title = '';
     }, 3500);
   }
 }
@@ -10914,6 +10922,50 @@ function showModal(title, content, { note = '', okLabel = 'Close', showCancel = 
   });
 }
 
+/** Inputs that are pressed or picked rather than typed in. Enter is theirs. */
+const NOT_TYPED = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'color', 'range']);
+
+/** When Enter last sent a dialog, and whether that press is still held. See `enterInModal`. */
+let enterSentAt = -Infinity;
+let enterHeld = false;
+
+/**
+ * Enter in a one-line field sends the dialog, as it would a form: the same as
+ * pressing its primary button, so the same checks answer it — a name another
+ * resume already has is refused and asked again, a form that saves waits.
+ *
+ * The dialog is a <div>, not a <form>, so nothing did this, and Rename, Save
+ * as and every other one-field dialog needed Tab, Tab, Enter to be finished.
+ * A textarea keeps Enter for a new line; Ctrl/Cmd+Enter sends from there. A
+ * button, a select or a checkbox does what it does with Enter already.
+ *
+ * Pressed twice quickly, or held, the rest is the same intention: dropped
+ * rather than sent again, or let through to the button focus has just gone
+ * back to, which would open the dialog again. Nor does the button that opened
+ * the dialog get it in the moment before focus moves in (see `focusModal`).
+ */
+function enterInModal(e) {
+  // Choosing characters in an input method, not asking to send.
+  if (e.isComposing || e.keyCode === 229) return;
+  // A fresh press: whatever sent the last dialog has been let go of.
+  if (!e.repeat) enterHeld = false;
+  const again = enterHeld || Date.now() - enterSentAt < 500;
+  const open = !$('#modal').classList.contains('hidden');
+  const at = e.target;
+  if (!open || !$('#modal').contains(at)) {
+    if (open || again) e.preventDefault();
+    return;
+  }
+  const typed = at.tagName === 'INPUT' && !NOT_TYPED.has(at.type);
+  if (!typed && !(at.tagName === 'TEXTAREA' && (e.ctrlKey || e.metaKey))) return;
+  // Also stops this keypress reaching the button focus goes back to on closing.
+  e.preventDefault();
+  if (again || e.repeat || $('#modal-ok').disabled) return;
+  enterSentAt = Date.now();
+  enterHeld = true;
+  $('#modal-ok').click();
+}
+
 function confirmModal(title, body) {
   return showModal(title, el('p', { textContent: body }), { okLabel: 'Delete', showCancel: true });
 }
@@ -11779,6 +11831,10 @@ async function boot() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) {
       $('#modal-cancel').click();
+      return;
+    }
+    if (e.key === 'Enter') {
+      enterInModal(e);
       return;
     }
 

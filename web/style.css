@@ -151,7 +151,23 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 .jobs-chip.hidden { display: none; }
 .jobs-chip.hidden + .status { margin-left: auto; }
 
-.status { color: var(--muted); font-size: 12px; max-width: 40ch; text-align: right; }
+/* One line, cut short with an ellipsis; its title holds the rest. It gives up
+   its room before the tabs give up any of theirs — it used to wrap to three
+   lines and squeeze the tabs until Voice & AI was cut off. The shrink is
+   shared in proportion to it, so it is large enough that the tabs' share
+   rounds to nothing: at 1000 times, a long status still took 0.6px from the
+   tabs at 1280. */
+.status {
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 40ch;
+  min-width: 0;
+  flex-shrink: 100000;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
 .status.err { color: var(--bad); }
 
 .tab { display: none; padding: 14px 16px 40px; }
@@ -2016,7 +2032,24 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   nav button { padding: 6px 11px; flex: none; min-height: 32px; }
   #project-chip { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
   .jobs-chip { padding: 4px 10px; }
-  .status { flex: 1 1 100%; max-width: none; text-align: left; order: 11; }
+  /* Floated at the bottom corner, as in the side panel, and wrapped whole:
+     a row of its own in the header pushed the toolbar down each time
+     something was said, and back up when it cleared. */
+  .status {
+    position: fixed;
+    right: 8px;
+    bottom: 8px;
+    z-index: 45;
+    max-width: calc(100vw - 16px);
+    white-space: normal;
+    text-align: left;
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    background: var(--ink);
+    color: #fff;
+    box-shadow: var(--shadow-md);
+  }
+  .status.err { background: var(--bad); color: #fff; }
   .status:empty { display: none; }
 
   .tab { padding: 8px 8px 32px; }
@@ -2233,7 +2266,10 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 .embedded h1, .embedded nav, .embedded #project-chip, .embedded #ai-peek-chip, .embedded #resume-select { display: none; }
 .embedded header .jobs-chip { margin-left: 0; box-shadow: var(--shadow-md); }
 .embedded .status {
+  /* In the floating header already, under the AI chip; not floated again. */
+  position: static;
   max-width: 100%;
+  white-space: normal;
   text-align: left;
   padding: 6px 12px;
   border-radius: var(--radius);
