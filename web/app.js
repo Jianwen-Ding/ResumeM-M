@@ -3237,7 +3237,9 @@ async function addAutofillField() {
 function renderEditor() {
   const editor = $('#editor');
   const carry = holdTyping(editor);
+  const scrolled = window.scrollY;
   drawEditor(editor);
+  if (window.scrollY !== scrolled) window.scrollTo(window.scrollX, scrolled);
   carry();
 }
 
