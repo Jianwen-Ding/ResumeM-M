@@ -162,3 +162,98 @@ describe('the card filing its copy', () => {
     expect(stored('job-helios-platform').label).toBe('Platform Engineer — Helios');
   });
 });
+
+/*
+ * The editor's other writes of a resume: the tier, the name, and a restore
+ * from the history. Each takes `basedOn` in its body, is refused over a write
+ * it did not see with the resume as it is, writes nothing then, and says the
+ * write it made as its `ETag`.
+ */
+describe('the editor’s other writes of a resume', () => {
+  const tier = (id: string, body: object) => request(app).put(`/api/resumes/${id}/tier`).send(body);
+  const rename = (id: string, body: object) => request(app).post(`/api/resumes/${id}/rename`).send(body);
+
+  it('sets the tier over the write it was based on, and says the write it made', async () => {
+    const was = await versionOf('intern');
+    const res = await tier('intern', { tier: 'base', basedOn: was }).expect(200);
+    expect(stored('intern').tier).toBe('base');
+    const now = await versionOf('intern');
+    expect(now).not.toBe(was);
+    expect(res.headers.etag).toBe(`"${now}"`);
+  });
+
+  it('does not set the tier over a write it did not see', async () => {
+    const was = await versionOf('intern');
+    await pause();
+    await save('intern', { ...stored('intern'), label: 'Renamed by the card' }).expect(200);
+    const theirs = await versionOf('intern');
+    const tierWas = stored('intern').tier;
+
+    const res = await tier('intern', { tier: 'base', basedOn: was }).expect(409);
+    expect(res.body).toMatchObject({ kind: 'conflict', id: 'intern', version: theirs });
+    expect(res.body.current.label).toBe('Renamed by the card');
+    expect(stored('intern').tier).toBe(tierWas);
+    expect(await versionOf('intern')).toBe(theirs);
+    // Without one, as before.
+    await tier('intern', { tier: 'base' }).expect(200);
+    expect(stored('intern').tier).toBe('base');
+  });
+
+  it('renames over the write it was based on, and not over one it did not see', async () => {
+    const was = await versionOf('intern');
+    const res = await rename('intern', { label: 'Summer internships', basedOn: was }).expect(200);
+    expect(res.headers.etag).toBe(`"${await versionOf('intern')}"`);
+    expect(stored('intern').label).toBe('Summer internships');
+
+    await pause();
+    await save('intern', { ...stored('intern'), label: 'Renamed by the card' }).expect(200);
+    const refused = await rename('intern', { label: 'Typed here', basedOn: (res.headers.etag ?? '').replace(/"/g, '') }).expect(409);
+    expect(refused.body).toMatchObject({ kind: 'conflict', current: { label: 'Renamed by the card' } });
+    expect(stored('intern').label).toBe('Renamed by the card');
+    // A name another resume has is still its own refusal, not a conflict.
+    const taken = stored('newgrad').label ?? 'newgrad';
+    const clash = await rename('intern', { label: taken, basedOn: await versionOf('intern') }).expect(409);
+    expect(clash.body.kind).toBeUndefined();
+  });
+});
+
+describe('restoring a version, based on the write it replaces', () => {
+  let repo: Repo;
+  beforeEach(async () => {
+    repo = Repo.forStore(t.dir);
+    await repo.ensure();
+    app = express();
+    app.use('/api', createApi({ store: t.store, repo }));
+  });
+  const firstHash = async () => {
+    const versions = (await request(app).get('/api/resumes/intern/history').expect(200)).body.versions;
+    return versions.at(-1).hash as string;
+  };
+  const restore = (hash: string, body: object) => request(app).post(`/api/resumes/intern/history/${hash}/restore`).send(body);
+
+  it('restores over the write the person chose to replace, and says the write it made', async () => {
+    const hash = await firstHash();
+    const label = stored('intern').label;
+    await save('intern', { ...stored('intern'), label: 'Edited since' }).expect(200);
+    const was = await versionOf('intern');
+    const res = await restore(hash, { basedOn: was }).expect(200);
+    expect(stored('intern').label).toBe(label);
+    expect(res.headers.etag).toBe(`"${await versionOf('intern')}"`);
+  });
+
+  it('is refused over a write made since, filing nothing and replacing nothing', async () => {
+    const hash = await firstHash();
+    const was = await versionOf('intern');
+    await pause();
+    await save('intern', { ...stored('intern'), label: 'Renamed by the card' }).expect(200);
+    const commits = (await repo.log(50)).length;
+
+    const res = await restore(hash, { basedOn: was }).expect(409);
+    expect(res.body).toMatchObject({ kind: 'conflict', current: { label: 'Renamed by the card' } });
+    expect(stored('intern').label).toBe('Renamed by the card');
+    expect((await repo.log(50)).length, 'nothing filed').toBe(commits);
+    // Anyway, on the write it was told about.
+    await restore(hash, { basedOn: res.body.version }).expect(200);
+    expect(stored('intern').label).not.toBe('Renamed by the card');
+  });
+});

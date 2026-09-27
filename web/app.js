@@ -689,8 +689,9 @@ async function stepHistory(direction) {
   undoing = true;
   try {
     for (const change of changes) {
-      const { path, options } = restoreRequest(change.docKey, direction === 'undo' ? change.before : change.after);
-      await api(path, options);
+      const back = direction === 'undo' ? change.before : change.after;
+      const from = direction === 'undo' ? change.after : change.before;
+      await putBack(change.docKey, back, from);
     }
     /*
      * The selections on screen are dropped, not kept.
@@ -769,6 +770,42 @@ async function stepHistory(direction) {
   } finally {
     undoing = false;
     paintUndo();
+  }
+}
+
+/**
+ * One document of a step put back: `back` over `from`, which is what the step
+ * left it as.
+ *
+ * A resume is put back only over the write the editor holds (`basedOn`), and
+ * as what the step changed rather than whole. Written whole, an undo took
+ * away everything written since the step: JobHelper's card filing its copy
+ * after an edit here, and Ctrl+Z meaning the edit, and the card's stage was
+ * gone. So when the editor's copy is not what the step left, the step is
+ * rebased onto it (`rebaseResume`), and refused, onto what is there, once.
+ * One the step created goes back only where none has been made since
+ * (`?create=1`). The other documents are put back whole, as they were.
+ */
+async function putBack(docKey, back, from) {
+  const { path, options } = restoreRequest(docKey, back);
+  const id = String(docKey).startsWith('resume:') ? String(docKey).slice('resume:'.length) : null;
+  if (!id || options.method !== 'PUT') return api(path, options);
+  if (from === null || from === undefined) return api(`${path}&create=1`, options);
+
+  const held = resumeById(id);
+  let body = held && !same(held, from) ? rebaseResume(from, back, held) : back;
+  let basedOn = heldVersion(id);
+  for (let refused = 0; ; refused++) {
+    try {
+      const reply = await api(`${path}${basedOnQuery(basedOn)}`, { ...options, body: JSON.stringify(body) });
+      tookResumeWrite(id, reply, basedOn);
+      return reply;
+    } catch (err) {
+      if (!refusedAsMovedOn(err) || refused >= 1) throw err;
+      adoptRefusal(id, err.body, { fromHere: false });
+      body = rebaseResume(from, back, err.body.current);
+      basedOn = err.body.version ?? undefined;
+    }
   }
 }
 
@@ -1306,6 +1343,7 @@ async function autoSave({ leaving = false } = {}) {
           const made = savedVersions.get(reply);
           if (made) state.store.versions[spec.id] = made;
           else delete state.store.versions[spec.id];
+          if (made && basedOn) wroteOver.set(made, basedOn);
         }
         // The store now holds what the editor shows, so the unsaved edits are
         // no longer overlays on top of it.
@@ -1379,18 +1417,7 @@ let rebasedOnto = null;
 function rebaseRefusedSave(spec, base, { current, version }) {
   const stored = resumeById(spec.id);
   if (state.masterView || state.resumeId !== spec.id || !stored) return false;
-  /*
-   * Sections have no ids, and `rebase` matches a list by id or not at all:
-   * unmatched, the edit's whole list of sections won, with the other write's
-   * copy of every section in it. Keyed for the merge the way their overlays
-   * are (`sectionKey`), by kind and place among that kind.
-   */
-  const keyed = (r) =>
-    r?.sections
-      ? { ...r, sections: r.sections.map((s, i, all) => ({ ...s, id: `${s.kind}:${all.slice(0, i).filter((o) => o.kind === s.kind).length}` })) }
-      : r;
-  const rebased = rebase(keyed(base ?? current), keyed(currentSpec()), keyed(current));
-  const merged = rebased.sections ? { ...rebased, sections: rebased.sections.map(({ id: _key, ...s }) => s) } : rebased;
+  const merged = rebaseResume(base ?? current, currentSpec(), current);
   for (const key of Object.keys(stored)) delete stored[key];
   Object.assign(stored, structuredClone(merged));
   // Folded into the resume above, so they are not laid over it again.
@@ -1401,6 +1428,133 @@ function rebaseRefusedSave(spec, base, { current, version }) {
   scheduleRender();
   setStatus('This resume was changed elsewhere while your edit was saving. Your edit was kept, on top of that change.');
   return true;
+}
+
+/**
+ * What `mine` changed from `base`, put on top of `theirs`: a resume written by
+ * this page from a copy that another write has since moved on from.
+ *
+ * Sections have no ids, and `rebase` matches a list by id or not at all:
+ * unmatched, the edit's whole list of sections won, with the other write's
+ * copy of every section in it. Keyed for the merge the way their overlays
+ * are (`sectionKey`), by kind and place among that kind.
+ */
+function rebaseResume(base, mine, theirs) {
+  const keyed = (r) =>
+    r?.sections
+      ? { ...r, sections: r.sections.map((s, i, all) => ({ ...s, id: `${s.kind}:${all.slice(0, i).filter((o) => o.kind === s.kind).length}` })) }
+      : r;
+  const rebased = rebase(keyed(base), keyed(mine), keyed(theirs));
+  return rebased?.sections ? { ...rebased, sections: rebased.sections.map(({ id: _key, ...s }) => s) } : rebased;
+}
+
+/**
+ * The editor's writes of a resume other than its auto-save, each made only
+ * over the write of the resume the editor holds.
+ *
+ * The auto-save was made conditional first (`basedOn`, see `autoSave`), and
+ * the rest still wrote whatever was there: the tier button, Rename, the
+ * adding and removing of an entry or a skills group (`saveResumeSpec`),
+ * undo and redo, and a restore from the history. JobHelper's card files its
+ * copy of a posting's resume whole with every stage, and a stage landing
+ * between the editor's read and one of these was written away by it, or by
+ * the undo of it: the undo step was the resume as the editor had it before
+ * the press, without the stage.
+ *
+ * `heldVersion` is which write the editor's copy is (`versions` from the
+ * store read, then each write's `ETag`); undefined when the server said none,
+ * and the write goes unconditionally, as it always did.
+ */
+const heldVersion = (id) => state.store?.versions?.[id] ?? undefined;
+
+/**
+ * Which write of a resume each of this page's writes replaced, by the version
+ * it made. How a restore tells the page's own saves, made while it flushed,
+ * from a write made elsewhere: see `restoreOver`.
+ */
+const wroteOver = new Map();
+
+/** `?basedOn=` for a resume PUT, or nothing when there is no version to send. */
+const basedOnQuery = (version, joiner = '&') => (version ? `${joiner}basedOn=${encodeURIComponent(version)}` : '');
+
+/** The editor's copy of a resume replaced whole by `doc`. */
+function replaceHeldResume(id, doc) {
+  // A rebased edit not written yet is only in that copy: see `rebaseRefusedSave`.
+  if (rebasedOnto?.id === id) return;
+  const stored = state.store?.resumes?.find((r) => r.id === id);
+  if (!stored || !doc || doc.id !== id) return;
+  const { warnings: _said, ...whole } = doc;
+  for (const key of Object.keys(stored)) delete stored[key];
+  Object.assign(stored, structuredClone(whole));
+}
+
+/**
+ * A write of a resume, answered: the write it made (the reply's `ETag`, see
+ * `api`) is what the editor now holds, with the resume as written when the
+ * reply is the whole of it. `basedOn` is what it was sent over, when anything.
+ */
+function tookResumeWrite(id, reply, basedOn) {
+  if (!state.store) return;
+  state.store.versions ??= {};
+  const made = savedVersions.get(reply);
+  if (made) {
+    state.store.versions[id] = made;
+    if (basedOn) wroteOver.set(made, basedOn);
+  } else {
+    delete state.store.versions[id];
+  }
+  replaceHeldResume(id, reply);
+}
+
+/**
+ * A resume written elsewhere since the editor read it, as a refusal says:
+ * what is there now is the editor's copy, and its version what the editor
+ * holds. Inside a step of undo that has not written this resume yet, it is
+ * what the step goes back to, too; the copy it read before is older than a
+ * write it never made (`fromHere: false` for a step whose own earlier writes
+ * may be in the refusal's copy).
+ */
+function adoptRefusal(id, { current, version }, { fromHere = true } = {}) {
+  if (state.store) {
+    state.store.versions ??= {};
+    if (version) state.store.versions[id] = version;
+    else delete state.store.versions[id];
+  }
+  replaceHeldResume(id, current);
+  const key = `resume:${id}`;
+  if (fromHere && openGroup?.before.has(key) && !openGroup.after.has(key)) {
+    openGroup.before.set(key, structuredClone(current));
+  }
+}
+
+/** A refusal of a conditional resume write, as `movedOn` in src/server/api.ts sends it. */
+const refusedAsMovedOn = (err) => err?.status === 409 && err.body?.kind === 'conflict' && Boolean(err.body.current);
+
+/**
+ * One field of a resume, changed by its own route: the tier, the name.
+ *
+ * Sent based on the write the editor holds. Refused, because the resume was
+ * written elsewhere meanwhile, the change is reapplied on what is there and
+ * sent once more, on that write: a press of a button is not dropped for a
+ * change it did not touch. `done(current)` says the write elsewhere already
+ * made it, and then nothing is sent again.
+ *
+ * Returns the reply, and whether the resume had moved on.
+ */
+async function writeResumeField(id, send, { done = () => false } = {}) {
+  let basedOn = heldVersion(id);
+  for (let refused = 0; ; refused++) {
+    try {
+      const reply = await send(basedOn);
+      tookResumeWrite(id, reply, basedOn);
+      return { reply, movedOn: refused > 0 };
+    } catch (err) {
+      if (!refusedAsMovedOn(err) || refused >= 1) throw err;
+      adoptRefusal(id, err.body);
+      if (done(err.body.current)) return { reply: err.body.current, movedOn: true };
+      basedOn = err.body.version ?? undefined;
+    }
+  }
 }
 
 /**
@@ -1494,7 +1648,11 @@ async function flushEdits({ leaving = false } = {}) {
  *  - The resume's save, first: it is small, and first is where the browser's
  *    64KB keepalive allowance is surest to have room (see `fetchKeptAlive`).
  *    It does not wait for a save of the resume still out; `?order` settles
- *    which of the two is written (see `autoSave`).
+ *    which of the two is written (see `autoSave`). It is the one resume write
+ *    of this page not based on the write it was made on (no `basedOn`): a
+ *    refusal would come back to a page that is gone, and the edit with it,
+ *    so it writes over whatever is there, as every save once did. This runs
+ *    when the page is only hidden, too (`visibilitychange`), not just closed.
  *  - The draft's save, which commits itself. A draft carries its posting and
  *    can be large; when it does not fit beside the rest it goes as a plain
  *    request, which is as good as it could do. Like the resume's, it does not
@@ -1741,9 +1899,38 @@ async function saveEntry(entry, message, { paint = true } = {}) {
   if (paint) render();
 }
 
+/**
+ * A change of the resume's own sections (an entry or a skills group added or
+ * taken out), written whole.
+ *
+ * Built from the editor's copy (`resumeById`), which is the base it is sent
+ * over (`basedOn`, see `heldVersion`). A write made elsewhere since, such as
+ * JobHelper's card filing its copy, was written away by it. Refused, the
+ * change is rebased onto what is there, as a refused auto-save is, and sent
+ * again on that write, up to three times.
+ */
 async function saveResumeSpec(spec, message) {
-  describeNext(message ?? 'the change');
-  await api(`/resumes/${encodeURIComponent(spec.id)}`, { method: 'PUT', body: JSON.stringify(spec) });
+  const base = structuredClone(resumeById(spec.id) ?? null);
+  let body = spec;
+  let basedOn = heldVersion(spec.id);
+  for (let refused = 0; ; refused++) {
+    describeNext(message ?? 'the change');
+    try {
+      const reply = await api(`/resumes/${encodeURIComponent(spec.id)}${basedOnQuery(basedOn, '?')}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
+      tookResumeWrite(spec.id, reply, basedOn);
+      break;
+    } catch (err) {
+      if (!refusedAsMovedOn(err) || refused >= 3 || !base) throw err;
+      // Not what an undo of this step goes back to: the step may have written
+      // this resume through another route already (a delete prunes it).
+      adoptRefusal(spec.id, err.body, { fromHere: false });
+      body = rebaseResume(base, spec, err.body.current);
+      basedOn = err.body.version ?? undefined;
+    }
+  }
   setStatus(message ?? `Saved ${spec.id}`);
   await loadStore();
 }
@@ -6321,10 +6508,37 @@ async function renameVariation() {
        * one press, under "Undid change". Naming the document makes the rename
        * its own step, and stops an older one putting the old name back.
        */
-      await undoGroup('rename', [`resume:${mine.id}`], () =>
-        api(`/resumes/${encodeURIComponent(mine.id)}/rename`, { method: 'POST', body: JSON.stringify({ label: wanted }) }),
+      /*
+       * Based on the write the editor holds, for the tier button's reason:
+       * refused, the name is set on the resume as it is now, and undoing the
+       * rename goes back to that. A name chosen elsewhere meanwhile is
+       * replaced by the one typed here, and said.
+       */
+      let movedOn = false;
+      let named = mine.label ?? mine.id;
+      await undoGroup('rename', [`resume:${mine.id}`], async () => {
+        ({ movedOn } = await writeResumeField(
+          mine.id,
+          (basedOn) =>
+            api(`/resumes/${encodeURIComponent(mine.id)}/rename`, {
+              method: 'POST',
+              body: JSON.stringify({ label: wanted, ...(basedOn ? { basedOn } : {}) }),
+            }),
+          {
+            done: (current) => {
+              named = current.label ?? current.id;
+              return named === wanted;
+            },
+          },
+        ));
+      });
+      setStatus(
+        movedOn
+          ? named !== (mine.label ?? mine.id) && named !== wanted
+            ? `Renamed to “${wanted}”. It had been renamed “${named}” elsewhere; its other changes were kept.`
+            : `Renamed to “${wanted}”. This resume had been changed elsewhere; that change was kept.`
+          : `Renamed to “${wanted}”`,
       );
-      setStatus(`Renamed to “${wanted}”`);
       await loadStore();
       render();
       return;
@@ -6380,7 +6594,22 @@ async function createVariation(chosenId, chosenLabel) {
   await flushAutoSave().catch(() => undefined);
 
   describeNext(`Saved ${spec.id}`);
-  await api(`/resumes/${encodeURIComponent(spec.id)}?create=1`, { method: 'PUT', body: JSON.stringify(spec) });
+  /*
+   * `?create=1` is this write's condition: written only where there is no
+   * resume by that file or that name, checked with nothing awaited before the
+   * write, which is what `basedOn: null` says on the routes that take a body
+   * beside the resume. A resume made elsewhere under the name since the
+   * form's own check (the card's copy, another tab) is refused rather than
+   * replaced, and the form asks again, knowing about it.
+   */
+  let reply;
+  try {
+    reply = await api(`/resumes/${encodeURIComponent(spec.id)}?create=1`, { method: 'PUT', body: JSON.stringify(spec) });
+  } catch (err) {
+    if (err.status === 409) await loadStore().catch(() => undefined);
+    throw err;
+  }
+  tookResumeWrite(spec.id, reply);
   setStatus(`Saved ${spec.id}`);
   await loadStore();
   clearEdits();
@@ -10821,6 +11050,11 @@ async function restoreResumeVersion(hash) {
    */
   const wanted = historyResumeId;
   if (!wanted) return;
+  /*
+   * The write of the resume the person is choosing to replace: the one the
+   * editor holds as the dialog opens. See `restoreOver`.
+   */
+  const seen = heldVersion(wanted);
   if (!confirm('Restore this version? The current version will be replaced (its own history is kept, so you can still get back to it).')) {
     return;
   }
@@ -10850,9 +11084,8 @@ async function restoreResumeVersion(hash) {
         return;
       }
     }
-    const back = await api(`/resumes/${encodeURIComponent(wanted)}/history/${encodeURIComponent(hash)}/restore`, {
-      method: 'POST',
-    });
+    const back = await restoreOver(wanted, hash, seen);
+    if (!back) return;
     /*
      * And the undo stack goes, for the reason a stack from another save goes
      * — see `projectChanged`. Its entries are "this document before and after
@@ -10891,6 +11124,55 @@ async function restoreResumeVersion(hash) {
     showRestoreNote(said);
   } catch (err) {
     setStatus(err.message, true);
+  }
+}
+
+/**
+ * The restore itself, made only over the resume the person chose to replace.
+ *
+ * A restore is a deliberate overwrite, but of the resume as it was when the
+ * dialog asked: a stage JobHelper's card filed while it was open, or an edit
+ * in another tab, is something nobody here has seen, and it was replaced
+ * with no word. So the restore is based on the write the editor held as the
+ * dialog opened (`seen`), moved on only by this page's own saves made while
+ * it flushed (`wroteOver`). Refused, the person is told and asked again, and
+ * restoring anyway is based on the write they were just told about, so a
+ * third write is asked about in turn. Null when they decline.
+ */
+async function restoreOver(id, hash, seen) {
+  let basedOn = seen;
+  for (let held = heldVersion(id), steps = 0; held && steps < 50; held = wroteOver.get(held), steps++) {
+    if (held === seen) {
+      basedOn = heldVersion(id);
+      break;
+    }
+  }
+  const path = `/resumes/${encodeURIComponent(id)}/history/${encodeURIComponent(hash)}/restore`;
+  for (;;) {
+    try {
+      const back = await api(path, { method: 'POST', body: JSON.stringify(basedOn ? { basedOn } : {}) });
+      tookResumeWrite(id, back, basedOn);
+      return back;
+    } catch (err) {
+      if (!refusedAsMovedOn(err)) throw err;
+      adoptRefusal(id, err.body, { fromHere: false });
+      const name = err.body.current.label ?? id;
+      const anyway = confirm(
+        `“${name}” was changed elsewhere since you chose to restore this version, and that change would be replaced too ` +
+          '(it is kept in its history). Restore anyway?',
+      );
+      if (!anyway) {
+        setStatus(`Nothing was restored: “${name}” was changed elsewhere since you chose to.`, true);
+        await loadStore();
+        if (id === state.resumeId) {
+          render();
+          scheduleRender();
+        }
+        await loadResumeHistory();
+        return null;
+      }
+      basedOn = err.body.version ?? undefined;
+    }
   }
 }
 
@@ -11408,14 +11690,31 @@ function renderBaseButton() {
        * sweep deletes it. Naming the document it changes makes it an ordinary
        * step, and stops a later undo silently reverting it.
        */
-      await undoGroup(TIER_LOOK[look.next].undo ?? 'change', [`resume:${state.resumeId}`], async () => {
-        await api(`/resumes/${encodeURIComponent(state.resumeId)}/tier`, {
-          method: 'PUT',
-          body: JSON.stringify({ tier: look.next }),
-        });
+      const id = state.resumeId;
+      let movedOn = false;
+      await undoGroup(TIER_LOOK[look.next].undo ?? 'change', [`resume:${id}`], async () => {
+        /*
+         * Based on the write the editor holds (see `writeResumeField`). The
+         * step's "before" is the editor's copy, and a write made elsewhere
+         * since was taken away by undoing the press. Refused, the copy it
+         * goes back to is the one there now, and the tier is set on it.
+         */
+        ({ movedOn } = await writeResumeField(
+          id,
+          (basedOn) =>
+            api(`/resumes/${encodeURIComponent(id)}/tier`, {
+              method: 'PUT',
+              body: JSON.stringify({ tier: look.next, ...(basedOn ? { basedOn } : {}) }),
+            }),
+          { done: (current) => (current.tier ?? 'extended') === look.next },
+        ));
       });
       await loadStore();
-      setStatus(TIER_LOOK[look.next].said);
+      setStatus(
+        movedOn
+          ? `${TIER_LOOK[look.next].said}. This resume had been changed elsewhere; that change was kept.`
+          : TIER_LOOK[look.next].said,
+      );
       render();
     } catch (err) {
       setStatus(err.message, true);

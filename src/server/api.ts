@@ -778,6 +778,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     });
     return true;
   };
+
+  /**
+   * Which write of the resume this answer is about, said as its `ETag`, for
+   * the writer's next write to be based on (see `resumeVersion`). Every route
+   * that writes a whole resume, or one field of it, says it.
+   */
+  const tagVersion = (res: Response, id: string): void => {
+    const version = resumeVersion(id);
+    if (version) res.setHeader('ETag', `"${version}"`);
+  };
   // Work the user started and walked away from.
 
   /**
@@ -921,6 +931,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const spec = store.loadResumes().find((r) => r.id === id);
       if (!spec) throw new Error(`No resume "${id}"`);
+      /*
+       * Only over the write the button was pressed on, when the editor says
+       * which (`basedOn`, as the resume PUT's `?basedOn=`). The tier alone is
+       * written, so nothing else of a write made elsewhere is lost here; but
+       * the editor's undo step for the press is the resume as the editor had
+       * it, and a write made elsewhere in between was taken away by undoing
+       * the press. Refused, the editor reapplies the tier on what is there
+       * and sends it again once (see `writeResumeField` in web/app.js).
+       */
+      if (movedOn(res, id, (req.body as { basedOn?: unknown }).basedOn)) return;
 
       spec.tier = tier;
       // The flag the tier replaced. Leaving it would let the two disagree.
@@ -935,7 +955,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       else delete spec.temporaryFrom;
 
       const said = { base: 'a base', extended: 'kept', temporary: 'temporary' }[tier];
-      await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => store.saveResume(spec));
+      // Tagged as written, before the commit's awaits let another write in.
+      await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => {
+        store.saveResume(spec);
+        tagVersion(res, id);
+      });
       res.json(spec);
     }),
   );
@@ -1173,17 +1197,27 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         res.status(400).json({ error: 'A resume needs a name.' });
         return;
       }
+      /*
+       * Only over the write the name was chosen on, when the editor says which
+       * (`basedOn`): see the tier route. Before the name is checked, so a
+       * refusal says the resume moved on rather than something about names.
+       */
+      if (movedOn(res, id, (req.body as { basedOn?: unknown })?.basedOn)) return;
       const taken = resumes.find((r) => r.id !== id && sameResumeName(r.label ?? r.id, label));
       if (taken) {
         res.status(409).json({ error: `A resume called “${taken.label ?? taken.id}” already exists. Choose another name.` });
         return;
       }
       if (mine.label === label) {
+        tagVersion(res, id);
         res.json(mine);
         return;
       }
       const renamed = { ...mine, label };
-      await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => store.saveResume(renamed));
+      await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => {
+        store.saveResume(renamed);
+        tagVersion(res, id);
+      });
       res.json(renamed);
     }),
   );
@@ -5604,6 +5638,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * been deleted is the case this exists to serve, and there is no
        * current version of it to keep.
        */
+      /*
+       * Only over the resume the person chose to replace, when the editor
+       * says which write that was (`basedOn`). A restore is a deliberate
+       * overwrite, but of the resume as it was when the person asked for it:
+       * a stage JobHelper's card filed while the dialog was open is something
+       * nobody has seen, and replacing it unasked is not what was confirmed.
+       * Refused, the editor says so and offers to restore anyway, based on
+       * the write it was just told about. Checked here, so a refusal files
+       * nothing, and again just before the write, as the filing awaits.
+       */
+      const { basedOn } = (req.body ?? {}) as { basedOn?: unknown };
+      if (movedOn(res, id, basedOn)) return;
+
       const here = Store.resumeFiles(id).filter((rel) => fs.existsSync(path.join(store.root, rel)));
       if (here.length > 0) {
         await repo
@@ -5713,6 +5760,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * date on read that must never reach disk. A resume that is gone keeps
        * the old version's tier, since there is nothing now to keep.
        */
+      // Nothing is awaited from here to the write. The filing commit above is
+      // this route's own, and does not move the version.
+      if (movedOn(res, id, basedOn)) return;
       const standing = store.loadResumesAsWritten().find((r) => r.id === id);
       if (standing) {
         delete restored.tier;
@@ -5741,7 +5791,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * to throw work away, which is exactly the kind of moment the history
        * is for.
        */
-      await withCommit(repo, true, `Restore "${id}" to an earlier version`, () => store.saveResume(restored));
+      await withCommit(repo, true, `Restore "${id}" to an earlier version`, () => {
+        store.saveResume(restored);
+        tagVersion(res, id);
+      });
 
       /*
        * Did it land? Compare what the resume resolves to now against what it
