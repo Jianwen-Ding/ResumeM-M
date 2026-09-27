@@ -1044,6 +1044,8 @@ function markDirty(message = 'Changed', { recompile = true } = {}) {
 
 const AUTOSAVE_DELAY_MS = 900;
 const COMMIT_IDLE_MS = 15_000;
+/** How often a save or a compile the server did not answer is asked again. */
+const UNREACHABLE_RETRY_MS = 4000;
 
 let autoSaveTimer = null;
 let commitTimer = null;
@@ -1164,7 +1166,23 @@ async function autoSave({ leaving = false } = {}) {
       // Nor does it failing, when a newer save carrying this edit has landed.
       if (order < (landedOrder.get(spec.id) ?? 0)) return;
       state.dirty = true; // it did not land; try again on the next edit
-      setSaveState('failed', err.message);
+      if (!unreachable(err)) {
+        setSaveState('failed', err.message);
+        return;
+      }
+      /*
+       * The server is not there to refuse it: stopped, or restarting. Waiting
+       * for the next edit left the chip at "Not saved" with nothing on the way
+       * to change it, over an edit that never saved once the server was back.
+       * So it is asked again on a timer, which an edit made meanwhile replaces.
+       */
+      setSaveState('failed', 'can’t reach the server. Retrying…');
+      if (!autoSaveTimer) {
+        autoSaveTimer = setTimeout(() => {
+          autoSaveTimer = null;
+          autoSave();
+        }, UNREACHABLE_RETRY_MS);
+      }
     }
   })();
 
@@ -5560,7 +5578,14 @@ function setLive(mode) {
   const chip = $('#live-state');
   if (!chip) return;
   chip.className = `live ${mode}`;
-  chip.textContent = mode === 'working' ? 'Updating…' : mode === 'bad' ? 'Compile failed' : 'Live';
+  chip.textContent =
+    mode === 'working'
+      ? 'Updating…'
+      : mode === 'bad'
+        ? 'Compile failed'
+        : mode === 'offline'
+          ? 'Can’t reach server'
+          : 'Live';
 }
 
 /**
@@ -5641,6 +5666,7 @@ async function renderPreview() {
     // A newer edit already asked for a newer compile; this answer is stale.
     if (token !== renderToken) return;
 
+    $('#preview-empty').textContent = 'Compiling your resume…';
     showPdf($('#preview-pane'), asWritten.pdfUrl);
     showWarnings(asWritten);
 
@@ -5669,9 +5695,26 @@ async function renderPreview() {
     showWarnings(fitted);
   } catch (err) {
     if (token !== renderToken) return;
-    setLive('bad');
     fit.className = 'fit bad';
-    fit.textContent = err.message;
+    if (!unreachable(err)) {
+      setLive('bad');
+      fit.textContent = err.message;
+      return;
+    }
+    /*
+     * The server stopped. This used to say "Failed to fetch" under a pane
+     * still reading "Compiling your resume…", and stay that way after the
+     * server was back, since only an edit asks for a compile. So it says what
+     * happened and asks again on a timer, which an edit made meanwhile
+     * replaces (see `scheduleRender`).
+     */
+    setLive('offline');
+    fit.textContent = 'Can’t reach the server. Retrying every few seconds…';
+    $('#preview-empty').textContent = 'Can’t reach the server. The preview will appear once it is back.';
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      renderPreview();
+    }, UNREACHABLE_RETRY_MS);
   }
 }
 
@@ -6808,13 +6851,18 @@ async function openApplication(id) {
   loadApplications().catch((err) => setStatus(err.message, true));
 }
 
+/** A request the server never answered, in the words each browser uses for it. */
+function unreachable(err) {
+  return /failed to fetch|networkerror|load failed/i.test(err?.message ?? '');
+}
+
 /**
  * Why a write did not land, as the end of a sentence. The browser's own words
  * for a server that did not answer are replaced; the server's reasons are
  * sentences already, full stop and all.
  */
 function whyNotSaved(err) {
-  return /failed to fetch|networkerror|load failed/i.test(err.message)
+  return unreachable(err)
     ? 'ResumeM-M could not be reached'
     : err.message.replace(/[\s.]+$/, '');
 }

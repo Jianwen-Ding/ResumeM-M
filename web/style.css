@@ -416,8 +416,8 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 }
 .live.working { color: var(--accent); }
 .live.working::before { background: currentColor; animation: live-pulse 1s ease-in-out infinite; }
-.live.bad { color: var(--bad); }
-.live.bad::before { background: currentColor; }
+.live.bad, .live.offline { color: var(--bad); }
+.live.bad::before, .live.offline::before { background: currentColor; }
 
 @keyframes live-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
