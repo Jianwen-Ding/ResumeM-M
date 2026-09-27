@@ -140,13 +140,126 @@ describe('More', () => {
   });
 
   it('keeps every button the wide toolbar had, in the order it had them', () => {
+    /*
+     * The order on screen: Undo and Redo sit after More's group in the markup,
+     * so they can stay on the bar when it is a menu, and the stylesheet's
+     * `order`s (outside any media query, which jsdom does not apply anyway)
+     * put the wide toolbar back as it was. #toolbar-more is `display:
+     * contents` wide, so its buttons are ordered as the toolbar's own.
+     */
+    const style = document.createElement('style');
+    style.textContent = fs.readFileSync('web/style.css', 'utf8');
+    document.head.append(style);
+    const orderOf = (b) => Number(getComputedStyle(b).order || 0);
     const ids = [...document.querySelectorAll('#tab-resumes .sticky-toolbar button')]
       .filter((b) => !b.closest('.narrow-only') && !b.classList.contains('narrow-only'))
-      .map((b) => b.id);
+      .map((b, i) => ({ b, i }))
+      .sort((x, y) => orderOf(x.b) - orderOf(y.b) || x.i - y.i)
+      .map(({ b }) => b.id);
+    expect(getComputedStyle(document.querySelector('#toolbar-more')).display).toBe('contents');
+    style.remove();
     expect(ids).toEqual([
       'btn-base', 'btn-save-as', 'btn-rename-resume', 'btn-delete-resume', 'btn-feedback',
       'btn-rebuild', 'btn-undo', 'btn-redo', 'btn-add-entry',
     ]);
+  });
+
+  it('says what it opens: a group of buttons, named, that More controls', () => {
+    const more = document.querySelector('#btn-more');
+    const menu = document.querySelector('#toolbar-more');
+    expect(more.getAttribute('aria-haspopup')).toBe('true');
+    expect(more.getAttribute('aria-controls')).toBe('toolbar-more');
+    expect(menu.getAttribute('role')).toBe('group');
+    expect(menu.getAttribute('aria-label')).toBeTruthy();
+    // Undo and Redo stay on the bar; the how-to and what the resume is go in the menu.
+    expect(menu.contains(document.querySelector('#btn-undo'))).toBe(false);
+    expect(menu.contains(document.querySelector('#btn-redo'))).toBe(false);
+    expect(menu.contains(document.querySelector('#btn-tips'))).toBe(true);
+    expect(menu.contains(document.querySelector('#btn-base'))).toBe(true);
+    // Right after More, so Tab from it goes into the menu.
+    expect(more.nextElementSibling).toBe(menu);
+  });
+});
+
+describe('More, as a menu', () => {
+  const open = () => {
+    const compact = setupCompact({ win: windowAt(320) });
+    const more = document.querySelector('#btn-more');
+    more.focus();
+    more.click();
+    return { compact, more, bar: document.querySelector('#tab-resumes .sticky-toolbar') };
+  };
+  const key = (target, k, init = {}) => target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...init }));
+
+  it('closes on Escape, and puts focus back on More', () => {
+    const { more, bar } = open();
+    document.querySelector('#btn-rename-resume').focus();
+    key(document.activeElement, 'Escape');
+    expect(bar.classList.contains('more-open')).toBe(false);
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(more);
+  });
+
+  it('closes on a click anywhere else, and not on one inside it', () => {
+    const { bar } = open();
+    document.querySelector('#toolbar-more').dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    expect(bar.classList.contains('more-open')).toBe(true);
+    document.querySelector('#editor').dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    expect(bar.classList.contains('more-open')).toBe(false);
+  });
+
+  it('closes once something in it is chosen, after that has run', () => {
+    const { more, bar } = open();
+    const rebuild = document.querySelector('#btn-rebuild');
+    let ranOpen = null;
+    rebuild.addEventListener('click', () => (ranOpen = bar.classList.contains('more-open')));
+    rebuild.focus();
+    rebuild.click();
+    expect(ranOpen).toBe(true);
+    expect(bar.classList.contains('more-open')).toBe(false);
+    // Not left on a button that is no longer on screen.
+    expect(document.activeElement).toBe(more);
+  });
+
+  it('opens the how-to from inside it, and closes', () => {
+    const { bar } = open();
+    document.querySelector('#btn-tips').click();
+    expect(document.body.classList.contains('tips-open')).toBe(true);
+    expect(bar.classList.contains('more-open')).toBe(false);
+  });
+
+  it('moves through its buttons with the arrow keys, Home and End', () => {
+    const { more } = open();
+    const menu = document.querySelector('#toolbar-more');
+    const ids = [...menu.querySelectorAll('button')].filter((b) => !b.disabled && !b.hidden).map((b) => b.id);
+    key(more, 'ArrowDown');
+    expect(document.activeElement.id).toBe(ids[0]);
+    key(document.activeElement, 'ArrowDown');
+    expect(document.activeElement.id).toBe(ids[1]);
+    key(document.activeElement, 'ArrowUp');
+    key(document.activeElement, 'ArrowUp');
+    expect(document.activeElement.id).toBe(ids.at(-1));
+    key(document.activeElement, 'Home');
+    expect(document.activeElement.id).toBe(ids[0]);
+    key(document.activeElement, 'End');
+    expect(document.activeElement.id).toBe(ids.at(-1));
+  });
+
+  it('opens from the keyboard on More with ArrowDown', () => {
+    setupCompact({ win: windowAt(320) });
+    const more = document.querySelector('#btn-more');
+    key(more, 'ArrowDown');
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(document.querySelector('#toolbar-more').contains(document.activeElement)).toBe(true);
+  });
+
+  it('closes when focus leaves it for somewhere else', () => {
+    const { bar } = open();
+    const last = document.querySelector('#btn-add-entry');
+    last.focus();
+    document.querySelector('#btn-undo').disabled = false;
+    document.querySelector('#btn-undo').focus();
+    expect(bar.classList.contains('more-open')).toBe(false);
   });
 });
 

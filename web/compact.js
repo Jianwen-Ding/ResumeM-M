@@ -18,7 +18,12 @@
  *    saved with a resume (`setCollapsed`) is a fact about the document, and
  *    this is only about the screen.
  *  - The toolbar's less-used half behind "More", so the row that stays on
- *    screen is the resume, whether it saved, and these switches.
+ *    screen is the resume, whether it saved, and these switches. More is a
+ *    menu floating over the page: opening it had put its buttons in rows of
+ *    their own that pushed the resume down by a fifth of a 320px panel and
+ *    wrapped the bar. It closes on Escape (back to More), a click anywhere
+ *    else, focus leaving it, or once one of its buttons is pressed; the
+ *    arrow keys, Home and End move through it, and so does Tab.
  *
  * Kept apart from app.js so it can be tested on its own, and so the wide
  * layout — where none of this applies — is untouched by it: every rule it
@@ -50,6 +55,7 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
   const viewButtons = [...doc.querySelectorAll('#narrow-view [data-view]')];
   const focusButton = doc.querySelector('#btn-focus');
   const moreButton = doc.querySelector('#btn-more');
+  const moreMenu = doc.querySelector('#toolbar-more');
   const zoomButton = doc.querySelector('#preview-zoom');
   const tipsButton = doc.querySelector('#btn-tips');
   const fit = doc.querySelector('#fit');
@@ -144,6 +150,13 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
     setMore(open) {
       state.more = Boolean(open);
       paint();
+      // Hung from More itself, which is on the toolbar's first row of two in
+      // a tab of its own, rather than from the toolbar's foot; 6px down, clear
+      // of More's focus ring.
+      if (state.more && moreMenu && moreButton && toolbar) {
+        const below = moreButton.getBoundingClientRect().bottom - toolbar.getBoundingClientRect().top;
+        if (below > 0) moreMenu.style.top = `${Math.round(below + 6)}px`;
+      }
     },
     setTips(open) {
       state.tips = Boolean(open);
@@ -161,6 +174,75 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
   focusButton?.addEventListener('click', () => api.setFocus(!state.focus));
   moreButton?.addEventListener('click', () => api.setMore(!state.more));
   tipsButton?.addEventListener('click', () => api.setTips(!state.tips));
+
+  /* ---- More, as a menu ---- */
+
+  /** The buttons in the menu that can be pressed now, in order. */
+  const menuItems = () =>
+    [...(moreMenu?.children ?? [])].filter(
+      (el) => el.tagName === 'BUTTON' && !el.hidden && !el.disabled && doc.defaultView?.getComputedStyle(el).display !== 'none',
+    );
+  /** Shut, and — if focus was in it or on More — back to More, not to nowhere. */
+  const closeMore = ({ refocus = false } = {}) => {
+    if (!state.more) return;
+    const inside = moreMenu?.contains(doc.activeElement);
+    api.setMore(false);
+    if ((refocus || inside) && moreButton) moreButton.focus({ preventScroll: true });
+  };
+  const moveIn = (to) => {
+    const items = menuItems();
+    if (!items.length) return;
+    const at = items.indexOf(doc.activeElement);
+    const next =
+      to === 'first' ? 0 : to === 'last' ? items.length - 1 : at < 0 ? (to > 0 ? 0 : items.length - 1) : (at + to + items.length) % items.length;
+    items[next].focus();
+  };
+
+  moreButton?.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+    ev.preventDefault();
+    if (!state.more) api.setMore(true);
+    moveIn(ev.key === 'ArrowDown' ? 'first' : 'last');
+  });
+  moreMenu?.addEventListener('keydown', (ev) => {
+    if (!state.more) return;
+    const step = { ArrowDown: 1, ArrowUp: -1, Home: 'first', End: 'last' }[ev.key];
+    if (step === undefined) return;
+    ev.preventDefault();
+    moveIn(step);
+  });
+  // A choice made: the menu goes, after the button has done its work.
+  moreMenu?.addEventListener('click', (ev) => {
+    if (state.more && ev.target?.closest?.('button')) closeMore();
+  });
+  doc.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape' || !state.more) return;
+    ev.preventDefault();
+    closeMore({ refocus: true });
+  });
+  // A click anywhere else, in this page. Pointerdown, so a click that starts
+  // something else (a drag, an edit) does not have the menu still over it.
+  doc.addEventListener(
+    'pointerdown',
+    (ev) => {
+      if (!state.more) return;
+      if (moreMenu?.contains(ev.target) || moreButton?.contains(ev.target)) return;
+      closeMore();
+    },
+    true,
+  );
+  // Tab or Shift+Tab out of it, or a click outside this page altogether (the
+  // side panel's own bar, around the frame this page is in).
+  moreMenu?.addEventListener('focusout', (ev) => {
+    const to = ev.relatedTarget;
+    if (!state.more || !to || moreMenu.contains(to) || to === moreButton) return;
+    api.setMore(false);
+  });
+  win.addEventListener?.('blur', () => closeMore());
+  // Widened past the narrow layout, there is no menu for it to be.
+  win.matchMedia?.(NARROW_QUERY).addEventListener?.('change', (ev) => {
+    if (!ev.matches) api.setMore(false);
+  });
 
   /*
    * The fit line opens on a tap or Enter, narrow only: wide, the whole

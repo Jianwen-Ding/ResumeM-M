@@ -1965,6 +1965,13 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
  * sizes the wide layout reads at.
  */
 .toolbar-more { display: contents; }
+/* Wide, the toolbar reads as it always did — the picker, what the resume is,
+   whether it saved, the actions, Undo and Redo, then + Entry at the far end —
+   though Undo and Redo sit after the More group in the markup (they stay on
+   the bar when More is a menu). */
+#resume-select { order: -2; }
+#btn-base { order: -1; }
+#toolbar-more > .grow, #btn-add-entry { order: 1; }
 
 .segmented {
   display: inline-flex;
@@ -2026,23 +2033,65 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
     padding-right: 8px;
     box-shadow: 0 1px 0 var(--line);
   }
-  .sticky-toolbar::before, .sticky-toolbar::after { content: ""; flex-basis: 100%; height: 0; }
-  .sticky-toolbar::before { order: 4; }
-  .sticky-toolbar::after { order: 19; }
+  .sticky-toolbar::before { content: ""; flex-basis: 100%; height: 0; order: 4; }
   .narrow-only { display: inline-flex; }
   #resume-select { order: 1; flex: 1 1 120px; min-width: 0; max-width: none; min-height: 32px; }
   #narrow-view { order: 2; }
   #btn-more { order: 3; }
-  #btn-tips { order: 9; }
   #save-state { order: 5; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; }
   #live-state { order: 6; }
   #btn-focus { order: 7; }
-  #btn-base, #toolbar-more > * { order: 20; }
-  #toolbar-more > #btn-undo, #toolbar-more > #btn-redo { order: 8; }
-  .sticky-toolbar:not(.more-open) #btn-base,
-  .sticky-toolbar:not(.more-open) #toolbar-more > :not(#btn-undo):not(#btn-redo) { display: none; }
+  #btn-undo, #btn-redo { order: 8; }
   .sticky-toolbar button, .segmented { min-height: 32px; }
   .segmented button { min-height: 26px; }
+
+  /*
+   * More: a menu that floats over the page under its button, rather than
+   * rows that push the resume down. It closes on Escape, a click anywhere
+   * else, or once something in it is chosen (compact.js).
+   */
+  .toolbar-more {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 8px;
+    z-index: 40;
+    flex-direction: column;
+    align-items: stretch;
+    min-width: 190px;
+    max-width: calc(100vw - 16px);
+    max-height: min(420px, calc(100vh - 64px));
+    overflow-y: auto;
+    padding: 6px 0;
+    background: var(--panel);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+  }
+  .sticky-toolbar.more-open .toolbar-more { display: flex; }
+  #btn-more[aria-expanded="true"] { background: var(--accent-soft); color: #174ea6; border-color: transparent; }
+  #toolbar-more > button {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    width: 100%;
+    min-height: 36px;
+    padding: 6px 16px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    color: var(--ink-soft);
+    font-size: var(--t-md);
+    text-align: left;
+  }
+  #toolbar-more > button:hover { background: var(--state-hover); color: var(--ink); }
+  #toolbar-more > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #toolbar-more > button.danger { color: var(--bad); }
+  #toolbar-more > button.danger:hover { background: rgba(217, 48, 37, .08); }
+  #toolbar-more > button[aria-expanded="true"] { background: var(--accent-soft); color: #174ea6; }
+  #toolbar-more > button:disabled:hover { background: none; }
+  /* What the resume is and the how-to, then what can be done with it. */
+  .toolbar-more > #btn-save-as { border-top: 1px solid var(--line-soft); margin-top: 4px; }
   .toolbar-more .grow { display: none; }
 
   /* One column at a time. The other is hidden, not removed, so nothing in it
@@ -2198,19 +2247,16 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 .embedded .tab { padding-top: 8px; }
 
 @media (max-width: 640px) {
-  /* One row: whether it saved, the view, Focus, Undo, Redo, tips, More. */
+  /* One row: whether it saved, the view, Focus, Undo, Redo, More — with
+     More's menu floating over the resume, so opening it moves nothing. */
   .embedded .sticky-toolbar::before { display: none; }
   .embedded .sticky-toolbar { gap: 4px; padding-top: 4px; padding-bottom: 4px; }
   .embedded #save-state { order: 1; flex: none; }
   .embedded #live-state { order: 2; font-size: 0; gap: 0; padding: 4px 6px; }
   .embedded #narrow-view { order: 3; }
   .embedded #btn-focus { order: 4; }
-  .embedded #toolbar-more > #btn-undo, .embedded #toolbar-more > #btn-redo { order: 5; }
-  /* The how-to is behind More here: it is the same every time, and its
-     room is what keeps this toolbar to one row in a 360px panel. */
-  .embedded #btn-tips { order: 20; }
-  .embedded .sticky-toolbar:not(.more-open) #btn-tips { display: none; }
-  .embedded #btn-more { order: 7; }
+  .embedded #btn-undo, .embedded #btn-redo { order: 5; }
+  .embedded #btn-more { order: 7; margin-left: auto; }
   .embedded .segmented button { padding: 4px 8px; }
   .embedded .sticky-toolbar button.tiny { padding: 4px 7px; }
   /* Said short: the whole sentence is its title, and "Not saved — …" keeps
