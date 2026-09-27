@@ -233,9 +233,13 @@ async function refreshOnReturn() {
   if (!state.store || state.masterView || state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
   const before = JSON.stringify(resumeById(state.resumeId) ?? null);
   const had = state.resumeId;
-  await loadStore();
+  const fresh = await readStoreUncrossed();
   // Something started while the store was being read: that edit is newer.
-  if (state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  // Asked before the read is put in place of the store, not after: asked
+  // after, standing aside only spared the screen, and the editor went on
+  // holding a store from before whatever was saved while it was out.
+  if (!fresh || state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  adoptStore(fresh);
   if (state.resumeId !== had || JSON.stringify(resumeById(state.resumeId) ?? null) === before) return;
   // Everything the overlays held was written on the way out; what is stored
   // now is newer than they are.
@@ -360,6 +364,14 @@ async function fetchKeptAlive(url, init) {
   return plainly();
 }
 
+/**
+ * Every write this page has sent, and how many of them are still out. A read
+ * of the whole store that one of them crossed may predate it: see
+ * `readStoreUncrossed`.
+ */
+let writesSent = 0;
+let writesOut = 0;
+
 async function api(path, options = {}) {
   /*
    * Undo is recorded here, and only here.
@@ -399,11 +411,19 @@ async function api(path, options = {}) {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
   };
+  // Counted, so a read of the whole store can tell a write crossed it. See
+  // `readStoreUncrossed`.
+  const writes = method !== 'GET';
+  if (writes) {
+    writesSent++;
+    writesOut++;
+  }
   let res;
   try {
     res = options.keepalive ? await fetchKeptAlive(url, init) : await fetch(url, init);
   } finally {
     if (order) unsettledOrders.delete(Number(order));
+    if (writes) writesOut--;
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
@@ -11227,7 +11247,31 @@ function renderBaseButton() {
 }
 
 async function loadStore() {
-  state.store = await api('/store');
+  adoptStore(await api('/store'));
+}
+
+/**
+ * The whole store, read again unasked — or null if a write of this page's
+ * was out while it was being read.
+ *
+ * For the reads nothing here asked for, which come at any moment: coming back
+ * to the tab, the side panel saying the save changed. A read the server
+ * answered before a save landed, taken after it, puts the editor back on a
+ * store without that save. Its resume is drawn from it, and its next save is
+ * written whole from it, so the edit came back undone on screen and then on
+ * disk. The write moves the save's revision, so whoever asked for this read
+ * asks again, and that read has it.
+ */
+async function readStoreUncrossed() {
+  if (writesOut > 0) return null;
+  const at = writesSent;
+  const fresh = await api('/store');
+  return writesSent === at && writesOut === 0 ? fresh : null;
+}
+
+/** Take a store read from the server as the editor's own. */
+function adoptStore(fresh) {
+  state.store = fresh;
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
     /*
      * The resume that was open has gone, so the unsaved edits are about
@@ -11388,8 +11432,12 @@ async function refreshFromPanel() {
   const before = listed();
   await refreshOnReturn();
   // `refreshOnReturn` leaves the list alone on the master view and while
-  // something is unsaved; the list itself is safe to take on the master.
-  if (state.masterView && !state.dirty) await loadStore();
+  // something is unsaved; the list itself is safe to take on the master, if
+  // nothing was written while it was read (see `readStoreUncrossed`).
+  if (state.masterView && !state.dirty) {
+    const fresh = await readStoreUncrossed();
+    if (fresh && !state.dirty && inlineSaves.size === 0) adoptStore(fresh);
+  }
   if (!state.dirty && listed() !== before) render();
 }
 
