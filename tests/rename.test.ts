@@ -87,3 +87,26 @@ describe('what counts as the same name', () => {
     expect(sameResumeName('', '')).toBe(false);
   });
 });
+
+describe('the editor’s save of a resume deleted elsewhere', () => {
+  const save = (id: string, query = '?commit=0&existing=1') =>
+    request(app).put(`/api/resumes/${id}${query}`).send({ id, label: 'Summer intern', sections: [] });
+
+  it('is refused, and does not put the resume back', async () => {
+    await request(app).delete('/api/resumes/intern').expect(200);
+    const res = await save('intern').expect(404);
+    expect(res.body.error).toMatch(/no resume “intern”/);
+    expect(labelOf('intern')).toBeUndefined();
+  });
+
+  it('while it still writes a resume that is there', async () => {
+    await save('intern').expect(200);
+    expect(labelOf('intern')).toBe('Summer intern');
+  });
+
+  it('and a save that does not ask still writes the file, as it always did', async () => {
+    await request(app).delete('/api/resumes/intern').expect(200);
+    await save('intern', '').expect(200);
+    expect(labelOf('intern')).toBe('Summer intern');
+  });
+});

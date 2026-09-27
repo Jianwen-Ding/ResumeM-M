@@ -30,20 +30,11 @@ vi.mock('../web/assets.js', () => ({
  * showing a resume nothing in this test ever asked for.
  *
  * It fails as a flake, which is the expensive kind: whichever assertion the
- * stale redraw lands on top of. Every listener a boot registers is recorded
- * here and taken off again after it.
+ * stale redraw lands on top of. tests/setup.ts takes every listener a boot
+ * registers off again after its test, in every file that boots the editor.
  */
-const registered = [];
-for (const on of [window, document]) {
-  const real = on.addEventListener.bind(on);
-  on.addEventListener = (type, fn, opts) => {
-    registered.push([on, type, fn, opts]);
-    real(type, fn, opts);
-  };
-}
 
 afterEach(() => {
-  for (const [on, type, fn, opts] of registered.splice(0)) on.removeEventListener(type, fn, opts);
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });

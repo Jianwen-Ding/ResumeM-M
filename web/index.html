@@ -31,7 +31,7 @@
   -->
   <button id="ai-peek-chip" class="jobs-chip peek" title="The last few AI runs — what they were given, and what they said">What the AI is doing</button>
   <span id="jobs-chip" class="jobs-chip hidden" title="Work the AI is doing, or has finished"></span>
-  <span id="status" class="status"></span>
+  <span id="status" class="status" role="status" aria-live="polite"></span>
 </header>
 
 <div id="project-banner" role="status"><strong id="project-status">No Save Open</strong><span id="project-banner-path">Open or create a save to access resumes, applications, and files.</span></div>
@@ -43,18 +43,33 @@
       <div class="pane pane-left">
         <div class="toolbar sticky-toolbar">
           <select id="resume-select" title="Master document or tailored resume"></select>
-          <button id="btn-base" class="tiny" title="What this resume is: a base, kept, or temporary"></button>
           <span id="save-state" class="save saved" title="Edits are written to the save as you make them, and committed once you stop.">All changes saved</span>
           <span id="live-state" class="live ok" title="The preview recompiles itself whenever you change something. Click to force one.">Live</span>
-          <button id="btn-save-as">Save as variation…</button>
-          <button id="btn-rename-resume" class="tiny" title="Change the name this resume is shown by">Rename…</button>
-          <button id="btn-delete-resume" class="tiny danger" title="Delete this variation from the save">Delete variation</button>
-          <button id="btn-feedback" class="ai-action" title="The AI reads this resume and says what is weak. Runs your AI command."><span class="ai-mark" aria-hidden="true">✦</span><span>Feedback</span></button>
-          <button id="btn-rebuild" class="tiny">Rebuild</button>
+          <!-- Narrow only (a side panel): one column at a time, and the rest of
+               this toolbar in a menu under More. See compact.js.
+               Wide, #toolbar-more is not a box at all (display: contents) and
+               the CSS `order`s in style.css put these back in the order the
+               wide toolbar always had: base, …, Rebuild, Undo, Redo, + Entry. -->
+          <div id="narrow-view" class="narrow-only segmented" role="group" aria-label="Show">
+            <button type="button" data-view="edit" aria-pressed="true">Edit</button>
+            <button type="button" data-view="preview" aria-pressed="false">Preview</button>
+          </div>
+          <button id="btn-focus" type="button" class="tiny narrow-only" aria-pressed="false" title="Show only the entry you are working in; the others fold to their headings until clicked">Focus</button>
+          <button id="btn-more" type="button" class="tiny narrow-only" aria-expanded="false" aria-haspopup="true" aria-controls="toolbar-more" title="The rest of this toolbar">More</button>
+          <div id="toolbar-more" class="toolbar-more" role="group" aria-label="More for this resume">
+            <span id="tier-state" class="tier-state"></span>
+            <button id="btn-base" class="tiny" aria-describedby="tier-state"></button>
+            <button id="btn-tips" type="button" class="tiny narrow-only" aria-expanded="false" aria-controls="resume-view-note" title="How this editor works">How it works</button>
+            <button id="btn-save-as">Save as variation…</button>
+            <button id="btn-rename-resume" class="tiny" title="Change the name this resume is shown by">Rename…</button>
+            <button id="btn-delete-resume" class="tiny danger" title="Delete this variation from the save">Delete variation</button>
+            <button id="btn-feedback" class="ai-action" title="The AI reads this resume and says what is weak. Runs your AI command."><span class="ai-mark" aria-hidden="true">✦</span><span>Feedback</span></button>
+            <button id="btn-rebuild" class="tiny">Rebuild</button>
+            <span class="grow"></span>
+            <button id="btn-add-entry" title="Add a new education entry, job, or project">+ Entry</button>
+          </div>
           <button id="btn-undo" class="tiny" disabled>Undo</button>
           <button id="btn-redo" class="tiny" disabled>Redo</button>
-          <span class="grow"></span>
-          <button id="btn-add-entry" title="Add a new education entry, job, or project">+ Entry</button>
         </div>
         <div id="way-back" class="way-back" hidden></div>
         <p id="resume-view-note" class="hint"></p>
@@ -68,6 +83,7 @@
              page in rather than blinking. See preview.js. -->
         <div id="preview-pane" class="preview-frame">
           <div id="preview-empty" class="preview-empty">Compiling your resume…</div>
+          <button id="preview-zoom" type="button" class="tiny narrow-only preview-zoom" aria-pressed="false" title="Show the page at its real size, and scroll it">Actual size</button>
         </div>
         <section id="feedback-panel" class="feedback-panel" aria-label="AI Feedback" hidden>
           <div class="toolbar">

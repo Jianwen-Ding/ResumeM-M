@@ -55,6 +55,7 @@ import { derivedAutofill, educationHistory, workHistory } from '../model/autofil
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
+import { FRAME_ANCESTORS } from './guard.js';
 import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
@@ -1145,6 +1146,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           });
           return;
         }
+      }
+
+      /*
+       * `?existing=1` writes over a resume that is there, and nothing else.
+       *
+       * The editor's auto-save sends it. A resume deleted elsewhere while an
+       * edit to it was waiting on its save — another tab, the CLI, the
+       * extension's card throwing away its copy — was put straight back by
+       * that save. Refused, the editor says the edit was not kept and moves
+       * on (see `resumeGone` in web/app.js). Checked with nothing awaited
+       * between here and the write.
+       */
+      if (req.query.existing === '1' && !store.loadResumes().some((r) => r.id === spec.id)) {
+        res.status(404).json({ error: `There is no resume “${spec.id}” in the save any more.` });
+        return;
       }
 
       /*
@@ -5670,7 +5686,7 @@ const COPY_PATH_SCRIPT = `
     ev.target.textContent = 'Copied';
   };
 `;
-const COPY_PATH_POLICY = `script-src 'sha256-${createHash('sha256').update(COPY_PATH_SCRIPT).digest('base64')}'; base-uri 'none'`;
+const COPY_PATH_POLICY = `script-src 'sha256-${createHash('sha256').update(COPY_PATH_SCRIPT).digest('base64')}'; base-uri 'none'; ${FRAME_ANCESTORS}`;
 
 /**
  * The flat folder, as a page you can open.

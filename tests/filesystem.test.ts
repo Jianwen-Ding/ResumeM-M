@@ -888,3 +888,43 @@ describe('two applications in flight, one upload dialog', () => {
     expect(syncCurrent(t.store).belongsTo['Test-Person-Resume.pdf']).toBe('a2');
   });
 });
+
+/*
+ * The folder's own copy, when the record of putting it there is lost.
+ *
+ * The manifest is written after the copies; a server stopped between the
+ * two, or a manifest restored from before them, leaves copies nobody claims.
+ * They were then refused as the person's own for ever, and every later
+ * application's resume was missing from the folder and from the card.
+ */
+describe('a copy the folder made, whose record was lost', () => {
+  const bundleFor = (id: string, bytes: string) => {
+    const dir = path.join(t.store.outDir(), 'applications', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Test-Person-Resume.pdf'), bytes, 'utf8');
+    return { id, company: id, role: 'Engineer', status: 'applying' as const, snapshotDir: `applications/${id}` };
+  };
+  const manifest = () => path.join(t.store.outDir(), 'current', '.rmm-current.json');
+
+  it("is replaced by the next application's file", () => {
+    t.write('applications.yaml', [bundleFor('a1', '%PDF a1\n')]);
+    syncCurrent(t.store, undefined, 'a1');
+    // The record goes; the copy stays. a1 is sent, a2 is the one in hand.
+    fs.writeFileSync(manifest(), JSON.stringify({ files: [], from: {} }), 'utf8');
+    t.write('applications.yaml', [{ ...bundleFor('a1', '%PDF a1\n'), status: 'closed' as const }, bundleFor('a2', '%PDF a2\n')]);
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(folder.problems ?? []).toEqual([]);
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('%PDF a2\n');
+  });
+
+  it("while a file of the person's own under that name is still left alone", () => {
+    t.write('applications.yaml', [bundleFor('a1', '%PDF a1\n')]);
+    syncCurrent(t.store, undefined, 'a1');
+    fs.writeFileSync(manifest(), JSON.stringify({ files: [], from: {} }), 'utf8');
+    fs.writeFileSync(path.join(t.store.outDir(), 'current', 'Test-Person-Resume.pdf'), 'my own polished one', 'utf8');
+    t.write('applications.yaml', [bundleFor('a2', '%PDF a2\n')]);
+    const folder = syncCurrent(t.store, undefined, 'a2');
+    expect(fs.readFileSync(path.join(folder.dir, 'Test-Person-Resume.pdf'), 'utf8')).toBe('my own polished one');
+    expect((folder.problems ?? []).join(' ')).toMatch(/file of your own/);
+  });
+});

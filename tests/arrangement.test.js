@@ -125,8 +125,24 @@ const lineRows = () => [...firstJob().querySelectorAll(':scope .bullet')];
 const textOf = (row) => row.querySelector('.bullet-head .editable, .bullet-head .text')?.textContent.trim();
 const lineText = () => lineRows().map(textOf);
 
+/*
+ * Each test boots its own copy of the app into the same window, and nothing
+ * unloads the one before: `resetModules` only means the next import is a
+ * fresh copy. The old copy's debounces were real timers, so the auto-save a
+ * drag or a tick had scheduled went off 900ms later in whichever test was
+ * running by then, through that test's `fetch` — into its `puts`, and via the
+ * `Object.assign` above into the resume its app had not loaded yet. Under
+ * load that was most runs: a line drawn in an order from two tests back, and
+ * a stale `['j1','j2','j3']`/`newest` write landing a millisecond either side
+ * of the one "writes the arrangement it is showing" checks.
+ *
+ * On fake timers from before the import, `useRealTimers` in `afterEach`
+ * throws the old copy's timers away with it, which is what leaving a page
+ * does to them.
+ */
 async function boot(options) {
   vi.resetModules();
+  vi.useFakeTimers();
   document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
   window.location.hash = '#resumes';
   serve(options);
@@ -203,7 +219,6 @@ describe('an arrangement already made, and something ticked afterwards', () => {
    * over a file that did not would be the worst of the three outcomes.
    */
   it('writes the arrangement it is showing', async () => {
-    vi.useFakeTimers();
     dragOnto(entryRows()[2], entryRows()[0]);
     entryRows()
       .find((e) => e.querySelector('.title')?.textContent === 'Everclear')
@@ -211,6 +226,9 @@ describe('an arrangement already made, and something ticked afterwards', () => {
       .click();
     await vi.advanceTimersByTimeAsync(1500);
 
+    // The drag and the tick are one debounce, so one write — and nothing
+    // else wrote, so the one checked below is this page's and not a leftover.
+    expect(puts, 'one write, of this edit').toHaveLength(1);
     const saved = puts.at(-1);
     expect(saved, 'the edit reached the store').toBeTruthy();
     // "Everclear" was switched off, so it is out of the list; the two that

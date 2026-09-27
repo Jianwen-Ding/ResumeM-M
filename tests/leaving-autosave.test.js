@@ -14,18 +14,7 @@ vi.mock('../web/assets.js', () => ({
   }),
 }));
 
-/* See boot-wiring.test.js: every listener a boot adds comes off after it. */
-const registered = [];
-for (const on of [window, document]) {
-  const real = on.addEventListener.bind(on);
-  on.addEventListener = (type, fn, opts) => {
-    registered.push([on, type, fn, opts]);
-    real(type, fn, opts);
-  };
-}
-
 afterEach(() => {
-  for (const [on, type, fn, opts] of registered.splice(0)) on.removeEventListener(type, fn, opts);
   delete document.visibilityState;
   vi.useRealTimers();
   vi.unstubAllGlobals();

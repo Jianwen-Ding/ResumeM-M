@@ -108,5 +108,25 @@ export function scriptPolicy(indexHtml: string, hash: (text: string) => string):
   );
   // No `object-src`: the PDFs served here open in Chrome's own viewer, which
   // is an embed, and a policy that stopped it would stop the files opening.
-  return [`script-src 'self' ${inline.join(' ')}`.trim(), "base-uri 'none'"].join('; ');
+  return [`script-src 'self' ${inline.join(' ')}`.trim(), "base-uri 'none'", FRAME_ANCESTORS].join('; ');
 }
+
+/**
+ * Who may put these pages inside a frame of their own.
+ *
+ * Nobody said, so anybody could: any page on the web could load the editor
+ * into an invisible frame over a button of its own and have the click land on
+ * "Delete variation" instead — the editor is on loopback with no password, so
+ * the frame opens already signed in to the whole save.
+ *
+ * The editor itself (`'self'`), and extension pages, which is where the
+ * browser extension shows it in a side panel. By scheme rather than by id: an
+ * unpacked extension's id is derived from the folder it was loaded from, so it
+ * is different on every machine, and an extension already holds host access
+ * to loopback — it can read and write the save directly, so framing it gives
+ * one nothing it did not have. What this shuts out is ordinary web pages.
+ *
+ * Chrome's PDF viewer is an extension too, and is the frame the typeset files
+ * open in; it is covered by the same scheme.
+ */
+export const FRAME_ANCESTORS = "frame-ancestors 'self' chrome-extension:";

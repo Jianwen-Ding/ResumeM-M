@@ -151,7 +151,23 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 .jobs-chip.hidden { display: none; }
 .jobs-chip.hidden + .status { margin-left: auto; }
 
-.status { color: var(--muted); font-size: 12px; max-width: 40ch; text-align: right; }
+/* One line, cut short with an ellipsis; its title holds the rest. It gives up
+   its room before the tabs give up any of theirs — it used to wrap to three
+   lines and squeeze the tabs until Voice & AI was cut off. The shrink is
+   shared in proportion to it, so it is large enough that the tabs' share
+   rounds to nothing: at 1000 times, a long status still took 0.6px from the
+   tabs at 1280. */
+.status {
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 40ch;
+  min-width: 0;
+  flex-shrink: 100000;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
 .status.err { color: var(--bad); }
 
 .tab { display: none; padding: 14px 16px 40px; }
@@ -416,8 +432,8 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 }
 .live.working { color: var(--accent); }
 .live.working::before { background: currentColor; animation: live-pulse 1s ease-in-out infinite; }
-.live.bad { color: var(--bad); }
-.live.bad::before { background: currentColor; }
+.live.bad, .live.offline { color: var(--bad); }
+.live.bad::before, .live.offline::before { background: currentColor; }
 
 @keyframes live-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -728,12 +744,6 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .chip.voice-flag.on { background: var(--accent-soft); border-color: transparent; color: #174ea6; }
 .chip.voice-flag.on:hover { background: #d2e3fc; }
 .chip.voice-flag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button.tiny.pinned {
-  background: var(--accent-soft);
-  border-color: #c6d4f2;
-  color: #174ea6;
-  font-weight: 550;
-}
 
 .note { color: var(--muted); font-size: 12px; margin-top: 4px; font-style: italic; }
 
@@ -822,6 +832,10 @@ td.mono { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: v
 }
 .mini-card .row1 { display: flex; align-items: baseline; gap: 8px; }
 .mini-card .row1 b { font-size: 13px; }
+/* A title is a flex item, which will not shrink below its longest word; a
+   letter titled with a long role pushed the Letters tab 34px past a 320px
+   side panel. Let it shrink and break. */
+.mini-card .row1 > b { min-width: 0; overflow-wrap: anywhere; }
 /* A preview is a first glance, not the text. Clipped flat it reads as a bug —
    a sentence that stops mid-word — so the last line fades out instead, which
    is the one shape everyone reads as "there is more of this". */
@@ -1835,15 +1849,18 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 
 
 /*
- * A resume on its way out. Amber rather than red: it is not an error, and it
- * is not urgent — it says "this will go by itself unless you keep it", and
+ * What the resume is — base, kept, or temporary — said quietly beside the
+ * button that changes it (#btn-base, which says what pressing it does). Not a
+ * button: it looked like one when it was one, and read as a status either way.
+ *
+ * A resume on its way out is amber rather than red: it is not an error, and
+ * it is not urgent — it says "this will go by itself unless you keep it", and
  * the button beside it is how you keep it.
  */
-.tiny.temporary {
-  border-color: #e0a800;
-  color: #8a6400;
-  background: #fff8e6;
-}
+.tier-state { color: var(--muted); font-size: var(--t-sm); white-space: nowrap; }
+.tier-state[hidden] { display: none; }
+.tier-state.pinned { color: #174ea6; font-weight: 550; }
+.tier-state.temporary { color: #8a6400; }
 
 /*
  * What the AI has been running.
@@ -1949,3 +1966,351 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 }
 .jobs-chip.peek:hover { color: var(--accent); border-color: var(--accent); }
 .jobs-chip.peek:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---- Narrow: the builder at the width of a side panel ----
+ *
+ * The browser extension shows this editor in a panel 320–500px wide, and a
+ * narrow window is the same case. Everything here is under one query and
+ * none of it applies wide; the switches it answers to are set by compact.js.
+ *
+ * Density rather than removal: the same controls, closer together, with
+ * nothing smaller than a comfortable 32px to press, and the type left at the
+ * sizes the wide layout reads at.
+ */
+.toolbar-more { display: contents; }
+/* Wide, the toolbar reads as it always did — the picker, what the resume is,
+   whether it saved, the actions, Undo and Redo, then + Entry at the far end —
+   though Undo and Redo sit after the More group in the markup (they stay on
+   the bar when More is a menu). */
+#resume-select { order: -2; }
+/* What the resume is sits with the other things the bar says about it, by
+   the picker; the button that changes it leads the actions. */
+#tier-state { order: -1; }
+#toolbar-more > .grow, #btn-add-entry { order: 1; }
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+  background: var(--panel);
+  gap: 2px;
+}
+.segmented button {
+  border: 0;
+  padding: 4px 12px;
+  font-size: var(--t-sm);
+  color: var(--muted);
+  background: none;
+}
+.segmented button[aria-pressed="true"] { background: var(--accent-soft); color: #174ea6; }
+button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea6; }
+/* After the rules above, which give these a display of their own. */
+.narrow-only { display: none; }
+
+@media (max-width: 640px) {
+  /* The header: two short rows that scroll away, rather than one wide row
+     that sticks and pushes the page sideways. The tabs scroll within
+     themselves. */
+  header {
+    position: static;
+    height: auto;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    padding: 6px 10px;
+  }
+  h1 { font-size: var(--t-base); }
+  nav {
+    order: 10;
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    gap: 2px;
+  }
+  nav::-webkit-scrollbar { display: none; }
+  nav button { padding: 6px 11px; flex: none; min-height: 32px; }
+  #project-chip { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
+  .jobs-chip { padding: 4px 10px; }
+  /* Floated at the bottom corner, as in the side panel, and wrapped whole:
+     a row of its own in the header pushed the toolbar down each time
+     something was said, and back up when it cleared. */
+  .status {
+    position: fixed;
+    right: 8px;
+    bottom: 8px;
+    z-index: 45;
+    max-width: calc(100vw - 16px);
+    white-space: normal;
+    text-align: left;
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    background: var(--ink);
+    color: #fff;
+    box-shadow: var(--shadow-md);
+  }
+  .status.err { background: var(--bad); color: #fff; }
+  .status:empty { display: none; }
+
+  .tab { padding: 8px 8px 32px; }
+
+  /* The toolbar: the row that stays on screen is the resume, whether it has
+     saved, and the switches; the rest is behind More. */
+  .sticky-toolbar {
+    top: 0;
+    gap: 6px;
+    padding: 6px 0;
+    margin: 0 -8px 6px;
+    padding-left: 8px;
+    padding-right: 8px;
+    box-shadow: 0 1px 0 var(--line);
+  }
+  .sticky-toolbar::before { content: ""; flex-basis: 100%; height: 0; order: 4; }
+  .narrow-only { display: inline-flex; }
+  #resume-select { order: 1; flex: 1 1 120px; min-width: 0; max-width: none; min-height: 32px; }
+  #narrow-view { order: 2; }
+  #btn-more { order: 3; }
+  #save-state { order: 5; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; }
+  #live-state { order: 6; }
+  #btn-focus { order: 7; }
+  #btn-undo, #btn-redo { order: 8; }
+  .sticky-toolbar button, .segmented { min-height: 32px; }
+  .segmented button { min-height: 26px; }
+
+  /*
+   * More: a menu that floats over the page under its button, rather than
+   * rows that push the resume down. It closes on Escape, a click anywhere
+   * else, or once something in it is chosen (compact.js).
+   */
+  .toolbar-more {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 8px;
+    z-index: 40;
+    flex-direction: column;
+    align-items: stretch;
+    min-width: 190px;
+    max-width: calc(100vw - 16px);
+    max-height: min(420px, calc(100vh - 64px));
+    overflow-y: auto;
+    padding: 6px 0;
+    background: var(--panel);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+  }
+  .sticky-toolbar.more-open .toolbar-more { display: flex; }
+  #btn-more[aria-expanded="true"] { background: var(--accent-soft); color: #174ea6; border-color: transparent; }
+  #toolbar-more > button {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    width: 100%;
+    min-height: 36px;
+    padding: 6px 16px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    color: var(--ink-soft);
+    font-size: var(--t-md);
+    text-align: left;
+  }
+  #toolbar-more > button:hover { background: var(--state-hover); color: var(--ink); }
+  #toolbar-more > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #toolbar-more > button.danger { color: var(--bad); }
+  #toolbar-more > button.danger:hover { background: rgba(217, 48, 37, .08); }
+  #toolbar-more > button[aria-expanded="true"] { background: var(--accent-soft); color: #174ea6; }
+  #toolbar-more > button:disabled:hover { background: none; }
+  /* What the resume is, as a quiet line over the button that changes it. */
+  #toolbar-more > #tier-state { padding: 4px 16px 0; }
+  /* What the resume is and the how-to, then what can be done with it. */
+  .toolbar-more > #btn-save-as { border-top: 1px solid var(--line-soft); margin-top: 4px; }
+  .toolbar-more .grow { display: none; }
+
+  /* One column at a time. The other is hidden, not removed, so nothing in it
+     is lost by looking; the toolbar stays in both. */
+  body:not([data-view="preview"]) .pane-right { display: none; }
+  body[data-view="preview"] .pane-left > :not(.sticky-toolbar) { display: none; }
+  .split { gap: 0; }
+  .pane-right { height: auto; }
+  .resume-preview-column > .preview-frame { height: calc(100vh - 150px); min-height: 280px; flex: none; }
+  .pdf-pages { padding: 6px; }
+  .pdf-pages.zoomed { align-items: flex-start; }
+  .pdf-pages.zoomed .pdf-page { max-width: none; }
+  .preview-zoom {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 4;
+    background: var(--panel);
+    box-shadow: var(--shadow-sm);
+  }
+  .preview-zoom:hover { background: var(--panel); }
+
+  /* Focus: the entry being worked in, whole; every other one its heading. */
+  body.focus-mode #editor .entry:not(.focus-active):not(.off) > :not(.entry-head):not(.head) { display: none; }
+  body.focus-mode #editor .entry:not(.focus-active):not(.off) { padding-top: 8px; padding-bottom: 8px; cursor: pointer; }
+  body.focus-mode #editor .entry:not(.focus-active):not(.off) :is(.entry-head, .head) { margin-bottom: 0; }
+  /* The two lines of how-to behind "?"; they are the same every time. */
+  body:not(.tips-open) #resume-view-note, body:not(.tips-open) .editor-interaction-hint { display: none; }
+  #resume-view-note, .editor-interaction-hint { margin: 0 0 6px; }
+
+  /*
+   * How it fits, and the notes that come with a compile, as one line that
+   * opens when tapped: "Fits on one page — room for about 3 more lines",
+   * then a count of what is behind it. A warning with something to do about
+   * it stays out, one line with its button.
+   */
+  #fit { padding: 6px 10px; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #fit[data-notes]::before {
+    content: attr(data-notes);
+    float: right;
+    margin-left: 8px;
+    font-size: var(--t-xs);
+    font-weight: 500;
+    opacity: .8;
+  }
+  body:not(.fit-open) #fit .squeezed { display: none; }
+  body.fit-open #fit { white-space: normal; }
+  body.fit-open #fit[data-notes]::before { content: "Less"; }
+  body:not(.fit-open) #warnings > div:not(:has(button)) { display: none; }
+  #warnings { margin-bottom: 6px; }
+  .warnings .orphan .what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .hint { font-size: var(--t-sm); }
+  .fit { padding: 8px 10px; }
+
+  /* Entries: the heading wraps instead of crushing the name into a column
+     one word wide. Its actions go on the line under the name and stay
+     there: shown on hover they would move the entry every time the pointer
+     crossed it, and a panel is as often touched or tabbed through. */
+  .entry { padding: 10px; }
+  .entry-head { flex-wrap: wrap; row-gap: 2px; }
+  .entry-head .title { flex: 1 1 55%; min-width: 0; overflow-wrap: anywhere; }
+  .entry-head .grow { display: none; }
+  .entry-actions { opacity: 1; margin-left: auto; }
+  .meta-row { gap: 4px 8px; }
+  /* A section's name, its order and "+ Add entry" wrap under each other
+     rather than pushing the page sideways at 320px. */
+  .section-heading { flex-wrap: wrap; row-gap: 2px; margin: 14px 0 6px; }
+  .section-heading .rule { flex: 1 1 24px; }
+  .section-heading select { max-width: 100%; min-width: 0; }
+  .profile-grid { grid-template-columns: 1fr; }
+
+  /* The other tabs' two-column grids, one column by now: a grid column is
+     as wide as its widest word unless told otherwise, and the Workspace and
+     Letters tabs pushed the whole page 100px sideways at 320px. */
+  .split-even, .workspace-split, .apps-split, .history-split, .assets-layout { grid-template-columns: minmax(0, 1fr); }
+  .split-even > *, .workspace-split > *, .apps-split > *, .history-split > *, .assets-layout > * { min-width: 0; }
+  /* Rows of a heading and its buttons wrap; lists of cards, pickers holding
+     a whole resume's name, shrink to the column they are in. */
+  .block-head, .mini-card .row1 { flex-wrap: wrap; }
+  .card-list { grid-template-columns: minmax(0, 1fr); }
+  .toolbar select, .draft-editor select { max-width: 100%; min-width: 0; }
+  /* The tracker scrolls sideways inside itself; its words stay whole. */
+  #apps-wrap td { overflow-wrap: break-word; }
+
+  /* Dialogs fit the panel, and their buttons wrap rather than run off it. */
+  .modal-body { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .modal-body > h2 { padding: 12px 14px 8px; }
+  .modal-scroll { padding: 10px 14px; }
+  .modal-actions { flex-wrap: wrap; padding: 9px 14px; }
+  .modal-actions .hint { flex: 1 1 100%; }
+}
+
+/* The live dot without its word, where the word is what squeezed "All
+   changes saved" down to its first letter. The title still says it. */
+@media (max-width: 420px) {
+  #live-state { font-size: 0; gap: 0; padding: 4px 8px; }
+}
+/* At 320-380px the switches give the resume's name back some room: it was
+   down to "Data Scie". */
+@media (max-width: 380px) {
+  .sticky-toolbar { gap: 4px; }
+  .segmented button { padding: 4px 8px; }
+  .sticky-toolbar button.tiny { padding: 4px 7px; }
+}
+
+/*
+ * Inside the extension's side panel, which is for one resume.
+ *
+ * The panel's own bar names the resume and switches it, says when a
+ * different save is open, and opens the whole editor in a tab. So the
+ * editor's header — the app's name, the tabs, the save chip, the AI chip —
+ * and its own resume picker are not drawn here at all: in a 360px panel they
+ * were a third of the height before any of the resume. What the header still
+ * has to say (a status line, AI work under way) floats at the bottom corner,
+ * so it appearing and going does not move the page.
+ *
+ * At every width, because a panel pulled wide is still a panel.
+ */
+.embedded header {
+  position: fixed;
+  top: auto;
+  left: auto;
+  right: 8px;
+  bottom: 8px;
+  height: auto;
+  max-width: calc(100vw - 16px);
+  padding: 0;
+  gap: 6px;
+  flex-direction: column;
+  align-items: flex-end;
+  background: none;
+  border: 0;
+  z-index: 45;
+  pointer-events: none;
+}
+.embedded header > * { pointer-events: auto; }
+.embedded h1, .embedded nav, .embedded #project-chip, .embedded #ai-peek-chip, .embedded #resume-select { display: none; }
+.embedded header .jobs-chip { margin-left: 0; box-shadow: var(--shadow-md); }
+.embedded .status {
+  /* In the floating header already, under the AI chip; not floated again. */
+  position: static;
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: #fff;
+  box-shadow: var(--shadow-md);
+}
+.embedded .status.err { background: var(--bad); }
+.embedded .status:empty { display: none; }
+.embedded .sticky-toolbar { top: 0; }
+.embedded .pane-right { top: 8px; height: calc(100vh - 16px); }
+.embedded .tab { padding-top: 8px; }
+
+@media (max-width: 640px) {
+  /* One row: whether it saved, the view, Focus, Undo, Redo, More — with
+     More's menu floating over the resume, so opening it moves nothing. */
+  .embedded .sticky-toolbar::before { display: none; }
+  .embedded .sticky-toolbar { gap: 4px; padding-top: 4px; padding-bottom: 4px; }
+  .embedded #save-state { order: 1; flex: none; }
+  .embedded #live-state { order: 2; font-size: 0; gap: 0; padding: 4px 6px; }
+  .embedded #narrow-view { order: 3; }
+  .embedded #btn-focus { order: 4; }
+  .embedded #btn-undo, .embedded #btn-redo { order: 5; }
+  .embedded #btn-more { order: 7; margin-left: auto; }
+  .embedded .segmented button { padding: 4px 8px; }
+  .embedded .sticky-toolbar button.tiny { padding: 4px 7px; }
+  /* Said short: the whole sentence is its title, and "Not saved — …" keeps
+     every word, because that one is asking for something. */
+  .embedded #save-state.saved { font-size: 0; }
+  .embedded #save-state.saved::after { content: "Saved"; font-size: var(--t-sm); }
+  .embedded #btn-undo, .embedded #btn-redo { font-size: 0; min-width: 32px; }
+  .embedded #btn-undo::before { content: "\21B6"; font-size: 17px; line-height: 1; }
+  .embedded #btn-redo::before { content: "\21B7"; font-size: 17px; line-height: 1; }
+  .embedded #btn-more { font-size: 0; min-width: 32px; }
+  .embedded #btn-more::before { content: "\22EF"; font-size: 18px; line-height: 1; }
+  .embedded .tab { padding-top: 0; }
+}
+/* A 320px panel keeps the same single row, a little closer together. */
+@media (max-width: 340px) {
+  .embedded .sticky-toolbar { gap: 2px; }
+  .embedded .segmented button { padding: 4px 6px; }
+  .embedded .sticky-toolbar button.tiny { padding: 4px 5px; }
+  .embedded #btn-undo, .embedded #btn-redo, .embedded #btn-more { min-width: 28px; }
+}

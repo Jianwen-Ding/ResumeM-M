@@ -17,9 +17,16 @@ import { insertNextTo, moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
 import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 import { markupFragment, plainMarkup } from './markup.js';
+import { setupCompact } from './compact.js';
+import { setupEmbed } from './embed.js';
 let activeProject;
+/** The narrow layout's switches, and the side panel's line to this page. See compact.js, embed.js. */
+let compact = null;
+let embed = null;
 let assetUI;
 const inlineSaves = new Set();
+/** Lines edited in place whose save the server never answered, waiting to be sent again. See `editableLine`. */
+const inlineRetrying = new Set();
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -220,15 +227,34 @@ function draftedFrom(kind) {
  * overlays, and those are what the next auto-save writes whole: one tick
  * here after coming back wrote the extension's changes away. Leaving the tab
  * already writes everything pending, so on return there is nothing of this
- * tab's to lose — and where something is still pending, nothing is done.
+ * tab's to lose — and where something is still pending, nothing is done,
+ * unless the resume it is pending on has been deleted: see `showWhatIsLeft`.
  */
 async function refreshOnReturn() {
-  if (!state.store || state.masterView || state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
-  const before = JSON.stringify(resumeById(state.resumeId) ?? null);
+  if (!state.store || state.masterView) return;
+  const pending = () => Boolean(state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0);
   const had = state.resumeId;
-  await loadStore();
+  const open = resumeById(had);
+  const before = JSON.stringify(open ?? null);
+  // Read even with an edit pending, if only to see whether its resume is
+  // still there: that edit's save would put a deleted resume back.
+  const fresh = await readStoreUncrossed();
+  if (!fresh) return;
+  if (had && state.resumeId === had && !state.masterView && !fresh.resumes.some((r) => r.id === had)) {
+    // Nothing of this page's was written while it was read, so an edit still
+    // pending is one waiting out the auto-save's pause, and it is about the
+    // resume that has gone.
+    const dropped = Boolean(state.dirty || autoSaveTimer);
+    adoptStore(fresh);
+    showWhatIsLeft(open, { dropped });
+    return;
+  }
   // Something started while the store was being read: that edit is newer.
-  if (state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  // Asked before the read is put in place of the store, not after: asked
+  // after, standing aside only spared the screen, and the editor went on
+  // holding a store from before whatever was saved while it was out.
+  if (pending()) return;
+  adoptStore(fresh);
   if (state.resumeId !== had || JSON.stringify(resumeById(state.resumeId) ?? null) === before) return;
   // Everything the overlays held was written on the way out; what is stored
   // now is newer than they are.
@@ -236,6 +262,68 @@ async function refreshOnReturn() {
   render();
   scheduleRender();
   setStatus('Updated with changes made in another tab.');
+}
+
+/**
+ * The resume that was open has been deleted elsewhere — another tab, the
+ * CLI, the extension's card throwing away its copy — and `adoptStore` has
+ * already moved `state.resumeId` onto a resume that is still there.
+ *
+ * Moving the id was all that happened. The screen went on showing the
+ * deleted resume, its dropdown and address still named it, the side panel
+ * was told nothing, and the next tick on that screen was written into the
+ * resume the id had moved to, which nobody had touched. So the move is made
+ * whole here, as `leaveResume` makes one: drawn, addressed, told, and said.
+ *
+ * `dropped`: an edit to the deleted resume had not been saved. It is not
+ * written anywhere — its own save would put the resume back, and it means
+ * nothing on any other one — and it is said that it was not kept.
+ */
+function showWhatIsLeft(gone, { dropped = false } = {}) {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  clearTimeout(renderTimer);
+  renderToken++;
+  clearEdits();
+  setSaveState('saved');
+  if (/^#resumes\//.test(location.hash)) {
+    const here = state.masterView
+      ? `${location.pathname}${location.search}`
+      : state.fromDraftId
+        ? `#resumes/${encodeURIComponent(state.resumeId)}/from/${encodeURIComponent(state.fromDraftId)}`
+        : `#resumes/${encodeURIComponent(state.resumeId)}`;
+    // `window.` because `history` in this file is the undo stack. Replaced
+    // rather than assigned, which would fire `hashchange` and move again.
+    window.history.replaceState(null, '', here);
+  }
+  render();
+  scheduleRender();
+  const now = state.masterView ? null : resumeById(state.resumeId);
+  const name = gone ? `“${gone.label ?? gone.id}”` : 'That resume';
+  setStatus(
+    `${name} was deleted elsewhere${dropped ? ', so your unsaved change to it was not kept' : ''}; ` +
+      `showing ${now ? `“${now.label ?? now.id}”` : 'the Master Document'}.`,
+    dropped,
+  );
+}
+
+/**
+ * A save of a resume that the server no longer has: deleted elsewhere while
+ * the edit was waiting, or while its save was out. Refused there
+ * (`existing=1`) rather than written, and the edit goes the way of one found
+ * pending by `refreshOnReturn`.
+ */
+async function resumeGone(spec) {
+  const gone = resumeById(spec.id) ?? spec;
+  const onScreen = !state.masterView && state.resumeId === spec.id;
+  await loadStore();
+  if (onScreen && state.resumeId !== spec.id) {
+    showWhatIsLeft(gone, { dropped: true });
+    return;
+  }
+  if (!state.dirty) setSaveState('saved');
+  render();
+  setStatus(`“${gone.label ?? gone.id}” was deleted elsewhere, so your change to it was not kept.`, true);
 }
 
 /** Forget every unsaved edit — used when switching resumes. */
@@ -256,14 +344,22 @@ function clearEdits() {
  * ------------------------------------------------------------------ */
 
 let statusTimer;
+/**
+ * A word in the header. One line there, cut short with an ellipsis when it is
+ * long, so a long name in "Renamed to …" or a long error does not squeeze the
+ * tabs; the whole sentence is its title, and all of it is still the text a
+ * screen reader is given (the element is a live region). Narrow, it floats at
+ * the bottom instead, where it can wrap without moving the toolbar.
+ */
 function setStatus(text, isError = false) {
   const s = $('#status');
   s.textContent = text;
+  s.title = text;
   s.className = isError ? 'status err' : 'status';
   clearTimeout(statusTimer);
   if (text && !isError) {
     statusTimer = setTimeout(() => {
-      if (s.textContent === text) s.textContent = '';
+      if (s.textContent === text) s.textContent = s.title = '';
     }, 3500);
   }
 }
@@ -345,6 +441,14 @@ async function fetchKeptAlive(url, init) {
   return plainly();
 }
 
+/**
+ * Every write this page has sent, and how many of them are still out. A read
+ * of the whole store that one of them crossed may predate it: see
+ * `readStoreUncrossed`.
+ */
+let writesSent = 0;
+let writesOut = 0;
+
 async function api(path, options = {}) {
   /*
    * Undo is recorded here, and only here.
@@ -384,14 +488,22 @@ async function api(path, options = {}) {
     ...options,
     headers: { 'Content-Type': 'application/json', ...(activeProject ? { 'X-RMM-Project': activeProject } : {}), ...(options.headers ?? {}) },
   };
+  // Counted, so a read of the whole store can tell a write crossed it. See
+  // `readStoreUncrossed`.
+  const writes = method !== 'GET';
+  if (writes) {
+    writesSent++;
+    writesOut++;
+  }
   let res;
   try {
     res = options.keepalive ? await fetchKeptAlive(url, init) : await fetch(url, init);
   } finally {
     if (order) unsettledOrders.delete(Number(order));
+    if (writes) writesOut--;
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+  if (!res.ok) throw Object.assign(new Error(body.error ?? `${res.status} ${res.statusText}`), { status: res.status });
 
   /*
    * Recorded here, from the response, rather than from the store on the next
@@ -1039,6 +1151,8 @@ function markDirty(message = 'Changed', { recompile = true } = {}) {
 
 const AUTOSAVE_DELAY_MS = 900;
 const COMMIT_IDLE_MS = 15_000;
+/** How often a save or a compile the server did not answer is asked again. */
+const UNREACHABLE_RETRY_MS = 4000;
 
 let autoSaveTimer = null;
 let commitTimer = null;
@@ -1141,7 +1255,9 @@ async function autoSave({ leaving = false } = {}) {
        * 64KB a page may have in keepalive requests at once; the draft's save
        * sends more than this and has always had the flag.
        */
-      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}`, {
+      // `existing=1`: over the resume as it is, never a new one. A save of a
+      // resume deleted elsewhere would otherwise put it back. See `resumeGone`.
+      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}&existing=1`, {
         method: 'PUT',
         body: JSON.stringify(spec),
         keepalive: true,
@@ -1158,8 +1274,28 @@ async function autoSave({ leaving = false } = {}) {
     } catch (err) {
       // Nor does it failing, when a newer save carrying this edit has landed.
       if (order < (landedOrder.get(spec.id) ?? 0)) return;
+      if (err.status === 404) {
+        await resumeGone(spec).catch(() => setSaveState('failed', err.message));
+        return;
+      }
       state.dirty = true; // it did not land; try again on the next edit
-      setSaveState('failed', err.message);
+      if (!unreachable(err)) {
+        setSaveState('failed', err.message);
+        return;
+      }
+      /*
+       * The server is not there to refuse it: stopped, or restarting. Waiting
+       * for the next edit left the chip at "Not saved" with nothing on the way
+       * to change it, over an edit that never saved once the server was back.
+       * So it is asked again on a timer, which an edit made meanwhile replaces.
+       */
+      setSaveState('failed', 'can’t reach the server. Retrying…');
+      if (!autoSaveTimer) {
+        autoSaveTimer = setTimeout(() => {
+          autoSaveTimer = null;
+          autoSave();
+        }, UNREACHABLE_RETRY_MS);
+      }
     }
   })();
 
@@ -1302,6 +1438,11 @@ function flushEditsLeaving() {
 function setSaveState(mode, detail) {
   const chip = $('#save-state');
   if (!chip) return;
+  // The resume saving says nothing about a line edited in place that has not.
+  if (mode === 'saved' && inlineRetrying.size > 0) {
+    mode = 'failed';
+    detail = 'can’t reach the server. Retrying…';
+  }
   chip.className = `save ${mode}`;
   chip.textContent =
     mode === 'saving'
@@ -1311,6 +1452,7 @@ function setSaveState(mode, detail) {
         : mode === 'failed'
           ? `Not saved — ${detail ?? 'the server did not accept it'}`
           : 'Unsaved changes';
+  embed?.announce();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1388,19 +1530,29 @@ async function inEntryLane(id, run, { whole = false } = {}) {
   try {
     return await mine;
   } finally {
-    await loadStore();
-    /*
-     * The server's own copy, read back, so anything a differently-shaped write
-     * did to this entry is what the next edit in the lane rebases onto.
-     *
-     * And the lane is only released after that reload, not before it. `state
-     * .store` still shows the pre-write entry for the length of that request,
-     * so an edit started inside that window would otherwise open a fresh lane,
-     * find nothing to rebase onto, and PUT the stale entry whole — undoing the
-     * write that had just landed.
-     */
-    lane.server = state.store?.entries?.find((e) => e.id === id) ?? lane.server;
-    if (--lane.pending === 0 && entryWrites.get(id) === lane) entryWrites.delete(id);
+    try {
+      await loadStore();
+      /*
+       * The server's own copy, read back, so anything a differently-shaped write
+       * did to this entry is what the next edit in the lane rebases onto.
+       *
+       * And the lane is only released after that reload, not before it. `state
+       * .store` still shows the pre-write entry for the length of that request,
+       * so an edit started inside that window would otherwise open a fresh lane,
+       * find nothing to rebase onto, and PUT the stale entry whole — undoing the
+       * write that had just landed.
+       */
+      lane.server = state.store?.entries?.find((e) => e.id === id) ?? lane.server;
+    } finally {
+      /*
+       * Released even when that reload throws, as it does with the server
+       * down. It used to stay held for good, keeping the copy it had last seen
+       * as the base of every later edit of the entry, so a change made to the
+       * entry elsewhere in the meantime was rebased away by the next edit here.
+       * entry-lane-unreachable.test.js.
+       */
+      if (--lane.pending === 0 && entryWrites.get(id) === lane) entryWrites.delete(id);
+    }
   }
 }
 
@@ -1743,7 +1895,12 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
   node.append(display(text));
 
   let editing = false;
+  let retryTimer = null;
   const stop = (commit) => {
+    // Enter, Escape or a click away replaces a retry still waiting.
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    inlineRetrying.delete(node);
     if (!editing) return;
     editing = false;
     node.contentEditable = 'false';
@@ -1753,7 +1910,12 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
       const save = Promise.resolve().then(() => onCommit(next));
       inlineSaves.add(save);
       save
-        .catch((err) => {
+        .then(() => {
+          // Landed, and no other line is still waiting: the chip can say so again.
+          if (inlineRetrying.size === 0 && $('#save-state')?.classList.contains('failed') && !state.dirty && !autoSaveTimer) {
+            setSaveState('saved');
+          }
+        }, (err) => {
           /*
            * The sentence stays in the box it was typed in.
            *
@@ -1770,14 +1932,45 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
            * store answers, and pulling the caret out of whatever the person
            * has started doing since would be worse than the message alone.
            */
-          setStatus(`${err.message} The wording is still in the line — press Enter to try again.`, true);
+          const offline = unreachable(err);
+          setStatus(
+            offline
+              ? 'Can’t reach the server. The wording is still in the line, and is saved once the server is back.'
+              : `${err.message} The wording is still in the line — press Enter to try again.`,
+            true,
+          );
           if (!node.isConnected) return;
           editing = true;
           node.contentEditable = 'plaintext-only';
           node.classList.add('editing');
           node.textContent = next;
-          const busy = document.activeElement;
-          if (!busy || busy === document.body) node.focus();
+          if (!offline) {
+            const busy = document.activeElement;
+            if (!busy || busy === document.body) node.focus();
+            return;
+          }
+          /*
+           * The server is not there to refuse it. Waiting for Enter left
+           * "Failed to fetch" in the status line, the chip at "All changes
+           * saved", and the wording unsaved after the server was back. So the
+           * chip says so, and the line is committed again on a timer — with
+           * whatever it holds by then, so a correction made meanwhile is what
+           * lands. Not while it has the caret: that is somebody still typing,
+           * and their Enter or click away commits it. Focus is not taken back
+           * for the same reason, or the retry would never come.
+           */
+          inlineRetrying.add(node);
+          setSaveState('failed', 'can’t reach the server. Retrying…');
+          const retry = () => {
+            retryTimer = null;
+            if (!editing || !node.isConnected) {
+              inlineRetrying.delete(node);
+              return;
+            }
+            if (document.activeElement === node) retryTimer = setTimeout(retry, UNREACHABLE_RETRY_MS);
+            else stop(true);
+          };
+          retryTimer = setTimeout(retry, UNREACHABLE_RETRY_MS);
         })
         .finally(() => inlineSaves.delete(save));
     } else {
@@ -3231,7 +3424,9 @@ async function addAutofillField() {
 function renderEditor() {
   const editor = $('#editor');
   const carry = holdTyping(editor);
+  const scrolled = window.scrollY;
   drawEditor(editor);
+  if (window.scrollY !== scrolled) window.scrollTo(window.scrollX, scrolled);
   carry();
 }
 
@@ -5552,7 +5747,14 @@ function setLive(mode) {
   const chip = $('#live-state');
   if (!chip) return;
   chip.className = `live ${mode}`;
-  chip.textContent = mode === 'working' ? 'Updating…' : mode === 'bad' ? 'Compile failed' : 'Live';
+  chip.textContent =
+    mode === 'working'
+      ? 'Updating…'
+      : mode === 'bad'
+        ? 'Compile failed'
+        : mode === 'offline'
+          ? 'Can’t reach server'
+          : 'Live';
 }
 
 /**
@@ -5633,6 +5835,7 @@ async function renderPreview() {
     // A newer edit already asked for a newer compile; this answer is stale.
     if (token !== renderToken) return;
 
+    $('#preview-empty').textContent = 'Compiling your resume…';
     showPdf($('#preview-pane'), asWritten.pdfUrl);
     showWarnings(asWritten);
 
@@ -5661,9 +5864,26 @@ async function renderPreview() {
     showWarnings(fitted);
   } catch (err) {
     if (token !== renderToken) return;
-    setLive('bad');
     fit.className = 'fit bad';
-    fit.textContent = err.message;
+    if (!unreachable(err)) {
+      setLive('bad');
+      fit.textContent = err.message;
+      return;
+    }
+    /*
+     * The server stopped. This used to say "Failed to fetch" under a pane
+     * still reading "Compiling your resume…", and stay that way after the
+     * server was back, since only an edit asks for a compile. So it says what
+     * happened and asks again on a timer, which an edit made meanwhile
+     * replaces (see `scheduleRender`).
+     */
+    setLive('offline');
+    fit.textContent = 'Can’t reach the server. Retrying every few seconds…';
+    $('#preview-empty').textContent = 'Can’t reach the server. The preview will appear once it is back.';
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      renderPreview();
+    }, UNREACHABLE_RETRY_MS);
   }
 }
 
@@ -6800,13 +7020,18 @@ async function openApplication(id) {
   loadApplications().catch((err) => setStatus(err.message, true));
 }
 
+/** A request the server never answered, in the words each browser uses for it. */
+function unreachable(err) {
+  return /failed to fetch|networkerror|load failed/i.test(err?.message ?? '');
+}
+
 /**
  * Why a write did not land, as the end of a sentence. The browser's own words
  * for a server that did not answer are replaced; the server's reasons are
  * sentences already, full stop and all.
  */
 function whyNotSaved(err) {
-  return /failed to fetch|networkerror|load failed/i.test(err.message)
+  return unreachable(err)
     ? 'ResumeM-M could not be reached'
     : err.message.replace(/[\s.]+$/, '');
 }
@@ -7243,8 +7468,23 @@ async function saveDraftNow(message, { leaving = false } = {}) {
         setDraftSaveState('failed', 'this application is no longer in the workspace');
         setStatus(`${DRAFT_GONE} It was finished or discarded somewhere else; what you typed is still on screen to copy.`, true);
         loadDrafts().catch(() => undefined);
-      } else {
+      } else if (!unreachable(err)) {
         setDraftSaveState('failed', err.message);
+      } else {
+        /*
+         * The server is not there to refuse it. Waiting for the next keystroke
+         * left "Not saved — Failed to fetch" over a letter that never saved
+         * once the server was back, as the resume's chip did (see `autoSave`).
+         * So it is asked again on a timer, which a keystroke made meanwhile
+         * replaces, and which sends the draft as it is by then.
+         */
+        setDraftSaveState('failed', 'can’t reach the server. Retrying…');
+        if (draftSave.current === draft && !draftSave.timer) {
+          draftSave.timer = setTimeout(() => {
+            draftSave.timer = null;
+            saveDraftNow().catch(() => {});
+          }, UNREACHABLE_RETRY_MS);
+        }
       }
       throw err;
     })
@@ -7364,10 +7604,8 @@ function renderDraft(draft) {
 
     // Drawn by pdf.js, so retypesetting mid-sentence swaps in a finished page
     // instead of blinking the letter away while a new PDF loads.
-    const letterEmpty = el('div', {
-      className: 'preview-empty',
-      textContent: 'Type a first sentence and it appears here, set like your resume.',
-    });
+    const LETTER_EMPTY = 'Type a first sentence and it appears here, set like your resume.';
+    const letterEmpty = el('div', { className: 'preview-empty', textContent: LETTER_EMPTY });
     const letterPane = el('div', { className: 'preview-frame letter-preview' }, [letterEmpty]);
     const letterFit = el('div', { className: 'fit idle', textContent: 'Not compiled yet.' });
     /*
@@ -7388,6 +7626,7 @@ function renderDraft(draft) {
       if (!draft.coverLetter.body.trim()) {
         // The whole page goes, not just the class over it.
         letterToken++;
+        letterEmpty.textContent = LETTER_EMPTY;
         clearPdf(letterPane);
         letterFit.className = 'fit idle';
         letterFit.textContent = 'Nothing written yet.';
@@ -7410,6 +7649,7 @@ function renderDraft(draft) {
           }),
         });
         if (token !== letterToken) return; // a newer keystroke already asked
+        letterEmpty.textContent = LETTER_EMPTY;
         showPdf(letterPane, r.pdfUrl);
         liveChip.className = 'live ok';
         liveChip.textContent = 'Live';
@@ -7422,10 +7662,29 @@ function renderDraft(draft) {
         );
       } catch (err) {
         if (token !== letterToken) return;
-        liveChip.className = 'live bad';
-        liveChip.textContent = 'Compile failed';
         letterFit.className = 'fit bad';
-        letterFit.textContent = err.message;
+        if (!unreachable(err)) {
+          liveChip.className = 'live bad';
+          liveChip.textContent = 'Compile failed';
+          letterFit.textContent = err.message;
+          return;
+        }
+        /*
+         * The server stopped. As with the resume's preview (see
+         * `renderPreview`), this said "Failed to fetch" and stayed that way
+         * after the server was back, since only a keystroke asks for a
+         * compile. So it says what happened and asks again on a timer, which
+         * a keystroke made meanwhile replaces (see `scheduleLetter`), for
+         * this draft only while it is the one on screen.
+         */
+        liveChip.className = 'live offline';
+        liveChip.textContent = 'Can’t reach server';
+        letterFit.textContent = 'Can’t reach the server. Retrying every few seconds…';
+        letterEmpty.textContent = 'Can’t reach the server. The preview will appear once it is back.';
+        letterTimer = setTimeout(() => {
+          letterTimer = null;
+          if (draftSave.current === draft && letterPane.isConnected) compile();
+        }, UNREACHABLE_RETRY_MS);
       }
     };
 
@@ -10679,6 +10938,16 @@ function modalFocusable() {
 }
 
 /**
+ * Where the keyboard was when the dialog opened: the button that opened it,
+ * for `hideModal` to put it back on.
+ *
+ * Closing a dialog put focus nowhere — on <body> — whether it was Escape,
+ * Cancel or a successful Save, so a keyboard user who had just renamed a
+ * resume started again from the top of the page.
+ */
+let modalOpener = null;
+
+/**
  * Land the keyboard somewhere inside the dialog that was just opened, rather
  * than leaving it wherever it already was.
  *
@@ -10692,8 +10961,43 @@ function modalFocusable() {
  * failing that, the first focusable thing in the dialog.
  */
 function focusModal() {
+  const at = document.activeElement;
+  // A dialog opened in place of another one keeps the first one's way back.
+  if (!$('#modal').contains(at)) modalOpener = at && at !== document.body ? at : null;
   const typed = $('#modal-content').querySelector('input[type=text], textarea');
   setTimeout(() => (typed ?? modalFocusable()[0])?.focus(), 0);
+}
+
+/** Somewhere the keyboard can land: in the page, on screen, and switched on. */
+function canFocus(node) {
+  if (!node?.isConnected || node.disabled) return false;
+  for (let at = node; at?.nodeType === 1; at = at.parentElement) {
+    if (at.hidden || getComputedStyle(at).display === 'none') return false;
+  }
+  return true;
+}
+
+/**
+ * Back where the dialog came from. When that button is no longer on screen —
+ * a narrow More menu shuts once something in it is chosen, and Delete goes
+ * with the last variation but one — the nearest thing to it in the toolbar:
+ * More, which is where the item was, or failing that the resume picker.
+ */
+function returnFocus(from) {
+  const toolbar = $('#tab-resumes .sticky-toolbar');
+  const to = canFocus(from)
+    ? from
+    : from && toolbar?.contains(from)
+      ? [$('#btn-more'), $('#resume-select')].find(canFocus)
+      : null;
+  to?.focus({ preventScroll: true });
+}
+
+function hideModal() {
+  $('#modal').classList.add('hidden');
+  const from = modalOpener;
+  modalOpener = null;
+  returnFocus(from);
 }
 
 function showModal(title, content, { note = '', okLabel = 'Close', showCancel = false, cancelLabel = 'Cancel' } = {}) {
@@ -10711,14 +11015,58 @@ function showModal(title, content, { note = '', okLabel = 'Close', showCancel = 
   focusModal();
   return new Promise((resolve) => {
     $('#modal-ok').onclick = () => {
-      $('#modal').classList.add('hidden');
+      hideModal();
       resolve(true);
     };
     $('#modal-cancel').onclick = () => {
-      $('#modal').classList.add('hidden');
+      hideModal();
       resolve(false);
     };
   });
+}
+
+/** Inputs that are pressed or picked rather than typed in. Enter is theirs. */
+const NOT_TYPED = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'color', 'range']);
+
+/** When Enter last sent a dialog, and whether that press is still held. See `enterInModal`. */
+let enterSentAt = -Infinity;
+let enterHeld = false;
+
+/**
+ * Enter in a one-line field sends the dialog, as it would a form: the same as
+ * pressing its primary button, so the same checks answer it — a name another
+ * resume already has is refused and asked again, a form that saves waits.
+ *
+ * The dialog is a <div>, not a <form>, so nothing did this, and Rename, Save
+ * as and every other one-field dialog needed Tab, Tab, Enter to be finished.
+ * A textarea keeps Enter for a new line; Ctrl/Cmd+Enter sends from there. A
+ * button, a select or a checkbox does what it does with Enter already.
+ *
+ * Pressed twice quickly, or held, the rest is the same intention: dropped
+ * rather than sent again, or let through to the button focus has just gone
+ * back to, which would open the dialog again. Nor does the button that opened
+ * the dialog get it in the moment before focus moves in (see `focusModal`).
+ */
+function enterInModal(e) {
+  // Choosing characters in an input method, not asking to send.
+  if (e.isComposing || e.keyCode === 229) return;
+  // A fresh press: whatever sent the last dialog has been let go of.
+  if (!e.repeat) enterHeld = false;
+  const again = enterHeld || Date.now() - enterSentAt < 500;
+  const open = !$('#modal').classList.contains('hidden');
+  const at = e.target;
+  if (!open || !$('#modal').contains(at)) {
+    if (open || again) e.preventDefault();
+    return;
+  }
+  const typed = at.tagName === 'INPUT' && !NOT_TYPED.has(at.type);
+  if (!typed && !(at.tagName === 'TEXTAREA' && (e.ctrlKey || e.metaKey))) return;
+  // Also stops this keypress reaching the button focus goes back to on closing.
+  e.preventDefault();
+  if (again || e.repeat || $('#modal-ok').disabled) return;
+  enterSentAt = Date.now();
+  enterHeld = true;
+  $('#modal-ok').click();
 }
 
 function confirmModal(title, body) {
@@ -10792,7 +11140,7 @@ function form(title, fields, note, submit) {
     const close = (value) => {
       closed = true;
       $('#modal-ok').disabled = false;
-      $('#modal').classList.add('hidden');
+      hideModal();
       resolve(value);
     };
     $('#modal-ok').onclick = async () => {
@@ -10861,6 +11209,9 @@ function render() {
   $('#btn-rename-resume').hidden = state.masterView;
   // Not on the master, which is not a variation.
   $('#btn-delete-resume').hidden = state.masterView || (state.store.resumes ?? []).length < 2;
+  // Delete goes once one resume is left, and focus was put back on it when
+  // its dialog closed. Not left on a button that is no longer there.
+  if (document.activeElement?.hidden) returnFocus(document.activeElement);
   /*
    * The label only, not the whole button.
    *
@@ -10882,6 +11233,7 @@ function render() {
     : 'Select source content for this resume. Shared wording edits also update the master and other resumes that use it.';
   renderBaseButton();
   renderEditor();
+  embed?.announce();
 }
 
 /**
@@ -10890,31 +11242,42 @@ function render() {
  * A cycle rather than three buttons. There are three tiers and two of the
  * moves are rare — you mark a base once and leave it, and you promote a
  * temporary resume you turned out to want — so three controls in a toolbar
- * would be two pieces of permanent furniture for one occasional act. The
- * button says what the resume *is*; its title says what pressing it does.
+ * would be two pieces of permanent furniture for one occasional act.
+ *
+ * The button says what pressing it does; the quiet label beside it (#tier-state)
+ * says what the resume is. The button used to say "☆ Kept", which reads as a
+ * status — in the narrow More menu, a row reading "☆ Kept" among "Rename…"
+ * and "Delete variation" gave no hint that pressing it made the resume a base,
+ * and only the hover text, which a touch screen never shows, said so.
  */
 const TIER_LOOK = {
   base: {
     label: '★ Base',
-    className: 'tiny pinned',
+    className: 'tier-state pinned',
+    about: 'New resumes and tailored drafts start from this one.',
     next: 'extended',
-    title: 'New resumes and tailored drafts start from this one. Click to keep it without starting from it.',
+    action: 'Stop using as a base',
+    title: 'Keep it in this save, but stop starting new resumes and tailored drafts from it.',
     said: 'Now a base',
     undo: 'making this a base',
   },
   extended: {
     label: '☆ Kept',
-    className: 'tiny',
+    className: 'tier-state',
+    about: 'Kept in this save and never swept.',
     next: 'base',
-    title: 'Kept in this save and never swept. Click to make it one of the ones you build from.',
+    action: 'Make this a base',
+    title: 'Make it one of the resumes that new ones and tailored drafts start from.',
     said: 'Kept',
     undo: 'keeping this resume',
   },
   temporary: {
     label: '⌛ Temporary',
-    className: 'tiny temporary',
+    className: 'tier-state temporary',
+    about: 'Made for one posting, and swept a week after that posting is done.',
     next: 'extended',
-    title: 'Made for one posting, and swept a week after that posting is done. Click to keep it.',
+    action: 'Keep this resume',
+    title: 'Keep it in this save, so the sweep never deletes it.',
     said: 'Now temporary',
     undo: 'making this temporary',
   },
@@ -10926,8 +11289,14 @@ function renderBaseButton() {
   const spec = state.store.resumes.find((r) => r.id === state.resumeId);
   const look = TIER_LOOK[spec?.tier ?? 'extended'];
 
-  btn.textContent = look.label;
-  btn.className = look.className;
+  const shown = $('#tier-state');
+  if (shown) {
+    shown.textContent = look.label;
+    shown.className = look.className;
+    shown.title = look.about;
+    shown.hidden = state.masterView || !spec;
+  }
+  btn.textContent = look.action;
   btn.title = look.title;
   btn.disabled = !spec;
   btn.onclick = async () => {
@@ -10961,7 +11330,31 @@ function renderBaseButton() {
 }
 
 async function loadStore() {
-  state.store = await api('/store');
+  adoptStore(await api('/store'));
+}
+
+/**
+ * The whole store, read again unasked — or null if a write of this page's
+ * was out while it was being read.
+ *
+ * For the reads nothing here asked for, which come at any moment: coming back
+ * to the tab, the side panel saying the save changed. A read the server
+ * answered before a save landed, taken after it, puts the editor back on a
+ * store without that save. Its resume is drawn from it, and its next save is
+ * written whole from it, so the edit came back undone on screen and then on
+ * disk. The write moves the save's revision, so whoever asked for this read
+ * asks again, and that read has it.
+ */
+async function readStoreUncrossed() {
+  if (writesOut > 0) return null;
+  const at = writesSent;
+  const fresh = await api('/store');
+  return writesSent === at && writesOut === 0 ? fresh : null;
+}
+
+/** Take a store read from the server as the editor's own. */
+function adoptStore(fresh) {
+  state.store = fresh;
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
     /*
      * The resume that was open has gone, so the unsaved edits are about
@@ -11048,6 +11441,87 @@ async function loadFromDraft() {
     }
   }
   render();
+}
+
+/**
+ * What the side panel is told about this page. See embed.js.
+ *
+ * `exists` separately from the id: the id stays on a resume deleted from
+ * under it until something else is opened, and the panel says so rather than
+ * showing a resume that is no longer in the save.
+ */
+function embedState() {
+  const id = state.masterView ? null : state.resumeId;
+  const resume = id ? resumeById(id) : null;
+  return {
+    resumeId: id,
+    label: resume?.label ?? null,
+    exists: Boolean(resume),
+    master: Boolean(state.masterView),
+    save: /\b(saving|saved|unsaved|failed)\b/.exec($('#save-state')?.className ?? '')?.[1] ?? 'saved',
+    tab: document.querySelector('#tabs button.active')?.dataset.tab ?? null,
+    view: compact?.view ?? 'edit',
+    focus: compact?.focus ?? false,
+    saveDir: activeProject ?? null,
+  };
+}
+
+/**
+ * A line still being typed in, finished as though it had been left.
+ *
+ * An inline edit is only saved when it loses focus (see `editableLine`), so
+ * it is not yet among the saves `flushEdits` waits for — and the side panel
+ * moves the editor on while the person's hands are in the other tab, which
+ * is exactly when a line is left mid-edit. Leaving it here puts its save in
+ * the queue that is waited on, before anything moves.
+ */
+function commitTyping() {
+  const box = document.activeElement;
+  if (box && box !== document.body && (box.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(box.tagName))) box.blur();
+}
+
+/**
+ * The side panel following its tab onto another resume.
+ *
+ * Through `applyHash`, the door a link from the extension already uses, so it
+ * writes what is pending and refuses to move while it cannot — and answers
+ * whether it moved, which a hash change alone never tells the page that made
+ * it. A resume not in the save is refused here, before anything moves.
+ */
+async function openFromPanel(id) {
+  const held = () => Boolean(state.store?.resumes?.some((r) => r.id === id));
+  // A copy the card has only just built is in the save and not yet in the
+  // copy of it this page holds.
+  if (!held()) await refreshFromPanel().catch(() => undefined);
+  if (!held()) return 'missing';
+  const here = !state.masterView && state.resumeId === id && $('#tab-resumes')?.classList.contains('active');
+  if (here) return 'moved';
+  commitTyping();
+  window.history.replaceState(null, '', `#resumes/${encodeURIComponent(id)}`);
+  await applyHash();
+  return !state.masterView && state.resumeId === id ? 'moved' : 'unsaved';
+}
+
+/**
+ * The save changed underneath, and the side panel noticed first.
+ *
+ * `refreshOnReturn` takes a new copy of the resume on screen when nothing
+ * here is unsaved. The list of resumes is the other half: a copy the card
+ * has just built for a posting, or one deleted elsewhere, belongs in the
+ * dropdown without a reload.
+ */
+async function refreshFromPanel() {
+  const listed = () => (state.store?.resumes ?? []).map((r) => `${r.id}\u0000${r.label}`).join('\u0001');
+  const before = listed();
+  await refreshOnReturn();
+  // `refreshOnReturn` leaves the list alone on the master view and while
+  // something is unsaved; the list itself is safe to take on the master, if
+  // nothing was written while it was read (see `readStoreUncrossed`).
+  if (state.masterView && !state.dirty) {
+    const fresh = await readStoreUncrossed();
+    if (fresh && !state.dirty && inlineSaves.size === 0) adoptStore(fresh);
+  }
+  if (!state.dirty && listed() !== before) render();
 }
 
 /** Switch tabs programmatically, so a deep link lands in the right place. */
@@ -11318,6 +11792,21 @@ async function boot() {
   for (const b of waiting) b.disabled = true;
   await loadStore();
   for (const b of waiting) b.disabled = false;
+  compact = setupCompact({
+    onPreviewShown: () => previews.get($('#preview-pane'))?.redraw(),
+    onChange: () => embed?.announce(),
+    onZoom: (zoom) => previews.get($('#preview-pane'))?.setZoom(zoom),
+  });
+  embed = setupEmbed({
+    getState: embedState,
+    open: openFromPanel,
+    flush: () => {
+      commitTyping();
+      return flushEdits();
+    },
+    refresh: refreshFromPanel,
+    compact,
+  });
   render();
 
   $('#resume-select').onchange = async (e) => {
@@ -11473,6 +11962,10 @@ async function boot() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) {
       $('#modal-cancel').click();
+      return;
+    }
+    if (e.key === 'Enter') {
+      enterInModal(e);
       return;
     }
 
