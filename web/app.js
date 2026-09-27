@@ -227,18 +227,33 @@ function draftedFrom(kind) {
  * overlays, and those are what the next auto-save writes whole: one tick
  * here after coming back wrote the extension's changes away. Leaving the tab
  * already writes everything pending, so on return there is nothing of this
- * tab's to lose — and where something is still pending, nothing is done.
+ * tab's to lose — and where something is still pending, nothing is done,
+ * unless the resume it is pending on has been deleted: see `showWhatIsLeft`.
  */
 async function refreshOnReturn() {
-  if (!state.store || state.masterView || state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
-  const before = JSON.stringify(resumeById(state.resumeId) ?? null);
+  if (!state.store || state.masterView) return;
+  const pending = () => Boolean(state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0);
   const had = state.resumeId;
+  const open = resumeById(had);
+  const before = JSON.stringify(open ?? null);
+  // Read even with an edit pending, if only to see whether its resume is
+  // still there: that edit's save would put a deleted resume back.
   const fresh = await readStoreUncrossed();
+  if (!fresh) return;
+  if (had && state.resumeId === had && !state.masterView && !fresh.resumes.some((r) => r.id === had)) {
+    // Nothing of this page's was written while it was read, so an edit still
+    // pending is one waiting out the auto-save's pause, and it is about the
+    // resume that has gone.
+    const dropped = Boolean(state.dirty || autoSaveTimer);
+    adoptStore(fresh);
+    showWhatIsLeft(open, { dropped });
+    return;
+  }
   // Something started while the store was being read: that edit is newer.
   // Asked before the read is put in place of the store, not after: asked
   // after, standing aside only spared the screen, and the editor went on
   // holding a store from before whatever was saved while it was out.
-  if (!fresh || state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0) return;
+  if (pending()) return;
   adoptStore(fresh);
   if (state.resumeId !== had || JSON.stringify(resumeById(state.resumeId) ?? null) === before) return;
   // Everything the overlays held was written on the way out; what is stored
@@ -247,6 +262,68 @@ async function refreshOnReturn() {
   render();
   scheduleRender();
   setStatus('Updated with changes made in another tab.');
+}
+
+/**
+ * The resume that was open has been deleted elsewhere — another tab, the
+ * CLI, the extension's card throwing away its copy — and `adoptStore` has
+ * already moved `state.resumeId` onto a resume that is still there.
+ *
+ * Moving the id was all that happened. The screen went on showing the
+ * deleted resume, its dropdown and address still named it, the side panel
+ * was told nothing, and the next tick on that screen was written into the
+ * resume the id had moved to, which nobody had touched. So the move is made
+ * whole here, as `leaveResume` makes one: drawn, addressed, told, and said.
+ *
+ * `dropped`: an edit to the deleted resume had not been saved. It is not
+ * written anywhere — its own save would put the resume back, and it means
+ * nothing on any other one — and it is said that it was not kept.
+ */
+function showWhatIsLeft(gone, { dropped = false } = {}) {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  clearTimeout(renderTimer);
+  renderToken++;
+  clearEdits();
+  setSaveState('saved');
+  if (/^#resumes\//.test(location.hash)) {
+    const here = state.masterView
+      ? `${location.pathname}${location.search}`
+      : state.fromDraftId
+        ? `#resumes/${encodeURIComponent(state.resumeId)}/from/${encodeURIComponent(state.fromDraftId)}`
+        : `#resumes/${encodeURIComponent(state.resumeId)}`;
+    // `window.` because `history` in this file is the undo stack. Replaced
+    // rather than assigned, which would fire `hashchange` and move again.
+    window.history.replaceState(null, '', here);
+  }
+  render();
+  scheduleRender();
+  const now = state.masterView ? null : resumeById(state.resumeId);
+  const name = gone ? `“${gone.label ?? gone.id}”` : 'That resume';
+  setStatus(
+    `${name} was deleted elsewhere${dropped ? ', so your unsaved change to it was not kept' : ''}; ` +
+      `showing ${now ? `“${now.label ?? now.id}”` : 'the Master Document'}.`,
+    dropped,
+  );
+}
+
+/**
+ * A save of a resume that the server no longer has: deleted elsewhere while
+ * the edit was waiting, or while its save was out. Refused there
+ * (`existing=1`) rather than written, and the edit goes the way of one found
+ * pending by `refreshOnReturn`.
+ */
+async function resumeGone(spec) {
+  const gone = resumeById(spec.id) ?? spec;
+  const onScreen = !state.masterView && state.resumeId === spec.id;
+  await loadStore();
+  if (onScreen && state.resumeId !== spec.id) {
+    showWhatIsLeft(gone, { dropped: true });
+    return;
+  }
+  if (!state.dirty) setSaveState('saved');
+  render();
+  setStatus(`“${gone.label ?? gone.id}” was deleted elsewhere, so your change to it was not kept.`, true);
 }
 
 /** Forget every unsaved edit — used when switching resumes. */
@@ -426,7 +503,7 @@ async function api(path, options = {}) {
     if (writes) writesOut--;
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+  if (!res.ok) throw Object.assign(new Error(body.error ?? `${res.status} ${res.statusText}`), { status: res.status });
 
   /*
    * Recorded here, from the response, rather than from the store on the next
@@ -1178,7 +1255,9 @@ async function autoSave({ leaving = false } = {}) {
        * 64KB a page may have in keepalive requests at once; the draft's save
        * sends more than this and has always had the flag.
        */
-      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}`, {
+      // `existing=1`: over the resume as it is, never a new one. A save of a
+      // resume deleted elsewhere would otherwise put it back. See `resumeGone`.
+      await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}&existing=1`, {
         method: 'PUT',
         body: JSON.stringify(spec),
         keepalive: true,
@@ -1195,6 +1274,10 @@ async function autoSave({ leaving = false } = {}) {
     } catch (err) {
       // Nor does it failing, when a newer save carrying this edit has landed.
       if (order < (landedOrder.get(spec.id) ?? 0)) return;
+      if (err.status === 404) {
+        await resumeGone(spec).catch(() => setSaveState('failed', err.message));
+        return;
+      }
       state.dirty = true; // it did not land; try again on the next edit
       if (!unreachable(err)) {
         setSaveState('failed', err.message);
