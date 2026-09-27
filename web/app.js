@@ -1419,19 +1419,29 @@ async function inEntryLane(id, run, { whole = false } = {}) {
   try {
     return await mine;
   } finally {
-    await loadStore();
-    /*
-     * The server's own copy, read back, so anything a differently-shaped write
-     * did to this entry is what the next edit in the lane rebases onto.
-     *
-     * And the lane is only released after that reload, not before it. `state
-     * .store` still shows the pre-write entry for the length of that request,
-     * so an edit started inside that window would otherwise open a fresh lane,
-     * find nothing to rebase onto, and PUT the stale entry whole — undoing the
-     * write that had just landed.
-     */
-    lane.server = state.store?.entries?.find((e) => e.id === id) ?? lane.server;
-    if (--lane.pending === 0 && entryWrites.get(id) === lane) entryWrites.delete(id);
+    try {
+      await loadStore();
+      /*
+       * The server's own copy, read back, so anything a differently-shaped write
+       * did to this entry is what the next edit in the lane rebases onto.
+       *
+       * And the lane is only released after that reload, not before it. `state
+       * .store` still shows the pre-write entry for the length of that request,
+       * so an edit started inside that window would otherwise open a fresh lane,
+       * find nothing to rebase onto, and PUT the stale entry whole — undoing the
+       * write that had just landed.
+       */
+      lane.server = state.store?.entries?.find((e) => e.id === id) ?? lane.server;
+    } finally {
+      /*
+       * Released even when that reload throws, as it does with the server
+       * down. It used to stay held for good, keeping the copy it had last seen
+       * as the base of every later edit of the entry, so a change made to the
+       * entry elsewhere in the meantime was rebased away by the next edit here.
+       * entry-lane-unreachable.test.js.
+       */
+      if (--lane.pending === 0 && entryWrites.get(id) === lane) entryWrites.delete(id);
+    }
   }
 }
 
