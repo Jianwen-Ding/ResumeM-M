@@ -280,6 +280,7 @@ async function refreshOnReturn() {
  * nothing on any other one — and it is said that it was not kept.
  */
 function showWhatIsLeft(gone, { dropped = false } = {}) {
+  if (gone?.id) dropRescue(gone.id);
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
   clearTimeout(renderTimer);
@@ -316,6 +317,8 @@ function showWhatIsLeft(gone, { dropped = false } = {}) {
  */
 async function resumeGone(spec) {
   const gone = resumeById(spec.id) ?? spec;
+  // Not kept for a rescue either: there is nothing to put it back on.
+  dropRescue(spec.id);
   const onScreen = !state.masterView && state.resumeId === spec.id;
   await loadStore();
   if (onScreen && state.resumeId !== spec.id) {
@@ -1293,17 +1296,20 @@ async function autoSave({ leaving = false } = {}) {
        * edit's save, or the save by the stage. Refused, the edit is rebased
        * onto what is there (see `rebaseRefusedSave`) and sent again.
        *
-       * Not on the way out of the page: a save still out ahead of this one has
-       * not said which write it made, and a refusal would come back to a page
-       * that is gone, taking the edit with it. Those write as they always did.
+       * On the way out of the page too. That save cannot wait for the one
+       * still out ahead of it, so it is based on the write that one was based
+       * on, and the server takes that from this page when the write it holds
+       * is that save's (`ownWriteSince` in src/server/api.ts). A refusal comes
+       * back to a page that is gone, so the edit is kept in this browser
+       * first, and offered again when the resume is next opened (see
+       * `keepForRescue`): an edit refused there is kept, where written whole
+       * it wrote the card's filing away. See `flushEditsLeaving`.
        */
-      const onto =
-        rebasedOnto?.id === spec.id
-          ? rebasedOnto
-          : { id: spec.id, base: resumeById(spec.id), version: state.store?.versions?.[spec.id] };
-      const basedOn = leaving ? undefined : onto.version;
+      const onto = saveBasis(spec.id);
+      const basedOn = onto.version;
       const base = structuredClone(onto.base ?? null);
       const order = ++saveOrder;
+      lastSentOrder.set(spec.id, order);
       state.dirty = false; // further edits re-dirty it; this one is in flight
       try {
         /*
@@ -1326,13 +1332,14 @@ async function autoSave({ leaving = false } = {}) {
         // `existing=1`: over the resume as it is, never a new one. A save of a
         // resume deleted elsewhere would otherwise put it back. See `resumeGone`.
         const on = basedOn ? `&basedOn=${encodeURIComponent(basedOn)}` : '';
+        resumeSavesOut++;
         const reply = await api(`/resumes/${encodeURIComponent(spec.id)}?commit=0&order=${SAVE_PAGE}:${order}&existing=1${on}`, {
           method: 'PUT',
           body: JSON.stringify(spec),
           keepalive: true,
           // Undone to what the server had, not to the rebased copy shown.
           ...(onto === rebasedOnto ? { undoFrom: structuredClone(onto.base) } : {}),
-        });
+        }).finally(() => resumeSavesOut--);
         // A newer save of this resume came back first; this one says nothing.
         if (order < (landedOrder.get(spec.id) ?? 0)) return;
         landedOrder.set(spec.id, order);
@@ -1349,6 +1356,9 @@ async function autoSave({ leaving = false } = {}) {
         // no longer overlays on top of it.
         const stored = state.store?.resumes?.find((r) => r.id === spec.id);
         if (stored) Object.assign(stored, spec);
+        // Everything this page had for the resume is in the save: nothing to
+        // rescue. See `keepForRescue`.
+        if (order >= (lastSentOrder.get(spec.id) ?? 0) && !state.dirty && !autoSaveTimer) dropRescue(spec.id);
         setSaveState('saved');
         scheduleCommit();
         return;
@@ -1400,6 +1410,176 @@ async function autoSave({ leaving = false } = {}) {
  * `rebaseRefusedSave`.
  */
 let rebasedOnto = null;
+
+/** Resume id to the order of the newest of this page's saves of it sent. */
+const lastSentOrder = new Map();
+/** This page's saves of a resume still waiting on a reply. */
+let resumeSavesOut = 0;
+
+/**
+ * What an edit to a resume was made on: the copy the server had (`base`) and
+ * which write that is (`version`), for its save to be based on.
+ */
+const saveBasis = (id) =>
+  rebasedOnto?.id === id ? rebasedOnto : { id, base: resumeById(id), version: state.store?.versions?.[id] };
+
+/*
+ * An edit kept in this browser while its save may still be refused out of
+ * sight.
+ *
+ * Hiding the page saves the resume as every auto-save does, based on the
+ * write it was made on, and a refusal is rebased and sent again (see
+ * `autoSave`): a hidden page still runs. Unloading it saves once more at
+ * once, and that save's reply comes back to a page that has gone. Written
+ * whole, as it used to be, it could write away JobHelper's card filing its
+ * copy, which it is most likely to do just then: the person has gone from
+ * here to the posting. Based on the write it was made on, it can be refused,
+ * and the edit would go with the page. So on hiding and on unloading, the
+ * edit (the resume as this page would save it, and the copy it was made on)
+ * is kept in localStorage first, one key per page and resume, and dropped once
+ * a save of the resume carrying everything this page had lands. A page that
+ * went before that leaves it behind, and the next page to open the resume
+ * offers to put it back on top of what is there (`drawRescue`), unless it is
+ * already there, which is what a save that did land leaves.
+ *
+ * localStorage rather than sessionStorage: a closed tab's session storage
+ * goes with it.
+ */
+const RESCUE_PREFIX = 'rmm-rescue:';
+const rescueKey = (id, page = SAVE_PAGE) => `${RESCUE_PREFIX}${JSON.stringify([activeProject ?? '', id, page])}`;
+
+/** Keep the edit on screen, and any save of it still out, for a rescue. */
+function keepForRescue() {
+  if (state.masterView || !state.resumeId || !resumeById(state.resumeId)) return;
+  const id = state.resumeId;
+  if (!state.dirty && !autoSaveTimer && !resumeSavesOut) return;
+  const onto = saveBasis(id);
+  try {
+    localStorage.setItem(
+      rescueKey(id),
+      JSON.stringify({ at: Date.now(), basedOn: onto.version ?? null, base: onto.base ?? null, spec: currentSpec() }),
+    );
+  } catch {
+    // Storage full or off: the save still goes.
+  }
+}
+
+function dropRescue(id, page = SAVE_PAGE) {
+  try {
+    localStorage.removeItem(rescueKey(id, page));
+  } catch {
+    // Nothing kept, then.
+  }
+}
+
+/** Same content, whatever order the keys were written in. */
+function sameDoc(a, b) {
+  const canon = (v) =>
+    Array.isArray(v)
+      ? v.map(canon)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(Object.keys(v).filter((k) => v[k] !== undefined).sort().map((k) => [k, canon(v[k])]))
+        : v;
+  return JSON.stringify(canon(a ?? null)) === JSON.stringify(canon(b ?? null));
+}
+
+/** A kept edit put on top of the resume as it is now. */
+const rescuedOnto = (kept, current) => (kept.base ? rebaseResume(kept.base, kept.spec, current) : kept.spec);
+
+/**
+ * Edits to this resume that other pages of this save kept and never saw land,
+ * newest first. One already in the resume (its save landed after all) is
+ * dropped here and not offered.
+ */
+function rescuesFor(id) {
+  const current = resumeById(id);
+  if (!current) return [];
+  const found = [];
+  let keys = [];
+  try {
+    keys = Object.keys(localStorage).filter((k) => k.startsWith(RESCUE_PREFIX));
+  } catch {
+    return [];
+  }
+  for (const key of keys) {
+    let project, rid, page, kept;
+    try {
+      [project, rid, page] = JSON.parse(key.slice(RESCUE_PREFIX.length));
+      kept = JSON.parse(localStorage.getItem(key));
+    } catch {
+      continue;
+    }
+    if (project !== (activeProject ?? '') || rid !== id || page === SAVE_PAGE || !kept?.spec) continue;
+    if (sameDoc(rescuedOnto(kept, current), current)) {
+      dropRescue(id, page);
+      continue;
+    }
+    found.push({ page, ...kept });
+  }
+  return found.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+}
+
+/**
+ * The offer to put back an edit a closed tab kept (see `keepForRescue`), on
+ * the resume it was made to.
+ */
+function drawRescue() {
+  const bar = $('#rescue');
+  if (!bar) return;
+  const [kept] = state.masterView || !state.resumeId ? [] : rescuesFor(state.resumeId);
+  bar.hidden = !kept;
+  if (!kept) {
+    bar.replaceChildren();
+    return;
+  }
+  const id = state.resumeId;
+  const when = kept.at ? new Date(kept.at).toLocaleString() : 'earlier';
+  bar.replaceChildren(
+    el('span', {
+      textContent:
+        `An edit to this resume, made in a tab that closed or reloaded (${when}), is not in the save: ` +
+        'the resume had been changed elsewhere meanwhile, or the server could not be reached.',
+    }),
+    el('button', { className: 'tiny', textContent: 'Put it back', onclick: () => putRescueBack(id, kept).catch((e) => setStatus(e.message, true)) }),
+    el('button', {
+      className: 'tiny',
+      textContent: 'Discard',
+      onclick: () => {
+        dropRescue(id, kept.page);
+        drawRescue();
+      },
+    }),
+  );
+}
+
+/**
+ * A kept edit put back on top of the resume as the server has it now, and
+ * saved as a rebased edit is (see `rebaseRefusedSave`): what the edit changed
+ * goes on top, and what it did not touch stays as the other write left it.
+ */
+async function putRescueBack(id, kept) {
+  await flushAutoSave();
+  const fresh = await readStoreUncrossed();
+  if (fresh) adoptStore(fresh);
+  if (state.masterView || state.resumeId !== id || !resumeById(id)) return;
+  const current = resumeById(id);
+  dropRescue(id, kept.page);
+  if (sameDoc(rescuedOnto(kept, current), current)) {
+    drawRescue();
+    setStatus('That edit is already in this resume.');
+    return;
+  }
+  const merged = rescuedOnto(kept, current);
+  rebasedOnto = { id, base: structuredClone(current), version: heldVersion(id) };
+  for (const key of Object.keys(current)) delete current[key];
+  Object.assign(current, structuredClone(merged));
+  clearEdits();
+  state.dirty = true;
+  render();
+  scheduleRender();
+  scheduleAutoSave();
+  setStatus('The edit from the closed tab was put back, on top of the resume as it is now.');
+}
 
 /**
  * A save of the resume refused because it was written elsewhere since this
@@ -1595,7 +1775,7 @@ function scheduleCommit() {
  * waits on nothing; see `flushEditsLeaving`.
  */
 async function flushEdits({ leaving = false } = {}) {
-  if (leaving) return flushEditsLeaving();
+  if (leaving) return flushEditsLeaving({ unloading: pageUnloading });
   // The Workspace's typing too. Every path out of a page already calls this —
   // closing the tab, switching resumes, following a deep link — and the draft
   // was the one thing it did not cover.
@@ -1647,12 +1827,25 @@ async function flushEdits({ leaving = false } = {}) {
  *
  *  - The resume's save, first: it is small, and first is where the browser's
  *    64KB keepalive allowance is surest to have room (see `fetchKeptAlive`).
- *    It does not wait for a save of the resume still out; `?order` settles
- *    which of the two is written (see `autoSave`). It is the one resume write
- *    of this page not based on the write it was made on (no `basedOn`): a
- *    refusal would come back to a page that is gone, and the edit with it,
- *    so it writes over whatever is there, as every save once did. This runs
- *    when the page is only hidden, too (`visibilitychange`), not just closed.
+ *    Based on the write it was made on, like every save of it, and the edit
+ *    kept in this browser first (`keepForRescue`), since a refusal may come
+ *    back to a page that has gone.
+ *
+ *    Hidden, the page is still there: someone gone from here to a posting,
+ *    where JobHelper's card is likely to file its copy of this resume just
+ *    then. So the save is the ordinary auto-save, behind a save of the
+ *    resume still out and based on the write that one made, and a refusal
+ *    is rebased and sent again while the page waits in the background. It
+ *    used to write whatever was there, unconditionally, and wrote the card's
+ *    filing away.
+ *
+ *    Unloading (`pagehide`), nothing waits for a reply, so it goes at once,
+ *    not behind a save of the resume still out: `?order` settles which of
+ *    the two is written (see `autoSave`), and the server takes it as based on
+ *    the write the one ahead was based on while that one's write is still
+ *    the resume's (`ownWriteSince` in src/server/api.ts). Refused, the edit
+ *    is the one kept in this browser, and offered back when the resume is
+ *    next opened (`drawRescue`).
  *  - The draft's save, which commits itself. A draft carries its posting and
  *    can be large; when it does not fit beside the rest it goes as a plain
  *    request, which is as good as it could do. Like the resume's, it does not
@@ -1668,10 +1861,11 @@ async function flushEdits({ leaving = false } = {}) {
  *    ahead of them, so the server holds it until they have landed, for a few
  *    seconds at most.
  */
-function flushEditsLeaving() {
+function flushEditsLeaving({ unloading = false } = {}) {
+  keepForRescue();
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
-  if (state.dirty) autoSave({ leaving: true }).catch(() => {});
+  if (state.dirty) autoSave({ leaving: unloading }).catch(() => {});
   sendEntryEditsLeaving();
   clearTimeout(draftSave.timer);
   draftSave.timer = null;
@@ -11580,6 +11774,7 @@ function render() {
   );
   select.value = state.masterView ? '__master__' : state.resumeId;
   drawWayBack();
+  drawRescue();
   $('#btn-base').hidden = state.masterView;
   $('#btn-save-as').hidden = state.masterView;
   $('#btn-rename-resume').hidden = state.masterView;
@@ -12231,16 +12426,26 @@ async function boot() {
     if (!moved) e.target.value = state.masterView ? '__master__' : state.resumeId;
   };
 
-  // Leaving the page: write and commit on the way out. `visibilitychange` is
-  // the event that actually fires when a tab is closed or hidden; `unload`
-  // does not, reliably.
+  /*
+   * Leaving the page: write and commit on the way out. `visibilitychange` is
+   * the event that fires when a tab is hidden, and the last one a page that
+   * is hidden and then thrown away (a phone, a discarded tab) ever gets;
+   * `pagehide` the one that fires when it is closed, reloaded or navigated
+   * away from (`unload` does not, reliably). Hidden, the page stays and its
+   * resume's save is conditional and answered here; unloading, nothing that
+   * waits on a reply runs. See `flushEditsLeaving`. `pagehide` comes first
+   * when a visible page unloads, and the `visibilitychange` after it has
+   * nothing left to send.
+   */
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flushEdits({ leaving: true }).catch(() => {});
-    else refreshOnReturn().catch(() => {});
+    if (document.visibilityState === 'hidden') {
+      if (!pageUnloading) flushEdits({ leaving: true }).catch(() => {});
+    } else refreshOnReturn().catch(() => {});
   });
-  // Whether a request that failed is worth sending again. See `fetchKeptAlive`.
+  // Also whether a request that failed is worth sending again. See `fetchKeptAlive`.
   window.addEventListener('pagehide', () => {
     pageUnloading = true;
+    flushEdits({ leaving: true }).catch(() => {});
   });
   window.addEventListener('pageshow', () => {
     pageUnloading = false;

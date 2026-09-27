@@ -780,6 +780,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   };
 
   /**
+   * The last conditional editor save written of each resume: the page and
+   * order it came with (`?order=<page>:<n>`), the write it was based on, and
+   * the write it made. In memory, since what it settles lasts one round trip.
+   */
+  const lastConditionalSave = new Map<string, { page: string; n: number; basedOn: string; made: string }>();
+
+  /**
+   * Whether the resume as it is now is this page's own save, made over the
+   * write this later save from the same page says it is based on.
+   *
+   * On the way out of the page the editor sends its latest edit at once, while
+   * its save ahead of it is still out (see `flushEditsLeaving` in
+   * web/app.js), so the latest cannot know the write the one ahead will make,
+   * and is based on the one both were made over. The one ahead landing first
+   * would get the latest refused, and its edit, on a page that has gone, kept
+   * only as a rescue for the next time the resume is opened. It carries
+   * everything the one ahead carried, and nothing else has written the file
+   * since (`made` is still the resume's version), so it is written. From any
+   * other page, or over any other write, it is refused as before.
+   */
+  const ownWriteSince = (id: string, order: { page: string; n: number }, basedOn: string): boolean => {
+    const own = lastConditionalSave.get(id);
+    return Boolean(own && own.page === order.page && own.n < order.n && own.basedOn === basedOn && own.made === resumeVersion(id));
+  };
+
+  /**
    * Which write of the resume this answer is about, said as its `ETag`, for
    * the writer's next write to be based on (see `resumeVersion`). Every route
    * that writes a whole resume, or one field of it, says it.
@@ -1288,10 +1314,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * while an edit here waited on its save was written away by that save —
        * or the other way round. Refused with 409, the resume as it is and its
        * version, and the editor rebases its edit onto it. Before `order`, so a
-       * save refused here is not counted as one written.
+       * save refused here is not counted as one written. A save sent on the
+       * way out of the page, while the page's save ahead of it was still out,
+       * is based on the write that one was based on: see `ownWriteSince`.
        */
       const basedOn = typeof req.query.basedOn === 'string' && req.query.basedOn ? req.query.basedOn : undefined;
-      if (movedOn(res, flat.id, basedOn)) return;
+      const order = savedOrderOf(req.query.order);
+      if (!(basedOn && order && ownWriteSince(flat.id, order, basedOn)) && movedOn(res, flat.id, basedOn)) return;
       /** What this route answers with besides the resume: which write it is. */
       const tag = () => {
         const version = resumeVersion(flat.id);
@@ -1314,7 +1343,6 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * recorded with nothing awaited between here and the write, which
        * `withCommit` makes before its first await.
        */
-      const order = savedOrderOf(req.query.order);
       if (order) {
         const last = lastSaveOrder.get(flat.id);
         if (last && last.page === order.page && order.n <= last.n) {
@@ -1333,6 +1361,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       await withCommit(repo, autoCommit() && wantCommit, `Update resume "${flat.id}"`, () => {
         store.saveResume(flat);
         tag();
+        // What the next save from this page may be based on: see `ownWriteSince`.
+        const made = resumeVersion(flat.id);
+        if (order && basedOn && made) lastConditionalSave.set(flat.id, { ...order, basedOn, made });
+        else lastConditionalSave.delete(flat.id);
       });
       res.json(flat);
     }),

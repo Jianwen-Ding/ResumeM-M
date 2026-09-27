@@ -89,6 +89,37 @@ describe('the editor’s save of a resume', () => {
     await save('intern', spec, `?basedOn=${was}`).expect(200);
     expect(stored('intern').label).toBe(spec.label);
   });
+
+  /*
+   * On the way out of the page the editor sends its latest edit while its
+   * save ahead is still out, so the latest is based on the write the one ahead
+   * was based on (see `ownWriteSince`).
+   */
+  it('takes a save from the page as based on the write its own save ahead was based on', async () => {
+    const was = await versionOf('intern');
+    await save('intern', { ...stored('intern'), label: 'First edit' }, `?commit=0&order=page-a:1&basedOn=${was}`).expect(200);
+    await pause();
+    await save('intern', { ...stored('intern'), label: 'Second edit' }, `?commit=0&order=page-a:2&basedOn=${was}`).expect(200);
+    expect(stored('intern').label).toBe('Second edit');
+  });
+
+  it('does not, from another page, or over a write made since the page’s own', async () => {
+    const was = await versionOf('intern');
+    await save('intern', { ...stored('intern'), label: 'First edit' }, `?commit=0&order=page-a:1&basedOn=${was}`).expect(200);
+    await pause();
+    await save('intern', { ...stored('intern'), label: 'Another tab' }, `?commit=0&order=page-b:1&basedOn=${was}`).expect(409);
+    // Written since by a route other than this one: the tier.
+    await request(app).put('/api/resumes/intern/tier').send({ tier: 'base' }).expect(200);
+    await pause();
+    await save('intern', { ...stored('intern'), label: 'Second edit' }, `?commit=0&order=page-a:2&basedOn=${was}`).expect(409);
+    expect(stored('intern').label).toBe('First edit');
+    expect(stored('intern').tier).toBe('base');
+    // And by this route, without a condition.
+    await save('intern', { ...stored('intern'), label: 'Renamed by the card' }).expect(200);
+    await pause();
+    await save('intern', { ...stored('intern'), label: 'Second edit' }, `?commit=0&order=page-a:3&basedOn=${was}`).expect(409);
+    expect(stored('intern').label).toBe('Renamed by the card');
+  });
 });
 
 describe('the card filing its copy', () => {
