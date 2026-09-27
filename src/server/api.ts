@@ -55,6 +55,7 @@ import { derivedAutofill, educationHistory, workHistory } from '../model/autofil
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
+import { FRAME_ANCESTORS } from './guard.js';
 import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
@@ -5670,7 +5671,7 @@ const COPY_PATH_SCRIPT = `
     ev.target.textContent = 'Copied';
   };
 `;
-const COPY_PATH_POLICY = `script-src 'sha256-${createHash('sha256').update(COPY_PATH_SCRIPT).digest('base64')}'; base-uri 'none'`;
+const COPY_PATH_POLICY = `script-src 'sha256-${createHash('sha256').update(COPY_PATH_SCRIPT).digest('base64')}'; base-uri 'none'; ${FRAME_ANCESTORS}`;
 
 /**
  * The flat folder, as a page you can open.
