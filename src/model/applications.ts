@@ -607,6 +607,52 @@ export interface BundleRequest {
    * store's default. Remembered on the application, so a rebuild keeps it.
    */
   naming?: { shape?: FileNameShape; custom?: CustomFileNames };
+  /**
+   * Stage (`status: 'applying'`) even over an application already sent. See
+   * `AlreadySent`: without it, a stage over one is refused.
+   */
+  evenIfSent?: boolean;
+}
+
+/**
+ * Whether an application has gone out: past `applying`, and not a row closed
+ * for going quiet, which counts as still open (see `closedAsStale`).
+ */
+export function sentAlready(app: Application | undefined): boolean {
+  const ORDER: ApplicationStatus[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
+  return Boolean(app) && !closedAsStale(app!) && ORDER.indexOf(app!.status) > ORDER.indexOf('applying');
+}
+
+/**
+ * A stage refused because the application it would file into has already
+ * gone out.
+ *
+ * Staging is the extension keeping the upload folder level with the card,
+ * with nobody pressing anything, and it asks for `applying`. The status never
+ * went backwards (see below), but the rest did: a stage that was queued, or
+ * already compiling, when the form was submitted landed after the send and
+ * rebuilt the sent application's files, and its history's last word became
+ * "Files rebuilt" in place of the send. Measured in JobHelper's
+ * tests/carrying.mjs, in a full gate run and alone: the stage leaving 170ms after Submit
+ * and landing 300ms after the send was recorded. What went out is what the
+ * archive has to keep. A rebuild of a sent application is still one request
+ * away: without `status: 'applying'` (filing it again, `rmm apply`), or with
+ * `evenIfSent`.
+ */
+export class AlreadySent extends Error {
+  constructor(readonly application: Application) {
+    super(
+      `${application.company} — ${application.role} has already been sent, so its files were not rebuilt. ` +
+        'File it again if you mean to replace what went out.',
+    );
+  }
+}
+
+/** A stage over an application already sent, told apart before anything is written. See `AlreadySent`. */
+export function refusedAsSent(store: Store, req: Pick<BundleRequest, 'company' | 'role' | 'url' | 'status' | 'evenIfSent'>): Application | null {
+  if (req.status !== 'applying' || req.evenIfSent) return null;
+  const app = findApplication(store.load().applications, req.company, req.role, req.url);
+  return app && sentAlready(app) ? app : null;
 }
 
 export interface BundleResult {
@@ -946,6 +992,16 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       YAML.stringify({ spec, resolved }, { lineWidth: 0 }),
       'utf8',
     );
+
+    /*
+     * And not over an application that went out while this compiled, which
+     * is the ordinary way a stage meets a send: read here, with nothing
+     * awaited between this and the hand-over below. See `AlreadySent`.
+     */
+    if (req.status === 'applying' && !req.evenIfSent) {
+      const now = store.load().applications.find((a) => a.id === id);
+      if (sentAlready(now)) throw new AlreadySent(now!);
+    }
 
     // Everything is written. Now it becomes the bundle.
     fs.mkdirSync(dir, { recursive: true });

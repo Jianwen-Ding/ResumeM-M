@@ -50,7 +50,7 @@ import {
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -4155,6 +4155,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const { basedOn } = body;
       delete body.basedOn;
 
+      /*
+       * A stage never lands on an application already sent — checked here,
+       * before anything is written, and again as the files are handed over,
+       * since the send can land while this compiles. See `AlreadySent`.
+       */
+      const refuseAsSent = (application: Application) =>
+        res.status(409).json({ kind: 'already-sent', error: new AlreadySent(application).message, application });
+      const sentBefore = refusedAsSent(store, body);
+      if (sentBefore) {
+        refuseAsSent(sentBefore);
+        return;
+      }
+
       // A posting-specific spec from the extension is saved first so the
       // snapshot refers to something that still exists later.
       let resumeVersionNow: string | null | undefined;
@@ -4177,7 +4190,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         body.resumeId = spec.id;
       }
 
-      const result = await buildBundle(store, body);
+      let result: Awaited<ReturnType<typeof buildBundle>>;
+      try {
+        result = await buildBundle(store, body);
+      } catch (err) {
+        if (!(err instanceof AlreadySent)) throw err;
+        refuseAsSent(err.application);
+        return;
+      }
 
       /*
        * And the space it was being written in stops looking like unfinished
