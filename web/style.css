@@ -2029,6 +2029,7 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   #resume-select { order: 1; flex: 1 1 120px; min-width: 0; max-width: none; min-height: 32px; }
   #narrow-view { order: 2; }
   #btn-more { order: 3; }
+  #btn-tips { order: 9; }
   #save-state { order: 5; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; }
   #live-state { order: 6; }
   #btn-focus { order: 7; }
@@ -2064,7 +2065,31 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   body.focus-mode #editor .entry:not(.focus-active):not(.off) > :not(.entry-head):not(.head) { display: none; }
   body.focus-mode #editor .entry:not(.focus-active):not(.off) { padding-top: 8px; padding-bottom: 8px; cursor: pointer; }
   body.focus-mode #editor .entry:not(.focus-active):not(.off) :is(.entry-head, .head) { margin-bottom: 0; }
-  body.focus-mode #resume-view-note, body.focus-mode .editor-interaction-hint { display: none; }
+  /* The two lines of how-to behind "?"; they are the same every time. */
+  body:not(.tips-open) #resume-view-note, body:not(.tips-open) .editor-interaction-hint { display: none; }
+  #resume-view-note, .editor-interaction-hint { margin: 0 0 6px; }
+
+  /*
+   * How it fits, and the notes that come with a compile, as one line that
+   * opens when tapped: "Fits on one page — room for about 3 more lines",
+   * then a count of what is behind it. A warning with something to do about
+   * it stays out, one line with its button.
+   */
+  #fit { padding: 6px 10px; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #fit[data-notes]::before {
+    content: attr(data-notes);
+    float: right;
+    margin-left: 8px;
+    font-size: var(--t-xs);
+    font-weight: 500;
+    opacity: .8;
+  }
+  body:not(.fit-open) #fit .squeezed { display: none; }
+  body.fit-open #fit { white-space: normal; }
+  body.fit-open #fit[data-notes]::before { content: "Less"; }
+  body:not(.fit-open) #warnings > div:not(:has(button)) { display: none; }
+  #warnings { margin-bottom: 6px; }
+  .warnings .orphan .what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   .hint { font-size: var(--t-sm); }
   .fit { padding: 8px 10px; }
@@ -2121,14 +2146,84 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 }
 
 /*
- * Inside the extension's side panel, one row of header: the panel's own bar
- * already names the resume, and says when a different save is open, so the
- * app's name and the save chip give up their room to the tabs. The AI chip
- * keeps its place as its mark.
+ * Inside the extension's side panel, which is for one resume.
+ *
+ * The panel's own bar names the resume and switches it, says when a
+ * different save is open, and opens the whole editor in a tab. So the
+ * editor's header — the app's name, the tabs, the save chip, the AI chip —
+ * and its own resume picker are not drawn here at all: in a 360px panel they
+ * were a third of the height before any of the resume. What the header still
+ * has to say (a status line, AI work under way) floats at the bottom corner,
+ * so it appearing and going does not move the page.
+ *
+ * At every width, because a panel pulled wide is still a panel.
  */
+.embedded header {
+  position: fixed;
+  top: auto;
+  left: auto;
+  right: 8px;
+  bottom: 8px;
+  height: auto;
+  max-width: calc(100vw - 16px);
+  padding: 0;
+  gap: 6px;
+  flex-direction: column;
+  align-items: flex-end;
+  background: none;
+  border: 0;
+  z-index: 45;
+  pointer-events: none;
+}
+.embedded header > * { pointer-events: auto; }
+.embedded h1, .embedded nav, .embedded #project-chip, .embedded #ai-peek-chip, .embedded #resume-select { display: none; }
+.embedded header .jobs-chip { margin-left: 0; box-shadow: var(--shadow-md); }
+.embedded .status {
+  max-width: 100%;
+  text-align: left;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: #fff;
+  box-shadow: var(--shadow-md);
+}
+.embedded .status.err { background: var(--bad); }
+.embedded .status:empty { display: none; }
+.embedded .sticky-toolbar { top: 0; }
+.embedded .pane-right { top: 8px; height: calc(100vh - 16px); }
+.embedded .tab { padding-top: 8px; }
+
 @media (max-width: 640px) {
-  .embedded h1, .embedded #project-chip { display: none; }
-  .embedded nav { order: 0; flex: 1 1 0; }
-  .embedded #ai-peek-chip { font-size: 0; padding: 4px 10px; min-height: 32px; margin-left: 0; }
-  .embedded #ai-peek-chip::before { content: "\2726"; font-size: 13px; }
+  /* One row: whether it saved, the view, Focus, Undo, Redo, tips, More. */
+  .embedded .sticky-toolbar::before { display: none; }
+  .embedded .sticky-toolbar { gap: 4px; padding-top: 4px; padding-bottom: 4px; }
+  .embedded #save-state { order: 1; flex: none; }
+  .embedded #live-state { order: 2; font-size: 0; gap: 0; padding: 4px 6px; }
+  .embedded #narrow-view { order: 3; }
+  .embedded #btn-focus { order: 4; }
+  .embedded #toolbar-more > #btn-undo, .embedded #toolbar-more > #btn-redo { order: 5; }
+  /* The how-to is behind More here: it is the same every time, and its
+     room is what keeps this toolbar to one row in a 360px panel. */
+  .embedded #btn-tips { order: 20; }
+  .embedded .sticky-toolbar:not(.more-open) #btn-tips { display: none; }
+  .embedded #btn-more { order: 7; }
+  .embedded .segmented button { padding: 4px 8px; }
+  .embedded .sticky-toolbar button.tiny { padding: 4px 7px; }
+  /* Said short: the whole sentence is its title, and "Not saved — …" keeps
+     every word, because that one is asking for something. */
+  .embedded #save-state.saved { font-size: 0; }
+  .embedded #save-state.saved::after { content: "Saved"; font-size: var(--t-sm); }
+  .embedded #btn-undo, .embedded #btn-redo { font-size: 0; min-width: 32px; }
+  .embedded #btn-undo::before { content: "\21B6"; font-size: 17px; line-height: 1; }
+  .embedded #btn-redo::before { content: "\21B7"; font-size: 17px; line-height: 1; }
+  .embedded #btn-more { font-size: 0; min-width: 32px; }
+  .embedded #btn-more::before { content: "\22EF"; font-size: 18px; line-height: 1; }
+  .embedded .tab { padding-top: 0; }
+}
+/* A 320px panel keeps the same single row, a little closer together. */
+@media (max-width: 340px) {
+  .embedded .sticky-toolbar { gap: 2px; }
+  .embedded .segmented button { padding: 4px 6px; }
+  .embedded .sticky-toolbar button.tiny { padding: 4px 5px; }
+  .embedded #btn-undo, .embedded #btn-redo, .embedded #btn-more { min-width: 28px; }
 }

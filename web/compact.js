@@ -51,6 +51,9 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
   const focusButton = doc.querySelector('#btn-focus');
   const moreButton = doc.querySelector('#btn-more');
   const zoomButton = doc.querySelector('#preview-zoom');
+  const tipsButton = doc.querySelector('#btn-tips');
+  const fit = doc.querySelector('#fit');
+  const warnings = doc.querySelector('#warnings');
 
   const saved = (() => {
     try {
@@ -64,6 +67,8 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
     focus: saved.focus === true,
     more: false,
     zoomed: false,
+    tips: false,
+    fitOpen: false,
     /** The entry last worked in, by id, which Focus keeps open. */
     active: null,
   };
@@ -98,6 +103,10 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
       focusButton.disabled = state.view !== 'edit';
     }
     if (moreButton) moreButton.setAttribute('aria-expanded', String(state.more));
+    body.classList.toggle('tips-open', state.tips);
+    tipsButton?.setAttribute('aria-expanded', String(state.tips));
+    body.classList.toggle('fit-open', state.fitOpen);
+    fit?.setAttribute('aria-expanded', String(state.fitOpen));
     if (zoomButton) {
       zoomButton.setAttribute('aria-pressed', String(state.zoomed));
       zoomButton.textContent = state.zoomed ? 'Fit width' : 'Actual size';
@@ -136,6 +145,14 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
       state.more = Boolean(open);
       paint();
     },
+    setTips(open) {
+      state.tips = Boolean(open);
+      paint();
+    },
+    setFitOpen(open) {
+      state.fitOpen = Boolean(open);
+      paint();
+    },
     /** Called after the editor redraws, which replaces every entry. */
     refresh: markActive,
   };
@@ -143,6 +160,57 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
   for (const b of viewButtons) b.addEventListener('click', () => api.setView(b.dataset.view));
   focusButton?.addEventListener('click', () => api.setFocus(!state.focus));
   moreButton?.addEventListener('click', () => api.setMore(!state.more));
+  tipsButton?.addEventListener('click', () => api.setTips(!state.tips));
+
+  /*
+   * The fit line opens on a tap or Enter, narrow only: wide, the whole
+   * banner is already there and there is nothing behind it to open.
+   */
+  if (fit) {
+    const toggleFit = () => {
+      if (narrow()) api.setFitOpen(!state.fitOpen);
+    };
+    fit.addEventListener('click', (ev) => {
+      if (!ev.target.closest?.('button, a')) toggleFit();
+    });
+    fit.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      ev.preventDefault();
+      toggleFit();
+    });
+    const role = () => {
+      if (narrow()) {
+        fit.setAttribute('role', 'button');
+        fit.tabIndex = 0;
+      } else {
+        fit.removeAttribute('role');
+        fit.removeAttribute('tabindex');
+      }
+    };
+    role();
+    win.matchMedia?.(NARROW_QUERY).addEventListener?.('change', role);
+  }
+
+  /*
+   * What is behind the fit line, counted onto it: the notes a compile left
+   * that ask for nothing, and the line saying how it was squeezed. The ones
+   * with a button stay on screen, so they are not counted.
+   */
+  const countNotes = () => {
+    if (!fit) return;
+    const notes = warnings ? [...warnings.children].filter((w) => !w.querySelector('button')).length : 0;
+    const squeezed = fit.querySelector('.squeezed') ? 1 : 0;
+    const said = notes ? `${notes} note${notes === 1 ? '' : 's'}` : squeezed ? 'More' : '';
+    if (said) fit.dataset.notes = said;
+    else delete fit.dataset.notes;
+  };
+  if (typeof win.MutationObserver === 'function') {
+    const watch = new win.MutationObserver(countNotes);
+    if (fit) watch.observe(fit, { childList: true });
+    if (warnings) watch.observe(warnings, { childList: true });
+  }
+  countNotes();
+
   zoomButton?.addEventListener('click', () => {
     state.zoomed = !state.zoomed;
     paint();
