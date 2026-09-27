@@ -25,6 +25,8 @@ let compact = null;
 let embed = null;
 let assetUI;
 const inlineSaves = new Set();
+/** Lines edited in place whose save the server never answered, waiting to be sent again. See `editableLine`. */
+const inlineRetrying = new Set();
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -1325,6 +1327,11 @@ function flushEditsLeaving() {
 function setSaveState(mode, detail) {
   const chip = $('#save-state');
   if (!chip) return;
+  // The resume saving says nothing about a line edited in place that has not.
+  if (mode === 'saved' && inlineRetrying.size > 0) {
+    mode = 'failed';
+    detail = 'can’t reach the server. Retrying…';
+  }
   chip.className = `save ${mode}`;
   chip.textContent =
     mode === 'saving'
@@ -1767,7 +1774,12 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
   node.append(display(text));
 
   let editing = false;
+  let retryTimer = null;
   const stop = (commit) => {
+    // Enter, Escape or a click away replaces a retry still waiting.
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    inlineRetrying.delete(node);
     if (!editing) return;
     editing = false;
     node.contentEditable = 'false';
@@ -1777,7 +1789,12 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
       const save = Promise.resolve().then(() => onCommit(next));
       inlineSaves.add(save);
       save
-        .catch((err) => {
+        .then(() => {
+          // Landed, and no other line is still waiting: the chip can say so again.
+          if (inlineRetrying.size === 0 && $('#save-state')?.classList.contains('failed') && !state.dirty && !autoSaveTimer) {
+            setSaveState('saved');
+          }
+        }, (err) => {
           /*
            * The sentence stays in the box it was typed in.
            *
@@ -1794,14 +1811,45 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
            * store answers, and pulling the caret out of whatever the person
            * has started doing since would be worse than the message alone.
            */
-          setStatus(`${err.message} The wording is still in the line — press Enter to try again.`, true);
+          const offline = unreachable(err);
+          setStatus(
+            offline
+              ? 'Can’t reach the server. The wording is still in the line, and is saved once the server is back.'
+              : `${err.message} The wording is still in the line — press Enter to try again.`,
+            true,
+          );
           if (!node.isConnected) return;
           editing = true;
           node.contentEditable = 'plaintext-only';
           node.classList.add('editing');
           node.textContent = next;
-          const busy = document.activeElement;
-          if (!busy || busy === document.body) node.focus();
+          if (!offline) {
+            const busy = document.activeElement;
+            if (!busy || busy === document.body) node.focus();
+            return;
+          }
+          /*
+           * The server is not there to refuse it. Waiting for Enter left
+           * "Failed to fetch" in the status line, the chip at "All changes
+           * saved", and the wording unsaved after the server was back. So the
+           * chip says so, and the line is committed again on a timer — with
+           * whatever it holds by then, so a correction made meanwhile is what
+           * lands. Not while it has the caret: that is somebody still typing,
+           * and their Enter or click away commits it. Focus is not taken back
+           * for the same reason, or the retry would never come.
+           */
+          inlineRetrying.add(node);
+          setSaveState('failed', 'can’t reach the server. Retrying…');
+          const retry = () => {
+            retryTimer = null;
+            if (!editing || !node.isConnected) {
+              inlineRetrying.delete(node);
+              return;
+            }
+            if (document.activeElement === node) retryTimer = setTimeout(retry, UNREACHABLE_RETRY_MS);
+            else stop(true);
+          };
+          retryTimer = setTimeout(retry, UNREACHABLE_RETRY_MS);
         })
         .finally(() => inlineSaves.delete(save));
     } else {
@@ -7299,8 +7347,23 @@ async function saveDraftNow(message, { leaving = false } = {}) {
         setDraftSaveState('failed', 'this application is no longer in the workspace');
         setStatus(`${DRAFT_GONE} It was finished or discarded somewhere else; what you typed is still on screen to copy.`, true);
         loadDrafts().catch(() => undefined);
-      } else {
+      } else if (!unreachable(err)) {
         setDraftSaveState('failed', err.message);
+      } else {
+        /*
+         * The server is not there to refuse it. Waiting for the next keystroke
+         * left "Not saved — Failed to fetch" over a letter that never saved
+         * once the server was back, as the resume's chip did (see `autoSave`).
+         * So it is asked again on a timer, which a keystroke made meanwhile
+         * replaces, and which sends the draft as it is by then.
+         */
+        setDraftSaveState('failed', 'can’t reach the server. Retrying…');
+        if (draftSave.current === draft && !draftSave.timer) {
+          draftSave.timer = setTimeout(() => {
+            draftSave.timer = null;
+            saveDraftNow().catch(() => {});
+          }, UNREACHABLE_RETRY_MS);
+        }
       }
       throw err;
     })
@@ -7420,10 +7483,8 @@ function renderDraft(draft) {
 
     // Drawn by pdf.js, so retypesetting mid-sentence swaps in a finished page
     // instead of blinking the letter away while a new PDF loads.
-    const letterEmpty = el('div', {
-      className: 'preview-empty',
-      textContent: 'Type a first sentence and it appears here, set like your resume.',
-    });
+    const LETTER_EMPTY = 'Type a first sentence and it appears here, set like your resume.';
+    const letterEmpty = el('div', { className: 'preview-empty', textContent: LETTER_EMPTY });
     const letterPane = el('div', { className: 'preview-frame letter-preview' }, [letterEmpty]);
     const letterFit = el('div', { className: 'fit idle', textContent: 'Not compiled yet.' });
     /*
@@ -7444,6 +7505,7 @@ function renderDraft(draft) {
       if (!draft.coverLetter.body.trim()) {
         // The whole page goes, not just the class over it.
         letterToken++;
+        letterEmpty.textContent = LETTER_EMPTY;
         clearPdf(letterPane);
         letterFit.className = 'fit idle';
         letterFit.textContent = 'Nothing written yet.';
@@ -7466,6 +7528,7 @@ function renderDraft(draft) {
           }),
         });
         if (token !== letterToken) return; // a newer keystroke already asked
+        letterEmpty.textContent = LETTER_EMPTY;
         showPdf(letterPane, r.pdfUrl);
         liveChip.className = 'live ok';
         liveChip.textContent = 'Live';
@@ -7478,10 +7541,29 @@ function renderDraft(draft) {
         );
       } catch (err) {
         if (token !== letterToken) return;
-        liveChip.className = 'live bad';
-        liveChip.textContent = 'Compile failed';
         letterFit.className = 'fit bad';
-        letterFit.textContent = err.message;
+        if (!unreachable(err)) {
+          liveChip.className = 'live bad';
+          liveChip.textContent = 'Compile failed';
+          letterFit.textContent = err.message;
+          return;
+        }
+        /*
+         * The server stopped. As with the resume's preview (see
+         * `renderPreview`), this said "Failed to fetch" and stayed that way
+         * after the server was back, since only a keystroke asks for a
+         * compile. So it says what happened and asks again on a timer, which
+         * a keystroke made meanwhile replaces (see `scheduleLetter`), for
+         * this draft only while it is the one on screen.
+         */
+        liveChip.className = 'live offline';
+        liveChip.textContent = 'Can’t reach server';
+        letterFit.textContent = 'Can’t reach the server. Retrying every few seconds…';
+        letterEmpty.textContent = 'Can’t reach the server. The preview will appear once it is back.';
+        letterTimer = setTimeout(() => {
+          letterTimer = null;
+          if (draftSave.current === draft && letterPane.isConnected) compile();
+        }, UNREACHABLE_RETRY_MS);
       }
     };
 
