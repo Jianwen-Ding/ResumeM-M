@@ -2112,6 +2112,13 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 @media (max-width: 420px) {
   #live-state { font-size: 0; gap: 0; padding: 4px 8px; }
 }
+/* At 320-380px the switches give the resume's name back some room: it was
+   down to "Data Scie". */
+@media (max-width: 380px) {
+  .sticky-toolbar { gap: 4px; }
+  .segmented button { padding: 4px 8px; }
+  .sticky-toolbar button.tiny { padding: 4px 7px; }
+}
 
 /*
  * Inside the extension's side panel, one row of header: the panel's own bar
