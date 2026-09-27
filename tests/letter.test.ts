@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { compileLetter } from '../src/render/compile.js';
 import { renderLetterFastBody, renderLetterLatex } from '../src/render/letter.js';
+import { inlineTex } from '../src/render/latex.js';
 import { DEFAULT_LAYOUT, type ResolvedProfile } from '../src/model/types.js';
 import { hasLatex } from './helpers.js';
 
@@ -94,6 +95,36 @@ describe('the cover letter template', () => {
   });
 });
 
+/*
+ * `_italic_` printed its underscores — "I am \_really\_ keen" — while
+ * `*italic*` beside it was set in italics. Same terms as the asterisk: an
+ * underscore glued to a letter or a slash is never a marker, so the ones in
+ * names, identifiers, addresses and links print as they always did.
+ */
+describe('underscores for italics', () => {
+  it('sets _this_ in italics in a letter, as *this* is', () => {
+    const tex = renderLetterLatex(letter('I am _really_ keen on the (_ingest_) work, and *also* this.'), DEFAULT_LAYOUT);
+    expect(tex).toContain('I am \\textit{really} keen on the (\\textit{ingest}) work, and \\textit{also} this.');
+    expect(tex).not.toContain('\\_really\\_');
+  });
+
+  it('leaves every underscore that is not a marker as it was', () => {
+    for (const [typed, set] of [
+      ['snake_case_names', 'snake\\_case\\_names'],
+      ['__init__ and MAX_VALUE', '\\_\\_init\\_\\_ and MAX\\_VALUE'],
+      ['morgan_testwell@example.com', 'morgan\\_testwell@example.com'],
+      ['a _ b and _private and foo_bar_ baz', 'a \\_ b and \\_private and foo\\_bar\\_ baz'],
+      ['https://example.com/_next_/a_b', 'https://example.com/\\_next\\_/a\\_b'],
+    ]) {
+      expect(inlineTex(typed!), typed).toBe(set);
+    }
+    // And a bare link in a letter still breaks where it did, underscores and all.
+    expect(renderLetterLatex(letter('See https://x.com/a_b_c now.'), DEFAULT_LAYOUT)).toContain(
+      'https://x.\\penalty100{}com/\\penalty100{}a\\_\\penalty100{}b\\_\\penalty100{}c',
+    );
+  });
+});
+
 describe.skipIf(!latex)('compiling a cover letter', { timeout: 180_000 }, () => {
   it('produces a one-page PDF', async () => {
     const result = await compileLetter(letter('I would like to work on ingest at scale.'), DEFAULT_LAYOUT);
@@ -130,5 +161,24 @@ describe.skipIf(!latex)('compiling a cover letter', { timeout: 180_000 }, () => 
     await expect(compileLetter(letter('Thanks for reading 🚀'), DEFAULT_LAYOUT)).rejects.toThrow(
       /^This cover letter contains/,
     );
+  });
+
+  /*
+   * And quotes what they wrote around it. The snippet came from the .tex, so
+   * an emoji closing the letter was shown near "Thanks for reading 🚀
+   * Sincerely, \\[25." — the sign-off and the signature gap's markup, which
+   * nobody typed and nobody can find in their letter.
+   */
+  it('quotes the person\u2019s own text around the character, not the LaTeX', async () => {
+    const said = await compileLetter(letter('I would love to join the team. Thanks for reading 🚀'), DEFAULT_LAYOUT).catch(
+      (err: Error) => err.message,
+    );
+    expect(said).toContain('near: "Thanks for reading 🚀".');
+    expect(said).not.toMatch(/Sincerely|\\\[/);
+
+    const inCompany = await compileLetter(letter('I would like to work on ingest.', { company: 'Emberlight 株式会社' }), DEFAULT_LAYOUT).catch(
+      (err: Error) => err.message,
+    );
+    expect(inCompany).toContain('near: "Emberlight 株式会社"');
   });
 });

@@ -379,3 +379,22 @@ describe('a title is not cut at a " - " for being there', () => {
     }
   });
 });
+
+describe('"Vagas abertas" — a careers page named in another language is still not the employer', () => {
+  it('refuses the page’s name in the languages careers sites are served in', () => {
+    for (const name of ['Vagas abertas', 'Carreiras', 'Empleos', 'Ofertas de empleo', 'Offres d’emploi', 'Stellenangebote', 'Karriere', 'Posizioni aperte', 'Vacatures']) {
+      expect(looksLikeCompanyName(name), name).toBe(false);
+    }
+  });
+
+  it('and reads the employer some other way on Qumulo’s Portuguese page', () => {
+    const url = 'https://qumulo.com/pt/job-openings?ashby_jid=43855947-3a85-4d1c-8b8e-e0c0ddcaf183';
+    const html = `<html><head><title>Vagas abertas</title></head><body><h1>Vagas abertas</h1>
+      <p>Descubra as vagas abertas na Qumulo.</p></body></html>`;
+    expect(extractJob(html, url, 'Vagas abertas').company).not.toBe('Vagas abertas');
+  });
+
+  it('while a name that only contains such a word is kept', () => {
+    expect(looksLikeCompanyName('Carrera Labs')).toBe(true);
+  });
+});

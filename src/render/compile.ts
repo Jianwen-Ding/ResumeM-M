@@ -8,6 +8,7 @@ import { DEFAULT_LAYOUT, type LayoutOptions, type ResolvedResume } from '../mode
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
 import { renderLatex, unrenderableReason } from './latex.js';
 import { letterLayout, renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
+import { namePlaceholders, placeholdersIn } from '../model/placeholders.js';
 
 const run = promisify(execFile);
 
@@ -458,8 +459,12 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
  * knows how to show — the log body carries the same text, so a UI that renders
  * the log instead of the message still says something useful.
  */
-function assertRenderable(tex: string, what: 'resume' | 'cover letter' = 'resume'): void {
-  const reason = unrenderableReason(tex, what);
+function assertRenderable(
+  tex: string,
+  what: 'resume' | 'cover letter' = 'resume',
+  own: readonly (string | undefined)[] = [],
+): void {
+  const reason = unrenderableReason(tex, what, own);
   if (reason) throw new LatexError(reason, reason);
 }
 
@@ -618,7 +623,8 @@ interface Tried {
  * doc's link in it that set cleanly as written was grown until the link ran
  * 30pt off the paper. Growing is a nicety; losing text is the one thing this
  * must not do, so a layout that runs further past the edge than the one as
- * written counts as not fitting.
+ * written counts as not fitting. When that is what stops it, the margins give
+ * their width back and the type goes on growing into it.
  */
 async function fitSearch<A extends Tried>(
   base: LayoutOptions,
@@ -632,8 +638,26 @@ async function fitSearch<A extends Tried>(
     left--;
     return attempt(layout);
   };
-  // How full the page is, where 1 is exactly full.
-  const fill = (a: Tried) => a.m.usedPt / (textHeightIn(a.layout) * PT_PER_IN * base.maxPages);
+  /*
+   * The pages growing may fill: the ones the resume was written on, not
+   * `maxPages`. Allowed two, a resume that fitted on one was grown until
+   * three bullets and its skills spilled onto a second page that was
+   * otherwise empty — "fits", and exactly what growing is meant to avoid.
+   */
+  const pages = Math.min(first.m.pages, base.maxPages);
+  /*
+   * How full those pages are, where 1 is exactly full — at the least height
+   * the last page's glue can shrink to, because TeX shrinks the gaps between
+   * items before it breaks a page. Measured as set, a page 98.7% full was
+   * left at 10.5pt when 10.92pt fitted it, and one short bullet more or less
+   * moved a resume between the two.
+   */
+  const fill = (a: Tried) => {
+    const perPage = textHeightIn(a.layout) * PT_PER_IN;
+    const last = readLastPage(a.raw.log);
+    const used = last ? (a.m.pages - 1) * perPage + last.totalPt - last.shrinkPt : a.m.usedPt;
+    return used / (perPage * pages);
+  };
   // Where between two tries the page should run out, kept off either end.
   const aim = (lo: number, hi: number, loFill: number, hiFill: number) => {
     const gap = hi - lo;
@@ -646,20 +670,57 @@ async function fitSearch<A extends Tried>(
   if (fitsAt(first)) {
     if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
     // On its page, and losing nothing off the side of it the page as written kept.
-    const edge = widestPastEdge(first.raw.log);
-    const roomy = (a: Tried) => fitsAt(a) && widestPastEdge(a.raw.log) <= edge;
-    // In amounts of growth: 0 is as written, 1 the ceiling.
-    let fit = { g: 0, a: first };
-    const widest = await next(layoutAt(base, -1));
-    if (roomy(widest)) {
-      fit = { g: 1, a: widest };
-    } else {
-      let over = { g: 1, a: widest };
-      for (let tries = 0; tries < 2 && left > 0 && over.g - fit.g > 0.04; tries++) {
-        const g = aim(fit.g, over.g, fill(fit.a), fill(over.a));
-        const a = await next(layoutAt(base, -g));
-        if (roomy(a)) fit = { g, a };
-        else over = { g, a };
+    const edges = pastEdge(first.raw.log).sort((x, y) => y - x);
+    // Nor wrapping a heading row onto more lines than the page as written
+    // did: larger type would otherwise buy itself two- and three-line titles.
+    const wrapped = wrappedRows(first.raw.log);
+    const wide = (a: Tried) => !noFurtherPastEdge(a.raw.log, edges) || wrappedRows(a.raw.log) > wrapped;
+    const tall = (a: Tried) => a.m.pages > pages;
+    const roomy = (a: Tried) => !tall(a) && !wide(a);
+    /*
+     * Growth in two amounts, 0 as written and 1 the ceiling: `g` for the type
+     * and the line spacing that goes with it, `h` for the margins. They move
+     * together unless the width says otherwise.
+     */
+    const at = (g: number, h: number): LayoutOptions => ({ ...layoutAt(base, -g), marginIn: layoutAt(base, -h).marginIn });
+    /*
+     * Closer to the edge between a try that fitted and one that did not.
+     * Aimed by the heights when the page ran out; halved when only the width
+     * did, which the heights say nothing about.
+     */
+    type Point = { x: number; a: A };
+    const narrow = async (along: (x: number) => LayoutOptions, fit: Point, over: Point, tries: number) => {
+      for (let i = 0; i < tries && left > 0 && over.x - fit.x > 0.04; i++) {
+        const x = tall(over.a) ? aim(fit.x, over.x, fill(fit.a), fill(over.a)) : (fit.x + over.x) / 2;
+        const a = await next(along(x));
+        if (roomy(a)) fit = { x, a };
+        else over = { x, a };
+      }
+      return { fit, over };
+    };
+    let fit: Point = { x: 0, a: first };
+    const widest = await next(at(1, 1));
+    let over: Point = { x: 1, a: widest };
+    if (roomy(widest)) fit = over;
+    // Everything grows evenly to where the page runs out, as long as it is
+    // the page that runs out.
+    else if (tall(widest)) ({ fit, over } = await narrow((g) => at(g, g), fit, over, 2));
+    /*
+     * The width stopped it with the page still not full: a heading wrapped
+     * onto another line, or a line ran further past the edge. That used to
+     * end the search with the type as written — one long project heading
+     * kept a page a third empty at 10.5pt. Both the type and the margins take
+     * width, so the margins give theirs back first, and the type grows into
+     * what they leave.
+     */
+    if (fit.a !== widest && wide(over.a) && !tall(over.a) && left > 0 && fill(fit.a) < NEARLY_FULL) {
+      const bigType = await next(at(1, 0));
+      if (roomy(bigType)) {
+        ({ fit } = await narrow((h) => at(1, h), { x: 0, a: bigType }, { x: 1, a: widest }, 2));
+      } else {
+        // At the margins as written, `at(fit.x, 0)` is no wider than `fit`
+        // and no taller, so the type's search starts from there.
+        ({ fit } = await narrow((g) => at(g, 0), fit, { x: 1, a: bigType }, 3));
       }
     }
 
@@ -806,7 +867,35 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
 
   // Before the fit loop, not inside it: a character the engine cannot set fails
   // identically on all eight attempts, and the answer is never to shrink.
-  assertRenderable(renderLatex(resume));
+  /*
+   * And quoted from what they wrote, not from the .tex: see `unrenderableReason`.
+   * A resume's snippet came from its LaTeX, so an emoji in a bullet was
+   * reported near `really} fast launch 🚀 for snake\_case\_n` — braces and
+   * backslashes nobody typed. The line or field holding the character is
+   * searched instead: every bullet, every entry's heading lines, every skill,
+   * the section headings and the profile.
+   */
+  const p = resume.profile;
+  assertRenderable(renderLatex(resume), 'resume', [
+    ...resume.sections.flatMap((section) => [
+      ...section.entries.flatMap((entry) => [
+        ...entry.bullets.map((bullet) => bullet.text),
+        entry.title,
+        entry.subtitle,
+        entry.location,
+        entry.dates,
+      ]),
+      ...section.skillGroups.flatMap((group) => [group.name, ...group.items]),
+      section.heading,
+    ]),
+    p.name,
+    p.phone,
+    p.email,
+    p.location,
+    p.linkedin,
+    p.github,
+    p.website,
+  ]);
 
   // The fast path is only ever a preview convenience. If it is unavailable, or
   // errors on this particular document, every attempt silently falls back to
@@ -878,11 +967,19 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     return { layout, raw, m: measure(raw.aux, layout, 1), tex, fast: false };
   };
   // 1. As authored — then larger if it has room, or smaller if it has to be.
-  const best = await fitSearch(base, await attempt(base), attempt, attemptsLeft);
+  const first = await attempt(base);
+  const best = await fitSearch(base, first, attempt, attemptsLeft);
 
-  const availablePt = textHeightIn(best.layout) * PT_PER_IN * base.maxPages;
-  const baselinePt = readBaseline(best.raw.log) ?? best.layout.fontSizePt * 1.2;
   const fits = best.m.pages <= base.maxPages;
+  /*
+   * Room counted on the pages it is held to. Auto-fit keeps a resume that
+   * fits as written on the pages it was written on, so a one-page resume
+   * allowed two was reported with about fifty lines of room — the whole of
+   * a second page it will not grow onto.
+   */
+  const heldTo = base.autoFit && first.m.pages <= base.maxPages ? Math.max(first.m.pages, best.m.pages) : base.maxPages;
+  const availablePt = textHeightIn(best.layout) * PT_PER_IN * heldTo;
+  const baselinePt = readBaseline(best.raw.log) ?? best.layout.fontSizePt * 1.2;
 
   // The compiled page count is ground truth; the height measurement is a
   // diagnostic derived from it. They can disagree by a few points at the
@@ -998,9 +1095,26 @@ function pastEdge(log: string): number[] {
   return [...log.matchAll(TOO_WIDE)].map((m) => Number(m[1])).filter((pt) => pt >= NOTICEABLE_PT);
 }
 
-/** How far past the edge the worst of those lines runs, in points; 0 when none does. */
-function widestPastEdge(log: string): number {
-  return Math.max(0, ...pastEdge(log));
+/**
+ * Whether no line runs further past the edge than the page as written had one
+ * run: no more such lines, and the widest no wider than the widest was, the
+ * next no wider than the next, and so on (`before` sorted widest first).
+ *
+ * Measured, not a yes-or-no. A link already off the side as written is the
+ * author's to shorten, and must not stop the page growing so long as growing
+ * does not push it further — nor excuse a second line going over.
+ */
+function noFurtherPastEdge(log: string, before: readonly number[]): boolean {
+  const now = pastEdge(log).sort((x, y) => y - x);
+  return now.length <= before.length && now.every((pt, i) => pt <= before[i]! + EDGE_SLACK_PT);
+}
+
+/** Noise in the width TeX reports for the same line at another size. */
+const EDGE_SLACK_PT = 0.5;
+
+/** Lines added by wrapping heading rows too long for one line (see `\rmmside`). */
+function wrappedRows(log: string): number {
+  return [...log.matchAll(/RMM-ROW-LINES: (\d+)/g)].reduce((sum, m) => sum + Number(m[1]) - 1, 0);
 }
 
 function tooWideWarnings(log: string): string[] {
@@ -1015,12 +1129,45 @@ function tooWideWarnings(log: string): string[] {
   ];
 }
 
+/** The last page's natural height and the total shrink of its glue, as `\\AtEndDocument` reported them. */
+function readLastPage(log: string): { totalPt: number; shrinkPt: number } | undefined {
+  const all = [...log.matchAll(/RMM-PAGE: ([\d.]+)pt ([\d.]+)pt/g)];
+  const m = all[all.length - 1];
+  return m ? { totalPt: Number(m[1]), shrinkPt: Number(m[2]) } : undefined;
+}
+
 function readBaseline(log: string): number | undefined {
   // The last one. `runtimeSetup` reports the leading again after setting it,
   // and on the precompiled path the earlier report is the format's default.
   const all = [...log.matchAll(/RMM-BASELINESKIP:\s*([\d.]+)pt/g)];
   const m = all[all.length - 1];
   return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * A template slot left in the letter — "[Your Name]", "[Company Name]",
+ * "{company}", "XX years" — which prints exactly as written.
+ *
+ * A model drafting a letter writes these when it cannot fill something in,
+ * and people keep them from templates they started from. The letter compiled,
+ * fit on its page and was attached with "Dear [Hiring Manager]," at the top,
+ * and nothing said so. Named rather than refused, as a line past the edge is:
+ * the text is theirs to change, and a bracket this reads wrongly as a slot
+ * should not stop a letter being built.
+ */
+export function placeholderWarnings(letter: LetterContent): string[] {
+  const found = placeholdersIn(
+    [letter.company, letter.role, letter.greeting, letter.body, letter.signOff, letter.date]
+      .filter((part): part is string => typeof part === 'string')
+      .join('\n\n'),
+  );
+  if (found.length === 0) return [];
+  const one = found.length === 1;
+  return [
+    `The letter still has ${one ? 'a placeholder' : `${found.length} placeholders`} in it — ` +
+      `${namePlaceholders(found)} — ${one ? 'which prints' : 'which print'} exactly as written. ` +
+      `Fill ${one ? 'it' : 'them'} in, or take the sentence out.`,
+  ];
 }
 
 export interface LetterCompileResult {
@@ -1097,17 +1244,35 @@ export async function compileLetter(
    * an emoji pasted into a cover letter — sending the reader to the wrong
    * document, which on a save with a dozen resumes in it is an afternoon.
    */
-  assertRenderable(renderLetterLatex(letter, base), 'cover letter');
+  /*
+   * And quoted from what they wrote, not from the .tex: see `unrenderableReason`.
+   */
+  const p = letter.profile;
+  assertRenderable(renderLetterLatex(letter, base), 'cover letter', [
+    letter.body,
+    letter.company,
+    letter.role,
+    letter.greeting,
+    letter.signOff,
+    letter.date,
+    p.name,
+    p.phone,
+    p.email,
+    p.location,
+    p.linkedin,
+    p.github,
+    p.website,
+  ]);
 
   type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };
   const wantFast = opts.mode === 'preview' && (await hasFastPath());
-  const attempt = async (at: LayoutOptions): Promise<Attempt> => {
-    const tex = renderLetterLatex(letter, at);
+  const attempt = async (at: LayoutOptions, lead = 0): Promise<Attempt> => {
+    const tex = renderLetterLatex(letter, at, lead);
     // The shortcut for the page as set only, as for a resume: its format
     // carries the layout, and every other attempt would dump one of its own.
     if (wantFast && at === base) {
       try {
-        const raw = await compileFastBody(renderLetterFastBody(letter, at), at.paper, at);
+        const raw = await compileFastBody(renderLetterFastBody(letter, at, lead), at.paper, at);
         return { layout: at, raw, m: measure(raw.aux, at, 1), tex, fast: true };
       } catch {
         // Fall back to the trusted engine.
@@ -1116,7 +1281,19 @@ export async function compileLetter(
     const raw = await compileOnce(tex, engine);
     return { layout: at, raw, m: measure(raw.aux, at, 1), tex, fast: false };
   };
-  const best = await fitSearch(base, await attempt(base), attempt, 6);
+  const fitted = await fitSearch(base, await attempt(base), (at) => attempt(at), 6);
+  /*
+   * And placed on it. Grown as far as a letter may go, a letter of a few
+   * lines still left the lower half of the page empty, under a date, a
+   * greeting and a sign-off packed against the letterhead. Some of that room
+   * — two-fifths, never more than two inches — goes above the date instead,
+   * so a short letter sits on the page. Only a letter with a third of the
+   * page to spare, and only if it still fits after: a full one is untouched.
+   */
+  const room = textHeightIn(fitted.layout) * PT_PER_IN - fitted.m.usedPt;
+  const spare = fitted.m.pages <= 1 && room > (textHeightIn(fitted.layout) * PT_PER_IN) / 3;
+  const placed = spare ? await attempt(fitted.layout, Math.min(room * 0.4, 144)).catch(() => undefined) : undefined;
+  const best = placed && placed.m.pages <= 1 ? placed : fitted;
   const { raw, tex } = best;
   const used = best.layout;
   const usedFast = best.fast;
@@ -1141,7 +1318,7 @@ export async function compileLetter(
     texPath: opts.texPath,
     tex,
     engine,
-    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log)],
+    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log), ...placeholderWarnings(letter)],
     pages: m.pages,
     fits,
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

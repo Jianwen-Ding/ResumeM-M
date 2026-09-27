@@ -542,6 +542,41 @@ describe('the jobs a work-history section asks for', () => {
     expect(jobs[1]?.end?.year).toBe(2022);
   });
 
+  /*
+   * `_italic_` is set in italics in the PDF, so its underscores are markup and
+   * come off for the form as asterisks do. The ones that are not markers stay:
+   * the PDF prints them, and a form holding `snake_case` without its
+   * underscores, or an address without one, says something else.
+   */
+  it('takes _italic_ markers off, and leaves snake_case, addresses and URLs alone', () => {
+    const [job] = workHistory(
+      resume([
+        {
+          id: 'e1',
+          kind: 'experience',
+          title: '_Vega_ Analytics',
+          subtitle: 'Backend Engineer',
+          dates: '2024',
+          bullets: [
+            { id: 'b1', variantId: 'v', text: 'Made the _really_ slow job (_much_) faster, *twice*' },
+            { id: 'b2', variantId: 'v', text: 'Renamed snake_case_names and __init__ hooks' },
+            { id: 'b3', variantId: 'v', text: 'Paged morgan_testwell@example.com via https://example.com/a_b_c' },
+            { id: 'b4', variantId: 'v', text: 'Kept `_private_` helpers and *.log files' },
+          ],
+        },
+      ]),
+    );
+    expect(job?.company).toBe('Vega Analytics');
+    expect(job?.description).toBe(
+      [
+        '• Made the really slow job (much) faster, twice',
+        '• Renamed snake_case_names and __init__ hooks',
+        '• Paged morgan_testwell@example.com via https://example.com/a_b_c',
+        '• Kept _private_ helpers and *.log files',
+      ].join('\n'),
+    );
+  });
+
   it('leaves out what is not a job', () => {
     const r = resume([
       { id: 'p', kind: 'project', title: 'A thing', bullets: [{ id: 'b', variantId: 'v', text: 'Did it' }] },

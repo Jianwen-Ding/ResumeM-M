@@ -85,6 +85,7 @@ import type {
   WritingSample,
 } from '../model/types.js';
 import { compileLetter, compileResume, OverflowError } from '../render/compile.js';
+import { namePlaceholders, placeholdersIn } from '../model/placeholders.js';
 import { Jobs } from './jobs.js';
 
 interface DescribedChange {
@@ -535,6 +536,17 @@ function writingTools(
 
 /** Where the compiled MCP entry point sits relative to this file. */
 const mcpDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mcp');
+
+/**
+ * What to say beside an AI draft that still has template slots in it, naming
+ * them — so it is not presented as finished. See `placeholdersIn`.
+ */
+function placeholderNote(what: string, found: string[]): string {
+  return (
+    `${what} still has ${found.length === 1 ? 'a placeholder' : `${found.length} placeholders`} in it — ` +
+    `${namePlaceholders(found)}. It is not finished: fill ${found.length === 1 ? 'it' : 'them'} in, or take the sentence out.`
+  );
+}
 
 /** Text a caller sent, trimmed — or nothing, for anything else or blank. */
 function sentText(v: unknown): string | undefined {
@@ -1003,12 +1015,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const wanted = String(req.query.application ?? '').trim();
       /*
-       * Named as the one being worked on, so it keeps the plain filename
-       * where two in-flight applications would clash — this endpoint exists
-       * to hand files to a form that is open in front of somebody. See
-       * `uniqueNames`.
+       * Named as the one being worked on — given the plain filenames in the
+       * shared folder — only when somebody asked for that: copied the folder
+       * path, opened it, pressed Attach. See `uniqueNames`. A card warming
+       * its chips in a background tab is not that, and taking the names on
+       * every warm let one tab rename the file another had just copied the
+       * path to. Either way the files are offered under the names they were
+       * built with (`builtAs`), so the card shows and hands over
+       * `First-Last-Resume.pdf` whatever the folder calls its copy.
        */
-      const folder = syncCurrent(store, undefined, wanted || undefined);
+      const claim = req.query.claim === '1' || req.query.claim === 'true';
+      const folder = syncCurrent(store, undefined, claim && wanted ? wanted : undefined);
       const attachments = folder.files
         .filter((name) => {
           const whose = folder.belongsTo[name] ?? '';
@@ -1019,7 +1036,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           return Boolean(wanted) && whose === wanted;
         })
         .map((name) => ({
-          name,
+          name: folder.builtAs?.[name] ?? name,
+          inFolder: name,
           standing: folder.belongsTo[name] === STANDING,
           url: `/current/${encodeURIComponent(name)}`,
         }));
@@ -2496,8 +2514,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const written = (result.tools as { letter?: string } | undefined)?.letter?.trim();
       const body = written || (result.executed ? trimToLetter(result.output) : '');
+      /*
+       * A draft with "[Company Name]" in it is not a finished letter. The
+       * writing tools refuse one; a run without them handed it back as the
+       * draft, and `save` filed it among the letters the next one is written
+       * from. Flagged, and not saved.
+       */
+      const placeholders = placeholdersIn(body);
+      const unfinished = placeholders.length > 0 ? placeholderNote('This letter', placeholders) : undefined;
       let saved: CoverLetter | undefined;
-      if (save && body.trim()) {
+      if (save && body.trim() && !unfinished) {
         saved = {
           id: letterId(job.company, job.jobTitle),
           // Named for the employer the address belongs to when the page never
@@ -2518,6 +2544,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         ...result,
         body,
         saved,
+        placeholders,
+        ...(unfinished ? { unfinished } : {}),
         // Always useful, and the whole answer when the AI is off.
         priorLetters: prior.map((l) => ({
           id: l.id,
@@ -2737,7 +2765,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         res.json({ output: '', executed: false, source: 'prompt', prompt: result.output, match });
         return;
       }
-      res.json({ ...result, source: 'ai', match });
+      // The same flag the letter carries: an answer with "[Company]" in it
+      // is not one to paste into a form.
+      const placeholders = placeholdersIn(result.output);
+      res.json({
+        ...result,
+        source: 'ai',
+        match,
+        placeholders,
+        ...(placeholders.length ? { unfinished: placeholderNote('This answer', placeholders) } : {}),
+      });
     }),
   );
 
@@ -3972,9 +4009,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       // The same files also go to the flat folder, which is the one a portal's
-      // file picker should be pointed at — the archive is for later. This one
-      // keeps the plain name; see `uniqueNames`.
-      const current = syncCurrent(store, undefined, result.application.id);
+      // file picker should be pointed at — the archive is for later. Without
+      // taking the plain names there: that is for what somebody does — copying
+      // the path, opening the folder, Attach — not for a build, which a tab
+      // in the background makes as its letter saves. See `uniqueNames`.
+      const current = syncCurrent(store);
       if (autoCommit()) {
         await commitQuietly(repo, `Apply: ${result.application.company} — ${result.application.role}`);
       }
@@ -4000,7 +4039,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * worked on (see `uniqueNames`), and a card naming it would be
          * pointing the upload dialog at that application's resume.
          */
-        currentFiles: current.files.filter((name) => current.belongsTo[name] === result.application.id),
+        currentFiles: current.files
+          .filter((name) => current.belongsTo[name] === result.application.id)
+          // Under the names they were built with, which is what the card
+          // shows and hands over: "always <Firstname>-<Lastname>-<Form type>".
+          .map((name) => current.builtAs[name] ?? name),
       });
     }),
   );
@@ -4848,7 +4891,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             );
             if (agent.executed && agent.output.trim()) {
               draft.coverLetter.body = trimToLetter(agent.output);
-              letterNotes.push('Cover letter drafted in your voice.');
+              // Not "drafted" when it still has slots in it: say which.
+              const gaps = placeholdersIn(draft.coverLetter.body);
+              letterNotes.push(gaps.length ? placeholderNote('The cover letter draft', gaps) : 'Cover letter drafted in your voice.');
             } else if (!agent.executed && prior[0]) {
               /*
                * Only when the AI did not run. This branch used to catch an AI
@@ -5003,6 +5048,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           target.source = produced.source;
           target.fromAnswerId = produced.fromAnswerId;
           target.needsReview = produced.needsReview;
+          // An answer the AI left a slot in, named where it landed — see
+          // `placeholdersIn`. Only one that was kept: one typed over is gone.
+          const gaps = produced.source === 'ai' ? placeholdersIn(produced.answer) : [];
+          if (gaps.length) notes.push(placeholderNote(`The answer to "${produced.question.length > 80 ? `${produced.question.slice(0, 79)}…` : produced.question}"`, gaps));
         }
         if (kept) {
           notes.push(

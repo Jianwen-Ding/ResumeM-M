@@ -16,6 +16,7 @@ import { rebase, same } from './rebase.js';
 import { insertNextTo, moveBefore, moveBy, orderEntryIds } from './reorder.js';
 import { DEFAULT_STYLE, endsBeforeItStarts, formatPeriod, inferStyle, parsePeriod } from './dates.js';
 import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
+import { markupFragment, plainMarkup } from './markup.js';
 let activeProject;
 let assetUI;
 const inlineSaves = new Set();
@@ -680,34 +681,25 @@ function plural(n, one, many = `${one}s`) {
 /**
  * Render the store's inline markup as real nodes. Raw `**asterisks**` on screen
  * were the single most obviously wrong thing about the first version.
+ *
+ * Read by the renderer's own rule — `_italic_` included — so a line is in
+ * italics here exactly where it is in the PDF. See web/markup.js.
  */
 function markup(text) {
-  const frag = document.createDocumentFragment();
-  const re = /\*\*(.+?)\*\*|`(.+?)`|(?:^|(?<=[\s(]))\*([^*]+)\*(?=[\s).,;:]|$)/g;
-  let last = 0;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) frag.append(text.slice(last, m.index));
-    if (m[1] !== undefined) frag.append(el('strong', { textContent: m[1] }));
-    else if (m[2] !== undefined) frag.append(el('span', { className: 'mono', textContent: m[2] }));
-    else frag.append(el('em', { textContent: m[3] }));
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) frag.append(text.slice(last));
-  return frag;
+  return markupFragment(text);
 }
 
 /**
  * Display text for stored source. The store holds LaTeX-flavoured text — `--`
  * for an en dash, `**bold**` — which is right for the renderer and looks like a
  * typo everywhere else.
+ *
+ * The markers come off by the renderer's rule too. Stripping every `*` and
+ * backtick left `_really_` showing its underscores while the PDF set it in
+ * italics, and took the asterisk out of `*.log`, which the PDF prints.
  */
 function display(text) {
-  return String(text ?? '')
-    .replace(/\s--\s/g, ' \u2013 ')
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/[`*]/g, '')
-    .trim();
+  return plainMarkup(String(text ?? '').replace(/\s--\s/g, ' \u2013 ')).trim();
 }
 
 /**
@@ -1746,7 +1738,9 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     className: `${className} editable`,
     title: title ?? 'Double-click to edit. This wording is shared by every resume using it.',
   });
-  node.append(markup(display(text)));
+  // Plain words: `display` has already taken the markers off, and reading
+  // what is left as markup again would find some in a code span's text.
+  node.append(display(text));
 
   let editing = false;
   const stop = (commit) => {
@@ -1789,7 +1783,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     } else {
       // Put the markup back: the raw text is what gets edited, the rendered
       // form is what gets shown.
-      node.replaceChildren(markup(display(text)));
+      node.replaceChildren(display(text));
     }
   };
 

@@ -149,6 +149,56 @@ describe('characters the engine cannot set', () => {
     await expect(compileResume(r, { maxAttempts: 8 })).rejects.toThrow(/Chinese/);
   }, 30_000);
 
+  /*
+   * And quotes the resume's own words around it, as a letter does. The
+   * snippet came from the .tex, so an emoji in a bullet was shown near
+   * `really} fast launch 🚀 for snake\_case\_n` — a brace and backslashes
+   * nobody typed and nobody can search their resume for.
+   */
+  it('quotes the line it is in, not the LaTeX made from it', async () => {
+    const withBullet = (text: string) =>
+      resume({
+        sections: [
+          {
+            kind: 'experience',
+            heading: 'Experience',
+            skillGroups: [{ id: 'g', name: 'Languages', items: ['Go', 'Rust'] }],
+            entries: [
+              {
+                id: 'e',
+                kind: 'experience',
+                title: 'Engineer',
+                subtitle: 'Acme',
+                dates: '2024',
+                location: 'Boston',
+                bullets: [
+                  { id: 'a', variantId: 'v', text: 'Did the **first** thing.' },
+                  { id: 'b', variantId: 'v', text },
+                ],
+              },
+            ],
+          },
+        ],
+      });
+
+    const said = await compileResume(withBullet('Shipped the _really_ fast launch 🚀 for snake_case_names'), {
+      maxAttempts: 1,
+    }).catch((err: Error) => err.message);
+    expect(said).toMatch(/^This resume contains 1 character/);
+    expect(said).toContain('near: "really_ fast launch 🚀 for snake_case_nam".');
+    expect(said).not.toMatch(/\\|[{}]/);
+
+    const inSkill = await compileResume(
+      resume({
+        sections: [
+          { kind: 'skills', heading: 'Skills', entries: [], skillGroups: [{ id: 'g', name: 'Languages', items: ['Go', '日本語 (N2)'] }] },
+        ],
+      }),
+      { maxAttempts: 1 },
+    ).catch((err: Error) => err.message);
+    expect(inSkill).toContain('near: "日本語 (N2)".');
+  }, 30_000);
+
   it('does not trip on the .tex the renderer writes for an ordinary resume', () => {
     expect(unrenderableReason(renderLatex(resume()))).toBeUndefined();
   });

@@ -106,10 +106,29 @@ export function unsupportedCharacters(text: string): UnsupportedCharacter[] {
   return [...found.values()];
 }
 
-/** The message shown when a document cannot be set, or undefined when it can. */
-export function unrenderableReason(text: string, what: 'resume' | 'cover letter' = 'resume'): string | undefined {
+/**
+ * The message shown when a document cannot be set, or undefined when it can.
+ *
+ * `own` is the text the person wrote, field by field, when the caller has it.
+ * The check has to run on the .tex — that is what the engine is given — but
+ * the snippet it quoted came from there too, so an emoji at the end of a
+ * letter was reported near `Thanks for reading 🚀 Sincerely, \\[25.`,
+ * half of it markup the person never typed and cannot find. Quoted from the
+ * field that holds the character instead, it is their own sentence.
+ */
+export function unrenderableReason(
+  text: string,
+  what: 'resume' | 'cover letter' = 'resume',
+  own: readonly (string | undefined)[] = [],
+): string | undefined {
   const bad = unsupportedCharacters(text);
   if (bad.length === 0) return undefined;
+  const first = bad[0]!;
+  const near =
+    own
+      .filter((field): field is string => typeof field === 'string' && field.includes(first.char))
+      .map((field) => unsupportedCharacters(field).find((c) => c.char === first.char)?.context)
+      .find(Boolean) ?? first.context;
 
   const shown = bad.slice(0, 6).map((b) => `${b.char} (${b.codePoint})`).join(', ');
   const more = bad.length > 6 ? `, and ${bad.length - 6} more` : '';
@@ -117,7 +136,7 @@ export function unrenderableReason(text: string, what: 'resume' | 'cover letter'
     `This ${what} contains ${bad.length} character${bad.length === 1 ? '' : 's'} the LaTeX ` +
     `engine cannot typeset: ${shown}${more}. It sets Latin scripts only, so text in ` +
     `Chinese, Japanese, Korean, Cyrillic, Greek, Arabic or Hebrew — and emoji — cannot go ` +
-    `in the PDF. First occurrence near: "${bad[0]!.context}".`
+    `in the PDF. First occurrence near: "${near}".`
   );
 }
 
@@ -207,8 +226,23 @@ export function unrenderableReason(text: string, what: 'resume' | 'cover letter'
  * markdown spelling nobody checks after typing, because in every editor
  * that renders it, it looks right.
  */
-const MARKUP =
-  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s([{'"])\*(?=[^\s*.,;:!?)\]}])([^*]+)(?<=[^\s*([{])\*(?=[\s).,;:!?\]}'"-]|$)|`(.+?)`/g;
+/*
+ * **And `_italic_`, on the same terms as `*italic*`.** A model writing a
+ * letter reaches for underscores as often as asterisks, and they printed as
+ * typed: "I am \_really\_ keen". The rules above are what keep it off the
+ * underscores that are not emphasis — an opening `_` must follow a space, an
+ * opening bracket or quote, or the start of the text, and a closing one must
+ * be followed by one of the same few characters — so `snake_case_names`,
+ * `__init__`, `morgan_testwell@example.com` and the `_` inside
+ * `https://example.com/a_b_c` are never read as markers: in every one of them
+ * the underscore is glued to a letter or a `/` on the side that matters.
+ */
+/*
+ * Exported, and copied into web/markup.js: the editor reads a line by this
+ * same rule, and tests/markup-agreement.test.js holds the two together.
+ */
+export const MARKUP =
+  /\[([^\]]+)\]\(((?:[^()]|\([^()]*\))*)\)|\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*|\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<=^|[\s([{'"])\*(?=[^\s*.,;:!?)\]}])([^*]+)(?<=[^\s*([{])\*(?=[\s).,;:!?\]}'"-]|$)|(?<=^|[\s([{'"])_(?=[^\s_.,;:!?)\]}])([^_\n]+)(?<=[^\s_([{])_(?=[\s).,;:!?\]}'"-]|$)|`(.+?)`/g;
 
 /** Enough for bold inside a link inside italics; a guard, not a limit anyone meets. */
 const MAX_NESTING = 4;
@@ -283,7 +317,8 @@ function markup(s: string, depth: number): string {
 
   while ((m = re.exec(s)) !== null) {
     out += tex(s.slice(last, m.index));
-    const [whole, label, url, strongem, bold, italic, code] = m;
+    const [whole, label, url, strongem, bold, starItalic, underItalic, code] = m;
+    const italic = starItalic ?? underItalic;
 
     if (label !== undefined) {
       out += `\\href{${texHref(url!)}}{\\underline{${markup(label, depth - 1)}}}`;
@@ -303,6 +338,27 @@ function markup(s: string, depth: number): string {
   }
 
   return out + tex(s.slice(last));
+}
+
+/**
+ * The words of a line with its markup taken off: what the PDF prints, as
+ * plain text. A link keeps its label, the way the page shows it.
+ *
+ * By the rule `inlineTex` sets it by, so a marker comes off exactly where the
+ * PDF would not print it — `_really_` loses its underscores, and
+ * `snake_case`, `morgan_testwell@example.com` and `*.log` keep theirs.
+ */
+export function plainText(input: string): string {
+  return plain(String(input ?? ''), MAX_NESTING);
+}
+
+function plain(s: string, depth: number): string {
+  if (depth <= 0) return s;
+  return s.replace(new RegExp(MARKUP.source, 'g'), (_whole, label, _url, strongem, bold, starItalic, underItalic, code) => {
+    if (code !== undefined) return code as string;
+    const inner = (label ?? strongem ?? bold ?? starItalic ?? underItalic) as string;
+    return plain(inner, depth - 1);
+  });
 }
 
 const PAPER = { letter: 'letterpaper', a4: 'a4paper' } as const;
@@ -451,31 +507,79 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
   }%
 }
 
+% One side of a heading row, #1 = l or r, set against the other side of the
+% same row: #2 is the row's left content, #3 its right.
+%
+% In a plain l/r table each column is as wide as its widest cell in any row,
+% so a long employer name and a long location — on different rows, each row
+% fitting on its own — added up to more than the page, and the dates and the
+% location were set off the right-hand edge and lost. Each side is set in a
+% zero-width box instead, pinned to its own edge, exactly where the table put
+% it. Only a row whose own two sides would come within 1em of each other is
+% wrapped: the right side keeps its width up to 40% of the row, the left
+% takes the rest, and either that is still too long wraps within its share.
+% Says how many lines a wrapped side took, so growing can refuse to wrap more.
+% (Through \\edef: \\typeout reads \\prevgraf too late, and always says 0.)
+\\newcommand{\\rmmlines}{\\par\\edef\\rmmn{\\the\\prevgraf}\\typeout{RMM-ROW-LINES: \\rmmn}}
+\\newcommand{\\rmmside}[3]{%
+  \\setbox0\\hbox{#2}\\setbox2\\hbox{#3}%
+  \\dimen0=0.97\\textwidth
+  \\ifdim\\dimexpr\\wd0+\\wd2+1em\\relax>\\dimen0
+    \\dimen2=\\wd2
+    \\ifdim\\dimen2>0.4\\dimen0 \\dimen2=0.4\\dimen0 \\fi
+    \\ifdim\\wd0<\\dimexpr\\dimen0-\\dimen2-1em\\relax \\dimen2=\\dimexpr\\dimen0-\\wd0-1em\\relax \\fi
+    \\dimen4=\\dimexpr\\dimen0-\\dimen2-1em\\relax
+    \\if l#1\\makebox[0pt][l]{\\parbox[t]{\\dimen4}{\\raggedright#2\\rmmlines}}%
+    \\else\\makebox[0pt][r]{\\parbox[t]{\\dimen2}{\\raggedleft#3\\rmmlines}}\\fi
+  \\else
+    \\if l#1\\makebox[0pt][l]{\\box0}\\else\\makebox[0pt][r]{\\box2}\\fi
+  \\fi}
+
 \\newcommand{\\resumeSubheading}[4]{%
   \\vspace{-2\\rmmunit}\\item
     \\begin{tabular*}{0.97\\textwidth}[t]{l@{\\extracolsep{\\fill}}r}
-      \\textbf{#1} & #2 \\\\
-      \\textit{\\small#3} & \\textit{\\small #4} \\\\
+      \\rmmside l{\\textbf{#1}}{#2} & \\rmmside r{\\textbf{#1}}{#2} \\\\
+      \\rmmside l{\\textit{\\small#3}}{\\textit{\\small #4}} & \\rmmside r{\\textit{\\small#3}}{\\textit{\\small #4}} \\\\
     \\end{tabular*}\\vspace{-7\\rmmunit}%
 }
 
 \\newcommand{\\resumeProjectHeading}[2]{%
     \\item
     \\begin{tabular*}{0.97\\textwidth}{l@{\\extracolsep{\\fill}}r}
-      \\small#1 & #2 \\\\
+      \\rmmside l{\\small#1}{#2} & \\rmmside r{\\small#1}{#2} \\\\
     \\end{tabular*}\\vspace{-7\\rmmunit}%
 }
 
 \\renewcommand\\labelitemii{$\\vcenter{\\hbox{\\tiny$\\bullet$}}$}
 
+% The " | " between contact details, as one piece of glue drawn with the bar
+% in its middle: the same width, stretch and shrink as a space either side of
+% it, but a line break there takes the whole separator away. Written as
+% " $|$ ", a contact line wrapped by a grown page's type and margins left a
+% "|" hanging at the end of its first line.
+\\newcommand{\\rmmsep}{%
+  \\setbox0\\hbox{$|$}%
+  \\dimen0=\\dimexpr\\wd0+2\\fontdimen2\\font\\relax
+  \\dimen2=\\dimexpr\\dimen0-2\\fontdimen4\\font\\relax
+  \\cleaders\\hbox to\\dimen2{\\hss\\box0\\hss}%
+  \\hskip\\dimen0 plus 2\\fontdimen3\\font minus 2\\fontdimen4\\font\\relax}
+
 \\newcommand{\\resumeSubHeadingListStart}{\\begin{itemize}[leftmargin=0.15in, label={}]}
 \\newcommand{\\resumeSubHeadingListEnd}{\\end{itemize}}
-\\newcommand{\\resumeItemListStart}{\\begin{itemize}}
+% Never a page break between an entry's heading and its first bullet. A list
+% invites one just before it (\\@beginparpenalty is negative), so a resume
+% running onto a second page could end page one on "Company / Role" with
+% every bullet under it overleaf.
+\\newcommand{\\resumeItemListStart}{\\begin{itemize}[beginpenalty=10000]}
 \\newcommand{\\resumeItemListEnd}{\\end{itemize}\\vspace{-5\\rmmunit}}
 
 % Records where the first and last lines of content landed, so the fit checker
 % can say "over by three lines" rather than only "two pages".
 \\AtEndDocument{\\zsavepos{rmmend}}
+% And how far the last page could still be squeezed: its natural height and
+% the total shrink of its glue, which TeX spends before it breaks a page. A
+% page that measured 98% full as set still took type 4% larger.
+\\AtEndDocument{\\par\\penalty10000 \\edef\\rmmpage{\\the\\pagetotal\\space\\the\\pageshrink}\\typeout{RMM-PAGE: \\rmmpage}}
 \\AtBeginDocument{\\typeout{RMM-BASELINESKIP: \\the\\baselineskip}}
 `;
 }
@@ -529,7 +633,7 @@ function header(r: ResolvedResume): string {
 
   return `\\begin{center}
     {\\Huge \\scshape ${tex(p.name)}} \\\\ \\vspace{${n(3 * r.layout.spacing, 2)}pt}\\small
-    ${bits.join(' $|$ ')}
+    ${bits.join('\\rmmsep ')}
 \\end{center}`;
 }
 
@@ -562,7 +666,7 @@ ${lines}
       // Projects use the one-line heading form, like the original template.
       if (e.kind === 'project') {
         const left = e.subtitle
-          ? `\\textbf{${lineTex(e.title)}} $|$ \\emph{${lineTex(e.subtitle)}}`
+          ? `\\textbf{${lineTex(e.title)}}\\rmmsep \\emph{${lineTex(e.subtitle)}}`
           : `\\textbf{${lineTex(e.title)}}`;
         /*
          * And the location, which this branch used to drop on the floor.

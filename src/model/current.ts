@@ -122,6 +122,13 @@ export interface CurrentFolder {
    * the application in front of it.
    */
   belongsTo: Record<string, string>;
+  /**
+   * What each file is called where it was built — `First-Last-Resume.pdf`
+   * — whatever the folder had to call it to keep two applications apart.
+   * The name the card offers and the name a dragged or attached file carries:
+   * "the default should always be <Firstname>-<Lastname>-<Form type>".
+   */
+  builtAs: Record<string, string>;
   /** In-flight applications whose files are in the folder. */
   applications: number;
   /**
@@ -268,17 +275,19 @@ function readSources(dir: string): Record<string, string> {
  * no upload in progress — every one of them is suffixed, as before.
  */
 /*
- * But not away from another application still being worked on.
+ * Always the one in hand. Asked for in so many words: "the default should
+ * always be <Firstname>-<Lastname>-<Form type>. Don't ever have it changed
+ * unless I specify". A twenty-minute hold kept the plain name for another
+ * application touched recently, and the resume the card offered for the form
+ * in front of somebody came out as
+ * `…-Resume-Computer-Software-Engineering-Co-op-Novanta-Corporation.pdf`.
  *
- * "The one being worked on" is one application only when one tab is open.
- * With two applications in progress at once, each staging in turn, the plain
- * name went to whichever staged last: tab A's card said its resume was
- * `First-Last-Resume.pdf`, tab B staged, and the file under that name became
- * B's — with A's card still naming it and the upload dialog over this folder
- * still offering it for A's form. So a name already held by an application
- * touched within `HOLD_MS` stays with it (`heldBy`), and the newcomer takes
- * the suffix. One left alone longer than that hands the name on, which keeps
- * the plain name for the ordinary case of applying to one job after another.
+ * The card is safe without the hold: it takes each file's bytes in the same
+ * answer that names it, for its own application, so a name another tab takes
+ * afterwards cannot hand it the other job's resume. And with nobody in hand —
+ * a listing of the tracker, a document added — nothing is renamed: the plain
+ * name stays with whoever has it (`heldBy`), or goes to the application
+ * touched most recently, the one somebody is likeliest to be uploading.
  */
 function uniqueNames(
   claims: { name: string; app: Application }[],
@@ -316,9 +325,9 @@ function uniqueNames(
         return made.every(Boolean) && new Set(made).size === group.length;
       }) ?? ((a: Application) => forFilename(a.id));
 
-    // The plain name goes to the one in hand, unless another in progress
-    // already has it. See `working` and `heldBy` above.
-    const plainTo = heldBy.get(name) ?? working;
+    // The plain name goes to the one in hand — always — and with nobody in
+    // hand stays where it is. See `working` and `heldBy` above.
+    const plainTo = group.some((c) => c.app.id === working) ? working : heldBy.get(name);
     for (const claim of group) {
       out.set(
         `${claim.app.id} ${name}`,
@@ -346,33 +355,12 @@ function uniqueNames(
  * you paste into a portal's upload dialog instead of trudging back through
  * the save folder every time.
  */
-/**
- * How long an application keeps the plain name against another one staged
- * after it.
- *
- * Two hours at first, the length of a sitting, and that suffixed the second
- * of any two applications made back to back. Asked for: "I'd rather have
- * plain names more often". Twenty minutes covers two tabs genuinely being
- * worked on at once, which is the mix-up this exists for, and lets the plain
- * name go to whichever posting is in hand the rest of the time.
- */
-const HOLD_MS = 20 * 60 * 1000;
-
-/**
- * Whether this application still holds its plain name: heard from within
- * `HOLD_MS`.
- *
- * Sent or not. "Mark as applied" files the application as sent and then says
- * its files are ready to attach — the upload dialog is still ahead — so a
- * rule that let a sent application give the name up at once took it from the
- * one in hand at exactly that moment, and the card listed a suffixed name.
- */
-function recentlyTouched(app: Application, now = Date.now()): boolean {
-  const last = Math.max(
+/** When the tracker last heard from an application: filed, or any change to it. */
+function lastTouched(app: Application): number {
+  return Math.max(
     Date.parse(app.appliedAt ?? '') || 0,
     ...(app.history ?? []).map((h) => Date.parse(h.at ?? '') || 0),
   );
-  return last > 0 && now - last < HOLD_MS;
 }
 
 export function currentDir(store: Store): string {
@@ -438,14 +426,23 @@ export function syncCurrent(
   }
 
   /*
-   * Which application each plain name was given to last time, where that one
-   * is still being worked on: its file is still the one under the name, and
-   * the tracker has heard from it within `HOLD_MS`. See `uniqueNames`.
+   * Who keeps each plain name when nobody is in hand: whoever's file is
+   * under it now, so a listing renames nothing, and otherwise the one the
+   * tracker heard from last. A tie names nobody. See `uniqueNames`.
    */
   const lastFrom = readSources(dir);
   const heldBy = new Map<string, string>();
-  for (const claim of claims) {
-    if (lastFrom[claim.name] === claim.from && recentlyTouched(claim.app)) heldBy.set(claim.name, claim.app.id);
+  const byName = new Map<string, typeof claims>();
+  for (const claim of claims) byName.set(claim.name, [...(byName.get(claim.name) ?? []), claim]);
+  for (const [name, group] of byName) {
+    const holder = group.find((c) => lastFrom[name] === c.from);
+    if (holder) {
+      heldBy.set(name, holder.app.id);
+      continue;
+    }
+    const newest = Math.max(...group.map((c) => lastTouched(c.app)));
+    const latest = group.filter((c) => lastTouched(c.app) === newest);
+    if (newest > 0 && latest.length === 1) heldBy.set(name, latest[0]!.app.id);
   }
   const renamed = uniqueNames(claims, working, heldBy);
   const wanted = new Map<string, string>(); // final name → where to copy it from
@@ -657,6 +654,7 @@ export function syncCurrent(
      * takes an id from the caller.
      */
     belongsTo: Object.fromEntries(files.map((name) => [name, owner.get(name) ?? ''])),
+    builtAs: Object.fromEntries(files.map((name) => [name, path.basename(wanted.get(name) ?? name)])),
     // What is actually here, not what the tracker says should be: a row whose
     // bundle folder has gone is named in `problems` above rather than counted.
     applications: new Set(files.map((name) => owner.get(name)).filter((id) => id && id !== STANDING)).size,

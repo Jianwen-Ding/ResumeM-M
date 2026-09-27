@@ -24,6 +24,7 @@
  * leaves the field blank exactly as before. An empty required field is
  * annoying and visible; a wrong name on a submitted application is neither.
  */
+import { plainText } from '../render/latex.js';
 import { parsePeriod } from './period.js';
 import { isVariantField } from './types.js';
 import type { Entry, MaybeVariant, Profile, ResolvedResume } from './types.js';
@@ -507,13 +508,17 @@ export interface PastJob {
   description: string;
 }
 
-/** Store markup is for the renderer; a form box takes plain words. */
+/**
+ * Store markup is for the renderer; a form box takes plain words.
+ *
+ * Taken off by the renderer's own rule. This had a copy of the asterisk rules
+ * and nothing for `_italic_`, so a line the PDF sets as "a *really* fast" and
+ * "a _really_ fast" alike went into the form as "a really fast" and
+ * "a _really_ fast". One rule, and the underscores in `snake_case` and an
+ * address stay where they are, as they do on the page.
+ */
 function plainLine(text: string | undefined): string {
-  return String(text ?? '')
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/`(.+?)`/g, '$1')
-    .replace(/(^|[\s(])\*([^*]+)\*(?=[\s).,;:]|$)/g, '$1$2')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+  return plainText(String(text ?? ''))
     .replace(/\s+/g, ' ')
     .trim();
 }

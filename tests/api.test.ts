@@ -1921,16 +1921,17 @@ describe.skipIf(!latex)('letter rendering', { timeout: 180_000 }, () => {
    * do, on the document where it actually happens.
    *
    * The preamble sets `\raggedright`, so TeX cannot stretch a line to
-   * swallow an unbreakable token. A Google Docs link pasted into a letter is
-   * set past the margin and whatever is past the paper edge is not in the
-   * PDF at all — the reader gets `…ouid=1234` where `…ouid=1234567890` was
-   * typed. The resume path has warned about this from the start;
+   * swallow an unbreakable token. A long path pasted into a letter is set
+   * past the margin and whatever is past the paper edge is not in the PDF at
+   * all — the reader gets half of what was typed. The resume path has warned about this from the start;
    * `compileLetter` computed nothing and `LetterCompileResult` had nowhere
    * to put it, so the letter was compiled, attached and sent in silence.
    */
   it('says when a line runs off the edge of the page', async () => {
+    // A pasted address now breaks at its slashes (see `proseTex` in
+    // letter.ts); a Windows path still does not break anywhere.
     const link =
-      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh/edit?usp=sharing&ouid=1234567890';
+      'C:\\Users\\PersonT\\Documents\\Applications2026\\StreamlyDataPlatform\\PortfolioSamples\\IngestPipelineBenchmarks.pdf';
     const res = await request(app)
       .post('/api/render/letter')
       .send({ body: `Here is the portfolio: ${link}`, company: 'Streamly', role: 'Intern', resumeId: 'newgrad' })
@@ -3840,8 +3841,10 @@ describe.skipIf(!latex)('where to point a file picker', { timeout: 180_000 }, ()
    * at least draws the page.
    */
   it('names a cover letter whose link runs off the page, in the folder it files', async () => {
+    // A pasted address now breaks at its slashes (see `proseTex` in
+    // letter.ts); a Windows path still does not break anywhere.
     const link =
-      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh/edit?usp=sharing&ouid=1234567890';
+      'C:\\Users\\PersonT\\Documents\\Applications2026\\StreamlyDataPlatform\\PortfolioSamples\\IngestPipelineBenchmarks.pdf';
     const res = await request(app)
       .post('/api/applications/bundle')
       .send({
@@ -4490,5 +4493,50 @@ describe('the questions a writing run is handed', () => {
     ]);
     expect(out.map((q) => q.limit)).toEqual([500, undefined, undefined, undefined]);
     expect(out[3]).toEqual({ id: 'q4', question: 'Anything else?', answer: '' });
+  });
+});
+
+/*
+ * The files a card is handed for the form in front of it.
+ *
+ * "The default should always be <Firstname>-<Lastname>-<Form type>. Don't
+ * ever have it changed unless I specify." Every application in flight wants
+ * `Test-Person-Resume.pdf` in the one shared folder, so one of them has to be
+ * called something else there — and that one was the card's own, the name it
+ * showed and the name the file carried into the form.
+ */
+describe('GET /attachments with two applications in flight', () => {
+  const bundle = (id: string, company: string, role: string) => {
+    const dir = path.join(t.store.outDir(), 'applications', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'Test-Person-Resume.pdf'), `%PDF ${id}\n`, 'utf8');
+    return { id, company, role, status: 'applying', snapshotDir: `applications/${id}`, history: [{ at: new Date().toISOString(), status: 'applying', note: 'Bundle created' }] };
+  };
+  const two = () => t.write('applications.yaml', [bundle('a1', 'Acme', 'Platform Engineer'), bundle('a2', 'Beta', 'Data Engineer')]);
+  const resumeOf = (body: { attachments: { name: string; inFolder: string; url: string }[] }) =>
+    body.attachments.find((a) => /Resume/.test(a.name))!;
+
+  it('offers each application its resume under the plain name, whatever the folder calls it', async () => {
+    two();
+    await request(app).get('/api/attachments?application=a1&claim=1').expect(200);
+    const res = await request(app).get('/api/attachments?application=a2').expect(200);
+    const mine = resumeOf(res.body);
+    expect(mine.name).toBe('Test-Person-Resume.pdf');
+    // In the folder it had to be told apart, and the bytes are still its own.
+    expect(mine.inFolder).toBe('Test-Person-Resume-Data-Engineer.pdf');
+    const file = await request(app).get(mine.url).expect(200);
+    expect(String(file.body.toString?.() ?? file.text)).toContain('%PDF a2');
+  });
+
+  it('takes the plain names in the folder only when asked to', async () => {
+    two();
+    await request(app).get('/api/attachments?application=a1&claim=1').expect(200);
+    // Another card warming its chips renames nothing.
+    await request(app).get('/api/attachments?application=a2').expect(200);
+    const folder = path.join(t.store.outDir(), 'current', 'Test-Person-Resume.pdf');
+    expect(fs.readFileSync(folder, 'utf8')).toBe('%PDF a1\n');
+    // Pressed in the other tab, it goes there.
+    await request(app).get('/api/attachments?application=a2&claim=1').expect(200);
+    expect(fs.readFileSync(folder, 'utf8')).toBe('%PDF a2\n');
   });
 });
