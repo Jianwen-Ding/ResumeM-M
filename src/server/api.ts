@@ -50,7 +50,7 @@ import {
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { advance, alreadySent, buildBundle, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -713,6 +713,107 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
    */
   const keptSafe = (spec: ResumeSpec): ResumeSpec =>
     spec.tier === 'temporary' ? { ...spec, id: copyIdFor(store.load().resumes, spec.id) } : spec;
+
+  /**
+   * Which write of a resume the save holds: a short string that changes every
+   * time its file is written, and at no other time. Null when there is none.
+   *
+   * Resume writes were last-writer-wins, and two writers hold the same copy:
+   * the editor, saving a line switched in it, and JobHelper's card, filing
+   * the copy whole with every stage. Each looked before writing, and an edit
+   * landing between the look and the write was written away. A writer can
+   * now say which write it built on (`basedOn`), and the write is refused
+   * when the save has moved on since (see `movedOn`).
+   *
+   * Of the file, not of its content: an edit that puts the resume back
+   * exactly as one earlier write had it is still a write the writer has not
+   * seen. The file is replaced whole on every save (`writeAtomic`), so its
+   * inode, time and size say which write it is; the same three the save's
+   * `/revision` is built from.
+   */
+  const resumeVersion = (id: string): string | null => {
+    const seen: string[] = [];
+    let files: string[];
+    try {
+      files = Store.resumeFiles(id);
+    } catch {
+      return null; // not a name a file could have
+    }
+    for (const rel of files) {
+      try {
+        const st = fs.statSync(path.join(store.root, rel));
+        seen.push(`${rel}\u0000${st.ino}\u0000${st.mtimeMs}\u0000${st.size}`);
+      } catch {
+        // Not kept under this spelling.
+      }
+    }
+    return seen.length ? createHash('sha1').update(seen.join('\n')).digest('hex').slice(0, 20) : null;
+  };
+
+  /**
+   * A conditional write of a resume that is not based on the write the save
+   * holds now: answered 409 with the resume as it is and its version, and
+   * true, so the caller writes nothing.
+   *
+   * `basedOn` is the version the writer last had, or null for "there is no
+   * resume here yet". Anything else — the CLI, MCP, an older page or
+   * extension sending nothing — is not a condition, and writes as before. A
+   * resume deleted since the writer looked is not refused either: there is
+   * nothing there to write over, and `?existing=1` is how a writer says it
+   * must not come back.
+   *
+   * Checked with nothing awaited between here and the caller's write.
+   */
+  const movedOn = (res: Response, id: string, basedOn: unknown): boolean => {
+    if (basedOn !== null && typeof basedOn !== 'string') return false;
+    const version = resumeVersion(id);
+    if (version === basedOn || (version === null && basedOn !== null)) return false;
+    const current = store.load().resumes.find((r) => r.id === id) ?? null;
+    res.status(409).json({
+      kind: 'conflict',
+      error: `“${current?.label ?? id}” was changed elsewhere since this change was made to it, so it was not written.`,
+      id,
+      current,
+      version,
+    });
+    return true;
+  };
+
+  /**
+   * The last conditional editor save written of each resume: the page and
+   * order it came with (`?order=<page>:<n>`), the write it was based on, and
+   * the write it made. In memory, since what it settles lasts one round trip.
+   */
+  const lastConditionalSave = new Map<string, { page: string; n: number; basedOn: string; made: string }>();
+
+  /**
+   * Whether the resume as it is now is this page's own save, made over the
+   * write this later save from the same page says it is based on.
+   *
+   * On the way out of the page the editor sends its latest edit at once, while
+   * its save ahead of it is still out (see `flushEditsLeaving` in
+   * web/app.js), so the latest cannot know the write the one ahead will make,
+   * and is based on the one both were made over. The one ahead landing first
+   * would get the latest refused, and its edit, on a page that has gone, kept
+   * only as a rescue for the next time the resume is opened. It carries
+   * everything the one ahead carried, and nothing else has written the file
+   * since (`made` is still the resume's version), so it is written. From any
+   * other page, or over any other write, it is refused as before.
+   */
+  const ownWriteSince = (id: string, order: { page: string; n: number }, basedOn: string): boolean => {
+    const own = lastConditionalSave.get(id);
+    return Boolean(own && own.page === order.page && own.n < order.n && own.basedOn === basedOn && own.made === resumeVersion(id));
+  };
+
+  /**
+   * Which write of the resume this answer is about, said as its `ETag`, for
+   * the writer's next write to be based on (see `resumeVersion`). Every route
+   * that writes a whole resume, or one field of it, says it.
+   */
+  const tagVersion = (res: Response, id: string): void => {
+    const version = resumeVersion(id);
+    if (version) res.setHeader('ETag', `"${version}"`);
+  };
   // Work the user started and walked away from.
 
   /**
@@ -813,6 +914,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // config carries no secrets, but the AI command is machine-specific and
         // the GUI has no use for it.
         config: { git: data.config.git, ai: { enabled: data.config.ai.enabled } },
+        // Which write of each resume this read saw, for a save to be based on.
+        // Beside the resumes rather than in them, so a resume sent back whole
+        // does not carry it into its file. See `resumeVersion`.
+        versions: Object.fromEntries(data.resumes.map((r) => [r.id, resumeVersion(r.id)])),
       });
     }),
   );
@@ -852,6 +957,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const spec = store.loadResumes().find((r) => r.id === id);
       if (!spec) throw new Error(`No resume "${id}"`);
+      /*
+       * Only over the write the button was pressed on, when the editor says
+       * which (`basedOn`, as the resume PUT's `?basedOn=`). The tier alone is
+       * written, so nothing else of a write made elsewhere is lost here; but
+       * the editor's undo step for the press is the resume as the editor had
+       * it, and a write made elsewhere in between was taken away by undoing
+       * the press. Refused, the editor reapplies the tier on what is there
+       * and sends it again once (see `writeResumeField` in web/app.js).
+       */
+      if (movedOn(res, id, (req.body as { basedOn?: unknown }).basedOn)) return;
 
       spec.tier = tier;
       // The flag the tier replaced. Leaving it would let the two disagree.
@@ -866,7 +981,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       else delete spec.temporaryFrom;
 
       const said = { base: 'a base', extended: 'kept', temporary: 'temporary' }[tier];
-      await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => store.saveResume(spec));
+      // Tagged as written, before the commit's awaits let another write in.
+      await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => {
+        store.saveResume(spec);
+        tagVersion(res, id);
+      });
       res.json(spec);
     }),
   );
@@ -1104,17 +1223,27 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         res.status(400).json({ error: 'A resume needs a name.' });
         return;
       }
+      /*
+       * Only over the write the name was chosen on, when the editor says which
+       * (`basedOn`): see the tier route. Before the name is checked, so a
+       * refusal says the resume moved on rather than something about names.
+       */
+      if (movedOn(res, id, (req.body as { basedOn?: unknown })?.basedOn)) return;
       const taken = resumes.find((r) => r.id !== id && sameResumeName(r.label ?? r.id, label));
       if (taken) {
         res.status(409).json({ error: `A resume called “${taken.label ?? taken.id}” already exists. Choose another name.` });
         return;
       }
       if (mine.label === label) {
+        tagVersion(res, id);
         res.json(mine);
         return;
       }
       const renamed = { ...mine, label };
-      await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => store.saveResume(renamed));
+      await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => {
+        store.saveResume(renamed);
+        tagVersion(res, id);
+      });
       res.json(renamed);
     }),
   );
@@ -1177,6 +1306,28 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const flat = spec.extends ? flattenOne(spec, store.loadResumes()) : spec;
 
       /*
+       * `?basedOn=<version>`: written only over the write it was made on.
+       *
+       * The editor's auto-save sends the version its copy of the resume came
+       * with (`versions` in `GET /store`, then this route's `ETag`). JobHelper's
+       * card files the same copy whole with every stage, and a stage landing
+       * while an edit here waited on its save was written away by that save —
+       * or the other way round. Refused with 409, the resume as it is and its
+       * version, and the editor rebases its edit onto it. Before `order`, so a
+       * save refused here is not counted as one written. A save sent on the
+       * way out of the page, while the page's save ahead of it was still out,
+       * is based on the write that one was based on: see `ownWriteSince`.
+       */
+      const basedOn = typeof req.query.basedOn === 'string' && req.query.basedOn ? req.query.basedOn : undefined;
+      const order = savedOrderOf(req.query.order);
+      if (!(basedOn && order && ownWriteSince(flat.id, order, basedOn)) && movedOn(res, flat.id, basedOn)) return;
+      /** What this route answers with besides the resume: which write it is. */
+      const tag = () => {
+        const version = resumeVersion(flat.id);
+        if (version) res.setHeader('ETag', `"${version}"`);
+      };
+
+      /*
        * `?order=<page>:<n>`: a save older than one already written from the
        * same page is not written.
        *
@@ -1192,10 +1343,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * recorded with nothing awaited between here and the write, which
        * `withCommit` makes before its first await.
        */
-      const order = savedOrderOf(req.query.order);
       if (order) {
         const last = lastSaveOrder.get(flat.id);
         if (last && last.page === order.page && order.n <= last.n) {
+          tag();
           res.json(store.loadResumes().find((r) => r.id === flat.id) ?? flat);
           return;
         }
@@ -1206,9 +1357,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // work, and a commit per keystroke would bury the history it feeds; it
       // commits once the editing stops, through /store/save.
       const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
-      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${flat.id}"`, () =>
-        store.saveResume(flat),
-      );
+      // Tagged as written, before the commit's awaits let another write in.
+      await withCommit(repo, autoCommit() && wantCommit, `Update resume "${flat.id}"`, () => {
+        store.saveResume(flat);
+        tag();
+        // What the next save from this page may be based on: see `ownWriteSince`.
+        const made = resumeVersion(flat.id);
+        if (order && basedOn && made) lastConditionalSave.set(flat.id, { ...order, basedOn, made });
+        else lastConditionalSave.delete(flat.id);
+      });
       res.json(flat);
     }),
   );
@@ -3893,6 +4050,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const stored = data.resumes.find((r) => r.id === spec.id) ?? null;
       const storedPrint = stored ? createHash('sha1').update(JSON.stringify(stored)).digest('hex') : null;
+      // Which write `stored` is, for the card's next stage to be based on.
+      const version = resumeVersion(spec.id);
 
       /*
        * The base, by when its file last changed against when the copy was
@@ -3916,7 +4075,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         );
         base = { id: from.id, label: from.label ?? from.id, changed: touched > made + 1000 };
       }
-      res.json({ printed, stored, storedPrint, base });
+      res.json({ printed, stored, storedPrint, version, base });
     }),
   );
 
@@ -3992,19 +4151,53 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/applications/bundle',
     handler(async (req, res) => {
-      const body = req.body as Parameters<typeof buildBundle>[1] & { spec?: ResumeSpec };
+      const body = req.body as Parameters<typeof buildBundle>[1] & { spec?: ResumeSpec; basedOn?: unknown };
+      const { basedOn } = body;
+      delete body.basedOn;
+
+      /*
+       * A stage never lands on an application already sent — checked here,
+       * before anything is written, and again as the files are handed over,
+       * since the send can land while this compiles. See `AlreadySent`.
+       */
+      const refuseAsSent = (application: Application) =>
+        res.status(409).json({ kind: 'already-sent', error: new AlreadySent(application).message, application });
+      const sentBefore = refusedAsSent(store, body);
+      if (sentBefore) {
+        refuseAsSent(sentBefore);
+        return;
+      }
 
       // A posting-specific spec from the extension is saved first so the
       // snapshot refers to something that still exists later.
+      let resumeVersionNow: string | null | undefined;
       if (body.spec) {
         // Never over a kept resume: see `copyIdFor`.
         const spec = keptSafe(body.spec as ResumeSpec);
-        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
+        /*
+         * And only over the write the card built on, when it says which.
+         * The card looks at the store before staging and files its copy
+         * whole; an edit made in ResumeM-M between the look and this write
+         * was written away. Refused, nothing of the application is written,
+         * and the card takes the edit (see `movedOn`).
+         */
+        if (movedOn(res, spec.id, basedOn)) return;
+        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => {
+          store.saveResume(spec);
+          resumeVersionNow = resumeVersion(spec.id);
+        });
         body.spec = spec;
         body.resumeId = spec.id;
       }
 
-      const result = await buildBundle(store, body);
+      let result: Awaited<ReturnType<typeof buildBundle>>;
+      try {
+        result = await buildBundle(store, body);
+      } catch (err) {
+        if (!(err instanceof AlreadySent)) throw err;
+        refuseAsSent(err.application);
+        return;
+      }
 
       /*
        * And the space it was being written in stops looking like unfinished
@@ -4060,6 +4253,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           // Under the names they were built with, which is what the card
           // shows and hands over: "always <Firstname>-<Lastname>-<Form type>".
           .map((name) => current.builtAs[name] ?? name),
+        // Which write of the copy this filed, for the card's next to be based on.
+        ...(resumeVersionNow !== undefined ? { resumeVersion: resumeVersionNow } : {}),
       });
     }),
   );
@@ -4285,10 +4480,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
+      let resumeVersionNow: string | null | undefined;
       if (body.spec) {
         const spec = keptSafe(body.spec);
+        // Only over the write it was built on, when that is said: the card's
+        // button and its keeper both file the copy here. See `movedOn`.
+        if (movedOn(res, spec.id, (req.body as { basedOn?: unknown }).basedOn)) return;
         body.spec = spec;
-        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => store.saveResume(spec));
+        await withCommit(repo, autoCommit(), `Add tailored resume "${spec.id}"`, () => {
+          store.saveResume(spec);
+          resumeVersionNow = resumeVersion(spec.id);
+        });
       }
 
       /*
@@ -4532,7 +4734,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return written;
       });
 
-      res.json({ draft: saved, url: `/#workspace/${encodeURIComponent(saved.id)}` });
+      res.json({
+        draft: saved,
+        url: `/#workspace/${encodeURIComponent(saved.id)}`,
+        ...(resumeVersionNow !== undefined ? { resumeVersion: resumeVersionNow } : {}),
+      });
     }),
   );
 
@@ -5484,6 +5690,19 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * been deleted is the case this exists to serve, and there is no
        * current version of it to keep.
        */
+      /*
+       * Only over the resume the person chose to replace, when the editor
+       * says which write that was (`basedOn`). A restore is a deliberate
+       * overwrite, but of the resume as it was when the person asked for it:
+       * a stage JobHelper's card filed while the dialog was open is something
+       * nobody has seen, and replacing it unasked is not what was confirmed.
+       * Refused, the editor says so and offers to restore anyway, based on
+       * the write it was just told about. Checked here, so a refusal files
+       * nothing, and again just before the write, as the filing awaits.
+       */
+      const { basedOn } = (req.body ?? {}) as { basedOn?: unknown };
+      if (movedOn(res, id, basedOn)) return;
+
       const here = Store.resumeFiles(id).filter((rel) => fs.existsSync(path.join(store.root, rel)));
       if (here.length > 0) {
         await repo
@@ -5593,6 +5812,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * date on read that must never reach disk. A resume that is gone keeps
        * the old version's tier, since there is nothing now to keep.
        */
+      // Nothing is awaited from here to the write. The filing commit above is
+      // this route's own, and does not move the version.
+      if (movedOn(res, id, basedOn)) return;
       const standing = store.loadResumesAsWritten().find((r) => r.id === id);
       if (standing) {
         delete restored.tier;
@@ -5621,7 +5843,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * to throw work away, which is exactly the kind of moment the history
        * is for.
        */
-      await withCommit(repo, true, `Restore "${id}" to an earlier version`, () => store.saveResume(restored));
+      await withCommit(repo, true, `Restore "${id}" to an earlier version`, () => {
+        store.saveResume(restored);
+        tagVersion(res, id);
+      });
 
       /*
        * Did it land? Compare what the resume resolves to now against what it

@@ -157,9 +157,15 @@ export function rebase(base, ours, theirs) {
   if (flat(ours) && flat(theirs)) {
     // Tags and the like. Ours in ours' order, plus anything they added, minus
     // anything either of them removed.
+    // Their removals too: a line the other write switched off while this one
+    // switched off another beside it came back on.
     const wasThere = new Set(flat(base) ? base : []);
     const mine = new Set(ours);
-    return [...ours, ...theirs.filter((v) => !mine.has(v) && !wasThere.has(v))];
+    const kept = new Set(theirs);
+    return [
+      ...ours.filter((v) => kept.has(v) || !wasThere.has(v)),
+      ...theirs.filter((v) => !mine.has(v) && !wasThere.has(v)),
+    ];
   }
 
   /*

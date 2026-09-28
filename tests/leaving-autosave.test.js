@@ -18,6 +18,7 @@ afterEach(() => {
   delete document.visibilityState;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  localStorage.clear();
 });
 
 /*
@@ -223,6 +224,10 @@ describe('an edit made just before leaving the page', () => {
    * never sent. On the way out it is sent at once instead, and it carries
    * where it stands among this page's saves, so that the server can drop the
    * earlier one if that arrives later.
+   *
+   * Unloading (`pagehide`). A page only hidden is still there, and its save
+   * waits for the one ahead, to be based on the write that one made: see
+   * tests/hidden-save.test.js.
    */
   it('sends the latest edit on the way out, not behind a save still in flight', async () => {
     const id = document.querySelector('#editor .entry:has(.fold)').dataset.dragId;
@@ -237,6 +242,7 @@ describe('an edit made just before leaving the page', () => {
     // Unfolded while the fold's save is still out, and the page then left.
     fold(id).click();
     const before = resumePuts().length;
+    window.dispatchEvent(new Event('pagehide'));
     setTimeout(() => {
       pageGone = true;
     }, 0);

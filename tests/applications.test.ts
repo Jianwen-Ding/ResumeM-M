@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, findDraft, freshApplicationId, slug, stats } from '../src/model/applications.js';
+import { AlreadySent, advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, findDraft, freshApplicationId, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -409,8 +409,11 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
 
     it('never moves the status backwards', async () => {
       await buildBundle(t.store, { ...staged, status: 'applied' });
-      // The form was submitted on the page; a build lands afterwards.
-      const again = await buildBundle(t.store, staged);
+      // The form was submitted on the page; a stage lands afterwards, and is
+      // refused (see `AlreadySent`). Asked for outright, it still does not
+      // move the status back.
+      await expect(buildBundle(t.store, staged)).rejects.toBeInstanceOf(AlreadySent);
+      const again = await buildBundle(t.store, { ...staged, evenIfSent: true });
       expect(again.application.status).toBe('applied');
       expect(t.store.load().applications).toHaveLength(1);
     });
@@ -471,9 +474,12 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
 
       let settled = false;
       const building = buildBundle(t.store, req);
-      void building.then(() => {
+      // Either way it ends: this one is refused (see below), and a `then`
+      // with no second half is a rejection nobody handles.
+      const ended = () => {
         settled = true;
-      });
+      };
+      void building.then(ended, ended);
 
       const staging = path.join(t.store.outDir(), 'applications');
       for (let i = 0; i < 2000 && !settled; i++) {
@@ -484,13 +490,19 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       expect(settled, 'the build finished before the submit could land').toBe(false);
 
       advance(t.store, id, 'applied', 'The form was submitted on the page');
-      const after = await building;
+      // Refused as it hands its files over: the application has gone out.
+      // See `AlreadySent`.
+      const after = await building.then(
+        () => null,
+        (err: unknown) => err,
+      );
 
       if (cache !== undefined) process.env.RMM_COMPILE_CACHE = cache;
 
-      expect(after.application.status).toBe('applied');
-      expect((after.application.history ?? []).some((h) => h.note?.includes('submitted on the page'))).toBe(true);
-      expect(t.store.load().applications.find((a) => a.id === id)?.status).toBe('applied');
+      expect(after).toBeInstanceOf(AlreadySent);
+      const row = t.store.load().applications.find((a) => a.id === id);
+      expect(row?.status).toBe('applied');
+      expect(row?.history?.at(-1)?.note).toContain('submitted on the page');
     });
 
     it('but still moves it forwards when that is what was asked', async () => {
@@ -510,7 +522,7 @@ describe.skipIf(!latex)('bundles', { timeout: 180_000 }, () => {
       const first = await buildBundle(t.store, { ...staged, status: 'applied' });
       const when = first.application.appliedAt;
       await new Promise((r) => setTimeout(r, 10));
-      const again = await buildBundle(t.store, staged);
+      const again = await buildBundle(t.store, { ...staged, evenIfSent: true });
       expect(again.application.appliedAt).toBe(when);
     });
 
