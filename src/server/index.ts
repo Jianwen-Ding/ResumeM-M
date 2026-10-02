@@ -15,6 +15,7 @@ import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
 import { localOnly, scriptPolicy } from './guard.js';
 import { createHash } from 'node:crypto';
+import { bugReportsApi } from './bug-reports.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = findProjectRoot(here);
@@ -24,6 +25,7 @@ export interface ServerOptions {
   port?: number;
   dataDir?: string;
   preferencesFile?: string;
+  bugReportsDir?: string;
   /** Desktop launches offer dataDir as a suggestion until a project is selected. */
   requireProjectSelection?: boolean;
   host?: string;
@@ -325,6 +327,9 @@ export async function startServer(opts: ServerOptions = {}) {
   });
 
   app.use('/api', express.json({ limit: '32mb' }));
+  app.use('/api/bug-reports', bugReportsApi(
+    opts.bugReportsDir ?? process.env.RMM_BUG_REPORTS_DIR ?? path.join(projectRoot, 'bug-reports'), buildStamp,
+  ));
   app.get('/api/projects', (_req, res) => {
     const stored = readProjects(preferencesFile);
     const existing = [...(stored.defaultFolder ? [stored.defaultFolder] : []), fallback, ...stored.recent].filter(isSave);

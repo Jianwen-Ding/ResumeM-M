@@ -4,4 +4,5 @@ out/
 *.log
 .DS_Store
 coverage/
+bug-reports/
 __pycache__/
