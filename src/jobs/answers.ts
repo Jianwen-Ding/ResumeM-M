@@ -437,6 +437,20 @@ const SENSITIVE_QUESTION = [
   /\bpassword\b/i,
   /\bsecurity\s*question\b/i,
   /\bmother['’]?s\s*maiden\b/i,
+  /*
+   * And the self-identification block, which is not an identifier but is
+   * never anybody else's business either: the extension refuses it on the
+   * page, and this refused nothing of it, so a client that let one through —
+   * "Veterans Status", which the extension's \bveteran\b did not reach — had
+   * it banked and offered to the next employer.
+   */
+  /\bveterans?\b/i,
+  /\bdisab(led|ility|ilities)\b/i,
+  /\b(race|racial|ethnicit(y|ies))\b/i,
+  /\b(hispanic|latin[oaxe]s?)\b/i,
+  /\bgender\b/i,
+  /\bsexual\s*orientation\b/i,
+  /\btransgender\b/i,
 ];
 
 /**

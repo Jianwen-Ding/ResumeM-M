@@ -681,6 +681,12 @@ describe('a question asking for something the bank must never hold', () => {
     'Zip code',
     'Postal Code',
     'Apartment/Suite',
+    // The self-identification block, as the bank had it banked.
+    'Veterans Status',
+    'What is your Veterans Status?',
+    'Are you Hispanic/Latino?',
+    'Do you have a disability?',
+    'Gender',
   ];
 
   it('recognises the questions this must refuse', () => {
