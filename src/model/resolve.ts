@@ -346,7 +346,10 @@ export function adoptDateOrder(
   const adopted: SectionSpec[] = [];
   const handOrdered: SectionSpec[] = [];
 
-  for (const section of sections) {
+  // Shapes `normalizeSections` makes true on the way in, checked again because
+  // a spec can also arrive from the API or the extension.
+  for (const section of Array.isArray(sections) ? sections : []) {
+    if (!section || typeof section !== 'object') continue;
     if (section.order !== undefined || section.kind === 'skills') {
       adopted.push(section);
       continue;
@@ -388,6 +391,7 @@ export function adoptDateOrder(
  * thrown away by the upgrade that introduced the feature.
  */
 export function orderedBullets(selected: string[], entry: Entry): string[] {
+  if (!Array.isArray(selected)) return [];
   const master = (entry.bullets ?? []).map((b) => b.id);
   const at = (id: string) => master.indexOf(id);
   // A line the master has never heard of keeps its place at the end rather
@@ -422,8 +426,10 @@ export function bulletsAreHandOrdered(section: SectionSpec, entryId: string): bo
  * that resume, exactly as `adoptDateOrder`'s does.
  */
 export function adoptBulletOrder(sections: SectionSpec[], entries: Entry[]): SectionSpec[] {
+  if (!Array.isArray(sections)) return [];
   return sections.map((section) => {
-    const listed = Object.entries(section.bullets ?? {});
+    if (!section || typeof section !== 'object') return section;
+    const listed = Object.entries(section.bullets ?? {}).filter(([, ids]) => Array.isArray(ids));
     if (listed.length === 0) return section;
 
     const found: Record<string, 'manual'> = { ...(section.bulletOrder ?? {}) };

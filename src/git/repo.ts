@@ -92,8 +92,8 @@ export class Repo {
     return new Repo(path.resolve(storeDir), ['.'], rebuilt);
   }
 
-  private async git(args: string[]): Promise<string> {
-    const { stdout } = await run('git', args, { cwd: this.root, maxBuffer: 8 * 1024 * 1024 });
+  private async git(args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
+    const { stdout } = await run('git', args, { cwd: this.root, maxBuffer: 8 * 1024 * 1024, ...(env ? { env } : {}) });
     return stdout;
   }
 
@@ -299,13 +299,34 @@ export class Repo {
         (await this.git(['ls-files', '--', target]).catch(() => '')).trim() !== '';
       if (there) targets.push(target);
     }
-    if (targets.length === 0) return undefined;
-    await this.git(['add', '--', ...targets]);
+    /*
+     * And none that `.gitignore` covers.
+     *
+     * `git add` refuses a command that names an ignored path outright — "The
+     * following paths are ignored by one of your .gitignore files", exit 1 —
+     * and refuses it after staging the rest. So a store that ignores `drafts/`
+     * failed every commit that named it, and left the tracker staged in the
+     * index for whatever commit came next to sweep up. `check-ignore` without
+     * `--no-index` does not count a path git already tracks as ignored, so
+     * those still go in.
+     */
+    const ignored = new Set(
+      // Exit 1 means none are, which is not a failure. quotePath off so a name
+      // with an accent comes back as it was passed rather than escaped.
+      (await this.git(['-c', 'core.quotePath=false', 'check-ignore', '--', ...targets]).catch(() => ''))
+        .split('\n')
+        .filter(Boolean),
+    );
+    const wanted = targets.filter((t) => !ignored.has(t));
+    if (wanted.length === 0) return undefined;
+    await this.git(['add', '--', ...wanted]);
 
     // Only commit what is staged within scope; unrelated working-tree changes
-    // elsewhere in the repo must not ride along.
-    const staged = await this.git(['diff', '--cached', '--name-only', '--', ...targets]);
-    if (!staged.trim()) return undefined;
+    // elsewhere in the repo must not ride along. The folders taken out of the
+    // index above are this save's change too.
+    const ours = [...wanted, ...untrack];
+    const files = (await this.git(['diff', '--cached', '--name-only', '-z', '--', ...ours])).split('\0').filter(Boolean);
+    if (files.length === 0) return undefined;
 
     /*
      * And a `.gitignore` this process has just written is not a change
@@ -317,36 +338,85 @@ export class Repo {
      * staged and rides along with the next real edit, which is where it
      * belongs: it is part of the store, not an event in its history.
      */
-    const files = staged.split('\n').map((f) => f.trim()).filter(Boolean);
     if (wroteIgnores && files.length === 1 && files[0] === '.gitignore') return undefined;
 
     /*
-     * No pathspec on the commit itself.
+     * Nor anything else that happens to be in the index.
      *
-     * `git commit -- <paths>` is a *partial* commit, and that had two costs.
-     * Git refuses one outright while a merge is in progress, so anyone who
-     * pulled their store on a second machine and resolved a conflict by hand
-     * could never save again through the app — "fatal: cannot do a partial
-     * commit during a merge" — and the GUI only console.warn'd it, so the
-     * editor reported 200 OK and committed nothing. And a partial commit
-     * records the *working tree* at commit time rather than the index that
-     * `git diff --cached` just checked, so a concurrent write could put a
-     * different version of a file into the commit than the one that was staged.
+     * `git add -- targets` scopes what this save stages, but it does not empty
+     * the index first, and a bare `git commit` takes all of it: a file the
+     * user had staged by hand, or one a failed commit left staged, rode along
+     * under "Update answer bank". One real store had the tracker and the
+     * drafts folder in fifteen commits that said they were about the answer
+     * bank.
      *
-     * The `git add -- targets` above already scopes what goes in.
+     * Not `git commit -- <paths>`, though, which is what would come to mind.
+     * That is a *partial* commit, and git refuses one outright while a merge
+     * is in progress — "fatal: cannot do a partial commit during a merge" —
+     * so anyone who had resolved a conflict by hand could never save through
+     * the app again. It also records the paths as the working tree has them
+     * rather than as staged, so a folder taken out of the index above with
+     * `rm --cached` went straight back in from the disk.
+     *
+     * So the index is used as it is when it holds nothing but this save — the
+     * usual case — or when a merge is being concluded, which has to take
+     * everything that was resolved. Otherwise the commit is built in an index
+     * of its own: HEAD, plus exactly the entries this save staged, copied
+     * from the real one. What the user staged stays staged for them.
      */
-    // -c keeps the commit working even if the machine has no global identity.
-    await this.git([
-      '-c',
-      'user.name=ResumeM-M',
-      '-c',
-      'user.email=resumem-m@localhost',
-      'commit',
-      '-q',
-      '-m',
-      message,
-    ]);
+    const everything = (await this.git(['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);
+    const mine = new Set(files);
+    const foreign = everything.some((f) => !mine.has(f));
+    const merging = await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(
+      () => true,
+      () => false,
+    );
+    const scoped = foreign && !merging ? await this.indexOf(files) : undefined;
+    try {
+      // -c keeps the commit working even if the machine has no global identity.
+      await this.git(
+        ['-c', 'user.name=ResumeM-M', '-c', 'user.email=resumem-m@localhost', 'commit', '-q', '-m', message],
+        scoped?.env,
+      );
+    } finally {
+      if (scoped) fs.rmSync(scoped.file, { force: true });
+    }
     return (await this.git(['rev-parse', 'HEAD'])).trim();
+  }
+
+  /**
+   * A throwaway index holding HEAD plus this save's entries from the real one,
+   * for a commit that must not take what else is staged. See `commitNow`.
+   */
+  private async indexOf(files: string[]): Promise<{ file: string; env: NodeJS.ProcessEnv }> {
+    const file = path.resolve(this.root, (await this.git(['rev-parse', '--git-path', 'index.rmm-scoped'])).trim());
+    fs.rmSync(file, { force: true });
+    const env = { ...process.env, GIT_INDEX_FILE: file };
+    await this.git(['read-tree', 'HEAD'], env);
+
+    // Literal, because these are file names and not patterns: a draft called
+    // `Résumé [final].yaml` is a glob otherwise.
+    const entries = (await this.git(['--literal-pathspecs', 'ls-files', '-s', '-z', '--', ...files]))
+      .split('\0')
+      .filter(Boolean)
+      .map((line) => {
+        const tab = line.indexOf('\t');
+        const [mode, sha] = line.slice(0, tab).split(' ');
+        return { mode, sha, path: line.slice(tab + 1) };
+      });
+    const kept = new Set(entries.map((e) => e.path));
+    const gone = files.filter((f) => !kept.has(f));
+
+    // In batches, so an import of thousands of files stays under the limit
+    // on the length of a command line.
+    for (let n = 0; n < entries.length; n += 200) {
+      const add = entries.slice(n, n + 200).flatMap((e) => ['--cacheinfo', `${e.mode},${e.sha},${e.path}`]);
+      await this.git(['update-index', '--add', ...add], env);
+    }
+    for (let n = 0; n < gone.length; n += 200) {
+      await this.git(['update-index', '--force-remove', '--', ...gone.slice(n, n + 200)], env);
+    }
+    return { file, env };
   }
 
   /**
@@ -555,7 +625,9 @@ export class Repo {
       );
     }
     try {
-      const out = await this.git(['push', '-u', 'origin', branch]);
+      // No terminal to ask for a password on — see `cloneRepo`. Without this a
+      // push to a remote with no credentials hung the request until it was killed.
+      const out = await this.git(['push', '-u', 'origin', branch], noPrompt());
       return { ok: true, output: out.trim() || `Pushed ${branch} to origin.` };
     } catch (err) {
       const e = err as { stderr?: string; stdout?: string; message?: string };
@@ -728,6 +800,11 @@ export async function commitQuietly(repo: Repo, message: string, paths?: string[
   }
 }
 
+/** Git with nobody to answer it: a missing credential is refused, not asked for. */
+function noPrompt(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo' };
+}
+
 /**
  * Clone a repository into a directory that already exists and is empty.
  *
@@ -746,7 +823,7 @@ export async function cloneRepo(url: string, into: string): Promise<void> {
     await run('git', ['clone', '--', url, into], {
       cwd: path.dirname(into),
       maxBuffer: 32 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo' },
+      env: noPrompt(),
     });
   } catch (err) {
     const said = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '').trim();

@@ -1,6 +1,6 @@
 import YAML from 'yaml';
 import { withoutBom } from './bom.js';
-import { normalizeEntries, normalizeProfile, normalizeSkillGroups } from './normalize.js';
+import { normalizeEntries, normalizeProfile, normalizeSections, normalizeSkillGroups } from './normalize.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
 import type { Entry, Profile, ResumeSpec, SkillGroup, StoreData } from './types.js';
 
@@ -71,7 +71,9 @@ export function parseSnapshot(files: Map<string, string>): StoreSnapshot {
     // it now actually is. Both places said this and then preferred the id
     // written inside the file, so a hand-copied resume file appeared twice
     // under one id and the history for the real one came back empty.
-    resumes.push({ ...spec, id: file.replace(/^resumes\//, '').replace(/\.ya?ml$/, '') });
+    // And its sections made walkable, as the live read makes them.
+    const sections = normalizeSections(spec.sections);
+    resumes.push({ ...spec, id: file.replace(/^resumes\//, '').replace(/\.ya?ml$/, ''), ...(sections ? { sections } : {}) });
   }
 
   const entriesNow = normalizeEntries(entries);

@@ -468,6 +468,25 @@ describe('remotes', () => {
     expect((await repo.remoteStatus()).ahead).toBe(1);
   });
 
+  /*
+   * A remote with no credentials makes git ask for a username on a terminal
+   * there is none of, and the push hung the request until something killed
+   * it. `cloneRepo` already refused the prompt; push did not.
+   */
+  it('pushes with nobody to answer a password prompt', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    const said = path.join(root, 'env.txt');
+    const ssh = path.join(root, 'fake-ssh.sh');
+    fs.writeFileSync(ssh, `#!/bin/sh\necho "$GIT_TERMINAL_PROMPT $GIT_ASKPASS" > "${said}"\nexit 1\n`, { mode: 0o755 });
+    git(['config', 'core.sshCommand', ssh]);
+    await repo.setRemote('ssh://example.invalid/store.git');
+
+    const result = await repo.push();
+    expect(result.ok).toBe(false);
+    expect(fs.readFileSync(said, 'utf8').trim()).toBe('0 echo');
+  });
+
   it('names the current branch', async () => {
     const repo = new Repo(root);
     await repo.ensure();
@@ -535,6 +554,71 @@ describe('a store someone has also used git on', () => {
      * checked out again.
      */
     await expect(repo.push()).rejects.toThrow(/detached/i);
+  });
+
+  /*
+   * A commit takes only what this save named.
+   *
+   * The commit had no pathspec, so it took the whole index: a file the user
+   * had staged by hand, or one a failed commit left behind, went into
+   * "Update answer bank". A real store had the tracker and the drafts folder
+   * in fifteen commits named for the answer bank.
+   */
+  it('leaves a file somebody else staged out of a scoped commit', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await seed(repo);
+
+    fs.writeFileSync(path.join(root, 'private-notes.txt'), 'secret\n');
+    git(['add', 'private-notes.txt']);
+    fs.writeFileSync(path.join(root, 'answers.yaml'), '[]\n');
+    await repo.commitAll('Update answer bank', ['answers.yaml']);
+
+    expect(git(['show', '--name-only', '--pretty=format:', 'HEAD']).trim()).toBe('answers.yaml');
+    // Still staged, as they left it: not committed, not unstaged.
+    expect(git(['diff', '--cached', '--name-only']).trim()).toBe('private-notes.txt');
+  });
+
+  it('commits a new file and a deletion with nothing else beside them', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.mkdirSync(path.join(root, 'drafts'));
+    fs.writeFileSync(path.join(root, 'drafts', 'old.yaml'), 'a: 1\n');
+    fs.writeFileSync(path.join(root, 'gone.yaml'), 'c: 3\n');
+    await repo.commitAll('first');
+
+    fs.writeFileSync(path.join(root, 'stray.txt'), 'x\n');
+    git(['add', 'stray.txt']);
+    fs.rmSync(path.join(root, 'drafts', 'old.yaml'));
+    fs.writeFileSync(path.join(root, 'drafts', 'new.yaml'), 'b: 2\n');
+    fs.rmSync(path.join(root, 'gone.yaml'));
+
+    await repo.commitAll('Tidy drafts', ['drafts', 'gone.yaml']);
+
+    const changed = git(['show', '--name-status', '--pretty=format:', 'HEAD']).trim().split('\n').sort();
+    expect(changed).toEqual(['A\tdrafts/new.yaml', 'D\tdrafts/old.yaml', 'D\tgone.yaml']);
+    expect(git(['status', '--porcelain']).trim()).toBe('A  stray.txt');
+  });
+
+  /*
+   * `git add` exits 1 on a pathspec `.gitignore` covers, after staging the
+   * rest — so a store that ignores `drafts/` failed every commit that named
+   * it, and left the tracker staged for the next unrelated commit to take.
+   */
+  it('commits the rest when one of the paths it was given is ignored', async () => {
+    fs.writeFileSync(path.join(root, '.gitignore'), 'drafts/\n');
+    const repo = new Repo(root);
+    await repo.ensure();
+    fs.mkdirSync(path.join(root, 'drafts'));
+    fs.writeFileSync(path.join(root, 'drafts', 'x.yaml'), 'a: 1\n');
+    fs.writeFileSync(path.join(root, 'applications.yaml'), '[]\n');
+
+    await withCommit(repo, true, 'Close stale applications', () => undefined, ['applications.yaml', 'drafts']);
+
+    expect(repo.lastCommitError).toBeUndefined();
+    expect(git(['show', '-s', '--format=%s', 'HEAD']).trim()).toBe('Close stale applications');
+    expect(git(['show', '--name-only', '--pretty=format:', 'HEAD']).trim()).toBe('applications.yaml');
+    expect(git(['diff', '--cached', '--name-only']).trim()).toBe('');
   });
 
   it('counts the files in an untracked folder, not the folder', async () => {

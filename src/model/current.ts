@@ -333,6 +333,15 @@ function uniqueNames(
   }
 
   const out = new Map<string, string>(); // `${app.id} ${name}` → final name
+  /*
+   * Every name some file already answers to, and every one handed out below.
+   *
+   * The suffixes were only checked against each other. Two bundles holding
+   * `Resume.pdf` and a third holding `Resume-Intern.pdf` gave the intern's
+   * copy of the first the third one's name, and the folder is keyed on the
+   * name — so one of the two simply was not there, with nothing to say so.
+   */
+  const taken = new Set(claims.map((c) => c.name));
 
   for (const [name, group] of groups) {
     if (group.length === 1) {
@@ -353,17 +362,27 @@ function uniqueNames(
     const suffix =
       candidates.find((of) => {
         const made = group.map((c) => of(c.app));
-        return made.every(Boolean) && new Set(made).size === group.length;
+        return (
+          made.every(Boolean) &&
+          new Set(made).size === group.length &&
+          made.every((m) => !taken.has(`${stem}-${m}${ext}`))
+        );
       }) ?? ((a: Application) => forFilename(a.id));
 
     // The plain name goes to the one in hand — always — and with nobody in
     // hand stays where it is. See `working` and `heldBy` above.
     const plainTo = group.some((c) => c.app.id === working) ? working : heldBy.get(name);
     for (const claim of group) {
-      out.set(
-        `${claim.app.id} ${name}`,
-        claim.app.id === plainTo ? name : `${stem}-${suffix(claim.app)}${ext}`,
-      );
+      if (claim.app.id === plainTo) {
+        out.set(`${claim.app.id} ${name}`, name);
+        continue;
+      }
+      // Counted on past anything still taken, which only the id fallback can
+      // reach: two applications whose ids reduce to the same characters.
+      let renamed = `${stem}-${suffix(claim.app)}${ext}`;
+      for (let n = 2; taken.has(renamed); n++) renamed = `${stem}-${suffix(claim.app)}-${n}${ext}`;
+      taken.add(renamed);
+      out.set(`${claim.app.id} ${name}`, renamed);
     }
   }
   return out;

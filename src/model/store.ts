@@ -36,6 +36,7 @@ import {
   normalizeApplications,
   normalizeEntry,
   normalizeProfile,
+  normalizeSections,
   normalizeSkillGroups,
 } from './normalize.js';
 export { repairAiArgs };
@@ -1093,7 +1094,9 @@ export class Store {
     }
     for (const draft of this.loadDrafts()) {
       if (draft.resumeId !== moved(draft.resumeId)) {
-        this.saveDraft({ ...draft, resumeId: moved(draft.resumeId) });
+        // Not touched: a rename nobody asked for is not an edit, and the
+        // date is what the drafts list sorts on and the sweep ages by.
+        this.saveDraft({ ...draft, resumeId: moved(draft.resumeId) }, { touch: false });
       }
     }
 
@@ -1151,7 +1154,17 @@ export class Store {
          * or copied and not yet filled in — arrived with `label: undefined`,
          * which is the label every picker in the app then showed for it.
          */
-        return { ...spec, id, label: String(spec.label ?? id) } satisfies ResumeSpec;
+        /*
+         * And sections in a shape that can be walked — see `normalizeSections`.
+         * One resume's hand edit is that resume's problem, not every screen's.
+         */
+        const sections = normalizeSections(spec.sections);
+        return {
+          ...spec,
+          id,
+          label: String(spec.label ?? id),
+          ...(sections ? { sections } : {}),
+        } satisfies ResumeSpec;
       })
       .filter((r, i, all) => Boolean(r.id) && all.findIndex((o) => o.id === r.id) === i);
   }
@@ -1347,7 +1360,7 @@ export class Store {
     refuseRepeatsInEntry(before, clean);
 
     const list = this.readYaml<Entry[]>(rel, []);
-    const idx = list.findIndex((e) => e.id === clean.id);
+    const idx = list.findIndex((e) => holdsId(e, clean.id));
     if (idx >= 0) list[idx] = clean;
     else list.push(clean);
     this.writeYaml(rel, list);
@@ -1355,7 +1368,7 @@ export class Store {
     for (const other of Store.ENTRY_FILES) {
       if (other === rel) continue;
       const stale = this.readYaml<Entry[]>(other, []);
-      const next = stale.filter((e) => e.id !== clean.id);
+      const next = stale.filter((e) => !holdsId(e, clean.id));
       if (next.length !== stale.length) this.writeYaml(other, next);
     }
 
@@ -1378,7 +1391,7 @@ export class Store {
     let removed = false;
     for (const rel of Store.ENTRY_FILES) {
       const list = this.readYaml<Entry[]>(rel, []);
-      const next = list.filter((e) => e.id !== id);
+      const next = list.filter((e) => !holdsId(e, id));
       if (next.length !== list.length) {
         this.writeYaml(rel, next);
         removed = true;
@@ -1838,10 +1851,27 @@ export class Store {
    */
   outPath(rel: string): string | undefined {
     const out = this.outDir();
-    if (!rel || rel.includes('\u0000')) return undefined;
+    // A hand-written `snapshotDir: 5` is not a folder either, and calling
+    // `.includes` on it threw out of the whole sync.
+    if (!rel || typeof rel !== 'string' || rel.includes('\u0000')) return undefined;
     const full = path.resolve(out, rel);
     return full.startsWith(out + path.sep) ? full : undefined;
   }
+}
+
+/**
+ * Whether an item read straight out of an entry file is the entry with this id.
+ *
+ * The file is compared raw, before `normalizeEntry` has run, so it has to
+ * read the id the way normalizing does. YAML makes `id: 2024` a number, and
+ * `e.id === '2024'` never matched it: a save appended a second copy that
+ * `loadEntries` then hid behind the first, so the edit was lost, and a delete
+ * removed whichever copy it found. A stray `-` is `null`, and reading `.id`
+ * off it threw — after the save had already written its own file.
+ */
+function holdsId(raw: unknown, id: string): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  return String((raw as Partial<Entry>).id ?? '') === id;
 }
 
 /**

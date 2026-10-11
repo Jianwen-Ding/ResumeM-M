@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { parsePeriod } from './period.js';
 import type { Period, Season } from './period.js';
 import type {
@@ -8,6 +9,7 @@ import type {
   Entry,
   MaybeVariant,
   Profile,
+  SectionSpec,
   SkillGroup,
   Variant,
   VariantField,
@@ -87,6 +89,36 @@ export function normalizeBullet(bullet: Bullet): Bullet {
 }
 
 /**
+ * A line written the short way, as the one phrasing it has.
+ *
+ * `- Built the thing` under `bullets:` is the obvious thing to type into a
+ * file advertised as hand-editable, and so is `{id: b_x, text: ...}` without
+ * the `variants:` around it. Both were filtered out as not being bullets —
+ * and since `saveEntry` writes back what it read, the next save of the entry
+ * deleted the line from disk. Now each becomes a bullet with one variant.
+ *
+ * A string has no id, and a line needs one that holds still: a resume's list
+ * and its chosen wordings name lines by id, so one that changed on every read
+ * would be unselectable. It is made from the entry, the position and the
+ * words, and written down by the first save, after which it is the line's id
+ * like any other.
+ */
+function plainBullet(raw: unknown, entryId: string, n: number): Bullet | undefined {
+  if (typeof raw === 'string' || typeof raw === 'number') {
+    const text = String(raw);
+    if (!text.trim()) return undefined;
+    const id = `b_${createHash('sha1').update(`${entryId}\u0000${n}\u0000${text}`).digest('hex').slice(0, 8)}`;
+    return { id, default: 'v_1', variants: [{ id: 'v_1', label: 'v_1', text }] } as Bullet;
+  }
+  if (!raw || typeof raw !== 'object') return undefined;
+  const { text, ...rest } = raw as Bullet & { text?: unknown };
+  if (Array.isArray(rest.variants) && rest.variants.length > 0) return raw as Bullet;
+  if (text === undefined || text === null || typeof text === 'object') return raw as Bullet;
+  const id = rest.id ?? plainBullet(String(text), entryId, n)?.id;
+  return { ...rest, id, default: 'v_1', variants: [{ id: 'v_1', label: 'v_1', text: String(text) }] } as Bullet;
+}
+
+/**
  * The default phrasing of a field, for the two things that need one string
  * rather than the set: reading a date out of it, and showing it in a list.
  */
@@ -135,7 +167,10 @@ export function normalizeEntry(entry: Entry): Entry {
    * before the machinery that says which file the problem is in could run.
    */
   out.bullets = Array.isArray(entry.bullets)
-    ? entry.bullets.filter((b) => b && typeof b === 'object').map(normalizeBullet)
+    ? entry.bullets
+        .map((b, n) => plainBullet(b, out.id, n))
+        .filter((b): b is Bullet => Boolean(b))
+        .map(normalizeBullet)
     : [];
 
   /*
@@ -269,6 +304,60 @@ export function normalizeAnswers(answers: unknown): AnswerBankItem[] {
     });
 }
 
+/** A list of ids, as a resume names them: strings, whatever YAML made of them. */
+function idList(raw: unknown): string[] {
+  if (typeof raw === 'string' || typeof raw === 'number') return [String(raw)];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id) => id !== null && id !== undefined && typeof id !== 'object').map(String);
+}
+
+/** `{entryId: [ids]}`, with anything that is not such a list dropped. */
+function idLists(raw: unknown): Record<string, string[]> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [key, ids] of Object.entries(raw)) {
+    if (Array.isArray(ids)) out[key] = idList(ids);
+  }
+  return out;
+}
+
+/**
+ * A resume's sections, in the shape everything that reads them assumes.
+ *
+ * Same story as the entries above, one file over. `sections:` written as a
+ * mapping, a stray `-` left in the list, or `bullets: {exp_acme: }` with the
+ * list deleted, and `Store.load()` threw — "sections is not iterable",
+ * "Cannot read properties of null" — taking every screen down with a message
+ * that named neither the resume nor the file.
+ *
+ * A mapping is read as the list it was meant to be, its keys taken as the
+ * kind when the section does not say. Anything that is not a section at all
+ * is skipped. Ids are made strings, as `normalizeEntry` makes them, or a
+ * hand-written `[7]` never matches the bullet it names. Absent stays absent.
+ */
+export function normalizeSections(raw: unknown): SectionSpec[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const listed: unknown[] = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'object'
+      ? Object.entries(raw).map(([kind, s]) => (s && typeof s === 'object' ? { kind, ...s } : s))
+      : [];
+  return listed
+    .filter((s): s is SectionSpec => Boolean(s) && typeof s === 'object' && !Array.isArray(s))
+    .map((section) => {
+      const out: SectionSpec = { ...section };
+      if (section.entries !== undefined) out.entries = idList(section.entries);
+      if (section.groups !== undefined) out.groups = idList(section.groups);
+      for (const key of ['bullets', 'items'] as const) {
+        if (section[key] === undefined) continue;
+        const lists = idLists(section[key]);
+        if (lists) out[key] = lists;
+        else delete out[key];
+      }
+      return out;
+    });
+}
+
 /**
  * The four stages that were dropped, and what they became.
  *
@@ -292,7 +381,9 @@ const STAGES: ApplicationStatus[] = ['interested', 'applying', 'applied', 'inter
 
 /** What this application's stage is called now. */
 export function normalizeStatus(status: unknown): ApplicationStatus {
-  const said = String(status ?? '').trim();
+  // Any case: `status: Applied` typed by hand read as `interested`, and the
+  // next save of the tracker wrote that back over it.
+  const said = String(status ?? '').trim().toLowerCase();
   if ((STAGES as string[]).includes(said)) return said as ApplicationStatus;
   return RETIRED_STATUSES[said] ?? 'interested';
 }
