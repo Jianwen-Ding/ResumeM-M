@@ -226,6 +226,9 @@ describe('"GitHub | Unknown role (job Automated-List-Of-…)" — a repository�
       'Software-Engineer-Summer-2027_R171666',
     );
     expect(jobNumberIn('https://boards.greenhouse.io/acme/jobs/4012345')).toBe('4012345');
+    // A year beside another number is part of the id.
+    expect(jobNumberIn('https://acme.taleo.net/careersection/2/jobdetail.ftl?job=2026-1234')).toBe('2026-1234');
+    expect(jobNumberIn('https://acme.example/apply/REQ-2026-0412')).toBe('REQ-2026-0412');
     expect(jobNumberIn('https://www.linkedin.com/jobs/search-results/?currentJobId=4472949726')).toBe('4472949726');
   });
 
