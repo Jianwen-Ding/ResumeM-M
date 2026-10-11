@@ -112,6 +112,14 @@ describe('a rebuild filed into a row found by its job number', () => {
     expect(rows()[0]).toMatchObject({ company: 'Electronic Arts', role: 'Gameplay Engineer Intern' });
   });
 
+  it('gives a row filed under a junk name the names a later build read properly', async () => {
+    const nuro = 'https://www.nuro.ai/careersitem?gh_jid=7351061';
+    await bundle({ company: 'Embed', role: 'Job Application for Software Engineer, AI Platform', url: nuro, status: 'applying' }).expect(200);
+    await bundle({ company: 'Nuro', role: 'Software Engineer, AI Platform', url: nuro, status: 'applying' }).expect(200);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ company: 'Nuro', role: 'Software Engineer, AI Platform' });
+  });
+
   it('takes a new spelling of the same employer, as it always has', async () => {
     await bundle({ company: 'Acme', role: 'Platform Engineer', status: 'applying' }).expect(200);
     await bundle({ company: 'Acme, Inc.', role: 'Platform Engineer', status: 'applying' }).expect(200);
@@ -147,6 +155,17 @@ describe('the history of an application rebuilt again and again', () => {
       'applying: Files rebuilt',
       'applied: Files rebuilt',
     ]);
+  });
+
+  it('moves the line on to the latest rebuild once it is an hour old, so the work still counts as recent', async () => {
+    await bundle({ ...JOB, status: 'applying' }).expect(200);
+    const apps = t.store.load().applications;
+    apps[0]!.history = [{ at: '2026-01-01T00:00:00.000Z', status: 'applying', note: 'Bundle created' }];
+    t.store.saveApplications(apps);
+    await bundle({ ...JOB, status: 'applying' }).expect(200);
+    const history = rows()[0]!.history!;
+    expect(history).toHaveLength(1);
+    expect(Date.now() - Date.parse(history[0]!.at)).toBeLessThan(60_000);
   });
 
   it('commits nothing for a rebuild that changes nothing on the row', async () => {

@@ -381,3 +381,29 @@ describe('one job spelt two ways makes one tailored copy', () => {
     expect(t.store.load().resumes.filter((r) => r.id.startsWith('job-intel'))).toHaveLength(1);
   });
 });
+
+describe('names the review found refused or accepted wrongly', () => {
+  it('still reads GitHub as the employer on a board', () => {
+    expect(named([{ url: LINKEDIN('4400000001'), title: 'Software Engineer | GitHub | LinkedIn' }]).company).toBe('GitHub');
+  });
+
+  it('does not take a team named for its work as a firm', () => {
+    expect(isFirmNamedForItsWork('Gameplay Engineering')).toBe(false);
+    expect(isFirmNamedForItsWork('Rendering Engineering')).toBe(false);
+    expect(isFirmNamedForItsWork('Thermagia Engineering')).toBe(true);
+  });
+
+  it('keeps a role written as two words either side of a slash', () => {
+    expect(looksLikeRoleTitle('Intern/Co-op')).toBe(true);
+    expect(looksLikeRoleTitle('Developer/Engineer')).toBe(true);
+    expect(looksLikeRoleTitle('someone/Summer-2027-Internships: a list of internships')).toBe(false);
+  });
+
+  it('keeps a SmartRecruiters posting beside its one-click form', () => {
+    const job = mergeJobPages([
+      { url: 'https://jobs.smartrecruiters.com/Visa/744000012345678-software-engineer', title: 'Software Engineer', html: page('Software Engineer') },
+      { url: 'https://jobs.smartrecruiters.com/oneclick-ui/company/Visa/publication/3f2c1a9e-1111-2222-3333-444455556666', title: 'Apply', html: page('Apply') },
+    ]);
+    expect(job.pages).toHaveLength(2);
+  });
+});

@@ -9192,7 +9192,10 @@ async function saveLetter(answer) {
    * of the server rather than of the list on screen, because the extension
    * and the Workspace file letters from elsewhere.
    */
-  const base = `${new Date().toISOString().slice(0, 10)}-${slug(answer.company || 'letter')}`;
+  // The day where you are, as the server dates its ids (`localDay`).
+  const today = new Date();
+  const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const base = `${day}-${slug(answer.company || 'letter')}`;
   const taken = new Set((await api('/letters')).map((l) => l.id));
   let id = base;
   for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;

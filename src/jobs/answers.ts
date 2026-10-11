@@ -647,8 +647,9 @@ export function tidyQuestion(raw: string): string {
     q = q
       .replace(/\s*\*+$/, '')
       .replace(/\s*\(\s*required\s*\)$/i, '')
-      .replace(/([?.)*])\s*required$/i, '$1')
-      .replace(/^\*+\s*/, '')
+      .replace(/([?.*])\s*required$/i, '$1')
+      // One marker in front; "**" opens bold, and its other half is further on.
+      .replace(/^\*(?!\*)\s*/, '')
       .trim();
     // After a label read twice, LinkedIn's "Required" follows whatever the
     // question ends in: "… in 2028I am … in 2028 Required".
@@ -663,7 +664,8 @@ function once(q: string): string {
   for (const gap of [0, 1]) {
     const half = (q.length - gap) / 2;
     if (!Number.isInteger(half) || half < 3) continue;
-    if (gap === 1 && q[half] !== ' ') continue;
+    // Spaced, only a question long enough not to be a name: "Walla Walla".
+    if (gap === 1 && (q[half] !== ' ' || q.slice(0, half).split(' ').length < 3)) continue;
     if (q.slice(0, half) === q.slice(half + gap)) return q.slice(0, half);
   }
   return q;

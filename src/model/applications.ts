@@ -7,7 +7,8 @@ import type { Application, ApplicationStatus, ResolvedResume } from './types.js'
 import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
 import { syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
-import { cleanRole, employerKey, hostOf, jobNumberIn } from '../jobs/names.js';
+import { cleanRole, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
+import { looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
 
 /**
  * One hyphenated part of a filename.
@@ -1117,8 +1118,18 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
      * Matched by name (one employer, another spelling), the request's
      * spelling still wins, as it always has.
      */
+    /*
+     * Unless the row's own names are the junk this was keeping them from:
+     * an "Unknown company" row, or "Embed" with "Job Application for …" as
+     * its role, found by its number is the row the request's better names
+     * were read for.
+     */
     const byNumberOnly =
-      settled !== undefined && identity(settled.company, settled.role) !== identity(req.company, req.role);
+      settled !== undefined &&
+      identity(settled.company, settled.role) !== identity(req.company, req.role) &&
+      looksLikeCompanyName(settled.company) &&
+      looksLikeRoleTitle(settled.role) &&
+      withoutTitleNoise(settled.role) === settled.role;
 
     /*
      * And one history line for a run of rebuilds, not one per rebuild.
@@ -1139,6 +1150,18 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       settled.status === status &&
       last?.status === status &&
       (last.note === 'Files rebuilt' || last.note === 'Bundle created');
+    /*
+     * But the line's time still moves, because it is what `goneStale` reads
+     * as the last sign of work: frozen at the first rebuild, an application
+     * rebuilt every day for a fortnight was closed as left alone for one.
+     * Moved once an hour at most, so a run of rebuilds is still one write
+     * and not one commit each.
+     */
+    const lastAt = Date.parse(last?.at ?? '');
+    const touched =
+      nothingNew && !(Date.parse(now) - lastAt < 3_600_000)
+        ? [...settled!.history!.slice(0, -1), { ...last!, at: now }]
+        : settled?.history;
 
     const application: Application = {
       ...settled,
@@ -1186,7 +1209,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       answers,
       coverLetter: letter,
       history: nothingNew
-        ? settled!.history
+        ? touched
         : [...(settled?.history ?? []), { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' }],
     };
     store.upsertApplication(application);

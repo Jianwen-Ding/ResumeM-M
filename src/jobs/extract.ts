@@ -1625,7 +1625,8 @@ export function looksLikeRoleTitle(role?: string): boolean {
   // A bare hostname, for the same reason `looksLikeCompanyName` refuses one.
   if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(r)) return false;
   // A repository, "owner/name" and its description: GitHub's title for a README.
-  if (/^[\w.-]+\/[\w.-]+(?::\s|$)/.test(r)) return false;
+  // With its description: "Intern/Co-op" and "Developer/Engineer" are jobs.
+  if (/^[\w.-]+\/[\w.-]+:\s/.test(r)) return false;
   if (NOT_A_ROLE.test(r.replace(/[!?.]+$/, ''))) return false;
   if (A_LIST_OF_JOBS.test(r)) return false;
   /*
@@ -2709,7 +2710,14 @@ function thisJobsPages(pages: PageSource[]): PageSource[] {
   return pages.filter((p) => {
     if (p === current || hostOf(p.url) !== host) return true;
     const theirs = jobNumberIn(p.url)?.toLowerCase();
-    return !theirs || theirs === number;
+    /*
+     * Two plain numbers only — LinkedIn's `currentJobId`, a board's id. A
+     * slug or a uuid can be one job's posting and its form on one host:
+     * SmartRecruiters' posting `744000012345678-software-engineer` and its
+     * one-click form `/publication/<uuid>`.
+     */
+    if (!theirs || !/^\d+$/.test(theirs) || !/^\d+$/.test(number)) return true;
+    return theirs === number;
   });
 }
 

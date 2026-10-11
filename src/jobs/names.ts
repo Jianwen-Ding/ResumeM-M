@@ -102,8 +102,11 @@ const BOARDS: { name: RegExp; host: RegExp }[] = [
    * repository's README of a hundred internships, "GitHub - someone/Summer-
    * 2027-Internships: …", was filed as an application at GitHub. GitHub's own
    * jobs are on its careers site, not on a repository page.
+   *
+   * By host only. Unlike LinkedIn's, GitHub's name on someone else's page is
+   * the employer — "Software Engineer | GitHub | LinkedIn" is a job there.
    */
-  { name: /^git\s?hub$/i, host: /(?:^|\.)github\.com$/i },
+  { name: /(?!)/, host: /(?:^|\.)github\.com$/i },
 ];
 
 /** A job board or aggregator's name: "LinkedIn", "Indeed.com", "Built In NYC". */
@@ -313,6 +316,12 @@ const WORK_QUALIFIERS = new Set([
   'events', 'office', 'store', 'restaurant', 'team', 'people', 'tools', 'tooling', 'build', 'performance', 'senior',
   'junior', 'associate', 'principal', 'staff', 'lead', 'entry', 'level', 'new', 'grad', 'research', 'software',
   'hardware', 'firmware', 'embedded', 'data', 'web', 'mobile', 'cloud', 'platform', 'product', 'business',
+  // Teams and disciplines a role is named for: "Senior Engineer | Gameplay Engineering".
+  'gameplay', 'rendering', 'graphics', 'audio', 'silicon', 'compiler', 'validation', 'verification', 'field',
+  'simulation', 'analog', 'rf', 'optical', 'avionics', 'propulsion', 'ui', 'ux', 'physics', 'animation',
+  'search', 'infra', 'infrastructure', 'kernel', 'engine', 'plugin', 'quantitative', 'inventory', 'identity',
+  'device', 'devices', 'security', 'reliability', 'manufacturing', 'operations', 'automation', 'controls',
+  'robotics', 'ml', 'ai', 'machine', 'learning', 'graphics', 'tools', 'core', 'online', 'services',
 ]);
 
 export function isFirmNamedForItsWork(s: string | undefined): boolean {

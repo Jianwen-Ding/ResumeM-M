@@ -820,6 +820,9 @@ describe('tidyQuestion', () => {
 
   it('reads a label read twice as once', () => {
     expect(tidyQuestion('SchoolSchool')).toBe('School');
+    expect(tidyQuestion('Walla Walla')).toBe('Walla Walla');
+    expect(tidyQuestion('Security clearance (TS/SCI) required')).toBe('Security clearance (TS/SCI) required');
+    expect(tidyQuestion('**Are you one of the following?** Citizen')).toBe('**Are you one of the following?** Citizen');
     expect(tidyQuestion('Location (city)Location (city)')).toBe('Location (city)');
     expect(tidyQuestion('How did you hear about this job?How did you hear about this job?')).toBe(
       'How did you hear about this job?',
