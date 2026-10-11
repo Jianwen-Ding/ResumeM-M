@@ -59,17 +59,106 @@ describe('answers already recorded on an application', () => {
     expect(fs.readdirSync(dir).some((f) => f.endsWith('.md'))).toBe(true);
   });
 
-  it('are replaced by a stage that sends answers of its own', async () => {
+  /*
+   * The card's list is the step of the form in front of it, not the form. A
+   * stage on step 2 replaced step 1's answers with step 2's, so this used to
+   * expect `next` alone; it now expects both.
+   */
+  it('are joined by a stage that sends answers to other questions', async () => {
     await bundle({ ...JOB, status: 'applying', answers: recorded }).expect(200);
     const next = [{ question: 'Why us?', answer: 'The platform work.' }];
     await bundle({ ...JOB, status: 'applying', answers: next }).expect(200);
-    expect(rows()[0]?.answers).toEqual(next);
+    expect(rows()[0]?.answers).toEqual([...recorded, ...next]);
   });
 
-  it('are cleared by filing the application with an empty list, which is said on purpose', async () => {
+  it('are replaced, question by question, by a stage that answers the same question again', async () => {
+    const step1 = [
+      { question: 'Please enter your name:', answer: 'Jian wen Ding' },
+      { question: 'Discipline', answer: 'Computer Science' },
+    ];
+    await bundle({ ...JOB, status: 'applying', answers: step1 }).expect(200);
+    // The same question as the form marks it up, with a new answer.
+    await bundle({ ...JOB, status: 'applying', answers: [{ question: 'Discipline*', answer: 'Computer Engineering' }] }).expect(200);
+    expect(rows()[0]?.answers).toEqual([
+      { question: 'Please enter your name:', answer: 'Jian wen Ding' },
+      { question: 'Discipline*', answer: 'Computer Engineering' },
+    ]);
+  });
+
+  /*
+   * This used to expect `[]`: filing with an empty list was taken as clearing
+   * them on purpose. But the card sends `[]` from any step with no questions,
+   * and filing as applied from the form's last page — a review page, as a
+   * rule — then cleared every answer the earlier steps had recorded. A build
+   * no longer clears answers; the tracker's PATCH does, below.
+   */
+  it('survive filing the application with an empty list, or with a later step’s answers', async () => {
     await bundle({ ...JOB, status: 'applying', answers: recorded }).expect(200);
     await bundle({ ...JOB, status: 'applied', answers: [] }).expect(200);
+    expect(rows()[0]?.answers).toEqual(recorded);
+    const step2 = [{ question: 'Are you willing to relocate?', answer: 'Yes' }];
+    await bundle({ ...JOB, status: 'applied', answers: step2 }).expect(200);
+    expect(rows()[0]?.answers).toEqual([...recorded, ...step2]);
+  });
+
+  it('are cleared on purpose through the tracker’s own route', async () => {
+    await bundle({ ...JOB, status: 'applying', answers: recorded }).expect(200);
+    const id = rows()[0]!.id;
+    await request(app).patch(`/api/applications/${encodeURIComponent(id)}`).send({ answers: [] }).expect(200);
     expect(rows()[0]?.answers).toEqual([]);
+    expect(rows()[0]).toMatchObject({ company: JOB.company, role: JOB.role });
+    await request(app).patch(`/api/applications/${encodeURIComponent(id)}`).send({ answers: [{ question: 'x' }] }).expect(400);
+  });
+});
+
+/*
+ * One job, spelt "Intel" on LinkedIn and "Intel Corporation" on Workday,
+ * visited four times as the extension does: analyze, then stage the copy the
+ * analysis returned. The copy's `generatedFor` takes each page's spelling and
+ * its id does not, so the copy reused on the second visit was not found on
+ * the third, and a second copy was minted beside it.
+ */
+describe('a tailored copy for one job spelt two ways, over repeated visits', () => {
+  const LI = 'https://www.linkedin.com/jobs/view/4012345678/';
+  const WD = 'https://intel.wd1.myworkdayjobs.com/External/job/Santa-Clara/Software-Engineer_JR0270001';
+  const visit = async (company: string, url: string) => {
+    const ld = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'JobPosting',
+      title: 'Software Engineer',
+      hiringOrganization: { '@type': 'Organization', name: company },
+      description: '<p>Build distributed systems in Python and Kafka. Requirements: Python, Java, SQL. Apply now.</p>',
+    });
+    const title = `Software Engineer - ${company}`;
+    const html = `<html><head><title>${title}</title><script type="application/ld+json">${ld}</script></head><body><h1>Software Engineer</h1><p>${company}</p><button>Apply</button></body></html>`;
+    const analysis = await request(app)
+      .post('/api/extension/analyze')
+      .send({ url, title, html, pages: [{ url, title, html }], baseResumeId: 'base', baseIsDefault: true, tailor: 'match', useAi: false })
+      .expect(200);
+    const spec = analysis.body.spec;
+    const fresh = await request(app).post('/api/extension/fresh').send({ spec }).expect(200);
+    await bundle({
+      spec,
+      resumeId: spec.id,
+      basedOn: fresh.body.version,
+      company: spec.generatedFor.company,
+      role: spec.generatedFor.role,
+      url,
+      source: 'x',
+      status: 'applying',
+      answers: [],
+    }).expect(200);
+    return spec as { id: string; generatedFor: { company: string } };
+  };
+
+  it('is one copy on every visit, under whichever spelling', async () => {
+    const ids = [];
+    for (const [company, url] of [['Intel', LI], ['Intel Corporation', WD], ['Intel Corporation', WD], ['Intel', LI]] as const) {
+      ids.push((await visit(company, url)).id);
+    }
+    expect(new Set(ids).size).toBe(1);
+    expect(t.store.load().resumes.filter((r) => r.id.startsWith('job-intel'))).toHaveLength(1);
+    expect(rows()).toHaveLength(1);
   });
 });
 

@@ -9,6 +9,9 @@ import { syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
 import { cleanRole, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
 import { looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
+// A cycle (answers.ts reads `employerName` and `localDay` from here), safe
+// because neither side calls the other while its module is loading.
+import { sameQuestion } from '../jobs/answers.js';
 
 /**
  * One hyphenated part of a filename.
@@ -791,25 +794,42 @@ async function inBuildLane<T>(id: string, run: () => Promise<T>): Promise<T> {
  * already holds.
  *
  * Absent keeps the row's, like every other field a build was not told about.
- * And an *empty* list on a stage keeps them too. A stage is the extension
- * keeping the upload folder level with the card, with nobody pressing
- * anything, and it sends whatever answers the card is holding at that moment
- * — `collectedAnswers()` in JobHelper's card, which is `[]` whenever the card
- * has not (or no longer) got the questions in hand: a reload, a step not yet
- * drawn, another frame. Measured on a real save: a Workday row's recorded
- * "Please enter your name:" went to `answers: []` eight seconds after it was
- * written, under a "Files rebuilt" line, by a stage nobody pressed. A stage
- * saying nothing is not somebody clearing their answers; filing the
- * application (any status but `applying`) or the tracker's own routes still
- * can, with an empty list.
+ *
+ * And a list is merged into the row's by question, never put in its place,
+ * whatever the status. The card's answer list is the step of the form it is
+ * looking at, not the form: a stage on step 2 sent step 2's answers and
+ * replaced step 1's, and filing the application from a step with no
+ * questions — or from a card that has not got them in hand (a reload, a
+ * step not yet drawn, another frame), which sends `[]` — cleared the lot.
+ * Measured on a real save: a Workday row's recorded "Please enter your
+ * name:" went to `answers: []` eight seconds after it was written, under a
+ * "Files rebuilt" line, by a stage nobody pressed.
+ *
+ * So an answer in the request beats the recorded one to the same question
+ * (`sameQuestion`, so "Discipline*" is "Discipline") and takes its place in
+ * the list; a recorded answer the request does not name is kept; a new one
+ * goes on the end. Clearing the answers on purpose is the tracker's own
+ * `PATCH /applications/:id`, which takes the list it is given.
  */
 function answersToKeep(
   req: Pick<BundleRequest, 'answers' | 'status'>,
   recorded: BundleRequest['answers'],
 ): BundleRequest['answers'] {
   if (req.answers == null) return recorded;
-  if (req.answers.length === 0 && req.status === 'applying' && recorded?.length) return recorded;
-  return req.answers;
+  if (!recorded?.length) return req.answers;
+  const incoming = req.answers;
+  const merged = recorded.map((r) => {
+    const over = incoming.filter((a) => sameQuestion(a.question, r.question)).pop();
+    return over ?? r;
+  });
+  for (const a of incoming) {
+    if (recorded.some((r) => sameQuestion(r.question, a.question))) continue;
+    // Twice in one request is once; the later one wins, as above.
+    const at = merged.findIndex((m) => sameQuestion(m.question, a.question));
+    if (at >= 0) merged[at] = a;
+    else merged.push(a);
+  }
+  return merged;
 }
 
 /**

@@ -643,10 +643,41 @@ function copyIdForPosting(resumes: ResumeSpec[], company: string, role: string):
   const made = resumes.find((r) => {
     const { company: was, role: as } = r.generatedFor ?? {};
     if (r.tier !== 'temporary' || !was) return false;
+    if (identity(was, as ?? 'Unknown role') !== job) return false;
     const minted = tailoredResumeId(was, as ?? 'Unknown role');
-    return (r.id === minted || r.id.startsWith(`${minted}-`)) && identity(was, as ?? 'Unknown role') === job;
+    return r.id === minted || r.id.startsWith(`${minted}-`) || mintedForJob(r.id, job);
   });
   return made?.id ?? copyIdFor(resumes, tailoredResumeId(company, role));
+}
+
+/**
+ * Whether `id` reads as `tailoredResumeId` of some spelling of the job whose
+ * `identity` is `job` — `job-<employer>-<role>`, perhaps numbered `-2`.
+ *
+ * A copy's `generatedFor` is rewritten with the spelling of the page that
+ * last tailored it, and its id is not: minted on LinkedIn as "Intel"
+ * (`job-intel-…`), staged from Workday's "Intel Corporation", it records
+ * "Intel Corporation" — and `tailoredResumeId` of that is
+ * `job-intel-corporation-…`, which is not its id. So asking only "does the
+ * record rebuild the id" found it once and never again: the next Workday
+ * visit minted a second copy beside it. Read the other way instead: split the
+ * id's words into an employer and a role every way they go, and ask whether
+ * any is this job. The id never changes, so this answers the same on every
+ * visit, under whatever spelling the page uses.
+ *
+ * Only readable ids: one carrying a fingerprint (a name with no ASCII, or
+ * cut at sixty characters) cannot be read back, and keeps the old rule.
+ */
+function mintedForJob(id: string, job: string): boolean {
+  if (!id.startsWith('job-')) return false;
+  const rest = id.slice('job-'.length);
+  for (const words of new Set([rest, rest.replace(/-\d+$/, '')])) {
+    const parts = words.split('-').filter(Boolean);
+    for (let i = 1; i < parts.length; i++) {
+      if (identity(parts.slice(0, i).join(' '), parts.slice(i).join(' ')) === job) return true;
+    }
+  }
+  return false;
 }
 
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
@@ -3999,16 +4030,43 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/applications/:id',
     handler(async (req, res) => {
       const id = String(req.params.id);
-      const body = (req.body ?? {}) as { company?: unknown; role?: unknown };
+      const body = (req.body ?? {}) as { company?: unknown; role?: unknown; answers?: unknown };
       const company = typeof body.company === 'string' ? body.company.trim() : undefined;
       const role = typeof body.role === 'string' ? body.role.trim() : undefined;
-      if (company === undefined && role === undefined) throw new Error('Say what the company or the role should be');
+      /*
+       * The answers recorded on the row, as given — the one place they are
+       * replaced rather than merged. A build merges what it is sent into what
+       * the row holds (see `answersToKeep`), because the card sends one step
+       * of a form at a time; so `[]` here is how they are cleared on purpose.
+       */
+      let answers: Application['answers'] | undefined;
+      if (body.answers !== undefined) {
+        const ok =
+          Array.isArray(body.answers) &&
+          body.answers.every(
+            (a) => a && typeof a === 'object' && typeof (a as { question?: unknown }).question === 'string' && typeof (a as { answer?: unknown }).answer === 'string',
+          );
+        if (!ok) throw new Error('Answers are a list of { question, answer }');
+        answers = (body.answers as { question: string; answer: string }[]).map((a) => ({ question: a.question, answer: a.answer }));
+      }
+      if (company === undefined && role === undefined && answers === undefined) {
+        throw new Error('Say what the company or the role should be');
+      }
       if (company === '' || role === '') throw new Error('A company and a role cannot be left empty');
       const apps = store.load().applications;
       const app = apps.find((a) => a.id === id);
       if (!app) throw new Error(`No application "${id}"`);
-      const next = { ...app, ...(company !== undefined ? { company } : {}), ...(role !== undefined ? { role } : {}) };
-      await withCommit(repo, autoCommit(), `Rename application "${id}" to ${next.role} at ${next.company}`, () => {
+      const next = {
+        ...app,
+        ...(company !== undefined ? { company } : {}),
+        ...(role !== undefined ? { role } : {}),
+        ...(answers !== undefined ? { answers } : {}),
+      };
+      const what =
+        company === undefined && role === undefined
+          ? `Set the answers on application "${id}"`
+          : `Rename application "${id}" to ${next.role} at ${next.company}`;
+      await withCommit(repo, autoCommit(), what, () => {
         const drafts = store.loadDrafts();
         /*
          * With the row's address, as every route that files, sends or moves a
@@ -4601,9 +4659,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * with `questions: []` and took every hand-written answer with it.
        */
       const incoming = body.questions ?? existing?.questions ?? [];
-      const questions: DraftQuestion[] = incoming.map((q, i) => {
+      const fresh: DraftQuestion[] = incoming.map((q, i) => {
         // Never clobber something a human has already written here.
-        const prior = existing?.questions.find((x) => x.question === q.question);
+        // `sameQuestion`, as the bank matches: "Discipline*" is "Discipline".
+        const prior = existing?.questions.find((x) => sameQuestion(x.question, q.question));
         if (prior?.edited) return { ...prior, required: q.required ?? prior.required };
 
         /*
@@ -4637,11 +4696,46 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         };
       });
       // The box's limit travels with its question, whichever branch made it.
-      questions.forEach((d, i) => {
+      fresh.forEach((d, i) => {
         const limit = validLimit((incoming[i] as { limit?: number }).limit) ?? d.limit;
         if (limit) d.limit = limit;
         else delete d.limit;
       });
+
+      /*
+       * What the request sends is the questions on the page in front of the
+       * extension — one step of the form — not the whole form. Replacing the
+       * stored list with it deleted everything written for the steps before:
+       * answer step 1 in the workspace, move to step 2, and step 1's answers
+       * were gone. So a stored question the request does not name is kept,
+       * ahead of the ones it does (it came from an earlier step), when there
+       * is anything in it worth keeping: an answer, or a hand's edit. An
+       * empty one nobody touched is left to go, as before.
+       *
+       * Removing a question on purpose is the editor's PUT /workspace/:id,
+       * which still takes the list it is given; the editor posts here only
+       * to open a space.
+       */
+      const kept = (existing?.questions ?? []).filter(
+        (x) =>
+          (x.edited || x.answer?.trim()) && !incoming.some((q) => sameQuestion(q.question, x.question)),
+      );
+      // Ids are per draft; a new step's "q1" must not be an earlier step's.
+      const taken = new Set(kept.map((x) => x.id));
+      let next = 1;
+      const questions: DraftQuestion[] = [
+        ...kept,
+        ...fresh.map((d) => {
+          if (!taken.has(d.id)) {
+            taken.add(d.id);
+            return d;
+          }
+          while (taken.has(`q${next}`)) next++;
+          const id = `q${next}`;
+          taken.add(id);
+          return { ...d, id };
+        }),
+      ];
 
       const now = new Date().toISOString();
       const draft: Draft = {
@@ -5554,6 +5648,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (_req, res) => res.json(store.loadCoverLetters())),
   );
 
+  /**
+   * The id the server gives a letter for a job today: `letterId` — the day
+   * on this machine's clock (`localDay`, YYYY-MM-DD, not UTC), then the
+   * company and the role, each lower-cased, runs of anything but a-z and 0-9
+   * made one "-", a "-" trimmed off either end, and only then cut to 30
+   * characters (so a cut on a gap keeps its trailing "-"); a missing or
+   * empty part is left out, and the parts are joined with "-". Asked here so a client saving a letter for a
+   * job writes it under the same name completing that job's application
+   * files it under, rather than computing its own and drifting.
+   */
+  api.get(
+    '/letters/id',
+    handler(async (req, res) => {
+      const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+      res.json({ id: letterId(text(req.query.company), text(req.query.role)) });
+    }),
+  );
+
   api.put(
     '/letters/:id',
     handler(async (req, res) => {
@@ -5561,11 +5673,33 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (typeof (req.body as { body?: unknown } | undefined)?.body !== 'string') {
         throw new Error('A letter needs a body');
       }
-      const letter = {
-        ...(req.body as { title: string; body: string }),
-        id: String(req.params.id),
-        createdAt: (req.body as { createdAt?: string }).createdAt ?? new Date().toISOString(),
+      /*
+       * Over the letter already stored under this id, not in place of it.
+       *
+       * The extension's "save to store" sends the letter it is holding —
+       * title, company, role, body — and nothing about an application, and
+       * its id is the server's `letterId` for the job and the day, which is
+       * the very id completing that application files its letter under. So
+       * saving the letter after sending it replaced the filed one with a copy
+       * that had lost its `applicationId`, and the tracker's row no longer
+       * found its letter by that link. What the request names is written —
+       * the newest text is the letter, and refusing it would throw away an
+       * edit — and what it does not name is kept: the link, `voice`, the
+       * tags. The date it was first written stays the date it was written.
+       * Unlinking on purpose is saying `applicationId: null`.
+       */
+      const id = String(req.params.id);
+      const stored = store.loadCoverLetters().find((l) => l.id === id);
+      const given = req.body as Partial<CoverLetter> & { applicationId?: string | null };
+      const letter: CoverLetter = {
+        ...(stored ?? {}),
+        ...(given as Partial<CoverLetter>),
+        id,
+        title: given.title ?? stored?.title ?? '',
+        body: given.body as string,
+        createdAt: stored?.createdAt ?? given.createdAt ?? new Date().toISOString(),
       };
+      if (given.applicationId === null) delete letter.applicationId;
       await withCommit(repo, autoCommit(), `Update cover letter "${letter.id}"`, () =>
         store.saveCoverLetter(letter),
       );

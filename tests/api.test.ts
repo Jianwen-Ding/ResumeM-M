@@ -4577,3 +4577,96 @@ describe('GET /attachments with two applications in flight', () => {
     expect(fs.readFileSync(folder, 'utf8')).toBe('%PDF a2\n');
   });
 });
+
+/*
+ * A form of several steps, handed over one step at a time. What the
+ * extension posts is the questions on the page in front of it, and the route
+ * took that as the whole list: answers written in the workspace for step 1
+ * were deleted when step 2 was handed over.
+ */
+describe('a workspace handed a later step of the form', () => {
+  const JOB = { company: 'Beta Labs', role: 'Platform Engineer', url: 'https://acme.wd1.myworkdayjobs.com/en-US/careers/job/Boston/Platform-Engineer_R123/apply' };
+  const open = (questions: { question: string; required?: boolean }[]) =>
+    request(app).post('/api/workspace').send({ ...JOB, coverLetterRequired: false, questions }).expect(200);
+
+  it('keeps the answers written for the steps before it', async () => {
+    const first = (await open([{ question: 'Why Beta?', required: true }, { question: 'Earliest start date?' }, { question: 'Anything else?' }])).body.draft;
+    first.questions[0] = { ...first.questions[0], answer: 'I love platforms.', edited: true, source: 'human' };
+    first.questions[1] = { ...first.questions[1], answer: 'June 2027', edited: true, source: 'human' };
+    await request(app).put(`/api/workspace/${first.id}`).send({ questions: first.questions }).expect(200);
+
+    const second = (await open([{ question: 'Are you willing to relocate?', required: true }])).body.draft;
+    const asked = second.questions.map((q: { question: string; answer: string }) => [q.question, q.answer]);
+    expect(asked).toEqual([
+      ['Why Beta?', 'I love platforms.'],
+      ['Earliest start date?', 'June 2027'],
+      ['Are you willing to relocate?', ''],
+    ]);
+    // An empty one nobody wrote in goes, as it did; and no two share an id.
+    const ids = second.questions.map((q: { id: string }) => q.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('knows a question again however the form marks it up', async () => {
+    const first = (await open([{ question: 'Discipline' }])).body.draft;
+    first.questions[0] = { ...first.questions[0], answer: 'Computer Science', edited: true, source: 'human' };
+    await request(app).put(`/api/workspace/${first.id}`).send({ questions: first.questions }).expect(200);
+
+    const again = (await open([{ question: 'Discipline*', required: true }])).body.draft;
+    expect(again.questions).toHaveLength(1);
+    expect(again.questions[0]).toMatchObject({ answer: 'Computer Science', edited: true, required: true });
+  });
+
+  it('still lets the editor take a question out', async () => {
+    const first = (await open([{ question: 'Why Beta?' }, { question: 'Earliest start date?' }])).body.draft;
+    first.questions[0] = { ...first.questions[0], answer: 'I love platforms.', edited: true };
+    first.questions[1] = { ...first.questions[1], answer: 'June 2027', edited: true };
+    await request(app).put(`/api/workspace/${first.id}`).send({ questions: [first.questions[0]] }).expect(200);
+    expect(t.store.getDraft(first.id)!.questions.map((q) => q.question)).toEqual(['Why Beta?']);
+  });
+});
+
+/*
+ * The extension's "save to store" PUTs the letter it holds under the
+ * server's `letterId` for the job and the day — the id completing that job's
+ * application files its letter under — with nothing about the application.
+ * It replaced the filed letter and took its `applicationId` with it.
+ */
+describe('a letter saved again over one filed with its application', () => {
+  const filed = {
+    id: '2026-10-11-intel-software-engineer',
+    title: 'Software Engineer — Intel',
+    company: 'Intel',
+    role: 'Software Engineer',
+    createdAt: '2026-10-11T09:00:00.000Z',
+    body: 'Dear Intel, as sent.',
+    applicationId: '2026-10-11-intel-software-engineer',
+    tags: ['sent'],
+  };
+
+  it('keeps its link to the application, and takes the new text', async () => {
+    t.store.saveCoverLetter(filed);
+    const res = await request(app)
+      .put(`/api/letters/${filed.id}`)
+      .send({ id: filed.id, title: filed.title, company: 'Intel', role: 'Software Engineer', createdAt: new Date().toISOString(), body: 'Dear Intel, revised.' })
+      .expect(200);
+    const stored = t.store.loadCoverLetters().find((l) => l.id === filed.id)!;
+    expect(stored).toMatchObject({ applicationId: filed.applicationId, tags: ['sent'], body: 'Dear Intel, revised.', createdAt: filed.createdAt });
+    expect(res.body.applicationId).toBe(filed.applicationId);
+  });
+
+  it('is unlinked only when that is said', async () => {
+    t.store.saveCoverLetter(filed);
+    await request(app).put(`/api/letters/${filed.id}`).send({ body: filed.body, applicationId: null }).expect(200);
+    expect(t.store.loadCoverLetters().find((l) => l.id === filed.id)!.applicationId).toBeUndefined();
+  });
+
+  it('says what id the server gives a letter for a job today', async () => {
+    const { letterId } = await import('../src/jobs/answers.js');
+    const role = 'Software Engineer, Distributed Systems and Platform Infrastructure';
+    const res = await request(app).get('/api/letters/id').query({ company: 'Intel Corporation', role }).expect(200);
+    expect(res.body.id).toBe(letterId('Intel Corporation', role));
+    // Cut after the ends are trimmed, so a cut on a gap keeps its "-".
+    expect(res.body.id).toMatch(/^\d{4}-\d{2}-\d{2}-intel-corporation-software-engineer-distributed-$/);
+  });
+});
