@@ -2,9 +2,19 @@ import { it, expect } from 'vitest';
 import { JSDOM } from 'jsdom';
 import fs from 'node:fs';
 
+/*
+ * The report page is a module that imports its helpers from the extension's
+ * shared code; jsdom here runs plain script, so the helpers go in front of it
+ * with their exports taken off.
+ */
+function asScript(page) {
+  const shared = fs.readFileSync(new URL('../../JobHelper/src/shared/bug-reports.js', import.meta.url), 'utf8');
+  return `${shared.replace(/^export\s+/gm, '')}\n${page.replace(/^import[^;]*;\s*$/gm, '')}`;
+}
+
 it('pastes a screenshot, saves notes, shows the queued receipt, and retries without another report', async () => {
   const html = fs.readFileSync(new URL('../../JobHelper/src/reports/report.html', import.meta.url), 'utf8');
-  const script = fs.readFileSync(new URL('../../JobHelper/src/reports/report.js', import.meta.url), 'utf8');
+  const script = asScript(fs.readFileSync(new URL('../../JobHelper/src/reports/report.js', import.meta.url), 'utf8'));
   const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'https://report.test/' });
   const { window } = dom;
   const reports = [];
@@ -55,7 +65,7 @@ it('keeps notes and images if the local save fails', async () => {
   window.chrome = { runtime: { getManifest: () => ({ version: '1' }), sendMessage: async ({ type }) =>
     type === 'listBugReports' ? { ok: true, data: [] } : { ok: false, error: 'Storage quota exceeded' } } };
   try {
-    window.eval(fs.readFileSync(new URL('../../JobHelper/src/reports/report.js', import.meta.url), 'utf8'));
+    window.eval(asScript(fs.readFileSync(new URL('../../JobHelper/src/reports/report.js', import.meta.url), 'utf8')));
     window.document.getElementById('notes').value = 'Keep these notes';
     window.document.getElementById('reportForm').dispatchEvent(new window.Event('submit', { cancelable: true }));
     await new Promise((r) => setTimeout(r, 20));

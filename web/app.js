@@ -820,11 +820,23 @@ async function stepHistory(direction) {
  * gone. So when the editor's copy is not what the step left, the step is
  * rebased onto it (`rebaseResume`), and refused, onto what is there, once.
  * One the step created goes back only where none has been made since
- * (`?create=1`). The other documents are put back whole, as they were.
+ * (`?create=1`).
+ *
+ * The other documents — an entry, the profile, the skills list — have no
+ * version to be based on, and were put back whole: change an entry's dates
+ * in another tab, fix a word of it here, press Ctrl+Z, and the dates went
+ * back too. So the step is rebased onto what the server has now, read just
+ * before, the same way: only what the step changed is taken back.
  */
 async function putBack(docKey, back, from) {
   const { path, options } = restoreRequest(docKey, back);
   const id = String(docKey).startsWith('resume:') ? String(docKey).slice('resume:'.length) : null;
+  if (!id && options.method === 'PUT' && from !== null && from !== undefined) {
+    const store = await api('/store');
+    const now = readDoc(store, docKey);
+    if (now && !same(now, from)) return api(path, { ...options, body: JSON.stringify(rebase(from, back, now)) });
+    return api(path, options);
+  }
   if (!id || options.method !== 'PUT') return api(path, options);
   if (from === null || from === undefined) return api(`${path}&create=1`, options);
 
@@ -1895,6 +1907,8 @@ async function flushEdits({ leaving = false } = {}) {
  *    seconds at most.
  */
 function flushEditsLeaving({ unloading = false } = {}) {
+  // A save still reading what is there before it writes goes now, without it.
+  for (const cut of [...leavingCuts]) cut();
   keepForRescue();
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
@@ -1912,6 +1926,30 @@ function flushEditsLeaving({ unloading = false } = {}) {
   }
   return true;
 }
+
+/**
+ * A read made before a write, given up on if the page goes first.
+ *
+ * Several saves read what is on the server before they write (see
+ * `saveEntry`, `inProfileLane`, `saveDraftNow`), so that what was changed
+ * elsewhere is kept rather than written over with the page's copy. Those
+ * saves go with `keepalive` because an edit made just before the page goes
+ * has to outlive it, and a read is a plain request: the page unloading cuts
+ * it short, and the write after it was never sent. So leaving the page
+ * (`flushEditsLeaving`) settles every such read at once, as `undefined`, and
+ * the save goes as it did before it read anything.
+ */
+const leavingCuts = new Set();
+function unlessLeaving(promise) {
+  return new Promise((resolve, reject) => {
+    const cut = () => resolve(undefined);
+    leavingCuts.add(cut);
+    promise.then(resolve, reject).finally(() => leavingCuts.delete(cut));
+  });
+}
+
+/** The store as the server has it now, or `undefined` when it cannot be read or the page went. */
+const readStoreNow = () => unlessLeaving(api('/store').catch(() => undefined));
 
 /** Docs says "All changes saved"; so does this, in the same quiet way. */
 function setSaveState(mode, detail) {
@@ -2072,11 +2110,22 @@ function sendEntryEditsLeaving() {
   }
 }
 
+/**
+ * Each entry as the store was last read, untouched by the screen.
+ *
+ * An edit's base is the entry it was made from, and that was read off
+ * `state.store`. But some edits change that copy in place before they save,
+ * so the redraw shows them at once (`saveEntryPeriod`), and then the base
+ * already held the edit: rebased onto what the server has, the edit looked
+ * like no change at all and the server's old date won.
+ */
+let entriesAsRead = new Map();
+
 async function saveEntry(entry, message, { paint = true } = {}) {
   describeNext(message ?? 'the change');
   const id = entry.id;
-  // What this edit was derived from: the store as the client last saw it.
-  const base = state.store?.entries?.find((e) => e.id === id) ?? null;
+  // What this edit was derived from: the store as the client last read it.
+  const base = entriesAsRead.get(id) ?? state.store?.entries?.find((e) => e.id === id) ?? null;
 
   await inEntryLane(
     id,
@@ -2087,8 +2136,23 @@ async function saveEntry(entry, message, { paint = true } = {}) {
        * save still out sent stands in for its reply, which will not come in
        * time. See `sendEntryEditsLeaving`.
        */
-      const theirs = leaving ? (lane.sent ?? lane.server) : lane.server;
-      const body = theirs && base && !same(theirs, base) ? rebase(base, entry, theirs) : entry;
+      let theirs = leaving ? (lane.sent ?? lane.server) : lane.server;
+      /*
+       * The first write of a lane has nothing landed to rebase onto: the lane
+       * is new, and `server` is empty. It sent the page's copy of the entry
+       * whole, and that copy is as old as the page's last read of the store.
+       * Move the entry's dates in another tab, or let JobHelper add a
+       * phrasing, then fix a word here, and the dates and the phrasing went
+       * back to what this page last saw. So the entry is read first, and the
+       * edit put on top of what is there. Skipped for an entry this page is
+       * creating, and given up on if the page goes (see `unlessLeaving`).
+       */
+      if (!theirs && base && !leaving) {
+        const now = (await readStoreNow())?.entries?.find((e) => e.id === id);
+        if (now) theirs = lane.server = now;
+      }
+      const rebased = Boolean(theirs && base && !same(theirs, base));
+      const body = rebased ? rebase(base, entry, theirs) : entry;
       const order = ++saveOrder;
       /*
        * Not cleared once it lands: a save leaves the queue early only while
@@ -2108,6 +2172,14 @@ async function saveEntry(entry, message, { paint = true } = {}) {
         method: 'PUT',
         body: JSON.stringify(body),
         keepalive: true,
+        /*
+         * Undone back to what it was written over, not to the page's copy:
+         * that copy lacks what was written elsewhere, and undoing this edit
+         * took that away as well. And not rebased, to the entry as read
+         * rather than the page's copy, which an edit may have changed in
+         * place already (see `entriesAsRead`), leaving nothing to undo.
+         */
+        ...(rebased ? { undoFrom: theirs } : base ? { undoFrom: base } : {}),
       });
       /*
        * A newer save of this entry came back first; this one says nothing.
@@ -3874,12 +3946,51 @@ async function addNameAlternate() {
   }
 }
 
+/**
+ * One write of the profile at a time, each made to the profile as it is on
+ * the server when its turn comes.
+ *
+ * The profile is written whole, and each of these built it from the page's
+ * copy (`{ ...state.store.profile, … }`) and sent it straight away, beside
+ * any other still out. So a field fixed in another tab, or by JobHelper, went
+ * back to what this page last read the moment any other field was saved
+ * here; and two fields saved a moment apart here each sent the other's old
+ * value. `change` is handed the profile as it is now and returns what to
+ * write, the way a change to the skills list is (see `inSkillsLane`).
+ *
+ * Read with `unlessLeaving`: a field committed as the page goes is written
+ * over the page's copy, as it always was, rather than not at all.
+ */
+let profileQueue = Promise.resolve();
+
+function inProfileLane(change) {
+  const mine = profileQueue.then(async () => {
+    const now = (await readStoreNow())?.profile;
+    const from = structuredClone(now ?? state.store.profile ?? {});
+    const profile = change(structuredClone(from));
+    // `keepalive` for the reason an entry's save has it: see `saveEntry`.
+    await api('/profile?commit=0', {
+      method: 'PUT',
+      body: JSON.stringify(profile),
+      keepalive: true,
+      // What it is written over, for undo; see `saveEntry`.
+      ...(now ? { undoFrom: now } : {}),
+    });
+    state.store.profile = profile;
+    return profile;
+  });
+  profileQueue = mine.then(
+    () => {},
+    () => {},
+  );
+  return mine;
+}
+
 async function saveProfileName(name, message) {
   describeNext(message ?? 'the change');
-  const profile = { ...state.store.profile, name };
-  // `keepalive` for the reason an entry's save has it: see `saveEntry`.
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
-  state.store.profile = profile;
+  // Built by the caller from the page's copy of the name; only what it changed goes on top.
+  const was = structuredClone(state.store.profile?.name ?? null);
+  await inProfileLane((profile) => ({ ...profile, name: rebase(was, name, profile.name) }));
   setStatus(message);
   render();
   scheduleRender();
@@ -3889,11 +4000,11 @@ async function saveProfileName(name, message) {
 async function saveProfileField(key, text) {
   const label = (PROFILE_FIELDS.find(([k]) => k === key) ?? [key, key])[1].toLowerCase();
   describeNext(text.trim() ? `the ${label}` : `removing the ${label}`);
-  const profile = { ...state.store.profile };
-  if (text.trim()) profile[key] = undisplay(text);
-  else delete profile[key];
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
-  state.store.profile = profile;
+  await inProfileLane((profile) => {
+    if (text.trim()) profile[key] = undisplay(text);
+    else delete profile[key];
+    return profile;
+  });
   setStatus('Saved');
   render();
   scheduleRender();
@@ -3901,14 +4012,14 @@ async function saveProfileField(key, text) {
 }
 
 async function saveAutofillField(key, text) {
-  const autofill = { ...(state.store.profile.autofill ?? {}) };
-  if (text.trim()) autofill[key] = text.trim();
-  else delete autofill[key];
-
-  const profile = { ...state.store.profile, autofill };
-  if (Object.keys(autofill).length === 0) delete profile.autofill;
-  await api('/profile?commit=0', { method: 'PUT', body: JSON.stringify(profile), keepalive: true });
-  state.store.profile = profile;
+  await inProfileLane((profile) => {
+    const autofill = { ...(profile.autofill ?? {}) };
+    if (text.trim()) autofill[key] = text.trim();
+    else delete autofill[key];
+    if (Object.keys(autofill).length === 0) delete profile.autofill;
+    else profile.autofill = autofill;
+    return profile;
+  });
   setStatus('Saved');
   render();
   scheduleCommit();
@@ -5604,9 +5715,22 @@ let skillsQueue = Promise.resolve();
 
 function inSkillsLane(change) {
   const mine = skillsQueue.then(async () => {
-    const groups = await change(state.store?.skillGroups ?? []);
+    /*
+     * Built on the list as the server has it, not the page's copy of it.
+     * The lane kept the page's own writes from crossing, but the first change
+     * in it was made to whatever this page last read, so a skill added in
+     * another tab, or a group renamed there, was written away by the next ×
+     * pressed here.
+     */
+    const now = (await readStoreNow())?.skillGroups;
+    const groups = await change(now ?? state.store?.skillGroups ?? []);
     if (!groups) return undefined;
-    const written = await api('/skills', { method: 'PUT', body: JSON.stringify(groups) });
+    const written = await api('/skills', {
+      method: 'PUT',
+      body: JSON.stringify(groups),
+      // What it is written over, for undo; see `saveEntry`.
+      ...(now ? { undoFrom: now } : {}),
+    });
     // Inside the lane, so the next change in the queue builds on this one
     // rather than on what was on screen before it.
     await loadStore();
@@ -6551,8 +6675,22 @@ async function deleteVariation() {
   }
 
   const copies = (state.store.resumes ?? []).filter((r) => r.copiedFrom === mine.id);
+  /*
+   * The applications in the Workspace that send it. Deleted without a word,
+   * each was left naming a resume that is not there, found out only when its
+   * files would not build. See `drawResumeChoices`.
+   */
+  const using = await api('/workspace').then(
+    ({ drafts }) => (drafts ?? []).filter((d) => d.resumeId === mine.id),
+    () => [],
+  );
   const ok = await confirmModal(`Delete “${mine.label ?? mine.id}”?`, [
     'It is removed from the save. The entries and wordings it selected are the store’s and stay.',
+    using.length > 0
+      ? `${using.length === 1 ? 'The application' : `${using.length} applications`} in the Workspace for ${using
+          .map((d) => d.company)
+          .join(', ')} ${using.length === 1 ? 'uses' : 'use'} it, and will need another resume chosen.`
+      : null,
     // Said because the list shows where each copy came from, so the name is
     // about to stop resolving there. Nothing about the copies themselves
     // changes — they hold their own sections and always did.
@@ -7088,6 +7226,26 @@ function celebrate(company) {
 }
 
 /**
+ * The day a stored timestamp fell on, here, as `YYYY-MM-DD`.
+ *
+ * Timestamps are stored in UTC (`toISOString`), and the first ten characters
+ * of one are the day in Greenwich, not here: an application sent at 8pm in
+ * California was listed as sent the next day, beside an id the server now
+ * names by the local day (`localDay` in src/model/applications.ts). A bare
+ * date is already a day and is shown as it is; read as a time it would be
+ * midnight UTC, the evening before anywhere west of it.
+ */
+function localDate(iso) {
+  if (!iso) return '';
+  const text = String(iso);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const at = new Date(text);
+  if (Number.isNaN(at.getTime())) return text.slice(0, 10);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+}
+
+/**
  * When this application actually went out.
  *
  * `appliedAt` is when the row was started, which for anything begun from the
@@ -7097,14 +7255,14 @@ function celebrate(company) {
  */
 function sentOn(a) {
   const went = (a.history ?? []).find((h) => h.status === 'applied');
-  if (went?.at) return went.at.slice(0, 10);
+  if (went?.at) return localDate(went.at);
   // Closed by the tracker for sitting at Applying: never sent, whatever
   // `closed` usually means. See `closedAsStale` in applications.ts, whose
   // note this is.
   const last = a.history?.at(-1);
   if (a.status === 'closed' && last?.status === 'closed' && /^Closed on its own: at Applying for/.test(last.note ?? '')) return '';
   // Rows from before the history was kept, or filed straight as applied.
-  return ['applied', 'interview', 'offer', 'closed'].includes(a.status) ? (a.appliedAt?.slice(0, 10) ?? '') : '';
+  return ['applied', 'interview', 'offer', 'closed'].includes(a.status) ? localDate(a.appliedAt) : '';
 }
 
 let openApplicationId = null;
@@ -7259,7 +7417,7 @@ async function loadApplications() {
       // Both dates get the same treatment: "2026-09-" over "17" is not a
       // date, and wrapping the narrowest column steals two lines of height
       // from every row to save nothing.
-      el('td', { className: 'when', textContent: a.appliedAt?.slice(0, 10) ?? '' }),
+      el('td', { className: 'when', textContent: localDate(a.appliedAt) }),
       el('td', { textContent: a.company }),
       el('td', { textContent: a.role }),
       el('td', {}, [sel]),
@@ -7449,6 +7607,10 @@ async function openApplication(id) {
 
   try {
     const { application: a, resume, copiedFromLabel, letter, files } = await api(`/applications/${encodeURIComponent(id)}`);
+    // Another application was clicked while this one was being read: that one
+    // owns the pane now, as in `openDraft`. Painting this one over it put one
+    // application's details beside the other's row marked as selected.
+    if (openApplicationId !== id) return;
 
     const sections = [];
 
@@ -7539,7 +7701,7 @@ async function openApplication(id) {
             { className: 'timeline' },
             a.history.map((h) =>
               el('div', { className: 'tl' }, [
-                el('span', { className: 'when', textContent: h.at?.slice(0, 10) ?? '' }),
+                el('span', { className: 'when', textContent: localDate(h.at) }),
                 el('span', { textContent: `${statusLabel(h.status)}${h.note ? ` — ${h.note}` : ''}` }),
               ]),
             ),
@@ -7563,6 +7725,7 @@ async function openApplication(id) {
       ...sections,
     );
   } catch (err) {
+    if (openApplicationId !== id) return;
     setChildren(panel, el('div', { className: 'err', textContent: err.message }));
   }
   // As in `openDraft`: the row has to be marked as the selected one, and a
@@ -7939,6 +8102,32 @@ function sameDraft(a, b) {
   return seen(a) === seen(b);
 }
 
+/**
+ * What each draft on screen was when it was last read or saved, so a save
+ * can send what was changed here since and nothing else. See `saveDraftNow`.
+ */
+const draftBases = new WeakMap();
+
+/**
+ * The fields of `draft` that differ from `base`, as a patch for the draft PUT,
+ * which merges a patch over what is stored (the letter one level down).
+ */
+function draftChanges(base, draft) {
+  const patch = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(draft)])) {
+    if (key === 'id' || key === 'updatedAt' || key === 'coverLetter') continue;
+    if (!same(base[key], draft[key])) patch[key] = draft[key];
+  }
+  const was = base.coverLetter ?? {};
+  const is = draft.coverLetter ?? {};
+  const letter = {};
+  for (const key of new Set([...Object.keys(was), ...Object.keys(is)])) {
+    if (!same(was[key], is[key])) letter[key] = is[key];
+  }
+  if (Object.keys(letter).length > 0) patch.coverLetter = letter;
+  return patch;
+}
+
 /** What the editor says about a draft that is not in the workspace any more. */
 const DRAFT_GONE = 'That application is no longer in the workspace.';
 
@@ -7970,6 +8159,17 @@ const draftGone = (err) => /^No draft "/.test(err?.message ?? '');
  * the draft PUT in src/server/api.ts). The replies can come back either way
  * round too, so an older one failing after a newer one landed marks nothing
  * unsaved.
+ *
+ * And only what was changed here since the draft was last read or saved
+ * (`draftChanges` against `draftBases`). Sent whole, every save put this
+ * page's copy of everything back: the letter "Draft it" had just written,
+ * when a note typed while it ran was saved as the reply came in; the letter
+ * typed in another tab, when a note was typed in this one; the answer
+ * JobHelper had just filed from the posting. The server merges what it is
+ * sent over what it has, so a field nobody touched here is left as it is.
+ * The questions go as one list, so when one was answered here they are read
+ * first and the answer put on top of the list as it is now (`rebase`),
+ * except on the way out (see `unlessLeaving`).
  */
 async function saveDraftNow(message, { leaving = false } = {}) {
   const draft = draftSave.current;
@@ -7990,12 +8190,25 @@ async function saveDraftNow(message, { leaving = false } = {}) {
     if (onScreen && !draftSave.dirty && !message) return;
     if (onScreen) draftSave.dirty = false; // further typing re-dirties it; this is in flight
     order = ++saveOrder;
+    const sending = structuredClone(draft);
+    const base = draftBases.get(draft);
+    const patch = base ? draftChanges(base, sending) : sending;
+    // Nothing differs from what was last read or saved: typed and taken back.
+    if (base && !message && Object.keys(patch).length === 0) return;
+    if (base && patch.questions && !leaving) {
+      const now = await unlessLeaving(api(`/workspace/${encodeURIComponent(draft.id)}`).catch(() => undefined));
+      if (Array.isArray(now?.questions)) patch.questions = rebase(base.questions, sending.questions, now.questions);
+    }
     await api(`/workspace/${encodeURIComponent(draft.id)}?order=${SAVE_PAGE}:${order}`, {
       method: 'PUT',
-      body: JSON.stringify(draft),
+      body: JSON.stringify(patch),
       keepalive: true,
     });
-    if (order > (draftSave.landed.get(draft.id) ?? 0)) draftSave.landed.set(draft.id, order);
+    if (order > (draftSave.landed.get(draft.id) ?? 0)) {
+      draftSave.landed.set(draft.id, order);
+      // What the screen held when this went, which is what the next save is measured from.
+      draftBases.set(draft, sending);
+    }
   })()
     .then(() => {
       // Only clear the chip if nothing has been typed since this write began.
@@ -8057,6 +8270,25 @@ function markDraftDirty() {
   }, AUTOSAVE_DELAY_MS);
 }
 
+/**
+ * Coming back to the tab: the open draft as it is now, when nothing typed
+ * here is waiting to be saved.
+ *
+ * A save sends only what was changed here (see `saveDraftNow`), so a stale
+ * screen no longer writes what changed elsewhere away. But it still shows
+ * the old letter, and editing that is editing the old letter. JobHelper
+ * filing an answer from the posting, or another tab, is exactly what
+ * happens while this one is in the background.
+ */
+async function refreshDraftOnReturn() {
+  const draft = draftSave.current;
+  const idle = () =>
+    draftSave.current === draft && openDraftId === draft.id && !draftSave.dirty && !draftSave.timer && !draftSave.pending;
+  if (!draft || !idle()) return;
+  const fresh = await api(`/workspace/${encodeURIComponent(draft.id)}`).catch(() => null);
+  if (fresh && idle() && !sameDraft(draft, fresh)) renderDraft(fresh);
+}
+
 /** Everything typed into the Workspace, on disk, before we go anywhere. */
 async function flushDraftEdits() {
   clearTimeout(draftSave.timer);
@@ -8101,13 +8333,26 @@ function drawResumeChoices(select, draft) {
      * "Send: Base resume" and building the files answered "400 Bad Request".
      * An empty choice is the honest thing to show when no choice has been made.
      */
-    ...(draft.resumeId ? [] : [el('option', { value: '', textContent: '— choose a resume —' })]),
+    /*
+     * And when the one it holds is not in the list any more — deleted, or
+     * swept as temporary. No option matched it, so the select fell back to
+     * its first, and showed some other resume as the one this application
+     * sends, with nothing wrong on screen until building the files failed.
+     */
+    ...(!draft.resumeId
+      ? [el('option', { value: '', textContent: '— choose a resume —' })]
+      : !resumes.some((r) => r.id === draft.resumeId)
+        ? [el('option', { value: '', selected: true, textContent: `— “${draft.resumeId}” was deleted; choose a resume —` })]
+        : []),
     ...(own.length
       ? [el('optgroup', { label: 'For this application' }, own.map(option)), el('optgroup', { label: 'Everything else' }, rest.map(option))]
       : rest.map(option)),
     ...(older.length ? [showOlderRow(older.length)] : []),
   );
 }
+
+/** Whether a draft names a resume that is still in the store. */
+const hasResume = (draft) => Boolean(draft.resumeId && (state.store?.resumes ?? []).some((r) => r.id === draft.resumeId));
 
 /** Whether the Workspace picker has been asked for its older postings. See `RECENT_POSTINGS`. */
 let draftAllPostings = false;
@@ -8133,6 +8378,8 @@ function renderDraft(draft) {
   /** Persist the draft as it stands, marking edited fields so generation
    *  never overwrites something a human wrote. */
   draftSave.current = draft;
+  // A draft as read from the server; repainted after an edit, it keeps the base it had.
+  if (!draftBases.has(draft)) draftBases.set(draft, structuredClone(draft));
   draftSave.dirty = false;
   clearTimeout(draftSave.timer);
   draftSave.timer = null;
@@ -8508,7 +8755,7 @@ function renderDraft(draft) {
           onclick: () => startVariation(draft, notes),
         }),
       ]),
-      draft.resumeId
+      hasResume(draft)
         ? el('div', { className: 'toolbar' }, [
             el('button', {
               className: 'link',
@@ -8536,17 +8783,24 @@ function renderDraft(draft) {
        * it is not one to guess at — but it is one to ask for plainly, next to
        * the button that needs it, rather than after the fact.
        */
-      draft.resumeId
+      hasResume(draft)
         ? null
-        : el('div', { className: 'hint warn' }, 'Choose a resume above before building the files.'),
+        : el(
+            'div',
+            { className: 'hint warn' },
+            draft.resumeId
+              ? 'The resume this application was using has been deleted. Choose another above before building the files.'
+              : 'Choose a resume above before building the files.',
+          ),
       el('div', { className: 'toolbar' }, [
         el('button', {
           className: 'primary',
           textContent: 'Build files and record it',
-          title: draft.resumeId
+          // A resume it names that has been deleted is no resume to build from. See `drawResumeChoices`.
+          title: hasResume(draft)
             ? 'Compile the resume, name the files, and log the answers in the application history'
             : 'Pick a resume for this application first — tailor one, or start one to edit yourself',
-          disabled: !draft.resumeId,
+          disabled: !hasResume(draft),
           onclick: () => completeDraft(draft, notes),
         }),
         el('button', { textContent: 'Save', onclick: () => save('Saved') }),
@@ -9086,7 +9340,7 @@ async function loadLetters() {
             el('div', { className: 'mini-card' }, [
               el('div', { className: 'row1' }, [
                 el('b', { textContent: l.title }),
-                el('span', { className: 'faint', textContent: l.createdAt?.slice(0, 10) ?? '' }),
+                el('span', { className: 'faint', textContent: localDate(l.createdAt) }),
                 el('span', { style: 'flex:1' }),
                 // A letter written for an application belongs to it; say so,
                 // and link across rather than making the two lists be
@@ -9644,7 +9898,7 @@ async function loadDocuments() {
             className: 'faint',
             // The name is what a reviewer opening the attachment sees, so it
             // is the thing itself rather than a label over an id.
-            textContent: `${size(doc.bytes)}${doc.at ? ` · added ${doc.at.slice(0, 10)}` : ''}`,
+            textContent: `${size(doc.bytes)}${doc.at ? ` · added ${localDate(doc.at)}` : ''}`,
           }),
         ]),
         el('button', {
@@ -11477,7 +11731,7 @@ function formatWhen(iso) {
   if (hours < 24) return `${plural(hours, 'hour')} ago`;
   const days = Math.round(hours / 24);
   if (days < 30) return `${plural(days, 'day')} ago`;
-  return new Date(then).toISOString().slice(0, 10);
+  return localDate(iso);
 }
 
 async function showCommit(hash) {
@@ -11991,6 +12245,8 @@ function adoptStore(fresh) {
     else rebasedOnto = null;
   }
   state.store = fresh;
+  // Kept apart from the copy the screen edits; see `entriesAsRead`.
+  entriesAsRead = new Map((fresh.entries ?? []).map((e) => [e.id, structuredClone(e)]));
   if (!state.resumeId || !state.store.resumes.some((r) => r.id === state.resumeId)) {
     /*
      * The resume that was open has gone, so the unsaved edits are about
@@ -12476,7 +12732,10 @@ async function boot() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
       if (!pageUnloading) flushEdits({ leaving: true }).catch(() => {});
-    } else refreshOnReturn().catch(() => {});
+    } else {
+      refreshOnReturn().catch(() => {});
+      refreshDraftOnReturn().catch(() => {});
+    }
   });
   // Also whether a request that failed is worth sending again. See `fetchKeptAlive`.
   window.addEventListener('pagehide', () => {
