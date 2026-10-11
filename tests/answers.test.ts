@@ -9,6 +9,7 @@ import {
   redactIdentifiers,
   relevantLetters,
   sameQuestion,
+  tidyQuestion,
 } from '../src/jobs/answers.js';
 import type { AnswerBankItem, CoverLetter } from '../src/model/types.js';
 import { SAMPLE_ANSWERS } from './helpers.js';
@@ -785,6 +786,63 @@ describe('sameQuestion', () => {
 
   it('treats an actual change in wording as a different question', () => {
     expect(sameQuestion('Why do you want to work here?', 'Why do you want to leave your current job?')).toBe(false);
+  });
+
+  // Each of these was a separate row in a real bank, saved from a form.
+  it('treats the required marker and a label read twice as the same question', () => {
+    expect(sameQuestion('Discipline*', 'Discipline')).toBe(true);
+    expect(sameQuestion('Discipline *', 'Discipline*')).toBe(true);
+    expect(sameQuestion('DisciplineDiscipline', 'Discipline')).toBe(true);
+    expect(
+      sameQuestion(
+        'Are you legally authorized to work in the country where this position is located?Are you legally authorized to work in the country where this position is located? Required',
+        'Are you legally authorized to work in the country where this position is located?',
+      ),
+    ).toBe(true);
+    expect(sameQuestion('Discipline*', 'Degree*')).toBe(false);
+  });
+});
+
+describe('tidyQuestion', () => {
+  it('takes off what a form adds at the ends: the required marker, in its usual spellings', () => {
+    expect(tidyQuestion('End date month*')).toBe('End date month');
+    expect(tidyQuestion('Active Security Clearance(s) *')).toBe('Active Security Clearance(s)');
+    expect(tidyQuestion('Are you willing to relocate?*')).toBe('Are you willing to relocate?');
+    expect(tidyQuestion('* Phone Device Type')).toBe('Phone Device Type');
+    expect(tidyQuestion('Phone Device Type (required)')).toBe('Phone Device Type');
+    expect(tidyQuestion('Will you require sponsorship? Required')).toBe('Will you require sponsorship?');
+  });
+
+  it('keeps "required" when it is a word of the question', () => {
+    expect(tidyQuestion('Is visa sponsorship required?')).toBe('Is visa sponsorship required?');
+    expect(tidyQuestion('Will visa sponsorship be required')).toBe('Will visa sponsorship be required');
+  });
+
+  it('reads a label read twice as once', () => {
+    expect(tidyQuestion('SchoolSchool')).toBe('School');
+    expect(tidyQuestion('Location (city)Location (city)')).toBe('Location (city)');
+    expect(tidyQuestion('How did you hear about this job?How did you hear about this job?')).toBe(
+      'How did you hear about this job?',
+    );
+    expect(tidyQuestion('I am available to begin in 2028I am available to begin in 2028 Required')).toBe(
+      'I am available to begin in 2028',
+    );
+    // A word that merely repeats inside a longer question is left alone.
+    expect(tidyQuestion('Yes or no: yes or no?')).toBe('Yes or no: yes or no?');
+    expect(tidyQuestion('Bye bye')).toBe('Bye bye');
+  });
+
+  it('lets a row kept with the markup on it be found by the question as asked', () => {
+    const bank = [
+      { id: 'a1', question: 'SchoolSchool', default: 'v_1', variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'Northeastern University' }] },
+      { id: 'a2', question: 'Discipline*', default: 'v_1', variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'Computer Science' }] },
+    ];
+    const school = matchAnswer('School', bank);
+    expect(school.item?.id).toBe('a1');
+    expect(school.confident).toBe(true);
+    const discipline = matchAnswer('Discipline', bank);
+    expect(discipline.item?.id).toBe('a2');
+    expect(discipline.confident).toBe(true);
   });
 });
 

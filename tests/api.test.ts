@@ -1525,6 +1525,43 @@ describe('answers', () => {
     // And the identical text was not piled on as a second variant either.
     expect(matches[0]?.variants).toHaveLength(1);
   });
+
+  /*
+   * As the extension sent them, from three forms marking up one question
+   * three ways. Each was a row of its own, and a bank kept five rows for
+   * "Discipline" — three of them under one id.
+   */
+  it('keeps one item for a question however a form marks it up, under the words a person reads', async () => {
+    for (const [question, answer] of [
+      ['Discipline*', 'Computer Science'],
+      ['Discipline *', 'Computer Science'],
+      ['DisciplineDiscipline', 'Mathematics'],
+      ['Discipline', 'Computer Science'],
+    ]) {
+      await request(app).post('/api/answers/save').send({ question, answer, label: 'Chosen on a form' }).expect(200);
+    }
+    const answers = t.store.load().answers;
+    const rows = answers.filter((a) => sameQuestion(a.question, 'Discipline'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.question).toBe('Discipline');
+    expect(rows[0]?.variants.map((v) => v.text)).toEqual(['Computer Science', 'Mathematics']);
+    // The last save says which one to use now.
+    expect(rows[0]?.variants.find((v) => v.id === rows[0]?.default)?.text).toBe('Computer Science');
+    expect(new Set(answers.map((a) => a.id)).size).toBe(answers.length);
+  });
+
+  it('finds a row kept with its marker when the question comes back without one', async () => {
+    const bank = t.store.load().answers;
+    t.store.saveAnswers([
+      ...bank,
+      { id: 'ans_end-date-month-3776dfc5', question: 'End date month*', default: 'v_1', variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'June' }] },
+    ]);
+    await request(app).post('/api/answers/save').send({ question: 'End date month', answer: 'May', label: 'Chosen on a form' }).expect(200);
+    const rows = t.store.load().answers.filter((a) => sameQuestion(a.question, 'End date month'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe('ans_end-date-month-3776dfc5');
+    expect(rows[0]?.variants.map((v) => v.text)).toEqual(['June', 'May']);
+  });
 });
 
 describe('cover letters', () => {

@@ -36,7 +36,7 @@ import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
-import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion } from '../jobs/answers.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion } from '../jobs/answers.js';
 import { classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
 import { jobNumberIn } from '../jobs/names.js';
 import {
@@ -2980,6 +2980,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
       const answers = store.load().answers;
       /*
+       * Kept as a person reads it: without the required marker a form puts
+       * on it, and once, not twice. See `tidyQuestion`.
+       */
+      const asked = tidyQuestion(question) || question.trim();
+      /*
        * Found by id when the caller has one, and otherwise by the question
        * itself — not only by id. Without this, saving a question the bank
        * already holds, from a caller that never learned its id, added a
@@ -3014,8 +3019,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         }
       } else {
         answers.push({
-          id: answerId(question, answers),
-          question: question.trim(),
+          id: answerId(asked, answers),
+          question: asked,
           default: 'v_1',
           variants: [{ id: 'v_1', label: label ?? 'Saved', text: answer.trim() }],
         });
@@ -5383,9 +5388,11 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
               existing.default = vid;
             }
           } else {
+            // As a person reads it. See `tidyQuestion`.
+            const asked = tidyQuestion(q.question) || q.question;
             answers.push({
-              id: answerId(q.question, answers),
-              question: q.question,
+              id: answerId(asked, answers),
+              question: asked,
               default: 'v_1',
               variants: [{ id: 'v_1', label: draft.company, text: q.answer }],
             });
@@ -5900,7 +5907,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 function answerId(question: string, taken: AnswerBankItem[]): string {
   const base = `ans_${slug(question).slice(0, 40)}`;
   if (base === 'ans_') return `ans_${fingerprint(question)}`;
-  return taken.some((a) => a.id === base) ? `${base}-${fingerprint(question)}` : base;
+  if (!taken.some((a) => a.id === base)) return base;
+  /*
+   * And never one already taken. The fingerprint is of the question, so the
+   * same question saved again got the same id: before a save looked an item
+   * up by its question, "Discipline*" saved three times was three items all
+   * called `ans_discipline-d30f07e6`.
+   */
+  const marked = `${base}-${fingerprint(question)}`;
+  let id = marked;
+  for (let n = 2; taken.some((a) => a.id === id); n++) id = `${marked}-${n}`;
+  return id;
 }
 
 

@@ -88,7 +88,8 @@ const AT_LEAST = [/\b(\d{1,3})\s*\+/g, /\b(?:at\s+least|minimum\s+of)\s+(\d{1,3}
 
 /** The question as it is compared: framing off, an age or a minimum as one token. */
 function normalise(s: string): string {
-  let out = String(s ?? '').toLowerCase().replace(FRAMING, ' ');
+  // As a person reads it, so a row kept as "SchoolSchool" is found by "School". See `tidyQuestion`.
+  let out = tidyQuestion(s).toLowerCase().replace(FRAMING, ' ');
   for (const re of AGE_MINIMUM) out = out.replace(re, (_m, age: string) => ` agemin${age} `);
   for (const re of AT_LEAST) out = out.replace(re, (_m, n: string) => ` min${n} `);
   return out;
@@ -603,10 +604,69 @@ export function isSensitiveQuestion(question: string): boolean {
  * "Why do you want to work here?" and "why do you want to work here? " from
  * living in the bank as two separate items with nobody ever finding the
  * second one.
+ *
+ * And for what a form's markup adds that nobody typed: the required marker,
+ * and a label read twice. See `tidyQuestion`. Without it "Discipline*",
+ * "Discipline *" and "Discipline" were three items, and the bank held five
+ * rows for that one question.
  */
 export function sameQuestion(a: string, b: string): boolean {
-  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const norm = (s: string) => tidyQuestion(s).toLowerCase();
   return norm(a) === norm(b);
+}
+
+/**
+ * A question as a form hands it over, put back to the words a person reads.
+ *
+ * Measured in a bank of 540 rows, every one written by the extension from a
+ * form's label:
+ *
+ *     "Discipline*"  "Discipline *"  "Discipline"          185 rows end in "*"
+ *     "SchoolSchool"  "DegreeDegree"                        a label read twice:
+ *     "Are you legally authorized …?Are you legally          once for the eye, once
+ *      authorized …? Required"                              for a screen reader
+ *
+ * The marker says the box is required, which is the form's business and not
+ * the question; and the same words twice over are one question. Each made
+ * the same question a second row in the bank, which the next form could
+ * reach only by being marked up the same way — "SchoolSchool" shares no
+ * word with "School".
+ *
+ * Only what a form adds at the ends, and only an exact repeat. "Required"
+ * goes only after punctuation or a marker, or after a label read twice, so
+ * "Is sponsorship required?" and "Will a visa be required" keep the word
+ * they ask about. Words run together with no space between them
+ * ("Agreement.Mutual Arbitration AgreementTo be considered") cannot be told
+ * apart from here; the reader on the form has to keep them apart, and the
+ * extension does.
+ */
+export function tidyQuestion(raw: string): string {
+  let q = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  for (let was = ''; q !== was; ) {
+    was = q;
+    q = q
+      .replace(/\s*\*+$/, '')
+      .replace(/\s*\(\s*required\s*\)$/i, '')
+      .replace(/([?.)*])\s*required$/i, '$1')
+      .replace(/^\*+\s*/, '')
+      .trim();
+    // After a label read twice, LinkedIn's "Required" follows whatever the
+    // question ends in: "… in 2028I am … in 2028 Required".
+    const unmarked = q.replace(/\s+required$/i, '');
+    q = once(unmarked) !== unmarked ? once(unmarked) : once(q);
+  }
+  return q;
+}
+
+/** "SchoolSchool" and "School School" as "School"; anything else as it is. */
+function once(q: string): string {
+  for (const gap of [0, 1]) {
+    const half = (q.length - gap) / 2;
+    if (!Number.isInteger(half) || half < 3) continue;
+    if (gap === 1 && q[half] !== ' ') continue;
+    if (q.slice(0, half) === q.slice(half + gap)) return q.slice(0, half);
+  }
+  return q;
 }
 
 export interface AnswerMatch {
