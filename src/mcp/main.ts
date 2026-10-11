@@ -98,7 +98,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }));
 
   // An empty state written up front, so a run that is killed before it calls
-  // anything is still distinguishable from one that never started.
+  // anything is still distinguishable from one that never started. Which
+  // means the file existing says nothing about whether a tool was called:
+  // a reader asks what the state holds instead (`decidedAnything`, agent.ts).
   save();
 
   await serve(process.stdin, process.stdout, tools, { name: `resumem-m-${file.kind ?? 'tailor'}`, version: '1' });

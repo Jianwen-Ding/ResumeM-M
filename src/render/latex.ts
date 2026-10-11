@@ -25,7 +25,19 @@ const ESCAPES: Record<string, string> = {
  * the rule that handles literal braces.
  */
 export function tex(input: string): string {
-  return String(input ?? '').replace(/[\\&%$#_{}~^]/g, (ch) => ESCAPES[ch] ?? ch);
+  return (
+    String(input ?? '')
+      .normalize('NFC')
+      .replace(/[\\&%$#_{}~^]/g, (ch) => ESCAPES[ch] ?? ch)
+      /*
+       * T1 fonts carry ligatures for `<<`, `>>` and `,,`: they set as « » and
+       * a low „, so `std::cout << x` printed with a guillemet in it. An empty
+       * group between the pair stops the font from joining them, and costs
+       * nothing where there was no pair. `--`, `---` and the TeX quotes are
+       * left as they are: those ligatures are ones people type on purpose.
+       */
+      .replace(/([<>,])(?=\1)/g, '$1{}')
+  );
 }
 
 /*
@@ -88,7 +100,14 @@ export interface UnsupportedCharacter {
  */
 export function unsupportedCharacters(text: string): UnsupportedCharacter[] {
   const found = new Map<string, UnsupportedCharacter>();
-  const chars = [...String(text ?? '')];
+  /*
+   * Composed first, as `tex` composes what it sets. "José" pasted from a Mac
+   * or a PDF can arrive decomposed — an `e` and a combining U+0301 — and the
+   * combining accent on its own is nothing T1 has, so a name the engine sets
+   * perfectly well once composed was refused. One that does not compose
+   * (a `q` with an acute) is still reported, since that one cannot be set.
+   */
+  const chars = [...String(text ?? '').normalize('NFC')];
   chars.forEach((ch, i) => {
     const code = ch.codePointAt(0) ?? 0;
     if (renderable(code)) return;
@@ -126,7 +145,7 @@ export function unrenderableReason(
   const first = bad[0]!;
   const near =
     own
-      .filter((field): field is string => typeof field === 'string' && field.includes(first.char))
+      .filter((field): field is string => typeof field === 'string' && field.normalize('NFC').includes(first.char))
       .map((field) => unsupportedCharacters(field).find((c) => c.char === first.char)?.context)
       .find(Boolean) ?? first.context;
 
@@ -255,7 +274,9 @@ const MAX_NESTING = 4;
  * cannot be broken that way by a callback.
  */
 export function inlineTex(input: string): string {
-  return markup(String(input ?? ''), MAX_NESTING);
+  // Composed before it is cut up by the markup, so an accent is never parted
+  // from its letter at a marker. `tex` composes again, which is a no-op then.
+  return markup(String(input ?? '').normalize('NFC'), MAX_NESTING);
 }
 
 /**
@@ -296,7 +317,9 @@ export function lineTex(input: string): string {
  * the link still points where it pointed, and TeX only ever sees `\%`.
  */
 export function texHref(url: string): string {
+  // Composed, like every other piece of text that reaches the .tex: see `tex`.
   return url
+    .normalize('NFC')
     .replace(/[\\{}]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
     /*
      * `&` too: hyperref reads `\&` as a plain ampersand in the target, and a

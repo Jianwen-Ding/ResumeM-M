@@ -446,6 +446,30 @@ describe('reading material into a proposal', () => {
     expect(s.state.entries).toHaveLength(1);
   });
 
+  /*
+   * The id is stored trimmed, so it has to be checked trimmed. The duplicate
+   * checks compared the id as sent, and " exp_acme" was let through as new
+   * beside the store's own exp_acme — then stored as "exp_acme".
+   */
+  it('refuses an id that is already taken once its spaces are trimmed', () => {
+    const s = authoring();
+    for (const id of [' exp_acme', 'exp_acme ', '\texp_acme']) {
+      const r = s.proposeEntry({ id, kind: 'experience', title: 'Vega Analytics', documentId: 'd1' });
+      expect(r.ok, JSON.stringify(id)).toBe(false);
+      expect(r.text).toContain('already an entry called "exp_acme"');
+    }
+    expect(s.state.entries).toHaveLength(0);
+  });
+
+  it('refuses the same id proposed twice, spaces or not', () => {
+    const s = authoring();
+    expect(s.proposeEntry({ id: 'exp_vega', kind: 'experience', title: 'Vega Analytics', documentId: 'd1' }).ok).toBe(true);
+    const again = s.proposeEntry({ id: ' exp_vega ', kind: 'experience', title: 'Vega Analytics', documentId: 'd1' });
+    expect(again.ok).toBe(false);
+    expect(again.text).toContain('already proposed "exp_vega"');
+    expect(s.state.entries.map((e) => e.id)).toEqual(['exp_vega']);
+  });
+
   it('refuses an entry that is not', () => {
     const r = authoring().proposeEntry({
       id: 'exp_google',

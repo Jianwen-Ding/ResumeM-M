@@ -311,13 +311,22 @@ function listTex(items: { label: string; text: string }[]): string {
  * address bar does, at a small cost so a space is still the break TeX would
  * rather take. Only a bare one: a markdown link's target goes into `\href`
  * as it is.
+ *
+ * The whole link is matched, label and all, and left alone — not just its
+ * `](target)` half. A label that is itself an address,
+ * `[https://github.com/me/proj](https://github.com/me/proj)` or
+ * `[github.com/me/proj](…)`, was read as a bare URL running on through the
+ * `](` into the target, and the break markers landed inside `\href{…}`,
+ * pointing the link somewhere that does not exist. The label is the same
+ * pattern `MARKUP` reads a link by, so the two agree on where a link ends.
  */
-const BARE_URL = /\]\((?:[^()]|\([^()]*\))*\)|(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S*/gi;
+const BARE_URL =
+  /\[[^\]]+\]\((?:[^()]|\([^()]*\))*\)|(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S*/gi;
 const BREAK = '\uE000';
 
 function proseTex(text: string): string {
   const marked = text.replace(BARE_URL, (url) =>
-    url.startsWith('](') ? url : url.replace(/((?<!:\/)\/(?!\/)|[.?&=_#])(?=\S)/g, `$1${BREAK}`),
+    url.startsWith('[') ? url : url.replace(/((?<!:\/)\/(?!\/)|[.?&=_#])(?=\S)/g, `$1${BREAK}`),
   );
   return inlineTex(marked).replaceAll(BREAK, '\\penalty100{}');
 }
@@ -371,6 +380,15 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
   if (written.length) blocks.push(written.join('\n\n'));
   else if (!own.greeting && !own.closing) blocks.push('\\textit{(nothing written yet)}');
 
+  /*
+   * A line break between the writer's own closing lines. `\\` looks ahead for
+   * a `*` or a `[`, past the newline, so a next line of "[555] 123-4567" was
+   * read as `\\[555]` — a length that is not one, and no PDF — and a line
+   * starting "* available June" lost its asterisk to `\\*`. The empty group
+   * ends the look-ahead.
+   */
+  const lineBreak = ' \\\\{}\n';
+
   // Room under the sign-off where a signature would go.
   const signature = `\\\\[${(2.2 * layout.fontSizePt * layout.spacing).toFixed(1)}pt]\n`;
   if (!own.closing) {
@@ -382,9 +400,9 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
     // taken as the whole closing, it sent the letter out unsigned.
     const [first, ...rest] = own.closing.map(inlineTex);
     if (SIGN_OFF_LINE.test(own.closing[0]!)) {
-      blocks.push(`${first} ${signature}${rest.length ? rest.join(' \\\\\n') : tex(p.name)}`);
+      blocks.push(`${first} ${signature}${rest.length ? rest.join(lineBreak) : tex(p.name)}`);
     } else {
-      blocks.push([first, ...rest].join(' \\\\\n'));
+      blocks.push([first, ...rest].join(lineBreak));
     }
   }
 

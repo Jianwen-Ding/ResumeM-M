@@ -28,6 +28,48 @@ describe('escaping', () => {
   });
 });
 
+/*
+ * T1 fonts join `<<`, `>>` and `,,` into « » and „, so a line about C++
+ * streams printed a guillemet. An empty group between the pair stops the
+ * ligature; a single `<` or `,` is left exactly as it was.
+ */
+describe('characters the fonts would join', () => {
+  it('keeps << and >> as two characters each', () => {
+    expect(tex('std::cout << x >> y')).toBe('std::cout <{}< x >{}> y');
+  });
+
+  it('breaks every pair in a longer run, and a doubled comma too', () => {
+    expect(tex('a <<< b')).toBe('a <{}<{}< b');
+    expect(tex('x,,y')).toBe('x,{},y');
+  });
+
+  it('leaves single ones, and the ligatures people mean, alone', () => {
+    expect(tex('a < b, c > d -- e --- f')).toBe('a < b, c > d -- e --- f');
+  });
+
+  it('does the same inside markup and code', () => {
+    expect(inlineTex('**a << b** and `x >> 1`')).toBe('\\textbf{a <{}< b} and \\texttt{x >{}> 1}');
+  });
+});
+
+/*
+ * "José" pasted from a Mac or a PDF can be an `e` and a combining U+0301.
+ * Composed, it is a character the fonts have; left decomposed, it was refused.
+ */
+describe('decomposed accents', () => {
+  const nfd = 'Jose\u0301 Garci\u0301a';
+
+  it('are composed in what reaches the .tex', () => {
+    expect(tex(nfd)).toBe('Jos\u00e9 Garc\u00eda');
+    expect(inlineTex(`**${nfd}**`)).toBe('\\textbf{Jos\u00e9 Garc\u00eda}');
+    expect(tex(nfd)).not.toContain('\u0301');
+  });
+
+  it('are composed in a link target too', () => {
+    expect(texHref('https://example.com/jose\u0301')).toBe('https://example.com/jos\u00e9');
+  });
+});
+
 describe('inline markup', () => {
   it('turns **bold** into \\textbf', () => {
     expect(inlineTex('cut latency by **80%**')).toBe('cut latency by \\textbf{80\\%}');

@@ -15,6 +15,8 @@ import path from 'node:path';
 import { runAgent } from '../src/ai/agent.js';
 import { findRun, forgetRuns, recentRuns, running, startRun } from '../src/ai/activity.js';
 import type { StoreConfig } from '../src/model/types.js';
+import { emptyState } from '../src/mcp/session.js';
+import { emptyWriting } from '../src/mcp/writing.js';
 
 afterEach(() => forgetRuns());
 
@@ -183,6 +185,54 @@ describe('watching a run as it happens', () => {
     expect(result.wiredButUnused).toBe(true);
     expect(recentRuns()[0]!.outcome).toBe('ok');
     expect(recentRuns()[0]!.note).toMatch(/never called any of the tools/i);
+  });
+
+  /*
+   * The tool server writes an empty state the moment it starts (mcp/main.ts),
+   * so "the file exists" was true of every wired run, called or not: the
+   * three checks above never fired against the real server. These wire the
+   * file the way it really is — present, and empty.
+   */
+  function wiredEmpty(state: unknown = emptyState()) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-empty-state-'));
+    const out = path.join(dir, 'state.json');
+    return {
+      wire: () => {
+        fs.writeFileSync(out, JSON.stringify(state), 'utf8');
+        return { args: [], out, env: {} };
+      },
+      read: (file: string) => JSON.parse(fs.readFileSync(file, 'utf8')) as unknown,
+    };
+  }
+
+  it('marks a run that answered in prose though the server wrote its empty state', async () => {
+    const config = configFor(`process.stdout.write('{"choices":{}}\\n');`);
+    const result = await runAgent(config, 'hello', wiredEmpty());
+    expect(result.wiredButUnused).toBe(true);
+    expect(result.tools).toBeUndefined();
+    expect(recentRuns()[0]!.note).toMatch(/never called any of the tools/i);
+  });
+
+  it('explains a silent run though the server wrote its empty state', async () => {
+    const config = configFor(`process.stderr.write('please log in\\n');`);
+    const err = await runAgent(config, 'hello', wiredEmpty(emptyWriting())).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/finished without writing anything/i);
+    expect((err as Error).message).toMatch(/not signed in/i);
+  });
+
+  it('says a timed-out run never reached its tools though the server wrote its empty state', async () => {
+    const config = configFor(`setTimeout(() => {}, 60_000);`, 700);
+    const err = await runAgent(config, 'hello', wiredEmpty()).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/never called any of the resume tools/i);
+  });
+
+  it('still counts a run whose state holds a decision', async () => {
+    const config = configFor(`process.stdout.write('');`);
+    const decided = { ...emptyState(), reasoning: 'Led with the ingest work.' };
+    const result = await runAgent(config, 'hello', wiredEmpty(decided));
+    expect(result.wiredButUnused).toBeUndefined();
+    expect(result.tools).toEqual(decided);
   });
 
   it('says nothing of the kind about a run that was never given tools', async () => {

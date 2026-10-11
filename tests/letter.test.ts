@@ -96,6 +96,58 @@ describe('the cover letter template', () => {
 });
 
 /*
+ * A markdown link whose label is itself an address. The pass that lets a bare
+ * URL break at its slashes read the label as a bare URL running on through
+ * `](` into the target, and put its break markers inside `\href{…}`.
+ */
+describe('a link in a letter', () => {
+  const hrefs = (tex: string) => [...tex.matchAll(/\\href\{([^}]*)\}/g)].map((m) => m[1]).filter((u) => !u!.startsWith('mailto:'));
+
+  it('keeps the target whole when the label is the full address', () => {
+    const tex = renderLetterLatex(letter('See [https://github.com/me/proj](https://github.com/me/proj).'), DEFAULT_LAYOUT);
+    expect(hrefs(tex)).toContain('https://github.com/me/proj');
+    expect(tex).not.toMatch(/\\href\{[^}]*penalty/);
+  });
+
+  it('keeps the target whole when the label is an address without its scheme', () => {
+    const tex = renderLetterLatex(letter('See [github.com/me/proj](https://github.com/me/proj).'), DEFAULT_LAYOUT);
+    expect(hrefs(tex)).toContain('https://github.com/me/proj');
+    expect(tex).not.toMatch(/\\href\{[^}]*penalty/);
+  });
+
+  it('still lets a bare address beside a link break', () => {
+    const tex = renderLetterLatex(letter('See [my code](https://github.com/me/proj) or docs.example.com/a/b.'), DEFAULT_LAYOUT);
+    expect(hrefs(tex)).toContain('https://github.com/me/proj');
+    expect(tex).toContain('docs.\\penalty100{}example.\\penalty100{}com/\\penalty100{}a/\\penalty100{}b.');
+  });
+});
+
+/*
+ * The writer's own closing lines are joined with `\\`, which looks past the
+ * newline for `[` or `*`: "[555] 123-4567" became a bad length and no PDF, and
+ * "* available June" lost its asterisk to `\\*`.
+ */
+describe('the lines under a sign-off', () => {
+  it('does not read a line starting with [ as the length of the break', () => {
+    const tex = renderLetterLatex(letter('Hello.\n\nBest,\nTest Person\n[555] 123-4567'), DEFAULT_LAYOUT);
+    expect(tex).toContain('Test Person \\\\{}\n[555] 123-4567');
+    expect(tex).not.toMatch(/\\\\\s*\[555\]/);
+  });
+
+  it('does not read a line starting with * as the starred break', () => {
+    const tex = renderLetterLatex(letter('Hello.\n\nBest,\nTest Person\n* available June'), DEFAULT_LAYOUT);
+    expect(tex).toContain('Test Person \\\\{}\n* available June');
+    expect(tex).not.toMatch(/\\\\\s*\*/);
+  });
+
+  it('does the same for a closing that starts at the name, with no sign-off', () => {
+    const tex = renderLetterLatex(letter('Hello.\n\nTest Person\n[555] 123-4567'), DEFAULT_LAYOUT);
+    expect(tex).toContain('Test Person \\\\{}\n[555] 123-4567');
+    expect(tex).not.toMatch(/\\\\\s*\[555\]/);
+  });
+});
+
+/*
  * `_italic_` printed its underscores — "I am \_really\_ keen" — while
  * `*italic*` beside it was set in italics. Same terms as the asterisk: an
  * underscore glued to a letter or a slash is never a marker, so the ones in

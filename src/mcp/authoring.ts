@@ -214,23 +214,30 @@ export class AuthoringSession {
     if (!entry.title?.trim()) return no('An entry needs a title — the employer, the school, or the project’s name.');
     if (!entry.id?.trim()) return no('An entry needs an id, like exp_acme or proj_ingest.');
     /*
+     * Trimmed once, here, and every check below runs on the trimmed id — the
+     * one that is stored. The duplicate checks used to compare the id as
+     * sent, so " exp_acme" was not "exp_acme", passed as new, and was then
+     * stored trimmed: a second entry under an id already in the store.
+     */
+    const id = entry.id.trim();
+    /*
      * Ids are used as keys elsewhere — `entryId.field` in a resume's choices,
      * split on the first dot — so one with a dot, a slash or a space in it is
      * an id that half the store cannot address. Refused here rather than
      * quietly rewritten, because a model that is told will use a real one and
      * a model that is corrected will keep sending the same thing.
      */
-    if (!/^[a-z0-9][a-z0-9_-]*$/i.test(entry.id.trim())) {
+    if (!/^[a-z0-9][a-z0-9_-]*$/i.test(id)) {
       return no(
         `"${entry.id}" will not work as an id: use letters, digits, hyphens and underscores only, ` +
           `like exp_vega or proj-ingest. Dots and spaces are used to address fields elsewhere.`,
       );
     }
-    if (this.existing.entryIds.includes(entry.id)) {
-      return no(`There is already an entry called "${entry.id}" in the store. Choose another id, or propose an alternate wording on its bullets instead.`);
+    if (this.existing.entryIds.includes(id)) {
+      return no(`There is already an entry called "${id}" in the store. Choose another id, or propose an alternate wording on its bullets instead.`);
     }
-    if (this.state.entries.some((e) => e.id === entry.id)) {
-      return no(`You have already proposed "${entry.id}". Add bullets to it with propose_bullet.`);
+    if (this.state.entries.some((e) => e.id === id)) {
+      return no(`You have already proposed "${id}". Add bullets to it with propose_bullet.`);
     }
     /*
      * The title is a name, not a quotation, so it is held to a name's
@@ -310,9 +317,8 @@ export class AuthoringSession {
       );
     }
 
-    // Trimmed, because the id was validated trimmed: accepting " exp_acme"
-    // and then storing it with the space makes an id nothing else can address.
-    const id = entry.id.trim();
+    // Stored trimmed (see above): an id with a space in it is one nothing
+    // else can address.
     this.state.entries.push({ ...entry, id, title: entry.title.trim(), bullets: [] });
     return ok(`Proposed ${entry.kind} entry [${id}] ${entry.title.trim()}. Add its bullets with propose_bullet.`);
   }

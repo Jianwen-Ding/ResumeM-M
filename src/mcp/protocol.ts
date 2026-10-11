@@ -82,7 +82,22 @@ export async function handle(
     return ERROR(null, -32600, 'Batch requests are not supported; send one request per line.');
   }
 
+  /*
+   * `null`, a number, a string, or an object whose `method` is not a string:
+   * all parse as JSON and none is a request. Destructuring `null` threw, and
+   * `method?.startsWith` threw on a numeric method; either rejection went
+   * up into `serve`'s queue, where every later request was chained onto it
+   * and so never answered, and the rejection itself went unhandled. The
+   * JSON-RPC answer is "Invalid Request", with the id when there is one.
+   */
+  if (request === null || typeof request !== 'object') {
+    return ERROR(null, -32600, 'Invalid Request: expected a JSON-RPC request object.');
+  }
   const { id, method, params } = request;
+  if (typeof method !== 'string') {
+    const known = typeof id === 'string' || typeof id === 'number' ? id : null;
+    return ERROR(known, -32600, 'Invalid Request: "method" must be a string.');
+  }
 
   if (method === 'initialize') {
     return RESULT(id, {
@@ -181,8 +196,21 @@ export function serve(
             output.write(`${JSON.stringify(ERROR(null, -32700, 'Parse error'))}\n`);
             return;
           }
-          const reply = await handle(request, tools, serverInfo);
-          if (reply !== null) output.write(`${JSON.stringify(reply)}\n`);
+          /*
+           * Each message is answered on its own. Anything that throws here
+           * is this server's fault, not the next request's: left to reject,
+           * it broke the chain every later request waits on, so the client
+           * hung on all of them. `handle` turns away the malformed requests
+           * it can name; this catches the rest, with the id when it has one.
+           */
+          try {
+            const reply = await handle(request, tools, serverInfo);
+            if (reply !== null) output.write(`${JSON.stringify(reply)}\n`);
+          } catch (err) {
+            const raw = (request as { id?: unknown } | null)?.id;
+            const id = typeof raw === 'string' || typeof raw === 'number' ? raw : null;
+            output.write(`${JSON.stringify(ERROR(id, -32603, `Internal error: ${(err as Error)?.message ?? String(err)}`))}\n`);
+          }
         });
       }
     });

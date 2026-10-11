@@ -204,6 +204,25 @@ describe('extractJson', () => {
   it('throws when the only object present is malformed', () => {
     expect(() => extractJson('{"a": }')).toThrow(AgentError);
   });
+
+  /*
+   * A balanced `{…}` in the prose ahead of the answer used to end the search:
+   * "{posting}" failed to parse and the plan after it was never looked at.
+   */
+  it('looks past braces in the prose that are not JSON', () => {
+    const text = 'Given the {posting} emphasis on C++, my plan: {"choices":{"b1":"v2"},"reasoning":"x"}';
+    expect(extractJson(text)).toEqual({ choices: { b1: 'v2' }, reasoning: 'x' });
+  });
+
+  it('looks past a fence that is not the answer', () => {
+    const text = 'Note the \\textbf{x} macro.\n\n```latex\n\\textbf{x}\n```\n\n{"choices":{}}';
+    expect(extractJson(text)).toEqual({ choices: {} });
+  });
+
+  it('finds the answer in a later fence when an earlier one is something else', () => {
+    const text = '```latex\n\\section{Experience}\n```\nand then\n```json\n{"a":1}\n```';
+    expect(extractJson(text)).toEqual({ a: 1 });
+  });
 });
 
 /**
@@ -332,6 +351,36 @@ describe('runAgent', () => {
     expect(result.executed).toBe(false);
     expect(result.output).toBe('PROMPT BODY');
     expect(result.command).toBeUndefined();
+  });
+
+  /*
+   * The tokens are read off the argument template, never off what replaced
+   * them. `{sandbox}` was substituted after the prompt had been spliced in, so
+   * a prompt that mentioned "{sandbox}" reached the CLI with a scratch path in
+   * its place.
+   */
+  it('leaves a placeholder that is part of the prompt text alone', async () => {
+    const prompt = 'Keep {sandbox} and {prompt} and {promptText} as written.';
+    const result = await runAgent(
+      config({ enabled: true, command: process.execPath, args: ['-e', 'process.stdout.write(process.argv[1])', '{promptText}'] }),
+      prompt,
+    );
+    expect(result.output).toBe(prompt);
+  });
+
+  it('still fills in every placeholder in the template', async () => {
+    const result = await runAgent(
+      config({
+        enabled: true,
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write(process.argv.slice(1).join("|"))', '{sandbox}', '{prompt}', 'x{promptText}y'],
+      }),
+      'hi',
+    );
+    const [sandbox, promptFile, inline] = result.output.split('|');
+    expect(sandbox).toMatch(/rmm-ai-/);
+    expect(promptFile!.startsWith(sandbox!)).toBe(true);
+    expect(inline).toBe('xhiy');
   });
 
   it('runs the configured command and returns its output', async () => {
