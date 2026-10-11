@@ -2137,7 +2137,16 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
    */
   const spelt =
     named && !fromData && named === fromAddress
-      ? [titled.company, titled.at, titled.hiring, fromSite].find((n) => n && squashed(n) === squashed(named))
+      ? [titled.company, titled.at, titled.hiring, fromSite].find(
+          (n) =>
+            n &&
+            (squashed(n) === squashed(named) ||
+              // "Freedom Consulting Group" for `freedomconsulting`: the slug and an organisation's word.
+              (squashed(n).startsWith(squashed(named)) &&
+                /^(?:inc|llc|ltd|corp|corporation|company|co|group|holdings|technologies|technology|labs?|systems|solutions)+$/.test(
+                  squashed(n).slice(squashed(named).length),
+                ))),
+        )
       : undefined;
   const company = spelt ?? named;
 

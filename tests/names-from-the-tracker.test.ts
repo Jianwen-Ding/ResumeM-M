@@ -448,3 +448,16 @@ describe('"Headlandstechnologiesllc", which an answer then named', () => {
     ).toBe('Headlands Technologies LLC');
   });
 });
+
+describe('"Freedomconsulting", from the board slug', () => {
+  it('is "Freedom Consulting Group" when the title says so', () => {
+    expect(
+      named([
+        {
+          url: 'https://job-boards.greenhouse.io/freedomconsulting/jobs/5248064007',
+          title: 'Job Application for Junior Software Engineer 780 at Freedom Consulting Group',
+        },
+      ]).company,
+    ).toBe('Freedom Consulting Group');
+  });
+});
