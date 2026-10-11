@@ -938,8 +938,13 @@ function overlapWords(a: string, b: string): number {
 
 /** A stable id for a saved letter, readable in a directory listing. */
 export function letterId(company: string | undefined, role: string | undefined, at = new Date()): string {
+  /*
+   * Letters and digits in any script. ASCII only, a company written in
+   * Japanese or Cyrillic slugged to nothing, so two such letters on one day
+   * were both "2026-10-11" and the second was saved over the first.
+   */
   const slug = (s: string) =>
-    s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
+    s.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 30);
   return [localDay(at), company && slug(company), role && slug(role)]
     .filter(Boolean)
     .join('-');

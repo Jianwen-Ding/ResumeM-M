@@ -145,6 +145,14 @@ describe('letterId', () => {
   it('copes with a missing company or role', () => {
     expect(letterId(undefined, undefined, new Date(2026, 2, 4))).toBe('2026-03-04');
   });
+
+  it('keeps names in other scripts, so two such letters on one day are two letters', () => {
+    const day = new Date(2026, 9, 11);
+    const mercari = letterId('株式会社メルカリ', 'ソフトウェアエンジニア', day);
+    const yandex = letterId('Яндекс', 'Разработчик', day);
+    expect(mercari).toBe('2026-10-11-株式会社メルカリ-ソフトウェアエンジニア');
+    expect(yandex).toBe('2026-10-11-яндекс-разработчик');
+  });
 });
 
 /*

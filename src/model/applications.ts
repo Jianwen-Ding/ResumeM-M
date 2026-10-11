@@ -23,8 +23,12 @@ import { sameQuestion } from '../jobs/answers.js';
  * hyphen hanging off either end.
  */
 function namePart(s: string | undefined): string {
+  // With the marks that complete a letter: Devanagari's and Thai's vowel
+  // signs, and an accent typed as its own character, which split "प्रिया"
+  // into "प-र-य" and "Nguyễn" into "Nguye-n".
   return String(s ?? '')
-    .replace(/[^\p{L}\p{N}_\s-]/gu, ' ')
+    .normalize('NFC')
+    .replace(/[^\p{L}\p{M}\p{N}_\s-]/gu, ' ')
     .replace(/[\s-]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }

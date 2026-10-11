@@ -36,6 +36,12 @@ describe('file naming', () => {
     );
   });
 
+  it('keeps the marks that complete a letter in a name', () => {
+    expect(bundleFileName('प्रिया शर्मा', undefined, 'Resume')).toBe('प्रिया-शर्मा-Resume.pdf');
+    expect(bundleFileName('สมชาย ใจดี', undefined, 'Resume')).toBe('สมชาย-ใจดี-Resume.pdf');
+    expect(bundleFileName('Nguye\u0302\u0303n An', undefined, 'Resume')).toBe('Nguyễn-An-Resume.pdf');
+  });
+
   it('omits the job title when there is not one', () => {
     expect(bundleFileName('Morgan Testwell', undefined, 'Resume')).toBe('Morgan-Testwell-Resume.pdf');
     expect(bundleFileName('Morgan Testwell', '   ', 'Resume')).toBe('Morgan-Testwell-Resume.pdf');
