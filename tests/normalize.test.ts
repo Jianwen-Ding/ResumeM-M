@@ -168,6 +168,21 @@ describe('making the rest of the store’s shape true', () => {
     expect(() => answers[0]!.variants.map((v) => v.text)).not.toThrow();
   });
 
+  it('gives a second item under one id an id of its own, and leaves the first alone', () => {
+    const answers = normalizeAnswers([
+      { id: 'ans_discipline-d30f07e6', question: 'Discipline*' },
+      { id: 'ans_discipline-d30f07e6-2', question: 'Discipline' },
+      { id: 'ans_discipline-d30f07e6', question: 'Discipline*' },
+      { id: 'ans_discipline-d30f07e6', question: 'Discipline*' },
+    ]);
+    expect(answers.map((a) => a.id)).toEqual([
+      'ans_discipline-d30f07e6',
+      'ans_discipline-d30f07e6-2',
+      'ans_discipline-d30f07e6-3',
+      'ans_discipline-d30f07e6-4',
+    ]);
+  });
+
   it('steps over an entry that is not an object', () => {
     expect(normalizeEntries([null, 'x', { id: 'ok', kind: 'project' }]).map((e) => e.id)).toEqual(['ok']);
   });

@@ -237,14 +237,31 @@ export function normalizeSkillGroups(groups: unknown): SkillGroup[] {
 
 export function normalizeAnswers(answers: unknown): AnswerBankItem[] {
   if (!Array.isArray(answers)) return [];
-  return answers
-    .filter((a) => a && typeof a === 'object')
-    .map((a, n) => {
-      const item = a as Partial<AnswerBankItem>;
+  const items = answers.filter((a) => a && typeof a === 'object') as Partial<AnswerBankItem>[];
+  /*
+   * One id, one item. A bank written before `answerId` checked the id it fell
+   * back to holds several items under one id — three called
+   * `ans_discipline-d30f07e6` in a real one — and every route that finds an
+   * item by id reaches only the first, while the voice toggle changed all of
+   * them. The second and later take a suffix nobody else has, here on the way
+   * in, so nothing on disk is rewritten until the bank is next saved.
+   */
+  const taken = new Set(items.map((item, n) => String(item.id ?? `a_${n + 1}`)));
+  const seen = new Set<string>();
+  const unique = (id: string): string => {
+    if (!seen.has(id)) return id;
+    let n = 2;
+    while (taken.has(`${id}-${n}`) || seen.has(`${id}-${n}`)) n++;
+    return `${id}-${n}`;
+  };
+  return items
+    .map((item, n) => {
       const variants = cleanVariants(item.variants);
+      const id = unique(String(item.id ?? `a_${n + 1}`));
+      seen.add(id);
       return {
         ...item,
-        id: String(item.id ?? `a_${n + 1}`),
+        id,
         question: String(item.question ?? ''),
         variants,
         default: settleDefault(variants, item.default),

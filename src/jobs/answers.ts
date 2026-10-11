@@ -1,5 +1,5 @@
 import type { AnswerBankItem, CoverLetter, Variant } from '../model/types.js';
-import { employerName } from '../model/applications.js';
+import { employerName, localDay } from '../model/applications.js';
 
 /**
  * Reusing what you already wrote, without an AI call.
@@ -852,7 +852,7 @@ function overlapWords(a: string, b: string): number {
 export function letterId(company: string | undefined, role: string | undefined, at = new Date()): string {
   const slug = (s: string) =>
     s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
-  return [at.toISOString().slice(0, 10), company && slug(company), role && slug(role)]
+  return [localDay(at), company && slug(company), role && slug(role)]
     .filter(Boolean)
     .join('-');
 }

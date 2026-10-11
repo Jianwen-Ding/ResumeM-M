@@ -138,12 +138,12 @@ describe('relevantLetters', () => {
 
 describe('letterId', () => {
   it('is readable in a directory listing', () => {
-    const id = letterId('Acme Co.', 'Software Engineer Intern', new Date('2026-03-04T00:00:00Z'));
+    const id = letterId('Acme Co.', 'Software Engineer Intern', new Date(2026, 2, 4));
     expect(id).toBe('2026-03-04-acme-co-software-engineer-intern');
   });
 
   it('copes with a missing company or role', () => {
-    expect(letterId(undefined, undefined, new Date('2026-03-04T00:00:00Z'))).toBe('2026-03-04');
+    expect(letterId(undefined, undefined, new Date(2026, 2, 4))).toBe('2026-03-04');
   });
 });
 

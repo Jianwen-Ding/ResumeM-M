@@ -50,7 +50,7 @@ import {
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -3012,7 +3012,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           existing.default = already.id;
         } else {
           // A new phrasing of a question already in the bank, not a new question.
-          const id = `v_${slug(label ?? new Date().toISOString().slice(0, 10))}` || `v_${Date.now()}`;
+          const id = `v_${slug(label ?? localDay())}` || `v_${Date.now()}`;
           const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
           existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
           existing.default = unique;
@@ -5336,7 +5336,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // letters view can be read either as a library or per application.
       let letterId: string | undefined;
       if (draft.coverLetter.required && draft.coverLetter.body.trim()) {
-        letterId = `${new Date().toISOString().slice(0, 10)}-${slug(draft.company)}`;
+        letterId = `${localDay()}-${slug(draft.company)}`;
         const letter: CoverLetter = {
           id: letterId,
           title: `${draft.role} — ${draft.company}`,

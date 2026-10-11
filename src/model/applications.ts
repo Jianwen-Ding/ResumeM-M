@@ -175,8 +175,21 @@ export function fingerprint(...parts: string[]): string {
   return createHash('sha1').update(parts.join('\u0000')).digest('hex').slice(0, 8);
 }
 
+/**
+ * The calendar day it is where the person is, as YYYY-MM-DD.
+ *
+ * Not `toISOString().slice(0, 10)`, which is the day in Greenwich: anything
+ * started after eight in the evening on the US east coast was filed under
+ * tomorrow — `drafts/2026-10-10-moog-…` made on the evening of the 9th, and
+ * its commit dated the 9th beside it. An id is read as the day you did it.
+ */
+export function localDay(at = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+}
+
 export function applicationId(company: string, role: string, at = new Date()): string {
-  const date = at.toISOString().slice(0, 10);
+  const date = localDay(at);
   const readable = `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
 
   return faithful(company, role) ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');

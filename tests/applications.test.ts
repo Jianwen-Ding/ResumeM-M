@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { AlreadySent, advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, findDraft, freshApplicationId, slug, stats } from '../src/model/applications.js';
+import { AlreadySent, advance, alreadySent, applicationId, buildBundle, localDay, bundleFileName, bundleFileNames, describeLost, findApplication, findDraft, freshApplicationId, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -167,18 +167,25 @@ describe('slug and id', () => {
   });
 
   it('builds a dated, readable application id', () => {
-    expect(applicationId('Streamly', 'SWE Intern', new Date('2026-09-16T00:00:00Z'))).toBe(
+    expect(applicationId('Streamly', 'SWE Intern', new Date(2026, 8, 16))).toBe(
       '2026-09-16-streamly-swe-intern',
     );
+  });
+
+  it('dates the id by the day where the person is, not by the day in Greenwich', () => {
+    // Ten at night on the 9th is the 9th, whatever UTC says it is.
+    expect(applicationId('Moog', 'Intern', new Date(2026, 9, 9, 22, 30))).toBe('2026-10-09-moog-intern');
+    expect(localDay(new Date(2026, 9, 9, 23, 59))).toBe('2026-10-09');
+    expect(localDay(new Date(2026, 0, 1, 0, 0))).toBe('2026-01-01');
   });
 
   it('does not leave a trailing dash when the role is unprintable', () => {
     // A role the slug cannot represent gets a fingerprint instead, because
     // `!!!` and `???` are two different roles and the slug says so about
     // neither. What it must not do is trail off after the company.
-    const id = applicationId('Acme', '!!!', new Date('2026-09-16T00:00:00Z'));
+    const id = applicationId('Acme', '!!!', new Date(2026, 8, 16));
     expect(id).toMatch(/^2026-09-16-acme-[0-9a-f]{8}$/);
-    expect(id).not.toBe(applicationId('Acme', '???', new Date('2026-09-16T00:00:00Z')));
+    expect(id).not.toBe(applicationId('Acme', '???', new Date(2026, 8, 16)));
   });
 });
 
