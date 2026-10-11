@@ -50,7 +50,7 @@ import {
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -618,6 +618,35 @@ function preferredNameFields(printed: string, legal: string): Record<string, str
     preferred_first_name: words[0] ?? name,
     ...(words.length > 1 ? { preferred_last_name: words.slice(1).join(' ') } : {}),
   };
+}
+
+/**
+ * Where a posting's tailored copy is written: the copy already made for this
+ * job, if there is one, and otherwise a fresh id.
+ *
+ * The id is made from the employer as it was spelt, and one job is spelt
+ * more than one way — Intel's LinkedIn posting says "Intel", its Workday
+ * form "Intel Corporation". Tailoring on each page minted a copy under each
+ * spelling, eight tailorings in seven minutes between two files, and the
+ * workspace pointed at one while the application filed the other. Asked the
+ * way the tracker asks whether two rows are one job (`identity`), so a
+ * legal form or a spelling the tracker already forgives does not make a
+ * second resume either.
+ */
+function copyIdForPosting(resumes: ResumeSpec[], company: string, role: string): string {
+  const job = identity(company, role);
+  /*
+   * Only a copy under the id this code would have minted for what it was made
+   * for: one somebody named themselves is theirs, and is a base to start
+   * from rather than a file to write over.
+   */
+  const made = resumes.find((r) => {
+    const { company: was, role: as } = r.generatedFor ?? {};
+    if (r.tier !== 'temporary' || !was) return false;
+    const minted = tailoredResumeId(was, as ?? 'Unknown role');
+    return (r.id === minted || r.id.startsWith(`${minted}-`)) && identity(was, as ?? 'Unknown role') === job;
+  });
+  return made?.id ?? copyIdFor(resumes, tailoredResumeId(company, role));
 }
 
 export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
@@ -3159,7 +3188,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * names one, as `unnamedRole` reads them. See `sameJobAs`.
        */
       const jobAddress = addresses.find((u) => jobNumberIn(u)) ?? url;
-      const specId = copyIdFor(data.resumes, tailoredResumeId(employer, role));
+      const specId = copyIdForPosting(data.resumes, employer, role);
 
       /*
        * A default never starts this posting from another posting's copy.
@@ -3173,7 +3202,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             (r) =>
               r.id === specId ||
               (Boolean(r.generatedFor?.company) &&
-                tailoredResumeId(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role') === thisPosting),
+                (tailoredResumeId(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role') === thisPosting ||
+                  identity(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role') === identity(employer, role))),
           )
         : baseResumeId;
       const baseId = baseForCopy(data.resumes, asked, specId);
@@ -4931,7 +4961,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
       }
       job = withYourTerms(job, data);
-      const specId = copyIdFor(data.resumes, tailoredResumeId(draft.company, draft.role));
+      const specId = copyIdForPosting(data.resumes, draft.company, draft.role);
 
       /*
        * Tailoring twice must not make a resume that inherits from itself. The

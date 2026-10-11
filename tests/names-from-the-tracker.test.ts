@@ -348,3 +348,36 @@ describe('one iCIMS application filed as a row per step', () => {
     ).toBe('Software Engineering Internship - Summer 2027');
   });
 });
+
+describe('one job spelt two ways makes one tailored copy', () => {
+  it('reuses the copy made under "Intel Corporation" for the posting that says "Intel"', async () => {
+    const { default: express } = await import('express');
+    const { default: request } = await import('supertest');
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+    t = makeTempStore({ config: { git: { autoCommit: false }, output: { dir: 'out' } } });
+    const app = express();
+    app.use(express.json({ limit: '5mb' }));
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+
+    const base = t.store.load().resumes.find((r) => r.id === 'base')!;
+    const made = 'job-intel-corporation-ai-software-technical-intern';
+    t.store.saveResume({
+      ...base,
+      id: made,
+      tier: 'temporary',
+      copiedFrom: 'base',
+      generatedFor: { company: 'Intel Corporation', role: 'AI Software Technical Intern', at: '2026-10-02T16:31:27.392Z' },
+    });
+
+    const url = 'https://www.linkedin.com/jobs/search-results/?currentJobId=4417503978';
+    const title = 'AI Software Technical Intern | Intel | LinkedIn';
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ url, title, html: page(title), pages: [{ url, title, html: page(title) }], baseResumeId: 'base', tailor: 'none' })
+      .expect(200);
+    expect(res.body.spec.generatedFor.company).toBe('Intel');
+    expect(res.body.spec.id).toBe(made);
+    expect(t.store.load().resumes.filter((r) => r.id.startsWith('job-intel'))).toHaveLength(1);
+  });
+});
