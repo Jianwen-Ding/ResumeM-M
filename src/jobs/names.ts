@@ -58,6 +58,10 @@ const KNOWN_EMPLOYERS: Record<string, string> = {
   bytedance: 'ByteDance',
   epicgames: 'Epic Games',
   ea: 'Electronic Arts',
+  // MACOM's Cornerstone tenant, `macomtech.csod.com`; the company writes itself "MACOM".
+  macomtech: 'MACOM',
+  // Its name on its own pages is refused as a board's (see `BOARDS`), so its own careers host has to spell it.
+  github: 'GitHub',
 };
 
 /** The employer's own spelling of a tenant or host word it is known by, if it is one of `KNOWN_EMPLOYERS`. */
@@ -93,6 +97,13 @@ const BOARDS: { name: RegExp; host: RegExp }[] = [
   { name: /^dice(?:\.com)?$/i, host: /(?:^|\.)dice\.com$/i },
   { name: /^otta$/i, host: /(?:^|\.)otta\.com$/i },
   { name: /^career\s?builder$/i, host: /(?:^|\.)careerbuilder\.com$/i },
+  /*
+   * Not a board, but where the lists students apply from are kept: a
+   * repository's README of a hundred internships, "GitHub - someone/Summer-
+   * 2027-Internships: …", was filed as an application at GitHub. GitHub's own
+   * jobs are on its careers site, not on a repository page.
+   */
+  { name: /^git\s?hub$/i, host: /(?:^|\.)github\.com$/i },
 ];
 
 /** A job board or aggregator's name: "LinkedIn", "Indeed.com", "Built In NYC". */
@@ -229,8 +240,12 @@ const CAREERS_ONLY = new RegExp(
  * "Jobs at Acme". A singular "Job" in front is the page describing itself —
  * "Job Details", "Job Description" — and "Details" is nobody's name.
  */
+/*
+ * And the invitation a careers site writes round its name: Tesla's site calls
+ * itself "Build your Career at Tesla", and that was filed as the employer.
+ */
 const LEADING_CAREERS = new RegExp(
-  String.raw`^(?:(?:careers?|jobs|opportunities|openings|vacancies|recruiting|recruitment)(?:\s+(?:at|with|for|@))?\s+|(?:${CAREERS_WORD})\s+(?:at|with|for|@)\s+|(?:life|work(?:ing)?)\s+(?:at|with)\s+|join\s+(?:the\s+)?)`,
+  String.raw`^(?:(?:careers?|jobs|opportunities|openings|vacancies|recruiting|recruitment)(?:\s+(?:at|with|for|@))?\s+|(?:${CAREERS_WORD})\s+(?:at|with|for|@)\s+|(?:life|work(?:ing)?)\s+(?:at|with)\s+|(?:build|start|grow|launch|shape|find|begin|accelerate)\s+(?:your|a|the)\s+(?:next\s+)?careers?\s+(?:at|with)\s+|join\s+(?:the\s+)?)`,
   'i',
 );
 const TRAILING_CAREERS = new RegExp(String.raw`[\s,:·|–—-]+(?:${CAREERS_WORD})(?:\s+(?:site|page|home|portal))?$`, 'i');
@@ -267,11 +282,79 @@ export const ROLE_NOUN =
   /\b(engineer|engineering|developer|development|programmer|manager|management|designer|analyst|scientist|intern|internship|director|architect|consultant|specialist|associate|coordinator|administrator|technician|researcher|recruiter|apprentice|trainee|senior|junior|principal|staff|lead|full[- ]?stack|front[- ]?end|back[- ]?end)\b/i;
 
 /*
+ * A firm named for the work it does: "Thermagia Engineering", "Wellington
+ * Management", "Acme Development".
+ *
+ * `ROLE_NOUN` has those three words in it because "Software Engineering" and
+ * "Product Management" are what a job is, and a name with one in it was
+ * refused as an employer everywhere — so LinkedIn's own "Software Engineering
+ * Intern | Thermagia Engineering | LinkedIn" left the employer unknown and
+ * filed the role as "Software Engineering Intern | Thermagia Engineering",
+ * and "Technology Undergraduate Summer Internship | Wellington Management"
+ * was filed the same way, three times over.
+ *
+ * What a name has that a field of work does not is a word that is nobody's
+ * field: a proper name, written as one, in front of the work. So the work word
+ * has to come last, every word in front of it has to be capitalised, none of
+ * them may be another role word, and at least one of them has to be something
+ * other than a field, an audience, a season, a place or one of the words that
+ * qualify the work itself ("Project Management", "Risk Management", "Business
+ * Development" are kinds of work, not firms).
+ */
+const FIRM_WORK = /^(.+?)\s+(?:engineering|management|development)$/i;
+const WORK_QUALIFIERS = new Set([
+  'project', 'projects', 'program', 'programme', 'portfolio', 'risk', 'asset', 'assets', 'wealth', 'investment',
+  'change', 'quality', 'account', 'accounts', 'case', 'property', 'facilities', 'facility', 'construction',
+  'talent', 'leadership', 'organizational', 'organisational', 'executive', 'general', 'technical', 'commercial',
+  'strategic', 'strategy', 'professional', 'personal', 'release', 'test', 'testing', 'site', 'reliability',
+  'process', 'production', 'game', 'application', 'applications', 'solutions', 'solution', 'database', 'network',
+  'electrical', 'mechanical', 'civil', 'chemical', 'aerospace', 'biomedical', 'industrial', 'systems', 'computer',
+  'front', 'back', 'full', 'stack', 'enterprise', 'revenue', 'brand', 'community', 'content', 'vendor', 'event',
+  'events', 'office', 'store', 'restaurant', 'team', 'people', 'tools', 'tooling', 'build', 'performance', 'senior',
+  'junior', 'associate', 'principal', 'staff', 'lead', 'entry', 'level', 'new', 'grad', 'research', 'software',
+  'hardware', 'firmware', 'embedded', 'data', 'web', 'mobile', 'cloud', 'platform', 'product', 'business',
+]);
+
+export function isFirmNamedForItsWork(s: string | undefined): boolean {
+  const t = String(s ?? '').trim().replace(/\s+/g, ' ');
+  const m = FIRM_WORK.exec(t);
+  if (!m) return false;
+  const before = m[1]!;
+  if (ROLE_NOUN.test(before)) return false;
+  const words = before.split(' ');
+  if (words.length > 4 || !words.every((w) => /^[\p{Lu}\p{N}&]/u.test(w))) return false;
+  return words.some((w) => {
+    const l = w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    return (
+      l.length > 1 &&
+      !FIELD_WORDS.has(l) &&
+      !AUDIENCE_WORDS.has(l) &&
+      !JOINING_WORDS.has(l) &&
+      !WORK_QUALIFIERS.has(l) &&
+      !isSeasonPhrase(l) &&
+      !isRegion(l) &&
+      !/^\d+$/.test(l)
+    );
+  });
+}
+
+/** A role word in it, other than the work a firm is named for. See `isFirmNamedForItsWork`. */
+export function namesAJob(s: string | undefined): boolean {
+  return ROLE_NOUN.test(String(s ?? '')) && !isFirmNamedForItsWork(s);
+}
+
+/*
  * A requisition number standing as a part of a title: "Job ID: 10452115",
  * "Req #4021", "JR0286834", "R171666". Amazon ends every title with one.
  */
 const JOB_ID_SEGMENT =
   /^(?:(?:job|req(?:uisition)?|posting|position|reference|ref)\s*(?:id|#|no\.?|number|code)?\s*[:#]?\s*[a-z]{0,3}[-_]?\d[\w-]{2,}|[a-z]{1,3}[-_]?\d{4,}|#?\d{5,})$/i;
+
+/*
+ * Not "(job 4012345)": that is `unnamedRole`'s own way of telling two unnamed
+ * jobs apart, and it has to survive being read back.
+ */
+const TRAILING_JOB_ID = /\s*\(\s*(?:req(?:uisition)?\s*(?:id|#|no\.?)?\s*[:#]?\s*)?#?\d{5,}\s*\)$/i;
 
 export function isJobIdSegment(s: string | undefined): boolean {
   return JOB_ID_SEGMENT.test(String(s ?? '').trim());
@@ -371,12 +454,35 @@ export function joinTitle(segments: TitleSegment[]): string {
   return segments.map((s, i) => (i ? s.sep : '') + s.text).join('').trim();
 }
 
-/** A leading notification count — LinkedIn's "(3) " — or a heading marker left from text: "#Software Engineer". */
+/*
+ * The step of applying, written in front of the job's name.
+ *
+ * Greenhouse titles its embedded form "Job Application for {job} at {company}",
+ * Cornerstone "Apply for {job}", iCIMS "Candidate Profile - {job}" and
+ * SuccessFactors "Career Opportunities: Apply for {job} ({number})". Each was
+ * filed as the role — "Apply for Test Software Developer Intern", "Job
+ * Application for Software Engineer, AI Platform" — beside the same job filed
+ * from its posting under its own name, so one job was two rows.
+ *
+ * Only in front of something that names a job: "Apply for this job — Novena
+ * Health" and "Candidate Profile" alone are the page talking about itself, and
+ * `NOT_A_ROLE` reads those whole.
+ */
+const APPLYING_PREFIX =
+  /^(?:(?:career\s+opportunities|careers?|jobs?)\s*:\s*)?(?:(?:job\s+)?application\s+for|apply(?:ing)?\s+(?:now\s+)?(?:for|to)|candidate\s+profile\s*[-–—:|])\s+/i;
+
+/**
+ * A leading notification count — LinkedIn's "(3) " — a heading marker left from
+ * text: "#Software Engineer", or the step of applying in front of the job:
+ * "Apply for Test Software Developer Intern". See `APPLYING_PREFIX`.
+ */
 export function withoutTitleNoise(title: string): string {
-  return title
+  const t = title
     .replace(/^\(\d+\+?\)\s*/, '')
     .replace(/^#+\s*(?=\p{L})/u, '')
     .trim();
+  const rest = t.replace(APPLYING_PREFIX, '');
+  return rest !== t && ROLE_NOUN.test(splitTitle(rest)[0]?.text ?? '') ? rest : t;
 }
 
 /** A name with no role in it and nothing that says it is not a name, for the checks here that cannot ask the extractor. */
@@ -385,7 +491,7 @@ function nameish(s: string): boolean {
   return (
     /\p{L}/u.test(t) &&
     t.split(/\s+/).length <= 6 &&
-    !ROLE_NOUN.test(t) &&
+    !namesAJob(t) &&
     !isFieldOfWork(t) &&
     !isSeasonPhrase(t) &&
     !isRegion(t)
@@ -443,7 +549,7 @@ const SITE_LABEL = /^(careers?|jobs?|apply|recruiting|hire|hiring|work|talent|jo
 /** A label that runs the careers words into the employer's name: `careersatdoordash`, `lifeatspotify`. */
 const RUN_IN = /^(?:careers?|jobs?|life|work|join)-?at-?(?=[a-z0-9]{3,}$)|^(?:careers?|jobs?)-(?=[a-z0-9]{3,}$)/i;
 const SYSTEM_HOST =
-  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|myworkdaysite|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|myjobs\.adp|workforcenow\.adp)\b/i;
+  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|myworkdaysite|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|myjobs\.adp|workforcenow\.adp|recruiting\.adp|ns2cloud)\b/i;
 
 /**
  * The employer's word in a host, as the host writes it: `careers.acme-corp.com`
@@ -598,7 +704,12 @@ export function cleanRole(role: string | undefined, ...employers: (string | unde
     }
     break;
   }
-  const out = joinTitle(segments);
+  /*
+   * And a requisition number in brackets on the end: SuccessFactors' "Image
+   * Processing Engineer Intern (41213)" is the job L3Harris's posting calls
+   * "Image Processing Engineer Intern". See `isJobIdSegment`.
+   */
+  const out = joinTitle(segments).replace(TRAILING_JOB_ID, '').trim();
   return (peeled ? withoutTrailingLocation(out) : out) || role.trim() || undefined;
 }
 
@@ -617,6 +728,21 @@ const JOB_PARAM =
 /** A job's number: five digits or more, and nothing but an id. The extension's `PATH_JOB_ID`. */
 const JOB_NUMBER = /^(?=(?:\D*\d){5})[a-z0-9_-]+$/i;
 
+/*
+ * Not counting a year written as a word of its own.
+ *
+ * `Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships` has eight
+ * digits and nothing but letters, digits and hyphens, so a GitHub repository's
+ * name was a job's number: the README was filed as "Unknown role (job
+ * Automated-List-Of-…)", and — because a page whose address names one job is
+ * not a list of them (`listsRoles`) — a list of a hundred internships was read
+ * as a posting. The digits that make a number a job's are its own; "2027"
+ * between hyphens is when, and `Software-Engineer-Summer-2027_R171666` still
+ * has its six.
+ */
+const YEAR_WORD = /(^|[-_])(?:19|20)\d\d(?=$|[-_])/g;
+const isJobNumber = (s: string): boolean => JOB_NUMBER.test(s) && JOB_NUMBER.test(s.replace(YEAR_WORD, '$1'));
+
 /** The job number one address names: in a job parameter first, then as a whole segment of its path. */
 export function jobNumberIn(url?: string): string | undefined {
   if (!url) return undefined;
@@ -627,9 +753,9 @@ export function jobNumberIn(url?: string): string | undefined {
     return undefined;
   }
   for (const [key, value] of parsed.searchParams) {
-    if (JOB_PARAM.test(key) && JOB_NUMBER.test(value)) return value;
+    if (JOB_PARAM.test(key) && isJobNumber(value)) return value;
   }
   const segments = parsed.pathname.split('/').filter(Boolean);
   // Nearest the end, as `roleFromUrl` reads: the job is further out than the system.
-  return segments.reverse().find((seg) => JOB_NUMBER.test(seg));
+  return segments.reverse().find((seg) => isJobNumber(seg));
 }
