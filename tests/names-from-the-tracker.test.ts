@@ -428,3 +428,23 @@ describe('Lever titles "{employer} - {job}" with the employer written out', () =
     expect(named([{ url: LEVER('spotify'), title: 'Spotify - Backend Engineer' }])).toEqual({ company: 'Spotify', role: 'Backend Engineer' });
   });
 });
+
+describe('"Headlandstechnologiesllc", which an answer then named', () => {
+  const GH = 'https://job-boards.greenhouse.io/headlandstechnologiesllc/jobs/4336806009';
+
+  it('takes the spelling from "… at Headlands Technologies LLC"', () => {
+    expect(named([{ url: GH, title: 'Job Application for C++ Software Developer - New Grad at Headlands Technologies LLC' }])).toEqual({
+      company: 'Headlands Technologies LLC',
+      role: 'C++ Software Developer - New Grad',
+    });
+  });
+
+  it('and from the form when the posting before it only had the address', () => {
+    expect(
+      named([
+        { url: GH, title: 'C++ Software Developer - New Grad' },
+        { url: `${GH}#app`, title: 'Job Application for C++ Software Developer - New Grad at Headlands Technologies LLC' },
+      ]).company,
+    ).toBe('Headlands Technologies LLC');
+  });
+});

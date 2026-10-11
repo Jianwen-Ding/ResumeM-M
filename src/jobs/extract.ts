@@ -2129,11 +2129,17 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
     titled.company ??
     titled.careersOf ??
     (soleName && soleName !== rawTitle ? soleName : undefined);
-  // The title's spelling of the address's employer: "Demiurge Studios", not "Demiurgestudios".
-  const company =
-    named && !fromData && named === fromAddress && titled.company && squashed(titled.company) === squashed(named)
-      ? titled.company
-      : named;
+  /*
+   * The title's spelling of the address's employer: "Demiurge Studios", not
+   * "Demiurgestudios"; "Headlands Technologies LLC" — Greenhouse's "… at
+   * Headlands Technologies LLC" — not "Headlandstechnologiesllc", which an
+   * answer written for that application then named.
+   */
+  const spelt =
+    named && !fromData && named === fromAddress
+      ? [titled.company, titled.at, titled.hiring, fromSite].find((n) => n && squashed(n) === squashed(named))
+      : undefined;
+  const company = spelt ?? named;
 
   // Page titles routinely carry the company along; the company has its own
   // field, and repeating it in the role reads badly everywhere it is shown.
@@ -2800,7 +2806,14 @@ export function mergeJobPages(pages: PageSource[]): MergedJob {
 
   // Fields come from whichever page actually knew them, not from the last one —
   // and a title one page wrote with another page's employer on the end loses it.
-  const company = read.map((r) => r.job.company).find(Boolean);
+  // And the spelling another page gives the same name, where the first read
+  // it off an address: the posting says "Headlandstechnologiesllc" and its
+  // form "Headlands Technologies LLC".
+  const first = read.map((r) => r.job.company).find(Boolean);
+  const spaced = first && !/\s/.test(first)
+    ? read.map((r) => r.job.company).find((c) => c && /\s/.test(c) && squashed(c) === squashed(first))
+    : undefined;
+  const company = spaced ?? first;
   const title = cleanRole(read.map((r) => r.job.title).find(Boolean), company);
 
   return {
