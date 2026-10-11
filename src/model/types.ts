@@ -270,8 +270,9 @@ export interface ResumeSpec {
    * `base` — what you actually build from, and what the extension offers
    * first. `extended` — a permanent resume in the save that is not offered
    * first: kept, findable, never swept. `temporary` — made for one posting,
-   * worked on, sent, and then gone a week later, recoverable from the version
-   * history like anything else deleted.
+   * listed last, and gone a week after that posting closed without it being
+   * sent (one that was sent is kept: see `wentOut`), recoverable from the
+   * version history like anything else deleted.
    *
    * Absent means `extended`, which is the reading that cannot lose anybody's
    * work: a resume written by a version that had no tiers, or by hand, is
@@ -281,8 +282,8 @@ export interface ResumeSpec {
   /**
    * When this resume became temporary, for the sweep to count from.
    *
-   * Only ever a fallback: the week is normally measured from the application
-   * being sent, because a posting you are still writing for is not one to
+   * Only ever a fallback, or a floor: the week is normally measured from the
+   * application closing unsent, because a posting you are still writing for is not one to
    * take the resume away from. This covers the copy that was made and then
    * abandoned — no application, nothing to measure — and, more importantly,
    * the resumes an upgrade makes temporary. A save upgraded today must not

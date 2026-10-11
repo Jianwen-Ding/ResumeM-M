@@ -199,6 +199,70 @@ describe('sweeping', () => {
     expect(temp.exists('resumes/job-old.yaml')).toBe(true);
   });
 
+  /*
+   * And one whose application went out, a week ago or a year. The folder
+   * holding what was sent is under `out/`, which a save does not track, so
+   * the resume is the only record in the history of what went out. Measured
+   * on a real save: three resumes swept a week after their rows went to
+   * `applied`, and a hundred `applied` rows naming resumes no longer there.
+   */
+  it('leaves one whose application was sent, and one that was sent and then closed', async () => {
+    planted({}, [
+      {
+        id: 'a1',
+        company: 'Acme',
+        role: 'Backend Engineer',
+        status: 'applied',
+        resumeId: 'job-old',
+        appliedAt: daysAgo(8),
+        history: [
+          { at: daysAgo(9), status: 'applying', note: 'Bundle created' },
+          { at: daysAgo(8), status: 'applied', note: 'The form was submitted on the page' },
+        ],
+      } as Application,
+    ]);
+    expect(wouldSweep(temp.store)).toEqual([]);
+
+    temp.write('applications.yaml', [
+      {
+        id: 'a1',
+        company: 'Acme',
+        role: 'Backend Engineer',
+        status: 'closed',
+        resumeId: 'job-old',
+        appliedAt: daysAgo(60),
+        history: [
+          { at: daysAgo(60), status: 'applied' },
+          { at: daysAgo(30), status: 'closed', note: 'Rejected' },
+        ],
+      },
+    ]);
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+    const { swept } = await sweepTemporary(temp.store, repo);
+    expect(swept).toEqual([]);
+    expect(temp.exists('resumes/job-old.yaml')).toBe(true);
+  });
+
+  it('takes one whose application closed without ever going out', async () => {
+    planted({}, [
+      {
+        id: 'a1',
+        company: 'Acme',
+        role: 'Backend Engineer',
+        status: 'closed',
+        resumeId: 'job-old',
+        appliedAt: daysAgo(30),
+        history: [
+          { at: daysAgo(30), status: 'applying', note: 'Bundle created' },
+          { at: daysAgo(16), status: 'closed', note: 'Closed on its own: at Applying for 14 days' },
+        ],
+      } as Application,
+    ]);
+    expect(wouldSweep(temp.store).map((d) => d.id)).toEqual(['job-old']);
+  });
+
   it('leaves one that was promoted out of temporary', async () => {
     planted({ tier: 'extended' });
     const { swept } = await sweepTemporary(temp.store, Repo.forStore(temp.dir));

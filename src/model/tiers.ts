@@ -19,9 +19,11 @@ import { tierOf } from './types.js';
  *   The one you made for a particular kind of role and want to keep. Kept,
  *   findable, never swept.
  *
- *   `temporary` — made for one posting, worked on, sent, and then gone a week
- *   later. Recoverable from the version history like anything else deleted,
- *   and promotable out of the tier at any time.
+ *   `temporary` — made for one posting. Listed last, and gone a week after
+ *   it is done with: abandoned, or its application closed without ever going
+ *   out. One that was *sent* stays — see `wentOut` — because it is the only
+ *   tracked record of what went out. Recoverable from the version history
+ *   like anything else deleted, and promotable out of the tier at any time.
  *
  * Absent means `extended`, and that is the important half of the rule: a
  * resume written by a version that had no tiers — or by hand, in a folder
@@ -99,14 +101,15 @@ export function byTier(resumes: ResumeSpec[]): ResumeSpec[] {
 /**
  * When a temporary resume is done with, and its week starts counting.
  *
- * "Done with" is the application being sent, not the resume being made: a
- * posting you are still writing a cover letter for is not something to take
- * the resume away from, however long it has been open. Where there is no
- * application at all — a copy made and abandoned — the resume's own date
- * stands in, because otherwise nothing would ever clear it.
+ * "Done with" is the application being over without having been sent, not
+ * the resume being made: a posting you are still writing a cover letter for
+ * is not something to take the resume away from, however long it has been
+ * open, and a posting it was sent to is never done with (see `wentOut`).
+ * Where there is no application at all — a copy made and abandoned — the
+ * resume's own date stands in, because otherwise nothing would ever clear it.
  *
- * `undefined` means it is not counting yet, which is the answer for a resume
- * whose application is still in flight.
+ * `undefined` means it is not counting, which is the answer for a resume
+ * whose application is still in flight or went out.
  */
 export function doneAt(
   spec: ResumeSpec,
@@ -146,7 +149,7 @@ export function doneAt(
      * closed is not permission to delete the document the other one is still
      * about.
      */
-    const sent = mine.map((a) => sentAt(a));
+    const sent = mine.map((a) => releasedAt(a));
     if (sent.some((at) => at === undefined)) return undefined;
     // The latest, so the week is measured from the last thing that happened.
     const last = sent.filter((at): at is string => Boolean(at)).sort().pop();
@@ -201,30 +204,52 @@ function later(a: string | undefined, b: string | undefined): string | undefined
 }
 
 /**
+ * Whether an application went out, which is what keeps its resume.
+ *
+ * This used to start the week at `applied`, on the argument the sweep's
+ * header gives: "the files that were *sent* are in the application's
+ * snapshot folder … the sweep removes the recipe, never the document". The
+ * snapshot folder is under `out/`, and `out/` is not tracked — a save's own
+ * README says so, "the first is rebuilt from the store" — and it cannot be
+ * rebuilt from a store whose resume has been deleted. So the resume file was
+ * the only record in the save's history of what was sent, and a week after
+ * sending the sweep deleted it: measured on a real save, 100 rows at
+ * `applied` naming resumes that no longer existed, three of them swept in one
+ * commit a week after they went out, while the tracker still said `applied`.
+ * That save's README describes the rule as "a week after the posting closes",
+ * and for a posting that was sent nothing ever lets go of it: the employer
+ * can ask about that document whenever they like.
+ *
+ * Read off the history, because that is where the tracker writes what
+ * happened. A `closed` row went out if the last status it had before closing
+ * was past `applying`; one with no history to read is kept, because the
+ * sweep deletes things and "cannot tell" is not permission.
+ */
+const SENT: ReadonlySet<string> = new Set(['applied', 'interview', 'offer']);
+
+export function wentOut(app: Application): boolean {
+  if (SENT.has(app.status)) return true;
+  if (app.status !== 'closed') return false;
+  const before = [...(app.history ?? [])].reverse().find((h) => h.status !== 'closed');
+  if (!before) return true;
+  return SENT.has(before.status);
+}
+
+/**
  * When an application stopped needing its resume, or `undefined` while it
  * still does.
- *
- * Read off the status, because the status is the thing the tracker actually
- * maintains — a timestamp of its own would be a second record of the same
- * fact, free to disagree with the first.
  *
  *   `interested`, `applying` — not sent. Nothing to take away yet, however
  *   long the posting has been sitting there.
  *
- *   `applied` — out of your hands, and the week starts.
+ *   `applied`, `interview`, `offer`, and `closed` after one of those — sent,
+ *   and kept. See `wentOut`.
  *
- *   `interview`, `offer` — sent, and still live. Somebody is about to ask you
- *   about the document you sent them, and the week does not run while that is
- *   true. This is the one that costs the sweep most of its work and is worth
- *   every bit of it.
- *
- *   `closed` — over, and counted from when it closed rather than from when it
- *   was sent, so a posting that ran for two months does not take its resume
- *   with it the day it ends.
+ *   `closed` without having gone out — abandoned, or closed for sitting at
+ *   Applying — counted from when it closed.
  */
-function sentAt(app: Application): string | undefined {
-  if (app.status === 'applied') return app.appliedAt;
-  if (app.status !== 'closed') return undefined;
+function releasedAt(app: Application): string | undefined {
+  if (app.status !== 'closed' || wentOut(app)) return undefined;
 
   const closed = [...(app.history ?? [])].reverse().find((h) => h.status === 'closed');
   return closed?.at ?? app.appliedAt;

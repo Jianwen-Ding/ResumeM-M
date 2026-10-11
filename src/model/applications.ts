@@ -773,6 +773,32 @@ async function inBuildLane<T>(id: string, run: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * The answers a build files, given what the request said and what the row
+ * already holds.
+ *
+ * Absent keeps the row's, like every other field a build was not told about.
+ * And an *empty* list on a stage keeps them too. A stage is the extension
+ * keeping the upload folder level with the card, with nobody pressing
+ * anything, and it sends whatever answers the card is holding at that moment
+ * — `collectedAnswers()` in JobHelper's card, which is `[]` whenever the card
+ * has not (or no longer) got the questions in hand: a reload, a step not yet
+ * drawn, another frame. Measured on a real save: a Workday row's recorded
+ * "Please enter your name:" went to `answers: []` eight seconds after it was
+ * written, under a "Files rebuilt" line, by a stage nobody pressed. A stage
+ * saying nothing is not somebody clearing their answers; filing the
+ * application (any status but `applying`) or the tracker's own routes still
+ * can, with an empty list.
+ */
+function answersToKeep(
+  req: Pick<BundleRequest, 'answers' | 'status'>,
+  recorded: BundleRequest['answers'],
+): BundleRequest['answers'] {
+  if (req.answers == null) return recorded;
+  if (req.answers.length === 0 && req.status === 'applying' && recorded?.length) return recorded;
+  return req.answers;
+}
+
+/**
  * Produce one folder holding everything an application needs, named the way
  * portals expect, plus a snapshot of the exact resume that was sent. The
  * snapshot is the point: six weeks later, when they ask about "the pipeline
@@ -918,7 +944,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    */
   const before = store.load().applications.find((a) => a.id === id);
   const letter = req.coverLetter === undefined ? before?.coverLetter : req.coverLetter?.trim() || undefined;
-  const answers = req.answers ?? before?.answers;
+  const answers = answersToKeep(req, before?.answers);
 
   try {
     const pdfPath = path.join(stage, resumeName);
@@ -1064,11 +1090,48 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
         ? settled.status
         : asked;
 
+    /*
+     * The row's own names, when it was found only by its job number.
+     *
+     * `sameJobAs` lets one job under two employers' names be one row — EA's
+     * job 216245 as "Electronic Arts" and as "Respawn Entertainment" — and
+     * that is a reason to *file* into the row, not to rename it. Writing the
+     * request's names over it is how a Texas Instruments row, found by the
+     * `currentJobId` in a LinkedIn search address the extension sent beside
+     * L3Harris's posting, became "L3Harris Technologies" — after which every
+     * later L3Harris stage matched it by name, and its address was replaced
+     * too. Renaming a row is `PATCH /applications/:id`, said on purpose.
+     * Matched by name (one employer, another spelling), the request's
+     * spelling still wins, as it always has.
+     */
+    const byNumberOnly =
+      settled !== undefined && identity(settled.company, settled.role) !== identity(req.company, req.role);
+
+    /*
+     * And one history line for a run of rebuilds, not one per rebuild.
+     *
+     * Building stages the files, and the card stages on every save of the
+     * letter, every answer, every Recompile — so one application's history
+     * read "Files rebuilt" eight times in two minutes, and a real save carried
+     * over a thousand of them, each its own "Apply:" commit. A rebuild that
+     * moves nothing on adds nothing to say after a line that already says it:
+     * the status is unchanged and the last thing the history says is that the
+     * files were built at this status. Anything that happened in between — a
+     * send, "Not sent after all", a note — is a line of its own, and the next
+     * rebuild after it is recorded again.
+     */
+    const last = settled?.history?.at(-1);
+    const nothingNew =
+      settled !== undefined &&
+      settled.status === status &&
+      last?.status === status &&
+      (last.note === 'Files rebuilt' || last.note === 'Bundle created');
+
     const application: Application = {
       ...settled,
       id,
-      company: req.company,
-      role: req.role,
+      company: byNumberOnly ? settled!.company : req.company,
+      role: byNumberOnly ? settled!.role : req.role,
       /*
        * And what the build was not told stays as the tracker had it.
        *
@@ -1109,10 +1172,9 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       naming: req.naming ?? settled?.naming,
       answers,
       coverLetter: letter,
-      history: [
-        ...(settled?.history ?? []),
-        { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' },
-      ],
+      history: nothingNew
+        ? settled!.history
+        : [...(settled?.history ?? []), { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' }],
     };
     store.upsertApplication(application);
     /*

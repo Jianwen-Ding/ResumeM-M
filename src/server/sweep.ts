@@ -14,9 +14,13 @@ import { workdayEmployer } from '../jobs/extract.js';
  *
  * What makes it acceptable at all is that nothing is actually lost: the store
  * is a git repository, the sweep commits, and a swept resume comes back out of
- * the history the same way a deleted entry does. The files that were *sent*
- * are in the application's snapshot folder and are not touched by any of this
- * — the sweep removes the recipe, never the document.
+ * the history the same way a deleted entry does.
+ *
+ * And it never takes the resume of an application that went out. This used
+ * to say "the files that were *sent* are in the application's snapshot
+ * folder … the sweep removes the recipe, never the document" — but that
+ * folder is under `out/`, which a save does not track, so the recipe was the
+ * only tracked record of what was sent. See `wentOut` in model/tiers.ts.
  *
  * That argument has a hole in it, and it is the reason for the first half of
  * `sweepTemporary`: committing the *deletion* recovers nothing if the resume

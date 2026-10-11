@@ -11878,7 +11878,7 @@ const TIER_LOOK = {
   temporary: {
     label: '⌛ Temporary',
     className: 'tier-state temporary',
-    about: 'Made for one posting, and swept a week after that posting is done.',
+    about: 'Made for one posting, and swept a week after that posting closes unsent. Kept if it was sent.',
     next: 'extended',
     action: 'Keep this resume',
     title: 'Keep it in this save, so the sweep never deletes it.',
