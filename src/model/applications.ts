@@ -1424,9 +1424,16 @@ export function stats(apps: Application[]): TrackerStats {
 
   // Sent in the window, so over the same rows: every row started in it was
   // counted, and a stale close or a form still open read as sent lately.
+  // And by when it was sent, not when it was started: `appliedAt` is when the
+  // row was made, which for one opened at Applying is weeks before it went.
+  // The first `applied` in its history, as `sentBefore` in api.ts reads it.
+  const sentAt = (a: Application) => (a.history ?? []).find((h) => h.status === 'applied')?.at ?? a.appliedAt;
   const now = Date.now();
   const since = (days: number) =>
-    wentOut.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
+    wentOut.filter((a) => {
+      const at = sentAt(a);
+      return at && now - Date.parse(at) < days * 86_400_000;
+    }).length;
 
   return {
     total: apps.length,

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { removeWhatIsFiled, withCommit } from '../git/repo.js';
 import type { Repo } from '../git/repo.js';
 import { Store } from '../model/store.js';
@@ -84,6 +86,29 @@ export async function sweepTemporary(
   const due = dueToGo(store.load(), { days, now });
   if (due.length === 0) return { swept: [], held: [], days };
 
+  /*
+   * What each one was when it was found due, byte for byte.
+   *
+   * `due` is an answer from before the filing commit and the status check,
+   * and both of those wait on git — long enough for the editor to promote the
+   * resume to extended, or for somebody to save an edit to it. Deleting from
+   * the stale answer took the one they had just decided to keep, and an edit
+   * made after the check is in no commit at all. So the deletion asks again,
+   * in the synchronous callback where nothing can land between the question
+   * and the act: still due, and still the file that was found due. Anything
+   * else is held, like one the history does not have.
+   */
+  const read = (id: string) =>
+    Store.resumeFiles(id).map((rel) => {
+      try {
+        return fs.readFileSync(path.join(store.root, rel), 'utf8');
+      } catch {
+        return null;
+      }
+    });
+  const found = new Map(due.map((d) => [d.id, JSON.stringify(read(d.id))]));
+  const changed: DueToGo[] = [];
+
   const { removed, held } = await removeWhatIsFiled(
     repo,
     store.root,
@@ -94,9 +119,13 @@ export async function sweepTemporary(
       // could not be filed is still there and does not belong in the message.
       removing: (swept) => `Sweep ${naming(swept)} — temporary, and done with`,
     },
-    (d) => store.deleteResume(d.id),
+    (d) => {
+      const stillDue = dueToGo(store.load(), { days, now }).some((x) => x.id === d.id);
+      if (stillDue && JSON.stringify(read(d.id)) === found.get(d.id)) store.deleteResume(d.id);
+      else changed.push(d);
+    },
   );
-  return { swept: removed, held, days };
+  return { swept: removed.filter((d) => !changed.includes(d)), held: [...held, ...changed], days };
 }
 
 /** How long an application may sit at Applying in this save. */

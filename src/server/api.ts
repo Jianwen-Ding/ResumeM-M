@@ -1416,6 +1416,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/profile',
     handler(async (req, res) => {
       const profile = req.body as Profile;
+      /*
+       * A cast is not a check, as on `PUT /answers`: `[]` or `{}` was written
+       * over profile.yaml and read back as a placeholder name and nothing
+       * else. The editor always sends the whole profile, name included.
+       */
+      if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+        throw new Error('The profile has to be an object');
+      }
+      if (profile.name === undefined || profile.name === null) throw new Error('The profile needs a name');
       // `?commit=0` for the editor's inline edits, which commit on idle like
       // every other auto-save rather than once per keystroke.
       const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
@@ -1456,8 +1465,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * lines have all been deleted has to remain sayable.
        */
       const stored = store.load().entries.find((e) => e.id === id);
+      /*
+       * And the same for every other field, when the body is not a whole
+       * entry.
+       *
+       * Only `bullets` was carried over, so `{ title }` alone dropped the
+       * kind, the dates and the rest — and an entry with no kind is filed in
+       * custom.yaml, out of the section it was in. A body without `kind` is
+       * read as a partial and laid over what is stored. A body with one is
+       * the whole entry, which is how the editor sends it, and there a field
+       * left out is one cleared: `editEntry` empties a location or a subtitle
+       * by deleting the key.
+       */
+      const base = body.kind === undefined && stored ? stored : {};
       const entry = withDatesFrom(
         {
+          ...base,
           ...body,
           id,
           bullets: body.bullets ?? stored?.bullets,
@@ -3921,7 +3944,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         url: typed(body.url, existing?.url),
         appliedAt: body.appliedAt ?? existing?.appliedAt ?? now,
         status,
-        resumeId: body.resumeId ?? existing?.resumeId,
+        /*
+         * The row's own, unless the request named the row by id. The editor's
+         * "Record an application" sends whichever resume is open, which is a
+         * fair guess for a new row and a wrong one for a row that already
+         * says what it was sent with: an interview's tailored copy was
+         * re-pointed at `base`, became a temporary nobody's application held,
+         * and the sweep took it.
+         */
+        resumeId: body.id ? (body.resumeId ?? existing?.resumeId) : (existing?.resumeId ?? body.resumeId),
         source: body.source ?? existing?.source,
         notes: typed(body.notes, existing?.notes),
         answers: body.answers ?? existing?.answers,
@@ -3999,7 +4030,13 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.post(
     '/applications/:id/status',
     handler(async (req, res) => {
-      const { status, note } = req.body as { status: Application['status']; note?: string };
+      const { status, note } = (req.body ?? {}) as { status: Application['status']; note?: string };
+      // Written as given, so a missing one was filed as a stage called
+      // "undefined" and a typo as a stage of its own.
+      const stages: string[] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
+      if (typeof status !== 'string' || !stages.includes(status)) {
+        throw new Error(`"${String(status)}" is not a stage — one of ${stages.join(', ')}`);
+      }
       const id = String(req.params.id);
       const app = await withCommit(repo, autoCommit(), `${id}: ${status}`, () => {
         const moved = advance(store, id, status, note);
@@ -4373,6 +4410,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     if (going.length === 0) return;
 
     const name = (d: Draft) => `${d.company} — ${d.role}`;
+    /*
+     * Asked again at the moment of deleting, from the file.
+     *
+     * `going` was read before the filing commit and the status check, and
+     * both wait on git. The Workspace is live in that wait: a space reopened
+     * or rewritten in it was answered 200 by its PUT, and then deleted from
+     * the answer read before it — the edit with it. The callback below runs
+     * with nothing awaited between the read and the unlink, so a space that
+     * is not exactly what was found stale is left where it is.
+     */
+    const asFound = new Map(going.map((d) => [d.id, JSON.stringify(d)]));
     await removeWhatIsFiled(
       repo,
       store.root,
@@ -4382,7 +4430,12 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         removing: (closed) =>
           `Close the workspace for ${closed.map(name).join(', ')} — sent, and quiet since`,
       },
-      (draft) => store.deleteDraft(draft.id),
+      (draft) => {
+        // Still sent, still the same `updatedAt`, and still the same space
+        // in every other field — a save made with `touch: false` included.
+        const now = store.getDraft(draft.id);
+        if (now && JSON.stringify(now) === asFound.get(draft.id)) store.deleteDraft(draft.id);
+      },
     );
   };
 
@@ -5364,11 +5417,24 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // was actually said, not merely that something was sent.
       // File the letter in `letters/` too, tagged with the application, so the
       // letters view can be read either as a library or per application.
-      let letterId: string | undefined;
+      let filedLetterId: string | undefined;
       if (draft.coverLetter.required && draft.coverLetter.body.trim()) {
-        letterId = `${localDay()}-${slug(draft.company)}`;
+        /*
+         * Named for the role as well as the company, and numbered past a
+         * letter that belongs to another application. By the day and the
+         * company alone, two roles at one employer sent on one day wrote the
+         * same file, and the second letter replaced the first. The same
+         * application completed again writes over its own, as it always did.
+         */
+        const named = letterId(draft.company, draft.role);
+        const taken = new Map(store.loadCoverLetters().map((l) => [l.id, l.applicationId]));
+        let candidate = named;
+        for (let n = 2; taken.has(candidate) && taken.get(candidate) !== result.application.id; n++) {
+          candidate = `${named}-${n}`;
+        }
+        filedLetterId = candidate;
         const letter: CoverLetter = {
-          id: letterId,
+          id: filedLetterId,
           title: `${draft.role} — ${draft.company}`,
           company: draft.company,
           role: draft.role,
@@ -5382,7 +5448,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const app = {
         ...result.application,
         answers: answered.map((q) => ({ question: q.question, answer: q.answer })),
-        letterId,
+        letterId: filedLetterId,
       };
       app.history = [
         ...(app.history ?? []),
@@ -5491,6 +5557,10 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
   api.put(
     '/letters/:id',
     handler(async (req, res) => {
+      // Without one, the file was written with the word "undefined" in it.
+      if (typeof (req.body as { body?: unknown } | undefined)?.body !== 'string') {
+        throw new Error('A letter needs a body');
+      }
       const letter = {
         ...(req.body as { title: string; body: string }),
         id: String(req.params.id),

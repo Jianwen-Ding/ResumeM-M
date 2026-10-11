@@ -476,6 +476,58 @@ describe('a resume the history has an older version of', () => {
 });
 
 /*
+ * The sweep decides what is due, then waits on git twice — the filing commit
+ * and the status check — before it deletes. The editor is live the whole
+ * time, so a promotion or an edit can land in between, and deleting from the
+ * answer it had before the wait took the resume somebody had just kept.
+ */
+describe('a resume that changes while the sweep is waiting on git', () => {
+  /** Run `change` after the status check, just before the deletion. */
+  function meanwhile(repo: Repo, change: () => void) {
+    const pending = repo.pending.bind(repo);
+    repo.pending = async (...args: Parameters<Repo['pending']>) => {
+      const answer = await pending(...args);
+      change();
+      return answer;
+    };
+  }
+
+  it('is kept when it was promoted out of temporary', async () => {
+    planted();
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+    meanwhile(repo, () => {
+      const spec = temp.store.loadResumes().find((r) => r.id === 'job-old')!;
+      temp.store.saveResume({ ...spec, tier: 'extended' });
+    });
+
+    const { swept, held } = await sweepTemporary(temp.store, repo);
+
+    expect(swept).toEqual([]);
+    expect(held.map((d) => d.id)).toEqual(['job-old']);
+    expect(temp.exists('resumes/job-old.yaml')).toBe(true);
+  });
+
+  it('is kept when it was edited, still temporary', async () => {
+    planted();
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+    meanwhile(repo, () => {
+      const spec = temp.store.loadResumes().find((r) => r.id === 'job-old')!;
+      temp.store.saveResume({ ...spec, label: 'Backend Engineer — Acme, the second round' });
+    });
+
+    const { swept, held } = await sweepTemporary(temp.store, repo);
+
+    expect(swept).toEqual([]);
+    expect(held.map((d) => d.id)).toEqual(['job-old']);
+    expect(temp.store.loadResumes().find((r) => r.id === 'job-old')?.label).toMatch(/second round/);
+  });
+});
+
+/*
  * Opening a save brings it up to date, and with auto-commit on, what that
  * wrote is a version of its own.
  *
