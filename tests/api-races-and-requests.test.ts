@@ -290,3 +290,34 @@ describe('requests that would have written nonsense', () => {
     expect(t.store.load().entries.find((e) => e.id === 'edu_neu')?.location).toBeUndefined();
   });
 });
+
+describe('the answer bank asked through the server', () => {
+  it('does not treat a version label as an employer, and does treat the tracker\'s employers as ones', async () => {
+    const { default: express } = await import('express');
+    const { default: request } = await import('supertest');
+    const { createApi } = await import('../src/server/api.js');
+    const { Repo } = await import('../src/git/repo.js');
+    const { makeTempStore } = await import('./helpers.js');
+    const t = makeTempStore({ config: { git: { autoCommit: false }, output: { dir: 'out' } } });
+    try {
+      t.store.saveAnswers([
+        { id: 'a1', question: 'Desired employment type', default: 'v1', variants: [{ id: 'v1', label: 'Full', text: 'Full-time' }] },
+        { id: 'a2', question: 'Why do you want to work here?', default: 'v1', variants: [{ id: 'v1', label: 'Long', text: 'I have admired Globex for years.' }] },
+      ] as never);
+      t.store.saveApplications([{ id: 'x', company: 'Globex', role: 'Engineer', status: 'applied', appliedAt: '2026-01-01T00:00:00Z', history: [] }] as never);
+      const app = express();
+      app.use(express.json());
+      app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+      const res = await request(app)
+        .post('/api/answers/match')
+        .send({ questions: ['Desired employment type', 'Why do you want to work here?'], company: 'Acme' })
+        .expect(200);
+      const [type, why] = res.body.matches;
+      expect(type.confident).toBe(true);
+      expect(why.confident).toBe(false);
+      expect(why.namesAnother).toBe('Globex');
+    } finally {
+      t.cleanup();
+    }
+  });
+});

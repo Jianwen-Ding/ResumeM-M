@@ -37,7 +37,7 @@ import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion } from '../jobs/answers.js';
-import { classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
+import { UNKNOWN_COMPANY, classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
 import { jobNumberIn } from '../jobs/names.js';
 import {
   applyInclusion,
@@ -51,7 +51,7 @@ import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
-import { derivedAutofill, educationHistory, workHistory } from '../model/autofill.js';
+import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
@@ -610,14 +610,26 @@ function legalNameChoice(profile: StoreData['profile']): Record<string, string> 
  * is left for the person rather than given the same name twice.
  */
 function preferredNameFields(printed: string, legal: string): Record<string, string> {
-  const name = String(printed ?? '').replace(/\s+/g, ' ').trim();
-  if (!name || name === String(legal ?? '').replace(/\s+/g, ' ').trim()) return {};
-  const words = name.split(' ');
-  return {
-    preferred_name: name,
-    preferred_first_name: words[0] ?? name,
-    ...(words.length > 1 ? { preferred_last_name: words.slice(1).join(' ') } : {}),
-  };
+  // Split as the legal name is: "Martin Luther King Jr." is first "Martin",
+  // last "Luther King Jr.", and "Dr. Jane Smith" has no first name "Dr.".
+  return preferredName(printed, legal);
+}
+
+/**
+ * Every employer the person has applied to or drafted for, for the answer
+ * bank to look for in an answer it is about to offer elsewhere. Without it
+ * the bank guessed from its own labels, and "Full" — the long version of an
+ * answer — counted as an employer.
+ */
+const employersRead = new WeakMap<object, string[]>();
+function employersOf(store: Store, data: { applications: { company: string }[] }): string[] {
+  // Once per loaded store, since a draft's questions are matched one by one.
+  const known = employersRead.get(data);
+  if (known) return known;
+  const names = [...data.applications.map((a) => a.company), ...store.loadDrafts().map((d) => d.company)];
+  const employers = [...new Set(names.filter((n) => n && n !== UNKNOWN_COMPANY))];
+  employersRead.set(data, employers);
+  return employers;
 }
 
 /**
@@ -2834,7 +2846,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       if (!Array.isArray(questions)) throw new Error('questions must be an array');
       const data = store.load();
       res.json({
-        matches: matchAnswers(questions, data.answers, { threshold, company }),
+        matches: matchAnswers(questions, data.answers, { threshold, company, employers: employersOf(store, data) }),
         bankSize: data.answers.length,
       });
     }),
@@ -2967,7 +2979,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * harmless only while nothing labelled its answers with a real company;
        * the card does now, so this had to follow. See `namesAnother`.
        */
-      const match = matchAnswer(question, data.answers, { company: job?.company });
+      const match = matchAnswer(question, data.answers, { company: job?.company, employers: employersOf(store, data) });
 
       // Something to change about a draft is a redraft asked for, and the
       // bank's answer is not one.
@@ -4685,7 +4697,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
         // See the note at the single-question endpoint: an answer written for
         // this employer must not be read as naming another one.
-        const match = matchAnswer(q.question, data.answers, { company: body.company });
+        const match = matchAnswer(q.question, data.answers, { company: body.company, employers: employersOf(store, data) });
         return {
           id: prior?.id ?? `q${i + 1}`,
           question: q.question,
@@ -5366,7 +5378,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
 
           // Same again: this draft's own company, so its own answers count as
           // its own.
-          const match = matchAnswer(q.question, data.answers, { company: draft.company });
+          const match = matchAnswer(q.question, data.answers, { company: draft.company, employers: employersOf(store, data) });
           if (match.confident && !overwrite) {
             q.answer = match.answer ?? '';
             q.fromAnswerId = match.item?.id;
