@@ -407,3 +407,24 @@ describe('names the review found refused or accepted wrongly', () => {
     expect(job.pages).toHaveLength(2);
   });
 });
+
+describe('Lever titles "{employer} - {job}" with the employer written out', () => {
+  const LEVER = (slug: string) => `https://jobs.lever.co/${slug}/85f401d2-5242-4096-b852-2947492d0035`;
+
+  it('is "Demiurge Studios", not "Demiurgestudios", and the role is the job alone', () => {
+    expect(named([{ url: LEVER('demiurgestudios'), title: 'Demiurge Studios - 2027 Associate Software Engineer' }])).toEqual({
+      company: 'Demiurge Studios',
+      role: '2027 Associate Software Engineer',
+    });
+  });
+
+  it('takes "Palantir Technologies" off the front of the role', () => {
+    expect(named([{ url: LEVER('palantir'), title: 'Palantir Technologies - Forward Deployed Software Engineer' }]).role).toBe(
+      'Forward Deployed Software Engineer',
+    );
+  });
+
+  it('leaves a role that only starts with the employer\'s word alone', () => {
+    expect(named([{ url: LEVER('spotify'), title: 'Spotify - Backend Engineer' }])).toEqual({ company: 'Spotify', role: 'Backend Engineer' });
+  });
+});

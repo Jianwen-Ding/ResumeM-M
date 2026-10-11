@@ -1744,6 +1744,28 @@ interface TitleReading {
  * And each is still held to `acceptEmployer`, so "Summer 2027" and "US" are
  * refused even where they stand.
  */
+/*
+ * The employer the address names, written out in full by the title.
+ *
+ * Lever's titles are "{employer} - {job}", and the address has the employer
+ * as a slug: `jobs.lever.co/demiurgestudios` titled "Demiurge Studios - 2027
+ * Associate Software Engineer", `jobs.lever.co/palantir` titled "Palantir
+ * Technologies - Forward Deployed Software Engineer". Neither is the slug's
+ * name exactly, so the employer stayed on the front of the role — and
+ * "Demiurgestudios" went on the letter.
+ */
+const squashed = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+function spellsOut(segment: string, employers: string[]): string | undefined {
+  for (const employer of employers) {
+    const e = employer.trim();
+    if (!e) continue;
+    if (/\s/.test(segment) && squashed(segment) === squashed(e)) return segment;
+    const rest = segment.slice(e.length).trim();
+    if (segment.toLowerCase().startsWith(`${e.toLowerCase()} `) && rest && ORG_SUFFIX.test(rest)) return segment;
+  }
+  return undefined;
+}
+
 /** A company's legal form, as the last word of its name: "Inc.", "B.V", "GmbH". */
 const LEGAL_ENTITY = /\b(?:inc|llc|l\.l\.c|ltd|limited|corp|corporation|holdings|gmbh|plc|ag|s\.?a|n\.?v|b\.?v)\.?$/i;
 
@@ -1831,6 +1853,7 @@ function readTitle(
       rest.length > 0 &&
       aName(s) &&
       (namesEmployer(s, ctx.employers, { exact: true }) ||
+        Boolean(spellsOut(s, ctx.employers)) ||
         (rest[0]!.strong && ctx.unnamed && rest.some((r) => ROLE_NOUN.test(r.text))))
     ) {
       out.company ??= s;
@@ -2097,7 +2120,7 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
     worthy(roleFromUrl(url)) ??
     (fromTitle && !addressShaped(fromTitle) && !(soleName && !namedElsewhere) ? fromTitle : undefined);
 
-  const company =
+  const named =
     fromData ??
     fromAddress ??
     titled.hiring ??
@@ -2106,6 +2129,11 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
     titled.company ??
     titled.careersOf ??
     (soleName && soleName !== rawTitle ? soleName : undefined);
+  // The title's spelling of the address's employer: "Demiurge Studios", not "Demiurgestudios".
+  const company =
+    named && !fromData && named === fromAddress && titled.company && squashed(titled.company) === squashed(named)
+      ? titled.company
+      : named;
 
   // Page titles routinely carry the company along; the company has its own
   // field, and repeating it in the role reads badly everywhere it is shown.
