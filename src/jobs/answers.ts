@@ -1,5 +1,6 @@
 import type { AnswerBankItem, CoverLetter, Variant } from '../model/types.js';
 import { employerName, localDay } from '../model/applications.js';
+import { looksLikeCompanyName } from './extract.js';
 
 /**
  * Reusing what you already wrote, without an AI call.
@@ -237,6 +238,40 @@ function overlap(ta: Set<string>, tb: Set<string>): number {
  */
 function shortTerms(s: string): Set<string> {
   return new Set(tokens(s).filter((w) => w.length > 0 && w.length <= 2 && /[a-z]/.test(w) && !STOP.has(w)));
+}
+
+/*
+ * What a form says about the box rather than the question: "(500 characters
+ * max)", "250 words or fewer", "(2 pages maximum)". Its number is padding;
+ * every other number is part of what is asked.
+ */
+const LENGTH_LIMIT =
+  /\b(?:max(?:imum)?\.?\s+(?:of\s+)?|up\s+to\s+|limit(?:\s+of)?\s+)?\d[\d,]*\s*(?:characters?|chars?|words?|pages?|sentences?)\b(?:\s*(?:max(?:imum)?|limit|or\s+(?:less|fewer)))?/gi;
+
+/** The numbers a question asks about, written one way: "3.0" is "3", "100,000" is "100000". */
+function numbers(s: string): Set<string> {
+  const text = tidyQuestion(s).replace(LENGTH_LIMIT, ' ');
+  return new Set((text.match(/\d[\d,]*(?:\.\d+)?/g) ?? []).map((n) => String(Number(n.replace(/,/g, '')))));
+}
+
+/**
+ * Two questions that ask about different numbers ask different things.
+ *
+ * `terms` drops anything of two characters or fewer, `shortTerms` wants a
+ * letter, and `unanswered` forgives a bare number, so between them a number
+ * was invisible: "Do you have 3 years of experience?" was confidently
+ * answered with what was said to "…5 years…", a GPA above 3.0 with what was
+ * said about 3.5, three days in the office with what was said about five.
+ * A veto like the others, so it can only take confidence away; the length
+ * limit beside the box is left out of it, being the form's and not the
+ * question's.
+ */
+function sameNumbers(a: string, b: string): boolean {
+  const na = numbers(a);
+  const nb = numbers(b);
+  if (na.size !== nb.size) return false;
+  for (const n of na) if (!nb.has(n)) return false;
+  return true;
 }
 
 /**
@@ -713,9 +748,16 @@ export interface AnswerMatch {
  * that has never been an employer here is never mistaken for one.
  */
 function mentions(text: string, name: string): boolean {
-  if (name.trim().length < 3) return false;
-  const escaped = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu').test(text);
+  /*
+   * And the name without its legal form: a variant labelled "Stripe, Inc."
+   * that says "Stripe" names Stripe, and looking only for "Stripe, Inc."
+   * found nothing, so it was confident on the form for Plaid.
+   */
+  return [name, employerName(name)].some((n) => {
+    if (n.trim().length < 3) return false;
+    const escaped = n.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu').test(text);
+  });
 }
 
 /*
@@ -724,6 +766,15 @@ function mentions(text: string, name: string): boolean {
  * bank's "Generic (edit per company)".
  */
 const TOOL_LABEL = /^(saved|chosen on a form|typed on a form|generic\b.*|default|base)$/i;
+
+/*
+ * Labels that say which version of an answer it is, not who it was for:
+ * "Full", "Short (two lines)", "Profile URL". Each read as a company name,
+ * so a "Full-time" answer named an employer called "Full" and was never
+ * confident.
+ */
+const VERSION_LABEL =
+  /^(?:(?:full|short(?:er)?|long(?:er)?|brief|detailed|formal|informal|casual|concise|extended|expanded|alternate|alternative|generic|technical|one[- ]liner)(?:\s+(?:version|answer|form|draft))?(?:\s*\(.*\))?|(?:version|option|draft|v)\s*\d+)$|\b(?:url|link|lines?|words?|sentences?|paragraphs?|characters?)\b|^profile\b/i;
 
 /**
  * Every employer the bank has written an answer for.
@@ -735,26 +786,46 @@ const TOOL_LABEL = /^(saved|chosen on a form|typed on a form|generic\b.*|default
  * warning that each named somebody else. A label that only repeats its own
  * answer names the answer; the tools' own labels name nobody.
  */
-function employersInBank(bank: AnswerBankItem[]): string[] {
+function employersInBank(bank: AnswerBankItem[], employers?: string[]): string[] {
+  /*
+   * The employers the person has actually applied to, when the caller knows
+   * them: the tracker's companies and the drafts'. A label is only ever a
+   * guess at one, and a guess that is wrong costs a confident answer.
+   */
+  const known = (employers ?? []).map((e) => String(e ?? '').trim()).filter((e) => looksLikeCompanyName(e));
+  if (known.length) return [...new Set(known)];
   const names = new Set<string>();
   for (const item of bank) {
     for (const v of item.variants) {
       const label = (v.label ?? '').trim();
       if (label.length < 3 || TOOL_LABEL.test(label)) continue;
       if (label.toLowerCase() === (v.text ?? '').trim().toLowerCase()) continue;
+      if (VERSION_LABEL.test(label) || !looksLikeCompanyName(label)) continue;
       names.add(label);
     }
   }
   return [...names];
 }
 
+export interface MatchOptions {
+  threshold?: number;
+  /** The employer being applied to. */
+  company?: string;
+  /**
+   * Every employer the person has applied to or drafted for — the tracker's
+   * companies and the drafts' — to look for in an answer. Without it the
+   * bank's own labels stand in, those that read as a company's name.
+   */
+  employers?: string[];
+}
+
 export function matchAnswer(
   question: string,
   bank: AnswerBankItem[],
-  options: number | { threshold?: number; company?: string } = {},
+  options: number | MatchOptions = {},
 ): AnswerMatch {
   // The threshold used to be the third argument, and callers pass it that way.
-  const { threshold = 0.45, company } = typeof options === 'number' ? { threshold: options } : options;
+  const { threshold = 0.45, company, employers } = typeof options === 'number' ? ({ threshold: options } as MatchOptions) : options;
 
   // See `isSensitiveQuestion`: an SSN, a date of birth, a passport number, a
   // home address never come back from the bank, not even as a loose read-first
@@ -799,7 +870,7 @@ export function matchAnswer(
   const ours = who(company ?? '');
   const namesAnother = forThisCompany
     ? undefined
-    : employersInBank(bank).find((name) => who(name) !== ours && mentions(text, name));
+    : employersInBank(bank, employers).find((name) => who(name) !== ours && mentions(text, name));
 
   return {
     question,
@@ -824,7 +895,8 @@ export function matchAnswer(
       (best.score >= 0.7 || overlap(bare(question), bare(best.item.question)) >= 0.7) &&
       fullyAsked(question, best.item.question) &&
       unanswered(question, best.item.question, company).length === 0 &&
-      sameShortTerms(question, best.item.question),
+      sameShortTerms(question, best.item.question) &&
+      sameNumbers(question, best.item.question),
     ...(namesAnother ? { namesAnother } : {}),
   };
 }
@@ -832,7 +904,7 @@ export function matchAnswer(
 export function matchAnswers(
   questions: string[],
   bank: AnswerBankItem[],
-  options?: number | { threshold?: number; company?: string },
+  options?: number | MatchOptions,
 ): AnswerMatch[] {
   return questions.map((q) => matchAnswer(q, bank, options ?? {}));
 }

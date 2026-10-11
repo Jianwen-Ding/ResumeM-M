@@ -1699,3 +1699,84 @@ describe('the keyword match with two skills sections', () => {
     }
   });
 });
+
+describe('a hiring thread says so in its title', () => {
+  const thread = (title: string, body: string) =>
+    `<!doctype html><html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${body}</p></main></body></html>`;
+  const url = 'https://www.reddit.com/r/cscareerquestions/comments/1abc/a_thread/';
+
+  it('is not a hiring thread for saying "looking for" or "hiring" in the body', () => {
+    const advice = thread(
+      'Should I take this offer? : r/cscareerquestions',
+      'Looking for advice. Got an offer, full-time, remote. Base salary is low and benefits ok. Requirements were 3 years of experience. Hiring is slow.',
+    );
+    expect(classifyPage(advice, url).kind).toBe('none');
+    expect(classifyPage(advice, url).why).not.toContain('a hiring thread');
+  });
+
+  it('while one marked [Hiring] still is', () => {
+    const hiring = thread('[Hiring] Backend Engineer, remote : r/forhire', 'Full-time, remote. Requirements: 3 years of experience. Benefits.');
+    expect(classifyPage(hiring, 'https://www.reddit.com/r/forhire/comments/1abd/hiring/').why).toContain('a hiring thread');
+  });
+});
+
+describe('a posting whose title is not just a role word at the end', () => {
+  const BODY =
+    `<h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul>` +
+    `<h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p>` +
+    `<a class="btn" href="/careers/apply?id=1">Apply now</a>`;
+  const page = (title: string, h1: string, extra = '') =>
+    `<!doctype html><html><head><title>${title}</title>${extra}</head><body><main><h1>${h1}</h1>${BODY}</main></body></html>`;
+
+  it.each([
+    ['Senior Software Engineer (Remote) - Acme Careers', 'Senior Software Engineer (Remote)'],
+    ['Software Engineering Internship - Summer 2027 | Acme', 'Software Engineering Internship - Summer 2027'],
+    ['Backend Developer (m/w/d) | Acme GmbH', 'Backend Developer (m/w/d)'],
+    ['Account Executive, Mid-Market | Acme', 'Account Executive'],
+    ['Product Owner | Acme', 'Product Owner'],
+    ['Developer Advocate | Acme', 'Developer Advocate'],
+    ['Pharmacist | Acme Health', 'Pharmacist'],
+    ['Electrician | Acme', 'Electrician'],
+  ])('reads %s as a posting', (title, h1) => {
+    expect(classifyPage(page(title, h1), 'https://acme.com/careers/role-slug').kind).toBe('posting');
+  });
+
+  it('and a role no list knows, when the address carries its number', () => {
+    expect(classifyPage(page('Shift Supervisor, Downtown | Acme Coffee', 'Shift Lead Downtown Store'), 'https://www.acme.com/jobs/12345').kind).toBe(
+      'posting',
+    );
+  });
+
+  it('while an article, a profile and an encyclopedia entry are none of them', () => {
+    expect(
+      classifyPage(page('Becoming a Staff Engineer | Irrational Exuberance', 'Becoming a Staff Engineer'), 'https://lethain.com/staff-engineer/').kind,
+    ).toBe('none');
+    expect(
+      classifyPage(page('Staff Engineer | Eng Blog', 'Staff Engineer', '<meta property="og:type" content="article">'), 'https://blog.acme.com/careers/staff-engineer').kind,
+    ).toBe('none');
+    expect(classifyPage(page('Software engineer - Wikipedia', 'Software engineer'), 'https://en.wikipedia.org/wiki/Software_engineer').kind).toBe('none');
+    expect(
+      classifyPage(page('Jane Doe - Senior Software Engineer | LinkedIn', 'Jane Doe'), 'https://www.linkedin.com/in/jane-doe-123/').kind,
+    ).toBe('none');
+    expect(
+      classifyPage(page('Twitter fires outspoken engineer - The Verge', 'Twitter fires outspoken engineer'), 'https://www.theverge.com/2022/11/14/23458233/twitter-fires-engineer').kind,
+    ).toBe('none');
+  });
+});
+
+describe('what a page says about itself is not a role or an employer', () => {
+  it.each(['Page not found', 'Untitled', 'About us', 'Remote', 'Hybrid', 'Full-time', 'My Applications'])('%s is not a role', (said) => {
+    expect(looksLikeRoleTitle(said)).toBe(false);
+  });
+
+  it('while a role is still a role', () => {
+    expect(looksLikeRoleTitle('Remote Software Engineer')).toBe(true);
+    expect(looksLikeRoleTitle('Full-time Barista')).toBe(true);
+  });
+
+  it('nor is a sign-in step or a bare legal form an employer', () => {
+    expect(looksLikeCompanyName('Sign in')).toBe(false);
+    expect(looksLikeCompanyName('Inc.')).toBe(false);
+    expect(looksLikeCompanyName('Acme, Inc.')).toBe(true);
+  });
+});

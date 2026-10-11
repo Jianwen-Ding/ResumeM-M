@@ -1256,3 +1256,90 @@ describe('the identifiers the extension refuses, refused here as well', () => {
     },
   );
 });
+
+describe('a question that asks about a different number', () => {
+  const one = (question: string, text = 'Yes'): AnswerBankItem[] => [
+    { id: 'ans_n', question, default: 'v_1', variants: [{ id: 'v_1', label: 'Saved', text }] },
+  ];
+
+  it('is not answered confidently with what was said about another number', () => {
+    expect(matchAnswer('Do you have 3 years of experience?', one('Do you have 5 years of experience?')).confident).toBe(false);
+    expect(matchAnswer('Is your GPA above 3.0?', one('Is your GPA above 3.5?')).confident).toBe(false);
+    expect(
+      matchAnswer('Are you able to work in the office 3 days a week?', one('Are you able to work in the office 5 days a week?'))
+        .confident,
+    ).toBe(false);
+  });
+
+  it('while the same number, and a length limit beside the box, still match', () => {
+    expect(matchAnswer('Do you have 5 years of experience?', one('Do you have 5 years of experience?')).confident).toBe(true);
+    expect(matchAnswer('Is your GPA above 3.0?', one('Is your GPA above 3?')).confident).toBe(true);
+    expect(
+      matchAnswer('Why do you want this job? (500 characters max)', one('Why do you want this job?', 'The work.')).confident,
+    ).toBe(true);
+  });
+});
+
+describe('an employer label with its legal form on it', () => {
+  it('still vetoes an answer that names that employer for somebody else', () => {
+    const bank: AnswerBankItem[] = [
+      {
+        id: 'ans_why',
+        question: 'Why do you want to work here?',
+        default: 'v_1',
+        variants: [{ id: 'v_1', label: 'Stripe, Inc.', text: 'I want to join Stripe because payments infrastructure excites me.' }],
+      },
+    ];
+    const m = matchAnswer('Why do you want to work here?', bank, { company: 'Plaid' });
+    expect(m.namesAnother).toBe('Stripe, Inc.');
+    expect(m.confident).toBe(false);
+    // And written for these people, it is theirs.
+    expect(matchAnswer('Why do you want to work here?', bank, { company: 'Stripe' }).confident).toBe(true);
+  });
+});
+
+describe('a label that says which version of an answer it is', () => {
+  const bank: AnswerBankItem[] = [
+    {
+      id: 'ans_type',
+      question: 'Are you looking for full-time work?',
+      default: 'v_full',
+      variants: [
+        { id: 'v_full', label: 'Full', text: 'Full-time, starting in June.' },
+        { id: 'v_short', label: 'Short (two lines)', text: 'Short answer: full-time.' },
+      ],
+    },
+    {
+      id: 'ans_link',
+      question: 'LinkedIn profile',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Profile URL', text: 'https://www.linkedin.com/in/someone' }],
+    },
+    {
+      id: 'ans_why',
+      question: 'Why do you want to work here?',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Acme', text: 'Acme builds the rockets I grew up watching.' }],
+    },
+  ];
+
+  it('is not taken for an employer', () => {
+    const m = matchAnswer('Are you looking for full-time work?', bank, { company: 'Helios' });
+    expect(m.namesAnother).toBeUndefined();
+    expect(m.confident).toBe(true);
+    // While a company's name still is.
+    expect(matchAnswer('Why do you want to work here?', bank, { company: 'Helios' }).namesAnother).toBe('Acme');
+  });
+
+  it('and the employers the caller knows are the ones looked for, when it knows them', () => {
+    const known = { company: 'Helios', employers: ['Helios', 'Globex'] };
+    // "Acme" is a label, never an application: with the list given, it is not looked for.
+    expect(matchAnswer('Why do you want to work here?', bank, known).namesAnother).toBeUndefined();
+    const globex: AnswerBankItem[] = [
+      { id: 'ans_why', question: 'Why do you want to work here?', default: 'v_1', variants: [{ id: 'v_1', label: 'Saved', text: 'Globex is where I learned to ship.' }] },
+    ];
+    const m = matchAnswer('Why do you want to work here?', globex, known);
+    expect(m.namesAnother).toBe('Globex');
+    expect(m.confident).toBe(false);
+  });
+});

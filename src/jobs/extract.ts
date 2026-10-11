@@ -1391,6 +1391,8 @@ export function looksLikeCompanyName(name?: string): boolean {
   // Without the trailing punctuation: "We are hiring!" is the same non-answer
   // as "We are hiring", and a page that shouts it is if anything more certain.
   if (NOT_A_NAME.test(n.replace(/[!?.]+$/, ''))) return false;
+  // The sign-in step in front of a form, and a legal form with no name before it.
+  if (/^(?:sign[ -]?(?:in|on|up)|log[ -]?(?:in|on)|inc|llc|l\.l\.c|ltd|limited|corp|corporation|co|plc|gmbh|ag|s\.?a)\.?$/i.test(n)) return false;
   // A sentence, a URL fragment, or a list is not a name.
   if (/[.!?]\s|[|<>{}]|\S@\S|^https?:/i.test(n)) return false;
   if (n.split(' ').length > 6) return false;
@@ -1617,6 +1619,14 @@ const A_POST =
  * themselves, which is a moment's work. Accepting a non-role puts a line in
  * the one list that is supposed to be the record of what they have done.
  */
+/*
+ * What a page or a posting says about itself or about the work's terms, and
+ * which was filed as the role: an error page, an empty tab, the About page,
+ * a working arrangement, and the tracker's own screen.
+ */
+const NOT_A_JOB_TITLE =
+  /^(?:(?:page|job|posting) not found|404(?: not found)?|not found|untitled(?: page| document)?|about(?: us)?|contact(?: us)?|remote|hybrid|on-?site|in[- ]office|full[- ]?time|part[- ]?time|contract|temporary|permanent|my applications|applications)$/i;
+
 export function looksLikeRoleTitle(role?: string): boolean {
   const r = (role ?? '').trim().replace(/\s+/g, ' ');
   if (r.length < 2 || r.length > 120) return false;
@@ -1628,6 +1638,7 @@ export function looksLikeRoleTitle(role?: string): boolean {
   // With its description: "Intern/Co-op" and "Developer/Engineer" are jobs.
   if (/^[\w.-]+\/[\w.-]+:\s/.test(r)) return false;
   if (NOT_A_ROLE.test(r.replace(/[!?.]+$/, ''))) return false;
+  if (NOT_A_JOB_TITLE.test(r.replace(/[!?.]+$/, ''))) return false;
   if (A_LIST_OF_JOBS.test(r)) return false;
   /*
    * A word, somewhere in it. `R-129384` and `4021_A` are requisition numbers
@@ -2228,6 +2239,16 @@ export interface PageVerdict {
 const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|successfactors|brassring|myjobs\.adp|workforcenow\.adp|recruiting\.adp)\b/i;
 const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y|ies)|apply|application|hiring|req|requisition)(\/|$|[?#])/i;
 const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
+/** What a hiring thread calls itself: "[Hiring]", "Who is hiring?", "We're hiring". */
+const HIRING_MARKER =
+  /\[\s*hiring\s*\]|\(\s*hiring\s*\)|\bwho\s*(?:is|['’]s)\s+hiring\b|\bwe\s*(?:are|['’]re)\s+hiring\b|\bnow\s+hiring\b|^\s*hiring\s*[:\-–—]/i;
+
+/** A person's page on a network, which has their job title for a title. */
+const PROFILE_PAGE = /\blinkedin\.com\/(?:in|pub)\//i;
+
+/** An encyclopedia or a dictionary, whose entry for a job is titled with it. */
+const REFERENCE_SITE = /(?:^|\.)(?:wikipedia|wiktionary|wikihow|britannica|merriam-webster|dictionary)\.(?:org|com)$/i;
+
 const FORUM = /\b(news\.ycombinator|reddit|lobste\.rs|discourse|forum|stackexchange|quora|levels\.fyi|blind)\b/i;
 
 /**
@@ -2394,7 +2415,14 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     asksWhoYouAre;
   if (uploadsResume) add(3, 'asks for a resume file');
 
-  const forumHiring = FORUM.test(link) && /\b(hiring|who is hiring|looking for|we are hiring)\b/i.test(text);
+  /*
+   * The thread has to say it is hiring where a thread says what it is: in
+   * its title or its heading. "Looking for" and "hiring" anywhere in the body
+   * made every r/cscareerquestions thread asking for advice a hiring thread —
+   * "Looking for advice", "I was looking for a job for months".
+   */
+  const headline = `${/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? ''} ${/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1] ?? ''}`;
+  const forumHiring = FORUM.test(link) && HIRING_MARKER.test(stripTags(headline));
   if (forumHiring) add(3, 'a hiring thread');
 
   const against = countIn(text, AGAINST);
@@ -2443,11 +2471,28 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * through.
    */
   const aRole = (said: string) => {
-    const named = stripTags(said).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
-    return (
-      named.split(/\s+/).length <= 8 &&
-      (ENDS_WITH_ROLE.test(named) || LEADS_WITH_ROLE.test(named)) &&
-      !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my)\b/i.test(named)
+    const first = stripTags(said).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
+    /*
+     * And the same with a hyphen as the separator, and without what a title
+     * puts in brackets after the role: "Senior Software Engineer (Remote) -
+     * Acme Careers", "Backend Developer (m/w/d)", "Software Engineering
+     * Internship - Summer 2027". Each named no role, because the role word
+     * was not the end of anything. Both readings are tried, so a title that
+     * puts the employer first with a hyphen still names its role as before.
+     */
+    const bare = (n: string) => n.replace(/(?:\s*\([^()]*\))+$/, '').trim();
+    const hyphened = bare(first.split(/\s+-\s+/)[0]!);
+    /*
+     * The hyphen reading only where the role is written as a title is, with a
+     * capital: "Twitter fires outspoken engineer - The Verge" is a headline.
+     */
+    const titled = (ROLE_WORDS.exec(hyphened.split(/\s+/).slice(-2).join(' '))?.[0] ?? '').match(/^[A-Z]/);
+    const named = [bare(first), ...(titled ? [hyphened] : [])];
+    return named.some(
+      (n) =>
+        n.split(/\s+/).length <= 8 &&
+        (ENDS_WITH_ROLE.test(n) || LEADS_WITH_ROLE.test(n)) &&
+        !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my|becoming|being|life|inside)\b/i.test(n),
     );
   };
   /*
@@ -2458,7 +2503,30 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * and the application started, nameless, on the form three steps later.
    * Its `og:title` is the role: "Software Engineering Intern".
    */
-  const namesARole = !thread && (aRole(heading) || aRole(metaContent(html, ['og:title']) ?? ''));
+  /*
+   * Never a page that says it is something else: an article (`og:type`), a
+   * person's profile, an encyclopedia's entry. Each has a job title for a
+   * title — "Becoming a Staff Engineer", "Jane Doe - Senior Software
+   * Engineer | LinkedIn", "Software engineer - Wikipedia" — and none is a
+   * job anybody can apply for.
+   */
+  const notAPosting =
+    /^article$/i.test(metaContent(html, ['og:type'])?.trim() ?? '') ||
+    PROFILE_PAGE.test(link) ||
+    REFERENCE_SITE.test(hostOf(url));
+  /*
+   * Or the address names one job and the page reads like a posting: a job's
+   * number in the URL and three or more of a posting's words. Roles no list
+   * of role words reaches — "Barista", "Pharmacist", "Product Owner" — are
+   * still one job when the address says which. Only an address that is a
+   * job's, by its path or its host: a news story's number is not one.
+   */
+  const numberedPosting =
+    Boolean(jobNumberIn(url)) && (JOB_PATH.test(link) || ATS.test(link) || BOARD.test(hostOf(url))) && described >= 3;
+  const namesARole =
+    !thread &&
+    !notAPosting &&
+    (aRole(heading) || aRole(metaContent(html, ['og:title']) ?? '') || numberedPosting);
 
   const hasFields = /<(input|textarea|select)\b/i.test(html);
   /*
@@ -2481,9 +2549,9 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    */
   const actionable =
     /"@type"\s*:\s*"?JobPosting/i.test(html) ||
-    uploadsResume ||
+    (uploadsResume && !notAPosting) ||
     namesARole ||
-    (formish >= 3 && hasFields && asksWhoYouAre);
+    (formish >= 3 && hasFields && asksWhoYouAre && !notAPosting);
   if (namesARole) why.push('names a role');
   else if (actionable) why.push('somewhere to apply');
   else if (thread) why.push('a comment thread, whatever it is about');
@@ -2638,7 +2706,7 @@ export const JOB_SHAPED = 3;
  * gets in through the button, the form, the structured data or the host.
  */
 const ROLE_WORDS =
-  /\b(engineer|developer|programmer|scientist|analyst|designer|manager|director|architect|administrator|consultant|specialist|technician|researcher|intern|internship|associate|coordinator|accountant|nurse|physician|teacher|professor|writer|editor|marketer|recruiter|counsel|attorney|paralegal|therapist|chef|driver|technologist|strategist|producer|operator|advisor|apprentice|fellow|lead|head of|officer|assistant|representative|agent)\b/i;
+  /\b(engineer|developer|programmer|scientist|analyst|designer|manager|director|architect|administrator|consultant|specialist|technician|researcher|intern|internship|associate|coordinator|accountant|nurse|physician|teacher|professor|writer|editor|marketer|recruiter|counsel|attorney|paralegal|therapist|chef|driver|technologist|strategist|producer|operator|advisor|apprentice|fellow|lead|head of|officer|assistant|representative|agent|executive|owner|advocate|pharmacist|electrician|plumber|mechanic|welder|carpenter|barista|cashier|clerk|bartender|cook|dentist|hygienist|veterinarian|pilot|librarian|instructor|tutor|trainer|planner|buyer|auditor|controller|underwriter|actuary|economist|statistician|psychologist|pharmacy technician|caregiver|receptionist|sre|sdr|bdr)\b/i;
 /**
  * The role word has to end the title, give or take a level — "Platform
  * Engineer", "Software Engineer II". "Software Engineer salaries" is a page

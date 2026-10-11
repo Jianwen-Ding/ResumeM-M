@@ -138,6 +138,29 @@ export function removeFile(full: string, what: string): void {
  */
 export { withoutBom } from './bom.js';
 
+/** `profile.autofill`'s scalars as their source text. See `Store.readProfile`. */
+function autofillAsWritten(profile: Profile, raw: string): Profile {
+  const block = profile?.autofill as Record<string, unknown> | undefined;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return profile;
+  let node: unknown;
+  try {
+    node = YAML.parseDocument(withoutBom(raw)).get('autofill', true);
+  } catch {
+    return profile;
+  }
+  if (!YAML.isMap(node)) return profile;
+  const autofill: Record<string, unknown> = { ...block };
+  for (const pair of node.items) {
+    const key = YAML.isScalar(pair.key) ? String(pair.key.value) : undefined;
+    const value = pair.value;
+    if (key === undefined || !(key in autofill) || !YAML.isScalar(value)) continue;
+    if (typeof value.value === 'string' || value.value === null) continue;
+    // A plain scalar's own characters; a quoted one was a string already.
+    if (typeof value.source === 'string') autofill[key] = value.source;
+  }
+  return { ...profile, autofill: autofill as Record<string, string> };
+}
+
 export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
   /*
    * A byte-order mark is how Notepad and a good many Windows tools start a
@@ -605,6 +628,25 @@ export class Store {
     );
   }
 
+  /*
+   * The profile, with its autofill values as they were typed.
+   *
+   * Every one of them goes into a text box on a form, and YAML reads a bare
+   * `address_zip: 02115` as the number 2115, `phone_ext: 0042` as 42 and
+   * `gpa_scale: 4.0` as 4 — a ZIP code a form rejects, or worse, accepts.
+   * So the block's plain scalars are taken from the file's own text. Only the
+   * autofill block: everywhere else in the profile the parsed value is the
+   * one meant.
+   */
+  private readProfile(): Profile {
+    const fallback: Profile = { name: PLACEHOLDER_NAME };
+    return this.cached(
+      this.file('profile.yaml'),
+      (raw) => autofillAsWritten(parseStoreYaml('profile.yaml', raw, fallback), raw),
+      fallback,
+    );
+  }
+
   private readYaml<T>(rel: string | string[], fallback: T): T {
     const parts = Array.isArray(rel) ? rel : [rel];
     const f = this.file(...parts);
@@ -763,7 +805,7 @@ export class Store {
     const config = this.loadConfig();
     const entries = this.loadEntries();
     return {
-      profile: normalizeProfile(this.readYaml<Profile>('profile.yaml', { name: PLACEHOLDER_NAME })),
+      profile: normalizeProfile(this.readProfile()),
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.

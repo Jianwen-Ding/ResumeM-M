@@ -13,6 +13,7 @@ import {
   educationHistory,
   schoolName,
   graduation,
+  preferredName,
   readGpa,
   splitDegree,
   splitLocation,
@@ -52,8 +53,8 @@ describe('splitting a name into the two boxes a form has', () => {
     expect(splitName('Cher')).toBeUndefined();
     expect(splitName('')).toBeUndefined();
     expect(splitName('   ')).toBeUndefined();
-    // A list, or a name with something after it: not a split this can read.
-    expect(splitName('Testwell, Morgan, PhD')).toBeUndefined();
+    // A list: not a split this can read.
+    expect(splitName('Testwell, Morgan, Jane')).toBeUndefined();
   });
 
   it('does not leave the given name empty by eating every particle', () => {
@@ -738,5 +739,87 @@ describe('a school and a degree as a form asks for them', () => {
       school: 'University of Virginia', degree: 'Bachelor of Science', major: 'Computer Science', gpa: '3.97',
       start: { year: 2025, month: 8 }, end: { year: 2027, month: 12 },
     });
+  });
+});
+
+describe('a name with a title in front or a credential after it', () => {
+  it('takes a credential after a comma as a suffix, not as the given name', () => {
+    expect(splitName('Jane Smith, CFA')).toEqual({ first: 'Jane', last: 'Smith' });
+    expect(splitName('Jane Smith, MS/PMP')).toEqual({ first: 'Jane', last: 'Smith' });
+    expect(splitName('Testwell, Morgan, PhD')).toEqual({ first: 'Morgan', last: 'Testwell' });
+    // While a name filed surname first is still read that way.
+    expect(splitName('Testwell, Morgan')).toEqual({ first: 'Morgan', last: 'Testwell' });
+  });
+
+  it('leaves the honorific out of the first-name box', () => {
+    expect(splitName('Dr. Jane Smith')).toEqual({ first: 'Jane', last: 'Smith' });
+    expect(splitName('Mr John Doe')).toEqual({ first: 'John', last: 'Doe' });
+    expect(splitName('Prof. Ada Lovelace, PhD')).toEqual({ first: 'Ada', last: 'Lovelace' });
+  });
+
+  it('splits a preferred name the way it splits the legal one', () => {
+    expect(preferredName('Martin Luther King Jr.', 'Michael King Jr.')).toEqual({
+      preferred_name: 'Martin Luther King Jr.',
+      preferred_first_name: 'Martin',
+      preferred_last_name: 'King',
+    });
+    expect(preferredName('Cher', 'Cherilyn Sarkisian')).toEqual({ preferred_name: 'Cher' });
+    expect(preferredName('Jane Smith', 'Jane Smith')).toEqual({});
+  });
+});
+
+describe('a location whose second part is not a state', () => {
+  it('puts a country, by name or by code, in the Country box', () => {
+    expect(splitLocation('London, UK')).toEqual({ city: 'London', country: 'UK' });
+    expect(splitLocation('Austin, USA')).toEqual({ city: 'Austin', country: 'USA' });
+    expect(splitLocation('Paris, France')).toEqual({ city: 'Paris', country: 'France' });
+    expect(splitLocation('Lyon, FR')).toEqual({ city: 'Lyon', country: 'FR' });
+  });
+
+  it('and a state or a province written out in the State box', () => {
+    expect(splitLocation('Austin, Texas')).toEqual({ city: 'Austin', state: 'Texas' });
+    expect(splitLocation('Toronto, Ontario')).toEqual({ city: 'Toronto', state: 'Ontario' });
+  });
+
+  it('does not call Remote a city', () => {
+    expect(splitLocation('Remote, US')).toEqual({ country: 'US' });
+  });
+
+  it('offers nothing it cannot place', () => {
+    expect(splitLocation('Springfield, Narnia')).toBeUndefined();
+    expect(splitLocation('Cambridge, XQ')).toBeUndefined();
+  });
+});
+
+describe('a degree line with more after the discipline', () => {
+  it('cuts a minor, a concentration or an honours clause off before splitting', () => {
+    expect(splitDegree('B.S. in Computer Science, Minor in Mathematics')).toEqual({ degree: 'B.S.', major: 'Computer Science' });
+    expect(splitDegree('BS in Computer Science with a concentration in AI')).toEqual({ degree: 'BS', major: 'Computer Science' });
+    expect(splitDegree('Bachelor of Arts in Economics and Minor in Math')).toEqual({ degree: 'Bachelor of Arts', major: 'Economics' });
+    expect(splitDegree('Bachelor of Science in Computer Science, magna cum laude')).toEqual({
+      degree: 'Bachelor of Science',
+      major: 'Computer Science',
+    });
+    expect(splitDegree('BSc (Hons) in Physics, First-Class Honours')).toEqual({ degree: 'BSc', major: 'Physics' });
+    expect(splitDegree('M.S. in Statistics; Specialization in Machine Learning')).toEqual({ degree: 'M.S.', major: 'Statistics' });
+  });
+});
+
+describe('the newest school when one is still in progress', () => {
+  it('takes a degree still under way over one finished', () => {
+    const out = derivedAutofill({}, [
+      edu({ id: 'edu_bs', title: 'State University', subtitle: 'B.S. in Biology', period: { start: { year: 2018 }, end: { year: 2022 } } }),
+      edu({ id: 'edu_ms', title: 'Tech Institute', subtitle: 'M.S. in Computer Science', period: { start: { year: 2024, month: 9 }, ongoing: true } }),
+    ]);
+    expect(out.school).toBe('Tech Institute');
+  });
+
+  it('and reads a lone date as when it ends, as the graduation boxes do', () => {
+    const out = derivedAutofill({}, [
+      edu({ id: 'edu_bs', title: 'State University', subtitle: 'B.S. in Biology', period: { start: { year: 2018 }, end: { year: 2022 } } }),
+      edu({ id: 'edu_ms', title: 'Tech Institute', subtitle: 'M.S. in Computer Science', dates: 'Expected May 2026', period: { start: { year: 2026, month: 5 }, expected: true } }),
+    ]);
+    expect(out.school).toBe('Tech Institute');
+    expect(out.graduation_date).toBe('May 2026');
   });
 });

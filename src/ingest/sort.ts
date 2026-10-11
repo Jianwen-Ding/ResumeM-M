@@ -42,7 +42,24 @@ export const MAX_BLOCKS = 120;
 const KINDS: SampleKind[] = ['letter', 'answer', 'resume', 'other'];
 
 const SALUTATION = /^(dear|hello|hi|greetings|to whom it may concern)\b[^\n]{0,80}[,:]\s*$/im;
-const SIGN_OFF = /^(sincerely|regards|best regards|kind regards|best|yours (sincerely|truly|faithfully)|thank you|thanks)\b[^\n]{0,40}[,.]?\s*$/im;
+/*
+ * A sign-off is a line of its own with nothing after a comma but a name:
+ * "Sincerely,", "Best regards, Jane Doe", "Thanks again for your time." Not
+ * a sentence that opens with the same word
+ * — "Thanks to my time at Beta, I learned Kafka." ended a letter half-way
+ * through, and the rest of it was filed as something else.
+ */
+const SIGN_OFF_WORDS = /^(?:sincerely|regards|best regards|kind regards|best|yours (?:sincerely|truly|faithfully)|thank you|thanks)\b(?!\s+to\b)([^\n,]{0,40})(?:,(.*))?$/i;
+
+function signsOff(text: string): boolean {
+  return text.split('\n').some((raw) => {
+    const hit = SIGN_OFF_WORDS.exec(raw.trim());
+    if (!hit) return false;
+    const after = (hit[2] ?? '').trim().replace(/[.!]$/, '');
+    // Nothing after the comma, or a name: capitals, up to four words.
+    return !after || /^\p{Lu}[\p{L}.'’-]*(?:\s+\p{Lu}[\p{L}.'’-]*){0,3}$/u.test(after);
+  });
+}
 const RESUME_HEADING = /^(education|experience|work experience|employment|skills|technical skills|projects|publications|awards|certifications)\s*$/im;
 
 /* ------------------------------------------------------------------ *
@@ -100,6 +117,16 @@ function isQuestion(text: string): boolean {
   return /\?\s*$/.test(first.trim()) || /^(q|question)\s*[:.]/i.test(first.trim());
 }
 
+/*
+ * A question with an answer under it, however short. "Why us?" over "Your
+ * mission." is a whole answer at 21 characters, and the floor meant for page
+ * numbers threw it away. A question on its own is still nothing.
+ */
+function answered(text: string): boolean {
+  const [first, ...rest] = text.split('\n');
+  return isQuestion(first ?? '') && /[\p{L}\p{N}]/u.test(rest.join('\n'));
+}
+
 function looksLikeResume(text: string): boolean {
   if (RESUME_HEADING.test(text)) return true;
   const lines = text.split('\n').filter(Boolean);
@@ -138,7 +165,7 @@ function labelFor(kind: SampleKind, text: string, fallback: string): string {
 
 function build(kind: SampleKind, blocks: Block[], title: string, by: Proposal['by']): Proposal | null {
   const text = blocks.map((b) => b.text).join('\n\n').trim();
-  if (text.length < MIN_SAMPLE) return null;
+  if (text.length < MIN_SAMPLE && !(kind === 'answer' && answered(text))) return null;
   return { kind, title, text, blocks: blocks.map((b) => b.index), by };
 }
 
@@ -176,7 +203,7 @@ export function sortByRules(fileName: string, blocks: Block[]): Proposal[] {
         if (SALUTATION.test(blocks[end]!.text)) break;
 
         run.push(blocks[end]!);
-        if (SIGN_OFF.test(blocks[end]!.text)) {
+        if (signsOff(blocks[end]!.text)) {
           // The name under "Sincerely," is part of the letter — but the next
           // letter's salutation is short too, and is not.
           const next = blocks[end + 1];
@@ -305,8 +332,7 @@ export function readIngestPlan(output: string, fileName: string, blocks: Block[]
       const index = typeof n === 'number' ? n : Number.parseInt(String(n), 10);
       const block = byIndex.get(index);
       // Unknown or already-spoken-for blocks are simply not there.
-      if (!block || claimed.has(index)) continue;
-      claimed.add(index);
+      if (!block || claimed.has(index) || picked.includes(block)) continue;
       picked.push(block);
     }
     if (picked.length === 0) continue;
@@ -316,8 +342,16 @@ export function readIngestPlan(output: string, fileName: string, blocks: Block[]
     const title = (rawTitle.length > 70 ? `${rawTitle.slice(0, 69).trimEnd()}…` : rawTitle)
       || labelFor(kind, picked[0]!.text, base);
 
+    /*
+     * Claimed only once they make something. A group too short to keep —
+     * a question on its own, its answer on its own — claimed its blocks
+     * and was then dropped, so the rules never saw them either and the
+     * answer was lost between the two.
+     */
     const made = build(kind, picked, title, 'ai');
-    if (made) out.push(made);
+    if (!made) continue;
+    for (const b of picked) claimed.add(b.index);
+    out.push(made);
   }
 
   // Whatever the model passed over still belongs to the user. The rules take

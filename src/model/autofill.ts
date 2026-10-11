@@ -25,9 +25,9 @@
  * annoying and visible; a wrong name on a submitted application is neither.
  */
 import { plainText } from '../render/latex.js';
-import { parsePeriod } from './period.js';
+import { parsePeriod, sortKey } from './period.js';
 import { isVariantField } from './types.js';
-import type { Entry, MaybeVariant, Profile, ResolvedResume } from './types.js';
+import type { Entry, MaybeVariant, Period, Profile, ResolvedResume } from './types.js';
 
 /**
  * Words that belong to the surname rather than being one.
@@ -52,6 +52,21 @@ const SUFFIX = /^(jr|sr|ii|iii|iv|v|phd|ph\.?d|md|m\.?d|mba|esq|cpa|rn|dds|jd)\.
 
 const tidy = (value: unknown): string => String(value ?? '').replace(/\s+/g, ' ').trim();
 
+/*
+ * Letters after a comma that are a credential, not a given name: "Jane Smith,
+ * CFA", "Jane Smith, MS/PMP", "Testwell, Morgan, Ph.D.". Capitals, or one of
+ * the mixed-case degrees, alone or several joined by a slash or a space.
+ */
+const CAPITALS = /^[A-Z]{2,6}\.?$/;
+const MIXED_DEGREE = /^(?:ph\.?\s?d|m\.?sc|b\.?sc|m\.?eng|b\.?eng|m\.?phil|d\.?phil|esq)\.?$/i;
+const isCredential = (part: string) => {
+  const words = tidy(part).split(/\s*\/\s*|\s+/).filter(Boolean);
+  return words.length > 0 && words.every((w) => SUFFIX.test(w) || CAPITALS.test(w) || MIXED_DEGREE.test(w));
+};
+
+/** A title in front of the name, which no form's First name box wants. */
+const HONORIFIC = /^(?:dr|mr|mrs|ms|mx|miss|prof|professor)\.?\s+/i;
+
 /**
  * A full name split into the two boxes a form actually has.
  *
@@ -65,21 +80,29 @@ const tidy = (value: unknown): string => String(value ?? '').replace(/\s+/g, ' '
  *   "J. R. R. Tolkien"        -> J. / Tolkien
  */
 export function splitName(full: string): { first: string; last: string } | undefined {
-  const said = tidy(full);
+  const said = tidy(full).replace(HONORIFIC, '');
   if (!said) return undefined;
+
+  /*
+   * A credential after a comma is a suffix, as "Jr." is: "Jane Smith, CFA"
+   * was read as the filed order and sent "CFA" as the first name. Only
+   * letters that read as one — an all-capitals name filed as "SMITH, JANE"
+   * is still a name.
+   */
+  const parts = said.split(',');
+  while (parts.length > 1 && isCredential(parts[parts.length - 1]!) && !/^[^a-z]*$/.test(parts[0]!)) parts.pop();
 
   // "Surname, Given" is how a name is filed, and people store it that way.
   // One comma only: two commas is a list or a name with a suffix after it,
   // and neither is this.
-  const parts = said.split(',');
   if (parts.length === 2) {
     const last = tidy(parts[0]);
-    const first = tidy(parts[1]).split(/\s+/)[0] ?? '';
+    const first = tidy(parts[1]).replace(HONORIFIC, '').split(/\s+/)[0] ?? '';
     return last && first && !SUFFIX.test(first) ? { first, last } : undefined;
   }
   if (parts.length > 2) return undefined;
 
-  const words = said.split(/\s+/).filter((w) => !SUFFIX.test(w));
+  const words = tidy(parts[0]).split(/\s+/).filter((w) => !SUFFIX.test(w));
   if (words.length < 2) return undefined;
 
   let at = words.length - 1;
@@ -90,6 +113,23 @@ export function splitName(full: string): { first: string; last: string } | undef
   const first = words[0]!;
   const last = words.slice(at).join(' ');
   return first && last ? { first, last } : undefined;
+}
+
+/**
+ * The name a resume prints, as a form's preferred-name boxes ask for it, and
+ * nothing when it is the legal name. Split as the legal name is, by
+ * `splitName`: "Martin Luther King Jr." prefers to be called Martin King, not
+ * Martin "Luther King Jr.". A name `splitName` cannot read still fills the
+ * whole-name box and leaves the two parts for the person.
+ */
+export function preferredName(printed: string, legal: string): Record<string, string> {
+  const name = tidy(printed);
+  if (!name || name === tidy(legal)) return {};
+  const split = splitName(name);
+  return {
+    preferred_name: name,
+    ...(split ? { preferred_first_name: split.first, preferred_last_name: split.last } : {}),
+  };
 }
 
 /**
@@ -115,8 +155,73 @@ const POSTAL_CODE = /^[A-Za-z]{2}$/i;
  */
 const asCode = (s: string) => (POSTAL_CODE.test(s) ? s.toUpperCase() : s);
 
-/** A country, rather than a state, when a location names three things. */
-const COUNTRYISH = /^[A-Za-z][A-Za-z .'-]*$/;
+/*
+ * The two-letter codes that are a state or a province: the fifty, DC and the
+ * territories, and Canada's thirteen. Only these go in the State box. "UK",
+ * "US" and "DE" are two letters too, and the shape alone put **UK** in the
+ * State box of a form for somebody in London.
+ */
+const US_STATES: Record<string, string> = {
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado',
+  CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia', HI: 'Hawaii', ID: 'Idaho',
+  IL: 'Illinois', IN: 'Indiana', IA: 'Iowa', KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana',
+  ME: 'Maine', MD: 'Maryland', MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota',
+  MS: 'Mississippi', MO: 'Missouri', MT: 'Montana', NE: 'Nebraska', NV: 'Nevada',
+  NH: 'New Hampshire', NJ: 'New Jersey', NM: 'New Mexico', NY: 'New York', NC: 'North Carolina',
+  ND: 'North Dakota', OH: 'Ohio', OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania',
+  RI: 'Rhode Island', SC: 'South Carolina', SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas',
+  UT: 'Utah', VT: 'Vermont', VA: 'Virginia', WA: 'Washington', WV: 'West Virginia',
+  WI: 'Wisconsin', WY: 'Wyoming', DC: 'District of Columbia', PR: 'Puerto Rico', GU: 'Guam',
+  VI: 'U.S. Virgin Islands', AS: 'American Samoa', MP: 'Northern Mariana Islands',
+};
+const PROVINCES: Record<string, string> = {
+  AB: 'Alberta', BC: 'British Columbia', MB: 'Manitoba', NB: 'New Brunswick',
+  NL: 'Newfoundland and Labrador', NS: 'Nova Scotia', NT: 'Northwest Territories', NU: 'Nunavut',
+  ON: 'Ontario', PE: 'Prince Edward Island', QC: 'Quebec', SK: 'Saskatchewan', YT: 'Yukon',
+};
+const STATE_CODES = new Set([...Object.keys(US_STATES), ...Object.keys(PROVINCES)]);
+const STATE_NAMES = new Set(
+  [...Object.values(US_STATES), ...Object.values(PROVINCES), 'Washington DC', 'Washington D.C.', 'Québec', 'Newfoundland'].map((n) =>
+    n.toLowerCase(),
+  ),
+);
+
+/*
+ * Countries by name and by ISO code, from the runtime's own region names so
+ * the list is every country's and not the handful somebody thought of; and
+ * the ways people write their own that are not the ISO name.
+ */
+const COUNTRY_CODES = new Set<string>(['UK', 'USA']);
+const COUNTRY_NAMES = new Set<string>(
+  [
+    'USA', 'U.S.A.', 'U.S.', 'UK', 'U.K.', 'United States of America', 'America', 'England', 'Scotland',
+    'Wales', 'Northern Ireland', 'Great Britain', 'Britain', 'Czech Republic', 'Republic of Korea',
+    'Korea', 'Holland', 'The Netherlands', 'UAE', 'Russia', 'Vietnam', 'Türkiye', 'Turkey',
+  ].map((n) => n.toLowerCase()),
+);
+try {
+  const regions = new Intl.DisplayNames(['en'], { type: 'region' });
+  for (let a = 65; a <= 90; a++) {
+    for (let b = 65; b <= 90; b++) {
+      const code = String.fromCharCode(a, b);
+      const name = regions.of(code);
+      if (!name || name === code || /unknown/i.test(name)) continue;
+      COUNTRY_CODES.add(code);
+      COUNTRY_NAMES.add(name.toLowerCase());
+    }
+  }
+} catch {
+  // A runtime without region names knows the aliases above and nothing more.
+}
+
+const plain = (s: string) => s.replace(/\./g, '').trim();
+const isStateCode = (s: string) => POSTAL_CODE.test(plain(s)) && STATE_CODES.has(plain(s).toUpperCase());
+const isStateName = (s: string) => STATE_NAMES.has(s.toLowerCase());
+const isCountry = (s: string) =>
+  COUNTRY_NAMES.has(s.toLowerCase()) || COUNTRY_CODES.has(plain(s).toUpperCase()) && /^[A-Za-z.]{2,6}$/.test(s);
+
+/** Where somebody works that is not a place: never a city. */
+const NOT_A_CITY = /^(?:remote|hybrid|anywhere|on-?site|in[- ]office|wfh|work from home|various|multiple locations?)$/i;
 
 /**
  * A stored location split into the boxes a form has.
@@ -139,15 +244,24 @@ export function splitLocation(
   if (!said || !said.includes(',')) return undefined;
 
   const parts = said.split(',').map(tidy).filter(Boolean);
+  const town = (city: string) => (NOT_A_CITY.test(city) ? {} : { city });
+  /*
+   * A state's code before a country's, because the two overlap — "CA",
+   * "DE", "IN" — and a location written "City, XX" in a store that is
+   * mostly American is a state. Anything not known to be either goes in no
+   * box at all: a blank is filled in by the person, a wrong box has to be
+   * noticed first.
+   */
   if (parts.length === 2) {
     const [city, second] = parts as [string, string];
-    if (POSTAL_CODE.test(second)) return { city, state: asCode(second) };
-    if (COUNTRYISH.test(second)) return { city, country: second };
+    if (isStateCode(second)) return { ...town(city), state: plain(second).toUpperCase() };
+    if (isCountry(second)) return { ...town(city), country: second };
+    if (isStateName(second)) return { ...town(city), state: second };
     return undefined;
   }
   if (parts.length === 3) {
     const [city, state, country] = parts as [string, string, string];
-    return COUNTRYISH.test(country) ? { city, state: asCode(state), country } : undefined;
+    return isCountry(country) ? { ...town(city), state: asCode(state), country } : undefined;
   }
   return undefined;
 }
@@ -242,9 +356,18 @@ export function graduation(dates: string): Record<string, string> {
  */
 export function splitDegree(line: string): { degree: string; major: string } | undefined {
   // Whatever a GPA clause contributes, it is not part of either box.
-  const said = tidy(String(line ?? '').replace(GPA_CLAUSE, ''))
+  let said = tidy(String(line ?? '').replace(GPA_CLAUSE, '').replace(HONOURS_ANYWHERE, ''))
     .replace(/[,;]\s*$/, '')
     .trim();
+  /*
+   * Nor a minor, a concentration or an honours clause after it, which have
+   * an " in " of their own: "B.S. in Computer Science, Minor in Mathematics"
+   * split on the last one and sent "Mathematics" as the major.
+   */
+  for (let was = ''; said !== was; ) {
+    was = said;
+    said = tidy(said.replace(TRAILING_CLAUSE, '').replace(/[,;]\s*$/, ''));
+  }
   if (!said) return undefined;
 
   /*
@@ -262,6 +385,18 @@ export function splitDegree(line: string): { degree: string; major: string } | u
   if (!DEGREE_WORD.test(degree)) return undefined;
   return { degree, major };
 }
+
+/*
+ * What a degree line says after the discipline that is not the discipline:
+ * a minor, a concentration, a specialization, a track or an emphasis, and
+ * the honours it was taken with. Only after a separator — a comma, "with",
+ * "and", a dash or a bracket — so "Honors Mathematics" is left alone.
+ */
+const TRAILING_CLAUSE =
+  /\s*(?:[,;(–—]|\s-\s|\bwith\b|\band\b)\s*(?:(?:an?|the)\s+)?(?:(?:double|dual|second|secondary)\s+)?(?:minors?|concentrations?|speciali[sz]ations?|tracks?|emphas[ie]s|(?:(?:summa|magna)\s+)?cum\s+laude|(?:first|second|third|upper|lower|1st|2nd|2:[12])[- ]class(?:\s+hono(?:u)?rs)?|(?:high(?:est)?\s+)?(?:hono(?:u)?rs|distinction)|hono(?:u)?rs)\b.*$/i;
+
+/** "(Honours)" or "(Hons)" wherever it is, which is not part of either box. */
+const HONOURS_ANYWHERE = /\s*\((?:with\s+)?(?:first[- ]class\s+)?hon(?:ou?r)?s\.?\)/gi;
 
 /** The words that make a phrase a qualification rather than a subject. */
 const DEGREE_WORD =
@@ -346,15 +481,37 @@ function newestEducation(entries: Entry[]): Entry | undefined {
   if (schools.length === 0) return undefined;
   if (schools.length === 1) return schools[0];
 
+  /*
+   * By `sortKey`, which puts a degree in progress above one finished and
+   * reads a lone date as the end, as `graduation` does. Ranked on the end
+   * year alone, "Sep. 2024 -- Present" and "Expected May 2026" had no end
+   * and were skipped, and the form was given the bachelor's finished years
+   * ago instead of the master's being taken now.
+   */
+  const key = (p: Period | undefined) => {
+    if (p?.start) return sortKey(p);
+    return p?.end?.year ? p.end.year * 100 + (p.end.month ?? 12) : undefined;
+  };
   const ranked = schools
-    .map((e) => ({ e, ends: e.period?.end?.year ?? undefined }))
+    .map((e) => {
+      const period = e.period ?? parsePeriod(asWritten(e.dates));
+      return { e, period, ends: key(period) };
+    })
     .filter((r) => r.ends !== undefined)
     .sort((a, b) => b.ends! - a.ends!);
 
-  // Two that finished in the same year cannot be told apart this way, and a
-  // wrong school on a submitted application is worse than an empty box.
-  if (ranked.length === 0 || ranked[0]!.ends === ranked[1]?.ends) return undefined;
-  return ranked[0]!.e;
+  // Two that finished in the same year cannot be told apart this way unless
+  // both name the month, and a wrong school on a submitted application is
+  // worse than an empty box.
+  const [first, second] = ranked;
+  if (!first) return undefined;
+  if (second) {
+    if (first.ends === second.ends) return undefined;
+    const point = (p?: Period) => p?.end ?? p?.start;
+    const [a, b] = [point(first.period), point(second.period)];
+    if (!first.period?.ongoing && a?.year === b?.year && (!a?.month || !b?.month)) return undefined;
+  }
+  return first.e;
 }
 
 /**

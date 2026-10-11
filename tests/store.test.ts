@@ -444,3 +444,35 @@ describe('a store file with a byte-order mark and Windows line endings', () => {
     }
   });
 });
+
+describe('autofill values in profile.yaml, as they were typed', () => {
+  it('keeps a ZIP code, an extension and a scale as their own characters', () => {
+    const t = makeTempStore();
+    try {
+      t.write(
+        'profile.yaml',
+        [
+          'name: Test Person',
+          'autofill:',
+          '  address_zip: 02115',
+          '  phone_ext: 0042',
+          '  gpa_scale: 4.0',
+          '  over_18: true',
+          '  start_date: 2026-06-01',
+          '  school: "Northeastern University"',
+          '',
+        ].join('\n'),
+      );
+      expect(t.store.load().profile.autofill).toEqual({
+        address_zip: '02115',
+        phone_ext: '0042',
+        gpa_scale: '4.0',
+        over_18: 'true',
+        start_date: '2026-06-01',
+        school: 'Northeastern University',
+      });
+    } finally {
+      t.cleanup();
+    }
+  });
+});
