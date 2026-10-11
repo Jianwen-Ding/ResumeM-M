@@ -2017,7 +2017,9 @@ function withoutEqualOpportunityStatement(text: string): string {
  * writes needs one. A mailbox the company keeps for applicants — careers@,
  * jobs@, recruiting@ — is how to apply, and is left.
  */
-const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
+// From the start of the run only: with `\b` it was tried again from inside a
+// long run of address characters with no @ in it, once per character.
+const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
 const COMPANY_MAILBOX =
   /^(?:careers?|jobs?|recruit\w*|talent\w*|hr|hiring|apply|applications?|people|accommodations?|accessibility|staffing|employment|resumes?|cv|info|hello|contact|privacy)$/i;
 const PHONE =

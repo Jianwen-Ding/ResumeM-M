@@ -72,7 +72,18 @@ export function localOnly({ host, allowHosts = [] }: GuardOptions = {}): Request
       if (!ok) {
         try {
           const url = new URL(origin);
-          ok = (url.protocol === 'http:' || url.protocol === 'https:') && allowed.has(url.hostname.toLowerCase());
+          /*
+           * And on this server's own port. Any other port on loopback is
+           * another program — a dev server, a notebook, a page some tool
+           * serves — and a form on it posting here was let through for having
+           * the right name, which is the whole of the attack this check is
+           * for. The editor is served from here, so its origin is the
+           * address the request itself was sent to.
+           */
+          const own = header ? new URL(`http://${header}`) : undefined;
+          const ownPort = own ? Number(own.port || 80) : req.socket.localPort;
+          const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+          ok = (url.protocol === 'http:' || url.protocol === 'https:') && allowed.has(url.hostname.toLowerCase()) && port === ownPort;
         } catch {
           ok = false; // `null`, or something that is not a URL at all
         }

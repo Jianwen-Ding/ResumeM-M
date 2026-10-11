@@ -8,7 +8,7 @@ import { ignoreBrokenPipe } from './cli-io.js';
 import { Repo, cloneRepo } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
-import { findProjectRoot, resolveStoreDir, seedStore } from './model/location.js';
+import { findProjectRoot, isEmptyStore, resolveStore, seedStore } from './model/location.js';
 import { buildBundle, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
@@ -35,7 +35,7 @@ const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url))
  * which is the exact thing that arrangement exists to prevent. A flag that is
  * accepted and discarded is worse than one that is rejected.
  */
-const dataDir = resolveStoreDir(projectRoot, arg(process.argv.slice(2), 'data'));
+const { dir: dataDir, from: dataFrom } = resolveStore(projectRoot, arg(process.argv.slice(2), 'data'));
 /*
  * Say so when a save is made rather than opened.
  *
@@ -790,12 +790,55 @@ async function main(argv: string[]): Promise<number> {
  * `unknownFlag` is the same call `main` makes, on the same arguments. Running
  * it twice costs nothing; running it too late cost a folder.
  */
+/*
+ * Where a new save may be started: a folder somebody named, or the home
+ * default on a first run. Not the save remembered from the app — see
+ * `resolveStore` — which, gone missing, is a thing to say rather than refill.
+ */
+const SEEDS = new Set(['flag', 'env', 'home']);
+
+/** The commands that make the folder a repository and commit all of it. */
+const COMMITS_EVERYTHING = new Set(['serve', 'save', 'master']);
+
+const isSaveFolder = (dir: string) =>
+  fs.existsSync(path.join(dir, 'profile.yaml')) && fs.existsSync(path.join(dir, 'config.yaml'));
+
+/**
+ * Why this folder cannot be worked in, or null when it can.
+ *
+ * `rmm serve --data ~/Documents` — one folder too high — ran `git init` in
+ * Documents and committed every file in it, tax returns and all, as
+ * "Initialise resume store". A folder with things in it and no save among
+ * them is somebody's folder, not a save; an empty one is still a save to
+ * start.
+ */
+function notASave(command: string): string | null {
+  if (isSaveFolder(dataDir)) return null;
+  if (dataFrom === 'remembered') {
+    return fs.existsSync(dataDir)
+      ? `The save last opened, ${dataDir}, is not a save any more (it has no profile.yaml and config.yaml). ` +
+          'Open another in the app, or name one with --data.'
+      : `The save last opened, ${dataDir}, is not there any more. It may have been moved, deleted, or be on a ` +
+          'drive that is not connected. Open another in the app, or name one with --data.';
+  }
+  if (COMMITS_EVERYTHING.has(command) && !isEmptyStore(dataDir)) {
+    return `${dataDir} has files in it but is not a save (it has no profile.yaml and config.yaml), so it was left ` +
+      'alone. Point --data at a save, or at an empty or new folder to start one.';
+  }
+  return null;
+}
+
 const ARGV = commandFirst(process.argv.slice(2));
 {
   const command = ARGV[0] ?? '';
   const refused =
     ['help', '--help', '-h'].includes(command) || !COMMANDS.has(command) ? null : unknownFlag(command, ARGV.slice(1));
-  if (!refused && WORKS_IN_A_STORE.has(command) && seedStore(path.join(projectRoot, 'data'), dataDir)) {
+  const problem = refused || !WORKS_IN_A_STORE.has(command) ? null : notASave(command);
+  if (problem) {
+    console.error(problem);
+    process.exit(1);
+  }
+  if (!refused && WORKS_IN_A_STORE.has(command) && SEEDS.has(dataFrom) && seedStore(path.join(projectRoot, 'data'), dataDir)) {
     console.error(`Started a new save at ${dataDir}, from the bundled example — there was nothing there.`);
   }
 }

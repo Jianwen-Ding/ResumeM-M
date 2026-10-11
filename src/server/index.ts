@@ -9,7 +9,7 @@ import { Store } from '../model/store.js';
 import { currentIgnore } from '../model/current.js';
 import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
 import { closeStaleApplying, sweepTemporary, tidyWorkdayNames } from './sweep.js';
-import { cloneProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
+import { cloneProject, createProject, prepareProject, readProjects, rememberProject, setDefaultFolder, projectsFile } from '../model/projects.js';
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
@@ -209,6 +209,8 @@ export async function startServer(opts: ServerOptions = {}) {
   const app = express();
   let requests = 0;
   let switching = false;
+  // A clone in progress: the API keeps answering, but no other switch may start.
+  let cloning = false;
   const watcher = setInterval(() => {
     if (!switching && active) void active.assets.scan().catch(error => console.warn('[rmm] Inbox:', error.message));
   }, 5000);
@@ -382,7 +384,7 @@ export async function startServer(opts: ServerOptions = {}) {
   const busy = () => requests || active?.assets.busy || active?.jobs.list().some(j => j.status === 'running');
   app.post('/api/projects/switch', async (req, res) => {
     if (busy()) { res.status(409).json({ error: 'Wait for current saves, imports, and AI work to finish before changing saves.' }); return; }
-    switching = true;
+    if (cloning) { res.status(409).json({ error: 'A save is still being cloned. Wait for it to finish before changing saves.' }); return; }
     try {
       const { dir, mode, url } = req.body;
       if (typeof dir !== 'string' || !['open', 'create', 'move', 'clone'].includes(mode)) {
@@ -393,17 +395,33 @@ export async function startServer(opts: ServerOptions = {}) {
        * network, takes an unbounded amount of time, and can fail for reasons
        * that are nothing to do with the folder. It ends in the same place:
        * a validated store that becomes the open save.
+       *
+       * And outside `switching`. The clone writes nowhere near the open save,
+       * and with the flag up for the whole of it every request to the API was
+       * refused for as long as the network took — the editor, the extension,
+       * the save button — on a remote that answered slowly, indefinitely.
+       * Only the swap itself needs the API held still.
        */
-      const next = projectSession(
-        mode === 'clone'
-          ? await cloneProject(String(url ?? ''), dir, cloneRepo)
-          : prepareProject(active?.store, dir, mode),
-      );
-      rememberProject(next.store.root, preferencesFile, active?.store.root);
-      active = next; openedBy = 'selected'; startupError = undefined;
-      res.json({ dir: next.store.root, mode });
+      let cloned: Store | undefined;
+      if (mode === 'clone') {
+        cloning = true;
+        try {
+          cloned = await cloneProject(String(url ?? ''), dir, cloneRepo, active?.store);
+        } finally { cloning = false; }
+        // Work that started while the clone ran gets to finish first.
+        for (const until = Date.now() + 10_000; busy() && Date.now() < until;) await new Promise(r => setTimeout(r, 100));
+        if (busy()) throw new Error(`The save was cloned to ${cloned.root}, but work in this save is still running. Open it once that finishes.`);
+      }
+      switching = true;
+      try {
+        const next = projectSession(
+          cloned ?? (mode === 'create' ? await createProject(active?.store, dir) : prepareProject(active?.store, dir, mode)),
+        );
+        rememberProject(next.store.root, preferencesFile, active?.store.root);
+        active = next; openedBy = 'selected'; startupError = undefined;
+      } finally { switching = false; }
+      res.json({ dir: active.store.root, mode });
     } catch (error) { res.status(400).json({ error: (error as Error).message }); }
-    finally { switching = false; }
   });
   app.post('/api/projects/close', (_req, res) => {
     if (busy()) { res.status(409).json({ error: 'Wait for current saves, imports, and AI work to finish before closing the save.' }); return; }

@@ -386,15 +386,24 @@ const STATE_NAMES =
   'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|Ontario|Quebec|British Columbia|Alberta|England|Scotland|Wales';
 const COUNTRIES =
   'United States of America|United States|USA|US|U\\.S\\.|United Kingdom|UK|Canada|Mexico|Brazil|Germany|France|Spain|Italy|Ireland|Netherlands|Switzerland|Sweden|Poland|Israel|India|China|Japan|Korea|South Korea|Singapore|Taiwan|Malaysia|Philippines|Vietnam|Australia|New Zealand';
-const PLACE_WORD = String.raw`[A-Z][\p{L}.'-]*`;
+/*
+ * A hyphen belongs to the word — "Winston-Salem", "Stratford-upon-Avon" — and
+ * only a space separates two. It was allowed to be both, a hyphen inside the
+ * word class and a separator between words, so "A-B-C-…" could be split
+ * 2^n ways and every one was tried before the match failed: 29 letters held
+ * the server for seconds over one job title.
+ */
+const PLACE_WORD = String.raw`[A-Z][\p{L}.']*(?:-[\p{L}.']+)*`;
 const PLACE = new RegExp(
-  String.raw`^${PLACE_WORD}(?:[ -]${PLACE_WORD})*(?:,\s*${PLACE_WORD}(?:[ -]${PLACE_WORD})*)*,\s*(?:${STATE_CODES}|${STATE_NAMES}|${COUNTRIES})$`,
+  String.raw`^${PLACE_WORD}(?: ${PLACE_WORD})*(?:,\s*${PLACE_WORD}(?: ${PLACE_WORD})*)*,\s*(?:${STATE_CODES}|${STATE_NAMES}|${COUNTRIES})$`,
   'u',
 );
+/** Longer than any place a title names, and short enough that no pattern here can take long over it. */
+const MAX_PLACE = 120;
 
 export function looksLikeLocation(s: string | undefined): boolean {
   const t = String(s ?? '').trim();
-  if (!t) return false;
+  if (!t || t.length > MAX_PLACE) return false;
   if (/^(?:multiple|various|several|many|all)\s+(?:locations|cities|sites|offices)$/i.test(t)) return true;
   /*
    * "Remote", "Remote, US", "Hybrid - Boston, MA", "Remote (US)" — the word
@@ -687,9 +696,19 @@ export function namesEmployer(segment: string, employers: (string | undefined)[]
  * "Activision 2027 Summer Internships - Graphics Engineering" are the titles
  * their employers wrote, and are kept whole.
  */
+/** Far longer than any job's name; past it a "title" is a pasted page. */
+const MAX_TITLE = 300;
+
 export function cleanRole(role: string | undefined, ...employers: (string | undefined)[]): string | undefined {
   if (role === undefined) return undefined;
-  const segments = splitTitle(withoutTitleNoise(role));
+  /*
+   * One space where there were many, and no more of it than a title could be.
+   * `SEPARATOR` opens on `\s*`, so a run of spaces with no separator after it
+   * was scanned again from every space in it: forty thousand of them in a
+   * pasted title held the server for seconds.
+   */
+  const title = role.replace(/\s+/g, ' ').slice(0, MAX_TITLE);
+  const segments = splitTitle(withoutTitleNoise(title));
   if (segments.length === 0) return role.trim() || undefined;
   let peeled = false;
   while (segments.length > 1) {

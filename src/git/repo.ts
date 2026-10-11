@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -319,6 +319,22 @@ export class Repo {
     );
     const wanted = targets.filter((t) => !ignored.has(t));
     if (wanted.length === 0) return undefined;
+    /*
+     * Never over a conflict nobody has resolved.
+     *
+     * The `add` below is what tells git a conflicted file is settled, and the
+     * commit after it concludes the merge. With the markers still in the file,
+     * that put `<<<<<<<` into profile.yaml as a finished merge, behind a 200
+     * that said the work was saved. A file someone has edited clean is theirs
+     * to save; one still holding the markers is refused by name.
+     */
+    const unresolved = await this.unresolved();
+    if (unresolved.length > 0) {
+      throw new Error(
+        `The store has a merge conflict nobody has resolved yet: ${unresolved.join(', ')}. ` +
+          'Edit the conflict markers out of those files (or run git merge --abort), then save again.',
+      );
+    }
     await this.git(['add', '--', ...wanted]);
 
     // Only commit what is staged within scope; unrelated working-tree changes
@@ -382,6 +398,35 @@ export class Repo {
       if (scoped) fs.rmSync(scoped.file, { force: true });
     }
     return (await this.git(['rev-parse', 'HEAD'])).trim();
+  }
+
+  /**
+   * Unmerged paths whose conflict is still there to see: the markers are in
+   * the file, or there is no text file to look at (a binary, or one side
+   * deleted it) and so nothing to say it was settled. `git add` would mark
+   * every one of them resolved as it stands.
+   */
+  async unresolved(): Promise<string[]> {
+    const listed = await this.git(['-c', 'core.quotePath=false', 'ls-files', '-u', '-z']).catch(() => '');
+    // One line per stage: "<mode> <object> <stage>\t<path>".
+    const paths = new Set(
+      listed
+        .split('\0')
+        .filter(Boolean)
+        .map((line) => line.slice(line.indexOf('\t') + 1)),
+    );
+    const left: string[] = [];
+    for (const rel of paths) {
+      let text: string;
+      try {
+        text = fs.readFileSync(path.join(this.root, rel), 'utf8');
+      } catch {
+        left.push(rel);
+        continue;
+      }
+      if (text.includes('\0') || (/^<{7}(?: |$)/m.test(text) && /^>{7}(?: |$)/m.test(text))) left.push(rel);
+    }
+    return left.sort();
   }
 
   /**
@@ -806,6 +851,66 @@ function noPrompt(): NodeJS.ProcessEnv {
 }
 
 /**
+ * The clone's environment: nobody to answer a prompt, and a remote that stops
+ * sending is given up on rather than waited for. An HTTP transfer under 1 KB/s
+ * for 30 seconds is abandoned; SSH is told not to ask (BatchMode) and not to
+ * spend more than 15 seconds connecting — unless the user has their own
+ * `GIT_SSH_COMMAND`, which is theirs to keep.
+ */
+function cloneEnv(): NodeJS.ProcessEnv {
+  return {
+    ...noPrompt(),
+    GIT_HTTP_LOW_SPEED_LIMIT: '1000',
+    GIT_HTTP_LOW_SPEED_TIME: '30',
+    ...(process.env.GIT_SSH_COMMAND ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=15' }),
+  };
+}
+
+/**
+ * `git clone`, and never for ever.
+ *
+ * A remote that accepts the connection and then sends nothing held the clone —
+ * and the request waiting on it — open until the server was killed. The
+ * low-speed limit in `cloneEnv` catches a transfer that stalls over HTTP; this
+ * catches everything else. In a process group of its own, so the timeout takes
+ * git's transport helper down with it: killing git alone left the helper
+ * holding the pipes, and the clone still never finished.
+ */
+function cloneWithin(args: string[], cwd: string, timeout: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const group = process.platform !== 'win32';
+    const child = spawn('git', args, { cwd, env: cloneEnv(), detached: group, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    let timedOut = false;
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      if (stderr.length < 1024 * 1024) stderr += chunk;
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (group && child.pid) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+    }, timeout);
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0 && !timedOut) resolve();
+      else reject(Object.assign(new Error(`git clone exited with ${code}`), { stderr, timedOut }));
+    });
+  });
+}
+
+/** How long a clone may take in all, however steadily it is still arriving. */
+export const CLONE_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
  * Clone a repository into a directory that already exists and is empty.
  *
  * Its own function rather than a method, because there is no `Repo` yet: this
@@ -818,14 +923,13 @@ function noPrompt(): NodeJS.ProcessEnv {
  * terminal: the server would hang until something killed it, with nothing on
  * screen to say why. Refused immediately, the failure is a sentence.
  */
-export async function cloneRepo(url: string, into: string): Promise<void> {
+export async function cloneRepo(url: string, into: string, timeout = CLONE_TIMEOUT_MS): Promise<void> {
   try {
-    await run('git', ['clone', '--', url, into], {
-      cwd: path.dirname(into),
-      maxBuffer: 32 * 1024 * 1024,
-      env: noPrompt(),
-    });
+    await cloneWithin(['clone', '--', url, into], path.dirname(into), timeout);
   } catch (err) {
+    if ((err as { timedOut?: boolean }).timedOut) {
+      throw new Error(`git clone took longer than ${Math.round(timeout / 1000)} seconds and was stopped. Nothing was written.`);
+    }
     const said = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '').trim();
     if (/could not read Username|terminal prompts disabled|Authentication failed|Permission denied \(publickey\)/i.test(said)) {
       throw new Error(

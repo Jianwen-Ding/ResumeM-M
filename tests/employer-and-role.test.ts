@@ -13,6 +13,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { companyFromUrl, extractJob, looksLikeCompanyName } from '../src/jobs/extract.js';
+import { cleanRole, looksLikeLocation, withoutTrailingLocation } from '../src/jobs/names.js';
 import { makeTempStore, type TempStore } from './helpers.js';
 
 let t: TempStore | undefined;
@@ -396,5 +397,58 @@ describe('"Vagas abertas" — a careers page named in another language is still 
 
   it('while a name that only contains such a word is kept', () => {
     expect(looksLikeCompanyName('Carrera Labs')).toBe(true);
+  });
+});
+
+/*
+ * A title is text off somebody else's page, and these patterns run on every
+ * one. Three of them could be made to take seconds by what was in it — the
+ * request reading the page held the whole server meanwhile.
+ */
+describe('a title built to be slow is not', () => {
+  const timed = <T>(f: () => T): [T, number] => {
+    const began = performance.now();
+    const out = f();
+    return [out, performance.now() - began];
+  };
+
+  it('reads a place of hyphenated capitals in linear time', () => {
+    // "A-B-C-…-C!": the hyphen was both part of a word and a separator between two.
+    const place = Array.from({ length: 29 }, (_, i) => String.fromCharCode(65 + (i % 26))).join('-') + '!';
+    const [found, ms] = timed(() => looksLikeLocation(place));
+    expect(found).toBe(false);
+    expect(ms).toBeLessThan(100);
+    expect(timed(() => withoutTrailingLocation(`Software Engineer in ${place}`))[1]).toBeLessThan(100);
+  });
+
+  it('and still reads a hyphenated place as one', () => {
+    for (const place of ['Winston-Salem, NC', 'Stratford-upon-Avon, England', 'Wilkes-Barre, Pennsylvania', 'Santa Rosa, California', 'Cambridge, England, United Kingdom', 'St. Louis, MO']) {
+      expect(looksLikeLocation(place), place).toBe(true);
+    }
+    expect(looksLikeLocation('Machine Learning')).toBe(false);
+    expect(withoutTrailingLocation('Software Engineer in Winston-Salem, NC')).toBe('Software Engineer');
+  });
+
+  it('cleans a title with a long run of spaces in it quickly, and as one space', () => {
+    const [role, ms] = timed(() => cleanRole(`Engineer${' '.repeat(40_000)}x | Acme`, 'Acme'));
+    expect(ms).toBeLessThan(100);
+    expect(role?.startsWith('Engineer x')).toBe(true);
+    expect(cleanRole('Software   Engineer | Acme', 'Acme')).toBe('Software Engineer');
+  });
+
+  it('redacts an address in a long run of address characters quickly', () => {
+    const ld = {
+      '@context': 'https://schema.org',
+      '@type': 'JobPosting',
+      title: 'Software Engineer',
+      hiringOrganization: { '@type': 'Organization', name: 'Acme' },
+      description: `We build things with Python and Go. Write to jane.doe@acme.com or careers@acme.com. ${'a.'.repeat(40_000)}`,
+    };
+    const html = `<html><head><title>Software Engineer</title><script type="application/ld+json">${JSON.stringify(ld)}</script></head><body><p>x</p></body></html>`;
+    const [job, ms] = timed(() => extractJob(html, 'https://careers.acme.com/jobs/123'));
+    expect(ms).toBeLessThan(1000);
+    expect(job.description).toContain('[redacted]');
+    expect(job.description).not.toContain('jane.doe');
+    expect(job.description).toContain('careers@acme.com');
   });
 });

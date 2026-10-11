@@ -57,21 +57,36 @@ export function findProjectRoot(from: string): string {
  *   5. ~/.resumem-m/store, seeded from the bundled example on first run.
  */
 export function resolveStoreDir(projectRoot: string, chosen?: string): string {
-  if (chosen?.trim()) return path.resolve(chosen.trim());
-  if (process.env.RMM_DATA) return path.resolve(process.env.RMM_DATA);
+  return resolveStore(projectRoot, chosen).dir;
+}
+
+/**
+ * Where a store came from, beside where it is: `--data`, RMM_DATA, the save
+ * remembered from the app, an in-tree store, or the home default.
+ *
+ * It matters for seeding. An empty folder somebody named, or the home default
+ * on a first run, is a store to start; a remembered save that is not there any
+ * more was moved, unmounted or deleted, and filling its path with the bundled
+ * example made somebody else's resumes the save the app reopened next time.
+ */
+export type StoreSource = 'flag' | 'env' | 'remembered' | 'bundled' | 'home';
+
+export function resolveStore(projectRoot: string, chosen?: string): { dir: string; from: StoreSource } {
+  if (chosen?.trim()) return { dir: path.resolve(chosen.trim()), from: 'flag' };
+  if (process.env.RMM_DATA) return { dir: path.resolve(process.env.RMM_DATA), from: 'env' };
 
   const preferences = readProjects();
   const selected = preferences.defaultFolder || preferences.active;
-  if (selected) return selected;
+  if (selected) return { dir: selected, from: 'remembered' };
 
   const bundled = path.join(projectRoot, 'data');
   const home = path.join(os.homedir(), '.resumem-m', 'store');
 
   // An in-tree store that is already under its own git control, or that has
   // been edited beyond the shipped example, stays where it is.
-  if (fs.existsSync(path.join(bundled, '.git'))) return bundled;
+  if (fs.existsSync(path.join(bundled, '.git'))) return { dir: bundled, from: 'bundled' };
 
-  return home;
+  return { dir: home, from: 'home' };
 }
 
 /**

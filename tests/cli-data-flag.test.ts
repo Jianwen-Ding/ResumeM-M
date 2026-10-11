@@ -548,3 +548,72 @@ describe('rmm --data, however it is written', () => {
     expect(r.err).not.toContain('is not something');
   });
 });
+
+/*
+ * Where a save may be started, and where one must not be.
+ *
+ * Seeding an empty folder is how a first run gets a store. It also ran for the
+ * save remembered from the app when that folder had gone — so a save on an
+ * unplugged drive came back as the bundled example's resumes — and `serve`,
+ * `save` and `master` ran `git init` in any folder `--data` named, committing
+ * whatever was there.
+ */
+describe('a folder that is not a save', () => {
+  let scratch: string;
+
+  beforeEach(() => {
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-notsave-'));
+  });
+  afterEach(() => fs.rmSync(scratch, { recursive: true, force: true }));
+
+  const rmm = (args: string[], env: NodeJS.ProcessEnv = {}) => {
+    const base: NodeJS.ProcessEnv = { ...process.env, RMM_AUTOCOMMIT: '0', HOME: scratch, RMM_PROJECTS_FILE: path.join(scratch, 'projects.json') };
+    delete base.RMM_DATA;
+    return run(process.execPath, [path.join(root, 'node_modules/.bin/tsx'), path.join(root, 'src/cli.ts'), ...args], {
+      cwd: scratch,
+      env: { ...base, ...env },
+      timeout: 60_000,
+    }).then(
+      (r) => ({ code: 0, out: r.stdout, err: r.stderr }),
+      (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code ?? 1, out: e.stdout ?? '', err: e.stderr ?? '' }),
+    );
+  };
+
+  it('names a remembered save that has gone, and does not refill its path', async () => {
+    const gone = path.join(scratch, 'unplugged', 'my-save');
+    fs.writeFileSync(path.join(scratch, 'projects.json'), JSON.stringify({ active: gone, defaultFolder: gone, recent: [gone] }));
+
+    const r = await rmm(['list']);
+
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(gone);
+    expect(r.err).toMatch(/not there any more/);
+    expect(fs.existsSync(gone)).toBe(false);
+  });
+
+  it.each(['save', 'serve', 'master'])('leaves a folder of other things alone on %s', async (command) => {
+    const documents = path.join(scratch, 'Documents');
+    fs.mkdirSync(documents);
+    fs.writeFileSync(path.join(documents, 'taxes.txt'), 'private\n');
+
+    const r = await rmm([command, '--data', documents]);
+
+    expect(r.code).toBe(1);
+    expect(r.err).toContain(documents);
+    expect(r.err).toMatch(/not a save/);
+    expect(fs.existsSync(path.join(documents, '.git'))).toBe(false);
+    expect(fs.readdirSync(documents)).toEqual(['taxes.txt']);
+  });
+
+  it('still starts a save in an empty folder it was pointed at', async () => {
+    const fresh = path.join(scratch, 'fresh');
+    fs.mkdirSync(fresh);
+
+    const r = await rmm(['save', '--data', fresh, '-m', 'first']);
+
+    expect(r.code).toBe(0);
+    expect(r.err).toContain('Started a new save');
+    expect(fs.existsSync(path.join(fresh, 'profile.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(fresh, '.git'))).toBe(true);
+  });
+});

@@ -105,6 +105,26 @@ describe('a write from another site', () => {
       .expect(200);
   });
 
+  /*
+   * Loopback is not one origin. Another port on this machine is another
+   * program — a dev server, a notebook — and a form on it posting here was let
+   * through for having the right host name.
+   */
+  it('refuses a page on another port of this machine', async () => {
+    for (const origin of ['http://127.0.0.1:3000', 'http://localhost:8888', 'http://127.0.0.1']) {
+      await request(appWith())
+        .post('/api/projects/close')
+        .set('Host', '127.0.0.1:4600')
+        .set('Origin', origin)
+        .expect(403);
+    }
+  });
+
+  it('counts a missing port as the scheme’s own, on both sides', async () => {
+    await request(appWith()).post('/api/projects/close').set('Host', 'localhost').set('Origin', 'http://localhost').expect(200);
+    await request(appWith()).post('/api/projects/close').set('Host', 'localhost').set('Origin', 'http://localhost:4600').expect(403);
+  });
+
   it('lets the extension through', async () => {
     await request(appWith())
       .post('/api/projects/close')
