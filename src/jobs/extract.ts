@@ -1743,6 +1743,9 @@ interface TitleReading {
  * And each is still held to `acceptEmployer`, so "Summer 2027" and "US" are
  * refused even where they stand.
  */
+/** A company's legal form, as the last word of its name: "Inc.", "B.V", "GmbH". */
+const LEGAL_ENTITY = /\b(?:inc|llc|l\.l\.c|ltd|limited|corp|corporation|holdings|gmbh|plc|ag|s\.?a|n\.?v|b\.?v)\.?$/i;
+
 function readTitle(
   raw: string | undefined,
   ctx: { employers: string[]; unnamed: boolean; onBoard: boolean },
@@ -1783,6 +1786,20 @@ function readTitle(
     // after a spaced hyphen that is a team — "iOS Engineer - Apple Music".
     if (segments.length > 1 && aName(s) && (namesEmployer(s, ctx.employers, { exact: !last.strong }) || (last.strong && ctx.unnamed))) {
       out.company ??= s;
+      segments.pop();
+      suffixGone = true;
+      continue;
+    }
+    /*
+     * A legal entity after a strong separator, when the employer is already
+     * known and this is another name for it — the group it belongs to.
+     * Epsilon's iCIMS titles its posting "Software Engineering Internship -
+     * Summer 2027 in Irving, Texas | Publicis Groupe Holdings B.V", and the
+     * whole of that was filed as the role, so the same job reached from its
+     * form, which says only the job, was a second row. Not taken as the
+     * employer: the address already said who, and said it better.
+     */
+    if (segments.length > 1 && last.strong && !ctx.unnamed && LEGAL_ENTITY.test(s) && aName(s)) {
       segments.pop();
       suffixGone = true;
       continue;
@@ -2067,8 +2084,17 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
     worthy(declared) ??
     (fromTitle && ROLE_NOUN.test(fromTitle) ? fromTitle : undefined) ??
     worthy(headingRole(html)) ??
-    (fromTitle && !addressShaped(fromTitle) && !(soleName && !namedElsewhere) ? fromTitle : undefined) ??
-    worthy(roleFromUrl(url));
+    /*
+     * The address before a title that names no job, when the address does
+     * name one. Iridium's self-identification step is titled with its
+     * tagline, "Truly Global Communications", which was filed as the role of
+     * a third row for an application already sent — while its address read
+     * `/jobs/5136/iridium-software-engineering-internship-–-summer-2027/form`.
+     * `roleFromUrl` only answers with a role noun in it, so "Product
+     * Marketing, Early Career" at an address that names nothing still stands.
+     */
+    worthy(roleFromUrl(url)) ??
+    (fromTitle && !addressShaped(fromTitle) && !(soleName && !namedElsewhere) ? fromTitle : undefined);
 
   const company =
     fromData ??

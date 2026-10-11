@@ -309,3 +309,39 @@ describe('"Build your Career at Tesla" — a careers site’s invitation round i
     });
   });
 });
+
+describe('one iCIMS application filed as a row per step', () => {
+  const GARMIN = 'https://careers-garmin.icims.com/jobs/20255/software-engineering-intern';
+  const IRIDIUM = 'https://careers-iridium.icims.com/jobs/5136/iridium-software-engineering-internship-%e2%80%93-summer-2027';
+
+  it('reads the job, not the step, out of "Job Specific Questions - …" and "Voluntary Self Identification - …"', () => {
+    for (const step of ['Candidate Profile', 'Job Specific Questions', 'Voluntary Self Identification']) {
+      expect(named([{ url: `${GARMIN}/questions`, title: `${step} - Software Engineering Intern | Careers at Garmin` }])).toEqual({
+        company: 'Garmin',
+        role: 'Software Engineering Intern',
+      });
+    }
+  });
+
+  it('keeps "Job Specific Questions" alone as the page talking about itself', () => {
+    expect(named([{ url: `${GARMIN}/questions`, title: 'Job Specific Questions - Careers at Garmin' }]).role).not.toMatch(/questions/i);
+  });
+
+  it('takes the job from the address over a tagline that names no job', () => {
+    expect(named([{ url: `${IRIDIUM}/form?form=Voluntary_Self_Identification_Form`, title: 'Truly Global Communications' }])).toEqual({
+      company: 'Iridium',
+      role: 'Iridium Software Engineering Internship – Summer 2027',
+    });
+  });
+
+  it('leaves off the group a known employer belongs to, and the place', () => {
+    expect(
+      named([
+        {
+          url: 'https://epsilon-publicisgroupe.icims.com/jobs/173034/software-engineering-internship---summer-2027/candidate',
+          title: 'Software Engineering Internship - Summer 2027 in Irving, Texas | Publicis Groupe Holdings B.V',
+        },
+      ]).role,
+    ).toBe('Software Engineering Internship - Summer 2027');
+  });
+});

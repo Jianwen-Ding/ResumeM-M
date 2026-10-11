@@ -468,8 +468,15 @@ export function joinTitle(segments: TitleSegment[]): string {
  * Health" and "Candidate Profile" alone are the page talking about itself, and
  * `NOT_A_ROLE` reads those whole.
  */
+/*
+ * And the rest of iCIMS's steps, which title themselves the same way: "Job
+ * Specific Questions - {job}", "Voluntary Self Identification - {job}". Read
+ * as the role, each step of one Garmin application filed a row of its own —
+ * Iridium's became three rows, Epsilon's two — one of them `applied` and the
+ * others left at `applying` for the fortnight's close to find.
+ */
 const APPLYING_PREFIX =
-  /^(?:(?:career\s+opportunities|careers?|jobs?)\s*:\s*)?(?:(?:job\s+)?application\s+for|apply(?:ing)?\s+(?:now\s+)?(?:for|to)|candidate\s+profile\s*[-–—:|])\s+/i;
+  /^(?:(?:career\s+opportunities|careers?|jobs?)\s*:\s*)?(?:(?:job\s+)?application\s+for|apply(?:ing)?\s+(?:now\s+)?(?:for|to)|(?:candidate\s+profile|job[\s-]+specific\s+questions|(?:application|screening|additional)\s+questions|voluntary\s+self[\s-]+identification(?:\s+forms?)?|self[\s-]+identification|eeo(?:c)?(?:\s+information)?|review\s+(?:and|&)\s+submit|personal\s+information|contact\s+information|my\s+(?:information|experience|documents))\s*[-–—:|])\s+/i;
 
 /**
  * A leading notification count — LinkedIn's "(3) " — a heading marker left from
