@@ -141,6 +141,7 @@ export const AI_PRESETS: AiPreset[] = [
      */
     args: [
       'exec',
+      '--ephemeral',
       '--sandbox',
       'read-only',
       '--skip-git-repo-check',
@@ -255,6 +256,11 @@ export function repairAiArgs(command: string, args: string[]): string[] {
     const out = [...args];
     // Refuses to start outside a git repository unless told not to check.
     if (!out.includes('--skip-git-repo-check')) out.splice(out.indexOf('exec') + 1, 0, '--skip-git-repo-check');
+    // These are independent jobs, never resumed Codex conversations. Keep
+    // history persistence out of their completion path: Codex 0.161.0 could
+    // finish the resume tools, then fail recording rollout items with
+    // "thread ... not found". The answer file and tool decisions still persist.
+    if (!out.includes('--ephemeral')) out.splice(out.indexOf('exec') + 1, 0, '--ephemeral');
     /*
      * Without this the answer has to be found inside Codex's printed session
      * — every turn of it, and a "tokens used" line at the end — which is how

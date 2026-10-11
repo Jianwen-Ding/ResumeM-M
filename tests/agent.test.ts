@@ -290,6 +290,7 @@ describe('stdin handling', () => {
     );
     expect(result.executed).toBe(true);
     expect(result.output).toContain('argv=the prompt');
+    expect(result.output).toContain('read 0 bytes of stdin');
     expect(Date.now() - started).toBeLessThan(4000); // i.e. it did not wait out the timeout
   });
 
@@ -820,6 +821,7 @@ describe('repairing an AI command that cannot work', () => {
     // repository, so codex refuses to start without this.
     expect(repairAiArgs('codex', ['exec', '--sandbox', 'read-only', '--cd', '{sandbox}', '{promptText}'])).toEqual([
       'exec',
+      '--ephemeral',
       '--skip-git-repo-check',
       '--sandbox',
       'read-only',
@@ -838,12 +840,12 @@ describe('repairing an AI command that cannot work', () => {
    */
   it('asks a codex exec for its last message in a file', () => {
     const repaired = repairAiArgs('codex', ['exec', '--skip-git-repo-check', '{promptText}']);
-    expect(repaired).toEqual(['exec', '--skip-git-repo-check', '--output-last-message', '{sandbox}/last-message.txt', '{promptText}']);
+    expect(repaired).toEqual(['exec', '--ephemeral', '--skip-git-repo-check', '--output-last-message', '{sandbox}/last-message.txt', '{promptText}']);
 
     // Whatever spelling is already there is theirs, and is left alone.
-    const mine = ['exec', '--skip-git-repo-check', '-o', '/tmp/mine.txt', '{promptText}'];
+    const mine = ['exec', '--ephemeral', '--skip-git-repo-check', '-o', '/tmp/mine.txt', '{promptText}'];
     expect(repairAiArgs('codex', mine)).toEqual(mine);
-    const joined = ['exec', '--skip-git-repo-check', '--output-last-message=/tmp/mine.txt', '{promptText}'];
+    const joined = ['exec', '--ephemeral', '--skip-git-repo-check', '--output-last-message=/tmp/mine.txt', '{promptText}'];
     expect(repairAiArgs('codex', joined)).toEqual(joined);
   });
 

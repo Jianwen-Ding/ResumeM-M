@@ -252,6 +252,7 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
 
     expect(seen.sandbox).toBe('read-only');
     expect(seen.cd).toBe(seen.cwd);
+    expect(seen.read).toBe(0);
     // The stand-in only reaches this line once stdin has been closed for it.
     expect(Date.now() - started).toBeLessThan(10_000);
   });
@@ -324,6 +325,7 @@ process.stdout.write('The actual answer.');
   it('repairs a config saved before that flag existed', () => {
     expect(repairAiArgs('codex', ['exec', '--sandbox', 'read-only', '--cd', '{sandbox}'])).toEqual([
       'exec',
+      '--ephemeral',
       '--skip-git-repo-check',
       '--sandbox',
       'read-only',

@@ -186,6 +186,7 @@ export async function runAgent(
     return [...expanded.slice(0, promptAt), ...added, ...expanded.slice(promptAt)];
   })();
   const usesFile = config.ai.args.some((a) => a.includes('{prompt}') && !a.includes('{promptText}'));
+  const usesInline = config.ai.args.some((a) => a.includes('{promptText}'));
 
   /*
    * Declared out here so `finally` can close the record whatever happens.
@@ -262,7 +263,9 @@ export async function runAgent(
     if (stdin) {
       // The child may exit before reading; a broken pipe is not our problem.
       stdin.on('error', () => undefined);
-      stdin.end(usesFile ? undefined : prompt);
+      // Codex appends piped stdin to a positional prompt. Sending both copies
+      // duplicated the full resume, posting and instructions in each run.
+      stdin.end(usesFile || usesInline ? undefined : prompt);
     }
 
     /*
