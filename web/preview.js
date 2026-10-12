@@ -33,7 +33,14 @@ export function createPreview(container) {
 
   let token = 0;
   let current = null; // the document on screen, kept until its replacement is ready
-  let currentUrl = null;
+  /**
+   * The PDF most recently asked for, which is not yet the one on screen while
+   * it loads. A redraw draws this one: redrawing the one on screen started a newer
+   * `show` for the old PDF, which took the token from the one still loading —
+   * so an edit followed by a window resize left the page before the edit on
+   * screen, for good, with the fit line beside it describing the new one.
+   */
+  let wantedUrl = null;
   /** The width the pages on screen were drawn for; 0 when drawn while hidden. */
   let drawnFor = 0;
   let resizeTimer = null;
@@ -73,6 +80,7 @@ export function createPreview(container) {
      */
     async show(url) {
       const mine = ++token;
+      wantedUrl = url;
       const seen = pages.clientWidth || container.clientWidth;
       const width = seen || 600;
 
@@ -95,7 +103,6 @@ export function createPreview(container) {
 
       current?.destroy();
       current = doc;
-      currentUrl = url;
     },
 
     /**
@@ -116,7 +123,7 @@ export function createPreview(container) {
 
     /** Re-render what is already shown, for a pane that changed width. */
     async redraw() {
-      if (currentUrl) await this.show(currentUrl);
+      if (wantedUrl) await this.show(wantedUrl);
     },
 
     /**
@@ -141,7 +148,7 @@ export function createPreview(container) {
       container.classList.remove('loaded');
       current?.destroy();
       current = null;
-      currentUrl = null;
+      wantedUrl = null;
     },
   };
 
@@ -158,7 +165,7 @@ export function createPreview(container) {
   if (typeof ResizeObserver === 'function') {
     new ResizeObserver(() => {
       const width = pages.clientWidth;
-      if (!currentUrl || zoom !== 'fit' || width === 0 || Math.abs(width - drawnFor) < 8) return;
+      if (!wantedUrl || zoom !== 'fit' || width === 0 || Math.abs(width - drawnFor) < 8) return;
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => preview.redraw().catch(() => {}), 120);
     }).observe(pages);

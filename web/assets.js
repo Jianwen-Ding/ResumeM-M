@@ -5,6 +5,14 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
   let importing = false;
   let signature = '';
   let shown = [];
+  /*
+   * What has been typed into each draft point and not yet added, by asset
+   * and point. The list is drawn again from the server whenever anything in
+   * it changes, and adding one point is such a change: every other point's
+   * box came back holding the server's wording, and the rewrites made to
+   * them while reviewing were gone. So the boxes are filled from here first.
+   */
+  const drafts = new Map();
   const report = error => status(error.message, true);
   const action = fn => async event => {
     const button = event.currentTarget;
@@ -227,7 +235,10 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
         }) }) : null,
         !asset.points.length ? el('p', { className: 'hint', textContent: 'No draft points yet. Generate points to turn evidence of your work into resume bullets.' }) : null,
         ...asset.points.map(point => {
-          const text = el('textarea', { value: point.text, rows: 3, disabled: Boolean(point.entryId), 'ariaLabel': 'Draft resume point' });
+          const draftKey = `${asset.id}/${point.id}`;
+          if (point.entryId) drafts.delete(draftKey);
+          const text = el('textarea', { value: drafts.get(draftKey) ?? point.text, rows: 3, disabled: Boolean(point.entryId), 'ariaLabel': 'Draft resume point' });
+          text.oninput = () => { if (text.value === point.text) drafts.delete(draftKey); else drafts.set(draftKey, text.value); };
           const target = el('select', { title: 'Entry to add this point to' }, [el('option', { value: '', textContent: 'Choose an Entry…' }),
             ...store.entries.filter(e => !e.archived).map(e => el('option', { value: e.id, textContent: entryName(e) })),
             el('option', { value: '__new', textContent: '+ New Entry…' })]);

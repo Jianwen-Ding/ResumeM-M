@@ -300,6 +300,13 @@ describe('folding an entry that is switched on', () => {
     expect(folded.querySelector('input[type=checkbox]')?.checked).toBe(true);
   });
 
+  it('tells a screen reader whether the entry is open', async () => {
+    expect(firstEntry().querySelector('.fold').getAttribute('aria-expanded')).toBe('true');
+    firstEntry().querySelector('.fold').click();
+    await vi.waitFor(() => expect(firstEntry()?.classList.contains('folded')).toBe(true));
+    expect(firstEntry().querySelector('.fold').getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('says how much is folded away, so a folded entry is not a mystery', async () => {
     firstEntry().querySelector('.fold').click();
     await vi.waitFor(() => expect(firstEntry()?.classList.contains('folded')).toBe(true));
@@ -537,6 +544,44 @@ describe('putting the lines of an entry in order', () => {
     const grip = [...firstEntry().querySelectorAll(':scope > .bullet')][2].querySelector(':scope > .bullet-head > .grip');
     grip.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }));
     await vi.waitFor(() => expect(lines()).toEqual([before[0], before[2], before[1]]));
+  });
+
+  /*
+   * The editor is rebuilt after every move, and the grip that was pressed went
+   * with it: focus fell to the page body, and the second Alt+Down went
+   * nowhere. Moving a line two places took a trip back with Tab.
+   */
+  it('keeps the keyboard on the line it moved, so it can be moved again', async () => {
+    const before = lines();
+    const gripOf = (i) => [...firstEntry().querySelectorAll(':scope > .bullet')][i].querySelector(':scope > .bullet-head > .grip');
+    gripOf(0).focus();
+    document.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+    await vi.waitFor(() => expect(lines()).toEqual([before[1], before[0], before[2]]));
+    expect(document.activeElement).toBe(gripOf(1));
+
+    document.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+    await vi.waitFor(() => expect(lines()).toEqual([before[1], before[2], before[0]]));
+    expect(document.activeElement).toBe(gripOf(2));
+  });
+
+  it('keeps the keyboard on a line\'s box once it is switched off, which draws a different row', async () => {
+    const box = [...firstEntry().querySelectorAll(':scope > .bullet')][1].querySelector('input[type=checkbox]');
+    box.focus();
+    box.click();
+    await vi.waitFor(() => expect(firstEntry().querySelector(':scope > .bullet.off')).not.toBeNull());
+    const now = document.activeElement;
+    expect(now?.matches('input[type=checkbox]')).toBe(true);
+    expect(now.closest('.bullet')?.classList.contains('off')).toBe(true);
+  });
+
+  /*
+   * Passed to `el` with the other properties, `aria-label` became a property
+   * of that name and never an attribute: every grip was announced by its
+   * glyph, "⠿", with nothing to say which line it moved.
+   */
+  it('names each grip for a screen reader', () => {
+    const grip = firstEntry().querySelector(':scope > .bullet > .bullet-head > .grip');
+    expect(grip.getAttribute('aria-label')).toMatch(/^Reorder /);
   });
 
   /*

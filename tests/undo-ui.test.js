@@ -23,6 +23,8 @@ afterEach(() => {
  */
 /** Set by a block that needs the save arranged before the editor opens it. */
 let arrange = () => {};
+/** A promise the next resume write waits on before it lands, when set. */
+let holdNextResumeWrite = null;
 
 describe('undo in the builder', () => {
   let data;
@@ -69,6 +71,11 @@ describe('undo in the builder', () => {
         data.resumes = data.resumes.map((r) => (r.id === id ? { ...r, label: body.label } : r));
         result = data.resumes.find((r) => r.id === id);
       } else if (url.startsWith('/api/resumes/') && method === 'PUT') {
+        if (holdNextResumeWrite) {
+          const gate = holdNextResumeWrite;
+          holdNextResumeWrite = null;
+          await gate;
+        }
         const id = decodeURIComponent(url.split('?')[0].split('/').pop());
         data.resumes = data.resumes.some((r) => r.id === id)
           ? data.resumes.map((r) => (r.id === id ? { ...body, id } : r))
@@ -145,6 +152,45 @@ describe('undo in the builder', () => {
     // so nothing writes it out again a moment later.
     await vi.advanceTimersByTimeAsync(5000);
     expect(spec('newgrad')).toEqual(restored);
+  });
+
+  /*
+   * Two presses of Undo, the second while the first was still writing.
+   *
+   * Each press started a step straight away. The second took its entry off
+   * the stack while the first's write was out, and the first, finishing,
+   * marked undoing as over — so the second's write was recorded as a fresh
+   * edit, which empties the redo stack. Two undos, and nothing to redo.
+   */
+  it('takes back two steps for two quick presses, and can redo both', async () => {
+    const boxes = () => [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+    const original = structuredClone(spec('newgrad'));
+
+    boxes()[0].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+    boxes()[1].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(written('newgrad').length).toBeGreaterThan(1));
+    const edited = structuredClone(spec('newgrad'));
+
+    let release;
+    holdNextResumeWrite = new Promise((go) => (release = go));
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(50);
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(500);
+    release();
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(spec('newgrad'), 'both steps taken back').toEqual(original);
+    const redoBtn = document.querySelector('#btn-redo');
+    expect(redoBtn.disabled, 'the redo stack survived').toBe(false);
+    redoBtn.click();
+    await vi.advanceTimersByTimeAsync(3000);
+    redoBtn.click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(spec('newgrad'), 'both steps put back').toEqual(edited);
   });
 
   /*

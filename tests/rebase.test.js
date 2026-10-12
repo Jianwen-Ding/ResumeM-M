@@ -294,4 +294,35 @@ describe('rebasing one edit onto another', () => {
     expect(ids).toContain('b_ours');
     expect(ids).toContain('b_theirs');
   });
+
+  it('keeps an order the other edit chose while this one added or deleted a bullet', () => {
+    // Someone dragged the bullets into a new order (another tab, the CLI) while
+    // this edit was adding a line. The addition is not a reorder.
+    const bullet = (id) => ({ id, default: 'v_1', variants: [{ id: 'v_1', label: 'B', text: id }] });
+    const base = { ...entry(), bullets: [bullet('a'), bullet('b'), bullet('c')] };
+    const theirs = { ...base, bullets: [bullet('c'), bullet('a'), bullet('b')] };
+
+    const added = { ...base, bullets: [...base.bullets, bullet('d')] };
+    expect(rebase(base, added, theirs).bullets.map((b) => b.id)).toEqual(['c', 'a', 'b', 'd']);
+
+    const deleted = { ...base, bullets: [bullet('a'), bullet('c')] };
+    expect(rebase(base, deleted, theirs).bullets.map((b) => b.id)).toEqual(['c', 'a']);
+  });
+
+  it('puts the other edit\'s new last bullet last, not after its old neighbour', () => {
+    const bullet = (id) => ({ id, default: 'v_1', variants: [{ id: 'v_1', label: 'B', text: id }] });
+    const base = { ...entry(), bullets: [bullet('a'), bullet('b'), bullet('c')] };
+    const ours = { ...base, bullets: [bullet('c'), bullet('a'), bullet('b')] };
+    const theirs = { ...base, bullets: [...base.bullets, bullet('d'), bullet('e')] };
+
+    expect(rebase(base, ours, theirs).bullets.map((b) => b.id)).toEqual(['c', 'a', 'b', 'd', 'e']);
+  });
+
+  it('keeps a reorder of a plain list while this edit added to it', () => {
+    const base = { ...entry(), tags: ['a', 'b', 'c'] };
+    const ours = { ...base, tags: ['a', 'b', 'c', 'd'] };
+    const theirs = { ...base, tags: ['c', 'a', 'b'] };
+
+    expect(rebase(base, ours, theirs).tags).toEqual(['c', 'a', 'b', 'd']);
+  });
 });

@@ -37,9 +37,21 @@ const $ = (sel) => document.querySelector(sel);
  */
 const setChildren = (node, ...kids) => node.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
 
-/** Build an element. `children` may contain strings, nodes, or null. */
+/**
+ * Build an element. `children` may contain strings, nodes, or null.
+ *
+ * `aria-*` and `data-*` keys become attributes. Assigned along with the rest
+ * they were only ever JavaScript properties named "aria-label" that nothing
+ * reads: every grip was announced as "⠿", a fold never said whether it was
+ * open, and a loading list never said it was loading.
+ */
 const el = (tag, props = {}, children = []) => {
-  const node = Object.assign(document.createElement(tag), props);
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (/^(aria|data)-/.test(key)) {
+      if (value != null && value !== false) node.setAttribute(key, String(value));
+    } else node[key] = value;
+  }
   for (const c of [].concat(children)) if (c != null && c !== false) node.append(c);
   return node;
 };
@@ -692,7 +704,25 @@ function describeNext(label) {
   undoLabel = label;
 }
 
-async function stepHistory(direction) {
+/**
+ * The undo or redo still running, for the next one to wait behind.
+ *
+ * Two quick presses of Ctrl+Z each started a step at once. The second popped
+ * its entry while the first's PUT was still out, and the first, finishing,
+ * cleared `undoing` underneath it — so the second's write was taken for a new
+ * edit, recorded as a step of its own, and the redo stack was thrown away.
+ * Two undos, one step taken back, nothing to redo. So steps run one at a time,
+ * in the order they were asked for.
+ */
+let stepping = Promise.resolve();
+
+function stepHistory(direction) {
+  const step = stepping.then(() => stepOnce(direction));
+  stepping = step.catch(() => {});
+  return step;
+}
+
+async function stepOnce(direction) {
   /*
    * Whatever is still on the debounce goes down first, for the reason
    * `undoGroup` gives and one more.
@@ -2641,9 +2671,16 @@ function alternateStepper(key, field, currentId) {
   ]);
 }
 
-/** A checkbox that includes or excludes something from this variation. */
-function toggle({ on, title, onChange }) {
+/**
+ * A checkbox that includes or excludes something from this variation.
+ *
+ * `key` names what it switches, the same whether it is on or off: switching
+ * a line off draws a different row around it, so `holdFocus` cannot find it
+ * again by where it sits.
+ */
+function toggle({ on, title, onChange, key }) {
   const cb = el('input', { type: 'checkbox', checked: on, title });
+  if (key) cb.dataset.focusKey = key;
   cb.onchange = () => {
     onChange(cb.checked);
     markDirty();
@@ -2748,6 +2785,7 @@ function bulletBlock(entry, section, bullet, choices) {
         on: false,
         title: 'Hidden on this variation — click to show',
         onChange: (checked) => setBulletIncluded(entry, section, bullet, checked),
+        key: `include:${entry.id}/${bullet.id}`,
       }),
       el('div', { className: 'text collapsed' }, [preview]),
     ]);
@@ -2770,6 +2808,7 @@ function bulletBlock(entry, section, bullet, choices) {
       on: included,
       title: 'Showing on this variation',
       onChange: (checked) => setBulletIncluded(entry, section, bullet, checked),
+      key: `include:${entry.id}/${bullet.id}`,
     }),
     isList
       ? el('div', { className: 'text' }, listPreview(bullet))
@@ -3144,6 +3183,7 @@ function entryBlock(entry, section, choices) {
         on: false,
         title: 'Hidden on this variation — click to show',
         onChange: (checked) => setEntryIncluded(section, entry, checked),
+        key: `include:${entry.id}`,
       }),
       el('span', { className: 'title', textContent: fieldText(entry.title, choices, `${entry.id}.title`) || 'Untitled' }),
     ]);
@@ -3164,6 +3204,7 @@ function entryBlock(entry, section, choices) {
       on: included,
       title: 'Showing on this variation',
       onChange: (checked) => setEntryIncluded(section, entry, checked),
+      key: `include:${entry.id}`,
     }),
     /*
      * Folding, for an entry that is switched *on*.
@@ -4045,10 +4086,70 @@ async function addAutofillField() {
 function renderEditor() {
   const editor = $('#editor');
   const carry = holdTyping(editor);
+  const refocus = holdFocus(editor);
   const scrolled = window.scrollY;
   drawEditor(editor);
   if (window.scrollY !== scrolled) window.scrollTo(window.scrollX, scrolled);
   carry();
+  refocus();
+}
+
+/**
+ * Put the keyboard back on the same control once the editor is drawn again.
+ *
+ * Every control is thrown away and rebuilt, and the one that had focus went
+ * with it, leaving focus on the page body. That is invisible to a mouse and
+ * ruinous to a keyboard: Alt+Down on a line's grip moved the line one place
+ * and then the second press went nowhere, a tick box toggled with Space
+ * left the next Tab starting from the top of the page.
+ *
+ * The control is found again by where it sits rather than by what it says:
+ * the rows it is inside (`data-drag-id`, which a line keeps wherever it is
+ * moved to), then its kind of element and which one of that kind it is in
+ * its own row. Its title and label are no use, since a tick box toggled
+ * says something else afterwards. Rows inside the row are skipped when
+ * counting, so a line moved within its entry does not shift which control
+ * of the entry's own is meant. A control whose row is drawn differently
+ * once it is used — the tick box that switches a line off — carries its own
+ * name instead, `data-focus-key`.
+ */
+function holdFocus(root) {
+  const was = document.activeElement;
+  if (!was || was === document.body || !root.contains(was)) return () => {};
+  const named = was.dataset?.focusKey;
+  if (named) {
+    return () => {
+      if (document.activeElement && document.activeElement !== document.body) return;
+      const next = [...root.querySelectorAll('[data-focus-key]')].find((node) => node.dataset.focusKey === named);
+      if (canFocus(next)) next.focus({ preventScroll: true });
+    };
+  }
+  const rowOf = (node) => node.parentElement?.closest('[data-drag-id]');
+  const rows = [];
+  for (let row = was.closest('[data-drag-id]'); row && root.contains(row); row = rowOf(row)) {
+    rows.unshift(row.dataset.dragId);
+  }
+  const kind = (node) => `${node.tagName}:${node.getAttribute('type') ?? ''}`;
+  const own = (scope) =>
+    [...scope.querySelectorAll('*')].filter(
+      (node) => kind(node) === kind(was) && (node.closest('[data-drag-id]') ?? root) === scope,
+    );
+  const scopeOf = () => {
+    let scope = root;
+    for (const id of rows) {
+      scope = [...scope.querySelectorAll('[data-drag-id]')].find((row) => row.dataset.dragId === id);
+      if (!scope) return null;
+    }
+    return scope;
+  };
+  const nth = own(scopeOf()).indexOf(was);
+  return () => {
+    // Already somewhere: `holdTyping` put it back, or something drawn chose.
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const scope = scopeOf();
+    const next = scope && own(scope)[nth];
+    if (canFocus(next)) next.focus({ preventScroll: true });
+  };
 }
 
 /**
