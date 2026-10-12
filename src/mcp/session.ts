@@ -34,7 +34,8 @@
 
 import { inListOrder, sectionForEntry, type AiPlan } from '../jobs/aiPlan.js';
 import { pickBullet } from '../model/resolve.js';
-import type { Bullet, Entry, MaybeVariant, ResolvedResume, SkillGroup, StoreData } from '../model/types.js';
+import type { Bullet, Entry, MaybeVariant, SkillGroup } from '../model/types.js';
+import type { SessionResume, TailorData } from './session-data.js';
 
 /** The entry fields that can carry alternate wordings — see `choose`. */
 const WORDED_FIELDS = ['title', 'dates', 'subtitle', 'location'] as const;
@@ -113,8 +114,9 @@ export class TailorSession {
   private readonly groups = new Map<string, SkillGroup>();
 
   constructor(
-    readonly data: StoreData,
-    readonly resume: ResolvedResume,
+    /** Only what this reads — see `session-data.ts`. */
+    readonly data: TailorData,
+    readonly resume: SessionResume,
     readonly posting: TailorPosting,
   ) {
     for (const entry of data.entries) {

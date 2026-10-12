@@ -1,4 +1,5 @@
 import type { StoreData, WritingSample } from '../model/types.js';
+import { answersForAi } from './privacy.js';
 
 /**
  * Conveying a writing voice by describing it is a losing game. People are poor
@@ -86,7 +87,7 @@ export function collectSamples(data: StoreData, { resume = true }: SampleOptions
     out.push({ kind: 'letter', title: letter.title, text });
   }
 
-  for (const item of data.answers ?? []) {
+  for (const item of answersForAi(data.answers)) {
     if (!countsAsTheirs(item)) continue;
     for (const v of item.variants) {
       const text = clean(v.text);

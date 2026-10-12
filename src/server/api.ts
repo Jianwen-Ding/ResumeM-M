@@ -26,9 +26,10 @@ import {
   type FeedbackContext,
   type TailorContext,
 } from '../ai/prompts.js';
-import { listModels } from '../ai/models.js';
+import { commandToAsk, listModels } from '../ai/models.js';
 import { AI_PRESETS, AI_TASKS, configForTask, researchIsOurs } from '../ai/presets.js';
 import { canWire, serverEntry, wireUp } from '../mcp/launch.js';
+import { sessionResume, tailorData, writingData } from '../mcp/session-data.js';
 import { readState } from '../mcp/main.js';
 import type { SessionState } from '../mcp/session.js';
 import type { AuthoringState } from '../mcp/authoring.js';
@@ -518,8 +519,9 @@ function writingTools(
         command,
         {
           kind: 'write',
-          data,
-          resume: resolved,
+          // What the writing tools read and nothing else — see `session-data.ts`.
+          data: writingData(data),
+          resume: sessionResume(resolved),
           posting: {
             company: job.company,
             jobTitle: job.jobTitle,
@@ -1764,10 +1766,17 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }),
   );
 
-  api.get(
+  /*
+   * A POST, though it changes nothing: it runs a program. As a GET it was
+   * outside the Origin guard, so an `<img src>` on any page could have it run
+   * any binary named codex, claude, gemini or agy from any path. Now the
+   * guard applies, and the command is the configured one or a known CLI by
+   * its bare name — see `commandToAsk`.
+   */
+  api.post(
     '/ai/models',
     handler(async (req, res) => {
-      const command = String(req.query.command ?? '') || store.loadConfig().ai.command;
+      const command = commandToAsk((req.body as { command?: unknown } | undefined)?.command, store.loadConfig().ai.command);
       res.json(await listModels(command, store.root));
     }),
   );
@@ -2554,9 +2563,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
               command,
               {
                 kind: 'author',
-                data,
-                resume: resolveResume(defaultBaseId(data.resumes) ?? data.resumes[0]?.id ?? '', data),
-                posting: { description: '' },
+                // No store data: the authoring tools read only the material
+                // and the ids in `existing`. See `session-data.ts`.
                 documents,
                 existing,
               },
@@ -3377,8 +3385,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
                 sandbox,
                 command,
                 {
-                  data,
-                  resume: resolved,
+                  data: tailorData(data),
+                  resume: sessionResume(resolved),
                   posting: {
                     company: job.company,
                     jobTitle: job.title,
@@ -4509,15 +4517,31 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     );
   };
 
+  /*
+   * When the retiring happens: once when the save is opened, with the rest of
+   * the housekeeping a save gets on the way in (`openSave`), and whenever the
+   * route below is asked to.
+   *
+   * It used to happen on `GET /workspace`, which made reading the list a
+   * write and a commit — the one GET that changed the save, and one outside
+   * the Origin guard, so any page could have it delete and commit. Not fatal
+   * to anything: retiring is housekeeping, and a save whose git is not
+   * answering should still open. Nothing is awaited before the drafts are
+   * read, so a save with nothing stale never touches git at all.
+   */
+  void retireStaleDrafts().catch(() => undefined);
+
+  api.post(
+    '/workspace/retire',
+    handler(async (_req, res) => {
+      await retireStaleDrafts().catch(() => undefined);
+      res.json({ drafts: store.loadDrafts() });
+    }),
+  );
+
   api.get(
     '/workspace',
     handler(async (_req, res) => {
-      /*
-       * Not fatal to the list. Retiring is housekeeping, and a save whose git
-       * is not answering should still show somebody the applications they are
-       * in the middle of writing.
-       */
-      await retireStaleDrafts().catch(() => undefined);
       res.json({ drafts: store.loadDrafts() });
     }),
   );

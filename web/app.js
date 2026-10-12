@@ -481,6 +481,8 @@ const READS_BY_POST = new Set([
   '/ai/draft-phrasing',
   '/voice/ingest',
   '/config/test-ai',
+  // Runs the CLI to read its model menu; changes nothing in the store.
+  '/ai/models',
   '/store/save',
   '/config/store/push',
 ]);
@@ -10735,7 +10737,8 @@ async function loadSettings() {
   const askAboutModels = async (cmd) => {
     if (!cmd || fromCli.has(cmd)) return;
     fromCli.set(cmd, null); // in flight, so a keystroke does not ask twice
-    const answer = await api(`/ai/models?command=${encodeURIComponent(cmd)}`).catch(() => ({
+    // A POST: asking runs the CLI, so it goes through the server's Origin guard.
+    const answer = await api('/ai/models', { method: 'POST', body: JSON.stringify({ command: cmd }) }).catch(() => ({
       models: [],
       from: 'unavailable',
       message: `Could not ask ${cmd} for its model choices; you can still type a model name.`,

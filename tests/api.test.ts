@@ -3036,6 +3036,10 @@ describe('workspace', () => {
    * and it lets itself out a fortnight later so the Workspace stays a list of
    * live work instead of becoming a second, worse tracker.
    */
+  /*
+   * Retired through its own POST, and when a save is opened — never by
+   * listing the Workspace, which is a GET and writes nothing.
+   */
   it('keeps a sent workspace, and lets it go once it is a fortnight stale', async () => {
     // A repository, because a space is only ever closed once the history has
     // it — see the test below, and `removeWhatIsFiled`.
@@ -3057,17 +3061,17 @@ describe('workspace', () => {
     };
 
     leave('submitted', 3);
-    let list = await request(app).get('/api/workspace').expect(200);
+    let list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
 
     // Still being written, and old: that is somebody's unfinished application,
     // not litter.
     leave('drafting', 400);
-    list = await request(app).get('/api/workspace').expect(200);
+    list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
 
     leave('submitted', 15);
-    list = await request(app).get('/api/workspace').expect(200);
+    list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts).toHaveLength(0);
   });
 
@@ -3098,7 +3102,7 @@ describe('workspace', () => {
     const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
 
-    await request(app).get('/api/workspace').expect(200);
+    await request(app).post('/api/workspace/retire').expect(200);
 
     expect(fs.existsSync(file)).toBe(false);
     const holds = await Promise.all(
@@ -3124,7 +3128,7 @@ describe('workspace', () => {
     const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
 
-    const list = await request(app).get('/api/workspace').expect(200);
+    const list = await request(app).post('/api/workspace/retire').expect(200);
 
     expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
     expect(fs.existsSync(file)).toBe(true);

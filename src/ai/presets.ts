@@ -149,7 +149,15 @@ export const AI_PRESETS: AiPreset[] = [
       '{sandbox}',
       '--output-last-message',
       '{sandbox}/last-message.txt',
-      '{promptText}',
+      /*
+       * `-` is Codex's own spelling of "the prompt is on stdin" (`codex exec
+       * --help`: if not given as an argument, or if `-` is used, instructions
+       * are read from stdin), and `runAgent` pipes the prompt there whenever
+       * no argument carries it. It was `{promptText}`: the whole prompt — the
+       * resume, the posting, the letters — as one argv entry, which any other
+       * user on the machine can read with `ps`.
+       */
+      '-',
     ],
     note: 'Runs in Codex’s own read-only sandbox, in a scratch directory.',
     model: {
@@ -273,10 +281,18 @@ export function repairAiArgs(command: string, args: string[]): string[] {
        * In front of the prompt, which Codex takes as a positional: anything
        * after it is read as more prompt.
        */
-      const promptAt = out.findIndex((a) => a === '{promptText}' || a === '{prompt}');
+      const promptAt = out.findIndex((a) => a === '{promptText}' || a === '{prompt}' || a === '-');
       const at = promptAt < 0 ? out.length : promptAt;
       out.splice(at, 0, '--output-last-message', '{sandbox}/last-message.txt');
     }
+    /*
+     * And the prompt off the command line, onto stdin. A config copied from
+     * the preset before it changed still says `{promptText}`, which put the
+     * whole prompt in argv for `ps` to show anyone on the machine. See the
+     * preset.
+     */
+    const inline = out.indexOf('{promptText}');
+    if (inline >= 0) out[inline] = '-';
     return out;
   }
 
@@ -524,7 +540,8 @@ function setSwitch(
    * posting. Inserted before the first argument that carries the prompt, or
    * at the end when none does.
    */
-  const promptAt = out.findIndex((a) => a.includes('{prompt}') || a.includes('{promptText}'));
+  // `-` is a prompt read from stdin, in the place the prompt goes (Codex).
+  const promptAt = out.findIndex((a) => a.includes('{prompt}') || a.includes('{promptText}') || a === '-');
   const added = spec.join === '=' ? [`${spec.flag}=${value}`] : [spec.flag, value];
   if (promptAt < 0) return [...out, ...added];
   return [...out.slice(0, promptAt), ...added, ...out.slice(promptAt)];

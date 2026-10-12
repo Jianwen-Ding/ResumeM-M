@@ -57,8 +57,8 @@ describe('the settings panel', () => {
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/voice') result = { voice: '' };
       else if (url === '/api/ai/presets') result = { presets: AI_PRESETS, tasks: AI_TASKS };
-      else if (url.startsWith('/api/ai/models?')) {
-        const command = new URL(url, 'http://local').searchParams.get('command');
+      else if (url === '/api/ai/models' && options.method === 'POST') {
+        const command = body?.command;
         result = { models: liveModels[command] ?? [], from: 'cli' };
       }
       // A working AI, which is one that answers the question the test asks:

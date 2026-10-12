@@ -878,7 +878,8 @@ describe('repairing an AI command that cannot work', () => {
       '{sandbox}',
       '--output-last-message',
       '{sandbox}/last-message.txt',
-      '{promptText}',
+      // And the prompt moved off argv onto stdin: see the Codex preset.
+      '-',
     ]);
   });
 
@@ -889,12 +890,12 @@ describe('repairing an AI command that cannot work', () => {
    */
   it('asks a codex exec for its last message in a file', () => {
     const repaired = repairAiArgs('codex', ['exec', '--skip-git-repo-check', '{promptText}']);
-    expect(repaired).toEqual(['exec', '--ephemeral', '--skip-git-repo-check', '--output-last-message', '{sandbox}/last-message.txt', '{promptText}']);
+    expect(repaired).toEqual(['exec', '--ephemeral', '--skip-git-repo-check', '--output-last-message', '{sandbox}/last-message.txt', '-']);
 
     // Whatever spelling is already there is theirs, and is left alone.
-    const mine = ['exec', '--ephemeral', '--skip-git-repo-check', '-o', '/tmp/mine.txt', '{promptText}'];
+    const mine = ['exec', '--ephemeral', '--skip-git-repo-check', '-o', '/tmp/mine.txt', '-'];
     expect(repairAiArgs('codex', mine)).toEqual(mine);
-    const joined = ['exec', '--ephemeral', '--skip-git-repo-check', '--output-last-message=/tmp/mine.txt', '{promptText}'];
+    const joined = ['exec', '--ephemeral', '--skip-git-repo-check', '--output-last-message=/tmp/mine.txt', '-'];
     expect(repairAiArgs('codex', joined)).toEqual(joined);
   });
 

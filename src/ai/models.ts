@@ -328,6 +328,31 @@ const presetFor = (command: string) => {
 };
 
 /**
+ * Which command a request may have asked for models from — or why not.
+ *
+ * Asking for models runs the command. The settings page asks before the
+ * setting is saved, so it may name a command that is not configured yet; but
+ * anything it may name is either what is configured already or one of the
+ * known CLIs by its bare name, found on PATH the way the run itself would
+ * find it. A path is refused unless it is the configured one: `presetFor`
+ * matches on the basename alone, so `/tmp/anything/codex` passed as a preset
+ * and was run. Throws, with the reason, for anything else.
+ */
+export function commandToAsk(requested: unknown, configured: string): string {
+  const asked = typeof requested === 'string' ? requested.trim() : '';
+  const current = (configured ?? '').trim();
+  if (!asked || asked === current) return current;
+  const bare = !/[\\/]/.test(asked) && AI_PRESETS.some((p) => p.command.toLowerCase() === asked.toLowerCase());
+  if (!bare) {
+    throw new Error(
+      `Models can be listed for the configured command or for a known AI CLI by name (${AI_PRESETS.map((p) => p.command).join(', ')}), ` +
+        'not for a path. Save the setting first to ask a command at a path.',
+    );
+  }
+  return asked;
+}
+
+/**
  * Ask the configured command's live model source. Failure deliberately does
  * not turn into a remembered list: the free-form field remains available and
  * the UI can say why live choices could not be read.

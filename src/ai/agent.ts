@@ -189,7 +189,8 @@ export async function runAgent(
   const args = (() => {
     const added = wiring ? [...wiring.args, ...approval] : [];
     if (added.length === 0) return expanded;
-    const promptAt = expanded.findIndex((a) => a === prompt || a === promptFile || a.endsWith(prompt));
+    // `-` is the prompt too, read from stdin where it stands (Codex).
+    const promptAt = expanded.findIndex((a) => a === prompt || a === promptFile || a.endsWith(prompt) || a === '-');
     if (promptAt < 0) return [...expanded, ...added];
     return [...expanded.slice(0, promptAt), ...added, ...expanded.slice(promptAt)];
   })();

@@ -3,6 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createApi } from '../src/server/api.js';
 import { Repo } from '../src/git/repo.js';
 import { stats } from '../src/model/applications.js';
@@ -63,9 +64,11 @@ function meanwhile(change: () => void | Promise<void>) {
 }
 
 /*
- * Listing the Workspace retires the sent spaces gone quiet, and it waits on
- * git to do it. A space reopened or edited in that wait was answered 200 and
- * then deleted, edit and all.
+ * Retiring the sent spaces gone quiet waits on git. A space reopened or
+ * edited in that wait was answered 200 and then deleted, edit and all.
+ *
+ * Retiring used to ride on listing the Workspace (`GET /workspace`); it is
+ * its own POST now, and runs when a save is opened — so a GET writes nothing.
  */
 describe('a sent workspace edited while it is being retired', () => {
   beforeEach(async () => {
@@ -87,7 +90,7 @@ describe('a sent workspace edited while it is being retired', () => {
     meanwhile(() => {
       t.store.saveDraft({ ...t.store.getDraft('d1')!, status: 'drafting' });
     });
-    const list = await request(app).get('/api/workspace').expect(200);
+    const list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain('d1');
     expect(t.store.getDraft('d1')?.status).toBe('drafting');
   });
@@ -97,12 +100,29 @@ describe('a sent workspace edited while it is being retired', () => {
       const d = t.store.getDraft('d1')!;
       t.store.saveDraft({ ...d, coverLetter: { ...d.coverLetter, body: 'The one they asked for again.' } });
     });
-    await request(app).get('/api/workspace').expect(200);
+    await request(app).post('/api/workspace/retire').expect(200);
     expect(t.store.getDraft('d1')?.coverLetter.body).toBe('The one they asked for again.');
   });
 
-  it('and still goes when nobody touched it', async () => {
+  it('is not retired, written or committed by listing the Workspace', async () => {
+    const head = () => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: t.dir, encoding: 'utf8' });
+    const before = head();
     const list = await request(app).get('/api/workspace').expect(200);
+    expect(list.body.drafts.map((d: { id: string }) => d.id)).toEqual(['d1']);
+    expect(t.exists('drafts/d1.yaml')).toBe(true);
+    expect(head()).toBe(before);
+  });
+
+  it('is retired when a save is opened, with nothing asked', async () => {
+    const opened = express();
+    opened.use('/api', createApi({ store: t.store, repo }));
+    await vi.waitFor(() => expect(t.exists('drafts/d1.yaml')).toBe(false), { timeout: 10_000 });
+    const list = await request(opened).get('/api/workspace').expect(200);
+    expect(list.body.drafts).toEqual([]);
+  });
+
+  it('and still goes when nobody touched it', async () => {
+    const list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts).toEqual([]);
     expect(t.exists('drafts/d1.yaml')).toBe(false);
   });
