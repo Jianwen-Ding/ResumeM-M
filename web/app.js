@@ -2121,7 +2121,7 @@ async function discardStuckSave() {
  * Waiting for each write and rebasing the next onto it is what stops the
  * second edit from carrying the first one away with it.
  */
-const entryWrites = new Map(); // id → { queue, server, pending, waiting, running, sent, landedOrder }
+const entryWrites = new Map(); // id → { queue, server, serverVersion, pending, waiting, running, sent, landedOrder }
 
 /**
  * Run something that changes one entry in that entry's lane.
@@ -2141,6 +2141,8 @@ async function inEntryLane(id, run, { whole = false } = {}) {
   const lane = entryWrites.get(id) ?? {
     queue: Promise.resolve(),
     server: null,
+    /** Which version of the entry `server` is, as the server said it. See `saveEntry`. */
+    serverVersion: undefined,
     pending: 0,
     /** Writes not started yet, in the order they were asked for. */
     waiting: [],
@@ -2194,7 +2196,11 @@ async function inEntryLane(id, run, { whole = false } = {}) {
        * find nothing to rebase onto, and PUT the stale entry whole — undoing the
        * write that had just landed.
        */
-      lane.server = state.store?.entries?.find((e) => e.id === id) ?? lane.server;
+      const read = state.store?.entries?.find((e) => e.id === id);
+      if (read) {
+        lane.server = read;
+        lane.serverVersion = state.store.entryVersions?.[id];
+      }
     } finally {
       /*
        * Released even when that reload throws, as it does with the server
@@ -2261,6 +2267,8 @@ async function saveEntry(entry, message, { paint = true } = {}) {
   const id = entry.id;
   // What this edit was derived from: the store as the client last read it.
   const base = entriesAsRead.get(id) ?? state.store?.entries?.find((e) => e.id === id) ?? null;
+  // And which version of the entry that was, from the same read. See `entryVersion` in src/server/api.ts.
+  const baseVersion = base ? (state.store?.entryVersions?.[id] ?? undefined) : undefined;
 
   await inEntryLane(
     id,
@@ -2272,6 +2280,7 @@ async function saveEntry(entry, message, { paint = true } = {}) {
        * time. See `sendEntryEditsLeaving`.
        */
       let theirs = leaving ? (lane.sent ?? lane.server) : lane.server;
+      let theirsVersion = lane.serverVersion;
       /*
        * The first write of a lane has nothing landed to rebase onto: the lane
        * is new, and `server` is empty. It sent the page's copy of the entry
@@ -2283,47 +2292,83 @@ async function saveEntry(entry, message, { paint = true } = {}) {
        * creating, and given up on if the page goes (see `unlessLeaving`).
        */
       if (!theirs && base && !leaving) {
-        const now = (await readStoreNow())?.entries?.find((e) => e.id === id);
-        if (now) theirs = lane.server = now;
+        const read = await readStoreNow();
+        const now = read?.entries?.find((e) => e.id === id);
+        if (now) {
+          theirs = lane.server = now;
+          theirsVersion = lane.serverVersion = read.entryVersions?.[id] ?? undefined;
+        }
       }
-      const rebased = Boolean(theirs && base && !same(theirs, base));
-      const body = rebased ? rebase(base, entry, theirs) : entry;
       const order = ++saveOrder;
       /*
-       * Not cleared once it lands: a save leaves the queue early only while
-       * every write running in the lane is one of these, and each of those
-       * set it as it went, so it is always what the newest of them sent.
+       * Sent based on the version of the entry it was rebased onto, or made
+       * on (`?basedOn=`, as a resume's save is: see `autoSave`).
+       *
+       * Reading the entry first was not enough. A change landing between that
+       * read and this write, or after the save ahead of it in the lane came
+       * back, or while the read failed, was still written away whole: a pull
+       * that moved an entry's location to "Seattle, WA", then a fix to its
+       * title here, and the location went back to "Boston, MA" with the fix.
+       * The server now refuses an entry that has moved on since (409, with
+       * the entry as it is and its version), and the edit is rebased onto that
+       * and sent again, up to three times, so both changes stay.
+       *
+       * Not on the way out of the page: the save still out ahead of this one
+       * will make a version nothing here knows yet, and a refusal would come
+       * back to a page that has gone. `order` keeps those in place instead,
+       * as it did before.
        */
-      lane.sent = body;
-      /*
-       * `keepalive`, like the resume's auto-save: an inline edit committed just
-       * before the page goes is still out when it does, and a browser cancels a
-       * plain request when its page unloads. Leaving no longer waits on it (see
-       * `flushEditsLeaving`), so it has to survive on its own. An entry is a
-       * few KB of the 64KB allowance, and `fetchKeptAlive` sends it plainly when
-       * that is spent.
-       */
-      const saved = await api(`/entries/${encodeURIComponent(id)}?order=${SAVE_PAGE}:${order}`, {
-        method: 'PUT',
-        body: JSON.stringify(body),
-        keepalive: true,
+      for (let refused = 0; ; refused++) {
+        const rebased = Boolean(theirs && base && !same(theirs, base));
+        const body = rebased ? rebase(base, entry, theirs) : entry;
+        const basedOn = leaving ? undefined : theirs ? theirsVersion : baseVersion;
         /*
-         * Undone back to what it was written over, not to the page's copy:
-         * that copy lacks what was written elsewhere, and undoing this edit
-         * took that away as well. And not rebased, to the entry as read
-         * rather than the page's copy, which an edit may have changed in
-         * place already (see `entriesAsRead`), leaving nothing to undo.
+         * Not cleared once it lands: a save leaves the queue early only while
+         * every write running in the lane is one of these, and each of those
+         * set it as it went, so it is always what the newest of them sent.
          */
-        ...(rebased ? { undoFrom: theirs } : base ? { undoFrom: base } : {}),
-      });
-      /*
-       * A newer save of this entry came back first; this one says nothing.
-       * Left to, it would be what the next edit in the lane is rebased onto,
-       * and that edit would take the newer one away.
-       */
-      if (order > lane.landedOrder) {
-        lane.landedOrder = order;
-        lane.server = saved?.id ? saved : body;
+        lane.sent = body;
+        let saved;
+        try {
+          /*
+           * `keepalive`, like the resume's auto-save: an inline edit committed just
+           * before the page goes is still out when it does, and a browser cancels a
+           * plain request when its page unloads. Leaving no longer waits on it (see
+           * `flushEditsLeaving`), so it has to survive on its own. An entry is a
+           * few KB of the 64KB allowance, and `fetchKeptAlive` sends it plainly when
+           * that is spent.
+           */
+          saved = await api(`/entries/${encodeURIComponent(id)}?order=${SAVE_PAGE}:${order}${basedOnQuery(basedOn)}`, {
+            method: 'PUT',
+            body: JSON.stringify(body),
+            keepalive: true,
+            /*
+             * Undone back to what it was written over, not to the page's copy:
+             * that copy lacks what was written elsewhere, and undoing this edit
+             * took that away as well. And not rebased, to the entry as read
+             * rather than the page's copy, which an edit may have changed in
+             * place already (see `entriesAsRead`), leaving nothing to undo.
+             */
+            ...(rebased ? { undoFrom: theirs } : base ? { undoFrom: base } : {}),
+          });
+        } catch (err) {
+          if (!refusedAsMovedOn(err) || refused >= 3) throw err;
+          // Changed elsewhere since: rebased onto what is there, and sent again.
+          theirs = lane.server = err.body.current;
+          theirsVersion = lane.serverVersion = err.body.version ?? undefined;
+          continue;
+        }
+        /*
+         * A newer save of this entry came back first; this one says nothing.
+         * Left to, it would be what the next edit in the lane is rebased onto,
+         * and that edit would take the newer one away.
+         */
+        if (order > lane.landedOrder) {
+          lane.landedOrder = order;
+          lane.server = saved?.id ? saved : body;
+          lane.serverVersion = savedVersions.get(saved);
+        }
+        return;
       }
     },
     { whole: true },
@@ -4883,6 +4928,7 @@ async function addEntry(kind, into) {
     // edit queued against the same id cannot cross with this one.
     await inEntryLane(id, async (lane) => {
       lane.server = await api(`/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(entry) });
+      lane.serverVersion = savedVersions.get(lane.server);
     });
 
     if (state.masterView) return;
@@ -4993,6 +5039,7 @@ async function removeEntry(entry) {
     await inEntryLane(entry.id, async (lane) => {
       await api(`/entries/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
       lane.server = null;
+      lane.serverVersion = undefined;
     });
 
     /*
@@ -11088,7 +11135,10 @@ async function loadProjectSettings() {
 
 function describeRemote(remote) {
   if (!remote.tracked) return `${remote.url} — never pushed.`;
-  if (remote.ahead === 0 && remote.behind === 0) return `${remote.url} — up to date.`;
+  // Nothing to push, as of the last time the remote was reached: the editor
+  // does not fetch to look, so "up to date" claimed more than it knew while
+  // another machine had pushed since.
+  if (remote.ahead === 0 && remote.behind === 0) return `${remote.url} — nothing to push (as of the last push).`;
   const bits = [];
   if (remote.ahead) bits.push(`${plural(remote.ahead, 'commit')} to push`);
   if (remote.behind) bits.push(`${plural(remote.behind, 'commit')} behind`);

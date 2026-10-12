@@ -247,6 +247,24 @@ export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
   raw = withoutBom(raw);
   if (!raw.trim()) return fallback;
 
+  /*
+   * A `git pull` that ended in a conflict leaves both sides in the file
+   * between `<<<<<<<` and `>>>>>>>` lines, and the save then would not open:
+   * "applications.yaml is not valid YAML — Implicit keys need to be on a
+   * single line at line 1, column 1", which is true and says nothing about a
+   * pull. The app has no Pull of its own, so whoever ran it is in a terminal
+   * and needs to hear that it is not finished. Checked before parsing,
+   * because a conflict can also happen to parse — into a value holding both
+   * sides and the markers as text, which is worse than not opening.
+   */
+  if (/^<{7} /m.test(raw) && /^>{7} /m.test(raw)) {
+    throw new Error(
+      `Unresolved git merge conflict in ${label}: it still has the <<<<<<< and >>>>>>> lines a git pull ` +
+        'leaves between the two sides. Edit the file to keep what you want and remove those lines, then ' +
+        'git add it and git commit (or run git merge --abort to undo the pull), and reload.',
+    );
+  }
+
   let parsed: unknown;
   try {
     parsed = YAML.parse(raw);

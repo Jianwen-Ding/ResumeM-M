@@ -38,7 +38,7 @@ import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
-import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion, fileSentAnswer } from '../jobs/answers.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion, fileSentAnswer, newVariantId } from '../jobs/answers.js';
 import { UNKNOWN_COMPANY, classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
 import { jobNumberIn, withRequisition } from '../jobs/names.js';
 import {
@@ -1108,6 +1108,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         // Beside the resumes rather than in them, so a resume sent back whole
         // does not carry it into its file. See `resumeVersion`.
         versions: Object.fromEntries(data.resumes.map((r) => [r.id, resumeVersion(r.id)])),
+        // And of each entry, for an entry's save. See `entryVersion`.
+        entryVersions: Object.fromEntries(data.entries.map((e) => [e.id, entryVersion(e)])),
       });
     }),
   );
@@ -1603,6 +1605,27 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     }),
   );
 
+  /**
+   * Which version of an entry the store holds: a short string that changes
+   * whenever the entry does. Null when there is no such entry.
+   *
+   * Of the entry's content, not of its file, as `resumeVersion` is: entries
+   * share a file per section, and a save of one entry in it is no reason to
+   * refuse an edit of its neighbour. Keys sorted, so a hand edit that only
+   * reorders them is not a change either. Read by the entry PUT and, for
+   * every entry, by `GET /store`.
+   */
+  const entryVersion = (entry: Entry | undefined | null): string | null => {
+    if (!entry) return null;
+    const sorted = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(sorted)
+        : value && typeof value === 'object'
+          ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, sorted((value as Record<string, unknown>)[k])]))
+          : value;
+    return createHash('sha1').update(JSON.stringify(sorted(entry))).digest('hex').slice(0, 20);
+  };
+
   api.put(
     '/entries/:id',
     handler(async (req, res) => {
@@ -1673,10 +1696,42 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * `order` is written as it always was. Checked and recorded with
        * nothing awaited before the write.
        */
+      /*
+       * `?basedOn=<version>`: written only over the entry it was made on, as
+       * on the resume PUT (see `movedOn`).
+       *
+       * The editor sends the entry whole, and a whole entry made from an old
+       * copy wrote away whatever had changed in it since: a `git pull` in a
+       * terminal, another tab, a phrasing added by the extension. Fix the
+       * title of an entry whose location had just been pulled in as
+       * "Seattle, WA", and it went back to "Boston, MA" along with the fix.
+       * Now the editor says which version of the entry its edit was made on
+       * (`entryVersions` in `GET /store`, then this route's `ETag`), and an
+       * entry that has moved on since is answered 409 with the entry as it
+       * is and its version, for the editor to rebase its edit onto and send
+       * again. Anything that sends no `basedOn` (the CLI, MCP, an older page,
+       * a new entry) is not a condition, and writes as it always did. An
+       * entry deleted since is not refused either, as a resume is not.
+       * Before `order`, so a save refused here is not counted as one written.
+       */
+      const basedOn = typeof req.query.basedOn === 'string' && req.query.basedOn ? req.query.basedOn : undefined;
+      const version = entryVersion(stored);
+      if (basedOn && version && basedOn !== version) {
+        res.status(409).json({
+          kind: 'conflict',
+          error: `“${stored?.title ?? id}” was changed elsewhere since this change was made to it, so it was not written.`,
+          id,
+          current: stored,
+          version,
+        });
+        return;
+      }
+
       const order = savedOrderOf(req.query.order);
       if (order) {
         const last = lastEntryOrder.get(id);
         if (last && last.page === order.page && order.n <= last.n) {
+          if (version) res.setHeader('ETag', `"${version}"`);
           res.json(stored ?? entry);
           return;
         }
@@ -1684,6 +1739,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       }
 
       await withCommit(repo, autoCommit(), `Update entry "${entry.id}"`, () => store.saveEntry(entry));
+      // Which version this write made, for the editor's next save to be based on.
+      const made = entryVersion(store.load().entries.find((e) => e.id === id));
+      if (made) res.setHeader('ETag', `"${made}"`);
       res.json(entry);
     }),
   );
@@ -3259,8 +3317,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           delete already.suggested;
         } else {
           // A new phrasing of a question already in the bank, not a new question.
-          const id = `v_${slug(label ?? localDay())}` || `v_${Date.now()}`;
-          const unique = existing.variants.some((v) => v.id === id) ? `${id}-${Date.now() % 10000}` : id;
+          /*
+           * Named after its label, as a person reads it. A label with nothing
+           * a slug keeps ("—", "！", an emoji) made the id a bare "v_": the
+           * fallback was put after the "v_" was added, where it could never
+           * be reached. And a clash is settled by counting up rather than by
+           * the clock, which can give the same number twice.
+           */
+          const stem = slug(label ?? localDay());
+          const unique = newVariantId(existing.variants, stem ? `v_${stem}` : `v_${Date.now().toString(36)}`);
           existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
           existing.default = unique;
         }
@@ -4212,8 +4277,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     handler(async (req, res) => {
       const id = String(req.params.id);
       const apps = store.load().applications;
-      const next = apps.filter((a) => a.id !== id);
-      if (next.length === apps.length) throw new Error(`No application "${id}"`);
+      /*
+       * The one row, not every row by that name. A filter by id took both
+       * copies of a row a hand-merged tracker held twice; loading now gives
+       * repeats their own id (see `normalizeApplications`), and this removes
+       * one row however the list came to hold it.
+       */
+      const at = apps.findIndex((a) => a.id === id);
+      if (at < 0) throw new Error(`No application "${id}"`);
+      const next = [...apps.slice(0, at), ...apps.slice(at + 1)];
       /*
        * The snapshot folder under out/ is left alone: a record of what was sent
        * is worth keeping even when the tracker row was a mistake.
@@ -4227,7 +4299,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * way out, as marking one kept in the editor does. Only temporary ones:
        * a base or a kept resume is never swept, and is left exactly as it is.
        */
-      const gone = apps.find((a) => a.id === id)!;
+      const gone = apps[at]!;
       const sentWith = wentOut(gone) ? [...new Set([gone.resumeId, ...(gone.sentResumeIds ?? [])])] : [];
       const toKeep = store
         .loadResumes()

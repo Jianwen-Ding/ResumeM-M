@@ -21,12 +21,16 @@ export interface PendingChange {
 }
 
 export interface RemoteStatus {
-  /** Configured push url, if any. */
+  /** Configured push url, if any — without any `user:token@`; see `redactUrl`. */
   url?: string;
   branch?: string;
   /** Commits made locally that the remote does not have. */
   ahead: number;
-  /** Commits on the remote that are not local. */
+  /**
+   * Commits on the remote that are not local — as of the last time this
+   * save heard from the remote (a push, or the fetch after a refused one).
+   * `remoteStatus` does not go and ask, so 0 is "none that we know of".
+   */
   behind: number;
   /** False when the remote has never been contacted. */
   tracked: boolean;
@@ -148,7 +152,17 @@ export class Repo {
    * undefined when there was nothing to commit — a no-op save should not be an
    * error, and should not create an empty commit either.
    */
-  async commitAll(message: string, paths?: string[]): Promise<string | undefined> {
+  async commitAll(
+    message: string,
+    paths?: string[],
+    /**
+     * `auto` for a commit the app makes on its own behind an edit, which must
+     * not conclude somebody's merge for them — see `commitNow`. A deliberate
+     * save (`rmm save`, the Save button) may: that is how a conflict resolved
+     * by hand is committed from here.
+     */
+    opts: { auto?: boolean } = {},
+  ): Promise<string | undefined> {
     /*
      * One commit at a time, per repository.
      *
@@ -169,7 +183,7 @@ export class Repo {
 
     await previous;
     try {
-      return await this.commitNow(message, paths);
+      return await this.commitNow(message, paths, opts.auto ?? false);
     } finally {
       release();
       // Only when nothing queued behind this one, so the next caller either
@@ -180,6 +194,150 @@ export class Repo {
 
   /** Serialised per repository directory by `commitAll`. */
   private static readonly commits = new Map<string, Promise<void>>();
+
+  /**
+   * How old an `index.lock` has to be before it is taken for one a killed git
+   * left behind, rather than one a running git is holding. Every git command
+   * that takes the lock lets it go within a second or two on a store this
+   * size; a minute is a git that is not coming back.
+   */
+  static STALE_LOCK_MS = 60_000;
+  /**
+   * How long after `git pull` fetches, or `git merge` starts, its merge is
+   * taken to be still running. See `outsideGit`.
+   */
+  static PULL_SETTLE_MS = 1_500;
+  /** How long a write waits for somebody else's git to let go of the save. */
+  static WRITE_WAIT_MS = 1_500;
+  /** How long an automatic commit waits for a pull to finish before giving up. */
+  static COMMIT_WAIT_MS = 3_000;
+
+  /**
+   * What a git outside this program is in the middle of, if anything.
+   *
+   * The commit queue in `commitAll` serialises this server's own commits and
+   * knows nothing about anybody else's git — and the store is a repository
+   * people use as one. A second machine catches up with `git pull` in a
+   * terminal while the server runs, and measured that way, with the tracker
+   * being written through the app during the pull, the app's auto-commit ran
+   * while git was half-way through its merge: `git add` and `git commit` in
+   * that window concluded git's merge for it, under "Track application to …",
+   * and tracker rows that had been answered 200 were missing from the file
+   * and from the history afterwards. A store write landing while git was
+   * rewriting the same file lost the row the same way, with no commit
+   * involved at all.
+   *
+   * Read straight off the files git leaves in `.git` while it works, with no
+   * git process, because this runs before every write and has to answer
+   * without an `await` (see `withCommit`). `MERGE_HEAD` and the rebase
+   * folders are there for as long as the operation is unfinished, conflicts
+   * and all. `index.lock` is there while any git is writing the index — the
+   * part of a merge that rewrites the working tree is done under it — so it
+   * counts only when it is fresh (an old one is a crashed git, see
+   * `STALE_LOCK_MS`) and only when it is not this server's own commit holding
+   * it, which `ownLock` lets the caller say.
+   *
+   * And one moment none of those cover, found by running the pull race again
+   * with them in place. A merge that cannot start because the tracker has an
+   * edit not yet committed ("Your local changes … would be overwritten") puts
+   * the working tree back the way it found it — a stash taken at the start,
+   * `reset --hard`, the stash applied — and a write landing between the
+   * stash and the reset was rolled back with it, after its 200, with no lock
+   * and no `MERGE_HEAD` to see. What a pull does leave is its timestamps:
+   * `FETCH_HEAD` is written as the fetch hands over to the merge, and
+   * `ORIG_HEAD` as a merge begins. Either one younger than `PULL_SETTLE_MS`
+   * is a pull or merge that may still be running, and a write or commit waits
+   * that long rather than land in the middle of it.
+   */
+  outsideGit(
+    ownLock = Repo.commits.has(this.root),
+  ): { kind: 'merge' | 'rebase' | 'lock' | 'pull'; what: string } | undefined {
+    const dir = this.gitDir();
+    if (!dir) return undefined;
+    const has = (name: string) => fs.existsSync(path.join(dir, name));
+    if (has('rebase-merge') || has('rebase-apply')) {
+      return { kind: 'rebase', what: 'a rebase (git pull --rebase, or git rebase) is in progress in the save' };
+    }
+    if (has('MERGE_HEAD')) return { kind: 'merge', what: 'a merge (git pull, or git merge) is in progress in the save' };
+    if (has('CHERRY_PICK_HEAD') || has('REVERT_HEAD')) {
+      return { kind: 'merge', what: 'a git cherry-pick or revert is in progress in the save' };
+    }
+    if (!ownLock) {
+      try {
+        const age = Date.now() - fs.statSync(path.join(dir, 'index.lock')).mtimeMs;
+        if (age < Repo.STALE_LOCK_MS) return { kind: 'lock', what: 'another git process is using the save' };
+      } catch {
+        // No lock, which is the usual answer.
+      }
+    }
+    if (this.justPulled(dir)) return { kind: 'pull', what: 'a git pull or merge has only just started in the save' };
+    return undefined;
+  }
+
+  /** A pull or merge began within `PULL_SETTLE_MS`. See `outsideGit`. */
+  private justPulled(dir = this.gitDir()): boolean {
+    if (!dir) return false;
+    return ['FETCH_HEAD', 'ORIG_HEAD'].some((name) => {
+      try {
+        return Date.now() - fs.statSync(path.join(dir, name)).mtimeMs < Repo.PULL_SETTLE_MS;
+      } catch {
+        return false; // Never pulled, which is fine.
+      }
+    });
+  }
+
+  /**
+   * The `.git` folder, without asking git: a folder, or a file pointing at one
+   * (a worktree or a submodule). Undefined when the store is not a repository
+   * of its own, which has no outside git to wait for.
+   */
+  private gitDir(): string | undefined {
+    const dotGit = path.join(this.root, '.git');
+    try {
+      if (fs.statSync(dotGit).isDirectory()) return dotGit;
+      const pointer = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotGit, 'utf8'))?.[1]?.trim();
+      return pointer ? path.resolve(this.root, pointer) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Refuse a store write while a git outside this program is part-way through
+   * changing the store. See `outsideGit`.
+   *
+   * Synchronous on purpose: the handlers check something and then write, and
+   * rely on nothing being awaited between the two (see `withCommit`). A fresh
+   * `index.lock`, or a pull that has only just begun, is waited out for a
+   * moment, because that is git rewriting files right now and it is done
+   * within a second; a lock that is still there after `WRITE_WAIT_MS` is not
+   * holding anything this write would lose, and the write goes ahead — the commit after it is what that lock stops, and
+   * `commitNow` says so. A merge or rebase is refused outright: it lasts until
+   * somebody finishes it, and a 200 for a write the pull is about to overwrite,
+   * or that the next auto-commit would bury inside git's merge, is the bug.
+   */
+  assertNoOutsideGit(): void {
+    /*
+     * Not `MERGE_HEAD`, even one that has only just appeared and will be gone
+     * in a moment when a clean pull commits its merge. Waiting that out was
+     * tried, and measured against the pull race it lost rows again: the
+     * waiting write lands just as git, having found the tracker changed under
+     * it, puts the working tree back the way it found it. Turned away with a
+     * sentence, the person makes the edit again a second later and nothing is
+     * lost; a 200 for a row that then disappears is the bug this is for.
+     */
+    const passing = (b: ReturnType<Repo['outsideGit']>) => b?.kind === 'lock' || b?.kind === 'pull';
+    let busy = this.outsideGit();
+    if (passing(busy)) {
+      const until = Date.now() + Repo.WRITE_WAIT_MS;
+      const pause = new Int32Array(new SharedArrayBuffer(4));
+      while (passing(busy) && Date.now() < until) {
+        Atomics.wait(pause, 0, 0, 25);
+        busy = this.outsideGit();
+      }
+    }
+    if (busy && !passing(busy)) throw new GitBusyError(busy.what, this.root);
+  }
 
   /**
    * Paths that must never be committed, and must never be walked either.
@@ -272,8 +430,37 @@ export class Repo {
     }
   }
 
-  private async commitNow(message: string, paths?: string[]): Promise<string | undefined> {
+  private async commitNow(message: string, paths: string[] | undefined, auto: boolean): Promise<string | undefined> {
     if (!(await this.isRepo())) return undefined;
+    /*
+     * Not in the middle of somebody else's git. See `outsideGit`.
+     *
+     * An automatic commit waits a moment first, because a clean `git pull`
+     * is over in well under a second and the edit behind this commit has
+     * already landed on disk: once git is done, committing it is exactly
+     * right. If git is still at it after that — a conflicted merge waits for
+     * a person — the commit is refused and the edit stays on disk, uncommitted,
+     * for the next commit after the pull to take. Refused rather than made,
+     * because `git commit` with `MERGE_HEAD` present *is* concluding the
+     * merge, with whatever half of it git had written so far.
+     *
+     * Inside the queue, so the lock is never this server's own here and is
+     * counted. A deliberate save is not made to wait, and may conclude a merge
+     * that has been resolved by hand — but never a rebase, where HEAD is
+     * detached part-way down somebody else's branch and a commit made here
+     * would be replayed into the middle of it.
+     */
+    let busy = this.outsideGit(false);
+    if (auto && busy) {
+      const until = Date.now() + Repo.COMMIT_WAIT_MS;
+      while (busy && Date.now() < until) {
+        await new Promise((done) => setTimeout(done, 50));
+        busy = this.outsideGit(false);
+      }
+    }
+    if (busy && (busy.kind === 'rebase' || (auto && busy.kind === 'merge'))) {
+      throw new GitBusyError(busy.what, this.root, true);
+    }
     const { wrote: wroteIgnores, untrack } = this.ensureIgnores();
     /*
      * And out of the index, where a store written before the folder was
@@ -335,7 +522,8 @@ export class Repo {
     if (unresolved.length > 0) {
       throw new Error(
         `The store has a merge conflict nobody has resolved yet: ${unresolved.join(', ')}. ` +
-          'Edit the conflict markers out of those files (or run git merge --abort), then save again.',
+          'Edit the conflict markers out of those files — or, for one that a side deleted, keep it with ' +
+          'git add or let it go with git rm — (or run git merge --abort), then save again.',
       );
     }
     await this.git(['add', '--', ...wanted]);
@@ -390,6 +578,15 @@ export class Repo {
       () => true,
       () => false,
     );
+    /*
+     * And asked again at the last moment: a pull started since the check at
+     * the top has had the length of an `add` to write `MERGE_HEAD`, and the
+     * commit below would conclude its merge. What was staged stays staged,
+     * for the commit after the pull.
+     */
+    if (auto && merging) {
+      throw new GitBusyError(this.outsideGit(false)?.what ?? 'a merge is in progress in the save', this.root, true);
+    }
     const scoped = foreign && !merging ? await this.indexOf(files) : undefined;
     try {
       // -c keeps the commit working even if the machine has no global identity.
@@ -405,21 +602,41 @@ export class Repo {
 
   /**
    * Unmerged paths whose conflict is still there to see: the markers are in
-   * the file, or there is no text file to look at (a binary, or one side
-   * deleted it) and so nothing to say it was settled. `git add` would mark
-   * every one of them resolved as it stands.
+   * the file, one side deleted it (whatever the other side left in the
+   * tree), or there is no text file to look at (a binary) and so nothing to
+   * say it was settled. `git add` would mark every one of them resolved as
+   * it stands.
    */
   async unresolved(): Promise<string[]> {
     const listed = await this.git(['-c', 'core.quotePath=false', 'ls-files', '-u', '-z']).catch(() => '');
     // One line per stage: "<mode> <object> <stage>\t<path>".
-    const paths = new Set(
-      listed
-        .split('\0')
-        .filter(Boolean)
-        .map((line) => line.slice(line.indexOf('\t') + 1)),
-    );
+    const stages = new Map<string, Set<string>>();
+    for (const line of listed.split('\0').filter(Boolean)) {
+      const tab = line.indexOf('\t');
+      const rel = line.slice(tab + 1);
+      const stage = line.slice(0, tab).split(' ')[2] ?? '';
+      stages.set(rel, (stages.get(rel) ?? new Set()).add(stage));
+    }
     const left: string[] = [];
-    for (const rel of paths) {
+    for (const [rel, has] of stages) {
+      /*
+       * A side that deleted the file is a conflict no text can settle.
+       *
+       * Stage 2 is ours and stage 3 theirs; a modify/delete conflict has only
+       * one of the two, and git leaves the surviving side's file in the tree
+       * as it was — no markers, because there is nothing to mark. Read as
+       * text, that looked resolved, the next auto-commit's `git add` took it,
+       * and the commit concluded the merge keeping the edit and dropping the
+       * deletion without anybody having chosen. Measured: a resume deleted on
+       * one machine and edited on the other came back in the merge, under a
+       * commit that said "Track application to Zeta". Only someone can say
+       * which side wins, with `git add` or `git rm`, and until then it is
+       * unresolved whatever the file says.
+       */
+      if (!has.has('2') || !has.has('3')) {
+        left.push(rel);
+        continue;
+      }
       let text: string;
       try {
         text = fs.readFileSync(path.join(this.root, rel), 'utf8');
@@ -524,7 +741,7 @@ export class Repo {
       const file = record.slice(3);
       // A rename or copy carries its old path in the following record.
       if (code[0] === 'R' || code[0] === 'C') i++;
-      changes.push({ path: file, state: stateOf(code) });
+      changes.push({ path: file, state: stateOf(code, () => fs.existsSync(path.join(this.root, file))) });
     }
     return changes.sort((a, b) => a.path.localeCompare(b.path));
   }
@@ -673,6 +890,14 @@ export class Repo {
       return;
     }
     const existing = await this.getRemote();
+    /*
+     * The address as it is shown is the address without its token (see
+     * `redactUrl`), and the settings panel sends back what it shows. Saved
+     * as given, that took the token off the real remote and the next push
+     * failed to sign in. The shown form of the remote that is already there
+     * is that remote, unchanged.
+     */
+    if (existing && url !== existing && url === redactUrl(existing)) return;
     await this.git(existing ? ['remote', 'set-url', 'origin', url] : ['remote', 'add', 'origin', url]);
   }
 
@@ -686,7 +911,7 @@ export class Repo {
   async remoteStatus(): Promise<RemoteStatus> {
     const url = await this.getRemote();
     const branch = await this.currentBranch();
-    if (!url || !branch) return { url, branch, ahead: 0, behind: 0, tracked: false };
+    if (!url || !branch) return { url: redactUrl(url), branch, ahead: 0, behind: 0, tracked: false };
 
     const counts = await this.git([
       'rev-list',
@@ -696,14 +921,14 @@ export class Repo {
     ]).catch(() => '');
 
     const [behind = '0', ahead = '0'] = counts.trim().split(/\s+/);
-    return { url, branch, ahead: Number(ahead) || 0, behind: Number(behind) || 0, tracked: Boolean(counts.trim()) };
+    return { url: redactUrl(url), branch, ahead: Number(ahead) || 0, behind: Number(behind) || 0, tracked: Boolean(counts.trim()) };
   }
 
   /**
    * Push the store to its remote. Returns git's own output, since an auth
    * failure or a rejected push is something the user has to read.
    */
-  async push(): Promise<{ ok: boolean; output: string }> {
+  async push(timeout = PUSH_TIMEOUT_MS): Promise<{ ok: boolean; output: string }> {
     const url = await this.getRemote();
     if (!url) throw new Error('No remote is configured for the store');
     /*
@@ -721,14 +946,59 @@ export class Repo {
           'Check a branch out first (git checkout main), then try again.',
       );
     }
+    /*
+     * With the clone's protections, all of them.
+     *
+     * No terminal to ask for a password on — see `cloneRepo`. Without that a
+     * push to a remote with no credentials hung the request until it was
+     * killed. Refusing the prompt was not enough, though: a remote that
+     * accepts the connection and then sends nothing held `git push`, and the
+     * request and the Push button waiting on it, open for as long as the
+     * server ran — measured at over a minute with no end in sight, git and its
+     * `git-remote-http` helper still there afterwards. So it gets what the
+     * clone has: the low-speed limit, SSH that will not ask and gives up
+     * connecting, and an overall timeout that takes the whole process group
+     * down with it.
+     *
+     * The user's own `core.sshCommand` is theirs to keep, as their
+     * `GIT_SSH_COMMAND` is: the environment variable would override it.
+     */
+    const ownSsh = (await this.git(['config', '--get', 'core.sshCommand']).catch(() => '')).trim();
     try {
-      // No terminal to ask for a password on — see `cloneRepo`. Without this a
-      // push to a remote with no credentials hung the request until it was killed.
-      const out = await this.git(['push', '-u', 'origin', branch], noPrompt());
-      return { ok: true, output: out.trim() || `Pushed ${branch} to origin.` };
+      const { stdout } = await gitWithin(['push', '-u', 'origin', branch], this.root, timeout, Boolean(ownSsh));
+      return { ok: true, output: redactUrls(stdout.trim()) || `Pushed ${branch} to origin.` };
     } catch (err) {
-      const e = err as { stderr?: string; stdout?: string; message?: string };
-      return { ok: false, output: (e.stderr ?? e.stdout ?? e.message ?? 'Push failed').trim() };
+      const e = err as { stderr?: string; message?: string; timedOut?: boolean };
+      if (e.timedOut) {
+        return {
+          ok: false,
+          output:
+            `The push took longer than ${Math.round(timeout / 1000)} seconds and was stopped: ${redactUrl(url)} ` +
+            'stopped answering. Nothing was changed on the remote, and the save here is as it was. ' +
+            'Check the address and your connection, and push again.',
+        };
+      }
+      const said = redactUrls((e.stderr || e.message || 'Push failed').trim());
+      /*
+       * Rejected because the remote has commits this save does not.
+       *
+       * Git's hint ends "use 'git pull' before pushing again", which is advice
+       * for a terminal and reads as an instruction to a button the app does
+       * not have. Said in the app's words instead — and the remote is fetched,
+       * cheaply, since it has just answered, so the status beside the message
+       * can say how far behind this save is rather than "behind 0".
+       */
+      if (/\[rejected\]|non-fast-forward|fetch first/i.test(said)) {
+        await gitWithin(['fetch', '--quiet', 'origin', branch], this.root, FETCH_TIMEOUT_MS, Boolean(ownSsh)).catch(() => undefined);
+        return {
+          ok: false,
+          output:
+            `The remote has changes this save does not have — saved from another machine — so the push was refused ` +
+            `and nothing on the remote was changed. The app cannot pull them in itself: in a terminal, run ` +
+            `git pull in ${this.root}, settle any conflicts it reports, and then push again.\n\n${said}`,
+        };
+      }
+      return { ok: false, output: said };
     }
   }
 
@@ -813,9 +1083,67 @@ export class Repo {
   }
 }
 
+/**
+ * Git outside this program is part-way through changing the save. See
+ * `Repo.outsideGit`.
+ *
+ * The app has no Pull of its own, so the only way out is the terminal the pull
+ * was started in, and the message says so in those words. `written` says
+ * whether the change it is refusing is already on disk (a commit refused after
+ * the write) or was never made (a write refused before it).
+ */
+export class GitBusyError extends Error {
+  constructor(what: string, root: string, written = false) {
+    const finish =
+      `Finish the pull in a terminal first: in ${root}, resolve any conflicts and run git commit ` +
+      '(or git merge --abort / git rebase --abort to undo it)';
+    super(
+      written
+        ? `Not added to the version history yet: ${what}. The change itself is saved on disk and goes into the history with the next save after that. ${finish}.`
+        : `Not saved: ${what}. ${finish}, then make this change again.`,
+    );
+    this.name = 'GitBusyError';
+  }
+}
+
+/**
+ * What git's "Unable to create '.git/index.lock': File exists" means here.
+ *
+ * Git's own sentence is about a file, and says to remove it only "if no other
+ * git process is currently running". Which of the two it is can be told from
+ * the lock's age (see `Repo.STALE_LOCK_MS`), so this says which, and what to do.
+ */
+function explainLock(message: string, root: string): string {
+  if (!/index\.lock.*File exists/is.test(message)) return message;
+  let age = 0;
+  try {
+    age = Date.now() - fs.statSync(path.join(root, '.git', 'index.lock')).mtimeMs;
+  } catch {
+    // Gone since, which is the "another git was running" reading.
+  }
+  return age >= Repo.STALE_LOCK_MS
+    ? `${message.trim()}\nThe lock is ${Math.round(age / 60_000)} minute(s) old, so it was left by a git that was stopped part-way. ` +
+        `If no git is running, delete ${path.join(root, '.git', 'index.lock')} and save again.`
+    : `${message.trim()}\nAnother git process was using the save at the time. Save again once it has finished.`;
+}
+
 /** Read a porcelain status code as one word. Untracked counts as added. */
-function stateOf(code: string): PendingChange['state'] {
+function stateOf(code: string, onDisk: () => boolean): PendingChange['state'] {
   if (code === '??') return 'added';
+  /*
+   * An unmerged path, which porcelain spells with the two sides' letters:
+   * `UD` is "we modified it, they deleted it". Read for a `D` like any other
+   * code, that listed the file the merge had left in the tree — the one with
+   * the edit in it — as deleted, which is the opposite of what is on disk and
+   * the opposite of what the next commit would record. An unmerged path is
+   * described by what is there now: both sides deleting it (`DD`) or nothing
+   * on disk is a deletion, added on either side is an addition, and the rest
+   * is a modification.
+   */
+  if (/^(DD|AU|UD|UA|DU|AA|UU)$/.test(code)) {
+    if (code === 'DD' || !onDisk()) return 'deleted';
+    return code.includes('A') ? 'added' : 'modified';
+  }
   const letters = code.replace(/\s/g, '');
   if (letters.includes('D')) return 'deleted';
   if (letters.includes('R') || letters.includes('C')) return 'renamed';
@@ -841,6 +1169,13 @@ export async function withCommit<T>(
   fn: () => T | Promise<T>,
   paths?: string[],
 ): Promise<T> {
+  /*
+   * Not while a pull is half done, whether or not auto-commit is on: the
+   * write is what the pull would overwrite, and the commit after it is what
+   * would conclude the pull's merge. See `Repo.outsideGit`. Before `fn` and
+   * with nothing awaited, so a handler's check-then-write stays one step.
+   */
+  repo.assertNoOutsideGit();
   const result = await fn();
   if (enabled) await commitQuietly(repo, message, paths);
   return result;
@@ -872,7 +1207,7 @@ export async function withCommit<T>(
  */
 export async function commitQuietly(repo: Repo, message: string, paths?: string[]): Promise<void> {
   try {
-    const hash = await repo.commitAll(message, paths);
+    const hash = await repo.commitAll(message, paths, { auto: true });
     /*
      * No hash is usually "nothing had changed", and sometimes "there is no
      * repository to commit to" — `commitAll` returns the same nothing for
@@ -892,9 +1227,35 @@ export async function commitQuietly(repo: Repo, message: string, paths?: string[
     // A failed commit must not lose the write that already landed on disk.
     // Remembered as well as logged: see `lastCommitError`, because a console
     // line in a server nobody is looking at is the same as saying nothing.
-    repo.lastCommitError = { message: (err as Error).message, at: new Date().toISOString() };
-    console.warn(`[rmm] auto-commit failed: ${(err as Error).message}`);
+    const message = explainLock((err as Error).message, repo.root);
+    repo.lastCommitError = { message, at: new Date().toISOString() };
+    console.warn(`[rmm] auto-commit failed: ${message}`);
   }
+}
+
+/**
+ * A remote's address as it can be shown: an http(s) URL without the
+ * `user:token@` in front of the host.
+ *
+ * A GitHub token pasted into the remote is the usual way to push over HTTPS
+ * without a credential helper, and git keeps it in `.git/config` as typed.
+ * `remoteStatus` handed that back as it was, so the token went out in every
+ * `GET /api/config/store`, sat in plain sight in the settings field, and was
+ * printed by `rmm save` — "3 commits not yet pushed to
+ * https://alice:ghp_…@…". The remote keeps it; nothing that shows the address
+ * does. Only http(s): in `git@github.com:me/save.git` the `git@` is the SSH
+ * login every GitHub remote shares, not a secret, and the address is not
+ * recognisable without it.
+ */
+export function redactUrl(url: string): string;
+export function redactUrl(url: string | undefined): string | undefined;
+export function redactUrl(url: string | undefined): string | undefined {
+  return url?.replace(/^(https?:\/\/)[^/?#]*@/i, '$1');
+}
+
+/** The same, for any address inside git's own output. See `redactUrl`. */
+export function redactUrls(text: string): string {
+  return text.replace(/(https?:\/\/)[^\s/?#@'"]*@/gi, '$1');
 }
 
 /** Git with nobody to answer it: a missing credential is refused, not asked for. */
@@ -927,13 +1288,29 @@ function cloneEnv(): NodeJS.ProcessEnv {
  * catches everything else. In a process group of its own, so the timeout takes
  * git's transport helper down with it: killing git alone left the helper
  * holding the pipes, and the clone still never finished.
+ *
+ * And `git push`, which talks to the same remotes and stalled the same way.
+ * `keepSsh` leaves SSH to the store's own `core.sshCommand`, which the
+ * environment variable would otherwise override.
  */
-function cloneWithin(args: string[], cwd: string, timeout: number): Promise<void> {
+function gitWithin(
+  args: string[],
+  cwd: string,
+  timeout: number,
+  keepSsh = false,
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const group = process.platform !== 'win32';
-    const child = spawn('git', args, { cwd, env: cloneEnv(), detached: group, stdio: ['ignore', 'ignore', 'pipe'] });
+    const env = cloneEnv();
+    if (keepSsh && !process.env.GIT_SSH_COMMAND) delete env.GIT_SSH_COMMAND;
+    const child = spawn('git', args, { cwd, env, detached: group, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
     let stderr = '';
     let timedOut = false;
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      if (stdout.length < 1024 * 1024) stdout += chunk;
+    });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
       if (stderr.length < 1024 * 1024) stderr += chunk;
@@ -953,11 +1330,21 @@ function cloneWithin(args: string[], cwd: string, timeout: number): Promise<void
     });
     child.once('close', (code) => {
       clearTimeout(timer);
-      if (code === 0 && !timedOut) resolve();
-      else reject(Object.assign(new Error(`git clone exited with ${code}`), { stderr, timedOut }));
+      if (code === 0 && !timedOut) resolve({ stdout, stderr });
+      else reject(Object.assign(new Error(`git ${args[0]} exited with ${code}`), { stderr, timedOut }));
     });
   });
 }
+
+/**
+ * How long a push may take in all. A save is YAML and prose, and pushes in
+ * seconds; this is for a remote that has stopped answering, not a slow one,
+ * which the low-speed limit in `cloneEnv` already lets through.
+ */
+export const PUSH_TIMEOUT_MS = 2 * 60 * 1000;
+
+/** The fetch after a refused push, which only has to bring down what the remote has. */
+const FETCH_TIMEOUT_MS = 30 * 1000;
 
 /** How long a clone may take in all, however steadily it is still arriving. */
 export const CLONE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -977,12 +1364,13 @@ export const CLONE_TIMEOUT_MS = 10 * 60 * 1000;
  */
 export async function cloneRepo(url: string, into: string, timeout = CLONE_TIMEOUT_MS): Promise<void> {
   try {
-    await cloneWithin(['clone', '--', url, into], path.dirname(into), timeout);
+    await gitWithin(['clone', '--', url, into], path.dirname(into), timeout);
   } catch (err) {
     if ((err as { timedOut?: boolean }).timedOut) {
       throw new Error(`git clone took longer than ${Math.round(timeout / 1000)} seconds and was stopped. Nothing was written.`);
     }
-    const said = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '').trim();
+    // Without any token in the address: see `redactUrl`.
+    const said = redactUrls(String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '').trim());
     if (/could not read Username|terminal prompts disabled|Authentication failed|Permission denied \(publickey\)/i.test(said)) {
       throw new Error(
         'Git could not sign in to that repository. Set up the credentials it needs — an SSH key, or a ' +
@@ -1046,7 +1434,7 @@ export async function removeWhatIsFiled<T>(
   if (going.length === 0) return { removed: [], held: [] };
 
   const onDisk = going.flatMap((g) => g.paths.filter((p) => fs.existsSync(path.join(root, p))));
-  await repo.commitAll(messages.filing, onDisk).catch(() => undefined);
+  await repo.commitAll(messages.filing, onDisk, { auto: true }).catch(() => undefined);
 
   const filed = await filedPaths(repo);
 

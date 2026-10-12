@@ -390,9 +390,32 @@ export function normalizeStatus(status: unknown): ApplicationStatus {
 
 export function normalizeApplications(apps: unknown): Application[] {
   if (!Array.isArray(apps)) return [];
-  return apps
-    .filter((a) => a && typeof a === 'object')
-    .map((a) => ({ ...(a as Application), status: normalizeStatus((a as Application).status) }));
+  const rows = apps.filter((a) => a && typeof a === 'object') as Application[];
+  /*
+   * One id, one row, as `normalizeAnswers` does for the answer bank.
+   *
+   * A tracker merged by hand after a `git pull` conflict is the usual way to
+   * get two rows under one id: keep both sides, and both sides were the same
+   * application. They loaded without a word, and then every route that finds
+   * a row by id reached only the first — a status change went to one copy —
+   * while removing the row filtered by id and took both. The second and
+   * later take a suffix nobody else has, here on the way in, so nothing on
+   * disk is rewritten until the tracker is next saved, and each row can then
+   * be moved or removed on its own. A row with no id is left as it is.
+   */
+  const taken = new Set(rows.map((row) => (typeof row.id === 'string' ? row.id : undefined)));
+  const seen = new Set<string>();
+  const unique = (id: string): string => {
+    if (!seen.has(id)) return id;
+    let n = 2;
+    while (taken.has(`${id}-${n}`) || seen.has(`${id}-${n}`)) n++;
+    return `${id}-${n}`;
+  };
+  return rows.map((row) => {
+    const id = typeof row.id === 'string' ? unique(row.id) : row.id;
+    if (typeof id === 'string') seen.add(id);
+    return { ...row, id, status: normalizeStatus(row.status) };
+  });
 }
 
 /**
