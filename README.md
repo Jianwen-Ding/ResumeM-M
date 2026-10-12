@@ -365,6 +365,19 @@ is treated as literal text, and text on stdin is not used as the prompt. Saved
 `agy` print arguments using `{prompt}` are repaired when the config is loaded.
 The desktop app includes `~/.local/bin` in its command search path.
 
+The CLI is not given the server's whole environment, only an allow-list:
+system basics (`PATH`, `HOME`, locale, temp folders, `XDG_*`, the Windows
+profile variables), proxy and certificate settings, and each CLI's own
+sign-in and config variables (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`,
+`CODEX_*`, `GEMINI_*`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_*` and the Google Cloud
+project and credentials, `ANTIGRAVITY_*`). `AWS_*` is passed only when
+`CLAUDE_CODE_USE_BEDROCK` is set. Everything else, such as `GITHUB_TOKEN`,
+`NPM_TOKEN`, a database URL or `NODE_OPTIONS`, stays with the server, because
+a job posting's text can steer what the model does. To pass more, name the
+variables in `RMM_AI_ENV_PASS`, comma-separated, e.g.
+`RMM_AI_ENV_PASS=MY_GATEWAY_KEY,NODE_OPTIONS`. The full list is in
+`src/ai/env.ts`.
+
 Two things make this different from pasting into a chat window:
 
 - **`voice.md` is prepended to every request.** The rules about how you write

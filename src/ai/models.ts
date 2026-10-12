@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { AI_PRESETS, type AiModelPicker } from './presets.js';
+import { envForAgent } from './env.js';
 
 /** What the installed CLI's own model picker offered. */
 export interface ModelList {
@@ -155,8 +156,14 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
     const child = spawn(bridge, bridgeArgs, {
       cwd,
       detached: true,
+      /*
+       * The same allow-list a run gets. This starts the very same CLI, signed
+       * in the same way, and a picker it opens is no reason to hand it the
+       * server's other tokens. The bridge and the PTY runner pass this on as
+       * they find it, so filtering here covers the CLI underneath them too.
+       */
       env: {
-        ...process.env,
+        ...envForAgent(),
         TERM: 'xterm-256color',
         NO_COLOR: '1',
         RMM_MODEL_COMMAND: command,

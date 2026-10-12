@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { redactIdentifiers } from '../jobs/answers.js';
 import { startRun, type RunHandle } from './activity.js';
 import { AI_PRESETS } from './presets.js';
+import { envForAgent } from './env.js';
 import type { StoreConfig } from '../model/types.js';
 
 const run = promisify(execFile);
@@ -214,8 +215,14 @@ export async function runAgent(
       // The confinement: an empty directory with only the prompt in it, never
       // the server's own working directory.
       cwd: dir,
+      /*
+       * Not the server's environment: an allow-list of it. The whole of
+       * `process.env` used to go through, so every token in the shell that
+       * started the server reached a CLI that does what a job posting's text
+       * can talk its model into. See `envForAgent` for what is kept and why.
+       */
       env: {
-        ...process.env,
+        ...envForAgent(),
         // Some CLIs treat these as "the project"; point them at the sandbox so
         // a stray relative path cannot escape it.
         PWD: dir,
