@@ -129,12 +129,32 @@ describe('a server with pairing', () => {
     expect(((await again.json()) as { kind: string }).kind).toBe('no-code');
   });
 
-  it('forgets a code after five wrong tries', async () => {
+  /*
+   * Five wrong tries ended the code for everyone, so any extension in the
+   * browser could post five wrong codes and keep the real one from pairing.
+   */
+  it('shuts out an extension after five wrong tries, and only that extension', async () => {
     const code = await makeCode();
     for (let i = 1; i <= 5; i++) {
-      const reply = await asExtension('/api/extension/pair', { method: 'POST', body: { code: 'WRONGONE' } });
+      const reply = await asExtension('/api/extension/pair', { origin: OTHER, method: 'POST', body: { code: 'WRONGONE' } });
       expect(reply.status).toBe(403);
       expect(((await reply.json()) as { triesLeft: number }).triesLeft).toBe(5 - i);
+    }
+    // The one that guessed cannot use it now, not even with the right code.
+    const late = await asExtension('/api/extension/pair', { origin: OTHER, method: 'POST', body: { code } });
+    expect(late.status).toBe(403);
+    expect(await late.json()).toMatchObject({ kind: 'bad-code', triesLeft: 0 });
+    // Everyone else still can.
+    expect((await asExtension('/api/extension/pair', { method: 'POST', body: { code } })).status).toBe(200);
+  });
+
+  it('still ends a code after fifty wrong tries in all', async () => {
+    const code = await makeCode();
+    const origin = (i: number) => `chrome-extension://${'abcdefghijklmnop'[Math.floor(i / 16)]!.repeat(16)}${'abcdefghijklmnop'[i % 16]!.repeat(16)}`;
+    for (let i = 0; i < 10; i++) {
+      for (let t = 0; t < 5; t++) {
+        expect((await asExtension('/api/extension/pair', { origin: origin(i), method: 'POST', body: { code: 'WRONGONE' } })).status).toBe(403);
+      }
     }
     const late = await asExtension('/api/extension/pair', { method: 'POST', body: { code } });
     expect(late.status).toBe(403);
@@ -183,6 +203,10 @@ describe('a server with pairing', () => {
     // The editor's own request: same origin.
     const editor = await fetch(`${base}/api/extension/pairings`, { headers: { 'Sec-Fetch-Site': 'same-origin' } });
     expect(editor.status).toBe(200);
+    // A tab opened on it, by a link or by an extension, is not the editor.
+    for (const site of ['none', 'cross-site']) {
+      await request(base).get('/api/extension/pairings').set('Sec-Fetch-Site', site).set('Sec-Fetch-Mode', 'navigate').expect(403);
+    }
   });
 
   it('pairs only from an extension origin', async () => {
@@ -235,6 +259,88 @@ describe('a server with pairing', () => {
     // (supertest, because Node's own fetch writes its own Sec-Fetch-Mode over this one.)
     const opened = await request(base).get('/current').set('Sec-Fetch-Site', 'cross-site').set('Sec-Fetch-Mode', 'navigate');
     expect(opened.status).toBe(200);
+  });
+});
+
+/*
+ * On a name that is not loopback (`RMM_ALLOWED_HOSTS=rmm.test`, or a LAN
+ * name) Chrome sends no Sec-Fetch headers, from the editor or from an
+ * extension. An unpaired extension's GET there carried nothing at all, looked
+ * like the CLI, and got the store, the full health, and the live code — which
+ * it then paired itself with. The headers below are what Chromium sends there.
+ */
+describe('a server reached by a name that is not loopback', () => {
+  let store: ReturnType<typeof makeTempStore>;
+  let dir: string;
+  let server: Awaited<ReturnType<typeof startServer>>;
+  let host: string;
+  const before = process.env.RMM_ALLOWED_HOSTS;
+
+  beforeEach(async () => {
+    store = makeTempStore();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-pairing-'));
+    process.env.RMM_ALLOWED_HOSTS = 'rmm.test';
+    server = await startServer({ port: 0, dataDir: store.dir, preferencesFile: path.join(dir, 'projects.json') });
+    host = `rmm.test:${server.port}`;
+  });
+  afterEach(async () => {
+    if (before === undefined) delete process.env.RMM_ALLOWED_HOSTS;
+    else process.env.RMM_ALLOWED_HOSTS = before;
+    await server.close();
+    store.cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const at = () => request(`http://127.0.0.1:${server.port}`);
+  /** The editor's own fetch on that name: a Referer of its page, nothing else. */
+  const editor = { Referer: '' };
+  beforeEach(() => { editor.Referer = `http://${host}/`; });
+
+  it('refuses an unpaired extension the store, the health details and the code', async () => {
+    const code = (await at().post('/api/extension/pairings/code').set('Host', `127.0.0.1:${server.port}`).expect(200)).body.code as string;
+    for (const p of ['/api/store', '/API/store', '/api/extension/pairings', '/pdf/x.pdf', '/current']) {
+      const reply = await at().get(p).set('Host', host);
+      expect(reply.status, p).toBe(403);
+      expect(reply.text, p).not.toContain(code);
+      expect(reply.text, p).not.toContain(store.dir);
+    }
+    for (const [method, p] of [['post', '/api/extension/pairings/code'], ['delete', '/api/extension/pairings/code']] as const) {
+      expect((await at()[method](p).set('Host', host)).status, `${method} ${p}`).toBe(403);
+      expect((await at()[method](p).set('Host', host).set('Origin', EXT)).status, `${method} ${p} with Origin`).toBe(403);
+    }
+    const health = await at().get('/health').set('Host', host).expect(200);
+    expect(health.body).toMatchObject({ ok: true, paired: false });
+    expect(health.body).not.toHaveProperty('dataDir');
+    expect(health.body).not.toHaveProperty('ai');
+    // The code is still the one showing: nothing above touched it.
+    expect((await at().get('/api/extension/pairings').set('Host', host).set(editor).expect(200)).body.code.code).toBe(code);
+  });
+
+  it('serves the editor there: its page, its files, the save and the code', async () => {
+    expect((await at().get('/').set('Host', host).set('Accept', 'text/html').expect(200)).text).toMatch(/<html/i);
+    await at().get('/app.js').set('Host', host).set('Origin', `http://${host}`).set(editor).expect(200);
+    await at().get('/vendor/marked.js').set('Host', host).set('Origin', `http://${host}`).set(editor).expect(200);
+    expect((await at().get('/api/store').set('Host', host).set(editor).expect(200)).body).toHaveProperty('profile');
+    expect((await at().get('/health').set('Host', host).set(editor).expect(200)).body.dataDir).toBe(store.dir);
+    const made = await at().post('/api/extension/pairings/code').set('Host', host).set('Origin', `http://${host}`).set(editor).expect(200);
+    const shown = await at().get('/api/extension/pairings').set('Host', host).set(editor).expect(200);
+    expect(shown.body.code.code).toBe(made.body.code);
+    await at().put('/api/config').set('Host', host).set('Origin', `http://${host}`).set(editor).send({ ai: { enabled: false } }).expect(200);
+  });
+
+  it('answers a paired extension there by its token', async () => {
+    const code = (await at().post('/api/extension/pairings/code').set('Host', host).set('Origin', `http://${host}`).set(editor).expect(200)).body.code as string;
+    const { token } = (await at().post('/api/extension/pair').set('Host', host).set('Origin', EXT).send({ code }).expect(200)).body as { token: string };
+    await at().get('/api/store').set('Host', host).set('X-RMM-Pair', token).expect(200);
+    // And still not the pairing routes.
+    await at().get('/api/extension/pairings').set('Host', host).set('X-RMM-Pair', token).expect(403);
+  });
+
+  it('leaves the CLI alone on loopback', async () => {
+    const local = `127.0.0.1:${server.port}`;
+    await at().get('/api/store').set('Host', local).expect(200);
+    expect((await at().get('/health').set('Host', local).expect(200)).body.dataDir).toBe(store.dir);
+    await at().get('/api/extension/pairings').set('Host', local).expect(200);
   });
 });
 

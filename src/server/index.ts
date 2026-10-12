@@ -13,7 +13,7 @@ import { cloneProject, createProject, prepareProject, readProjects, rememberProj
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
-import { PAIR_HEADER, foreignCaller, localOnly, scriptPolicy } from './guard.js';
+import { PAIR_HEADER, fromEditor, localOnly, scriptPolicy } from './guard.js';
 import { EXTENSION_ORIGIN, Pairings, pairingsFile } from './pairing.js';
 import { createHash } from 'node:crypto';
 import { bugReportsApi } from './bug-reports.js';
@@ -247,6 +247,32 @@ export async function startServer(opts: ServerOptions = {}) {
     return Boolean(res.locals.extension?.paired) || req.path === '/health' || req.path === '/api/extension/pair';
   };
 
+  /*
+   * The editor's own files, which `express.static` serves from `web/` at the
+   * end. A file there and nothing else: no route, no directory, and nothing
+   * under the prefixes the save is served from, however it is spelled.
+   */
+  const editorRoot = path.join(projectRoot, 'web');
+  const editorFile = (urlPath: string) => {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(urlPath);
+    } catch {
+      return false;
+    }
+    if (decoded.includes('\0')) return false;
+    if (decoded === '/' || decoded === '/vendor/marked.js' || decoded === '/vendor/purify.mjs') return true;
+    const first = decoded.split('/').find(Boolean)?.toLowerCase() ?? '';
+    if (['api', 'pdf', 'current', 'health'].includes(first)) return false;
+    const full = path.resolve(editorRoot, `.${decoded}`);
+    if (!full.startsWith(editorRoot + path.sep)) return false;
+    try {
+      return fs.statSync(full).isFile();
+    } catch {
+      return false;
+    }
+  };
+
   // Before anything else: the `Host` check that makes DNS rebinding fail, and
   // the `Origin` check that catches writes CORS never got to preflight.
   app.use(
@@ -254,6 +280,7 @@ export async function startServer(opts: ServerOptions = {}) {
       host,
       allowHosts: (process.env.RMM_ALLOWED_HOSTS ?? '').split(',').filter(Boolean),
       paired,
+      editorFile,
     }),
   );
 
@@ -373,10 +400,14 @@ export async function startServer(opts: ServerOptions = {}) {
    * The code and the list are the editor's alone. A paired extension is
    * refused them too, or it could mint codes and pair any other extension it
    * liked. A local process with no browser headers — the CLI, a test — may
-   * make one, as it may read the save straight off the disk.
+   * make one, as it may read the save straight off the disk, but only on a
+   * loopback name: anywhere else Chrome sends no `Sec-Fetch-*`, and "no
+   * browser headers" is what an extension's GET looks like too. So it takes a
+   * positive sign of the editor, not the absence of a foreign one — see
+   * `fromEditor`.
    */
   const editorOnly: express.RequestHandler = (req, res, next) => {
-    if (foreignCaller(req) !== null) {
+    if (!fromEditor(req)) {
       res.status(403).json({ kind: 'editor-only', error: 'Pairing codes are made and shown in the ResumeM-M editor only.' });
       return;
     }

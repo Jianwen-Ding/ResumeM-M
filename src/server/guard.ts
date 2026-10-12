@@ -46,6 +46,13 @@ export interface GuardOptions {
    * See `src/server/pairing.ts`.
    */
   paired?: (token: string | undefined, origin: string | undefined) => boolean;
+  /**
+   * Whether a path is one of the editor's own files — the page, its scripts,
+   * its styles — which hold nothing of the save. Served to a caller that says
+   * nothing about itself on a non-loopback name, because there the editor's
+   * own navigation to `/` says nothing either.
+   */
+  editorFile?: (path: string) => boolean;
 }
 
 const EXTENSION = /^chrome-extension:\/\/[a-p]{32}$/;
@@ -53,6 +60,23 @@ const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /** The header a paired extension sends its token in. */
 export const PAIR_HEADER = 'X-RMM-Pair';
+
+const isLoopback = (header: string | undefined) => Boolean(header) && LOOPBACK.includes(hostName(header!));
+
+/**
+ * Whether `value`, an `Origin` or a `Referer`, is the address this request was
+ * sent to: same scheme-relative host and port as its `Host`.
+ */
+export function ownAddress(value: string, hostHeader: string | undefined): boolean {
+  if (!hostHeader) return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    return url.host === new URL(`${url.protocol}//${hostHeader}`).host;
+  } catch {
+    return false; // `null`, or something that is not a URL at all
+  }
+}
 
 /**
  * A browser asking from somewhere that is not the editor, and not a person
@@ -67,6 +91,19 @@ export const PAIR_HEADER = 'X-RMM-Pair';
  * from the editor, and `none` or `cross-site` from an extension. The CLI,
  * scripts and tests send no `Sec-Fetch-Site` at all, and are local processes
  * that can read the save off the disk anyway, so they are left alone.
+ *
+ * On loopback only. Chrome sends the `Sec-Fetch-*` headers to trustworthy
+ * origins alone, which for plain http means 127.0.0.1, localhost and ::1; at
+ * `http://rmm.test:4600` (`RMM_ALLOWED_HOSTS`) or a LAN name it sends none of
+ * them, from the editor or from an extension. So there, a request with none
+ * looked like the CLI, and an unpaired extension read the whole store, the
+ * full `/health`, and the live pairing code — and paired itself with it.
+ * The CLI and the macOS app only ever talk to 127.0.0.1, so on any other
+ * name the missing header proves nothing, and what the editor does send is
+ * a `Referer` of its own page on every fetch (and an `Origin` on every write
+ * and module script) — measured in Chromium at `http://rmm.test`. An
+ * extension's service worker cannot send either: its own `referrer` is
+ * ignored for another origin, and both headers are the browser's to write.
  */
 export function foreignCaller(req: Request): string | null {
   const origin = req.headers.origin;
@@ -76,8 +113,27 @@ export function foreignCaller(req: Request): string | null {
   if (origin) return null;
   const site = req.headers['sec-fetch-site'];
   const mode = req.headers['sec-fetch-mode'];
-  if (typeof site === 'string' && site !== 'same-origin' && mode !== 'navigate') return '';
-  return null;
+  if (typeof site === 'string') return site !== 'same-origin' && mode !== 'navigate' ? '' : null;
+  if (isLoopback(req.headers.host)) return null;
+  const referer = req.headers.referer;
+  return typeof referer === 'string' && ownAddress(referer, req.headers.host) ? null : '';
+}
+
+/**
+ * Whether the request positively comes from the editor: a browser saying it
+ * is same-origin, an `Origin` or `Referer` of this very address, or — on a
+ * loopback name only — no browser headers at all, which is the CLI or a script.
+ *
+ * Not "nothing says otherwise": that is what let a navigation, and every
+ * request on a non-loopback name, reach the routes that show the pairing code.
+ */
+export function fromEditor(req: Request): boolean {
+  const { origin, referer, host } = req.headers;
+  const site = req.headers['sec-fetch-site'];
+  if (typeof site === 'string') return site === 'same-origin' && (typeof origin !== 'string' || ownAddress(origin, host));
+  if (typeof origin === 'string') return ownAddress(origin, host);
+  if (typeof referer === 'string') return ownAddress(referer, host);
+  return isLoopback(host);
 }
 
 /**
@@ -97,7 +153,7 @@ export const NOT_PAIRED =
   'This browser extension is not paired with ResumeM-M. In ResumeM-M, open Save & Files → Pair JobHelper, ' +
   'make a code, and enter it in the extension.';
 
-export function localOnly({ host, allowHosts = [], paired = () => false }: GuardOptions = {}): RequestHandler {
+export function localOnly({ host, allowHosts = [], paired = () => false, editorFile = () => false }: GuardOptions = {}): RequestHandler {
   const allowed = new Set([
     ...LOOPBACK,
     // Binding to every interface is a choice to be reachable by whatever name
@@ -142,14 +198,23 @@ export function localOnly({ host, allowHosts = [], paired = () => false }: Guard
        * this — the editor it frames is a navigation, and asks for its own
        * files from its own origin.
        */
-      if (!pairedNow && !openToUnpaired(req.method, req.path)) {
+      /*
+       * On a name Chrome sends no `Sec-Fetch-*` to, typing the address is a
+       * navigation with no header at all — the same as an extension's fetch.
+       * So the editor's own files go to either, and nothing else does.
+       */
+      const anonymous = foreign === '' && !isLoopback(header);
+      const shell = anonymous && (req.method === 'GET' || req.method === 'HEAD') && editorFile(req.path);
+      if (!pairedNow && !shell && !openToUnpaired(req.method, req.path)) {
         if (EXTENSION.test(foreign)) res.setHeader('Access-Control-Allow-Origin', foreign);
         res.setHeader('Vary', 'Origin');
         res.status(403).json({
           kind: 'not-paired',
           error: token
             ? `${NOT_PAIRED} The pairing this extension has was removed, or was made with another ResumeM-M.`
-            : NOT_PAIRED,
+            : anonymous
+              ? `${NOT_PAIRED} If this is not an extension: open the editor at http://${header}/ and go from there.`
+              : NOT_PAIRED,
         });
         return;
       }

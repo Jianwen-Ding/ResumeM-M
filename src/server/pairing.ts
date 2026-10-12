@@ -31,8 +31,29 @@ export const EXTENSION_ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 export const CODE_LENGTH = 8;
 export const CODE_LIFETIME_MS = 10 * 60 * 1000;
-/** Wrong guesses a code survives. The fifth one ends it. */
+/** Wrong guesses one extension gets at a code. Its fifth shuts that extension out of it. */
 export const CODE_TRIES = 5;
+/**
+ * Wrong guesses a code survives from all extensions together.
+ *
+ * The limit used to be the code's own: five wrong tries from anywhere ended
+ * it, so any extension in the browser could post five wrong codes and stop
+ * the one being paired from pairing, every time a code was made. So the five
+ * are counted per origin now, and an extension that runs out is refused that
+ * code for the rest of its life while everyone else carries on.
+ *
+ * This ceiling is the backstop against something with many origins. In a
+ * browser that is not one extension: the browser writes `Origin`, and an
+ * extension has exactly one, so reaching fifty takes ten installed
+ * extensions working together. Only a non-browser can claim origins at will —
+ * and it can lock the code by rotating them, which is the price of the
+ * ceiling. That is the better side of the trade: a local process can already
+ * ask the editor's routes for the code, or cancel it, so burning it gives it
+ * nothing new, while without a ceiling such a process would get unlimited
+ * guesses at it. Fifty wrong guesses at one of 32^8 codes is a chance of
+ * about one in twenty billion.
+ */
+export const CODE_TRIES_IN_ALL = 50;
 /** Pairings one extension keeps at once: one per browser profile it is installed in. */
 export const TOKENS_PER_EXTENSION = 8;
 
@@ -65,7 +86,7 @@ export function pairingsFile(preferencesFile: string): string {
 }
 
 export class Pairings {
-  private code: { value: string; expiresAt: number; wrong: number } | undefined;
+  private code: { value: string; expiresAt: number; wrong: Map<string, number>; wrongInAll: number } | undefined;
   private cache: { stamp: string; list: Paired[] } | undefined;
 
   constructor(
@@ -119,7 +140,7 @@ export class Pairings {
     let value = '';
     for (let i = 0; i < CODE_LENGTH; i++) value += ALPHABET[randomInt(ALPHABET.length)];
     const expiresAt = this.now() + CODE_LIFETIME_MS;
-    this.code = { value, expiresAt, wrong: 0 };
+    this.code = { value, expiresAt, wrong: new Map(), wrongInAll: 0 };
     return { code: value, expiresAt: new Date(expiresAt).toISOString() };
   }
 
@@ -146,16 +167,35 @@ export class Pairings {
           'Pair JobHelper, press "Make a code", and enter that one.',
       };
     }
+    const used = this.code.wrong.get(origin) ?? 0;
+    if (used >= CODE_TRIES) {
+      // Not compared at all: a locked-out extension learns nothing more from trying.
+      return {
+        ok: false,
+        kind: 'bad-code',
+        triesLeft: 0,
+        error: 'This extension entered a wrong code too many times, so it cannot use this one. Make a new one in ResumeM-M.',
+      };
+    }
     if (!sameSecret(normaliseCode(input), this.code.value)) {
-      this.code.wrong += 1;
-      const triesLeft = CODE_TRIES - this.code.wrong;
-      if (triesLeft <= 0) {
+      this.code.wrong.set(origin, used + 1);
+      this.code.wrongInAll += 1;
+      if (this.code.wrongInAll >= CODE_TRIES_IN_ALL) {
         this.code = undefined;
         return {
           ok: false,
           kind: 'bad-code',
           triesLeft: 0,
-          error: 'That code was wrong too many times, so it no longer works. Make a new one in ResumeM-M.',
+          error: 'That code was guessed wrong too many times, so it no longer works. Make a new one in ResumeM-M.',
+        };
+      }
+      const triesLeft = CODE_TRIES - (used + 1);
+      if (triesLeft <= 0) {
+        return {
+          ok: false,
+          kind: 'bad-code',
+          triesLeft: 0,
+          error: 'That code was wrong too many times, so this extension cannot use it. Make a new one in ResumeM-M.',
         };
       }
       return {
