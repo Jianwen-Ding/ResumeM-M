@@ -4206,19 +4206,39 @@ let profileQueue = Promise.resolve();
 
 function inProfileLane(change) {
   const mine = profileQueue.then(async () => {
-    const now = (await readStoreNow())?.profile;
-    const from = structuredClone(now ?? state.store.profile ?? {});
-    const profile = change(structuredClone(from));
-    // `keepalive` for the reason an entry's save has it: see `saveEntry`.
-    await api('/profile?commit=0', {
-      method: 'PUT',
-      body: JSON.stringify(profile),
-      keepalive: true,
-      // What it is written over, for undo; see `saveEntry`.
-      ...(now ? { undoFrom: now } : {}),
-    });
-    state.store.profile = profile;
-    return profile;
+    const read = await readStoreNow();
+    let now = read?.profile;
+    let version = read?.profileVersion;
+    /*
+     * Written only over the profile it was made to (`?basedOn=`), and made
+     * again to the one the server has when that has moved on in between —
+     * a pull, another tab — which the 409 hands back with its version. A
+     * few times at most: a profile changing that often under one edit is
+     * not going to stop, and the refusal says so.
+     */
+    for (let attempt = 0; ; attempt++) {
+      const from = structuredClone(now ?? state.store.profile ?? {});
+      const profile = change(structuredClone(from));
+      try {
+        // `keepalive` for the reason an entry's save has it: see `saveEntry`.
+        await api(`/profile?commit=0${basedOnQuery(version)}`, {
+          method: 'PUT',
+          body: JSON.stringify(profile),
+          keepalive: true,
+          // What it is written over, for undo; see `saveEntry`.
+          ...(now ? { undoFrom: now } : {}),
+        });
+      } catch (err) {
+        if (err.status === 409 && err.body?.current && attempt < 3) {
+          now = err.body.current;
+          version = err.body.version ?? undefined;
+          continue;
+        }
+        throw err;
+      }
+      state.store.profile = profile;
+      return profile;
+    }
   });
   profileQueue = mine.then(
     () => {},
@@ -6082,15 +6102,31 @@ function inSkillsLane(change) {
      * another tab, or a group renamed there, was written away by the next ×
      * pressed here.
      */
-    const now = (await readStoreNow())?.skillGroups;
-    const groups = await change(now ?? state.store?.skillGroups ?? []);
-    if (!groups) return undefined;
-    const written = await api('/skills', {
-      method: 'PUT',
-      body: JSON.stringify(groups),
-      // What it is written over, for undo; see `saveEntry`.
-      ...(now ? { undoFrom: now } : {}),
-    });
+    const read = await readStoreNow();
+    let now = read?.skillGroups;
+    let version = read?.skillsVersion;
+    let written;
+    // Over the list it was made to, and made again to a newer one: see `inProfileLane`.
+    for (let attempt = 0; ; attempt++) {
+      const groups = await change(structuredClone(now ?? state.store?.skillGroups ?? []));
+      if (!groups) return undefined;
+      try {
+        written = await api(`/skills${basedOnQuery(version, '?')}`, {
+          method: 'PUT',
+          body: JSON.stringify(groups),
+          // What it is written over, for undo; see `saveEntry`.
+          ...(now ? { undoFrom: now } : {}),
+        });
+        break;
+      } catch (err) {
+        if (err.status === 409 && Array.isArray(err.body?.current) && attempt < 3) {
+          now = err.body.current;
+          version = err.body.version ?? undefined;
+          continue;
+        }
+        throw err;
+      }
+    }
     // Inside the lane, so the next change in the queue builds on this one
     // rather than on what was on screen before it.
     await loadStore();
@@ -9979,6 +10015,31 @@ async function addAnswer() {
  * throws away the wording you have been reusing all year, and the history of
  * those applications keeps the answer it actually sent either way.
  */
+/**
+ * Write the answer bank, changed by `change`, over the bank as the server has
+ * it — and only over that one (`?basedOn=`): one that moved on between the
+ * read and the write, an answer the extension kept a moment ago, is handed
+ * back with the 409 and `change` is made to it instead. The bank is written
+ * whole, so without this the answer kept in between was written away.
+ */
+async function writeAnswers(change) {
+  const read = await api('/store');
+  let answers = read.answers;
+  let version = read.answersVersion;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api(`/answers${basedOnQuery(version, '?')}`, { method: 'PUT', body: JSON.stringify(change(structuredClone(answers))) });
+    } catch (err) {
+      if (err.status === 409 && Array.isArray(err.body?.current) && attempt < 3) {
+        answers = err.body.current;
+        version = err.body.version ?? undefined;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 async function removeAnswer(item, usedIn = 0) {
   const ok = await confirmModal(
     `Delete “${item.question}”?`,
@@ -9992,8 +10053,7 @@ async function removeAnswer(item, usedIn = 0) {
   // Through the whole list, which is the only way the bank is written: the
   // endpoint refuses anything that is not a list, so a filter is the edit.
   try {
-    const answers = (await api('/store')).answers.filter((a) => a.id !== item.id);
-    await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
+    await writeAnswers((answers) => answers.filter((a) => a.id !== item.id));
   } catch (err) {
     setStatus(`“${item.question}” was not deleted — ${whyNotSaved(err)}.`, true);
     return;
@@ -10051,12 +10111,13 @@ async function editAnswer(item) {
         loadLetters();
         return undefined;
       }
-      const answers = (await api('/store')).answers.map((a) =>
-        a.id !== item.id
-          ? a
-          : { ...a, variants: a.variants.map((x) => (x.id === v.id ? { ...x, ...changed } : x)) },
+      await writeAnswers((answers) =>
+        answers.map((a) =>
+          a.id !== item.id
+            ? a
+            : { ...a, variants: a.variants.map((x) => (x.id === v.id ? { ...x, ...changed } : x)) },
+        ),
       );
-      await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
     }
     setStatus('Answer saved');
     loadLetters();
@@ -11231,6 +11292,13 @@ async function pullSave(setResult) {
   }
   const where = res.remote?.url ? `\n${describeRemote(res.remote)}` : '';
   setResult(`${res.message}${where}`, res.ok ? 'ok' : 'bad');
+  // Pulled, and then the save would not open: what the editor holds is from before the pull, so it is let go of.
+  if (!res.ok && res.pulled > 0) {
+    forgetHistory();
+    paintUndo();
+    setStatus('Pulled, but the save will not open as it now is — see Save & Files', true);
+    return;
+  }
   if (!res.ok) {
     setStatus(res.conflict?.length ? `Not pulled: ${res.conflict.join(', ')} conflict — see Save & Files` : 'Not pulled — see Save & Files', true);
     return;
@@ -11977,6 +12045,10 @@ async function loadSettings() {
     researchNote,
     config.overrides.ai
       ? el('div', { className: 'override', textContent: 'RMM_AI=0 is set, so the AI stays off whatever this says.' })
+      : null,
+    // A pull or a clone that brought a different AI command switched it off here; ticking the box above turns it back on.
+    config.overrides.aiSwitchedOff
+      ? el('div', { className: 'override', textContent: `${config.overrides.aiSwitchedOff} The AI is off on this machine until you turn it on here.` })
       : null,
     field('Preset', preset),
     presetNote,

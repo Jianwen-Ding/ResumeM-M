@@ -289,6 +289,146 @@ export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
 }
 
 /**
+ * The files of a save that are read as a list, by their path in the save. Every
+ * other YAML file the save reads is a set of keys and values. See
+ * `storeFileProblem`.
+ */
+const LIST_FILES = new Set([
+  'skills.yaml',
+  'applications.yaml',
+  'answers.yaml',
+  'education.yaml',
+  'experience.yaml',
+  'projects.yaml',
+  'custom.yaml',
+]);
+
+/**
+ * Why this file, as it would be in the save, would stop the save opening —
+ * or undefined when it would read, or is not a file the save parses.
+ *
+ * For a pull to ask before it changes anything (see `Repo.pull`). A merge
+ * git calls clean is a merge of lines, not of YAML: two machines that each
+ * added `phone:` to the profile, one near the top and one near the bottom,
+ * merge without a conflict into a profile.yaml with the key twice, which
+ * does not parse — and the pull said "Pulled 1 commit", after which every
+ * page of the app answered "profile.yaml is not valid YAML". So the files a
+ * pull would bring in are read here first, by the same parser and with the
+ * same expectations (`parseStoreYaml`) the save is opened with, and a pull
+ * that would leave one unreadable is refused instead, the way a conflict is.
+ *
+ * `rel` is the path in the save, with forward slashes, as git names it.
+ */
+export function storeFileProblem(rel: string, raw: string): string | undefined {
+  const parts = rel.split('/');
+  const name = parts[parts.length - 1] ?? '';
+  const folder = parts.length === 2 ? parts[0] : parts.length === 1 ? '' : undefined;
+  try {
+    if (folder === '' && (LIST_FILES.has(name) || name === 'profile.yaml' || name === 'config.yaml')) {
+      parseStoreYaml(rel, raw, LIST_FILES.has(name) ? [] : {});
+    } else if ((folder === 'resumes' && /\.ya?ml$/.test(name)) || (folder === 'drafts' && name.endsWith('.yaml'))) {
+      parseStoreYaml(rel, raw, {});
+    } else if ((folder === 'letters' || folder === 'corpus') && name.endsWith('.md')) {
+      // The header only, as the loaders read it; the body is prose.
+      const split = splitFrontMatter(withoutBom(raw));
+      if (split) parseStoreYaml(rel, split.header, {});
+    }
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * The file in this machine's `.git` folder that says the AI has been
+ * switched off here, and why. See `aiCommandChange`.
+ *
+ * In `.git` because it is about this machine and must never travel: a
+ * switch-off written into config.yaml and committed would be pushed, and the
+ * other machine's next pull would switch its AI off in turn. Undefined when
+ * the save is not a repository of its own, which nothing can pull into.
+ */
+export function aiSwitchOffFile(root: string): string | undefined {
+  const dotGit = path.join(root, '.git');
+  try {
+    if (fs.statSync(dotGit).isDirectory()) return path.join(dotGit, 'rmm-ai-switched-off');
+    const pointer = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotGit, 'utf8'))?.[1]?.trim();
+    return pointer ? path.join(path.resolve(root, pointer), 'rmm-ai-switched-off') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Why the AI was switched off on this machine by a pull or a clone, if it was. */
+export function aiSwitchedOff(root: string): string | undefined {
+  const file = aiSwitchOffFile(root);
+  if (!file) return undefined;
+  try {
+    return fs.readFileSync(file, 'utf8').trim() || 'The AI command came from another machine.';
+  } catch {
+    return undefined;
+  }
+}
+
+/** Switch the AI off on this machine (see `aiSwitchOffFile`). False when there is nowhere to say so. */
+export function switchAiOff(root: string, why: string): boolean {
+  const file = aiSwitchOffFile(root);
+  if (!file) return false;
+  fs.writeFileSync(file, `${why}\n`, 'utf8');
+  return true;
+}
+
+/** What turning the AI on in Settings does to a switch-off. */
+export function clearAiSwitchOff(root: string): void {
+  const file = aiSwitchOffFile(root);
+  if (file) fs.rmSync(file, { force: true });
+}
+
+/**
+ * What a change to config.yaml would do to the command this machine runs
+ * for AI actions, in words; undefined when it does not change it.
+ *
+ * config.yaml is tracked, so it travels with a pull, and `ai.command` and
+ * `ai.args` are a program and its arguments that this app starts. Whoever
+ * can push to the remote — or a remote that is not who it was — could
+ * change them, and the next AI action on this machine ran whatever they
+ * said, with nothing on screen about it. So a pull that changes them, or
+ * that switches the AI on, switches it off here instead, until the person
+ * has looked at the command in Settings and turned it on themselves (see
+ * `aiSwitchOffFile`). A change that leaves the AI off needs nothing: the
+ * person sees the command when they turn it on.
+ *
+ * `before` undefined is a save that had no config.yaml here — a clone — so
+ * any AI that arrives switched on is new to this machine.
+ */
+export function aiCommandChange(before: string | undefined, after: string | undefined): string | undefined {
+  const ai = (raw: string | undefined): Partial<StoreConfig['ai']> => {
+    if (raw === undefined) return {};
+    try {
+      const parsed = parseStoreYaml<Partial<StoreConfig>>('config.yaml', raw, {});
+      return parsed.ai && typeof parsed.ai === 'object' ? parsed.ai : {};
+    } catch {
+      return {};
+    }
+  };
+  const was = ai(before);
+  const now = ai(after);
+  const on = (c: Partial<StoreConfig['ai']>) => (c.enabled ?? DEFAULT_CONFIG.ai.enabled) === true;
+  if (!on(now)) return undefined;
+  const command = (c: Partial<StoreConfig['ai']>) => String(c.command ?? DEFAULT_CONFIG.ai.command);
+  const args = (c: Partial<StoreConfig['ai']>) => JSON.stringify(c.args ?? DEFAULT_CONFIG.ai.args);
+  const said: string[] = [];
+  if (before === undefined) {
+    said.push(`the AI is switched on, running ${JSON.stringify(command(now))} ${args(now)}`);
+  } else {
+    if (command(was) !== command(now)) said.push(`the command went from ${JSON.stringify(command(was))} to ${JSON.stringify(command(now))}`);
+    if (args(was) !== args(now)) said.push(`its arguments went from ${args(was)} to ${args(now)}`);
+    if (!on(was)) said.push(`it was switched on, running ${JSON.stringify(command(now))} ${args(now)}`);
+  }
+  return said.length ? said.join('; ') : undefined;
+}
+
+/**
  * A file already in this folder whose name differs from `full` only in case.
  *
  * Deliberately only the same folder, and only on an exact case-insensitive
@@ -521,6 +661,21 @@ function onDiskSpelling(full: string): string {
   return found === undefined ? full : path.join(dir, found);
 }
 
+/** The refusal for a symbolic link inside the save. See `Store.assertNoLink`. */
+function linkInSave(rel: string, full: string): Error {
+  let to = '';
+  try {
+    to = ` (to ${fs.readlinkSync(full)})`;
+  } catch {
+    // Gone since, or unreadable: the name is what matters.
+  }
+  return new Error(
+    `"${rel.split(path.sep).join('/')}" in the save is a symbolic link${to}, and the app does not follow links in a save: ` +
+      'one can lead anywhere on this computer. Nothing was read or written through it. Replace the link with the ' +
+      'file or folder itself (or remove it), and try again.',
+  );
+}
+
 /**
  * Remove from `target` every key the patch set to `null`, following the patch
  * into nested objects. The merge has already copied those nulls across; this
@@ -577,7 +732,39 @@ export class Store {
     if (full !== this.root && !full.startsWith(this.root + path.sep)) {
       throw new Error('That name is not allowed — it points outside the save folder.');
     }
-    return onDiskSpelling(full);
+    const found = onDiskSpelling(full);
+    this.assertNoLink(found);
+    return found;
+  }
+
+  /**
+   * And no link on the way there.
+   *
+   * The checks above are of the name, and a name can be perfectly good and
+   * still lead out of the save: a save is a git repository, git carries
+   * symbolic links, and a remote that put `voice.md -> ../../.ssh/id_ed25519`
+   * or `letters -> /somewhere/else` into it had this app reading and writing
+   * outside the save after a pull, every check here passed. A pull now
+   * refuses a tree with a link in it (see `Repo.pull`); this is for a link
+   * that got in some other way — an older version's pull, a hand-made one.
+   *
+   * Every part of the path below the save's own folder, with `lstat`, so the
+   * link itself is what is looked at and not what it points to. The save's
+   * folder may be reached through a link of its own (`/tmp` on a Mac is
+   * one), which is the person's choice of where the save is and not a thing
+   * inside it. A part that is not there yet ends the walk: nothing below a
+   * missing folder can be a link.
+   */
+  private assertNoLink(full: string): void {
+    const rel = path.relative(this.root, full);
+    if (!rel) return;
+    let at = this.root;
+    for (const part of rel.split(path.sep)) {
+      at = path.join(at, part);
+      const stat = fs.lstatSync(at, { throwIfNoEntry: false });
+      if (!stat) return;
+      if (stat.isSymbolicLink()) throw linkInSave(path.relative(this.root, at), at);
+    }
   }
 
   /**
@@ -1042,6 +1229,8 @@ export class Store {
     // should be able to leave no commits behind without editing config.yaml.
     if (process.env.RMM_AUTOCOMMIT === '0') config.git.autoCommit = false;
     if (process.env.RMM_AI === '0') config.ai.enabled = false;
+    // And this machine's own switch-off, from a pull that changed the command. See `aiCommandChange`.
+    if (config.ai.enabled && aiSwitchedOff(this.root) !== undefined) config.ai.enabled = false;
     if (process.env.RMM_LATEX_ENGINE) {
       config.latex.engine = process.env.RMM_LATEX_ENGINE as StoreConfig['latex']['engine'];
     }
@@ -1091,6 +1280,9 @@ export class Store {
     };
     dropNulls(merged as Record<string, unknown>, patch);
     this.writeYaml('config.yaml', merged);
+    // Turning the AI on is the person answering a pull's switch-off: they have
+    // seen the command in Settings. See `aiCommandChange`.
+    if (patch.ai?.enabled === true) clearAiSwitchOff(this.root);
     return this.loadConfig();
   }
 
@@ -1143,12 +1335,22 @@ export class Store {
           'Move that file aside and try again — nothing has been changed.',
       );
     }
+    let names: fs.Dirent[];
     try {
-      return fs.readdirSync(dir).filter(keep);
+      names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => keep(d.name));
     } catch (err) {
       const said = err instanceof Error ? err.message : String(err);
       throw new Error(`The save's "${rel}" folder could not be read (${dir}) — ${said}`);
     }
+    /*
+     * And none of what is listed a link, for the reason `assertNoLink` gives:
+     * the loaders read each name they are given straight from this folder,
+     * so a `letters/x.md` linking to a file outside the save was read and
+     * shown, and written back over, as a letter.
+     */
+    const link = names.find((d) => d.isSymbolicLink());
+    if (link) throw linkInSave(`${rel}/${link.name}`, path.join(dir, link.name));
+    return names.map((d) => d.name);
   }
 
   /** Resumes live one-per-file so a new variation is a new small file. */

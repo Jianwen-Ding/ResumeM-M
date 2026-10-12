@@ -3,6 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { aiCommandChange, aiSwitchedOff, clearAiSwitchOff, storeFileProblem, switchAiOff } from '../model/store.js';
 
 const run = promisify(execFile);
 
@@ -38,6 +39,12 @@ export interface RemoteStatus {
 }
 
 /** What `Repo.pull` did, in the shape the API, the CLI and the editor all report. */
+/** One request's holds on the saves it writes, and whether it has been let go. See `Repo.writesOfRequest`. */
+interface RequestHolds {
+  closed: boolean;
+  holds: { root: string; release: () => void }[];
+}
+
 export interface PullResult {
   /** True when the save now has what the remote had, or already did. */
   ok: boolean;
@@ -50,6 +57,13 @@ export interface PullResult {
    * undone, so none of them has changed: this is what to resolve by hand.
    */
   conflict?: string[];
+  /**
+   * Files the pull would have left unreadable, when it was refused for that.
+   * Nothing was merged. See `Repo.vetIncoming`.
+   */
+  unreadable?: string[];
+  /** True when the pull changed the AI command, and the AI was switched off here for it. */
+  aiSwitchedOff?: boolean;
   /** One paragraph for a person to read, with any address in it redacted. */
   message: string;
 }
@@ -440,8 +454,25 @@ export class Repo {
         busy = this.outsideGit();
       }
     }
+    /*
+     * Not the app's own pull, though, to a request that already holds a
+     * write in this save. The pull is waiting for that hold to go before it
+     * merges (see `writesSettled`), so this write cannot land in the middle
+     * of it. And refusing it part-way is what lost work: a route that writes
+     * twice — a new variation's resume, then its draft — passed its first
+     * check, the pull began, and the second write was refused with the first
+     * already on disk. The person saw an error, tried again, and had two
+     * variations, one of them belonging to nothing.
+     */
+    if (busy?.kind === 'app' && this.heldByThisRequest()) busy = undefined;
     if (busy && !passing(busy)) throw new GitBusyError(busy.what, this.root, false, busy.kind === 'app');
     this.holdForRequest();
+  }
+
+  /** Whether the request this runs in holds a write in this save already. See `holdForRequest`. */
+  private heldByThisRequest(): boolean {
+    const request = Repo.requestHolds.getStore();
+    return Boolean(request && !request.closed && request.holds.some((h) => h.root === this.root));
   }
 
   /* ---- Writes under way, for a pull to wait for ------------------- *
@@ -461,11 +492,17 @@ export class Repo {
    * The HTTP request a check is being made for, when there is one: its holds
    * are let go when the request is answered. See `writesOfRequest`.
    */
-  private static readonly requestHolds = new AsyncLocalStorage<{ root: string; release: () => void }[]>();
+  private static readonly requestHolds = new AsyncLocalStorage<RequestHolds>();
 
-  /** `holdWrite`, for a write made outside any request; a no-op inside one, which holds already. */
+  /**
+   * `holdWrite`, for a write made outside any request; a no-op inside one,
+   * which holds already. And a hold of its own for a write made in a request
+   * that has been answered — work it left behind — which nothing holds for
+   * any more. See `holdForRequest`.
+   */
   holdWriteOutsideRequest(): () => void {
-    return Repo.requestHolds.getStore() ? () => undefined : this.holdWrite();
+    const request = Repo.requestHolds.getStore();
+    return request && !request.closed ? () => undefined : this.holdWrite();
   }
 
   /** Count one write under way until the returned function is called. */
@@ -491,9 +528,19 @@ export class Repo {
    * own write instead.
    */
   private holdForRequest(): void {
-    const holds = Repo.requestHolds.getStore();
-    if (!holds || holds.some((h) => h.root === this.root)) return;
-    holds.push({ root: this.root, release: this.holdWrite() });
+    const request = Repo.requestHolds.getStore();
+    /*
+     * Not once the request has been let go. Work a handler leaves running
+     * after it answers — a timer, a promise nobody awaited — is still in
+     * the request's async context, and its check pushed a hold onto a list
+     * `writesOfRequest` had already emptied for the last time: a hold that
+     * was never released, and every pull of the save after it waited out
+     * `PULL_DRAIN_MS` and gave up. Such a write is held by `withCommit`
+     * around itself instead, as one outside any request is
+     * (`holdWriteOutsideRequest`).
+     */
+    if (!request || request.closed || request.holds.some((h) => h.root === this.root)) return;
+    request.holds.push({ root: this.root, release: this.holdWrite() });
   }
 
   /**
@@ -502,10 +549,12 @@ export class Repo {
    * caller does when the request has been answered. See `holdForRequest`.
    */
   static writesOfRequest(next: () => void): () => void {
-    const holds: { root: string; release: () => void }[] = [];
-    Repo.requestHolds.run(holds, next);
+    const request: RequestHolds = { closed: false, holds: [] };
+    Repo.requestHolds.run(request, next);
     return () => {
-      for (const hold of holds.splice(0)) hold.release();
+      // Closed first, so nothing can join the list after it is emptied. See `holdForRequest`.
+      request.closed = true;
+      for (const hold of request.holds.splice(0)) hold.release();
     };
   }
 
@@ -1131,7 +1180,13 @@ export class Repo {
       'rev-list',
       '--left-right',
       '--count',
-      `origin/${branch}...${branch}`,
+      /*
+       * Full names, because short ones are looked up tags first: a tag
+       * called `origin/main` — anybody can push one — was what this counted
+       * against, and what the pull merged, instead of the branch. See
+       * `mergeFrom`.
+       */
+      `refs/remotes/origin/${branch}...refs/heads/${branch}`,
     ]).catch(() => '');
 
     const [behind = '0', ahead = '0'] = counts.trim().split(/\s+/);
@@ -1533,9 +1588,36 @@ export class Repo {
      * so a pull that cannot go through never writes a marker anywhere. Git
      * older than 2.38 does not have it, and gets the merge and its undo.
      */
+    /*
+     * From `tracking`, the remote-tracking branch's full name, never the
+     * short `origin/<branch>`. git looks a short name up as a tag before it
+     * looks at the remotes, so a tag called `origin/main` on the remote —
+     * fetched with everything else — was what this merged: an old commit,
+     * "Already up to date", and every pull after it did nothing at all while
+     * reporting success.
+     */
+    let merged: string | undefined;
     if (!fastForward) {
-      const clash = await this.wouldConflict(`origin/${theirs}`);
-      if (clash && clash.length > 0) return conflicted(clash, 'Nothing was merged');
+      const clash = await this.wouldConflict(tracking);
+      if (clash && clash.conflicts.length > 0) return conflicted(clash.conflicts, 'Nothing was merged');
+      merged = clash?.tree;
+    }
+    /*
+     * And what the pull would leave in the save, looked at before the save
+     * has it. See `vetIncoming`. The tree a fast-forward ends at is the
+     * remote's own; a merge's is the one `merge-tree` has just worked out.
+     * A git too old for `merge-tree` has no tree to look at until it has
+     * merged, and is vetted, and undone if need be, after.
+     */
+    const resultTree = fastForward
+      ? (await this.git(['rev-parse', '-q', '--verify', `${tracking}^{tree}`]).catch(() => '')).trim()
+      : merged;
+    let switchedOff: string | undefined;
+    const hadSwitchOff = aiSwitchedOff(this.root) !== undefined;
+    if (resultTree) {
+      const vetted = await this.vetIncoming(resultTree, shown);
+      if (typeof vetted === 'object') return vetted;
+      switchedOff = vetted;
     }
     /*
      * Merged from the remote-tracking branch, never from `FETCH_HEAD`: git
@@ -1552,11 +1634,19 @@ export class Repo {
     try {
       await this.git(
         fastForward
-          ? ['merge', '--ff-only', '--no-autostash', '--quiet', `origin/${theirs}`]
-          : ['-c', 'user.name=ResumeM-M', '-c', 'user.email=resumem-m@localhost', 'merge', '--no-ff', '--no-edit', '--no-autostash', '--quiet', `origin/${theirs}`],
+          ? ['merge', '--ff-only', '--no-autostash', '--quiet', tracking]
+          : [
+              '-c', 'user.name=ResumeM-M', '-c', 'user.email=resumem-m@localhost',
+              'merge', '--no-ff', '--no-edit', '--no-autostash', '--quiet',
+              // Named as git names it from the short name, which the full one does not get.
+              '-m', `Merge remote-tracking branch 'origin/${theirs}'`,
+              tracking,
+            ],
         env,
       );
     } catch (err) {
+      // Not switched off for a pull that did not happen.
+      if (switchedOff && !hadSwitchOff) clearAiSwitchOff(this.root);
       const conflicts = await this.conflictedPaths();
       const merging = await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(() => true, () => false);
       let undone = true;
@@ -1582,6 +1672,19 @@ export class Repo {
     }
 
     const after = (await this.git(['rev-parse', 'HEAD'])).trim();
+    if (!resultTree) {
+      /*
+       * The older git's turn: vetted now it has merged, and put back exactly
+       * as it was when the result would not open. Writes are still held off
+       * and the tree was clean before the merge, so the reset loses nothing.
+       */
+      const vetted = await this.vetIncoming(`${after}^{tree}`, shown, before);
+      if (typeof vetted === 'object') {
+        await this.git(['reset', '--hard', '--quiet', before]).catch(() => undefined);
+        return vetted;
+      }
+      switchedOff = vetted;
+    }
     const files = (await this.git(['-c', 'core.quotePath=false', 'diff', '--name-only', '-z', before, after]).catch(() => ''))
       .split('\0')
       .filter(Boolean);
@@ -1591,11 +1694,91 @@ export class Repo {
       ok: true,
       pulled: incoming,
       files,
-      message: fastForward
-        ? `Pulled ${commits} from ${shown} (origin/${theirs}) — ${changed}.`
-        : `Pulled ${commits} from ${shown} (origin/${theirs}) and merged ${incoming === 1 ? 'it' : 'them'} with the ` +
-          `${outgoing} made here — ${changed}. Push sends the merge back, so the other machine has it too.`,
+      ...(switchedOff ? { aiSwitchedOff: true } : {}),
+      message:
+        (fastForward
+          ? `Pulled ${commits} from ${shown} (origin/${theirs}) — ${changed}.`
+          : `Pulled ${commits} from ${shown} (origin/${theirs}) and merged ${incoming === 1 ? 'it' : 'them'} with the ` +
+            `${outgoing} made here — ${changed}. Push sends the merge back, so the other machine has it too.`) +
+        (switchedOff ? ` ${switchedOff}` : ''),
     };
+  }
+
+  /**
+   * Whether the save may have `tree` — what a pull would leave in it — and,
+   * when it may, what that does to the AI here.
+   *
+   * A refusal (a `PullResult`) for either of two things, both found before
+   * the working tree is touched, so the save is exactly as it was:
+   *
+   * - A symbolic link anywhere in the tree. git checks links out as links,
+   *   and the store opened every path it was given: a remote that sent
+   *   `voice.md -> ../outside/credentials`, or `letters -> ../outside`, had
+   *   this app showing a file from outside the save in the editor after a
+   *   pull, and writing into a folder outside it on the next save. A resume
+   *   save has no use for a link, so any link at all is refused rather than
+   *   only the ones that are found to lead out — working out where a link
+   *   leads, through other links, is the kind of check that is right until
+   *   it is not. `Store` refuses to follow one as well, for a link that got
+   *   in some other way.
+   * - A file the save reads that would not parse. See `storeFileProblem`:
+   *   git merges lines, and a merge it calls clean can still be a
+   *   profile.yaml with the same key twice. Only the files the pull changes,
+   *   since a file it leaves alone is the save's own business.
+   *
+   * Otherwise a sentence to add to the pull's message when it switches the
+   * AI off here (see `aiCommandChange`), having already done so — before the
+   * merge, so there is no moment when the new command is in config.yaml and
+   * switched on — or undefined.
+   */
+  private async vetIncoming(tree: string, shown: string, base = 'HEAD'): Promise<PullResult | string | undefined> {
+    const refused = (message: string): PullResult => ({ ok: false, pulled: 0, files: [], message });
+    const listed = await this.git(['-c', 'core.quotePath=false', 'ls-tree', '-r', '-z', '--full-tree', tree]).catch(() => '');
+    const entries = new Map<string, { mode: string; oid: string }>();
+    for (const line of listed.split('\0').filter(Boolean)) {
+      const tab = line.indexOf('\t');
+      const [mode = '', , oid = ''] = line.slice(0, tab).split(' ');
+      entries.set(line.slice(tab + 1), { mode, oid });
+    }
+    const links = [...entries].filter(([, e]) => e.mode === '120000').map(([p]) => p).sort();
+    if (links.length > 0) {
+      return refused(
+        `Not pulled: ${linksRefused(links, shown)} Nothing was merged, so the save is exactly as it was. On the ` +
+          'machine that pushed it, replace the link with the file itself, commit and push, and pull again.',
+      );
+    }
+
+    const changed = (await this.git(['-c', 'core.quotePath=false', 'diff-tree', '-r', '-z', '--name-only', '--no-renames', base, tree]).catch(() => ''))
+      .split('\0')
+      .filter((p) => entries.has(p));
+    const contents = await this.blobs(changed.map((p) => entries.get(p)!.oid));
+    const unreadable: { path: string; why: string }[] = [];
+    for (const file of changed) {
+      const raw = contents.get(entries.get(file)!.oid);
+      const why = raw === undefined ? undefined : storeFileProblem(file, raw);
+      if (why) unreadable.push({ path: file, why });
+    }
+    if (unreadable.length > 0) {
+      const names = unreadable.map((u) => u.path);
+      return {
+        ...refused(
+          `Not pulled: git could put the changes from ${shown} together with this save's, but the result would leave ` +
+            `${names.join(', ')} unreadable, and the save would not open: ${unreadable.map((u) => u.why).join(' ')} ` +
+            'Nothing was merged, so the save is exactly as it was. To settle it, in a terminal: ' +
+            `cd ${this.root}, run git pull, fix ${names.length === 1 ? 'that file' : 'those files'} (a key written twice, ` +
+            'most likely — keep one), then git add and git commit, and Push so the other machine has the fix too.',
+        ),
+        unreadable: names,
+      };
+    }
+
+    // The AI command, after the checks: a pull that is refused switches nothing off.
+    if (!changed.includes('config.yaml')) return undefined;
+    const config = async (at: string) => this.git(['cat-file', 'blob', `${at}:config.yaml`]).catch(() => undefined);
+    const change = aiCommandChange(await config(base), await config(tree));
+    if (!change) return undefined;
+    switchAiOff(this.root, `The AI command changed in what was pulled: ${change}.`);
+    return `The AI command changed in what was pulled: ${change}. AI is switched off until you turn it on again in Settings.`;
   }
 
   /**
@@ -1610,18 +1793,20 @@ export class Repo {
    * without touching the working tree or the index; `[]` for a clean merge,
    * and undefined when this git cannot say. See `mergeFrom`.
    */
-  private async wouldConflict(theirs: string): Promise<string[] | undefined> {
+  private async wouldConflict(theirs: string): Promise<{ conflicts: string[]; tree?: string } | undefined> {
     if (Repo.mergeTreeWorks === false) return undefined;
     try {
-      await this.git(['merge-tree', '--write-tree', '--name-only', '--no-messages', 'HEAD', theirs]);
+      // A clean merge prints the tree it would make, and nothing else: what `vetIncoming` reads.
+      const out = await this.git(['merge-tree', '--write-tree', '--name-only', '--no-messages', 'HEAD', theirs]);
       Repo.mergeTreeWorks = true;
-      return [];
+      const tree = /^[0-9a-f]{40,64}$/.exec(out.trim())?.[0];
+      return { conflicts: [], ...(tree ? { tree } : {}) };
     } catch (err) {
       const e = err as { code?: number; stdout?: string };
       // Exit 1 with a tree is "conflicts": the tree's id, then one name per line.
       if (e.code === 1 && typeof e.stdout === 'string' && /^[0-9a-f]{40,64}\n/.test(e.stdout)) {
         Repo.mergeTreeWorks = true;
-        return [...new Set(e.stdout.split('\n').slice(1).map((l) => l.trim()).filter(Boolean))].sort();
+        return { conflicts: [...new Set(e.stdout.split('\n').slice(1).map((l) => l.trim()).filter(Boolean))].sort() };
       }
       // Usage error (an older git), or anything else: let the merge itself say.
       if (e.code === 129) Repo.mergeTreeWorks = false;
@@ -2098,6 +2283,39 @@ export const PULL_TIMEOUT_MS = 2 * 60 * 1000;
 
 /** The fetch after a refused push, which only has to bring down what the remote has. */
 const FETCH_TIMEOUT_MS = 30 * 1000;
+
+/** The sentence for symbolic links in what a pull or a clone brought. See `Repo.vetIncoming`. */
+function linksRefused(links: string[], shown: string): string {
+  return (
+    `${links.slice(0, 5).join(', ')}${links.length > 5 ? '…' : ''} on ${shown} ` +
+    `${links.length === 1 ? 'is a symbolic link' : 'are symbolic links'}, and a save cannot have one: a link can ` +
+    'lead the app to read and write files outside the save, anywhere on this computer.'
+  );
+}
+
+/**
+ * Refuse a freshly cloned save that has a symbolic link in it, for the reason
+ * `Repo.vetIncoming` refuses a pull with one. Read off the commit with
+ * `ls-tree`, as the pull does, rather than off the disk; `cloneProject`
+ * removes the clone when this throws, so nothing of it is ever opened.
+ */
+export async function refuseClonedLinks(dir: string, url: string): Promise<void> {
+  const { stdout } = await run('git', ['-c', 'core.quotePath=false', 'ls-tree', '-r', '-z', '--full-tree', 'HEAD'], {
+    cwd: dir,
+    maxBuffer: Repo.MAX_BUFFER,
+  });
+  const links = stdout
+    .split('\0')
+    .filter((line) => line.startsWith('120000 '))
+    .map((line) => line.slice(line.indexOf('\t') + 1))
+    .sort();
+  if (links.length > 0) {
+    throw new Error(
+      `Not opened: ${linksRefused(links, redactUrl(url))} The clone was removed. Replace the link with the file ` +
+        'itself in that repository, and clone again.',
+    );
+  }
+}
 
 /** How long a clone may take in all, however steadily it is still arriving. */
 export const CLONE_TIMEOUT_MS = 10 * 60 * 1000;

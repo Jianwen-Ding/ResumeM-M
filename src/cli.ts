@@ -11,7 +11,7 @@ import { ingestFile } from './ingest/index.js';
 import { findProjectRoot, isEmptyStore, resolveStore, seedStore } from './model/location.js';
 import { buildBundle, localDay, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
-import { Store } from './model/store.js';
+import { Store, aiSwitchedOff } from './model/store.js';
 import { currentIgnore } from './model/current.js';
 import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
@@ -803,6 +803,8 @@ async function main(argv: string[]): Promise<number> {
       const store = await cloneProject(url, into, cloneRepo);
       rememberProject(store.root);
       console.log(`Cloned into ${store.root}, and opened it. Run \`rmm serve\` to work on it.`);
+      const switched = aiSwitchedOff(store.root);
+      if (switched) console.log(`${switched} AI is switched off until you turn it on again in Settings.`);
       return 0;
     }
 

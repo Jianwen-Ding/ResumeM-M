@@ -3,9 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PLACEHOLDER_NAME } from './resolve.js';
-import { Store } from './store.js';
+import { Store, aiCommandChange, switchAiOff } from './store.js';
 import { currentIgnore } from './current.js';
-import { Repo } from '../git/repo.js';
+import { Repo, refuseClonedLinks } from '../git/repo.js';
 
 export const projectsFile = () => process.env.RMM_PROJECTS_FILE || path.join(os.homedir(), '.resumem-m', 'projects.json');
 export interface ProjectPreferences { active?: string; recent: string[]; defaultFolder?: string | null }
@@ -219,9 +219,19 @@ export async function cloneProject(
   const stage = fs.mkdtempSync(path.join(path.dirname(target), '.rmm-clone-'));
   try {
     await clone(link, stage);
+    // No symbolic links, before anything reads through one. See `Repo.vetIncoming`.
+    if (fs.existsSync(path.join(stage, '.git'))) await refuseClonedLinks(stage, link);
     if (!fs.existsSync(path.join(stage, 'profile.yaml')) || !fs.existsSync(path.join(stage, 'config.yaml'))) {
       throw new Error('That repository is not a resume save: it has no profile.yaml and config.yaml at its root.');
     }
+    /*
+     * And an AI command that arrives switched on is not run until it has been
+     * looked at here, as after a pull that changes it (see `aiCommandChange`):
+     * it is a program somebody else's machine, or whoever can push to that
+     * repository, chose. Before the load below, which reads the config.
+     */
+    const change = aiCommandChange(undefined, fs.readFileSync(path.join(stage, 'config.yaml'), 'utf8'));
+    if (change) switchAiOff(stage, `The save was cloned with ${change}.`);
     const store = new Store(stage);
     store.load(); // Validate before it becomes the open save.
 

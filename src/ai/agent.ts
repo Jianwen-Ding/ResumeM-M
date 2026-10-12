@@ -222,7 +222,7 @@ export async function runAgent(
        * can talk its model into. See `envForAgent` for what is kept and why.
        */
       env: {
-        ...envForAgent(),
+        ...envForAgent(process.env, config.ai.command),
         // Some CLIs treat these as "the project"; point them at the sandbox so
         // a stray relative path cannot escape it.
         PWD: dir,

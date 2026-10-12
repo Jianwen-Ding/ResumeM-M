@@ -19,9 +19,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import YAML from 'yaml';
-import { Repo, withCommit } from '../src/git/repo.js';
+import { Repo, cloneRepo, withCommit } from '../src/git/repo.js';
+import { cloneProject } from '../src/model/projects.js';
 import { saveStore } from '../src/git/save.js';
-import { Store } from '../src/model/store.js';
+import { Store, aiSwitchedOff } from '../src/model/store.js';
 import { createApi } from '../src/server/api.js';
 import { makeTempStore, tempDir, type TempStore } from './helpers.js';
 
@@ -432,4 +433,349 @@ describe('rmm pull', () => {
     expect(nowhere.code).toBe(1);
     expect(nowhere.stderr).toMatch(/No remote is configured/);
   }, 120_000);
+});
+
+/*
+ * What a pull brings in is looked at before the save has it: a merge git
+ * calls clean can still leave a file the save will not read, a remote can
+ * plant a link out of the save, and config.yaml names the program the AI
+ * actions run.
+ */
+describe('what a pull would bring in, looked at first', () => {
+  const profileText = () => fs.readFileSync(path.join(b, 'profile.yaml'), 'utf8');
+  /** The same key, added on each machine in a place apart enough for git to merge them. */
+  async function bothAddWebsite(): Promise<void> {
+    fs.writeFileSync(path.join(a, 'profile.yaml'), `website: a.example\n${fs.readFileSync(path.join(a, 'profile.yaml'), 'utf8')}`);
+    await repoA.commitAll('A: website');
+    expect((await repoA.push()).ok).toBe(true);
+    fs.writeFileSync(path.join(b, 'profile.yaml'), `${profileText()}website: b.example\n`);
+    commitAs(b, 'B: website');
+  }
+
+  it('refuses a clean merge that would leave a file the save cannot read, and changes nothing', async () => {
+    await bothAddWebsite();
+    const before = head(b);
+    const text = profileText();
+
+    const res = await request(app).post('/api/config/store/pull').expect(200);
+
+    expect(res.body.ok).toBe(false);
+    expect(res.body.pulled).toBe(0);
+    expect(res.body.unreadable).toEqual(['profile.yaml']);
+    expect(res.body.message).toMatch(/profile\.yaml unreadable.*not valid YAML.*Nothing was merged.*exactly as it was/s);
+    expect(head(b)).toBe(before);
+    expect(profileText()).toBe(text);
+    expect(git(['status', '--porcelain'], b)).toBe('');
+    expect(fs.existsSync(path.join(b, '.git', 'ORIG_HEAD'))).toBe(false);
+    // The save still opens.
+    await request(app).get('/api/store').expect(200);
+  });
+
+  it('refuses it and puts the save back, with a git too old to work the merge out first', async () => {
+    await bothAddWebsite();
+    const before = head(b);
+    const text = profileText();
+    const was = Repo.mergeTreeWorks;
+    Repo.mergeTreeWorks = false;
+    try {
+      const result = await repoB.pull();
+      expect(result.ok).toBe(false);
+      expect(result.unreadable).toEqual(['profile.yaml']);
+    } finally {
+      Repo.mergeTreeWorks = was;
+    }
+    expect(head(b)).toBe(before);
+    expect(profileText()).toBe(text);
+    expect(git(['status', '--porcelain'], b)).toBe('');
+  });
+
+  it('refuses a fast-forward to a file that will not parse', async () => {
+    fs.writeFileSync(path.join(a, 'skills.yaml'), 'id: not-a-list\n');
+    await repoA.commitAll('A: break skills');
+    expect((await repoA.push()).ok).toBe(true);
+    const before = head(b);
+
+    const result = await repoB.pull();
+
+    expect(result.ok).toBe(false);
+    expect(result.unreadable).toEqual(['skills.yaml']);
+    expect(result.message).toMatch(/skills\.yaml should be a list/);
+    expect(head(b)).toBe(before);
+  });
+
+  it('says the pull is not ok when the save will not open after it', async () => {
+    await aMarksZetaInterview();
+    const failing = express();
+    failing.use(express.json());
+    failing.use('/api', createApi({ store: storeB, repo: repoB, afterPull: async () => { throw new Error('migration broke'); } }));
+
+    const res = await request(failing).post('/api/config/store/pull').expect(200);
+
+    expect(res.body.ok).toBe(false);
+    expect(res.body.pulled).toBe(1);
+    expect(res.body.message).toMatch(/Pulled 1 commit.*will not open as it now is: migration broke/s);
+  });
+
+  it('merges the branch, not a tag that happens to be called origin/<branch>', async () => {
+    const old = head(b);
+    await aMarksZetaInterview();
+    git(['tag', 'origin/main', old], b);
+    git(['tag', 'origin/master', old], b);
+
+    const result = await repoB.pull();
+
+    expect(result.ok).toBe(true);
+    expect(head(b)).toBe(head(a));
+    expect(rows(b)[0]!.status).toBe('interview');
+    const status = await repoB.remoteStatus();
+    expect(status.behind).toBe(0);
+    expect(status.ahead).toBe(0);
+  });
+
+  it('refuses a tree with a symbolic link in it, and the save is as it was', async () => {
+    const outside = tempDir('rmm-outside-');
+    fs.writeFileSync(path.join(outside, 'credentials'), 'secret\n');
+    fs.rmSync(path.join(a, 'voice.md'));
+    fs.symlinkSync(path.relative(a, path.join(outside, 'credentials')), path.join(a, 'voice.md'));
+    fs.rmSync(path.join(a, 'letters'), { recursive: true });
+    fs.symlinkSync(outside, path.join(a, 'letters'));
+    git(['add', '-A'], a);
+    commitAs(a, 'A: links');
+    expect((await repoA.push()).ok).toBe(true);
+    const before = head(b);
+
+    const res = await request(app).post('/api/config/store/pull').expect(200);
+
+    expect(res.body.ok).toBe(false);
+    expect(res.body.message).toMatch(/letters, voice\.md .*are symbolic links.*Nothing was merged/s);
+    expect(head(b)).toBe(before);
+    expect(fs.lstatSync(path.join(b, 'voice.md')).isSymbolicLink()).toBe(false);
+    expect(fs.lstatSync(path.join(b, 'letters')).isDirectory()).toBe(true);
+  });
+
+  it('turns the AI off here when a pull changes its command, and says so', async () => {
+    const config = YAML.parse(fs.readFileSync(path.join(a, 'config.yaml'), 'utf8'));
+    config.ai = { ...config.ai, enabled: true, command: '/tmp/somebody-else.sh', args: ['{prompt}'] };
+    fs.writeFileSync(path.join(a, 'config.yaml'), YAML.stringify(config));
+    await repoA.commitAll('A: new AI');
+    expect((await repoA.push()).ok).toBe(true);
+
+    const res = await request(app).post('/api/config/store/pull').expect(200);
+
+    expect(res.body.ok).toBe(true);
+    expect(res.body.aiSwitchedOff).toBe(true);
+    expect(res.body.message).toMatch(
+      /The AI command changed in what was pulled: the command went from "claude" to "\/tmp\/somebody-else\.sh".*AI is switched off until you turn it on again in Settings\./s,
+    );
+    // The pulled file is as it came; the switch-off is this machine's own, and is never committed.
+    expect(YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8')).ai.enabled).toBe(true);
+    expect(git(['status', '--porcelain'], b)).toBe('');
+    expect(storeB.loadConfig().ai.enabled).toBe(false);
+    expect((await request(app).get('/api/store').expect(200)).body.config.ai.enabled).toBe(false);
+    expect((await request(app).get('/api/config').expect(200)).body.overrides.aiSwitchedOff).toMatch(/somebody-else/);
+
+    // Turned on again in Settings, it is on.
+    await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
+    expect(storeB.loadConfig().ai.enabled).toBe(true);
+
+    // And a pull that leaves the command alone leaves it on.
+    await aMarksZetaInterview();
+    const quiet = await request(app).post('/api/config/store/pull').expect(200);
+    expect(quiet.body.ok).toBe(true);
+    expect(quiet.body.aiSwitchedOff).toBeUndefined();
+    expect(storeB.loadConfig().ai.enabled).toBe(true);
+  });
+
+  it('does not switch the AI off for a pull that is refused', async () => {
+    const config = YAML.parse(fs.readFileSync(path.join(a, 'config.yaml'), 'utf8'));
+    config.ai = { ...config.ai, enabled: true, command: '/tmp/somebody-else.sh' };
+    fs.writeFileSync(path.join(a, 'config.yaml'), YAML.stringify(config));
+    fs.writeFileSync(path.join(a, 'skills.yaml'), 'id: not-a-list\n');
+    await repoA.commitAll('A: new AI, broken skills');
+    expect((await repoA.push()).ok).toBe(true);
+    await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
+
+    expect((await repoB.pull()).ok).toBe(false);
+    expect(storeB.loadConfig().ai.enabled).toBe(true);
+  });
+});
+
+describe('a symbolic link already in the save', () => {
+  it('is not read or written through', async () => {
+    const outside = tempDir('rmm-outside-');
+    const credentials = path.join(outside, 'credentials');
+    fs.writeFileSync(credentials, 'secret\n');
+    fs.rmSync(path.join(b, 'voice.md'));
+    fs.symlinkSync(credentials, path.join(b, 'voice.md'));
+
+    const read = await request(app).get('/api/store');
+    expect(read.status).toBe(400);
+    expect(read.body.error).toMatch(/"voice\.md" in the save is a symbolic link/);
+    expect(() => storeB.saveVoice('overwritten')).toThrow(/symbolic link/);
+    expect(fs.readFileSync(credentials, 'utf8')).toBe('secret\n');
+  });
+
+  it('is not listed, or written into, as a folder of the save', async () => {
+    const outside = tempDir('rmm-outside-');
+    fs.writeFileSync(path.join(outside, 'planted.md'), '---\ntitle: planted\n---\nnot a letter\n');
+    fs.rmSync(path.join(b, 'letters'), { recursive: true, force: true });
+    fs.symlinkSync(outside, path.join(b, 'letters'));
+
+    expect(() => storeB.loadCoverLetters()).toThrow(/"letters" in the save is a symbolic link/);
+    expect(() => storeB.saveCoverLetter({ id: 'x', title: 'x', createdAt: '', body: 'x' })).toThrow(/symbolic link/);
+    expect(fs.readdirSync(outside)).toEqual(['planted.md']);
+  });
+
+  it('is not listed as a file inside a folder of the save either', async () => {
+    const outside = tempDir('rmm-outside-');
+    fs.writeFileSync(path.join(outside, 'planted.md'), '---\ntitle: planted\n---\nnot a letter\n');
+    fs.mkdirSync(path.join(b, 'letters'), { recursive: true });
+    fs.symlinkSync(path.join(outside, 'planted.md'), path.join(b, 'letters', 'planted.md'));
+
+    expect(() => storeB.loadCoverLetters()).toThrow(/"letters\/planted\.md" in the save is a symbolic link/);
+  });
+});
+
+describe('cloning a save', () => {
+  it('refuses one with a symbolic link in it, and leaves nothing behind', async () => {
+    fs.symlinkSync('/etc/passwd', path.join(a, 'voice-link.md'));
+    git(['add', '-A'], a);
+    commitAs(a, 'A: link');
+    expect((await repoA.push()).ok).toBe(true);
+    const into = path.join(tempDir('rmm-clone-into-'), 'save');
+
+    await expect(cloneProject(remote, into, cloneRepo)).rejects.toThrow(/voice-link\.md .*is a symbolic link.*clone was removed/s);
+    expect(fs.existsSync(into)).toBe(false);
+  });
+
+  it('switches off an AI that arrives switched on, until it is turned on here', async () => {
+    const config = YAML.parse(fs.readFileSync(path.join(a, 'config.yaml'), 'utf8'));
+    config.ai = { ...config.ai, enabled: true, command: '/tmp/somebody-else.sh' };
+    fs.writeFileSync(path.join(a, 'config.yaml'), YAML.stringify(config));
+    await repoA.commitAll('A: AI on');
+    expect((await repoA.push()).ok).toBe(true);
+    const into = path.join(tempDir('rmm-clone-into-'), 'save');
+
+    const cloned = await cloneProject(remote, into, cloneRepo);
+
+    expect(cloned.loadConfig().ai.enabled).toBe(false);
+    expect(aiSwitchedOff(cloned.root)).toMatch(/cloned with the AI is switched on, running "\/tmp\/somebody-else\.sh"/);
+    cloned.saveConfig({ ai: { enabled: true } as never });
+    expect(cloned.loadConfig().ai.enabled).toBe(true);
+  });
+});
+
+/*
+ * The whole-object writes, given the version protection an entry's has: a
+ * copy read before a pull is not written back over what the pull brought.
+ */
+describe('whole-object writes from a stale copy', () => {
+  it('refuses a profile, skills or answers write based on a version that has moved on, with what is there now', async () => {
+    const seen = (await request(app).get('/api/store').expect(200)).body;
+    expect(seen.profileVersion).toMatch(/^[0-9a-f]{20}$/);
+
+    // A changes all three and pushes; B pulls.
+    const profile = YAML.parse(fs.readFileSync(path.join(a, 'profile.yaml'), 'utf8'));
+    fs.writeFileSync(path.join(a, 'profile.yaml'), YAML.stringify({ ...profile, phone: '555-0199' }));
+    fs.writeFileSync(path.join(a, 'skills.yaml'), YAML.stringify([...seen.skillGroups, { id: 'g_new', name: 'New', items: [] }]));
+    fs.writeFileSync(path.join(a, 'answers.yaml'), YAML.stringify([]));
+    await repoA.commitAll('A: three things');
+    expect((await repoA.push()).ok).toBe(true);
+    expect((await request(app).post('/api/config/store/pull').expect(200)).body.ok).toBe(true);
+
+    const staleProfile = await request(app)
+      .put(`/api/profile?basedOn=${seen.profileVersion}`)
+      .send({ ...seen.profile, email: 'new@example.com' })
+      .expect(409);
+    expect(staleProfile.body.kind).toBe('conflict');
+    expect(staleProfile.body.current.phone).toBe('555-0199');
+    expect(YAML.parse(fs.readFileSync(path.join(b, 'profile.yaml'), 'utf8')).phone).toBe('555-0199');
+
+    const staleSkills = await request(app).put(`/api/skills?basedOn=${seen.skillsVersion}`).send(seen.skillGroups).expect(409);
+    expect(staleSkills.body.current.some((g: { id: string }) => g.id === 'g_new')).toBe(true);
+    const staleAnswers = await request(app).put(`/api/answers?basedOn=${seen.answersVersion}`).send(seen.answers).expect(409);
+    expect(staleAnswers.body.current).toEqual([]);
+
+    // Made again on what the 409 handed back, it is written, and says the version it made.
+    const again = await request(app)
+      .put(`/api/profile?basedOn=${staleProfile.body.version}`)
+      .send({ ...staleProfile.body.current, email: 'new@example.com' })
+      .expect(200);
+    const now = (await request(app).get('/api/store').expect(200)).body;
+    expect(now.profile.phone).toBe('555-0199');
+    expect(now.profile.email).toBe('new@example.com');
+    expect(again.headers.etag).toBe(`"${now.profileVersion}"`);
+    await request(app).put(`/api/skills?basedOn=${now.skillsVersion}`).send(now.skillGroups).expect(200);
+    await request(app).put(`/api/answers?basedOn=${now.answersVersion}`).send(now.answers).expect(200);
+  });
+
+  it('still writes for a caller that sends no basedOn', async () => {
+    const seen = (await request(app).get('/api/store').expect(200)).body;
+    await request(app).put('/api/profile').send({ ...seen.profile, email: 'plain@example.com' }).expect(200);
+    await request(app).put('/api/skills').send(seen.skillGroups).expect(200);
+    await request(app).put('/api/answers').send(seen.answers).expect(200);
+    expect(storeB.load().profile.email).toBe('plain@example.com');
+  });
+});
+
+/*
+ * The holds a request takes for a pull to wait on.
+ */
+describe('a request part-way through when a pull begins', () => {
+  const drain = Repo.PULL_DRAIN_MS;
+  afterEach(() => {
+    Repo.PULL_DRAIN_MS = drain;
+  });
+
+  it('is let finish its second write, which the pull waits for, rather than refused part-way', async () => {
+    await aMarksZetaInterview();
+    let second: unknown = 'not run';
+    let release!: () => void;
+    let pulling!: Promise<unknown>;
+    const done = new Promise<void>((finished) => {
+      release = Repo.writesOfRequest(() => {
+        void (async () => {
+          await withCommit(repoB, true, 'first', () => fs.writeFileSync(path.join(b, 'first.txt'), '1'));
+          pulling = repoB.pull();
+          // Long enough for the pull to have fetched and be holding writes off.
+          for (let i = 0; i < 200 && repoB.outsideGit()?.kind !== 'app'; i++) await sleep(10);
+          expect(repoB.outsideGit()?.kind).toBe('app');
+          try {
+            await withCommit(repoB, true, 'second', () => fs.writeFileSync(path.join(b, 'second.txt'), '2'));
+            second = 'written';
+          } catch (err) {
+            second = err;
+          }
+          finished();
+        })();
+      });
+    });
+    await done;
+    release();
+    const result = (await pulling) as { ok: boolean };
+
+    expect(second).toBe('written');
+    expect(result.ok).toBe(true);
+    expect(rows(b)[0]!.status).toBe('interview');
+    expect(fs.readFileSync(path.join(b, 'second.txt'), 'utf8')).toBe('2');
+  });
+
+  it('does not leave a hold behind for work a request left running after it was answered', async () => {
+    Repo.PULL_DRAIN_MS = 500;
+    await aMarksZetaInterview();
+    let late!: Promise<void>;
+    const release = Repo.writesOfRequest(() => {
+      late = (async () => {
+        await sleep(30);
+        await withCommit(repoB, true, 'late', () => fs.writeFileSync(path.join(b, 'late.txt'), 'late'));
+        repoB.assertNoOutsideGit();
+      })();
+    });
+    release();
+    await late;
+
+    const result = await repoB.pull();
+    expect(result.message).not.toMatch(/still being saved/);
+    expect(result.ok).toBe(true);
+  });
 });

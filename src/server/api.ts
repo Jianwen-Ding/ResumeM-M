@@ -64,7 +64,7 @@ import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/per
 import { readSnapshot, type ParsedYaml, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
-import { Store, withoutBom } from '../model/store.js';
+import { Store, aiSwitchedOff, withoutBom } from '../model/store.js';
 import { isVariantField, layoutFor, RESUME_TIERS, tierOf, type ResumeTier } from '../model/types.js';
 import { wentOut } from '../model/tiers.js';
 import type {
@@ -856,6 +856,52 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
   const autoCommit = () => store.loadConfig().git.autoCommit;
 
   /**
+   * A short string that changes whenever `value` does: what `entryVersion`
+   * and the whole-object writes' versions are made of. Keys sorted, so a
+   * hand edit that only reorders them is not a change.
+   */
+  const contentVersion = (value: unknown): string => {
+    const sorted = (v: unknown): unknown =>
+      Array.isArray(v)
+        ? v.map(sorted)
+        : v && typeof v === 'object'
+          ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted((v as Record<string, unknown>)[k])]))
+          : v;
+    return createHash('sha1').update(JSON.stringify(sorted(value) ?? null)).digest('hex').slice(0, 20);
+  };
+
+  /**
+   * `?basedOn=<version>` for the writes that replace a whole object — the
+   * profile, the skills list, the answer bank — as an entry's PUT has it.
+   *
+   * Each is sent whole, built from a copy the writer read a moment or an hour
+   * ago, and each was written over whatever the file held by then: a pull
+   * that brought in the other machine's new phone number, a skill added in
+   * another tab, an answer the extension kept. Sent from a copy read before
+   * the pull, the next save of any one field put every pulled change back
+   * the way it was, with nothing on screen to say so. Now the writer says
+   * which version it built on (`profileVersion`, `skillsVersion` and
+   * `answersVersion` in `GET /store`, and the `ETag` of each write), and a
+   * write over a different one is answered 409 with what is there now and
+   * its version, for the writer to make its change to that and send again.
+   * A write that sends no `basedOn` — the CLI, MCP, undo, an older page —
+   * is not a condition, and writes as it always did. Checked with nothing
+   * awaited before the write, as the entry's is.
+   */
+  const wholeMovedOn = (res: Response, what: string, basedOn: unknown, current: unknown): boolean => {
+    if (typeof basedOn !== 'string' || !basedOn) return false;
+    const version = contentVersion(current);
+    if (basedOn === version) return false;
+    res.status(409).json({
+      kind: 'conflict',
+      error: `${what} changed elsewhere since this change was made to it, so it was not written.`,
+      current,
+      version,
+    });
+    return true;
+  };
+
+  /**
    * The newest editor save written of each resume, as `?order=<page>:<n>`.
    * See the resume PUT. In memory, since the race it settles lasts one round
    * trip; one entry per resume.
@@ -1149,6 +1195,10 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         versions: Object.fromEntries(data.resumes.map((r) => [r.id, resumeVersion(r.id)])),
         // And of each entry, for an entry's save. See `entryVersion`.
         entryVersions: Object.fromEntries(data.entries.map((e) => [e.id, entryVersion(e)])),
+        // And of the three things written whole. See `wholeMovedOn`.
+        profileVersion: contentVersion(data.profile),
+        skillsVersion: contentVersion(data.skillGroups),
+        answersVersion: contentVersion(data.answers),
       });
     }),
   );
@@ -1659,7 +1709,10 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       // `?commit=0` for the editor's inline edits, which commit on idle like
       // every other auto-save rather than once per keystroke.
       const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
+      if (wholeMovedOn(res, 'Your profile', req.query.basedOn, store.load().profile)) return;
       await withCommit(repo, autoCommit() && wantCommit, 'Update profile', () => store.saveProfile(profile));
+      // Which version this write made, for the next one to be based on.
+      res.setHeader('ETag', `"${contentVersion(store.load().profile)}"`);
       res.json(profile);
     }),
   );
@@ -1674,16 +1727,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
    * reorders them is not a change either. Read by the entry PUT and, for
    * every entry, by `GET /store`.
    */
-  const entryVersion = (entry: Entry | undefined | null): string | null => {
-    if (!entry) return null;
-    const sorted = (value: unknown): unknown =>
-      Array.isArray(value)
-        ? value.map(sorted)
-        : value && typeof value === 'object'
-          ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, sorted((value as Record<string, unknown>)[k])]))
-          : value;
-    return createHash('sha1').update(JSON.stringify(sorted(entry))).digest('hex').slice(0, 20);
-  };
+  const entryVersion = (entry: Entry | undefined | null): string | null => (entry ? contentVersion(entry) : null);
 
   api.put(
     '/entries/:id',
@@ -1909,7 +1953,9 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     handler(async (req, res) => {
       const groups = req.body as SkillGroup[];
       if (!Array.isArray(groups)) throw new Error('Skills have to be a list of groups');
+      if (wholeMovedOn(res, 'The skills list', req.query.basedOn, store.load().skillGroups)) return;
       await withCommit(repo, autoCommit(), 'Update skills', () => store.saveSkillGroups(groups));
+      res.setHeader('ETag', `"${contentVersion(store.load().skillGroups)}"`);
       res.json(groups);
     }),
   );
@@ -1932,6 +1978,8 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         overrides: {
           autoCommit: process.env.RMM_AUTOCOMMIT === '0',
           ai: process.env.RMM_AI === '0',
+          // Why a pull or a clone switched the AI off on this machine, if one did. See `aiCommandChange`.
+          aiSwitchedOff: aiSwitchedOff(store.root) ?? null,
           engine: Boolean(process.env.RMM_LATEX_ENGINE),
           /*
            * And the one setting whose effect depends on which CLI is
@@ -2150,10 +2198,35 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * editor's reload after this sees the result; not allowed to turn a
        * pull that worked into a failed one.
        */
-      if (result.ok && result.pulled > 0 && afterPull) {
-        await afterPull().catch((err: unknown) => {
-          console.warn(`ResumeM-M: after the pull: ${err instanceof Error ? err.message : String(err)}`);
-        });
+      /*
+       * And the save read once, whole, after anything came in: a pull that
+       * leaves a save the app cannot open is not one to answer `ok` for.
+       * `Repo.pull` reads the files it brings in before merging them (see
+       * `vetIncoming`), but the opening pass and the loaders ask more of a
+       * save than that it parses — and a pull that answered "Pulled 1
+       * commit" over a save every page then refused to read, with the reason
+       * only in the server's console, was the bug. The pull itself is done
+       * by now and is not undone; this is the person hearing why the editor
+       * is about to fail, and what to fix.
+       */
+      if (result.ok && result.pulled > 0) {
+        try {
+          if (afterPull) await afterPull();
+          store.forgetReads();
+          store.load();
+        } catch (err) {
+          const said = err instanceof Error ? err.message : String(err);
+          console.warn(`ResumeM-M: after the pull: ${said}`);
+          res.json({
+            ...result,
+            ok: false,
+            message:
+              `${result.message} But the save will not open as it now is: ${said} ` +
+              `Fix that in ${store.root} (git log shows what the pull brought in), and reload.`,
+            remote: await repo.remoteStatus(),
+          });
+          return;
+        }
       }
       res.json({ ...result, remote: await repo.remoteStatus() });
     }),
@@ -6178,7 +6251,9 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       // answers.yaml, which reads back as an empty list — the whole answer
       // bank gone, with a 200 and nothing said.
       if (!Array.isArray(answers)) throw new Error('The answer bank has to be a list of answers');
+      if (wholeMovedOn(res, 'The answer bank', req.query.basedOn, store.load().answers)) return;
       await withCommit(repo, autoCommit(), 'Update answer bank', () => store.saveAnswers(answers));
+      res.setHeader('ETag', `"${contentVersion(store.load().answers)}"`);
       res.json(answers);
     }),
   );

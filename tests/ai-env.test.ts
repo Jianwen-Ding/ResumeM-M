@@ -73,6 +73,59 @@ describe('envForAgent', () => {
     expect(on).toEqual({ ...aws, CLAUDE_CODE_USE_BEDROCK: '1' });
   });
 
+  it('lets AWS through when ~/.claude/settings.json turns Bedrock on, and shrugs off a broken one', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-env-home-'));
+    try {
+      const aws = { AWS_REGION: 'us-east-1', AWS_PROFILE: 'bedrock' };
+      fs.mkdirSync(path.join(home, '.claude'));
+      const settings = path.join(home, '.claude', 'settings.json');
+
+      expect(envForAgent({ HOME: home, ...aws })).toEqual({ HOME: home });
+
+      fs.writeFileSync(settings, JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }));
+      expect(envForAgent({ HOME: home, ...aws, GITHUB_TOKEN: 't' })).toEqual({ HOME: home, ...aws });
+      // Claude Code's own CLAUDE_CONFIG_DIR, when it is set, is where the file is.
+      expect(envForAgent({ HOME: '/nowhere', CLAUDE_CONFIG_DIR: path.join(home, '.claude'), ...aws })).toMatchObject(aws);
+
+      fs.writeFileSync(settings, JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: '0' } }));
+      expect(envForAgent({ HOME: home, ...aws })).toEqual({ HOME: home });
+      fs.writeFileSync(settings, '{ not json');
+      expect(envForAgent({ HOME: home, ...aws })).toEqual({ HOME: home });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('lets Google account credentials through only to a Vertex or Gemini setup', () => {
+    const creds = { GOOGLE_APPLICATION_CREDENTIALS: '/home/me/deploy-sa.json', CLOUDSDK_CONFIG: '/home/me/.gcloud' };
+
+    expect(envForAgent({ ...creds })).toEqual({});
+    expect(envForAgent({ ...creds }, 'claude')).toEqual({});
+    expect(envForAgent({ ...creds, CLAUDE_CODE_USE_VERTEX: '0' })).toEqual({ CLAUDE_CODE_USE_VERTEX: '0' });
+
+    expect(envForAgent({ ...creds, CLAUDE_CODE_USE_VERTEX: '1' })).toEqual({ ...creds, CLAUDE_CODE_USE_VERTEX: '1' });
+    expect(envForAgent({ ...creds, GOOGLE_GENAI_USE_VERTEXAI: 'true' })).toEqual({ ...creds, GOOGLE_GENAI_USE_VERTEXAI: 'true' });
+    expect(envForAgent({ ...creds }, 'gemini')).toEqual(creds);
+    expect(envForAgent({ ...creds }, '/usr/local/bin/gemini')).toEqual(creds);
+    expect(envForAgent({ ...creds }, 'C:\\Users\\me\\AppData\\Roaming\\npm\\gemini.cmd')).toEqual(creds);
+  });
+
+  it('keeps the gateway, project, keyring and Windows names the CLIs read', () => {
+    const kept = {
+      GOOGLE_GEMINI_BASE_URL: 'https://gw',
+      GOOGLE_VERTEX_BASE_URL: 'https://gw',
+      GOOGLE_CLOUD_QUOTA_PROJECT: 'q',
+      GCLOUD_PROJECT: 'p',
+      CLOUDSDK_CORE_PROJECT: 'p',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      USERNAME: 'win',
+      'ProgramFiles(x86)': 'C:\\PF86',
+      CommonProgramFiles: 'C:\\CPF',
+      ALLUSERSPROFILE: 'C:\\PD',
+    };
+    expect(envForAgent({ ...kept, ...SECRETS })).toEqual(kept);
+  });
+
   it('passes the extra names the owner lists in RMM_AI_ENV_PASS, and only those', () => {
     const out = envForAgent({
       RMM_AI_ENV_PASS: ' NODE_OPTIONS , MY_GATEWAY_KEY,,',
@@ -114,12 +167,12 @@ describe('what a launched CLI actually sees', () => {
   });
 
   /** A shim called `claude` that prints its environment as JSON. */
-  function fakeClaude(): string {
+  function fakeClaude(name = 'claude'): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-env-cli-'));
     dirs.push(dir);
     const script = path.join(dir, 'print-env.cjs');
     fs.writeFileSync(script, 'process.stdout.write(JSON.stringify(process.env));\n', 'utf8');
-    const shim = path.join(dir, 'claude');
+    const shim = path.join(dir, name);
     fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, { mode: 0o755 });
     return shim;
   }
@@ -144,6 +197,20 @@ describe('what a launched CLI actually sees', () => {
     // What the app adds for the run still arrives on top of the list.
     expect(seen.RMM_TAILOR_SESSION).toBe('/s.json');
     expect(seen.PWD).toContain('rmm-ai-');
+  });
+
+  it.skipIf(process.platform === 'win32')('a run of gemini gets the Google credentials, and claude does not', async () => {
+    saved.GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    saved.CLAUDE_CODE_USE_VERTEX = process.env.CLAUDE_CODE_USE_VERTEX;
+    saved.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_VERTEXAI;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = '/home/me/adc.json';
+    delete process.env.CLAUDE_CODE_USE_VERTEX;
+    delete process.env.GOOGLE_GENAI_USE_VERTEXAI;
+    const tools = { wire: () => null, read: () => undefined };
+    const asGemini = JSON.parse((await runAgent(config(fakeClaude('gemini')), 'print it', tools)).output) as Record<string, string>;
+    const asClaude = JSON.parse((await runAgent(config(fakeClaude()), 'print it', tools)).output) as Record<string, string>;
+    expect(asGemini.GOOGLE_APPLICATION_CREDENTIALS).toBe('/home/me/adc.json');
+    expect(asClaude.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
   });
 
   it.skipIf(process.platform === 'win32')('so does asking it which models it has', async () => {

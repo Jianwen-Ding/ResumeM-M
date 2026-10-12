@@ -163,7 +163,7 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
      * button which does nothing visible reads as a button that did not work.
      */
     if (mode === 'clone') status('Cloning the save…');
-    await api('/projects/switch', {
+    const switched = await api('/projects/switch', {
       method: 'POST',
       body: JSON.stringify({
         dir: $('#project-path').value.trim(),
@@ -171,6 +171,8 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
         ...(mode === 'clone' ? { url: $('#project-url')?.value.trim() ?? '' } : {}),
       }),
     });
+    // A clone that arrived with its AI switched on has had it switched off here; said before the reload takes the page away.
+    if (switched?.notice) window.alert(switched.notice);
     // A fresh page clears previews, cached selections, and all project-specific UI.
     location.hash = 'save';
     location.reload();

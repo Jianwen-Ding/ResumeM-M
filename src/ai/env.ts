@@ -23,6 +23,8 @@
  * keys an owner has set for one AI tool reaching another AI tool, not a token
  * for something unrelated reaching any of them.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 
 /** Passed by exact name. Compared ignoring case: Windows spells `Path`. */
 const NAMES = new Set(
@@ -54,6 +56,18 @@ const NAMES = new Set(
     'HOMEPATH',
     'PROGRAMDATA',
     'PROGRAMFILES',
+    'PROGRAMFILES(X86)',
+    'COMMONPROGRAMFILES',
+    'ALLUSERSPROFILE',
+    // Windows' own name for USER, which node's os.userInfo() and the CLIs'
+    // "who is signed in" both read there.
+    'USERNAME',
+    /*
+     * The Linux session bus. The keyring is reached over it: Codex can keep
+     * its sign-in there, and Gemini its keychain. Without it they ask for a
+     * login they already have, or fall back to a file they never wrote.
+     */
+    'DBUS_SESSION_BUS_ADDRESS',
     // Proxy and certificates. A CLI behind a corporate proxy or a TLS-inspecting
     // gateway cannot reach its own API without these. The lowercase forms are
     // covered by the case-insensitive comparison.
@@ -77,14 +91,18 @@ const NAMES = new Set(
      * loader, which has no business inside somebody else's CLI. An owner who does
      * need it (a larger heap, say) can name it in RMM_AI_ENV_PASS.
      */
-    // Gemini, and Claude on Vertex: Google sign-in by API key or by
-    // application-default credentials. CLOUDSDK_CONFIG is where gcloud keeps
-    // those credentials when it is not the default folder.
+    /*
+     * Gemini, and Claude on Vertex: Google sign-in by API key, and which
+     * project and region to bill. The project goes by four names depending on
+     * which Google tool set it. The application-default credentials and
+     * gcloud's own folder are not here: see `GOOGLE_CREDENTIALS`.
+     */
     'GOOGLE_API_KEY',
     'GOOGLE_CLOUD_PROJECT',
     'GOOGLE_CLOUD_LOCATION',
-    'GOOGLE_APPLICATION_CREDENTIALS',
-    'CLOUDSDK_CONFIG',
+    'GOOGLE_CLOUD_QUOTA_PROJECT',
+    'GCLOUD_PROJECT',
+    'CLOUDSDK_CORE_PROJECT',
     // Claude Code on Vertex names its region with this one.
     'CLOUD_ML_REGION',
   ].map((n) => n.toUpperCase()),
@@ -108,6 +126,10 @@ const PREFIXES = [
   // Gemini.
   'GEMINI_',
   'GOOGLE_GENAI_',
+  // Gemini CLI's own gateway and Vertex settings (GOOGLE_GEMINI_BASE_URL,
+  // GOOGLE_VERTEX_BASE_URL and the like).
+  'GOOGLE_GEMINI_',
+  'GOOGLE_VERTEX_',
   /*
    * agy. Neither the preset nor the README names a variable it reads — it
    * signs in through its own login and keeps that in its config folder, which
@@ -117,6 +139,18 @@ const PREFIXES = [
   'ANTIGRAVITY_',
   'AGY_',
 ];
+
+/**
+ * Google's application-default credentials, and the folder gcloud keeps its
+ * sign-in in. Passed only to a Google setup — see `envForAgent`.
+ *
+ * They were on the list for everyone, and they are not a CLI's sign-in so
+ * much as a cloud account's: GOOGLE_APPLICATION_CREDENTIALS is as often a
+ * deploy service account's key file as anything an AI tool reads, and
+ * CLOUDSDK_CONFIG is every gcloud login on the machine. They are the AWS
+ * keys' Google twin, and are gated the same way.
+ */
+const GOOGLE_CREDENTIALS = new Set(['GOOGLE_APPLICATION_CREDENTIALS', 'CLOUDSDK_CONFIG']);
 
 /** The owner's own additions: comma-separated names, passed exactly. */
 export const PASS_VAR = 'RMM_AI_ENV_PASS';
@@ -144,7 +178,45 @@ function lookup(env: NodeJS.ProcessEnv, name: string): string | undefined {
  * the tool server's session file, the model probe's terminal settings — is
  * added by the caller afterwards, so it never has to be on the list.
  */
-export function envForAgent(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+/**
+ * Whether Claude Code's own settings file turns Bedrock on.
+ *
+ * `CLAUDE_CODE_USE_BEDROCK` can be set in the shell or in the `env` block of
+ * `~/.claude/settings.json`, and the second is what Claude Code's Bedrock
+ * set-up guide tells people to do. Read only from the environment, a setup
+ * made the documented way had its AWS profile and region taken away here and
+ * Claude Code failed to sign in with nothing on screen saying why. Any error —
+ * no file, a file that is not JSON, a folder that cannot be read — is "no",
+ * which is what it was before this looked.
+ */
+function bedrockInSettings(env: NodeJS.ProcessEnv): boolean {
+  const configDir = lookup(env, 'CLAUDE_CONFIG_DIR');
+  const home = lookup(env, 'HOME') ?? lookup(env, 'USERPROFILE');
+  const dir = configDir || (home ? path.join(home, '.claude') : undefined);
+  if (!dir) return false;
+  try {
+    const settings = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')) as {
+      env?: Record<string, unknown>;
+    };
+    const value = settings?.env?.CLAUDE_CODE_USE_BEDROCK;
+    return isOn(typeof value === 'string' ? value : value === undefined || value === null ? undefined : String(value));
+  } catch {
+    return false;
+  }
+}
+
+/** The configured command is Gemini's CLI, by its file name on any platform. */
+function isGemini(command: string | undefined): boolean {
+  if (!command) return false;
+  const name = command.trim().split(/[\\/]/).pop() ?? '';
+  return /^gemini(\.(cmd|exe|ps1|js|mjs))?$/i.test(name);
+}
+
+export function envForAgent(
+  env: NodeJS.ProcessEnv = process.env,
+  /** The AI command about to be started, which is how a Gemini setup is known. */
+  command?: string,
+): Record<string, string> {
   const extra = new Set(
     (lookup(env, PASS_VAR) ?? '')
       .split(',')
@@ -163,7 +235,16 @@ export function envForAgent(env: NodeJS.ProcessEnv = process.env): Record<string
    * has them there for that. So they go through only when the owner has said,
    * with CLAUDE_CODE_USE_BEDROCK, that the AI is meant to use them.
    */
-  const bedrock = isOn(lookup(env, 'CLAUDE_CODE_USE_BEDROCK'));
+  const bedrock = isOn(lookup(env, 'CLAUDE_CODE_USE_BEDROCK')) || bedrockInSettings(env);
+
+  /*
+   * And Google's account-wide credentials only to a Google setup, for the
+   * same reason (see `GOOGLE_CREDENTIALS`): Claude Code told to use Vertex,
+   * Gemini told to, or Gemini's CLI itself, which signs in with them when no
+   * API key is set.
+   */
+  const google =
+    isOn(lookup(env, 'CLAUDE_CODE_USE_VERTEX')) || isOn(lookup(env, 'GOOGLE_GENAI_USE_VERTEXAI')) || isGemini(command);
 
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
@@ -175,6 +256,7 @@ export function envForAgent(env: NodeJS.ProcessEnv = process.env): Record<string
       NAMES.has(upper) ||
       PREFIXES.some((p) => upper.startsWith(p)) ||
       (bedrock && upper.startsWith('AWS_')) ||
+      (google && GOOGLE_CREDENTIALS.has(upper)) ||
       extra.has(upper);
     if (allowed) out[name] = value;
   }

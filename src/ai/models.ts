@@ -163,7 +163,7 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
        * they find it, so filtering here covers the CLI underneath them too.
        */
       env: {
-        ...envForAgent(),
+        ...envForAgent(process.env, command),
         TERM: 'xterm-256color',
         NO_COLOR: '1',
         RMM_MODEL_COMMAND: command,

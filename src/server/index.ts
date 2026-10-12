@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { Repo, cloneRepo, commitQuietly } from '../git/repo.js';
 import { findProjectRoot, resolveStoreDir, seedStore } from '../model/location.js';
-import { Store } from '../model/store.js';
+import { Store, aiSwitchedOff } from '../model/store.js';
 import { currentIgnore } from '../model/current.js';
 import { createApi, createPdfRouter, createCurrentRouter } from './api.js';
 import { closeStaleApplying, sweepTemporary, tidyWorkdayNames } from './sweep.js';
@@ -527,7 +527,9 @@ export async function startServer(opts: ServerOptions = {}) {
         rememberProject(next.store.root, preferencesFile, active?.store.root);
         active = next; openedBy = 'selected'; startupError = undefined;
       } finally { switching = false; }
-      res.json({ dir: active.store.root, mode });
+      // What the clone switched off, said where the person will see it. See `aiCommandChange`.
+      const notice = mode === 'clone' ? aiSwitchedOff(active.store.root) : undefined;
+      res.json({ dir: active.store.root, mode, ...(notice ? { notice: `${notice} AI is switched off until you turn it on again in Settings.` } : {}) });
     } catch (error) { res.status(400).json({ error: (error as Error).message }); }
   });
   app.post('/api/projects/close', (_req, res) => {

@@ -369,14 +369,21 @@ The CLI is not given the server's whole environment, only an allow-list:
 system basics (`PATH`, `HOME`, locale, temp folders, `XDG_*`, the Windows
 profile variables), proxy and certificate settings, and each CLI's own
 sign-in and config variables (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`,
-`CODEX_*`, `GEMINI_*`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_*` and the Google Cloud
-project and credentials, `ANTIGRAVITY_*`). `AWS_*` is passed only when
-`CLAUDE_CODE_USE_BEDROCK` is set. Everything else, such as `GITHUB_TOKEN`,
-`NPM_TOKEN`, a database URL or `NODE_OPTIONS`, stays with the server, because
-a job posting's text can steer what the model does. To pass more, name the
-variables in `RMM_AI_ENV_PASS`, comma-separated, e.g.
-`RMM_AI_ENV_PASS=MY_GATEWAY_KEY,NODE_OPTIONS`. The full list is in
-`src/ai/env.ts`.
+`CODEX_*`, `GEMINI_*`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_*`, `GOOGLE_GEMINI_*`,
+`GOOGLE_VERTEX_*` and the Google Cloud project, `ANTIGRAVITY_*`), and the
+desktop session bus the keyring is reached over. `AWS_*` is passed only when
+`CLAUDE_CODE_USE_BEDROCK` is set, in the environment or in the `env` block of
+`~/.claude/settings.json`; `GOOGLE_APPLICATION_CREDENTIALS` and
+`CLOUDSDK_CONFIG` only when `CLAUDE_CODE_USE_VERTEX` or
+`GOOGLE_GENAI_USE_VERTEXAI` is set, or the AI command is `gemini`. Everything
+else, such as `GITHUB_TOKEN`, `NPM_TOKEN`, a database URL or `NODE_OPTIONS`,
+stays with the server, because a job posting's text can steer what the model
+does. To pass more, name the variables in `RMM_AI_ENV_PASS`, comma-separated,
+e.g. `RMM_AI_ENV_PASS=MY_GATEWAY_KEY,NODE_OPTIONS`. That includes the key of a
+Codex provider set up in `~/.codex/config.toml` with its own `env_key`, such
+as `RMM_AI_ENV_PASS=OPENROUTER_API_KEY`: Codex reads it from the environment,
+and only `OPENAI_*` and `AZURE_OPENAI_*` are passed without being named. The
+full list is in `src/ai/env.ts`.
 
 Two things make this different from pasting into a chat window:
 
