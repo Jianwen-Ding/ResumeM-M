@@ -573,8 +573,16 @@ function fsyncDirectory(dir: string): void {
  * Trailing spaces after a fence are allowed for the same reason: they are
  * invisible, and a file that has one is not a file without a header.
  */
-function splitFrontMatter(raw: string): { header: string; body: string } | undefined {
-  const m = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(raw);
+/*
+ * And a byte-order mark in front of the first fence, which Notepad and Word
+ * write at the start of a UTF-8 file. With one there the file did not start
+ * with "---", so the header was read as prose: the letter lost its title, its
+ * company and its `applicationId`, and the first save wrote a second header
+ * above the first. A header with nothing in it ("---" straight after "---")
+ * is a header too, and was the same prose.
+ */
+export function splitFrontMatter(raw: string): { header: string; body: string } | undefined {
+  const m = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(withoutBom(raw));
   return m ? { header: m[1] ?? '', body: m[2] ?? '' } : undefined;
 }
 
@@ -2134,6 +2142,14 @@ export class Store {
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
     this.writeAtomic(this.file('corpus', `${id}.md`), `---\n${front}\n---\n${text}`);
+  }
+
+  /** Take a cover letter out; false when there was none by that id. */
+  deleteCoverLetter(id: string): boolean {
+    const f = this.file('letters', `${id}.md`);
+    if (!fs.existsSync(f)) return false;
+    removeFile(f, 'That cover letter');
+    return true;
   }
 
   deleteSample(id: string): boolean {

@@ -136,161 +136,172 @@ const NAMED_AS_PHONE =
   /\b(?:call|phone|mobile|cell|tel|text|whats\s?app|ring|dial|reach)\b(?:\s+(?:me|us))?(?:\s+(?:on|at))?\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:.#]?\s*$/i;
 
 function phoneIn(text: string): boolean {
-  for (const found of text.matchAll(DIGIT_RUN)) {
-    const run = found[0];
-    const before = text.slice(Math.max(0, found.index! - 40), found.index);
-    const named = NAMED_AS_OTHER.test(before);
-    const called = NAMED_AS_PHONE.test(before);
-    const groups = run.match(/\+?\d+/g)!;
-    const seps = run.split(/\+?\d+/).slice(1, -1);
-    /*
-     * A list of figures: four or more groups of three digits or more, each
-     * larger than the last, with nothing but a single space between them and
-     * no "+" or trunk "0" in front — "ran 128 256 512 1024 jobs". Its last
-     * three groups are a North American phone's 3-3-4, so every stretch of it
-     * was refused. A phone written with a country code in front of that has a
-     * one- or two-digit code ("1 415 555 1234", "44 20 7946 0958"), a "+", or
-     * "00". Rising, because two phones written one after the other with no
-     * word between, "415 555 1234 650 555 1234", are four long groups too, and
-     * they fall back at the second.
-     */
-    if (
-      groups.length >= 4 &&
-      !/^[+0]/.test(groups[0]!) &&
-      groups.every((x, k) => x.length >= 3 && (k === 0 || Number(x) > Number(groups[k - 1]))) &&
-      seps.every((sep) => sep === ' ')
-    ) {
-      continue;
-    }
-    /*
-     * A number straight after "#", in one piece: "issue #123456789012", "PR
-     * #1234567890". Nobody writes "#" against a phone number, and in one
-     * unbroken run it has no phone's layout to go by either.
-     */
-    if (groups.length === 1 && !groups[0]!.startsWith('+') && text[found.index! - 1] === '#') continue;
-    const breakable = (sep: string) => !/[.-]/.test(sep);
-    for (let i = 0; i < groups.length; i++) {
-      if (i > 0 && !breakable(seps[i - 1]!)) continue;
-      for (let j = i; j < groups.length; j++) {
-        if (j < groups.length - 1 && !breakable(seps[j]!)) continue;
-        const g = groups.slice(i, j + 1);
-        const between = seps.slice(i, j);
-        const digits = g.join('').replace(/\D/g, '').length;
-        if (digits < 10 || digits > 15) continue;
-        const bare = g.map((x) => x.replace('+', ''));
-        const plus = g[0]!.startsWith('+');
-        /*
-         * "00" is how a "+" is dialled, and is written in its place: "0049
-         * 1520 1234 5678" is "+49 1520 1234 5678", and went through as a list
-         * of four-digit figures. No figure or identifier starts with "00" and
-         * a digit after it. Used only by the two rules a country code changes
-         * the reading of; "tickets 00123 45678" is still named as tickets.
-         */
-        const intl = plus || /^00[1-9]/.test(bare[0]!);
-        /*
-         * Not after a "+": a figure is never written with a country code, and
-         * a great many phones are written in threes after one — "+34 912 345
-         * 678", "+31 612 345 678" — which this let through as a figure.
-         */
-        if (!plus && bare.length > 2 && bare[0]!.length <= 3 && bare.slice(1).every((x) => x.length === 3)) continue;
-        if (bare.some((x, k) => k > 0 && x.length === 1 && between[k - 1]!.includes('.'))) continue;
-        /*
-         * Figures and identifiers in a phone's digit count, which the two
-         * rules below the "+" one let through once they stopped being read as
-         * requisitions: "ISBN 978 0 13 468599 1", "batch 4096 8192 16384",
-         * "order 10000 20000", "IDs 12345 67890".
-         *
-         * - A group of one digit after the first: an ISBN's group or a
-         *   check digit. A phone's one-digit group is the country code or
-         *   trunk at the front ("+1 415…", "1 800…"), or the "(0)" a trunk
-         *   is bracketed as after a country code ("+49 (0)30 1234567").
-         * - Three or more groups of four digits or more each: a list of
-         *   figures. A phone is written in twos, threes and fours, and at
-         *   most two of them are long.
-         * - Two groups with no "+", no dash and no bracket: only in a
-         *   phone's own layout, 10 or 11 digits with a first group of 3 to 5
-         *   ("07700 900123", "98765 43210", "030 12345678"); and not when
-         *   every long group is a round figure ("10000 20000"), or the word
-         *   in front names the numbers as something else ("IDs", "order",
-         *   "tickets").
-         *
-         * "+1 234 567 890" is left refused: written with a country code it
-         * is exactly a phone's shape, whatever the sentence around it says.
-         *
-         * The group straight after a country code is not "after the first":
-         * France writes its mobiles "+33 6 12 34 56 78" and Paris "+33 1 42
-         * 68 53 00", Australia "+61 4 1234 5678" and Sydney "+61 2 9876 5432",
-         * and each of those went through as an ISBN. An ISBN is never written
-         * with a "+" in front.
-         *
-         * A word in front that names the numbers is taken at its word, trunk
-         * 0 or not, and a round pair is a figure unless a word in front says
-         * phone; see the two-group rule below.
-         */
-        if (bare.some((x, k) => k > (intl ? 1 : 0) && x.length === 1 && !(x === '0' && between[k - 1]!.includes('(')))) {
-          continue;
-        }
-        /*
-         * Groups of four or more after "00" were let through as a phone
-         * however they were named, so "Order 0012 3456 7890" was refused:
-         * "0012" reads as a dialled "+12". A word that names the numbers as
-         * an order is the better evidence; "Call 0049 1520 1234 5678" has no
-         * such word and is still a phone.
-         */
-        if ((!intl || named) && bare.length >= 3 && bare.every((x) => x.length >= 4)) continue;
-        /*
-         * One unbroken run of digits named as something else: "Order ID
-         * 1234567890". A phone is written in groups far more often than not,
-         * and when it is not, nothing in front of it says "order" or "ID".
-         */
-        if (named && !plus && bare.length === 1) continue;
-        if (bare.length === 2 && !plus && !between.some((sep) => /[-()]/.test(sep))) {
-          if (digits > 11 || bare[0]!.length < 3 || bare[0]!.length > 5) continue;
-          /*
-           * Named as IDs, orders or tickets, the numbers are those, trunk 0
-           * or not. Round 16 kept a number starting with a trunk 0 a phone
-           * after any word, for "Ref: 07700 900123" and the other everyday
-           * words the list used to hold; with those gone from
-           * `NAMED_AS_OTHER` the words that are left mean only what they say,
-           * and "IDs 01234 56789" and "order 01234 56789" were refused for
-           * the 0. "IDs 07700 900123" goes through with them: the label is
-           * the only thing that tells it apart from "IDs 01234 56789", and
-           * the label says IDs. "Ref: 07700 900123" is still a phone.
-           */
-          if (named) continue;
-          /*
-           * Round figures, "10000 20000" and "Revenue grew 70000 60000",
-           * unless a word in front says it is a phone: "Call 90000 80000" is
-           * an Indian mobile, which is written in fives and can be round. The
-           * rule used to let every ten digits in fives starting 6 to 9
-           * through as a mobile, round or not, which refused the revenue.
-           */
-          if (!called && bare.every((x) => /^[1-9]0{3,}$/.test(x))) continue;
-        }
-        const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
-        if (bare.length > 1 && bare.every(year)) continue;
-        /*
-         * A requisition only when something says so: a dash between the
-         * groups ("2024-0012345") or a year beside the long one ("2024
-         * 0012345"). Two groups with a space between are how half the world
-         * writes a phone — "07700 900123", "98765 43210" — and a leading 0 is
-         * a trunk prefix, which no reference number starts with.
-         */
-        const long = bare.findIndex((x) => x.length >= 5);
-        const marked =
-          between.some((sep) => sep.includes('-')) || bare.some((x, k) => k !== long && year(x));
-        if (
-          bare.length > 1 &&
-          long >= 0 &&
-          !plus &&
-          marked &&
-          !bare[0]!.startsWith('0') &&
-          bare.filter((_, k) => k !== long).join('').length > 3
-        ) {
-          continue;
-        }
-        return true;
+  for (const found of text.matchAll(DIGIT_RUN)) if (isPhoneRun(text, found)) return true;
+  return false;
+}
+
+/** The runs of digits in `text` that `phoneIn` reads as phone numbers. */
+function phoneRunsIn(text: string): { at: number; length: number }[] {
+  return [...text.matchAll(DIGIT_RUN)]
+    .filter((found) => isPhoneRun(text, found))
+    .map((found) => ({ at: found.index!, length: found[0].length }));
+}
+
+/** Whether some stretch of this one run of digits is a phone number. */
+function isPhoneRun(text: string, found: RegExpMatchArray): boolean {
+  const run = found[0];
+  const before = text.slice(Math.max(0, found.index! - 40), found.index);
+  const named = NAMED_AS_OTHER.test(before);
+  const called = NAMED_AS_PHONE.test(before);
+  const groups = run.match(/\+?\d+/g)!;
+  const seps = run.split(/\+?\d+/).slice(1, -1);
+  /*
+   * A list of figures: four or more groups of three digits or more, each
+   * larger than the last, with nothing but a single space between them and
+   * no "+" or trunk "0" in front — "ran 128 256 512 1024 jobs". Its last
+   * three groups are a North American phone's 3-3-4, so every stretch of it
+   * was refused. A phone written with a country code in front of that has a
+   * one- or two-digit code ("1 415 555 1234", "44 20 7946 0958"), a "+", or
+   * "00". Rising, because two phones written one after the other with no
+   * word between, "415 555 1234 650 555 1234", are four long groups too, and
+   * they fall back at the second.
+   */
+  if (
+    groups.length >= 4 &&
+    !/^[+0]/.test(groups[0]!) &&
+    groups.every((x, k) => x.length >= 3 && (k === 0 || Number(x) > Number(groups[k - 1]))) &&
+    seps.every((sep) => sep === ' ')
+  ) {
+    return false;
+  }
+  /*
+   * A number straight after "#", in one piece: "issue #123456789012", "PR
+   * #1234567890". Nobody writes "#" against a phone number, and in one
+   * unbroken run it has no phone's layout to go by either.
+   */
+  if (groups.length === 1 && !groups[0]!.startsWith('+') && text[found.index! - 1] === '#') return false;
+  const breakable = (sep: string) => !/[.-]/.test(sep);
+  for (let i = 0; i < groups.length; i++) {
+    if (i > 0 && !breakable(seps[i - 1]!)) continue;
+    for (let j = i; j < groups.length; j++) {
+      if (j < groups.length - 1 && !breakable(seps[j]!)) continue;
+      const g = groups.slice(i, j + 1);
+      const between = seps.slice(i, j);
+      const digits = g.join('').replace(/\D/g, '').length;
+      if (digits < 10 || digits > 15) continue;
+      const bare = g.map((x) => x.replace('+', ''));
+      const plus = g[0]!.startsWith('+');
+      /*
+       * "00" is how a "+" is dialled, and is written in its place: "0049
+       * 1520 1234 5678" is "+49 1520 1234 5678", and went through as a list
+       * of four-digit figures. No figure or identifier starts with "00" and
+       * a digit after it. Used only by the two rules a country code changes
+       * the reading of; "tickets 00123 45678" is still named as tickets.
+       */
+      const intl = plus || /^00[1-9]/.test(bare[0]!);
+      /*
+       * Not after a "+": a figure is never written with a country code, and
+       * a great many phones are written in threes after one — "+34 912 345
+       * 678", "+31 612 345 678" — which this let through as a figure.
+       */
+      if (!plus && bare.length > 2 && bare[0]!.length <= 3 && bare.slice(1).every((x) => x.length === 3)) continue;
+      if (bare.some((x, k) => k > 0 && x.length === 1 && between[k - 1]!.includes('.'))) continue;
+      /*
+       * Figures and identifiers in a phone's digit count, which the two
+       * rules below the "+" one let through once they stopped being read as
+       * requisitions: "ISBN 978 0 13 468599 1", "batch 4096 8192 16384",
+       * "order 10000 20000", "IDs 12345 67890".
+       *
+       * - A group of one digit after the first: an ISBN's group or a
+       *   check digit. A phone's one-digit group is the country code or
+       *   trunk at the front ("+1 415…", "1 800…"), or the "(0)" a trunk
+       *   is bracketed as after a country code ("+49 (0)30 1234567").
+       * - Three or more groups of four digits or more each: a list of
+       *   figures. A phone is written in twos, threes and fours, and at
+       *   most two of them are long.
+       * - Two groups with no "+", no dash and no bracket: only in a
+       *   phone's own layout, 10 or 11 digits with a first group of 3 to 5
+       *   ("07700 900123", "98765 43210", "030 12345678"); and not when
+       *   every long group is a round figure ("10000 20000"), or the word
+       *   in front names the numbers as something else ("IDs", "order",
+       *   "tickets").
+       *
+       * "+1 234 567 890" is left refused: written with a country code it
+       * is exactly a phone's shape, whatever the sentence around it says.
+       *
+       * The group straight after a country code is not "after the first":
+       * France writes its mobiles "+33 6 12 34 56 78" and Paris "+33 1 42
+       * 68 53 00", Australia "+61 4 1234 5678" and Sydney "+61 2 9876 5432",
+       * and each of those went through as an ISBN. An ISBN is never written
+       * with a "+" in front.
+       *
+       * A word in front that names the numbers is taken at its word, trunk
+       * 0 or not, and a round pair is a figure unless a word in front says
+       * phone; see the two-group rule below.
+       */
+      if (bare.some((x, k) => k > (intl ? 1 : 0) && x.length === 1 && !(x === '0' && between[k - 1]!.includes('(')))) {
+        continue;
       }
+      /*
+       * Groups of four or more after "00" were let through as a phone
+       * however they were named, so "Order 0012 3456 7890" was refused:
+       * "0012" reads as a dialled "+12". A word that names the numbers as
+       * an order is the better evidence; "Call 0049 1520 1234 5678" has no
+       * such word and is still a phone.
+       */
+      if ((!intl || named) && bare.length >= 3 && bare.every((x) => x.length >= 4)) continue;
+      /*
+       * One unbroken run of digits named as something else: "Order ID
+       * 1234567890". A phone is written in groups far more often than not,
+       * and when it is not, nothing in front of it says "order" or "ID".
+       */
+      if (named && !plus && bare.length === 1) continue;
+      if (bare.length === 2 && !plus && !between.some((sep) => /[-()]/.test(sep))) {
+        if (digits > 11 || bare[0]!.length < 3 || bare[0]!.length > 5) continue;
+        /*
+         * Named as IDs, orders or tickets, the numbers are those, trunk 0
+         * or not. Round 16 kept a number starting with a trunk 0 a phone
+         * after any word, for "Ref: 07700 900123" and the other everyday
+         * words the list used to hold; with those gone from
+         * `NAMED_AS_OTHER` the words that are left mean only what they say,
+         * and "IDs 01234 56789" and "order 01234 56789" were refused for
+         * the 0. "IDs 07700 900123" goes through with them: the label is
+         * the only thing that tells it apart from "IDs 01234 56789", and
+         * the label says IDs. "Ref: 07700 900123" is still a phone.
+         */
+        if (named) continue;
+        /*
+         * Round figures, "10000 20000" and "Revenue grew 70000 60000",
+         * unless a word in front says it is a phone: "Call 90000 80000" is
+         * an Indian mobile, which is written in fives and can be round. The
+         * rule used to let every ten digits in fives starting 6 to 9
+         * through as a mobile, round or not, which refused the revenue.
+         */
+        if (!called && bare.every((x) => /^[1-9]0{3,}$/.test(x))) continue;
+      }
+      const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
+      if (bare.length > 1 && bare.every(year)) continue;
+      /*
+       * A requisition only when something says so: a dash between the
+       * groups ("2024-0012345") or a year beside the long one ("2024
+       * 0012345"). Two groups with a space between are how half the world
+       * writes a phone — "07700 900123", "98765 43210" — and a leading 0 is
+       * a trunk prefix, which no reference number starts with.
+       */
+      const long = bare.findIndex((x) => x.length >= 5);
+      const marked =
+        between.some((sep) => sep.includes('-')) || bare.some((x, k) => k !== long && year(x));
+      if (
+        bare.length > 1 &&
+        long >= 0 &&
+        !plus &&
+        marked &&
+        !bare[0]!.startsWith('0') &&
+        bare.filter((_, k) => k !== long).join('').length > 3
+      ) {
+        continue;
+      }
+      return true;
     }
   }
   return false;
@@ -356,4 +367,73 @@ export function personalDetailIn(text: string): string | null {
   if (STREET.test(prose)) return 'a street address';
   if (isSensitiveAnswer(body)) return 'an identifier (a national, tax, passport or card number, or a date of birth)';
   return null;
+}
+
+/*
+ * What a scrubbed contact detail is replaced with: says what was there, so a
+ * sentence like "reach me at [phone number]" still reads as one, and is
+ * plainly not something to copy into a letter.
+ */
+const SCRUBBED = {
+  email: '[email address]',
+  phone: '[phone number]',
+  street: '[street address]',
+};
+
+/**
+ * `text` with its email addresses, phone numbers and street addresses
+ * replaced by a neutral placeholder, and everything else as it was.
+ *
+ * For the letters and samples handed to an AI as the person's own writing.
+ * A letter ends with a signature, and an old resume pasted into the corpus
+ * starts with a contact line, so the phone, the email and the home address
+ * went into the voice section of every job's prompt, into `find_my_letters`
+ * and `check_claim`, and into the session file in the AI's working
+ * directory — none of which needs them to learn how somebody writes. The
+ * sample stays: dropping a letter for its signature would take the letter's
+ * voice with it.
+ *
+ * The same shapes `personalDetailIn` refuses, so the two cannot disagree
+ * about what a contact detail is: the email shape away from a git remote,
+ * and the phone and street shapes looked for with links and identifiers
+ * blanked out first — blanked to spaces of the same length rather than
+ * removed, so a place found in the blanked text is the same place in the
+ * text itself. One kind at a time, emails, then phones, then streets: a
+ * signature's "(617) 555-0199" on the line above "12 Elm Street" reads, to
+ * the street shape, as house number 0199, and taken first it left the rest
+ * of the phone number behind.
+ */
+export function withoutContactDetails(text: string): string {
+  const blank = (t: string, re: RegExp) => t.replace(re, (m) => ' '.repeat(m.length));
+  const email = new RegExp(CONTACT_ANSWER[0]!.source, 'g');
+  const street = new RegExp(STREET.source, 'g');
+  const noGit = (t: string) => blank(t, GIT_REMOTE);
+  const prose = (t: string) => URL_LIKE.reduce(blank, noGit(t));
+
+  /** `t` with each place `find` names in it replaced by `say`, from the end. */
+  const replace = (t: string, say: string, find: (t: string) => { at: number; length: number }[]) =>
+    find(t)
+      .sort((a, b) => b.at - a.at)
+      .reduce((out, { at, length }) => out.slice(0, at) + say + out.slice(at + length), t);
+  const matches = (re: RegExp) => (t: string) => [...t.matchAll(re)].map((m) => ({ at: m.index!, length: m[0].length }));
+
+  let out = String(text ?? '');
+  out = replace(out, SCRUBBED.email, (t) => matches(email)(noGit(t)));
+  /*
+   * Line by line: a run of digits goes on across a line break, so the
+   * number on a signature's last line took the house number on the next
+   * with it. Each break made a character no run continues over, in place.
+   */
+  const lineByLine = (t: string) => t.replace(/[\r\n]/g, '\u0001');
+  /*
+   * The bracket in front of an area code with it: the run of digits starts
+   * after the "(" (see `DIGIT_RUN`), and "([phone number]" is half a
+   * number still.
+   */
+  out = replace(out, SCRUBBED.phone, (t) =>
+    phoneRunsIn(lineByLine(prose(t))).map(({ at, length }) =>
+      t[at - 1] === '(' && /^\d+\)/.test(t.slice(at, at + length)) ? { at: at - 1, length: length + 1 } : { at, length },
+    ),
+  );
+  return replace(out, SCRUBBED.street, (t) => matches(street)(prose(t)));
 }

@@ -52,7 +52,7 @@ import {
 import { fitResumes, forgetPrintedText, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -676,6 +676,32 @@ function placeholderNote(what: string, found: string[]): string {
     `${what} still has ${found.length === 1 ? 'a placeholder' : `${found.length} placeholders`} in it — ` +
     `${namePlaceholders(found)}. It is not finished: fill ${found.length === 1 ? 'it' : 'them'} in, or take the sentence out.`
   );
+}
+
+/**
+ * A letter id for a job that is not another application's letter.
+ *
+ * `letterId` is the day, the company and the role, and that name is the
+ * file. Completing an application files its letter under it, tagged with the
+ * application (`applicationId`), and the extension's "Save to store" and the
+ * cover-letter route's `save` asked for the same name and wrote over it: a
+ * second application to the same title on the same day, or a draft saved
+ * after the first was sent, replaced the letter the tracker's row points at.
+ * So a name already held by a letter linked to a different application is
+ * numbered past, "-2", "-3", the way completing an application numbers past
+ * one. `owner` is the application the letter is for, when the caller knows
+ * it: its own letter under the name is its own to write over. A letter linked
+ * to nothing is anybody's draft, and is not numbered past.
+ */
+function unclaimedLetterId(letters: CoverLetter[], named: string, owner?: string): string {
+  const linked = new Map(letters.map((l) => [l.id, l.applicationId]));
+  const claimed = (id: string) => {
+    const by = linked.get(id);
+    return Boolean(by) && by !== owner;
+  };
+  let candidate = named;
+  for (let n = 2; claimed(candidate); n++) candidate = `${named}-${n}`;
+  return candidate;
 }
 
 /** Text a caller sent, trimmed — or nothing, for anything else or blank. */
@@ -3181,14 +3207,29 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const unfinished = placeholders.length > 0 ? placeholderNote('This letter', placeholders) : undefined;
       let saved: CoverLetter | undefined;
       if (save && body.trim() && !unfinished) {
+        /*
+         * Never over a letter an application filed. This wrote a new object
+         * under `letterId` for the job and the day, which is the name
+         * completing the application gives its letter, so asking for a
+         * redraft after sending replaced the sent letter and took its
+         * `applicationId` and its date with it. A linked letter under the
+         * name is numbered past (`unclaimedLetterId`); a draft this route
+         * saved before, linked to nothing, is its own to write over, and
+         * keeps the date it was first written and any key somebody added to
+         * its header.
+         */
+        const letters = store.loadCoverLetters();
+        const id = unclaimedLetterId(letters, letterId(job.company, job.jobTitle));
+        const before = letters.find((l) => l.id === id);
         saved = {
-          id: letterId(job.company, job.jobTitle),
+          ...(before ?? {}),
+          id,
           // Named for the employer the address belongs to when the page never
           // said who is hiring, and never for the address — see `employerOrUnknown`.
           title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerOrUnknown(job.url)}`,
           company: job.company,
           role: job.jobTitle,
-          createdAt: new Date().toISOString(),
+          createdAt: before?.createdAt || new Date().toISOString(),
           body,
         };
         const letter = saved;
@@ -4485,8 +4526,22 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const toKeep = store
         .loadResumes()
         .filter((r) => sentWith.includes(r.id) && tierOf(r) === 'temporary');
+      /*
+       * Its letter stays, unlinked. The letter is a letter you wrote and is
+       * kept as one, but it still said `applicationId:` the row that is
+       * gone: the letters view offered "application" beside it and opened
+       * nothing, and anything that looks a letter up by its application —
+       * completing one, `GET /letters/id` — would take it for the letter of
+       * a row that only shares the id. Cleared in the same commit as the
+       * row, so the history has no state with one and not the other.
+       */
+      const linkedLetters = store.loadCoverLetters().filter((l) => l.applicationId === id);
       await withCommit(repo, autoCommit(), `Remove application "${id}"`, () => {
         store.saveApplications(next);
+        for (const letter of linkedLetters) {
+          const { applicationId: _gone, ...unlinked } = letter;
+          store.saveCoverLetter(unlinked);
+        }
         for (const spec of toKeep) {
           spec.tier = 'extended';
           delete spec.temporaryFrom;
@@ -6201,9 +6256,17 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
    * Cover letters and answers                                         *
    * ---------------------------------------------------------------- */
 
+  /*
+   * Each with its `version`, for a save to be based on — the same
+   * `contentVersion` the whole-object writes use. See `PUT /letters/:id`.
+   * Beside the letter's own fields, and taken off again by the PUT, so a
+   * letter sent back whole does not carry it into its file.
+   */
   api.get(
     '/letters',
-    handler(async (_req, res) => res.json(store.loadCoverLetters())),
+    handler(async (_req, res) =>
+      res.json(store.loadCoverLetters().map((l) => ({ ...l, version: contentVersion(l) }))),
+    ),
   );
 
   /**
@@ -6215,22 +6278,121 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
    * empty part is left out, and the parts are joined with "-". Asked here so a client saving a letter for a
    * job writes it under the same name completing that job's application
    * files it under, rather than computing its own and drifting.
+   *
+   * And not over another application's letter. That name was handed back
+   * bare, and the extension's "Save to store" wrote under it — so a letter
+   * saved for a second job with the same title on the same day, or for the
+   * same title reposted, landed on the letter the first application had
+   * filed. The caller says which application it is writing for when it
+   * knows (`applicationId`), or the posting's address (`url`), which finds
+   * the tracker row for it. The letter already linked to that application
+   * is the answer when there is one, whatever day it was filed; otherwise
+   * the name is numbered past any letter linked to a different application
+   * (`unclaimedLetterId`), as completing an application numbers past one.
+   * The application found is said too, for the save to carry, so the
+   * letter is linked and a save that lands on another's is refused.
    */
   api.get(
     '/letters/id',
     handler(async (req, res) => {
       const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
-      res.json({ id: letterId(text(req.query.company), text(req.query.role)) });
+      const asked = text(req.query.applicationId);
+      const url = text(req.query.url);
+      const apps = store.load().applications;
+      /*
+       * By the address alone, not by the names: a second job with the same
+       * title is the case this is here for, and by name it is the first
+       * job's row. Never a row that is over — the same address reposted a
+       * season later is a new application, and its letter is a new letter.
+       * An `applicationId` that names no row (the extension knows the id an
+       * application will be filed under before it is) is no answer, and the
+       * address is asked instead.
+       */
+      const app =
+        (asked ? apps.find((a) => a.id === asked) : undefined) ??
+        (url
+          ? apps
+              .filter((a) => sameAddress(url, a.url) && (a.status !== 'closed' || closedAsStale(a)))
+              .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0]
+          : undefined);
+      const letters = store.loadCoverLetters();
+      const linked = app ? { applicationId: app.id } : {};
+      if (app) {
+        const mine = letters.filter((l) => l.applicationId === app.id);
+        const own = mine.find((l) => l.id === app.letterId) ?? mine[0];
+        if (own) {
+          res.json({ id: own.id, ...linked });
+          return;
+        }
+      }
+      const named = letterId(text(req.query.company), text(req.query.role));
+      res.json({ id: unclaimedLetterId(letters, named, app?.id), ...linked });
     }),
   );
 
   api.put(
     '/letters/:id',
     handler(async (req, res) => {
-      // Without one, the file was written with the word "undefined" in it.
-      if (typeof (req.body as { body?: unknown } | undefined)?.body !== 'string') {
-        throw new Error('A letter needs a body');
+      const id = String(req.params.id);
+      const stored = store.loadCoverLetters().find((l) => l.id === id);
+      const given = { ...((req.body ?? {}) as Partial<CoverLetter> & { applicationId?: string | null; version?: unknown }) };
+      // The version `GET /letters` reads out is not part of the letter.
+      delete given.version;
+      /*
+       * Without one, the file was written with the word "undefined" in it.
+       * A letter already stored keeps the body it has when none is sent: the
+       * editor sends only the fields that were changed (see `editLetter` in
+       * web/app.js), and a retitle is not a request to empty the letter.
+       */
+      if (given.body !== undefined && typeof given.body !== 'string') throw new Error('A letter needs a body');
+      if (given.body === undefined && !stored) throw new Error('A letter needs a body');
+
+      /*
+       * `?basedOn=<version>`: written only over the letter it was made on,
+       * as the profile and the answer bank are (`wholeMovedOn`).
+       *
+       * The editor opened a letter, and whatever was saved to it while the
+       * box was open — the extension's "Save to store", completing the
+       * application, another tab — was written away by the box's copy when
+       * it was saved, with nothing said. Now a letter that moved on is
+       * answered 409 with the letter as it is and its version, for the editor
+       * to make its change to and send again. No `basedOn` (the extension,
+       * MCP, undo, an older page) is no condition. A letter deleted since is
+       * not refused, as an entry is not.
+       */
+      const basedOn = typeof req.query.basedOn === 'string' && req.query.basedOn ? req.query.basedOn : undefined;
+      if (basedOn && stored && contentVersion(stored) !== basedOn) {
+        res.status(409).json({
+          kind: 'conflict',
+          error: `“${stored.title || id}” was changed elsewhere since this change was made to it, so it was not written.`,
+          id,
+          current: stored,
+          version: contentVersion(stored),
+        });
+        return;
       }
+
+      /*
+       * Never another application's letter. A save that says which
+       * application it is for (`applicationId`), landing on a letter linked
+       * to a different one, is the extension writing one job's letter over
+       * another's — see `GET /letters/id`, which no longer hands out such a
+       * name, and this is for a caller that worked one out itself or a name
+       * taken in between. Refused, with the letter that is there.
+       */
+      if (typeof given.applicationId === 'string' && given.applicationId && stored?.applicationId && stored.applicationId !== given.applicationId) {
+        res.status(409).json({
+          kind: 'conflict',
+          error:
+            `“${stored.title || id}” is the letter filed for another application, so this was not written over it. ` +
+            'Save it again to file it under a name of its own.',
+          id,
+          current: stored,
+          version: contentVersion(stored),
+        });
+        return;
+      }
+
       /*
        * Over the letter already stored under this id, not in place of it.
        *
@@ -6245,23 +6407,54 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * edit — and what it does not name is kept: the link, `voice`, the
        * tags. The date it was first written stays the date it was written.
        * Unlinking on purpose is saying `applicationId: null`.
+       *
+       * A date that is there, not merely a key: a letter whose header has
+       * none reads back as `createdAt: ""`, and `??` kept the empty string
+       * over every date a save offered, so the letter stayed undated for
+       * good.
        */
-      const id = String(req.params.id);
-      const stored = store.loadCoverLetters().find((l) => l.id === id);
-      const given = req.body as Partial<CoverLetter> & { applicationId?: string | null };
       const letter: CoverLetter = {
         ...(stored ?? {}),
         ...(given as Partial<CoverLetter>),
         id,
         title: given.title ?? stored?.title ?? '',
-        body: given.body as string,
-        createdAt: stored?.createdAt ?? given.createdAt ?? new Date().toISOString(),
+        body: (given.body ?? stored?.body) as string,
+        createdAt: stored?.createdAt || given.createdAt || new Date().toISOString(),
       };
-      if (given.applicationId === null) delete letter.applicationId;
+      /*
+       * And the optional fields as the link is: null clears one. Undo puts a
+       * letter back by sending it whole (`restoreBody` in web/undo.js), and
+       * a field the letter did not have before the step is sent as null, or
+       * the merge above would keep what the step added.
+       */
+      const cleared = letter as unknown as Record<string, unknown>;
+      for (const key of ['applicationId', 'company', 'role', 'tags'] as const) {
+        if ((given as Record<string, unknown>)[key] === null) delete cleared[key];
+      }
       await withCommit(repo, autoCommit(), `Update cover letter "${letter.id}"`, () =>
         store.saveCoverLetter(letter),
       );
+      // Which version this write made, for the editor's next save to be based on.
+      const made = store.loadCoverLetters().find((l) => l.id === id);
+      if (made) res.setHeader('ETag', `"${contentVersion(made)}"`);
       res.json(letter);
+    }),
+  );
+
+  /*
+   * Take a letter out. Undo needs it: undoing a letter added by hand puts
+   * back the state before it, in which there was no such letter, and every
+   * other document the editor's undo restores has a DELETE for that (see
+   * `restoreRequest` in web/undo.js).
+   */
+  api.delete(
+    '/letters/:id',
+    handler(async (req, res) => {
+      const id = String(req.params.id);
+      const removed = await withCommit(repo, autoCommit(), `Remove cover letter "${id}"`, () =>
+        store.deleteCoverLetter(id),
+      );
+      res.json({ ok: removed });
     }),
   );
 

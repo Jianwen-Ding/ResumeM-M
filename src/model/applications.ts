@@ -455,7 +455,7 @@ function postingAddress(u: string): string {
   }
 }
 
-function sameAddress(url: string | undefined, other: string | undefined): boolean {
+export function sameAddress(url: string | undefined, other: string | undefined): boolean {
   if (!url || !other) return false;
   const number = jobNumberIn(url);
   const otherNumber = jobNumberIn(other);

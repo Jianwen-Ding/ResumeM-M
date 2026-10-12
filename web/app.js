@@ -10,7 +10,7 @@
 
 import { createPreview } from './preview.js';
 import { setupAssets } from './assets.js';
-import { createHistory, docKeyFor, readDoc, restoreRequest } from './undo.js';
+import { createHistory, docKeyFor, readDoc, restoreBody, restoreRequest } from './undo.js';
 import { renderFeedbackMarkdown } from './feedback.js';
 import { rebase, same } from './rebase.js';
 import { insertNextTo, moveBefore, moveBy, orderEntryIds } from './reorder.js';
@@ -890,7 +890,7 @@ async function putBack(docKey, back, from) {
   if (!id && options.method === 'PUT' && from !== null && from !== undefined) {
     const store = await api('/store');
     const now = readDoc(store, docKey);
-    if (now && !same(now, from)) return api(path, { ...options, body: JSON.stringify(rebase(from, back, now)) });
+    if (now && !same(now, from)) return api(path, { ...options, body: JSON.stringify(restoreBody(docKey, rebase(from, back, now))) });
     return api(path, options);
   }
   if (!id || options.method !== 'PUT') return api(path, options);
@@ -9956,17 +9956,53 @@ function drawLetters({ letters, store }) {
  * reason it gives: they closed first and saved after, so a write that did
  * not land took an hour's rewording with it and said nothing.
  */
+/*
+ * Only what was changed in the box, and only over the letter it was opened
+ * on (`?basedOn=`, the `version` `GET /letters` gives each letter).
+ *
+ * It sent the whole letter as it was when the box opened, so anything saved
+ * to the letter while the box was open — the extension's "Save to store",
+ * the application being completed, the same letter edited in another tab —
+ * was written away when this one was saved, and nothing said so. Now a
+ * letter that moved on is handed back with the 409, and the change made here
+ * is made to that one instead, as `writeAnswers` does for the bank. The
+ * letter as it was before the write is the undo step's "before" (`undoFrom`),
+ * since the editor's own copy of the store may be older than either.
+ */
+const LETTER_FIELDS = ['title', 'company', 'role', 'body'];
+
 async function editLetter(letter) {
+  const { version, ...opened } = letter;
   await formThatSaves(letter.title ?? 'Cover letter', [
     { name: 'title', label: 'Title', value: letter.title ?? '' },
     { name: 'company', label: 'Company', value: letter.company ?? '' },
     { name: 'role', label: 'Role', value: letter.role ?? '' },
     { name: 'body', label: 'Body', value: letter.body ?? '', multiline: true, tall: true },
   ], '', async (answer) => {
-    await api(`/letters/${encodeURIComponent(letter.id)}`, {
-      method: 'PUT',
-      body: JSON.stringify({ ...letter, ...answer }),
-    });
+    const changed = Object.fromEntries(
+      LETTER_FIELDS.filter((k) => (answer[k] ?? '') !== (opened[k] ?? '')).map((k) => [k, answer[k]]),
+    );
+    if (Object.keys(changed).length === 0) return undefined;
+    let current = opened;
+    let basedOn = version;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        describeNext(`edit the letter “${current.title || letter.id}”`);
+        await api(`/letters/${encodeURIComponent(letter.id)}${basedOnQuery(basedOn, '?')}`, {
+          method: 'PUT',
+          body: JSON.stringify(changed),
+          undoFrom: current,
+        });
+        break;
+      } catch (err) {
+        if (err.status === 409 && err.body?.current && typeof err.body.current === 'object' && attempt < 3) {
+          current = err.body.current;
+          basedOn = err.body.version ?? undefined;
+          continue;
+        }
+        throw err;
+      }
+    }
     setStatus('Letter saved');
     loadLetters();
   });
@@ -9999,8 +10035,11 @@ async function saveLetter(answer) {
   const taken = new Set((await api('/letters')).map((l) => l.id));
   let id = base;
   for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+  describeNext('add a cover letter');
   await api(`/letters/${encodeURIComponent(id)}`, {
     method: 'PUT',
+    // A name no letter had, so undoing this takes the letter away again.
+    undoFrom: null,
     body: JSON.stringify({
       id,
       title: `${answer.role || 'Role'} — ${answer.company || 'Unknown'}`,
@@ -10643,6 +10682,8 @@ async function ingestFiles(files) {
 
   const proposals = [];
   const failed = [];
+  // Files that keep themselves out of the corpus (`voice: false`), said as such.
+  const skipped = [];
   try {
     for (const [n, file] of files.entries()) {
       setChildren(
@@ -10663,6 +10704,7 @@ async function ingestFiles(files) {
           method: 'POST',
           body: JSON.stringify({ name: file.name, data: await readAsBase64(file) }),
         });
+        if (result.skipped) skipped.push(result.skipped);
         for (const item of result.items) proposals.push({ ...item, source: file.name });
         if (result.aiError) setStatus(`Sorted ${file.name} without AI: ${result.aiError}`, true);
       } catch (err) {
@@ -10674,9 +10716,9 @@ async function ingestFiles(files) {
     resetVoiceDrop();
   }
 
-  if (failed.length) setStatus(failed.join(' · '), true);
+  if (failed.length || skipped.length) setStatus([...failed, ...skipped].join(' · '), true);
   if (proposals.length === 0) {
-    if (!failed.length) setStatus('Nothing in those files looked like writing', true);
+    if (!failed.length && !skipped.length) setStatus('Nothing in those files looked like writing', true);
     return;
   }
   await reviewProposals(proposals);

@@ -34,7 +34,7 @@ import type { MoveResult, TailorPosting } from './session.js';
 import { questionSimilarity } from '../jobs/answers.js';
 import { DEFAULT_LETTER_WORDS, letterWordCap, ownLetterLength, statedWordLimit, wordCount } from '../ai/length.js';
 import { countsAsTheirs } from '../ai/voice.js';
-import { answersForAi, personalDetailIn } from '../ai/privacy.js';
+import { answersForAi, personalDetailIn, withoutContactDetails } from '../ai/privacy.js';
 import { placeholderIn } from '../model/placeholders.js';
 
 const ok = (text: string): MoveResult => ({ ok: true, text });
@@ -171,11 +171,14 @@ export class WritingSession {
     this.resumeText = resumeText;
     // Every letter, including one taken out of their voice: a letter written
     // to somebody else's template is still one they sent, and what it says
-    // about them they have said.
+    // about them they have said. Without the signature's phone, email and
+    // address, which `check_claim` would otherwise quote back to the model
+    // (see `withoutContactDetails`); the session file is scrubbed already,
+    // and this is for a session made from the store directly.
     this.ownWords = [
       ...(data.coverLetters ?? [])
         .filter((l) => l.body?.trim())
-        .map((l) => ({ where: `in their letter to ${l.company || l.title}`, text: l.body })),
+        .map((l) => ({ where: `in their letter to ${l.company || l.title}`, text: withoutContactDetails(l.body) })),
       ...answersForAi(data.answers).flatMap((a) =>
         a.variants
           .filter((v) => v.text?.trim())
@@ -269,7 +272,8 @@ export class WritingSession {
     return ranked
       .map((l) => {
         const where = [l.company, l.role].filter(Boolean).join(' — ') || l.title;
-        return `### ${where}\n\n${clip(l.body, 4000)}`;
+        // Without the contact details its signature carries: see `ownWords`.
+        return `### ${where}\n\n${clip(withoutContactDetails(l.body), 4000)}`;
       })
       .join('\n\n');
   }

@@ -25,7 +25,7 @@
  */
 
 import type { ResolvedResume, ResumeSpec, StoreData } from '../model/types.js';
-import { answersForAi } from '../ai/privacy.js';
+import { answersForAi, withoutContactDetails } from '../ai/privacy.js';
 
 export type TailorData = Pick<StoreData, 'entries' | 'skillGroups'> & {
   resumes: Pick<ResumeSpec, 'id' | 'label' | 'sections'>[];
@@ -45,8 +45,16 @@ export function tailorData(data: Pick<StoreData, 'entries' | 'skillGroups' | 're
   };
 }
 
+/*
+ * The letters with their signatures' phone numbers, email addresses and home
+ * addresses taken out (`withoutContactDetails`): the file is read by the
+ * model, and no tool needs them to find a letter or check a claim.
+ */
 export function writingData(data: Pick<StoreData, 'coverLetters' | 'answers'>): WritingData {
-  return { coverLetters: data.coverLetters ?? [], answers: answersForAi(data.answers) };
+  return {
+    coverLetters: (data.coverLetters ?? []).map((l) => ({ ...l, body: withoutContactDetails(l.body) })),
+    answers: answersForAi(data.answers),
+  };
 }
 
 export function sessionResume(resume: Pick<ResolvedResume, 'id' | 'label' | 'sections' | 'profile'>): SessionResume {

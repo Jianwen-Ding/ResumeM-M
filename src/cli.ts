@@ -802,6 +802,7 @@ async function main(argv: string[]): Promise<number> {
       const stamp = Date.now().toString(36);
       const samples: WritingSample[] = [];
       let failed = 0;
+      let skipped = 0;
 
       for (const file of paths) {
         let found;
@@ -810,6 +811,13 @@ async function main(argv: string[]): Promise<number> {
         } catch (err) {
           console.error(`${file}: ${err instanceof Error ? err.message : String(err)}`);
           failed++;
+          continue;
+        }
+        // A file that keeps itself out (`voice: false` in its header) is said
+        // as skipped, not as a file with no writing in it.
+        if (found.skipped) {
+          console.log(`${file} — skipped: ${found.skipped}.`);
+          skipped++;
           continue;
         }
 
@@ -830,7 +838,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       if (samples.length === 0) {
-        console.log('Nothing was added.');
+        console.log(skipped > 0 ? `Nothing was added; ${plural(skipped, 'file')} skipped.` : 'Nothing was added.');
         return failed > 0 ? 1 : 0;
       }
       if (dryRun) {
@@ -843,7 +851,10 @@ async function main(argv: string[]): Promise<number> {
         await repo.ensure();
         await repo.commitAll(`Add ${plural(samples.length, 'writing sample')} from ${plural(paths.length, 'file')}`);
       }
-      console.log(`\nAdded ${plural(samples.length, 'sample')}. Fix anything filed wrongly in Voice & AI, or with \`rmm serve\`.`);
+      console.log(
+        `\nAdded ${plural(samples.length, 'sample')}${skipped > 0 ? `; ${plural(skipped, 'file')} skipped` : ''}. ` +
+          'Fix anything filed wrongly in Voice & AI, or with `rmm serve`.',
+      );
       return failed > 0 ? 1 : 0;
     }
 

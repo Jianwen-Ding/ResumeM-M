@@ -1,5 +1,5 @@
 import type { StoreData, WritingSample } from '../model/types.js';
-import { answersForAi } from './privacy.js';
+import { answersForAi, withoutContactDetails } from './privacy.js';
 
 /**
  * Conveying a writing voice by describing it is a losing game. People are poor
@@ -36,6 +36,14 @@ function clean(text: string): string {
   return String(text ?? '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/*
+ * A letter's or a sample's text, without the contact details in it. A letter
+ * is signed with a phone and an email, and an old resume in the corpus opens
+ * with a home address; all of it went into every job's prompt as "how they
+ * write". See `withoutContactDetails`.
+ */
+const prose = (text: string): string => clean(withoutContactDetails(text));
+
 /**
  * Whether a letter or an answer counts as their writing. See the note on
  * `CoverLetter.voice`: absent means yes, `false` keeps it out.
@@ -68,7 +76,7 @@ export function collectSamples(data: StoreData, { resume = true }: SampleOptions
 
   for (const s of data.samples ?? []) {
     if (s.archived) continue;
-    const text = clean(s.text);
+    const text = prose(s.text);
     if (text.length < 40) continue;
     out.push({ kind: s.kind, title: s.title, text });
   }
@@ -82,7 +90,7 @@ export function collectSamples(data: StoreData, { resume = true }: SampleOptions
    */
   for (const letter of data.coverLetters ?? []) {
     if (!countsAsTheirs(letter)) continue;
-    const text = clean(letter.body);
+    const text = prose(letter.body);
     if (text.length < 40) continue;
     out.push({ kind: 'letter', title: letter.title, text });
   }
