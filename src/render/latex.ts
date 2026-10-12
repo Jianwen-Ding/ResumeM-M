@@ -315,12 +315,17 @@ export function lineTex(input: string): string {
  *
  * None of the three is legal in a URI anyway, so they are percent-encoded:
  * the link still points where it pointed, and TeX only ever sees `\%`.
+ *
+ * And `^`, for the same reason and a worse one: the tokenizer reads `^^5c` as
+ * a backslash before hyperref sees the target, so "/^^5cinput^^20x" ran
+ * `\input` — from a link a posting or the AI may have written — and the build
+ * died with "TeX capacity exceeded". `%5E` is the same address.
  */
 export function texHref(url: string): string {
   // Composed, like every other piece of text that reaches the .tex: see `tex`.
   return url
     .normalize('NFC')
-    .replace(/[\\{}]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/[\\{}^]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
     /*
      * `&` too: hyperref reads `\&` as a plain ampersand in the target, and a
      * bare one is an alignment tab wherever the link was already read as a
@@ -608,7 +613,33 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 }
 
 /** The numbers for one particular layout, run inside the document. */
+/*
+ * The numbers as the engine will take them, or a sentence saying which is
+ * not. The settings route holds its own limits, but a save is YAML that is
+ * advertised as editable by hand, and what reached TeX from there — a font of
+ * -5pt, a margin of "abc" — came back as "Font T1/lmr/m/n/-5 not found" or
+ * "Missing number, treated as zero", retried by the fit loop eight times and
+ * naming nothing the person could find. The bounds are only what can be set
+ * at all; the settings keep the sensible ones.
+ */
+function checkLayoutNumbers(layout: LayoutOptions): void {
+  const paper = layout.paper === 'a4' ? { w: 8.27, h: 11.69 } : { w: 8.5, h: 11 };
+  const wrong = (what: string, value: unknown, range: string) =>
+    new Error(`The layout's ${what} has to be a number ${range}, not ${JSON.stringify(value)}. Fix it in the save's settings.`);
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  if (!ok(layout.fontSizePt) || layout.fontSizePt < 4 || layout.fontSizePt > 40) {
+    throw wrong('font size (fontSizePt)', layout.fontSizePt, 'from 4 to 40');
+  }
+  if (!ok(layout.marginIn) || layout.marginIn < 0 || layout.marginIn * 2 >= Math.min(paper.w, paper.h)) {
+    throw wrong('margin (marginIn)', layout.marginIn, `from 0 to under ${Math.min(paper.w, paper.h) / 2}`);
+  }
+  if (!ok(layout.spacing) || layout.spacing <= 0 || layout.spacing > 10) {
+    throw wrong('spacing', layout.spacing, 'above 0 and up to 10');
+  }
+}
+
 export function runtimeSetup(layout: LayoutOptions): string {
+  checkLayoutNumbers(layout);
   const sp = layout.spacing;
   // Jake's template hard-codes 0.5in margins by fiddling \oddsidemargin etc.
   // The offsets below reproduce that arithmetic for an arbitrary margin.

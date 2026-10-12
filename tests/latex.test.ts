@@ -211,6 +211,17 @@ describe('a link target', () => {
     expect(texHref('https://x.example/a{b}c\\d')).toBe('https://x.example/a\\%7Bb\\%7Dc\\%5Cd');
   });
 
+  /*
+   * And `^`, which TeX also reads before hyperref sees anything: `^^5c` is a
+   * backslash to the tokenizer, so a link ending "/^^5cinput^^20x" ran
+   * `\input` while the target was being scanned and the build died with "TeX
+   * capacity exceeded". A link is text from a posting or the AI as often as
+   * from the person, so that was a file-read primitive as well as a dead build.
+   */
+  it('percent-encodes a caret, so `^^` cannot spell a control sequence', () => {
+    expect(texHref('https://x.example/^^5cinput^^20x')).toBe('https://x.example/\\%5E\\%5E5cinput\\%5E\\%5E20x');
+  });
+
   it('does not double-encode a URL that already carries an escape', () => {
     // `\%20` is how hyperref is told to put one literal `%` in the target.
     expect(texHref('https://x.example/a%20b')).toBe('https://x.example/a\\%20b');
@@ -218,6 +229,29 @@ describe('a link target', () => {
 
   it('handles an address someone mistyped, rather than refusing to build', () => {
     expect(texHref('a{b@c.example')).toBe('a\\%7Bb@c.example');
+  });
+});
+
+/*
+ * A save is YAML advertised as editable by hand, and a layout number from
+ * there went straight into the .tex: -5pt came back as "Font T1/lmr/m/n/-5
+ * not found", a margin of "abc" as "Missing number, treated as zero".
+ */
+describe('a layout number the engine cannot take', () => {
+  const withLayout = (over: Record<string, unknown>) =>
+    resume({ layout: { ...DEFAULT_LAYOUT, ...over } as ResolvedResume['layout'] });
+
+  it('is named, rather than handed to TeX', () => {
+    expect(() => renderLatex(withLayout({ fontSizePt: -5 }))).toThrow(/font size \(fontSizePt\).*-5/);
+    expect(() => renderLatex(withLayout({ fontSizePt: 1e5 }))).toThrow(/fontSizePt/);
+    expect(() => renderLatex(withLayout({ marginIn: 'abc' }))).toThrow(/margin \(marginIn\).*"abc"/);
+    expect(() => renderLatex(withLayout({ spacing: Number.NaN }))).toThrow(/spacing/);
+  });
+
+  it('while every number the settings allow still renders', () => {
+    for (const over of [{ fontSizePt: 8 }, { fontSizePt: 14 }, { marginIn: 0.3 }, { marginIn: 1.5 }, { spacing: 0.8 }, { spacing: 1.5 }]) {
+      expect(() => renderLatex(withLayout(over))).not.toThrow();
+    }
   });
 });
 
