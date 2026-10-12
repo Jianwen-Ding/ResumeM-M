@@ -364,25 +364,31 @@ const JOB_ID_SEGMENT =
  * jobs apart, and it has to survive being read back.
  */
 const TRAILING_JOB_ID =
-  /\s*\(\s*(?:(?:req(?:uisition)?\s*(?:id|#|no\.?)?\s*[:#]?\s*)?#?\d{5,}|[a-z]{1,3}[-_]?\d{5,})\s*\)$/i;
+  /\s*\(\s*(?:(?:req(?:uisition)?\s*(?:id|#|no\.?)?\s*[:#]?\s*)?#?\d{5,}|[a-z]{1,3}[-_]?\d{5,}|req(?:uisition)?\s*(?:id|#|no\.?)\s*[:#]?\s*[a-z]{0,3}[-_]?\d[\w-]{2,})\s*\)$/i;
 /*
  * Workday's "(R22724)" is that bracket too: letters and five digits or more,
  * the way `JOB_ID_SEGMENT` reads "R171666" after a separator. Five, not four,
- * so a bracketed year with letters before it ("(FY2026)") is not one.
+ * so a bracketed year with letters before it ("(FY2026)") is not one. And
+ * any number labelled as a requisition's, "(Req #4021)", "(Req #JR0286834)":
+ * the shape `withRequisition` writes one the other two would not read.
  */
 
 export function isJobIdSegment(s: string | undefined): boolean {
   return JOB_ID_SEGMENT.test(String(s ?? '').trim());
 }
 
-/** "Job ID: 10452115", "Req #123456", "(12345678)", "JR0286834" — as the one number they name. */
-function jobIdOf(s: string): string {
+/** "Job ID: 10452115", "Req #123456", "(12345678)", "JR0286834" — as the one number they name, in the case it was written. */
+function jobIdAsWritten(s: string): string {
   return s
     .replace(/^\s*\(|\)\s*$/g, '')
     .trim()
-    .toLowerCase()
-    .replace(/^(?:job|req(?:uisition)?|posting|position|reference|ref)\s*(?:id|#|no\.?|number|code)?\s*[:#]?\s*/, '')
-    .replace(/[^a-z0-9]/g, '');
+    .replace(/^(?:job|req(?:uisition)?|posting|position|reference|ref)\s*(?:id|#|no\.?|number|code)?\s*[:#]?\s*/i, '')
+    .replace(/[^a-z0-9]/gi, '');
+}
+
+/** The same, lower case: what two ways of writing one number have in common. */
+function jobIdOf(s: string): string {
+  return jobIdAsWritten(s).toLowerCase();
 }
 
 /**
@@ -398,6 +404,15 @@ function jobIdOf(s: string): string {
  * reads the cut title; whoever compares two roles asks this as well.
  */
 export function trailingJobId(role: string | undefined, ...employers: (string | undefined)[]): string | undefined {
+  return requisitionOf(role, ...employers)?.toLowerCase();
+}
+
+/**
+ * `trailingJobId` in the case the title wrote it — "JR0286834", not
+ * "jr0286834" — for carrying beside a role that has had it cut
+ * (`ExtractedJob.requisition`) and putting back on it (`withRequisition`).
+ */
+export function requisitionOf(role: string | undefined, ...employers: (string | undefined)[]): string | undefined {
   if (!role) return undefined;
   const title = role.replace(/\s+/g, ' ').slice(0, MAX_TITLE);
   const segments = splitTitle(withoutTitleNoise(title));
@@ -405,7 +420,7 @@ export function trailingJobId(role: string | undefined, ...employers: (string | 
   while (segments.length > 1) {
     const last = segments[segments.length - 1]!;
     const s = last.text;
-    if (isJobIdSegment(s)) return jobIdOf(s) || undefined;
+    if (isJobIdSegment(s)) return jobIdAsWritten(s) || undefined;
     if (siteSegment(s) || namesEmployer(s, employers, { exact: !last.strong })) {
       segments.pop();
       continue;
@@ -413,7 +428,27 @@ export function trailingJobId(role: string | undefined, ...employers: (string | 
     break;
   }
   const bracket = TRAILING_JOB_ID.exec(joinTitle(segments));
-  return bracket ? jobIdOf(bracket[0]) || undefined : undefined;
+  return bracket ? jobIdAsWritten(bracket[0]) || undefined : undefined;
+}
+
+/**
+ * A role with its requisition number put back on the end, as "(12345678)" —
+ * or "(Req #4021)" where the number alone would not read as one — unless it
+ * carries one already.
+ *
+ * Extraction cuts the number off the role (`cleanRole`) and carries it
+ * beside it, and whatever files an application from a page puts it back:
+ * "Software Engineer Intern (12345678)" and "(87654321)" are two
+ * requisitions, two copies and two rows (`differentRequisitions`), and filed
+ * as the bare title they were one. A number on one side only still matches
+ * the bare title, so the same job read off a page that has none is still one.
+ */
+export function withRequisition(role: string | undefined, requisition: string | undefined): string | undefined {
+  const id = jobIdAsWritten(String(requisition ?? ''));
+  if (!role || !id || trailingJobId(role)) return role;
+  const bare = `${role} (${id})`;
+  if (trailingJobId(bare) === id.toLowerCase()) return bare;
+  return `${role} (Req #${id})`;
 }
 
 /**

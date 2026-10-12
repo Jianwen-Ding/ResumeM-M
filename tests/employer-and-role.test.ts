@@ -158,7 +158,8 @@ describe('"Robotics | Software Development Engineer"', () => {
     expect(job.title).toBe('Robotics - Software Development Engineer');
     expect(extractJob(page(TITLE, og('og:site_name', 'Amazon.jobs')), URL, TITLE).company).toBe('Amazon');
     const analyze = await analyzer();
-    expect(await analyze(URL, TITLE)).toMatchObject({ company: 'Amazon', role: 'Robotics - Software Development Engineer' });
+    // Filed with its number put back, so two requisitions under one title are two jobs: see `withRequisition`.
+    expect(await analyze(URL, TITLE)).toMatchObject({ company: 'Amazon', role: 'Robotics - Software Development Engineer (10452115)' });
   });
 
   it('refuses a field of work, or a word about the page, as a name on its own', () => {
@@ -227,9 +228,11 @@ describe('"Amazon.jobs | Software Dev Engineer I, Graviton Software, Annapurna L
     const title = 'Software Dev Engineer I, Graviton Software, Annapurna Labs - Job ID: 2912345 | Amazon.jobs';
     const url = 'https://www.amazon.jobs/en/jobs/2912345/software-dev-engineer-i-graviton-software-annapurna-labs';
     const analyze = await analyzer();
+    expect(extractJob(page(title), url, title).title).toBe('Software Dev Engineer I, Graviton Software, Annapurna Labs');
+    // Filed with its number put back, in the form the cut reads: see `withRequisition`.
     expect(await analyze(url, title)).toMatchObject({
       company: 'Amazon',
-      role: 'Software Dev Engineer I, Graviton Software, Annapurna Labs',
+      role: 'Software Dev Engineer I, Graviton Software, Annapurna Labs (2912345)',
     });
   });
 });

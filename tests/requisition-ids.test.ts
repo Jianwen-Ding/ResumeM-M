@@ -33,7 +33,7 @@ const { createApi } = await import('../src/server/api.js');
 const { Repo } = await import('../src/git/repo.js');
 const { makeTempStore } = await import('./helpers.js');
 const { alreadySent, findApplication, identity, sameIdentity } = await import('../src/model/applications.js');
-const { cleanRole, trailingJobId } = await import('../src/jobs/names.js');
+const { cleanRole, trailingJobId, withRequisition } = await import('../src/jobs/names.js');
 type Application = import('../src/model/types.js').Application;
 type TempStore = ReturnType<typeof makeTempStore>;
 
@@ -165,5 +165,142 @@ describe('staging a second requisition under the title of one already sent', () 
     expect(first.status).toBe('applied');
     expect(second.status).toBe('applying');
     expect(second.id).not.toBe(first.id);
+  });
+});
+
+/*
+ * The same through the analysis, where the role is read off a page.
+ *
+ * Extraction cuts the number off the title for display, and the analysis
+ * filed what was left: "Software Engineer Intern (87654321) | Acme" was
+ * "Software Engineer Intern", so the second requisition was handed the first
+ * one's tailored copy and found as its application. The number is carried
+ * alongside (`job.requisition`) and put back on the role the analysis files.
+ */
+describe('analysing two postings whose titles differ only by requisition number', () => {
+  let t: TempStore;
+  let app: express.Express;
+
+  beforeEach(() => {
+    t = makeTempStore();
+    app = express();
+    app.use('/api', createApi({ store: t.store, repo: Repo.forStore(t.dir) }));
+  });
+  afterEach(() => t.cleanup());
+
+  const BODY = `<h1>Software Engineer Intern</h1>
+<h2>About the role</h2>
+<p>You will build and ship software with a small team. Responsibilities include design reviews,
+testing and on-call. Minimum qualifications: pursuing a degree in computer science. Python, TypeScript.</p>
+<p>Apply now.</p>`;
+  const posting = (title: string, url: string) => ({
+    url,
+    title,
+    html: `<html><head><title>${title}</title></head><body>${BODY}</body></html>`,
+  });
+  const FIRST = posting('Software Engineer Intern (12345678) | Acme', 'https://careers.acme.com/jobs/first-posting');
+  const SECOND = posting('Software Engineer Intern (87654321) | Acme', 'https://careers.acme.com/jobs/second-posting');
+  const BARE = posting('Software Engineer Intern | Acme', 'https://careers.acme.com/jobs/the-posting');
+
+  const analyze = async (p: ReturnType<typeof posting>) => {
+    const res = await request(app)
+      .post('/api/extension/analyze')
+      .send({ ...p, pages: [p], baseResumeId: 'intern', tailor: 'none' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body as { spec: { id: string; generatedFor: { company: string; role: string } }; application: { id: string; resumeId?: string } };
+  };
+  /* As JobHelper stages: the copy, under `filedAs` — the copy's own `generatedFor`. */
+  const stage = async (p: ReturnType<typeof posting>, analysis: Awaited<ReturnType<typeof analyze>>) => {
+    const res = await request(app)
+      .post('/api/applications/bundle')
+      .send({ spec: analysis.spec, resumeId: analysis.spec.id, ...analysis.spec.generatedFor, url: p.url, source: 'careers.acme.com', status: 'applying' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  };
+
+  it('gives each its own copy and its own application', async () => {
+    const first = await analyze(FIRST);
+    await stage(FIRST, first);
+    const second = await analyze(SECOND);
+    expect(second.spec.id).not.toBe(first.spec.id);
+    expect(second.application.id).not.toBe(first.application.id);
+    expect(second.application.resumeId).toBeUndefined();
+    await stage(SECOND, second);
+    const apps = t.store.load().applications;
+    expect(apps).toHaveLength(2);
+    expect(new Set(apps.map((a) => a.resumeId)).size).toBe(2);
+  });
+
+  it('and a posting with the number and one without still share one', async () => {
+    const numbered = await analyze(FIRST);
+    await stage(FIRST, numbered);
+    const bare = await analyze(BARE);
+    expect(bare.spec.id).toBe(numbered.spec.id);
+    expect(bare.application.id).toBe(numbered.application.id);
+    expect(bare.application.resumeId).toBe(numbered.spec.id);
+  });
+
+  /* The case the cut was made for: L3Harris's own posting, then SuccessFactors' "(41213)". */
+  it('the other way round too', async () => {
+    const own = posting('Image Processing Engineer Intern | L3Harris', 'https://careers.l3harris.com/job/image-processing-engineer-intern');
+    const sf = posting('Image Processing Engineer Intern (41213) | L3Harris', 'https://careers.l3harris.com/apply/image-processing');
+    const bare = await analyze(own);
+    await stage(own, bare);
+    const numbered = await analyze(sf);
+    expect(numbered.spec.generatedFor.role).toBe('Image Processing Engineer Intern (41213)');
+    expect(numbered.spec.id).toBe(bare.spec.id);
+    expect(numbered.application.id).toBe(bare.application.id);
+  });
+
+  it('keeps the number on the role it files, and off the title it shows', async () => {
+    const first = await analyze(FIRST);
+    expect(first.spec.generatedFor.role).toBe('Software Engineer Intern (12345678)');
+    expect((first as unknown as { job: { title: string; requisition: string } }).job).toMatchObject({
+      title: 'Software Engineer Intern',
+      requisition: '12345678',
+    });
+  });
+
+  it('does not say the second was applied to because the first was', async () => {
+    const first = await analyze(FIRST);
+    await stage(FIRST, first);
+    await request(app)
+      .post('/api/extension/sent')
+      .send({ ...first.spec.generatedFor, url: FIRST.url, note: '"Submit" was pressed on the page' })
+      .expect(200);
+    expect(((await analyze(FIRST)) as unknown as { applied?: unknown }).applied).toBeTruthy();
+    expect(((await analyze(SECOND)) as unknown as { applied?: unknown }).applied).toBeFalsy();
+  });
+
+  it('and "- JR0286834" beside "- JR0299999" the same way', async () => {
+    const a = posting('Software Engineer - JR0286834 | Acme', 'https://careers.acme.com/jobs/a');
+    const b = posting('Software Engineer - JR0299999 | Acme', 'https://careers.acme.com/jobs/b');
+    const first = await analyze(a);
+    expect(first.spec.generatedFor.role).toBe('Software Engineer (JR0286834)');
+    await stage(a, first);
+    const second = await analyze(b);
+    expect(second.spec.id).not.toBe(first.spec.id);
+    expect(second.application.id).not.toBe(first.application.id);
+  });
+});
+
+describe('putting a requisition number back on a role', () => {
+  it('writes it the way the cut reads it back', () => {
+    for (const [id, out] of [
+      ['12345678', 'Software Engineer (12345678)'],
+      ['JR0286834', 'Software Engineer (JR0286834)'],
+      ['4021', 'Software Engineer (Req #4021)'],
+      ['R1234', 'Software Engineer (Req #R1234)'],
+    ] as const) {
+      const role = withRequisition('Software Engineer', id);
+      expect(role).toBe(out);
+      expect(cleanRole(role, 'Acme')).toBe('Software Engineer');
+      expect(trailingJobId(role, 'Acme')).toBe(id.toLowerCase());
+    }
+  });
+
+  it('and leaves alone a role with none, or one already', () => {
+    expect(withRequisition('Software Engineer', undefined)).toBe('Software Engineer');
+    expect(withRequisition(undefined, '12345678')).toBeUndefined();
+    expect(withRequisition('Software Engineer (12345678)', '12345678')).toBe('Software Engineer (12345678)');
   });
 });

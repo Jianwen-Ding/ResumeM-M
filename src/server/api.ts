@@ -39,7 +39,7 @@ import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion } from '../jobs/answers.js';
 import { UNKNOWN_COMPANY, classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
-import { jobNumberIn } from '../jobs/names.js';
+import { jobNumberIn, withRequisition } from '../jobs/names.js';
 import {
   applyInclusion,
   sanitizeAiPlan,
@@ -3386,7 +3386,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // or two such forms at one employer are one application: see
       // `unnamedRole`.
       const addresses = trail.map((p) => p.url ?? (p === current ? url : undefined));
-      const role = job.title ?? unnamedRole(addresses);
+      /*
+       * With the requisition number the extraction cut off it put back: two
+       * requisitions under one title — "Software Engineer Intern (12345678)"
+       * and "(87654321)" — are two copies and two applications, and filed as
+       * the bare title the second was handed the first's copy and found as
+       * its row. A number on one side only still matches the bare title, so
+       * the same job read off a page without one stays one. See
+       * `differentRequisitions`.
+       */
+      const role = withRequisition(job.title, job.requisition) ?? unnamedRole(addresses);
       /*
        * Which address says which job this is, for finding the application by
        * its number when its employer was written another way — the oldest that
@@ -3715,7 +3724,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * enough label for a resume and nowhere near good enough to tell
          * somebody they have done this already.
          */
-        applied: sentBefore(data.applications, job.company, job.title, jobAddress),
+        applied: sentBefore(data.applications, job.company, job.title && role, jobAddress),
         /*
          * And which application this page belongs to, from the first paint.
          *

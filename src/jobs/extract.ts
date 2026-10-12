@@ -21,6 +21,7 @@ import {
   knownEmployer,
   namesAJob,
   namesEmployer,
+  requisitionOf,
   ROLE_NOUN,
   siteSegment,
   splitTitle,
@@ -39,6 +40,13 @@ export interface ExtractedJob {
   source: 'json-ld' | 'meta' | 'heuristic';
   /** Technology and domain keywords, used to score variants without an AI call. */
   keywords: string[];
+  /**
+   * The requisition number the title carried and `title` has had cut — "12345678"
+   * of "Software Engineer Intern (12345678)". Kept so whatever files an
+   * application can tell two requisitions under one title apart: see
+   * `withRequisition`.
+   */
+  requisition?: string;
 }
 
 /** Terms worth matching against variant tags. Kept small and concrete. */
@@ -2167,6 +2175,16 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
   // field, and repeating it in the role reads badly everywhere it is shown.
   const unAt = rawTitle?.replace(/\s+at\s+[A-Z][\w&.\- ]{1,40}\s*$/, '').trim() || rawTitle;
   const title = cleanRole(unAt, company, ...employers);
+  /*
+   * And the requisition number it cut, read off whichever of the title's
+   * sources still has one: the cut above, and `readTitle` before it, may have
+   * taken it already.
+   */
+  const requisition = title
+    ? [unAt, ld?.title, og, pageTitle]
+        .map((t) => requisitionOf(t, company, ...employers, titled.company, titled.careersOf))
+        .find(Boolean)
+    : undefined;
 
   // A structured description is authoritative even when it is short — it is the
   // posting itself, where the page text is the posting plus navigation, cookie
@@ -2212,6 +2230,7 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
   return {
     title,
     company,
+    ...(requisition ? { requisition } : {}),
     location: ld?.location,
     description: description.slice(0, 40_000),
     source: ld ? 'json-ld' : metaContent(html, ['og:title']) ? 'meta' : 'heuristic',
@@ -2893,11 +2912,15 @@ export function mergeJobPages(pages: PageSource[]): MergedJob {
     ? read.map((r) => r.job.company).find((c) => c && /\s/.test(c) && squashed(c) === squashed(first))
     : undefined;
   const company = spaced ?? first;
-  const title = cleanRole(read.map((r) => r.job.title).find(Boolean), company);
+  const titled = read.find((r) => r.job.title);
+  const title = cleanRole(titled?.job.title, company);
+  // The number of the page the title came from, or of any that has one.
+  const requisition = titled?.job.requisition ?? read.map((r) => r.job.requisition).find(Boolean);
 
   return {
     title,
     company,
+    ...(requisition ? { requisition } : {}),
     location: read.map((r) => r.job.location).find(Boolean),
     description,
     source: best.job.source,
