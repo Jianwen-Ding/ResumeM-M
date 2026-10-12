@@ -46,6 +46,55 @@ export interface TimedOptions {
 
 export type TimedRun = Promise<{ stdout: string; stderr: string }> & { child: ChildProcess };
 
+/*
+ * The groups still running, for this process to take with it when it goes.
+ *
+ * A group of its own is also a group the terminal does not reach. Ctrl-C on
+ * `rmm serve` sends SIGINT to the foreground job's group, which is the
+ * server's, and the AI CLI or `latexmk` it had started was in another one: the
+ * server died at once and the run carried on with nobody to read it, until it
+ * finished on its own. Measured with a `sleep 300` under `sh`: the server gone,
+ * the sleep reparented to init and still there.
+ *
+ * So each group is noted while it runs, and SIGINT, SIGTERM and SIGHUP, and
+ * the process exiting any other way, send SIGTERM to every one still noted.
+ * After that a signal is let do what it did before: the handler takes itself
+ * off and the signal is sent again, so the process dies of it with the same
+ * exit status a shell reads as "interrupted" — unless something else in the
+ * process listens for it too, in which case that listener decides, as it did.
+ *
+ * Installed the first time a group is started, not on import: a handler for
+ * SIGINT changes what Ctrl-C does to any process that loads this module, and
+ * one that never runs a command should not be touched.
+ */
+const liveGroups = new Set<number>();
+let handlersInstalled = false;
+
+function endLiveGroups(): void {
+  for (const pid of liveGroups) {
+    try {
+      process.kill(-pid, 'SIGTERM');
+    } catch {
+      // Already gone, which is the outcome this wanted.
+    }
+  }
+  liveGroups.clear();
+}
+
+function installGroupCleanup(): void {
+  if (handlersInstalled) return;
+  handlersInstalled = true;
+  process.on('exit', endLiveGroups);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    const onSignal = () => {
+      endLiveGroups();
+      process.removeListener(sig, onSignal);
+      if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+    };
+    process.on(sig, onSignal);
+  }
+}
+
 export function runInGroup(cmd: string, args: string[], opts: TimedOptions): TimedRun {
   if (process.platform === 'win32') return runAlone(cmd, args, opts);
 
@@ -60,6 +109,11 @@ export function runInGroup(cmd: string, args: string[], opts: TimedOptions): Tim
    * `code`, `signal`, `stdout` and `stderr` on the error — is done here.
    */
   const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, detached: true, stdio: 'pipe' });
+  const group = child.pid;
+  if (group) {
+    installGroupCleanup();
+    liveGroups.add(group);
+  }
   const signal = (sig: NodeJS.Signals) => {
     try {
       if (child.pid) process.kill(-child.pid, sig);
@@ -95,7 +149,15 @@ export function runInGroup(cmd: string, args: string[], opts: TimedOptions): Tim
       if (settled) return;
       settled = true;
       clearTimeout(polite);
-      if (!timedOut) clearTimeout(forced);
+      /*
+       * Forgotten once it is over — but a group that was sent SIGTERM for
+       * running out of time stays noted until the forced kill, which is for
+       * what under it would not stop.
+       */
+      if (!timedOut) {
+        clearTimeout(forced);
+        if (group) liveGroups.delete(group);
+      }
       if (!err) {
         resolve({ stdout, stderr });
         return;
@@ -116,7 +178,10 @@ export function runInGroup(cmd: string, args: string[], opts: TimedOptions): Tim
     timedOut = true;
     signal('SIGTERM');
   }, opts.timeout);
-  forced = setTimeout(() => signal('SIGKILL'), opts.timeout + opts.graceMs);
+  forced = setTimeout(() => {
+    signal('SIGKILL');
+    if (group) liveGroups.delete(group);
+  }, opts.timeout + opts.graceMs);
   forced.unref?.();
 
   return Object.assign(done, { child });

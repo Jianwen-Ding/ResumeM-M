@@ -885,7 +885,37 @@ async function stepOnce(direction) {
  * before, the same way: only what the step changed is taken back.
  */
 async function putBack(docKey, back, from) {
-  const { path, options } = restoreRequest(docKey, back);
+  let { path, options } = restoreRequest(docKey, back);
+  /*
+   * A letter's body is put back even when it went out with an application
+   * (`editSent=1`, see `PUT /letters/:id`): the step being taken back is an
+   * edit made here, in the letters tab, which said the same.
+   */
+  if (String(docKey).startsWith('letter:') && options.method === 'PUT') path = `${path}&editSent=1`;
+  /*
+   * A letter the step added is taken away only as the step left it.
+   *
+   * Undoing "add a cover letter" is a DELETE, and it went out whatever had
+   * happened to the letter since: the extension's "Save to store" writing
+   * under the same name, the application being completed with it, an edit in
+   * another tab. All of it went with the letter, and the step that took it
+   * said "Undid add a cover letter". So the letter is read first, as the
+   * other documents are before they are put back, and one that is filed with
+   * an application now, or is not what the step left, stays — refused the
+   * way a step that cannot be taken back is, with the step kept on the stack.
+   * One already gone is no loss.
+   */
+  if (String(docKey).startsWith('letter:') && options.method === 'DELETE') {
+    const now = readDoc(await api('/store'), docKey);
+    if (now && (now.applicationId || !same(now, from))) {
+      const name = now.title || String(docKey).slice('letter:'.length);
+      throw new Error(
+        now.applicationId
+          ? `Nothing was undone: “${name}” has been filed with an application since it was added, so it was not taken away.`
+          : `Nothing was undone: “${name}” was changed since it was added, so it was not taken away.`,
+      );
+    }
+  }
   const id = String(docKey).startsWith('resume:') ? String(docKey).slice('resume:'.length) : null;
   if (!id && options.method === 'PUT' && from !== null && from !== undefined) {
     const store = await api('/store');
@@ -9988,7 +10018,10 @@ async function editLetter(letter) {
     for (let attempt = 0; ; attempt++) {
       try {
         describeNext(`edit the letter “${current.title || letter.id}”`);
-        await api(`/letters/${encodeURIComponent(letter.id)}${basedOnQuery(basedOn, '?')}`, {
+        // `editSent=1`: a letter that went out with an application is
+        // refused a new body unless the write says it means to, and opening
+        // the letter here and changing it is meaning to. See `PUT /letters/:id`.
+        await api(`/letters/${encodeURIComponent(letter.id)}?editSent=1${basedOnQuery(basedOn)}`, {
           method: 'PUT',
           body: JSON.stringify(changed),
           undoFrom: current,

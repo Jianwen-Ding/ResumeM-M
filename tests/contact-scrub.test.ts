@@ -54,6 +54,28 @@ describe('withoutContactDetails', () => {
   });
 
   /*
+   * Two numbers joined by a "/" in a signature. A run of digits never starts
+   * straight after a "/", so the pair was left whole, or the second kept its
+   * "+" and the first number. `personalDetailIn` still reads the text as it
+   * was: the "/" is a break only in what the scrub looks through.
+   */
+  it('takes out both numbers of a pair joined by a slash, and the "+" in front', () => {
+    for (const [text, want] of [
+      ['Tel/Fax: 617-555-0199/617-555-0100', 'Tel/Fax: [phone number]/[phone number]'],
+      ['Tel: 617-555-0199/+44 20 7946 0958', 'Tel: [phone number]/[phone number]'],
+      ['Mobile/WhatsApp: +44 7700 900123/+1 617 555 0199', 'Mobile/WhatsApp: [phone number]/[phone number]'],
+      ['Tel: 617-555-0199 / 617-555-0100', 'Tel: [phone number] / [phone number]'],
+    ]) {
+      expect(withoutContactDetails(text!), text).toBe(want);
+    }
+    // A date or a path is not two numbers.
+    for (const text of ['Started 03/2021, left 11/2024', 'Signed 12/03/2024']) {
+      expect(withoutContactDetails(text), text).toBe(text);
+    }
+    expect(personalDetailIn('Tel/Fax: 617-555-0199/617-555-0100')).toBeNull();
+  });
+
+  /*
    * The same shapes `personalDetailIn` refuses, so the corpus of its verdicts
    * holds for this too: text it lets through is left exactly as it was, and
    * text it refuses for a phone, an email or a street is no longer refused

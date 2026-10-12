@@ -127,6 +127,9 @@ describe('editing a letter', () => {
     expect(writes).toHaveLength(2);
     expect(writes[0].sent).toEqual({ title: 'Platform Engineer — Acme' });
     expect(writes[0].path).toContain('basedOn=v-Engineer%20%E2%80%94%20Acme-28');
+    // Opening a letter here and changing it is meaning to, sent or not: see
+    // `PUT /letters/:id`, which refuses a sent letter's new body otherwise.
+    expect(writes[0].path).toContain('editSent=1');
     // Made again on what the 409 handed back, and the edit made meanwhile kept.
     expect(writes[1].sent).toEqual({ title: 'Platform Engineer — Acme' });
     expect(writes[1].path).not.toBe(writes[0].path);
@@ -145,5 +148,105 @@ describe('editing a letter', () => {
     // Back to the letter the edit was made on, which is the one with the
     // extension's text, not the one the box opened with.
     expect(stored.body).toBe('Changed by the extension meanwhile.');
+    // Taking back an edit made here says so as the edit did (`editSent=1`).
+    expect(writes.at(-1).path).toContain('editSent=1');
+  });
+});
+
+/*
+ * Undoing "add a cover letter" is a DELETE, and it went out whatever had
+ * happened to the letter since: the extension's "Save to store" under the
+ * same name, the application being completed with it. All of that went with
+ * the letter. It is taken away now only as the step left it.
+ */
+describe('undoing a letter added here', () => {
+  let letters;
+  let deletes;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
+    window.location.hash = '#letters';
+    const fixture = makeTempStore();
+    const data = fixture.store.load();
+    fixture.cleanup();
+    letters = new Map();
+    deletes = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        const path = String(url);
+        const id = /^\/api\/letters\/([^?]+)/.exec(path)?.[1];
+        let result = {};
+        if (path === '/api/store') result = { ...data, coverLetters: [...letters.values()] };
+        else if (path === '/api/ai/jobs') result = { jobs: [] };
+        else if (path === '/api/letters') result = [...letters.values()];
+        else if (id && options.method === 'PUT') {
+          const key = decodeURIComponent(id);
+          const next = { ...(letters.get(key) ?? {}), ...JSON.parse(options.body) };
+          for (const k of Object.keys(next)) if (next[k] === null) delete next[k];
+          letters.set(key, next);
+          result = next;
+        } else if (id && options.method === 'DELETE') {
+          const key = decodeURIComponent(id);
+          deletes.push(key);
+          result = { ok: letters.delete(key) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          statusText: '200',
+          headers: { get: () => null },
+          json: async () => structuredClone(result),
+        };
+      }),
+    );
+
+    await import('../web/app.js');
+    await vi.waitFor(() => expect(document.querySelector('#btn-add-letter')).not.toBeNull());
+  });
+
+  const addOne = async () => {
+    document.querySelector('#btn-add-letter').click();
+    await vi.waitFor(() => expect(document.querySelector('#modal-content [name="body"]')).not.toBeNull());
+    document.querySelector('#modal-content [name="company"]').value = 'Acme';
+    document.querySelector('#modal-content [name="role"]').value = 'Engineer';
+    document.querySelector('#modal-content [name="body"]').value = 'Dear Acme, a letter added by hand.';
+    document.querySelector('#modal-ok').click();
+    await vi.waitFor(() => expect(letters.size).toBe(1));
+    await vi.waitFor(() => expect(document.querySelector('#btn-undo').disabled).toBe(false));
+    return [...letters.keys()][0];
+  };
+
+  it('takes the letter away when nothing has been written to it since', async () => {
+    const id = await addOne();
+    document.querySelector('#btn-undo').click();
+    await vi.waitFor(() => expect(deletes).toEqual([id]));
+    expect(letters.size).toBe(0);
+  });
+
+  it('leaves it, and says why, once it is filed with an application', async () => {
+    const id = await addOne();
+    // Completing the application with it, in another tab or from the extension.
+    letters.set(id, { ...letters.get(id), applicationId: 'app-acme' });
+    document.querySelector('#btn-undo').click();
+    await vi.waitFor(() => expect(document.querySelector('#status').textContent).toMatch(/Nothing was undone/));
+    expect(document.querySelector('#status').textContent).toMatch(/filed with an application/);
+    expect(deletes).toEqual([]);
+    expect(letters.get(id)?.applicationId).toBe('app-acme');
+    // The step is still there to be taken back.
+    expect(document.querySelector('#btn-undo').disabled).toBe(false);
+  });
+
+  it('leaves it, and says why, once it has been written over', async () => {
+    const id = await addOne();
+    // The extension's "Save to store" under the same name.
+    letters.set(id, { ...letters.get(id), body: 'Dear Acme, the version from the extension.' });
+    document.querySelector('#btn-undo').click();
+    await vi.waitFor(() => expect(document.querySelector('#status').textContent).toMatch(/Nothing was undone/));
+    expect(document.querySelector('#status').textContent).toMatch(/changed since it was added/);
+    expect(deletes).toEqual([]);
+    expect(letters.get(id)?.body).toBe('Dear Acme, the version from the extension.');
   });
 });

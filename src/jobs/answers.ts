@@ -1010,19 +1010,34 @@ function datesIn(text: string): string[] {
  * for its first date, each was held back from the form as stale. Only when
  * every date named has passed is there nothing left in it still to come.
  *
- * And a start given from today ("Immediately", "ASAP", "two weeks' notice")
- * is a date too, one that never passes: the August in "Immediately; I left my
- * last role in August 2026" is not when the person starts, and the answer is
- * as good next year as it is today.
+ * A start given from today ("Immediately", "ASAP", "two weeks' notice") is a
+ * date that never passes — but only when it is the only thing the answer
+ * says about time. It used to excuse any answer it appeared in, so
+ * "Available from 1 March 2025, after two weeks' notice" and "Immediately
+ * after my contract ends on 31 March 2025" were offered as good, confidently,
+ * a year and a half on: the notice is counted from a date, and the date is
+ * what has passed. An answer that names a date is judged by its dates, as
+ * above, whatever else it says. That costs "Immediately; I left my last role
+ * in August 2026", which is read as stale once August has gone — and stale is
+ * only "read this before it is sent", where the other way a start date
+ * eighteen months gone was filled in unread.
+ *
+ * The notice is read with its possessive however it is written: "one
+ * month's", "two weeks'", "two weeks’".
  */
 const STARTS_FROM_TODAY =
-  /\b(immediately|asap|as\s+soon\s+as\s+possible|right\s+away|straight\s+away|at\s+once|(\d+|one|two|three|four|six)\s+(days?|weeks?|months?)[’']?\s+notice)\b/i;
+  /\b(immediately|asap|as\s+soon\s+as\s+possible|right\s+away|straight\s+away|at\s+once|(\d+|one|two|three|four|six)\s+(days?|weeks?|months?)([’']s?)?\s+notice)\b/i;
 
 export function namesPassedDate(text: string, now = new Date(Date.now())): boolean {
   const said = String(text ?? '');
-  if (STARTS_FROM_TODAY.test(said)) return false;
-  const today = localDay(now);
   const days = datesIn(said);
+  /*
+   * A start from today on its own never passes. Said as its own rule, though
+   * an answer with no date in it has nothing to pass either way: what the
+   * rule no longer does is excuse the dates beside it.
+   */
+  if (days.length === 0 && STARTS_FROM_TODAY.test(said)) return false;
+  const today = localDay(now);
   return days.length > 0 && days.every((day) => day < today);
 }
 
@@ -1060,7 +1075,14 @@ const ASKS_WHEN_YOU_START = new RegExp(
     // German, French and Spanish, as the forms of employers there ask it.
     String.raw`\b(ab\s+wann|wann\s+k(ö|oe|o)nn(en|ten)\s+sie\s+(anfangen|beginnen|starten|eintreten))\b`,
     String.raw`\beintritts(datum|termin)\b`,
-    String.raw`\b(date\s+de\s+d[ée]but|disponibilit[ée]|quand\s+pouvez[-\s]vous\s+(commencer|d[ée]buter))`,
+    /*
+     * "Disponibilité" as English "availability" is: the word alone asked
+     * about weekends ("Disponibilité le week-end") and travel ("disponibilité
+     * pour les déplacements") as well. Read with a start beside it, or as the
+     * whole label.
+     */
+    String.raw`\b(date\s+de\s+(d[ée]but|disponibilit[ée])|disponib(ilit[ée]|le)\s+[àa]\s+partir|disponibilit[ée]\s+pour\s+(commencer|d[ée]buter)|quand\s+pouvez[-\s]vous\s+(commencer|d[ée]buter))`,
+    String.raw`^\s*disponibilit[ée][\s:?*]*$`,
     String.raw`\b(fecha\s+de\s+(inicio|incorporaci[óo]n|disponibilidad)|cu[áa]ndo\s+(puede|puedes|podr[íi]as?)\s+(usted\s+)?(empezar|comenzar|incorporarse|incorporarte))`,
   ].join('|'),
   'i',

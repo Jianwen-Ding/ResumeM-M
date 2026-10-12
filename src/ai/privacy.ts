@@ -426,14 +426,28 @@ export function withoutContactDetails(text: string): string {
    */
   const lineByLine = (t: string) => t.replace(/[\r\n]/g, '\u0001');
   /*
+   * And a "/" between two numbers made a break as well. A run of digits
+   * never starts straight after a "/" (see `DIGIT_RUN`: that is a path or a
+   * date), so "Tel/Fax: 617-555-0199/617-555-0100" was left whole and
+   * "617-555-0199/+44 20 7946 0958" kept its first number. Between digits —
+   * or a digit and the "+" of a country code — a "/" in a signature is two
+   * numbers side by side. In the text looked through only, as the line
+   * breaks are: `personalDetailIn` reads the text as it was, and refuses
+   * what it refused before.
+   */
+  const slashBySlash = (t: string) => t.replace(/(?<=\d)\/(?=\+?\d)/g, '\u0001');
+  /*
    * The bracket in front of an area code with it: the run of digits starts
    * after the "(" (see `DIGIT_RUN`), and "([phone number]" is half a
-   * number still.
+   * number still. So is "+[phone number]", where something in front of the
+   * "+" kept the run from starting at it.
    */
   out = replace(out, SCRUBBED.phone, (t) =>
-    phoneRunsIn(lineByLine(prose(t))).map(({ at, length }) =>
-      t[at - 1] === '(' && /^\d+\)/.test(t.slice(at, at + length)) ? { at: at - 1, length: length + 1 } : { at, length },
-    ),
+    phoneRunsIn(slashBySlash(lineByLine(prose(t)))).map(({ at, length }) => {
+      if (t[at - 1] === '(' && /^\d+\)/.test(t.slice(at, at + length))) return { at: at - 1, length: length + 1 };
+      if (t[at - 1] === '+') return { at: at - 1, length: length + 1 };
+      return { at, length };
+    }),
   );
   return replace(out, SCRUBBED.street, (t) => matches(street)(prose(t)));
 }

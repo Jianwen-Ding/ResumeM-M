@@ -6316,17 +6316,32 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
               .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0]
           : undefined);
       const letters = store.loadCoverLetters();
-      const linked = app ? { applicationId: app.id } : {};
-      if (app) {
-        const mine = letters.filter((l) => l.applicationId === app.id);
-        const own = mine.find((l) => l.id === app.letterId) ?? mine[0];
+      /*
+       * Only while the application has not gone out (`wentOut`: `applied`,
+       * `interview`, `offer`, or closed after one of those).
+       *
+       * The application's own letter was the answer whatever its status, so
+       * coming back to the posting after sending — to draft a follow-up, or
+       * to look again — and pressing "Save to store" wrote the new text over
+       * the letter that was sent, which is the one record of what the
+       * employer has. Once it is sent the answer is a name of its own,
+       * numbered past every linked letter, the sent one included, and the
+       * application is not said: a save linked to it would read as a second
+       * letter sent with it, and the next save would be refused as a change
+       * to a sent letter (`PUT /letters/:id`).
+       */
+      const open = app && !wentOut(app) ? app : undefined;
+      const linked = open ? { applicationId: open.id } : {};
+      if (open) {
+        const mine = letters.filter((l) => l.applicationId === open.id);
+        const own = mine.find((l) => l.id === open.letterId) ?? mine[0];
         if (own) {
           res.json({ id: own.id, ...linked });
           return;
         }
       }
       const named = letterId(text(req.query.company), text(req.query.role));
-      res.json({ id: unclaimedLetterId(letters, named, app?.id), ...linked });
+      res.json({ id: unclaimedLetterId(letters, named, open?.id), ...linked });
     }),
   );
 
@@ -6386,6 +6401,35 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
           error:
             `“${stored.title || id}” is the letter filed for another application, so this was not written over it. ` +
             'Save it again to file it under a name of its own.',
+          id,
+          current: stored,
+          version: contentVersion(stored),
+        });
+        return;
+      }
+
+      /*
+       * Never a new text for a letter that was sent. A letter linked to an
+       * application that went out (`wentOut`) is what the employer was sent,
+       * and a save that changes its body — an older extension's "Save to
+       * store", which works the name out itself when `GET /letters/id` does
+       * not answer, or any caller holding the name from before the
+       * application went out — is refused with the letter that is there.
+       * The editor's letters tab, where somebody opens that letter and
+       * corrects it on purpose, says so with `?editSent=1`, and so does its
+       * undo of such an edit. Everything else about the letter — the title,
+       * the tags, the link — can still be changed.
+       */
+      const editSent = req.query.editSent === '1' || req.query.editSent === 'true';
+      const sentWith = stored?.applicationId
+        ? store.load().applications.find((a) => a.id === stored.applicationId)
+        : undefined;
+      if (!editSent && stored && sentWith && wentOut(sentWith) && typeof given.body === 'string' && given.body !== stored.body) {
+        res.status(409).json({
+          kind: 'conflict',
+          error:
+            `“${stored.title || id}” is the letter sent with the application to ${sentWith.company || 'this employer'}, ` +
+            'so it was not written over. Save it again to file it under a name of its own.',
           id,
           current: stored,
           version: contentVersion(stored),

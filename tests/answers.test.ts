@@ -1722,6 +1722,15 @@ describe('an answer whose date has passed', () => {
     ['Eintrittsdatum', true],
     ['Date de début', true],
     ['Date de disponibilité', true],
+  ['Disponibilité', true],
+  ['Disponibilité :', true],
+  ['Disponibilité à partir du', true],
+  ['Disponible à partir de quand ?', true],
+  ['Disponibilité pour commencer', true],
+  ['Votre disponibilité pour débuter le poste', true],
+  ['Disponibilité le week-end', false],
+  ['Disponibilité pour les déplacements', false],
+  ['Êtes-vous disponible le soir et le week-end ?', false],
     ['Fecha de inicio', true],
     ['¿Cuándo puede empezar?', true],
     ['Availability', true],
@@ -1756,8 +1765,9 @@ describe('an answer whose date has passed', () => {
   it('is judged by the latest date it names', () => {
     const now = new Date(2026, 9, 12, 12);
     for (const text of [
-      'Immediately; I left my last role in August 2026',
-      'Two weeks’ notice; my contract ended in May 2026',
+      'Immediately',
+      'Two weeks’ notice',
+      'One month\'s notice',
       'Between May 2026 and February 2027',
       'Available from 05/11/2026',
       '01/12/2026',
@@ -1769,8 +1779,36 @@ describe('an answer whose date has passed', () => {
     }
     at(new Date(2026, 9, 12, 12), () => {
       const items: AnswerBankItem[] = [];
-      fileSentAnswer(items, { question: 'When can you start?', answer: 'Immediately; I left my last role in August 2026', label: 'Helios Systems', unread: false, newId: () => 'now' });
+      fileSentAnswer(items, { question: 'When can you start?', answer: 'Two weeks’ notice', label: 'Helios Systems', unread: false, newId: () => 'now' });
       expect(matchAnswer('When can you start?', items, { company: 'Orbital Labs' }).confident).toBe(true);
+    });
+  });
+
+  /*
+   * A start from today excused every date beside it, so a notice counted
+   * from a day eighteen months gone was offered as good, unread. It holds
+   * only when the answer names no date at all; one that does is judged by its
+   * dates — the August in "Immediately; I left my last role in August 2026"
+   * included, which is the price of it.
+   */
+  it('judges an answer that starts from today by the dates it names beside it', () => {
+    const now = new Date(2026, 9, 12, 12);
+    for (const text of [
+      'Available from 1 March 2025, after two weeks\' notice',
+      'I can start on 3 March 2025 with 2 weeks notice',
+      'Available from 1 March 2025, after one month\'s notice',
+      'Immediately after my contract ends on 31 March 2025',
+      'ASAP after graduating in May 2025',
+      'Immediately; I left my last role in August 2026',
+      'Two weeks’ notice; my contract ended in May 2026',
+    ]) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    expect(namesPassedDate('Two weeks’ notice from 1 December 2026', now)).toBe(false);
+    at(new Date(2026, 9, 12, 12), () => {
+      const items: AnswerBankItem[] = [];
+      fileSentAnswer(items, { question: 'When can you start?', answer: 'Available from 1 March 2025, after one month\'s notice', label: 'Helios Systems', unread: false, newId: () => 'then' });
+      expect(matchAnswer('When can you start?', items, { company: 'Orbital Labs' }).confident).toBe(false);
     });
   });
 });

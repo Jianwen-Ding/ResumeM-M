@@ -76,7 +76,12 @@ describe('GET /letters/id, for a job that already has a letter filed under its n
 
   it("answers with the application's own letter, found by its address, whatever its name", async () => {
     t.store.saveApplications([
-      application({ id: 'app-first', url: 'https://jobs.example.com/helios/1111', letterId: '2026-03-01-helios-platform-engineer' }),
+      application({
+        id: 'app-first',
+        url: 'https://jobs.example.com/helios/1111',
+        letterId: '2026-03-01-helios-platform-engineer',
+        status: 'applying',
+      }),
     ]);
     t.store.saveCoverLetter(filedLetter('2026-03-01-helios-platform-engineer', 'app-first'));
 
@@ -88,13 +93,54 @@ describe('GET /letters/id, for a job that already has a letter filed under its n
   });
 
   it('takes an application id it is given over the address', async () => {
-    t.store.saveApplications([application({ id: 'app-second', url: 'https://jobs.example.com/helios/2222' })]);
+    t.store.saveApplications([application({ id: 'app-second', url: 'https://jobs.example.com/helios/2222', status: 'applying' })]);
     t.store.saveCoverLetter(filedLetter('2026-03-02-helios-platform-engineer', 'app-second'));
     const res = await request(app)
       .get('/api/letters/id')
       .query({ company: 'Helios', role: 'Platform Engineer', applicationId: 'app-second' })
       .expect(200);
     expect(res.body).toEqual({ id: '2026-03-02-helios-platform-engineer', applicationId: 'app-second' });
+  });
+
+  /*
+   * Coming back to a posting after sending, and pressing "Save to store",
+   * wrote the new text over the letter that was sent: the application's own
+   * letter was the answer whatever its status.
+   */
+  it('answers a name of its own, numbered past the sent letter, once the application has gone out', async () => {
+    const named = today('Helios', 'Platform Engineer');
+    for (const status of ['applied', 'interview', 'offer'] as const) {
+      t.store.saveApplications([
+        application({ id: 'app-first', url: 'https://jobs.example.com/helios/1111', letterId: named, status }),
+      ]);
+      t.store.saveCoverLetter(filedLetter(named, 'app-first'));
+      const res = await request(app)
+        .get('/api/letters/id')
+        .query({ company: 'Helios', role: 'Platform Engineer', url: 'https://jobs.example.com/helios/1111' })
+        .expect(200);
+      expect(res.body).toEqual({ id: `${named}-2` });
+    }
+  });
+
+  it('and for one closed after it went out, asked by its id', async () => {
+    const named = today('Helios', 'Platform Engineer');
+    t.store.saveApplications([
+      application({
+        id: 'app-first',
+        letterId: named,
+        status: 'closed',
+        history: [
+          { status: 'applied', at: '2026-03-01T09:00:00.000Z' },
+          { status: 'closed', at: '2026-04-01T09:00:00.000Z', note: 'Rejected' },
+        ],
+      } as Partial<Application> & { id: string }),
+    ]);
+    t.store.saveCoverLetter(filedLetter(named, 'app-first'));
+    const res = await request(app)
+      .get('/api/letters/id')
+      .query({ company: 'Helios', role: 'Platform Engineer', applicationId: 'app-first' })
+      .expect(200);
+    expect(res.body).toEqual({ id: `${named}-2` });
   });
 
   it('keeps answering the bare name when no letter holds it', async () => {
@@ -115,6 +161,39 @@ describe("PUT /letters/:id, over another application's letter", () => {
       .expect(409);
     expect(res.body.current.applicationId).toBe('app-first');
     expect(t.store.loadCoverLetters().find((l) => l.id === named)?.body).toBe('Dear Helios, the letter that was sent.');
+  });
+
+  it('is refused a new body for a letter whose application has gone out', async () => {
+    const named = today('Helios', 'Platform Engineer');
+    t.store.saveApplications([application({ id: 'app-first', letterId: named, status: 'applied' })]);
+    t.store.saveCoverLetter(filedLetter(named, 'app-first'));
+    const res = await request(app)
+      .put(`/api/letters/${named}`)
+      .send({ title: 'Platform Engineer — Helios', body: 'Dear Helios, a follow-up.' })
+      .expect(409);
+    expect(res.body.kind).toBe('conflict');
+    expect(res.body.current.body).toBe('Dear Helios, the letter that was sent.');
+    expect(t.store.loadCoverLetters().find((l) => l.id === named)?.body).toBe('Dear Helios, the letter that was sent.');
+
+    // The same body, or no body, is no change to what was sent.
+    await request(app).put(`/api/letters/${named}`).send({ title: 'Renamed', body: 'Dear Helios, the letter that was sent.' }).expect(200);
+    await request(app).put(`/api/letters/${named}`).send({ tags: ['kept'] }).expect(200);
+  });
+
+  it('writes a sent letter when the request says it means to (the editor, `editSent=1`)', async () => {
+    const named = today('Helios', 'Platform Engineer');
+    t.store.saveApplications([application({ id: 'app-first', letterId: named, status: 'interview' })]);
+    t.store.saveCoverLetter(filedLetter(named, 'app-first'));
+    await request(app).put(`/api/letters/${named}?editSent=1`).send({ body: 'Dear Helios, corrected.' }).expect(200);
+    expect(t.store.loadCoverLetters().find((l) => l.id === named)?.body).toBe('Dear Helios, corrected.');
+  });
+
+  it('writes a letter whose application has not gone out', async () => {
+    const named = today('Helios', 'Platform Engineer');
+    t.store.saveApplications([application({ id: 'app-first', letterId: named, status: 'applying' })]);
+    t.store.saveCoverLetter(filedLetter(named, 'app-first'));
+    await request(app).put(`/api/letters/${named}`).send({ body: 'Dear Helios, second draft.' }).expect(200);
+    expect(t.store.loadCoverLetters().find((l) => l.id === named)?.body).toBe('Dear Helios, second draft.');
   });
 
   it('links an unlinked letter to the application the save names', async () => {
