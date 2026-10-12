@@ -125,12 +125,23 @@ describe('a write from another site', () => {
     await request(appWith()).post('/api/projects/close').set('Host', 'localhost').set('Origin', 'http://localhost:4600').expect(403);
   });
 
-  it('lets the extension through', async () => {
-    await request(appWith())
+  it('lets the extension through once it is paired, and only then', async () => {
+    const ext = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
+    const paired = (token: string | undefined, origin: string | undefined) => token === 'the-token' && origin === ext;
+    await request(appWith({ paired }))
       .post('/api/projects/close')
       .set('Host', '127.0.0.1:4600')
-      .set('Origin', 'chrome-extension://abcdefghijklmnopabcdefghijklmnop')
+      .set('Origin', ext)
+      .set('X-RMM-Pair', 'the-token')
       .expect(200);
+    const refused = await request(appWith({ paired }))
+      .post('/api/projects/close')
+      .set('Host', '127.0.0.1:4600')
+      .set('Origin', ext)
+      .expect(403);
+    expect(refused.body.kind).toBe('not-paired');
+    // And with nothing configured, no extension is paired at all.
+    await request(appWith()).post('/api/projects/close').set('Host', '127.0.0.1:4600').set('Origin', ext).expect(403);
   });
 
   it('leaves alone anything that is not a browser', async () => {

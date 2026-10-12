@@ -10028,6 +10028,93 @@ async function loadDocuments() {
   );
 }
 
+/*
+ * Pairing the browser extension.
+ *
+ * The server used to answer every browser extension, so anything installed in
+ * the browser could read the whole save. Now an extension is paired once, from
+ * here: this shows a short code, JobHelper's popup takes it, and the server
+ * gives the extension a token of its own. Pairings belong to this computer,
+ * not to the save, so this sits with the things that are about the machine
+ * and shows with no save open.
+ *
+ * Plain `fetch`, not `api`: nothing here is a document, so there is nothing
+ * to undo, and the save-switch header would only get in the way.
+ */
+let pairingTimer = null;
+async function loadPairing() {
+  const box = $('#pairing');
+  if (!box) return;
+  const ask = async (path, method = 'GET') => {
+    const res = await fetch(`/api/extension/pairings${path}`, { method, headers: { 'Content-Type': 'application/json' } });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+    return body;
+  };
+  const note = el('p', { className: 'hint', id: 'pair-status' });
+  const draw = (state) => {
+    clearTimeout(pairingTimer);
+    pairingTimer = null;
+    const children = [];
+    if (state.code) {
+      const left = Math.max(0, Math.ceil((Date.parse(state.code.expiresAt) - Date.now()) / 60000));
+      children.push(
+        el('div', { className: 'pair-code', id: 'pair-code', textContent: `${state.code.code.slice(0, 4)}-${state.code.code.slice(4)}` }),
+        el('p', { className: 'hint', textContent: `Type this into JobHelper’s popup. It works once, for the next ${left} ${left === 1 ? 'minute' : 'minutes'}.` }),
+      );
+      // Looked at again until it is used or runs out, so the list below
+      // gains the extension the moment it pairs.
+      pairingTimer = setTimeout(() => refresh().catch(() => {}), 3000);
+    }
+    children.push(el('div', { className: 'toolbar' }, [
+      el('button', {
+        id: 'pair-make',
+        textContent: state.code ? 'Make a new code' : 'Make a code',
+        onclick: () => ask('/code', 'POST').then(refresh).catch((e) => { note.textContent = e.message; }),
+      }),
+    ]));
+    if (state.paired.length > 0) {
+      children.push(el('div', { className: 'lbl', textContent: 'Paired extensions' }));
+      children.push(el('div', { className: 'card-list', id: 'pair-list' }, state.paired.map((p) =>
+        el('div', { className: 'card pair-row' }, [
+          el('div', { className: 'mono-path', textContent: p.origin }),
+          el('div', { className: 'hint', textContent: `Paired ${new Date(p.pairedAt).toLocaleString()}` }),
+          el('button', {
+            className: 'tiny',
+            textContent: 'Remove',
+            title: 'This extension stops reaching the save until it is paired again.',
+            onclick: () => ask(`/${encodeURIComponent(p.id)}`, 'DELETE')
+              .then(() => { note.textContent = 'Removed. That extension can no longer reach the save.'; return refresh(); })
+              .catch((e) => { note.textContent = e.message; }),
+          }),
+        ]))));
+    } else {
+      children.push(el('p', { className: 'hint', textContent: 'No extension is paired yet.' }));
+    }
+    children.push(note);
+    box.replaceChildren(...children);
+  };
+  const refresh = async () => draw(await ask(''));
+  await refresh();
+}
+
+function setupPairing() {
+  const after = $('#save-default-status');
+  if (!after || $('#pairing')) return;
+  after.after(
+    el('hr'),
+    el('h3', { id: 'pair-jobhelper', textContent: 'Pair JobHelper' }),
+    el('p', {
+      className: 'hint',
+      textContent: 'The JobHelper browser extension can read and change this save only once it is paired with ' +
+        'ResumeM-M on this computer. Make a code here, then enter it in JobHelper’s popup. An extension ' +
+        'that is not paired is refused.',
+    }),
+    el('div', { id: 'pairing' }),
+  );
+  loadPairing().catch((e) => { $('#pairing').textContent = e.message; });
+}
+
 function setupDocuments() {
   const add = $('#doc-add');
   const picker = $('#doc-file');
@@ -12696,7 +12783,7 @@ async function applyHash() {
   // here when it needs to send someone to a setting, and a link that lands on
   // the wrong tab is worse than no link.
   const requestedTab = /^#([a-z]+)$/.exec(location.hash)?.[1];
-  const tab = ['assets', 'project'].includes(requestedTab) ? 'save'
+  const tab = ['assets', 'project', 'pair'].includes(requestedTab) ? 'save'
     : ['build', 'master'].includes(requestedTab) ? 'resumes' : requestedTab;
   if (requestedTab === 'master' || requestedTab === 'build') {
     // Through the same door as the dropdown. This set the view and rendered,
@@ -12708,6 +12795,8 @@ async function applyHash() {
   }
   if (tab && document.querySelector(`#tabs button[data-tab="${tab}"]`)) {
     showTab(tab);
+    // Where the extension sends somebody who has to pair it.
+    if (requestedTab === 'pair') $('#pair-jobhelper')?.scrollIntoView({ block: 'start' });
     return true;
   }
   return false;
@@ -12811,6 +12900,7 @@ async function boot() {
     }, loadProjectSettings });
   setupTabs();
   setupDocuments();
+  setupPairing();
   const project = await assetUI.init();
   loadDocuments().catch(() => {});
   if (!project.current) { showTab('save'); return; }

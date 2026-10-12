@@ -13,7 +13,8 @@ import { cloneProject, createProject, prepareProject, readProjects, rememberProj
 import { Assets } from '../ingest/assets.js';
 import { assetsApi } from './assets.js';
 import { Jobs } from './jobs.js';
-import { localOnly, scriptPolicy } from './guard.js';
+import { PAIR_HEADER, foreignCaller, localOnly, scriptPolicy } from './guard.js';
+import { EXTENSION_ORIGIN, Pairings, pairingsFile } from './pairing.js';
 import { createHash } from 'node:crypto';
 import { bugReportsApi } from './bug-reports.js';
 
@@ -25,6 +26,8 @@ export interface ServerOptions {
   port?: number;
   dataDir?: string;
   preferencesFile?: string;
+  /** Which browser extensions are paired. Beside the preferences file unless said. */
+  pairingsFile?: string;
   bugReportsDir?: string;
   /** Desktop launches offer dataDir as a suggestion until a project is selected. */
   requireProjectSelection?: boolean;
@@ -224,14 +227,25 @@ export async function startServer(opts: ServerOptions = {}) {
    * traversal in an id turned into a page being able to set `ai.command` — the
    * command this application runs.
    *
-   * The extension is why the header exists at all, and it asks for
-   * `host_permissions` on loopback, so Chrome exempts it from CORS regardless.
-   * Echoing its origin is belt and braces for an install that has not been
-   * granted them; every other origin gets no header, which is what stops an
-   * ordinary web page from reaching in. The editor is served from here, so it
-   * is same-origin and needs nothing.
+   * Then it answered every `chrome-extension://` origin, which is every
+   * extension installed in the browser. Now only one that has been paired
+   * from the editor, and only on a request carrying its token — see
+   * `src/server/pairing.ts`, and `localOnly`, which refuses the rest. The
+   * header is still echoed to such an extension, as belt and braces for an
+   * install that has not been granted `host_permissions`; every other origin
+   * gets no header, which is what stops an ordinary web page from reaching
+   * in. The editor is served from here, so it is same-origin and needs nothing.
    */
-  const mayCall = (origin: string | undefined) => /^chrome-extension:\/\/[a-p]+$/.test(origin ?? '');
+  const pairings = new Pairings(opts.pairingsFile ?? pairingsFile(preferencesFile));
+  const paired = (token: string | undefined, origin: string | undefined) => Boolean(pairings.check(token, origin));
+  const mayCall = (req: express.Request, res: express.Response) => {
+    const origin = req.headers.origin;
+    if (!origin || !EXTENSION_ORIGIN.test(origin)) return false;
+    // A preflight carries no token, and answering it says nothing. The
+    // request it clears is checked on its own.
+    if (req.method === 'OPTIONS') return true;
+    return Boolean(res.locals.extension?.paired) || req.path === '/health' || req.path === '/api/extension/pair';
+  };
 
   // Before anything else: the `Host` check that makes DNS rebinding fail, and
   // the `Origin` check that catches writes CORS never got to preflight.
@@ -239,6 +253,7 @@ export async function startServer(opts: ServerOptions = {}) {
     localOnly({
       host,
       allowHosts: (process.env.RMM_ALLOWED_HOSTS ?? '').split(',').filter(Boolean),
+      paired,
     }),
   );
 
@@ -259,9 +274,9 @@ export async function startServer(opts: ServerOptions = {}) {
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (mayCall(origin)) res.setHeader('Access-Control-Allow-Origin', origin!);
+    if (mayCall(req, res)) res.setHeader('Access-Control-Allow-Origin', origin!);
     res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-RMM-Project');
+    res.setHeader('Access-Control-Allow-Headers', `Content-Type,X-RMM-Project,${PAIR_HEADER}`);
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
     next();
@@ -322,7 +337,23 @@ export async function startServer(opts: ServerOptions = {}) {
      * Nothing in a single server can see that; a caller running several can,
      * and the test pool does exactly this.
      */
+    /*
+     * Less, to an extension that is not paired.
+     *
+     * This answers without pairing so the extension can tell "not running"
+     * from "not paired", and say which. Where the save is kept and what
+     * command the AI runs are the person's business, not every extension's:
+     * an unpaired one hears that the server is up, whether a save is open,
+     * and that it is not paired.
+     */
+    const extension = res.locals.extension as { paired: boolean } | undefined;
+    if (extension && !extension.paired) {
+      res.json({ ok: true, service: 'resumem-m', build: buildStamp, projectOpen: Boolean(active), paired: false,
+        ...(fresh === undefined ? {} : { onDisk: fresh, stale: fresh !== buildStamp }) });
+      return;
+    }
     res.json({ ok: true, service: 'resumem-m', build: buildStamp, dataDir: active?.store.root ?? null,
+      ...(extension ? { paired: true } : {}),
       outDir: active?.store.outDir() ?? null,
       ...(fresh === undefined ? {} : { onDisk: fresh, stale: fresh !== buildStamp }),
       projectOpen: Boolean(active), ai: { enabled: ai?.enabled ?? false, command: ai?.command ?? '', configured: Boolean(ai?.command?.trim()) } });
@@ -332,6 +363,51 @@ export async function startServer(opts: ServerOptions = {}) {
   app.use('/api/bug-reports', bugReportsApi(
     opts.bugReportsDir ?? process.env.RMM_BUG_REPORTS_DIR ?? path.join(projectRoot, 'bug-reports'), buildStamp,
   ));
+  /*
+   * Pairing a browser extension.
+   *
+   * Before the "which save" and "no save open" checks: a pairing belongs to
+   * this machine, not to a save, and an extension should be able to pair
+   * while the chooser is up.
+   *
+   * The code and the list are the editor's alone. A paired extension is
+   * refused them too, or it could mint codes and pair any other extension it
+   * liked. A local process with no browser headers — the CLI, a test — may
+   * make one, as it may read the save straight off the disk.
+   */
+  const editorOnly: express.RequestHandler = (req, res, next) => {
+    if (foreignCaller(req) !== null) {
+      res.status(403).json({ kind: 'editor-only', error: 'Pairing codes are made and shown in the ResumeM-M editor only.' });
+      return;
+    }
+    next();
+  };
+  app.post('/api/extension/pair', (req, res) => {
+    const result = pairings.pair(req.headers.origin, req.body?.code);
+    if (!result.ok) {
+      res.status(result.kind === 'not-extension' ? 400 : 403).json(result);
+      return;
+    }
+    console.log(`ResumeM-M: paired ${result.origin}.`);
+    res.json({ token: result.token, origin: result.origin });
+  });
+  app.get('/api/extension/pairings', editorOnly, (_req, res) => {
+    res.json({ code: pairings.currentCode(), paired: pairings.list() });
+  });
+  app.post('/api/extension/pairings/code', editorOnly, (_req, res) => {
+    res.json(pairings.newCode());
+  });
+  app.delete('/api/extension/pairings/code', editorOnly, (_req, res) => {
+    pairings.cancelCode();
+    res.json({ code: null });
+  });
+  app.delete('/api/extension/pairings/:id', editorOnly, (req, res) => {
+    const origin = `chrome-extension://${req.params.id}`;
+    if (!EXTENSION_ORIGIN.test(origin)) { res.status(400).json({ error: 'That is not an extension id.' }); return; }
+    const removed = pairings.remove(origin);
+    if (removed) console.log(`ResumeM-M: unpaired ${origin}.`);
+    res.json({ removed, paired: pairings.list() });
+  });
   app.get('/api/projects', (_req, res) => {
     const stored = readProjects(preferencesFile);
     const existing = [...(stored.defaultFolder ? [stored.defaultFolder] : []), fallback, ...stored.recent].filter(isSave);

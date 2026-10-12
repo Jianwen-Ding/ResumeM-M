@@ -1,4 +1,4 @@
-import type { RequestHandler } from 'express';
+import type { Request, RequestHandler } from 'express';
 
 /**
  * This server is on loopback with no password, so "who is asking" is decided
@@ -40,12 +40,64 @@ export interface GuardOptions {
   host?: string;
   /** Extra names to answer to, e.g. `RMM_ALLOWED_HOSTS=rmm.local`. */
   allowHosts?: string[];
+  /**
+   * Whether a request from a browser extension carries a pairing token this
+   * server gave out, to that extension. Left out, no extension is paired.
+   * See `src/server/pairing.ts`.
+   */
+  paired?: (token: string | undefined, origin: string | undefined) => boolean;
 }
 
-const EXTENSION = /^chrome-extension:\/\/[a-p]+$/;
+const EXTENSION = /^chrome-extension:\/\/[a-p]{32}$/;
 const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-export function localOnly({ host, allowHosts = [] }: GuardOptions = {}): RequestHandler {
+/** The header a paired extension sends its token in. */
+export const PAIR_HEADER = 'X-RMM-Pair';
+
+/**
+ * A browser asking from somewhere that is not the editor, and not a person
+ * following a link: an extension, or a page's subresource. The origin when it
+ * says one, `''` when it does not, and `null` for everything else.
+ *
+ * Chrome leaves `Origin` off a GET an extension makes to a host it holds
+ * permission for — measured, from JobHelper's own service worker, with and
+ * without `no-cors`, and the reply was readable both times. So "no Origin"
+ * is not "not a browser". What every browser request to loopback does carry
+ * is `Sec-Fetch-Site`, which no page and no extension can set: `same-origin`
+ * from the editor, and `none` or `cross-site` from an extension. The CLI,
+ * scripts and tests send no `Sec-Fetch-Site` at all, and are local processes
+ * that can read the save off the disk anyway, so they are left alone.
+ */
+export function foreignCaller(req: Request): string | null {
+  const origin = req.headers.origin;
+  if (typeof origin === 'string' && origin.startsWith('chrome-extension:')) return origin;
+  // A web page's own origin: a write is refused below, and a read is
+  // withheld by CORS, as before.
+  if (origin) return null;
+  const site = req.headers['sec-fetch-site'];
+  const mode = req.headers['sec-fetch-mode'];
+  if (typeof site === 'string' && site !== 'same-origin' && mode !== 'navigate') return '';
+  return null;
+}
+
+/**
+ * What an unpaired extension may still reach: whether the server is there,
+ * how to pair, and the bug-report inbox (which only takes a report in, and is
+ * how somebody says pairing does not work).
+ */
+export function openToUnpaired(method: string, path: string): boolean {
+  // As Express routes it: without regard to case, or to a trailing slash.
+  const p = path.toLowerCase().replace(/\/+$/, '') || '/';
+  if (p === '/health') return method === 'GET' || method === 'HEAD';
+  if (method !== 'POST') return false;
+  return p === '/api/extension/pair' || p === '/api/bug-reports';
+}
+
+export const NOT_PAIRED =
+  'This browser extension is not paired with ResumeM-M. In ResumeM-M, open Save & Files → Pair JobHelper, ' +
+  'make a code, and enter it in the extension.';
+
+export function localOnly({ host, allowHosts = [], paired = () => false }: GuardOptions = {}): RequestHandler {
   const allowed = new Set([
     ...LOOPBACK,
     // Binding to every interface is a choice to be reachable by whatever name
@@ -66,9 +118,46 @@ export function localOnly({ host, allowHosts = [] }: GuardOptions = {}): Request
       return;
     }
 
+    /*
+     * An extension, only once it is paired.
+     *
+     * Every `chrome-extension://` origin was let through, and echoed in CORS,
+     * so any extension installed in the browser could read the whole store
+     * and write to it. Now the token has to be there and has to be the one
+     * this machine gave that extension. The refusal is readable — it says
+     * nothing about the save — so the extension can say what to do.
+     */
+    const foreign = foreignCaller(req);
+    let pairedNow = false;
+    if (foreign !== null && req.method !== 'OPTIONS') {
+      const token = req.headers[PAIR_HEADER.toLowerCase()];
+      pairedNow = EXTENSION.test(foreign) || foreign === ''
+        ? paired(typeof token === 'string' ? token : undefined, foreign || undefined)
+        : false;
+      res.locals.extension = { origin: foreign || null, paired: pairedNow };
+      /*
+       * Everything else is refused, not a list of what holds the save: Express
+       * matches `/API/store` to `/api`, and a list is one spelling away from
+       * a hole. Nothing an extension legitimately asks for is left out by
+       * this — the editor it frames is a navigation, and asks for its own
+       * files from its own origin.
+       */
+      if (!pairedNow && !openToUnpaired(req.method, req.path)) {
+        if (EXTENSION.test(foreign)) res.setHeader('Access-Control-Allow-Origin', foreign);
+        res.setHeader('Vary', 'Origin');
+        res.status(403).json({
+          kind: 'not-paired',
+          error: token
+            ? `${NOT_PAIRED} The pairing this extension has was removed, or was made with another ResumeM-M.`
+            : NOT_PAIRED,
+        });
+        return;
+      }
+    }
+
     const origin = req.headers.origin;
     if (origin && WRITES.has(req.method)) {
-      let ok = EXTENSION.test(origin);
+      let ok = EXTENSION.test(origin) && (pairedNow || openToUnpaired(req.method, req.path));
       if (!ok) {
         try {
           const url = new URL(origin);
