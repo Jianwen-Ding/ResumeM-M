@@ -2856,7 +2856,43 @@ describe('workspace', () => {
    * extension's quick submit, which opens no workspace at all, or opening one
    * and then deleting it, which is a button.
    */
+  /*
+   * Recorded with the posting's address, as the extension's quick submit
+   * records it. A row recorded with no address at all is only the names'
+   * match for a posting that has one (`MatchStrength`), and a sent row only
+   * the names tie to a posting is never filed into: see the next test.
+   */
   it('finds the row this job already has, even if it was opened another day', async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const created = await request(app)
+      .post('/api/applications')
+      .send({
+        id: `${yesterday.slice(0, 10)}-streamly-data-platform-intern`,
+        company: 'Streamly',
+        role: 'Data Platform Intern',
+        url: 'https://boards.greenhouse.io/streamly/jobs/1',
+        status: 'applied',
+        appliedAt: yesterday,
+      })
+      .expect(200);
+
+    await open().expect(200);
+
+    const { body } = await request(app).get('/api/applications').expect(200);
+    const mine = body.applications.filter((a: { company: string }) => a.company === 'Streamly');
+    expect(mine.map((a: { id: string }) => a.id)).toEqual([created.body.id]);
+    expect(mine[0].status).toBe('applied');
+  });
+
+  /*
+   * But a sent row with no address is only the same job by its name, and a
+   * second posting with the same title at the same employer is the ordinary
+   * case that name cannot tell apart: Red Hat's Raleigh and Boston interns.
+   * Opened as that row, the space showed the sent one's letter as this one's
+   * and completing it replaced the files that went out. The row is left as it
+   * was, and the space is a new application's.
+   */
+  it('but does not take a sent row that only shares the name for this posting', async () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const created = await request(app)
       .post('/api/applications')
@@ -2869,12 +2905,14 @@ describe('workspace', () => {
       })
       .expect(200);
 
-    await open().expect(200);
+    const opened = await open().expect(200);
 
+    expect(opened.body.draft.id).not.toBe(created.body.id);
+    expect(opened.body.draft.status).toBe('drafting');
     const { body } = await request(app).get('/api/applications').expect(200);
-    const mine = body.applications.filter((a: { company: string }) => a.company === 'Streamly');
-    expect(mine.map((a: { id: string }) => a.id)).toEqual([created.body.id]);
-    expect(mine[0].status).toBe('applied');
+    const was = body.applications.find((a: { id: string }) => a.id === created.body.id);
+    expect(was.status).toBe('applied');
+    expect(was.history).toHaveLength(1);
   });
 
   /*

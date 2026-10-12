@@ -52,7 +52,7 @@ import {
 import { fitResumes, forgetPrintedText, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, localDay, alreadySent, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -845,6 +845,20 @@ function mintedForJob(id: string, job: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * The spaces that could be a row's when none has its id: every one but those
+ * whose id is another row's.
+ *
+ * A row moved or renamed looks for its space by id, then by the job's names
+ * (`draftForJob`) — and by name, last year's closed Coinbase intern row moved
+ * back to `applying` found this year's space, sent and named for this year's
+ * row, and reopened it; renamed, it renamed that space. A space whose id is
+ * another row's is that row's.
+ */
+function othersLeftOut<T extends { id: string }>(drafts: T[], apps: { id: string }[], id: string): T[] {
+  return drafts.filter((d) => d.id === id || !apps.some((a) => a.id === d.id));
 }
 
 export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps): Router {
@@ -4066,8 +4080,10 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
           id:
             // Not a space left over from an application that is over: see
             // `draftForJob`.
+            // Nor a sent row only the name ties to it: that is another job's,
+            // and the card would stage into it. See `forWriting`.
             draftForJob(store.loadDrafts(), data.applications, employer, role, jobAddress)?.id ??
-            findApplication(data.applications, employer, role, jobAddress)?.id ??
+            applicationToWrite(data.applications, employer, role, jobAddress)?.id ??
             freshApplicationId(data.applications, employer, role, store.outDir()),
           /*
            * And the resume made for it, so the card can put that one first in
@@ -4075,7 +4091,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
            * should always be on the very top … when looking at that very job
            * application". Absent until one has been built.
            */
-          resumeId: findApplication(data.applications, employer, role, jobAddress)?.resumeId,
+          resumeId: applicationToWrite(data.applications, employer, role, jobAddress)?.resumeId,
         },
         score,
         kind: verdict.kind,
@@ -4424,17 +4440,39 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * typed is laid over it. Nothing is taken away by not being mentioned:
        * this form asks for four things and an application holds a dozen.
        */
+      /*
+       * Found by name, only a row this could be written into (`forWriting`):
+       * a sent row only the name ties to it is another job's, and recording
+       * this one over it moved its status and replaced its address and notes.
+       * And how surely, for what follows.
+       */
       const apps = store.load().applications;
-      const existing = body.id
-        ? apps.find((a) => a.id === body.id)
-        : findApplication(apps, body.company, body.role, body.url);
+      const match = body.id ? undefined : findApplicationMatch(apps, body.company, body.role, body.url);
+      const existing = body.id ? apps.find((a) => a.id === body.id) : forWriting(match);
+      const weak = !body.id && match?.strength === 'weak';
 
       const now = new Date().toISOString();
-      const status = body.status ?? existing?.status ?? 'applied';
+      /*
+       * Never backwards when the row was found by its name. The web form sends
+       * no status, and the API's caller does: "applied" recorded for a job the
+       * tracker already has at `interview` put it back to `applied`. A row
+       * named by id is the caller's to move, as before.
+       */
+      const ORDER: Application['status'][] = ['interested', 'applying', 'applied', 'interview', 'offer', 'closed'];
+      const rank = (a: Application) => (closedAsStale(a) ? ORDER.indexOf('applying') : ORDER.indexOf(a.status));
+      const backwards =
+        !body.id && existing !== undefined && body.status !== undefined && ORDER.indexOf(body.status) < rank(existing);
+      const status = (backwards ? undefined : body.status) ?? existing?.status ?? 'applied';
       // Typed, not merely present: the form sends every box it has, so an
       // empty one means "I had nothing to add here" and not "delete that".
       const typed = (was: string | undefined, before: string | undefined) =>
         was?.trim() ? was : before;
+      /*
+       * And a row only the name ties to this (`MatchStrength`) keeps the
+       * address and notes it has: they may be another posting's, and only the
+       * typing says this one is the same. Filled when it has none.
+       */
+      const kept = (was: string | undefined, before: string | undefined) => (weak && before?.trim() ? before : typed(was, before));
       const resumeId = body.id ? (body.resumeId ?? existing?.resumeId) : (existing?.resumeId ?? body.resumeId);
       /*
        * And a sent row moved on to another resume remembers the one it went
@@ -4467,7 +4505,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         id: existing?.id ?? body.id ?? freshApplicationId(apps, body.company, body.role, store.outDir()),
         company: body.company,
         role: body.role,
-        url: typed(body.url, existing?.url),
+        url: kept(body.url, existing?.url),
         appliedAt: body.appliedAt ?? existing?.appliedAt ?? now,
         status,
         /*
@@ -4480,7 +4518,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          */
         resumeId,
         source: body.source ?? existing?.source,
-        notes: typed(body.notes, existing?.notes),
+        notes: kept(body.notes, existing?.notes),
         answers: body.answers ?? existing?.answers,
         ...(sentResumeIds ? { sentResumeIds } : {}),
         history: [
@@ -4637,7 +4675,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          * by its number too (see `sameJobAs`), so moving the row never found
          * its space again.
          */
-        const space = drafts.find((d) => d.id === id) ?? draftForJob(drafts, apps, app.company, app.role, app.url);
+        const space = drafts.find((d) => d.id === id) ?? draftForJob(othersLeftOut(drafts, apps, id), apps, app.company, app.role, app.url);
         store.saveApplications(apps.map((a) => (a.id === id ? next : a)));
         if (space) store.saveDraft({ ...space, company: next.company, role: next.role });
       });
@@ -4685,7 +4723,13 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
           const drafts = store.loadDrafts();
           const space =
             drafts.find((d) => d.id === moved.id) ??
-            draftForJob(drafts, store.load().applications, moved.company, moved.role, moved.url);
+            draftForJob(
+              othersLeftOut(drafts, store.load().applications, moved.id),
+              store.load().applications,
+              moved.company,
+              moved.role,
+              moved.url,
+            );
           if (space && unsent && space.status === 'submitted') store.saveDraft({ ...space, status: 'drafting' });
           if (space && sent && space.status !== 'submitted') store.saveDraft({ ...space, status: 'submitted' });
         }
@@ -4783,7 +4827,13 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * application as `applied` while the one being worked on sat at
        * `applying` for ever. See `findApplication`.
        */
-      const tracked = findApplication(data.applications, body.company, body.role, body.url);
+      /*
+       * Never a sent row only the name ties to this posting (`forWriting`):
+       * Red Hat's Boston requisition sent after its Raleigh one, both
+       * "Software Engineer Intern", was answered `changed: false` with
+       * Raleigh's row, and Boston's send was recorded nowhere.
+       */
+      const tracked = applicationToWrite(data.applications, body.company, body.role, body.url);
       // Not `applicationId`: a job applied for and closed earlier the same day
       // already holds the id today would make. See `freshApplicationId`.
       const id = tracked?.id ?? freshApplicationId(data.applications, body.company, body.role, store.outDir());
@@ -4824,7 +4874,21 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          * not the version history; given a commit of its own, every send cost
          * a second git run.
          */
-        const draft = findDraft(store.loadDrafts(), body.company!, body.role!, body.url);
+        /*
+         * Its own space first, by id; and by name never a space whose id is
+         * another row's — that is another application's, and this send is
+         * not its. See `draftForJob`.
+         */
+        const drafts = store.loadDrafts();
+        const rows = store.load().applications;
+        const draft =
+          drafts.find((d) => d.id === recorded.id) ??
+          findDraft(
+            drafts.filter((d) => !rows.some((a) => a.id === d.id)),
+            body.company!,
+            body.role!,
+            body.url,
+          );
         if (draft && draft.status !== 'submitted') store.saveDraft({ ...draft, status: 'submitted', updatedAt: now });
         return recorded;
       });
@@ -5207,7 +5271,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        */
       const id =
         draftForJob(store.loadDrafts(), data.applications, body.company, body.role, body.url)?.id ??
-        findApplication(data.applications, body.company, body.role, body.url)?.id ??
+        applicationToWrite(data.applications, body.company, body.role, body.url)?.id ??
         freshApplicationId(data.applications, body.company, body.role, store.outDir());
 
       // A posting-specific resume comes over with the draft; save it so the
@@ -5436,7 +5500,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
         const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
 
-        const tracked = findApplication(store.load().applications, draft.company, draft.role, draft.url);
+        const tracked = applicationToWrite(store.load().applications, draft.company, draft.role, draft.url);
         /*
          * In the draft's commit, not after it.
          *

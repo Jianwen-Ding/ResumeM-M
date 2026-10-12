@@ -794,6 +794,49 @@ const MAX_TITLE = 300;
 
 export function cleanRole(role: string | undefined, ...employers: (string | undefined)[]): string | undefined {
   if (role === undefined) return undefined;
+  const peeled = peelTitle(role, employers);
+  if (!peeled) return role.trim() || undefined;
+  return (peeled.peeled ? withoutTrailingLocation(peeled.out) : peeled.out) || role.trim() || undefined;
+}
+
+/**
+ * The place `cleanRole` cut off the end of a title, if it cut one: "Software
+ * Engineer Intern in Austin, TX | Coinbase" → "austin, tx".
+ *
+ * Cut so a role names the job the way the employer's other page does — the
+ * posting writes "{title} in {place} | {employer}" and the form "{title}" —
+ * but two titles that both name a place, and not the same one, are two jobs:
+ * Coinbase's Austin intern and its Seattle intern were one tracker row, and
+ * the send for the second was read as already made. `identity` reads the cut
+ * title and cannot see that; whoever compares two roles asks this as well,
+ * as it asks `differentRequisitions`. A place on one side only still matches.
+ */
+export function trailingPlaceOf(role: string | undefined, ...employers: (string | undefined)[]): string | undefined {
+  if (role === undefined) return undefined;
+  const peeled = peelTitle(role, employers);
+  if (!peeled?.peeled) return undefined;
+  const kept = withoutTrailingLocation(peeled.out);
+  if (kept === peeled.out) return undefined;
+  const place = peeled.out
+    .slice(kept.length)
+    .replace(/^\s+in\s+/i, '')
+    .trim();
+  return place ? place.toLowerCase().replace(/\s+/g, ' ') : undefined;
+}
+
+/** Two roles that both name a place `cleanRole` cuts (`trailingPlaceOf`), and not the same one. */
+export function differentPlaces(a: string | undefined, b: string | undefined, ...employers: (string | undefined)[]): boolean {
+  const x = trailingPlaceOf(a, ...employers);
+  const y = trailingPlaceOf(b, ...employers);
+  return Boolean(x && y && x !== y);
+}
+
+/**
+ * The title with what `cleanRole` peels taken off its ends, before the place,
+ * and whether anything was: the place only comes off after a site or employer
+ * suffix has. Undefined for a title with nothing in it.
+ */
+function peelTitle(role: string, employers: (string | undefined)[]): { out: string; peeled: boolean } | undefined {
   /*
    * One space where there were many, and no more of it than a title could be.
    * `SEPARATOR` opens on `\s*`, so a run of spaces with no separator after it
@@ -802,7 +845,7 @@ export function cleanRole(role: string | undefined, ...employers: (string | unde
    */
   const title = role.replace(/\s+/g, ' ').slice(0, MAX_TITLE);
   const segments = splitTitle(withoutTitleNoise(title));
-  if (segments.length === 0) return role.trim() || undefined;
+  if (segments.length === 0) return undefined;
   let peeled = false;
   while (segments.length > 1) {
     const last = segments[segments.length - 1]!;
@@ -838,7 +881,7 @@ export function cleanRole(role: string | undefined, ...employers: (string | unde
    * "Image Processing Engineer Intern". See `isJobIdSegment`.
    */
   const out = joinTitle(segments).replace(TRAILING_JOB_ID, '').trim();
-  return (peeled ? withoutTrailingLocation(out) : out) || role.trim() || undefined;
+  return { out, peeled };
 }
 
 /* ------------------------------------------------------------------ *
@@ -894,4 +937,49 @@ export function jobNumberIn(url?: string): string | undefined {
   const segments = parsed.pathname.split('/').filter(Boolean);
   // Nearest the end, as `roleFromUrl` reads: the job is further out than the system.
   return segments.reverse().find((seg) => isJobNumber(seg));
+}
+
+/*
+ * The parameters an address names a requisition by — the employer's own
+ * number for the job, the one a title writes as "(R-059038)" — rather than a
+ * board's number for its page of it.
+ */
+const REQUISITION_PARAM = /^(jobreqid|career_job_req_id|requisitionid|reqid|req)$/i;
+
+/*
+ * Workday ends a job's address with its requisition after the title's words:
+ * `…/job/Raleigh/Software-Engineer-Intern_R-059038`, `…_JR0286834`.
+ */
+const WORKDAY_HOST = /(?:^|\.)myworkday(?:jobs|site)\.com$/i;
+const WORKDAY_REQUISITION = /_([a-z]{0,4}[-_]?\d{4,}(?:-\d+)?)$/i;
+
+/**
+ * The requisition number an address names, lower case and letters and digits
+ * only — the shape `trailingJobId` gives a title's — so "R-059038" in a
+ * Workday address and "(R-059038)" in a LinkedIn title are one number.
+ *
+ * Only where the address names the requisition itself: a board's own number
+ * for its page (LinkedIn's `/jobs/view/4461337126`, a Greenhouse job id) is
+ * not one, and compared with a title's requisition it would make every job
+ * read on two sites two jobs. Those are compared with each other, on one
+ * site, by `jobNumberIn`.
+ */
+export function requisitionInUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const tidy = (s: string) => s.replace(/[^a-z0-9]/gi, '').toLowerCase() || undefined;
+  for (const [key, value] of parsed.searchParams) {
+    if (REQUISITION_PARAM.test(key) && /\d/.test(value)) return tidy(value);
+  }
+  if (!WORKDAY_HOST.test(parsed.hostname)) return undefined;
+  for (const seg of parsed.pathname.split('/').filter(Boolean).reverse()) {
+    const req = WORKDAY_REQUISITION.exec(seg)?.[1];
+    if (req) return tidy(req);
+  }
+  return undefined;
 }

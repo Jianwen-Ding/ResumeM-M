@@ -9,7 +9,7 @@ import { letterText } from '../render/letter.js';
 import { clipToBytes, fileNameKey, MAX_NAME_BYTES, syncCurrent } from './current.js';
 import { normalizeApplications } from './normalize.js';
 import { resolveResume, unsendableReason } from './resolve.js';
-import { cleanRole, differentRequisitions, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
+import { cleanRole, differentPlaces, differentRequisitions, employerKey, hostOf, isJobBoardHost, jobNumberIn, requisitionInUrl, trailingJobId, withoutTitleNoise } from '../jobs/names.js';
 import { companyFromUrl, looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
 // A cycle (answers.ts reads `employerName` and `localDay` from here), safe
 // because neither side calls the other while its module is loading.
@@ -372,7 +372,26 @@ function employerPart(company: string): string {
 }
 
 function rolePart(role: string, company: string): string {
-  return cleanRole(role, company) ?? role;
+  return sameWorkAnyWay(cleanRole(role, company) ?? role);
+}
+
+/*
+ * And with what one job's two pages write differently about it.
+ *
+ * LinkedIn adds how the job is worked to the title — "Software Engineer,
+ * Backend (Remote)", "… - Remote" — and the employer's own form says
+ * "Software Engineer, Backend"; one page writes "2027 Summer" and the other
+ * "Summer 2027". Each pair was two rows for one job: the workspace opened on
+ * LinkedIn sat at `applying` while the send from the form filed a second row
+ * at `applied`. Only for the key two rows are compared by — the role a row
+ * shows is the one it was given. Two postings with different job numbers are
+ * still two jobs: see the address veto in `sameJobAs`.
+ */
+const WORK_MODE_SUFFIX = /(?:\s*\(\s*(?:remote|hybrid|on-?site)\s*\)|\s+[-–—|]\s+(?:remote|hybrid|on-?site))$/i;
+const YEAR_THEN_SEASON = /\b((?:19|20)\d\d)\s+(summer|fall|autumn|winter|spring)\b/gi;
+
+function sameWorkAnyWay(role: string): string {
+  return role.replace(WORK_MODE_SUFFIX, '').replace(YEAR_THEN_SEASON, '$2 $1').trim() || role;
 }
 
 export function identity(company: string, role: string): string {
@@ -393,10 +412,17 @@ export function identity(company: string, role: string): string {
  * A number on one side only still matches: that is what the cut is for.
  * Compare two roles with this, not `identity(…) === identity(…)`.
  */
+/*
+ * Nor two places under one title: "Software Engineer Intern in Austin, TX |
+ * Coinbase" and "… in Seattle, WA | Coinbase" read as one key, since the place
+ * comes off with the employer (`cleanRole`), and are two jobs. See
+ * `differentPlaces`.
+ */
 export function sameIdentity(company: string, role: string, otherCompany: string, otherRole: string): boolean {
   return (
     identity(company, role) === identity(otherCompany, otherRole) &&
-    !differentRequisitions(role, otherRole, company, otherCompany)
+    !differentRequisitions(role, otherRole, company, otherCompany) &&
+    !differentPlaces(role, otherRole, company, otherCompany)
   );
 }
 
@@ -523,6 +549,119 @@ function sameTenant(url: string, other: string): boolean {
 }
 
 /*
+ * Two different jobs, whatever their names say: the address veto.
+ *
+ * The names were the only thing compared, so "Software Engineer Intern" at
+ * Red Hat was one job however many Red Hat posted. Its Raleigh requisition,
+ * R-059038, was applied for; the workspace for its Boston one, R-111111, then
+ * opened as `submitted` holding Raleigh's letter, completing it replaced the
+ * letter, resume and files that had gone to Raleigh, and the send from
+ * Boston's form was swallowed as already made. A requisition on both titles
+ * told them apart (`differentRequisitions`); the address, which said so on
+ * every page, was never asked.
+ *
+ * Two are different when both addresses are on one site, for one employer
+ * there (`sameTenant`), and name two job numbers — or when each side names a
+ * requisition, in its title or its address, and none of them is the other's.
+ * A requisition both share is never vetoed: Workday names one job at more than
+ * one address, with the title's words in it, and the number is what is the
+ * same.
+ */
+function requisitionsOf(role: string, company: string, url?: string): string[] {
+  return [trailingJobId(role, company), requisitionInUrl(url)].filter((r): r is string => Boolean(r));
+}
+
+function shareOne(mine: string[], theirs: string[]): boolean {
+  return mine.some((r) => theirs.includes(r));
+}
+
+function differentPostings(url: string | undefined, other: string | undefined): boolean {
+  if (!url || !other) return false;
+  const number = jobNumberIn(url);
+  const otherNumber = jobNumberIn(other);
+  if (!number || !otherNumber || number === otherNumber) return false;
+  const host = postingHost(hostOf(url));
+  return host !== '' && host === postingHost(hostOf(other)) && sameTenant(url, other);
+}
+
+/*
+ * One employer's own site, where neither address names a job number: the
+ * posting at `careers.helios.com/roles/platform-engineer` and its form at
+ * `/apply/platform-engineer`. Nothing in either address says which job, so
+ * nothing in them says another one, and the site is the employer's — the
+ * same title on it is that employer's same job, as surely as the names on
+ * one page. Not on a job board, whose one site is everybody's.
+ */
+function sameEmployersSite(url: string | undefined, other: string | undefined): boolean {
+  if (!url || !other || jobNumberIn(url) || jobNumberIn(other)) return false;
+  const host = postingHost(hostOf(url));
+  return host !== '' && host === postingHost(hostOf(other)) && !isJobBoardHost(host) && sameTenant(url, other);
+}
+
+/**
+ * How sure a match by name is.
+ *
+ * `strong`: something besides the names says it is this job — the same
+ * address (`sameAddress`), the same job number on the same site, a
+ * requisition both name, the employer's own site with no number on either
+ * address (`sameEmployersSite`) — or the job is asked about with no address, so the
+ * names are all there is to go on and they are what was meant: a row typed
+ * by hand ("Record an application" for a job the tracker has, to add a
+ * note), `rmm apply` filing one again.
+ *
+ * `weak`: a posting with an address, and a row only the names tie to it. A
+ * row with no address, or two addresses on two sites with no number in
+ * common: LinkedIn's page and the employer's form for one job, ordinarily —
+ * and just as ordinarily a second job with the same title at the same
+ * employer, which the posting's address would have told apart had the row
+ * had one. A weak match may suggest (which space to open, which letter to
+ * offer), and is never used to say a job has been sent, to refuse a stage, to
+ * swallow a send, or to file into a row that has gone out. See `forWriting`.
+ * Nor at all against a row untouched for half a year (`WEAK_MATCH_DAYS`).
+ */
+export type MatchStrength = 'strong' | 'weak';
+
+/** A row a job was found as, and how surely. */
+export interface JobMatch<T> {
+  row: T;
+  strength: MatchStrength;
+}
+
+/*
+ * How long a weak match is worth anything. A row named the same with nothing
+ * else in common, untouched for half a year, is last year's application or
+ * another job; it is not the one being worked on now.
+ */
+const WEAK_MATCH_DAYS = 180;
+
+type Matchable = {
+  company: string;
+  role: string;
+  url?: string;
+  aliases?: { company: string; role: string }[];
+  appliedAt?: string;
+  updatedAt?: string;
+  createdAt?: string;
+  history?: { at?: string }[];
+};
+
+/** The last time anything happened to a row or a space, as milliseconds; 0 when nothing says. */
+function lastActivity(row: Matchable): number {
+  const stamps = [row.appliedAt, row.updatedAt, row.createdAt, ...(row.history ?? []).map((h) => h?.at)];
+  let last = 0;
+  for (const at of stamps) {
+    const t = at ? Date.parse(at) : NaN;
+    if (Number.isFinite(t) && t > last) last = t;
+  }
+  return last;
+}
+
+function tooOldForAWeakMatch(row: Matchable, now = Date.now()): boolean {
+  const last = lastActivity(row);
+  return last > 0 && now - last > WEAK_MATCH_DAYS * 24 * 60 * 60 * 1000;
+}
+
+/*
  * The same job, by its number, under two spellings of who it is with.
  *
  * Electronic Arts posts its studios' jobs on its own board, and one job there
@@ -565,11 +704,7 @@ function sameTenant(url: string, other: string): boolean {
  * name somebody has already said is wrong is no evidence on its own; the
  * address is what says it is the same page. See `sameAddress`.
  */
-function sameJobAs(
-  company: string,
-  role: string,
-  url?: string,
-): (row: { company: string; role: string; url?: string; aliases?: { company: string; role: string }[] }) => boolean {
+function sameJobAs(company: string, role: string, url?: string): (row: Matchable) => MatchStrength | undefined {
   const key = identity(company, role);
   const number = jobNumberIn(url);
   /*
@@ -581,19 +716,48 @@ function sameJobAs(
   const site = postingHost(hostOf(url));
   const job = slug(rolePart(role, company));
   const named = Boolean(job) && !/^unknown role\b/i.test(role.trim());
+  const mine = requisitionsOf(role, company, url);
   const byName = (other: { company: string; role: string }) =>
-    identity(other.company, other.role) === key && !differentRequisitions(role, other.role, company, other.company);
-  return (row) =>
-    byName(row) ||
-    ((row.aliases ?? []).some((was) => typeof was?.company === 'string' && typeof was?.role === 'string' && byName(was)) &&
-      sameAddress(url, row.url)) ||
-    (named &&
+    identity(other.company, other.role) === key &&
+    !differentRequisitions(role, other.role, company, other.company) &&
+    !differentPlaces(role, other.role, company, other.company);
+  return (row) => {
+    const theirs = requisitionsOf(row.role, row.company, row.url);
+    const shared = shareOne(mine, theirs);
+    if (!shared && ((mine.length > 0 && theirs.length > 0) || differentPostings(url, row.url))) return undefined;
+    const byNumber =
+      named &&
       Boolean(number) &&
       jobNumberIn(row.url) === number &&
       postingHost(hostOf(row.url)) === site &&
       sameTenant(url!, row.url!) &&
-      slug(rolePart(row.role, row.company)) === job);
+      slug(rolePart(row.role, row.company)) === job;
+    if (byNumber) return 'strong';
+    if (
+      (row.aliases ?? []).some((was) => typeof was?.company === 'string' && typeof was?.role === 'string' && byName(was)) &&
+      sameAddress(url, row.url)
+    ) {
+      return 'strong';
+    }
+    if (!byName(row)) return undefined;
+    if (shared || sameAddress(url, row.url) || sameEmployersSite(url, row.url) || !url) return 'strong';
+    return tooOldForAWeakMatch(row) ? undefined : 'weak';
+  };
 }
+
+/** Every row a job matches, with how surely. */
+function matchesOf<T extends Matchable>(rows: T[], company: string, role: string, url?: string): JobMatch<T>[] {
+  const strength = sameJobAs(company, role, url);
+  const out: JobMatch<T>[] = [];
+  for (const row of rows) {
+    const s = strength(row);
+    if (s) out.push({ row, strength: s });
+  }
+  return out;
+}
+
+const strongFirst = (a: { strength: MatchStrength }, b: { strength: MatchStrength }) =>
+  (a.strength === 'strong' ? 0 : 1) - (b.strength === 'strong' ? 0 : 1);
 
 /**
  * What each kind of lost reference is called in a sentence a person reads,
@@ -671,17 +835,62 @@ export function describeLost(lost: { kind: string }[]): string | undefined {
  * built were nowhere a file picker would find them.
  */
 export function findApplication(apps: Application[], company: string, role: string, url?: string): Application | undefined {
-  const same = apps.filter(sameJobAs(company, role, url));
+  return findApplicationMatch(apps, company, role, url)?.row;
+}
+
+/**
+ * `findApplication`, saying how sure it is (`MatchStrength`).
+ *
+ * A row something besides the names ties to this job is preferred to one only
+ * the names do, before the rule about which is being worked on: the row whose
+ * address is this posting's is this posting's even when another with the
+ * same title is still at `applying`.
+ */
+export function findApplicationMatch(
+  apps: Application[],
+  company: string,
+  role: string,
+  url?: string,
+): JobMatch<Application> | undefined {
+  const same = matchesOf(apps, company, role, url);
   if (same.length === 0) return undefined;
 
-  const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
   // Closed only for being left alone is still this application; see
   // `closedAsStale`.
-  const unsent = same.filter((a) => a.status === 'interested' || a.status === 'applying' || closedAsStale(a));
-  if (unsent.length > 0) return unsent.sort(byNewest)[0];
-  // Undefined when every one of them is finished: this is a new attempt, and
-  // it needs a row and a folder of its own. See `freshApplicationId`.
-  return same.filter((a) => a.status !== 'closed').sort(byNewest)[0];
+  const unsent = (a: Application) => a.status === 'interested' || a.status === 'applying' || closedAsStale(a);
+  // Strong over weak; then, as always, one being worked on over one sent, and
+  // the newest. Undefined when every one of them is finished: this is a new
+  // attempt, and it needs a row and a folder of its own. See
+  // `freshApplicationId`.
+  return same
+    .filter(({ row }) => unsent(row) || row.status !== 'closed')
+    .sort(
+      (a, b) =>
+        strongFirst(a, b) ||
+        Number(unsent(b.row)) - Number(unsent(a.row)) ||
+        (b.row.appliedAt ?? '').localeCompare(a.row.appliedAt ?? ''),
+    )[0];
+}
+
+/**
+ * The row a job's files, letter, send or status may be written into: the
+ * one `findApplicationMatch` found, unless only its name matched and it has
+ * already gone out. Then it is another job's, as far as anything that writes
+ * is concerned — filing into it replaced what was sent to that job, a send
+ * into it was swallowed as already made, a stage was refused — and the caller
+ * files a new row. See `MatchStrength`.
+ */
+export function forWriting(match: JobMatch<Application> | undefined): Application | undefined {
+  if (!match) return undefined;
+  if (match.strength === 'weak' && (sentAlready(match.row) || (match.row.status === 'closed' && !closedAsStale(match.row)))) {
+    return undefined;
+  }
+  return match.row;
+}
+
+/** `findApplication` for anything that writes: see `forWriting`. */
+export function applicationToWrite(apps: Application[], company: string, role: string, url?: string): Application | undefined {
+  return forWriting(findApplicationMatch(apps, company, role, url));
 }
 
 /**
@@ -738,9 +947,17 @@ export function freshApplicationId(apps: Application[], company: string, role: s
  * September — and it closed. See what you sent", dated the day they started
  * and pointing at nothing sent.
  */
+/*
+ * And only a row something besides the name ties to this job (`MatchStrength`).
+ * "You applied to this on 20 September" about Red Hat's Boston requisition,
+ * because Raleigh's had the same title, is the claim this exists to make and
+ * was wrong: the card offered the other job's files, and somebody believing it
+ * does not apply.
+ */
 export function alreadySent(apps: Application[], company: string, role: string, url?: string): Application | undefined {
-  return apps
-    .filter(sameJobAs(company, role, url))
+  return matchesOf(apps, company, role, url)
+    .filter((m) => m.strength === 'strong')
+    .map((m) => m.row)
     .filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
 }
@@ -752,10 +969,26 @@ export function findDraft<T extends { id: string; company: string; role: string;
   role: string,
   url?: string,
 ): T | undefined {
-  const same = drafts.filter(sameJobAs(company, role, url));
+  return findDraftMatch(drafts, company, role, url)?.row;
+}
+
+/** `findDraft`, saying how sure it is, strong over weak first. See `MatchStrength`. */
+export function findDraftMatch<T extends { id: string; company: string; role: string; status: string; updatedAt?: string; url?: string }>(
+  drafts: T[],
+  company: string,
+  role: string,
+  url?: string,
+): JobMatch<T> | undefined {
+  return pickDraft(matchesOf(drafts, company, role, url));
+}
+
+/** One being written over one sent, then strong over weak, then the newest. */
+function pickDraft<T extends { status: string; updatedAt?: string }>(same: JobMatch<T>[]): JobMatch<T> | undefined {
   if (same.length === 0) return undefined;
-  const open = same.filter((d) => d.status !== 'submitted');
-  return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
+  const open = same.filter((m) => m.row.status !== 'submitted');
+  return (open.length > 0 ? open : same).sort(
+    (a, b) => strongFirst(a, b) || (b.row.updatedAt ?? '').localeCompare(a.row.updatedAt ?? ''),
+  )[0];
 }
 
 /**
@@ -786,18 +1019,26 @@ export function draftForJob<T extends { id: string; company: string; role: strin
   role: string,
   url?: string,
 ): T | undefined {
-  const live = findApplication(apps, company, role, url);
+  const live = applicationToWrite(apps, company, role, url);
   const over = (d: T): boolean => {
     const row = apps.find((a) => a.id === d.id);
     if (row) return row.status === 'closed' && !closedAsStale(row);
     return d.status === 'submitted' && !live && Boolean(alreadySent(apps, company, role, url));
   };
-  return findDraft(
-    drafts.filter((d) => !over(d)),
-    company,
-    role,
-    url,
-  );
+  /*
+   * And not a space only the name ties to this job when it has gone out — it
+   * is `submitted`, or its row is past `applying`. That space is another
+   * job's sent application: opened for this one it showed that job's letter
+   * as this one's, opened as `submitted`, and its id took the new row's place
+   * over the sent one. See `forWriting`.
+   */
+  const sentElsewhere = (m: JobMatch<T>): boolean => {
+    if (m.strength === 'strong') return false;
+    if (m.row.status === 'submitted') return true;
+    const row = apps.find((a) => a.id === m.row.id);
+    return Boolean(row) && !forWriting({ row: row!, strength: 'weak' });
+  };
+  return pickDraft(matchesOf(drafts.filter((d) => !over(d)), company, role, url).filter((m) => !sentElsewhere(m)))?.row;
 }
 
 /**
@@ -810,7 +1051,7 @@ export function draftForJob<T extends { id: string; company: string; role: strin
  * Workspace while it was being written. This asks it of the live row only.
  */
 export function liveOneSent(apps: Application[], company: string, role: string, url?: string): boolean {
-  const live = findApplication(apps, company, role, url);
+  const live = applicationToWrite(apps, company, role, url);
   return Boolean(live) && live!.status !== 'interested' && live!.status !== 'applying' && !closedAsStale(live!);
 }
 
@@ -874,7 +1115,8 @@ export class AlreadySent extends Error {
 /** A stage over an application already sent, told apart before anything is written. See `AlreadySent`. */
 export function refusedAsSent(store: Store, req: Pick<BundleRequest, 'company' | 'role' | 'url' | 'status' | 'evenIfSent'>): Application | null {
   if (req.status !== 'applying' || req.evenIfSent) return null;
-  const app = findApplication(store.load().applications, req.company, req.role, req.url);
+  // Only a row this job is surely: see `forWriting`.
+  const app = applicationToWrite(store.load().applications, req.company, req.role, req.url);
   return app && sentAlready(app) ? app : null;
 }
 
@@ -1064,7 +1306,7 @@ function answersToKeep(
  */
 export async function buildBundle(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data0 = store.load();
-  const existing = findApplication(data0.applications, req.company, req.role, req.url);
+  const existing = applicationToWrite(data0.applications, req.company, req.role, req.url);
   return inBuildLane(
     existing?.id ?? freshApplicationId(data0.applications, req.company, req.role, store.outDir()),
     () => buildBundleNow(store, req),
@@ -1111,7 +1353,11 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * already using, so rebuilding does not quietly rename the files somebody
    * has been dragging into a form.
    */
-  const already = findApplication(data.applications, req.company, req.role, req.url);
+  /*
+   * Never a sent row only the name ties to this job: its files are what went
+   * to another job, and this build would replace them. See `forWriting`.
+   */
+  const already = applicationToWrite(data.applications, req.company, req.role, req.url);
   const naming = req.naming ?? already?.naming;
   const [resumeName, letterName, answersName] = bundleFileNames(
     resolved.profile.name,
