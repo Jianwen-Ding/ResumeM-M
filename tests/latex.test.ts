@@ -182,6 +182,22 @@ describe('inline markup', () => {
   it('renders a markdown link as \\href', () => {
     expect(inlineTex('[my site](https://example.com)')).toContain('\\href{https://example.com}');
   });
+
+  /*
+   * The PDF goes to an employer, and the text can come from a posting or an
+   * AI draft: a `javascript:` (or `data:`, `file:`) target was a live link
+   * annotation in it. Only the web, mail, phone and bare addresses link.
+   */
+  it('keeps a link to anything but the web, mail or a phone as its words', () => {
+    for (const url of ['javascript:alert(1)', 'JavaScript:x', ' data:text/html,x', 'file:///etc/passwd', 'vbscript:x']) {
+      const out = inlineTex(`[click](${url})`);
+      expect(out, url).not.toContain('\\href');
+      expect(out, url).toContain('click');
+    }
+    for (const url of ['https://example.com', 'http://a.b', 'mailto:a@example.com', 'tel:+15550100', 'example.com/x']) {
+      expect(inlineTex(`[ok](${url})`), url).toContain('\\href{');
+    }
+  });
 });
 
 /*

@@ -335,6 +335,21 @@ export function texHref(url: string): string {
     .replace(/([%#&])/g, '\\$1');
 }
 
+/**
+ * Whether a markdown link's target may become a link in the PDF.
+ *
+ * The PDF is what goes to an employer, and a letter or a bullet can carry
+ * text that came from somewhere else — a posting, an AI draft. Any scheme
+ * written there became a live link annotation: `[here](javascript:…)` was
+ * a `javascript:` URI in the document sent out. Only the schemes a reader's
+ * PDF viewer should open are linked — the web, mail and phone, and a bare
+ * address with no scheme at all — as the editor's own links already are.
+ */
+function linkable(url: string): boolean {
+  const scheme = /^\s*([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase();
+  return scheme === undefined || ['http', 'https', 'mailto', 'tel'].includes(scheme);
+}
+
 function markup(s: string, depth: number): string {
   if (depth <= 0) return tex(s);
 
@@ -348,7 +363,11 @@ function markup(s: string, depth: number): string {
     const [whole, label, url, strongem, bold, starItalic, underItalic, code] = m;
     const italic = starItalic ?? underItalic;
 
-    if (label !== undefined) {
+    if (label !== undefined && !linkable(url!)) {
+      // A link to anything but a web page or an address: kept as its words.
+      // See `linkable`.
+      out += markup(label, depth - 1);
+    } else if (label !== undefined) {
       out += `\\href{${texHref(url!)}}{\\underline{${markup(label, depth - 1)}}}`;
     } else if (strongem !== undefined) {
       out += `\\textbf{\\textit{${markup(strongem, depth - 1)}}}`;
