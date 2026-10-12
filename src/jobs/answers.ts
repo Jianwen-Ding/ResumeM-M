@@ -150,18 +150,55 @@ function tokens(s: string): string[] {
   return normalise(s).split(/[^a-z0-9+#]+/).filter(Boolean);
 }
 
-/** Every word, common ones included: the fallback when filtering leaves nothing. */
-function words(s: string): Set<string> {
-  return new Set(tokens(s));
+/*
+ * Read once per string, not once per comparison.
+ *
+ * Matching a form against the bank compares every question asked with every
+ * question stored, and each comparison read both questions into words from
+ * scratch: a hundred questions against a bank of 540 re-read the same 540
+ * stored questions a hundred times over, and took over a second. The words of
+ * a question do not change between one comparison and the next, so they are
+ * kept, keyed by the text. Bounded, because the server runs for days and
+ * every question any form ever asked would otherwise stay in memory; when it
+ * fills it starts again, which costs one re-read each and changes no answer.
+ *
+ * The sets handed back are shared, so they are read-only: nothing that takes
+ * one may add to it or take from it.
+ */
+const READ_LIMIT = 5000;
+
+function remembered<T>(fn: (s: string) => T): (s: string) => T {
+  const seen = new Map<string, T>();
+  return (s: string) => {
+    let out = seen.get(s);
+    if (out === undefined) {
+      if (seen.size >= READ_LIMIT) seen.clear();
+      out = fn(s);
+      seen.set(s, out);
+    }
+    return out;
+  };
 }
 
-function terms(s: string): Set<string> {
-  return new Set(
-    tokens(s)
-      .filter((w) => w.length > 2 && !STOP.has(w))
-      .map(stem),
-  );
-}
+/** Every word, common ones included: the fallback when filtering leaves nothing. */
+const words = remembered((s: string): ReadonlySet<string> => new Set(tokens(s)));
+
+/*
+ * Words of three letters or more — and the short ones that are a language's
+ * whole name. `tokens` keeps "#" and "+" so that C, C# and C++ are three
+ * words, but the length cut then threw "c#" away along with "c", and
+ * "C# Skill Proficiency Levels" read as exactly "C Skill Proficiency
+ * Levels": the bank's answer about C came back for a question about C#. A
+ * word with a letter and a "#" or "+" in it is never noise, so it stays.
+ */
+const terms = remembered(
+  (s: string): ReadonlySet<string> =>
+    new Set(
+      tokens(s)
+        .filter((w) => (w.length > 2 || (/[a-z]/.test(w) && /[+#]/.test(w))) && !STOP.has(w))
+        .map(stem),
+    ),
+);
 
 /**
  * Jaccard-style overlap, biased toward covering the *stored* question: a short
@@ -199,7 +236,7 @@ export function questionSimilarity(a: string, b: string): number {
 }
 
 /** The score itself, over two questions already read into terms. */
-function overlap(ta: Set<string>, tb: Set<string>): number {
+function overlap(ta: ReadonlySet<string>, tb: ReadonlySet<string>): number {
   if (ta.size === 0 || tb.size === 0) return 0;
 
   let shared = 0;
@@ -848,14 +885,54 @@ export function matchAnswer(
   // suggestion. Checked before the bank is even searched, so nothing about
   // what is stored — or whether anything is stored — leaks through the score.
   if (isSensitiveQuestion(question)) return { question, score: 0, confident: false };
-  // And never hand back a stored value that is itself an identifier — one
-  // banked before these checks existed, or under a question worded past them.
-  bank = bank.filter((item) => !item.variants.some((v) => isSensitiveAnswer(v.text)));
+  return matchInBank(question, safeToOffer(bank), threshold, company, employers);
+}
 
+/*
+ * Never hand back a stored value that is itself an identifier — one banked
+ * before these checks existed, or under a question worded past them.
+ *
+ * Its own step so `matchAnswers` can take it once for a whole form. It ran
+ * once per question, through every variant of every item, and a form of a
+ * hundred questions read the whole bank for identifiers a hundred times.
+ */
+function safeToOffer(bank: AnswerBankItem[]): AnswerBankItem[] {
+  return bank.filter((item) => !item.variants.some((v) => isSensitiveAnswer(v.text)));
+}
+
+/** `matchAnswer` past its checks, against a bank already through `safeToOffer`. */
+function matchInBank(
+  question: string,
+  bank: AnswerBankItem[],
+  threshold: number,
+  company: string | undefined,
+  employers: string[] | undefined,
+): AnswerMatch {
+  /*
+   * The stored question that is this question, if there is one, before any
+   * scoring.
+   *
+   * The best score used to win, and the first of several equal scores. But a
+   * score of 1 is not only the question itself: "desired" and "expected" are
+   * one word to the matcher, so "What is your desired salary?" scored 1 against
+   * a stored "What is your expected salary?" too, and whichever came first in
+   * the bank answered — a different figure, written for a different form, and
+   * confident, so filled in unread. Asking each stored question of a real bank
+   * of 540 handed back some other item 32 times. When the bank holds the very
+   * question asked, as `sameQuestion` reads it, that is the answer the person
+   * wrote for it, and nothing that merely scores as well comes ahead of it.
+   * Otherwise the first of equal scores still wins, which is at least the same
+   * one every time.
+   */
   let best: { item: AnswerBankItem; score: number } | undefined;
-  for (const item of bank) {
-    const score = questionSimilarity(question, item.question);
-    if (!best || score > best.score) best = { item, score };
+  const exact = bank.find((item) => sameQuestion(question, item.question));
+  if (exact) {
+    best = { item: exact, score: questionSimilarity(question, exact.question) };
+  } else {
+    for (const item of bank) {
+      const score = questionSimilarity(question, item.question);
+      if (!best || score > best.score) best = { item, score };
+    }
   }
 
   if (!best || best.score < threshold) {
@@ -988,7 +1065,14 @@ export function matchAnswers(
   bank: AnswerBankItem[],
   options?: number | MatchOptions,
 ): AnswerMatch[] {
-  return questions.map((q) => matchAnswer(q, bank, options ?? {}));
+  const { threshold = 0.45, company, employers } =
+    typeof options === 'number' ? ({ threshold: options } as MatchOptions) : (options ?? {});
+  // Read the bank for identifiers once for the form, not once per question.
+  // See `safeToOffer`; the order of checks is otherwise `matchAnswer`'s own.
+  const safe = safeToOffer(bank);
+  return questions.map((q) =>
+    isSensitiveQuestion(q) ? { question: q, score: 0, confident: false } : matchInBank(q, safe, threshold, company, employers),
+  );
 }
 
 /**

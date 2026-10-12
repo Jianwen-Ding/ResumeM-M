@@ -9547,8 +9547,29 @@ function voiceChip(kind, id, inVoice, after) {
   });
 }
 
+/*
+ * The letters and the store as last loaded, so the search boxes narrow what
+ * is in hand.
+ *
+ * Every keystroke in either box called `loadLetters`, which asked for every
+ * letter and the whole store again — 150 to 340ms a key on a real save, with
+ * nothing to stop a slow answer for "hel" landing after the one for
+ * "helios" and drawing the wrong list. Typing is a view of what is loaded,
+ * as it is for the tracker (`lastApplications`), so the boxes redraw from
+ * here; a load that a newer one has overtaken is dropped rather than drawn.
+ */
+let lastWriting = null;
+let writingLoads = 0;
+
 async function loadLetters() {
+  const mine = ++writingLoads;
   const [letters, store] = await Promise.all([api('/letters'), api('/store')]);
+  if (mine !== writingLoads) return;
+  lastWriting = { letters, store };
+  drawLetters(lastWriting);
+}
+
+function drawLetters({ letters, store }) {
 
   /*
    * The whole card is searched, body included. Somebody looking for a letter
@@ -13192,7 +13213,10 @@ async function boot() {
    * than asking the server again — this is a view of what is loaded, not a
    * query, so it answers as fast as somebody types.
    */
+  let narrowing = null;
   const narrow = () => {
+    clearTimeout(narrowing);
+    narrowing = null;
     appFilter = {
       text: ($('#app-find')?.value ?? '').trim(),
       status: $('#app-status')?.value ?? '',
@@ -13200,7 +13224,23 @@ async function boot() {
     if (lastApplications) drawApplications(lastApplications);
     else loadApplications().catch((e) => setStatus(e.message, true));
   };
-  if ($('#app-find')) $('#app-find').oninput = narrow;
+  /*
+   * The search box waits for a pause in the typing before it redraws.
+   *
+   * Drawing the tracker builds every row afresh, and on a long tracker the
+   * first letter typed — the one that still matches nearly everything — paid
+   * for all of them, then the next letter paid again, while the box lagged
+   * behind the keys. Redrawing once somebody stops for a moment draws the
+   * list they meant. The filter itself is taken at once, so anything that
+   * reloads the list in between already draws it narrowed. The stage menu is
+   * one deliberate choice and redraws straight away.
+   */
+  const narrowSoon = () => {
+    appFilter = { ...appFilter, text: ($('#app-find')?.value ?? '').trim() };
+    clearTimeout(narrowing);
+    narrowing = setTimeout(narrow, 120);
+  };
+  if ($('#app-find')) $('#app-find').oninput = narrowSoon;
   if ($('#app-status')) $('#app-status').onchange = narrow;
   $('#btn-new-draft').onclick = () => newDraft().catch((e) => setStatus(e.message, true));
   // The extension writes drafts from another tab, so there is something to
@@ -13217,11 +13257,13 @@ async function boot() {
   $('#btn-add-answer').onclick = addAnswer;
 
   // Narrowing the two lists on the Letters & Answers tab. Both redraw from
-  // what is already loaded, so they answer as fast as somebody types.
+  // what is already loaded (`lastWriting`), so they answer as fast as
+  // somebody types; only a box typed in before the first load asks.
   const narrowWriting = () => {
     letterFilter = ($('#letter-find')?.value ?? '').trim();
     answerFilter = ($('#answer-find')?.value ?? '').trim();
-    loadLetters().catch((e) => setStatus(e.message, true));
+    if (lastWriting) drawLetters(lastWriting);
+    else loadLetters().catch((e) => setStatus(e.message, true));
   };
   if ($('#letter-find')) $('#letter-find').oninput = narrowWriting;
   if ($('#answer-find')) $('#answer-find').oninput = narrowWriting;

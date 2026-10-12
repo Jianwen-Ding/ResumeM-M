@@ -239,6 +239,30 @@ describe('narrowing the tracker', () => {
     expect(asked()).toBe(before);
   });
 
+  /*
+   * Every keystroke rebuilt every row of the tracker, the first one — which
+   * still matches nearly everything — most of all. The box waits for a pause
+   * in the typing and draws once.
+   */
+  it('draws once somebody stops typing, not once a letter', async () => {
+    const find = document.querySelector('#app-find');
+    const table = document.querySelector('#apps-wrap');
+    let redraws = 0;
+    const seen = new window.MutationObserver((changes) => {
+      if (changes.some((c) => c.target === table)) redraws++;
+    });
+    seen.observe(table, { childList: true });
+    for (const typed of ['h', 'he', 'hel', 'helios']) {
+      find.value = typed;
+      find.dispatchEvent(new window.Event('input'));
+    }
+    expect(rows()).toHaveLength(3);
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+    await new Promise((r) => setTimeout(r, 200));
+    seen.disconnect();
+    expect(redraws).toBe(1);
+  });
+
   it('narrows to one stage', async () => {
     const stage = document.querySelector('#app-status');
     stage.value = 'interview';

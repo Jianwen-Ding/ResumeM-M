@@ -1443,3 +1443,108 @@ describe('an AI-written answer filed from a completed application', () => {
     expect(matchAnswer(Q, bank).confident).toBe(true);
   });
 });
+
+describe('the stored question that is the question asked', () => {
+  const item = (id: string, question: string, text: string): AnswerBankItem => ({
+    id,
+    question,
+    default: 'v1',
+    variants: [{ id: 'v1', label: 'Base', text }],
+  });
+
+  it('answers it, even when a near-duplicate scoring the same comes first', () => {
+    // "desired" and "expected" are one word to the matcher, so both score 1.
+    const bank = [
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?', '$110,000'),
+    ];
+    expect(questionSimilarity('What is your desired salary?', bank[0]!.question)).toBe(
+      questionSimilarity('What is your desired salary?', bank[1]!.question),
+    );
+    const m = matchAnswer('What is your desired salary?', bank);
+    expect(m.item?.id).toBe('desired');
+    expect(m.answer).toBe('$110,000');
+    expect(matchAnswer('What is your expected salary?', bank).item?.id).toBe('expected');
+  });
+
+  it('as sameQuestion reads it: case, spacing and a required marker aside', () => {
+    const bank = [
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?*', '$110,000'),
+    ];
+    expect(matchAnswer('what is your  desired salary? ', bank).item?.id).toBe('desired');
+  });
+
+  it('and the same through matchAnswers, for a whole form at once', () => {
+    const bank = [
+      item('m05', 'month 2027-05', 'May'),
+      item('m12', 'month 2027-12', 'December'),
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?', '$110,000'),
+    ];
+    const ms = matchAnswers(bank.map((b) => b.question), bank);
+    expect(ms.map((m) => m.item?.id)).toEqual(['m05', 'm12', 'expected', 'desired']);
+  });
+
+  it('without one, equal scores go to the first in the bank every time', () => {
+    const bank = [
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?', '$110,000'),
+    ];
+    expect(matchAnswer('Your desired salary', bank).item?.id).toBe('expected');
+    expect(matchAnswer('Your desired salary', [...bank].reverse()).item?.id).toBe('desired');
+  });
+});
+
+describe('C, C# and C++', () => {
+  const bank: AnswerBankItem[] = ['C', 'C#', 'C++'].map((lang) => ({
+    id: lang,
+    question: `${lang} Skill Proficiency Levels`,
+    default: 'v1',
+    variants: [{ id: 'v1', label: 'Base', text: `My ${lang} is solid.` }],
+  }));
+
+  it('are three different words to the matcher', () => {
+    expect(questionSimilarity('C# Skill Proficiency Levels', 'C Skill Proficiency Levels')).toBeLessThan(1);
+    expect(questionSimilarity('C++ Skill Proficiency Levels', 'C Skill Proficiency Levels')).toBeLessThan(1);
+    expect(questionSimilarity('C# Skill Proficiency Levels', 'C++ Skill Proficiency Levels')).toBeLessThan(1);
+  });
+
+  it('each find their own answer, in any order in the bank', () => {
+    for (const order of [bank, [...bank].reverse()]) {
+      for (const lang of ['C', 'C#', 'C++']) {
+        expect(matchAnswer(`${lang} Skill Proficiency Levels`, order).item?.id).toBe(lang);
+        // Worded past `sameQuestion`, so found by score alone.
+        expect(matchAnswer(`Please rate your ${lang} skill proficiency levels`, order).item?.id).toBe(lang);
+      }
+    }
+  });
+
+  it('and C# asked is never confidently answered with C', () => {
+    const m = matchAnswer('Please rate your C# skill proficiency levels', [bank[0]!]);
+    expect(m.confident).toBe(false);
+  });
+});
+
+describe('matchAnswers', () => {
+  it('matches each question as matchAnswer does, sensitive ones and stored identifiers included', () => {
+    const bank: AnswerBankItem[] = [
+      ...SAMPLE_ANSWERS,
+      {
+        id: 'dob',
+        question: 'Anything else we should know?',
+        default: 'v1',
+        variants: [{ id: 'v1', label: 'Base', text: 'DOB: 04/02/1999' }],
+      },
+    ];
+    const qs = [
+      ...bank.map((b) => b.question),
+      'What is your Social Security number?',
+      'Anything else we should know?',
+      'Why us?',
+    ];
+    const one = qs.map((q) => matchAnswer(q, bank, { company: 'Acme' }));
+    expect(matchAnswers(qs, bank, { company: 'Acme' })).toEqual(one);
+    expect(matchAnswers(qs, bank, 0.3)).toEqual(qs.map((q) => matchAnswer(q, bank, 0.3)));
+  });
+});
