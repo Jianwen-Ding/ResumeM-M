@@ -7468,8 +7468,24 @@ let openApplicationId = null;
  */
 let appFilter = { text: '', status: '' };
 
+/*
+ * The last list the server sent, so narrowing it is not another request.
+ *
+ * The search box and the status filter called `loadApplications` on every
+ * keystroke, and `GET /applications` is not only a read: it brings the upload
+ * folder up to date (`syncCurrent`), which rewrites the folder's manifest
+ * each time. Typing "Acme" into the search wrote out/current four times —
+ * the folder a portal's file dialog may be open over — to show a view of a
+ * list already in hand.
+ */
+let lastApplications = null;
+
 async function loadApplications() {
-  const { applications, stats, current } = await api('/applications');
+  lastApplications = await api('/applications');
+  drawApplications(lastApplications);
+}
+
+function drawApplications({ applications, stats, current }) {
 
   // Where to point a file picker: everything still in flight, in one folder,
   // already named the way portals want it.
@@ -9464,6 +9480,13 @@ async function completeDraft(draft, notes) {
         ...res.files.map((f) => el('div', { className: 'hint', textContent: f })),
         el('p', { className: 'hint', style: 'margin-top:8px', textContent: res.dir }),
         el('p', { className: 'hint', textContent: 'Answers are in the application history and saved to your bank.' }),
+        /*
+         * And what the server said about it. The route has always returned
+         * `warnings` — a letter edited while it compiled, files of an
+         * application already sent replaced by this build — and this modal
+         * said "Filed" over them and nothing else.
+         */
+        ...(res.warnings ?? []).map((w) => el('p', { className: 'hint warn', textContent: w })),
       ]),
     );
   } catch (err) {
@@ -13174,7 +13197,8 @@ async function boot() {
       text: ($('#app-find')?.value ?? '').trim(),
       status: $('#app-status')?.value ?? '',
     };
-    loadApplications().catch((e) => setStatus(e.message, true));
+    if (lastApplications) drawApplications(lastApplications);
+    else loadApplications().catch((e) => setStatus(e.message, true));
   };
   if ($('#app-find')) $('#app-find').oninput = narrow;
   if ($('#app-status')) $('#app-status').onchange = narrow;

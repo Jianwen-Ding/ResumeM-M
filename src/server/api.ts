@@ -38,7 +38,7 @@ import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
-import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion } from '../jobs/answers.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion, fileSentAnswer } from '../jobs/answers.js';
 import { UNKNOWN_COMPANY, classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
 import { jobNumberIn, withRequisition } from '../jobs/names.js';
 import {
@@ -65,7 +65,8 @@ import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snap
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
 import { Store, withoutBom } from '../model/store.js';
-import { isVariantField, layoutFor, RESUME_TIERS, type ResumeTier } from '../model/types.js';
+import { isVariantField, layoutFor, RESUME_TIERS, tierOf, type ResumeTier } from '../model/types.js';
+import { wentOut } from '../model/tiers.js';
 import type {
   AnswerBankItem,
   Application,
@@ -3254,6 +3255,8 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         const already = existing.variants.find((v) => v.text.trim() === answer.trim());
         if (already) {
           existing.default = already.id;
+          // Saved by hand: no longer an AI draft nobody has read.
+          delete already.suggested;
         } else {
           // A new phrasing of a question already in the bank, not a new question.
           const id = `v_${slug(label ?? localDay())}` || `v_${Date.now()}`;
@@ -3770,7 +3773,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
             // `draftForJob`.
             draftForJob(store.loadDrafts(), data.applications, employer, role, jobAddress)?.id ??
             findApplication(data.applications, employer, role, jobAddress)?.id ??
-            freshApplicationId(data.applications, employer, role),
+            freshApplicationId(data.applications, employer, role, store.outDir()),
           /*
            * And the resume made for it, so the card can put that one first in
            * its picker: "temporary resumes created for a job application
@@ -4139,7 +4142,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         was?.trim() ? was : before;
       const app: Application = {
         ...existing,
-        id: existing?.id ?? body.id ?? freshApplicationId(apps, body.company, body.role),
+        id: existing?.id ?? body.id ?? freshApplicationId(apps, body.company, body.role, store.outDir()),
         company: body.company,
         role: body.role,
         url: typed(body.url, existing?.url),
@@ -4176,11 +4179,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const apps = store.load().applications;
       const next = apps.filter((a) => a.id !== id);
       if (next.length === apps.length) throw new Error(`No application "${id}"`);
-      // The snapshot folder under out/ is left alone: a record of what was sent
-      // is worth keeping even when the tracker row was a mistake.
-      await withCommit(repo, autoCommit(), `Remove application "${id}"`, () =>
-        store.saveApplications(next),
-      );
+      /*
+       * The snapshot folder under out/ is left alone: a record of what was sent
+       * is worth keeping even when the tracker row was a mistake.
+       *
+       * And so is the resume it was sent with. The confirm says "the files on
+       * disk stay", but a temporary resume is kept only for as long as a sent
+       * row names it (see `wentOut` in tiers.ts): with the row gone it read as
+       * abandoned from the day it was made, and the next sweep deleted the
+       * one record of what went out that the save's history holds — `out/` is
+       * not tracked. So a sent row's temporary resumes are marked kept on the
+       * way out, as marking one kept in the editor does. Only temporary ones:
+       * a base or a kept resume is never swept, and is left exactly as it is.
+       */
+      const gone = apps.find((a) => a.id === id)!;
+      const sentWith = wentOut(gone) ? [...new Set([gone.resumeId, ...(gone.sentResumeIds ?? [])])] : [];
+      const toKeep = store
+        .loadResumes()
+        .filter((r) => sentWith.includes(r.id) && tierOf(r) === 'temporary');
+      await withCommit(repo, autoCommit(), `Remove application "${id}"`, () => {
+        store.saveApplications(next);
+        for (const spec of toKeep) {
+          spec.tier = 'extended';
+          delete spec.temporaryFrom;
+          store.saveResume(spec);
+        }
+      });
       res.json({ ok: true });
     }),
   );
@@ -4226,12 +4250,25 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const apps = store.load().applications;
       const app = apps.find((a) => a.id === id);
       if (!app) throw new Error(`No application "${id}"`);
-      const next = {
+      const next: Application = {
         ...app,
         ...(company !== undefined ? { company } : {}),
         ...(role !== undefined ? { role } : {}),
         ...(answers !== undefined ? { answers } : {}),
       };
+      /*
+       * And the names it had, kept as another name for it.
+       *
+       * The page the row came from still says them: the card still open on
+       * it, and the next visit. A send under the old names found no row — on
+       * an address with no job number nothing else ties the two together — and
+       * filed a second one at `applied` beside this one. See `sameJobAs`.
+       */
+      if (!sameIdentity(app.company, app.role, next.company, next.role)) {
+        const was = { company: app.company, role: app.role };
+        const known = (app.aliases ?? []).some((a) => sameIdentity(a.company, a.role, was.company, was.role));
+        if (!known) next.aliases = [...(app.aliases ?? []), was];
+      }
       const what =
         company === undefined && role === undefined
           ? `Set the answers on application "${id}"`
@@ -4396,7 +4433,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const tracked = findApplication(data.applications, body.company, body.role, body.url);
       // Not `applicationId`: a job applied for and closed earlier the same day
       // already holds the id today would make. See `freshApplicationId`.
-      const id = tracked?.id ?? freshApplicationId(data.applications, body.company, body.role);
+      const id = tracked?.id ?? freshApplicationId(data.applications, body.company, body.role, store.outDir());
       const note = body.note ?? 'The form was submitted on the page';
       const now = new Date().toISOString();
 
@@ -4808,7 +4845,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const id =
         draftForJob(store.loadDrafts(), data.applications, body.company, body.role, body.url)?.id ??
         findApplication(data.applications, body.company, body.role, body.url)?.id ??
-        freshApplicationId(data.applications, body.company, body.role);
+        freshApplicationId(data.applications, body.company, body.role, store.outDir());
 
       // A posting-specific resume comes over with the draft; save it so the
       // draft refers to something that still exists later.
@@ -5730,14 +5767,22 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         answers: answered.map((q) => ({ question: q.question, answer: q.answer })),
         letterId: filedLetterId,
       };
-      app.history = [
-        ...(app.history ?? []),
-        {
-          at: new Date().toISOString(),
-          status: app.status,
-          note: `${answered.length} question(s) answered${draft.coverLetter.required ? ', cover letter included' : ''}`,
-        },
-      ];
+      /*
+       * Only when there is something to say. Every Complete added this line,
+       * so a space with no questions — most of them — wrote "0 question(s)
+       * answered" under the build's own line each time it was completed,
+       * which reads as though questions were asked and skipped.
+       */
+      const said = [
+        ...(answered.length ? [`${answered.length} question(s) answered`] : []),
+        ...(draft.coverLetter.required ? ['cover letter included'] : []),
+      ].join(', ');
+      if (said) {
+        app.history = [
+          ...(app.history ?? []),
+          { at: new Date().toISOString(), status: app.status, note: said.charAt(0).toUpperCase() + said.slice(1) },
+        ];
+      }
       store.upsertApplication(app);
 
       // Anything written by hand is worth having next time.
@@ -5751,28 +5796,20 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
           // that is the history of this one application — but it does not
           // go into the bank other applications draw from.
           if (isSensitiveQuestion(q.question) || isSensitiveAnswer(q.answer)) continue;
-          const existing = answers.find((a) => a.id === q.fromAnswerId || sameQuestion(a.question, q.question));
-          if (existing) {
-            // The same wording saved twice — a form resubmitted, a workspace
-            // completed twice — is not a second variant. See `/answers/save`.
-            const already = existing.variants.find((v) => v.text.trim() === q.answer.trim());
-            if (already) {
-              existing.default = already.id;
-            } else {
-              const vid = `v_${Date.now().toString(36)}`;
-              existing.variants.push({ id: vid, label: draft.company, text: q.answer });
-              existing.default = vid;
-            }
-          } else {
-            // As a person reads it. See `tidyQuestion`.
-            const asked = tidyQuestion(q.question) || q.question;
-            answers.push({
-              id: answerId(asked, answers),
-              question: asked,
-              default: 'v_1',
-              variants: [{ id: 'v_1', label: draft.company, text: q.answer }],
-            });
-          }
+          /*
+           * An answer still word for word as the AI wrote it goes in marked
+           * unread, so the next form is offered it rather than filled with
+           * it. See `fileSentAnswer`. `edited` and `source: 'human'` are what
+           * the Workspace sets when the person changes the text.
+           */
+          fileSentAnswer(answers, {
+            question: q.question,
+            answer: q.answer,
+            fromAnswerId: q.fromAnswerId,
+            label: draft.company,
+            unread: q.source === 'ai' && !q.edited,
+            newId: (asked) => answerId(asked, answers),
+          });
         }
         store.saveAnswers(answers);
       }
@@ -5789,7 +5826,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * those were built from the copy that was read first. When that has
        * happened, the draft stays, marked submitted, and the reply says why.
        */
-      const warnings: string[] = [];
+      // Starting with the build's own, when it replaced the files of an
+      // application already sent (see `replaced` in `buildBundle`).
+      const warnings: string[] = result.replaced ? [result.replaced] : [];
       const typedSince = changedText(store.getDraft(id), draft);
       /*
        * Marked, never deleted — `keepDraft` is now what it always was for the

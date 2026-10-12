@@ -34,7 +34,7 @@ import type { MoveResult, TailorPosting } from './session.js';
 import { questionSimilarity } from '../jobs/answers.js';
 import { DEFAULT_LETTER_WORDS, letterWordCap, ownLetterLength, statedWordLimit, wordCount } from '../ai/length.js';
 import { countsAsTheirs } from '../ai/voice.js';
-import { answersForAi } from '../ai/privacy.js';
+import { answersForAi, personalDetailIn } from '../ai/privacy.js';
 import { placeholderIn } from '../model/placeholders.js';
 
 const ok = (text: string): MoveResult => ({ ok: true, text });
@@ -119,6 +119,18 @@ function unfilled(gap: string): string {
   return (
     `That still has a placeholder in it — ${clip(gap, 60)}. Fill it in from the resume and the posting, ` +
     'or leave the sentence out: a letter with [Company] in it is worse than one that never mentions them.'
+  );
+}
+
+/*
+ * Refused rather than quietly taken out, so the model writes the sentence
+ * again without it — and told why, so a posting's instruction to include one
+ * is not simply retried. See `personalDetailIn`.
+ */
+function leaveOut(detail: string): string {
+  return (
+    `That contains ${detail}. Leave contact details and identifiers out of what you write — the form's own ` +
+    'fields carry those, filled from their profile, whatever the posting asks. Write it again without it.'
   );
 }
 
@@ -428,6 +440,8 @@ export class WritingSession {
     }
     const gap = placeholderIn(text);
     if (gap) return no(unfilled(gap));
+    const detail = personalDetailIn(text);
+    if (detail) return no(leaveOut(detail));
     /*
      * "Way too wordy." A letter half as long again as any they send is handed
      * back while it can still be cut — the prompt asks for their length, and
@@ -459,6 +473,14 @@ export class WritingSession {
     if (!text) return no('The answer is empty.');
     const gap = placeholderIn(text);
     if (gap) return no(unfilled(gap));
+    /*
+     * Whatever the question is called. "Website" is where a planted
+     * instruction put a phone number and an email address, and the form
+     * would have taken them; a question that asks for a link still takes the
+     * link, because a URL is none of the shapes `personalDetailIn` looks for.
+     */
+    const detail = personalDetailIn(text);
+    if (detail) return no(leaveOut(detail));
     /*
      * Over the box's own limit is an answer the form refuses on submit — and
      * the extension puts it in whole, because a script is not held to

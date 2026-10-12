@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  fileSentAnswer,
   isSensitiveAnswer,
   isSensitiveQuestion,
   letterId,
@@ -1395,5 +1396,50 @@ describe('an address however a form asks for it', () => {
     ]) {
       expect(isSensitiveQuestion(q), q).toBe(false);
     }
+  });
+});
+
+/*
+ * Every answer not taken from the bank was filed into it on completion,
+ * the AI's drafts as if the person had written them, so the next form asking
+ * the same question had the AI's text filled in confidently and unread. A
+ * draft still word for word as written is filed as a suggestion, and offered
+ * like a loose match; one the person typed or edited is filed as before.
+ */
+describe('an AI-written answer filed from a completed application', () => {
+  const Q = 'Why do you want to work at a streaming company?';
+  const file = (bank: AnswerBankItem[], answer: string, unread: boolean, label = 'Streamly') =>
+    fileSentAnswer(bank, { question: Q, answer, label, unread, newId: () => 'ans_new' });
+
+  it('is offered next time, not filled in', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'Because streaming is the work I want to do.', true);
+    expect(bank).toHaveLength(1);
+    const m = matchAnswer(Q, bank);
+    expect(m.answer).toBe('Because streaming is the work I want to do.');
+    expect(m.confident).toBe(false);
+  });
+
+  it('but one the person typed or edited is filled as before', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'Because I edited this one myself.', false);
+    expect(matchAnswer(Q, bank).confident).toBe(true);
+  });
+
+  it('does not push a reviewed answer out of the default', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'My own answer.', false, 'Acme');
+    file(bank, 'The AI answer.', true, 'Streamly');
+    expect(bank[0]!.variants).toHaveLength(2);
+    const m = matchAnswer(Q, bank, { company: 'Plaid' });
+    expect(m.answer).toBe('My own answer.');
+    expect(matchAnswer(Q, bank, { company: 'Streamly' }).confident).toBe(false);
+  });
+
+  it('is filled once the person has sent it having read it', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'Because streaming is the work I want to do.', true);
+    file(bank, 'Because streaming is the work I want to do.', false);
+    expect(matchAnswer(Q, bank).confident).toBe(true);
   });
 });

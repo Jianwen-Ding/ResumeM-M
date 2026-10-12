@@ -140,6 +140,19 @@ export function doneAt(
    */
   if (drafts.some((d) => d.resumeId === spec.id && d.status !== 'submitted')) return undefined;
 
+  /*
+   * And a resume an application went out with, even after that application
+   * was built again from another one.
+   *
+   * Filing a sent application again moves its `resumeId` on to the new
+   * resume, and this used to look at `resumeId` alone — so the resume that
+   * had actually been sent was referenced by nothing, counted as abandoned
+   * from the day it was made, and swept. The row remembers it in
+   * `sentResumeIds`, and it is kept for the reason `wentOut` gives: the
+   * employer can ask about that document whenever they like.
+   */
+  if (applications.some((a) => a.sentResumeIds?.includes(spec.id))) return undefined;
+
   const mine = applications.filter((a) => a.resumeId === spec.id);
 
   if (mine.length > 0) {

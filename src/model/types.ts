@@ -528,7 +528,30 @@ export interface Application {
   status: ApplicationStatus;
   /** Resume spec id used, and the snapshot folder holding the exact files. */
   resumeId?: string;
+  /**
+   * Resumes this application went out with before its current one.
+   *
+   * A sent application can be built again — `rmm apply`, the extension's
+   * "Prepare to submit", completing its space in the Workspace — and the
+   * build may name another resume. `resumeId` then points at the new one,
+   * and the resume that was actually sent was referenced by nothing: if it
+   * was a temporary copy made for this posting, the sweep took it a week
+   * later, and a save ended up with rows at `applied` whose resume no longer
+   * existed. Kept here so the sweep keeps them too (see `doneAt` in
+   * tiers.ts).
+   */
+  sentResumeIds?: string[];
   snapshotDir?: string;
+  /**
+   * What this row was called before it was corrected by hand.
+   *
+   * The tracker's Edit renames a row, and the page it came from does not
+   * know: the extension's card that is still open, or the next visit to the
+   * same posting, still says "Summer 2027". Without these a send under the
+   * old names found no row and filed a second one beside the corrected one.
+   * See `sameJobAs`.
+   */
+  aliases?: { company: string; role: string }[];
   source?: string;
   notes?: string;
   /** Free-form per-application answers, useful when a company re-asks. */

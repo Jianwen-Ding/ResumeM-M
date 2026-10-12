@@ -907,6 +907,12 @@ export function matchAnswer(
      */
     confident:
       !namesAnother &&
+      /*
+       * And never an answer the AI wrote that nobody has read since: banked
+       * from a completed application word for word as it was drafted, it is
+       * a suggestion, offered like a loose match rather than filled in.
+       */
+      !variant?.suggested &&
       // Or the same score with the furniture out of it. See `bare`.
       (best.score >= 0.7 || overlap(bare(question), bare(best.item.question)) >= 0.7) &&
       fullyAsked(question, best.item.question) &&
@@ -915,6 +921,66 @@ export function matchAnswer(
       sameNumbers(question, best.item.question),
     ...(namesAnother ? { namesAnother } : {}),
   };
+}
+
+/**
+ * One answer from a completed application, filed into the bank.
+ *
+ * Every answer not taken from the bank unchanged was filed as it was sent,
+ * and the AI's drafts went in exactly like the person's own. The answer the
+ * writing run put under "Why do you want to work here?" — text a posting's
+ * own wording can steer, and nobody had to read before sending — then came
+ * back confident on the next form asking the same thing, and was filled in
+ * there unread. So an answer still word for word as the AI wrote it (`unread`)
+ * is filed `suggested`, the mark the editor already uses for drafted but not
+ * reviewed, and `matchAnswer` treats a suggested phrasing as it treats a loose
+ * match: offered to read, never filled in. Anything the person typed or
+ * edited is filed as it always was, and sending a stored phrasing having
+ * read it clears the mark.
+ */
+export function fileSentAnswer(
+  bank: AnswerBankItem[],
+  sent: {
+    question: string;
+    answer: string;
+    fromAnswerId?: string;
+    /** The employer it was written for, which labels the phrasing. */
+    label: string;
+    unread: boolean;
+    /** An id for a question the bank does not hold yet. */
+    newId: (asked: string) => string;
+  },
+): void {
+  const mark = sent.unread ? { suggested: true } : {};
+  const existing = bank.find((a) => a.id === sent.fromAnswerId || sameQuestion(a.question, sent.question));
+  if (!existing) {
+    // As a person reads it. See `tidyQuestion`.
+    const asked = tidyQuestion(sent.question) || sent.question;
+    bank.push({
+      id: sent.newId(asked),
+      question: asked,
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: sent.label, text: sent.answer, ...mark }],
+    });
+    return;
+  }
+  // The same wording saved twice — a form resubmitted, a workspace completed
+  // twice — is not a second variant. See `/answers/save`.
+  const already = existing.variants.find((v) => v.text.trim() === sent.answer.trim());
+  if (already) {
+    existing.default = already.id;
+    if (!sent.unread) delete already.suggested;
+    return;
+  }
+  const vid = `v_${Date.now().toString(36)}`;
+  existing.variants.push({ id: vid, label: sent.label, text: sent.answer, ...mark });
+  /*
+   * And an unread draft does not push a reviewed answer out of the default:
+   * the next form for somebody else would lose the answer the person stood
+   * behind and be offered one they never read.
+   */
+  const current = existing.variants.find((v) => v.id === existing.default);
+  if (!sent.unread || !current || current.suggested) existing.default = vid;
 }
 
 export function matchAnswers(

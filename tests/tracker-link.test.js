@@ -218,6 +218,27 @@ describe('narrowing the tracker', () => {
     await vi.waitFor(() => expect(companies()).toEqual(['Lyra']));
   });
 
+  /*
+   * `GET /applications` brings the upload folder up to date as it answers,
+   * which writes to out/current. The search box asked it again on every
+   * keystroke, so typing a name rewrote the folder a file dialog may be open
+   * over, once per letter, to show a view of a list already loaded.
+   */
+  it('narrows the list it already has, without asking the server on each keystroke', async () => {
+    const asked = () => globalThis.fetch.mock.calls.filter(([url]) => url === '/api/applications').length;
+    const before = asked();
+    const find = document.querySelector('#app-find');
+    for (const typed of ['h', 'he', 'hel', 'helios']) {
+      find.value = typed;
+      find.dispatchEvent(new window.Event('input'));
+    }
+    const stage = document.querySelector('#app-status');
+    stage.value = 'applied';
+    stage.dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(companies()).toEqual(['Helios']));
+    expect(asked()).toBe(before);
+  });
+
   it('narrows to one stage', async () => {
     const stage = document.querySelector('#app-status');
     stage.value = 'interview';

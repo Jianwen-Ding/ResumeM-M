@@ -421,14 +421,34 @@ export function sameIdentity(company: string, role: string, otherCompany: string
  * second was found as the first's row, told it had already been sent, and
  * would have been filed into it. EA's two pages are both on jobs.ea.com.
  */
-function sameJobAs(company: string, role: string, url?: string): (row: { company: string; role: string; url?: string }) => boolean {
+/*
+ * And under a name the row had before somebody corrected it.
+ *
+ * The tracker's Edit renames a row — "Summer 2027" to the employer it really
+ * is — and the page it came from goes on saying "Summer 2027": the card still
+ * open on it, and every later visit. Matched by its names alone, the send
+ * from that card found no row and filed a second one at `applied` beside the
+ * corrected row, which sat at `applying` until it was closed as left alone.
+ * Measured through the routes on a posting whose address carries no job
+ * number, where nothing else could tie the two together. The row keeps the
+ * names it was corrected from (`aliases`, written by `PATCH
+ * /applications/:id`), and they are the row's names too.
+ */
+function sameJobAs(
+  company: string,
+  role: string,
+  url?: string,
+): (row: { company: string; role: string; url?: string; aliases?: { company: string; role: string }[] }) => boolean {
   const key = identity(company, role);
   const number = jobNumberIn(url);
   const site = hostOf(url);
   const job = slug(rolePart(role, company));
   const named = Boolean(job) && !/^unknown role\b/i.test(role.trim());
+  const byName = (other: { company: string; role: string }) =>
+    identity(other.company, other.role) === key && !differentRequisitions(role, other.role, company, other.company);
   return (row) =>
-    (identity(row.company, row.role) === key && !differentRequisitions(role, row.role, company, row.company)) ||
+    byName(row) ||
+    (row.aliases ?? []).some((was) => typeof was?.company === 'string' && typeof was?.role === 'string' && byName(was)) ||
     (named &&
       Boolean(number) &&
       jobNumberIn(row.url) === number &&
@@ -537,13 +557,22 @@ export function findApplication(apps: Application[], company: string, role: stri
  *
  * Counted rather than stamped with a time, because the id is a folder name
  * somebody reads.
+ *
+ * And not the id of a folder already on disk, when the caller says where the
+ * folders are (`outDir`). Removing a row from the tracker leaves its folder
+ * of sent files where it is — the confirm says "the files on disk stay" — so
+ * the tracker alone no longer knows the id is spoken for. Measured: a row
+ * removed and the same job filed again later that day asked for the removed
+ * row's id, and the build's hand-over replaced the kept resume and deleted
+ * the kept cover letter beside it.
  */
-export function freshApplicationId(apps: Application[], company: string, role: string): string {
+export function freshApplicationId(apps: Application[], company: string, role: string, outDir?: string): string {
   const wanted = applicationId(company, role);
-  const taken = new Set(apps.map((a) => a.id));
-  if (!taken.has(wanted)) return wanted;
+  const ids = new Set(apps.map((a) => a.id));
+  const taken = (id: string) => ids.has(id) || (outDir !== undefined && fs.existsSync(path.join(outDir, 'applications', id)));
+  if (!taken(wanted)) return wanted;
   for (let n = 2; ; n++) {
-    if (!taken.has(`${wanted}-${n}`)) return `${wanted}-${n}`;
+    if (!taken(`${wanted}-${n}`)) return `${wanted}-${n}`;
   }
 }
 
@@ -729,6 +758,13 @@ export interface BundleResult {
   letterPages?: number;
   warnings: string[];
   /**
+   * Set when this build replaced files of an application that had already
+   * gone out — the sentence is also first in `warnings`. Apart so a route
+   * that does not pass every warning on (the Workspace's Complete leaves out
+   * the typography notes) can still pass this one.
+   */
+  replaced?: string;
+  /**
    * What the resume asked for and the store no longer has, in a sentence.
    *
    * Separate from `warnings`, which also carries typography notes about the
@@ -891,7 +927,7 @@ export async function buildBundle(store: Store, req: BundleRequest): Promise<Bun
   const data0 = store.load();
   const existing = findApplication(data0.applications, req.company, req.role, req.url);
   return inBuildLane(
-    existing?.id ?? freshApplicationId(data0.applications, req.company, req.role),
+    existing?.id ?? freshApplicationId(data0.applications, req.company, req.role, store.outDir()),
     () => buildBundleNow(store, req),
   );
 }
@@ -952,7 +988,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * application was opened lands in that application's folder rather than in
    * a second one beside it.
    */
-  const id = already?.id ?? freshApplicationId(data.applications, req.company, req.role);
+  const id = already?.id ?? freshApplicationId(data.applications, req.company, req.role, store.outDir());
   /*
    * Through the store, so an id that is a path cannot choose the folder. The
    * id here is often not one this code made — `findApplication` takes it from
@@ -1212,12 +1248,22 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
      * its role, found by its number is the row the request's better names
      * were read for.
      */
-    const byNumberOnly =
+    /*
+     * And never back to a name somebody corrected the row from: the request
+     * found it by one of its `aliases`, because the page still says "Summer
+     * 2027", and the correction is the row's name whatever the page says.
+     */
+    const byOldName =
       settled !== undefined &&
-      !sameIdentity(settled.company, settled.role, req.company, req.role) &&
-      looksLikeCompanyName(settled.company) &&
-      looksLikeRoleTitle(settled.role) &&
-      withoutTitleNoise(settled.role) === settled.role;
+      (settled.aliases ?? []).some((a) => sameIdentity(a.company, a.role, req.company, req.role)) &&
+      !sameIdentity(settled.company, settled.role, req.company, req.role);
+    const byNumberOnly =
+      byOldName ||
+      (settled !== undefined &&
+        !sameIdentity(settled.company, settled.role, req.company, req.role) &&
+        looksLikeCompanyName(settled.company) &&
+        looksLikeRoleTitle(settled.role) &&
+        withoutTitleNoise(settled.role) === settled.role);
 
     /*
      * And one history line for a run of rebuilds, not one per rebuild.
@@ -1250,6 +1296,43 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       nothingNew && !(Date.parse(now) - lastAt < 3_600_000)
         ? [...settled!.history!.slice(0, -1), { ...last!, at: now }]
         : settled?.history;
+
+    /*
+     * And said out loud when this replaces what was sent.
+     *
+     * A stage over a sent application is refused (`AlreadySent`), but filing
+     * it again is not, and should not be: the extension's "Prepare to submit"
+     * and the Workspace's Complete both build without `status`, and neither
+     * expects a refusal there. So `rmm apply newgrad` over an application at
+     * `interview` that went out with `intern` switched the row to `newgrad`,
+     * replaced the PDF and the letter in its folder, and recorded it as one
+     * more "Files rebuilt" — and the resume that was sent, if it was a
+     * temporary copy made for that posting, was then referenced by nothing
+     * and swept a week later. That is how a save ended up with rows at
+     * `applied` pointing at resumes that no longer existed.
+     *
+     * The build still happens. What changes is that the replaced resume is
+     * remembered on the row (`sentResumeIds`, which the sweep reads), the
+     * history says what was replaced, and the result carries a warning the
+     * CLI prints and the routes pass on. Only where there were sent files to
+     * replace: a row recorded by a send alone has no folder yet.
+     */
+    const wasSent = sentAlready(settled) && Boolean(settled?.snapshotDir);
+    const swappedResume = wasSent && settled!.resumeId !== undefined && settled!.resumeId !== req.resumeId;
+    const swappedLetter = wasSent && (settled!.coverLetter?.trim() ?? '') !== (letter?.trim() ?? '');
+    const label = (rid: string) => data.resumes.find((r) => r.id === rid)?.label ?? rid;
+    const what = [
+      ...(swappedResume ? [`the resume (${label(settled!.resumeId!)} → ${label(req.resumeId)})`] : []),
+      ...(swappedLetter ? ['the cover letter'] : []),
+    ].join(' and ');
+    const replaced = what
+      ? `${req.company} — ${req.role} had already been sent, and this build replaced ${what} in its folder: ` +
+        'the files there are no longer the ones that went out.' +
+        (swappedResume ? ` The resume that was sent, ${label(settled!.resumeId!)}, is kept.` : '')
+      : undefined;
+    const sentResumeIds = swappedResume
+      ? [...new Set([...(settled!.sentResumeIds ?? []), settled!.resumeId!])]
+      : settled?.sentResumeIds;
 
     const application: Application = {
       ...settled,
@@ -1296,9 +1379,12 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       naming: req.naming ?? settled?.naming,
       answers,
       coverLetter: letter,
-      history: nothingNew
-        ? touched
-        : [...(settled?.history ?? []), { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' }],
+      ...(sentResumeIds ? { sentResumeIds } : {}),
+      history: replaced
+        ? [...(settled?.history ?? []), { at: now, status, note: `Files rebuilt after sending: replaced ${what} that went out` }]
+        : nothingNew
+          ? touched
+          : [...(settled?.history ?? []), { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' }],
     };
     store.upsertApplication(application);
     /*
@@ -1332,7 +1418,13 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
        * documents are fixed in different places and "a line runs past the
        * edge" sends whoever reads it to the resume otherwise.
        */
-      warnings: [...compiled.warnings, ...aboutTheResume(compiled), ...aboutTheLetter(letterOut)],
+      warnings: [
+        ...(replaced ? [replaced] : []),
+        ...compiled.warnings,
+        ...aboutTheResume(compiled),
+        ...aboutTheLetter(letterOut),
+      ],
+      replaced,
       missing: describeLost(resolved.lost ?? []),
     };
   } finally {
@@ -1501,16 +1593,28 @@ export function stats(apps: Application[]): TrackerStats {
   for (const a of apps) byStatus[a.status] = (byStatus[a.status] ?? 0) + 1;
 
   /*
-   * A response is somebody coming back to you. `closed` is not counted: it
-   * covers a rejection, which is a reply, and being ghosted, which is the
-   * absence of one, and the tracker cannot tell them apart — counting it
-   * either way would state something the data does not know.
+   * A response is somebody coming back to you. `closed` on its own is not
+   * counted: it covers a rejection, which is a reply, and being ghosted,
+   * which is the absence of one, and the tracker cannot tell them apart —
+   * counting it either way would state something the data does not know.
+   *
+   * But an interview or an offer is counted when it was reached, not only
+   * while the row stands at it: an interview that ended in a rejection was
+   * still somebody coming back to you. Reading the current status alone, the
+   * rate fell when an interviewed row was closed — measured, 50% with one
+   * interview of two sent, then 0% the moment that interview's rejection was
+   * recorded — so the history counts too.
    */
-  const responded = apps.filter((a) => ['interview', 'offer'].includes(a.status)).length;
+  const RESPONSES = ['interview', 'offer'];
   // "Applying" has not been sent yet, so it cannot have drawn a response —
   // and nor has one closed only for sitting at Applying. See `closedAsStale`.
   const wentOut = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a));
   const sent = wentOut.length;
+  // Of the ones sent, so a row moved back to Applying after an interview
+  // cannot push the rate past 100%.
+  const responded = wentOut.filter(
+    (a) => RESPONSES.includes(a.status) || (a.history ?? []).some((h) => RESPONSES.includes(h.status)),
+  ).length;
 
   // Sent in the window, so over the same rows: every row started in it was
   // counted, and a stale close or a form still open read as sent lately.

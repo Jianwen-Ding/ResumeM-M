@@ -9,7 +9,7 @@ import { Repo, cloneRepo } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
 import { findProjectRoot, isEmptyStore, resolveStore, seedStore } from './model/location.js';
-import { buildBundle, slug, stats } from './model/applications.js';
+import { buildBundle, localDay, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
 import { Store } from './model/store.js';
 import { currentIgnore } from './model/current.js';
@@ -610,7 +610,20 @@ async function main(argv: string[]): Promise<number> {
       console.log(`${s.total} applications — ${s.last7} in the last 7 days, ${s.last30} in the last 30`);
       console.log(`Response rate (OA or beyond): ${s.responseRate}%\n`);
       for (const a of [...apps].sort((x, y) => (y.appliedAt ?? '').localeCompare(x.appliedAt ?? ''))) {
-        const when = a.appliedAt?.slice(0, 10) ?? '          ';
+        /*
+         * The day on this machine's clock, as the ids, the GUI and every
+         * other date this program shows. `appliedAt` is UTC, and its first
+         * ten characters are the day in Greenwich: an application filed on
+         * the evening of the 11th in California printed as the 12th here,
+         * beside an id and a tracker row both reading the 11th. A bare date
+         * typed by hand has no time to move, and is printed as it is.
+         */
+        const at = a.appliedAt ? new Date(a.appliedAt) : undefined;
+        const when = !a.appliedAt
+          ? '          '
+          : /^\d{4}-\d{2}-\d{2}$/.test(a.appliedAt) || Number.isNaN(at!.getTime())
+            ? a.appliedAt.slice(0, 10)
+            : localDay(at);
         console.log(`  ${when}  ${a.status.padEnd(10)} ${a.company} — ${a.role}`);
       }
       return 0;
