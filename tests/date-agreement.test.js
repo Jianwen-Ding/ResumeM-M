@@ -84,6 +84,7 @@ const STYLES = [
   { month: 'abbr', range: ' – ', present: 'Current', expected: 'Anticipated' },
   { month: 'long', range: ' to ', present: 'Now', expected: 'Expected' },
   { month: 'numeric', range: '-', present: 'present', expected: 'Expected' },
+  { month: 'iso', range: ' -- ', present: 'Present', expected: 'Expected' },
 ];
 
 describe('the editor and the renderer agree about dates', () => {

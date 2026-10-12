@@ -363,10 +363,68 @@ const JOB_ID_SEGMENT =
  * Not "(job 4012345)": that is `unnamedRole`'s own way of telling two unnamed
  * jobs apart, and it has to survive being read back.
  */
-const TRAILING_JOB_ID = /\s*\(\s*(?:req(?:uisition)?\s*(?:id|#|no\.?)?\s*[:#]?\s*)?#?\d{5,}\s*\)$/i;
+const TRAILING_JOB_ID =
+  /\s*\(\s*(?:(?:req(?:uisition)?\s*(?:id|#|no\.?)?\s*[:#]?\s*)?#?\d{5,}|[a-z]{1,3}[-_]?\d{5,})\s*\)$/i;
+/*
+ * Workday's "(R22724)" is that bracket too: letters and five digits or more,
+ * the way `JOB_ID_SEGMENT` reads "R171666" after a separator. Five, not four,
+ * so a bracketed year with letters before it ("(FY2026)") is not one.
+ */
 
 export function isJobIdSegment(s: string | undefined): boolean {
   return JOB_ID_SEGMENT.test(String(s ?? '').trim());
+}
+
+/** "Job ID: 10452115", "Req #123456", "(12345678)", "JR0286834" — as the one number they name. */
+function jobIdOf(s: string): string {
+  return s
+    .replace(/^\s*\(|\)\s*$/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:job|req(?:uisition)?|posting|position|reference|ref)\s*(?:id|#|no\.?|number|code)?\s*[:#]?\s*/, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * The requisition number `cleanRole` cuts off the end of a title, if it cuts
+ * one: "Software Engineer Intern (12345678)" → "12345678", "Software Engineer
+ * - JR0286834" → "jr0286834", "… (Req #123456)" → "123456".
+ *
+ * Cut so a role names the job the way the employer's other page does —
+ * SuccessFactors' "Image Processing Engineer Intern (41213)" is L3Harris's
+ * "Image Processing Engineer Intern" — but two titles that both carry one,
+ * and not the same one, are two requisitions with one title: one employer
+ * hiring the same intern role twice. `identity` cannot see that, since it
+ * reads the cut title; whoever compares two roles asks this as well.
+ */
+export function trailingJobId(role: string | undefined, ...employers: (string | undefined)[]): string | undefined {
+  if (!role) return undefined;
+  const title = role.replace(/\s+/g, ' ').slice(0, MAX_TITLE);
+  const segments = splitTitle(withoutTitleNoise(title));
+  // As `cleanRole` peels the end, stopping at the first requisition number.
+  while (segments.length > 1) {
+    const last = segments[segments.length - 1]!;
+    const s = last.text;
+    if (isJobIdSegment(s)) return jobIdOf(s) || undefined;
+    if (siteSegment(s) || namesEmployer(s, employers, { exact: !last.strong })) {
+      segments.pop();
+      continue;
+    }
+    break;
+  }
+  const bracket = TRAILING_JOB_ID.exec(joinTitle(segments));
+  return bracket ? jobIdOf(bracket[0]) || undefined : undefined;
+}
+
+/**
+ * Two roles that both carry a requisition number (`trailingJobId`), and not
+ * the same one. Never a reason to be the same: one title with a number and
+ * one without are still read as one job.
+ */
+export function differentRequisitions(a: string | undefined, b: string | undefined, ...employers: (string | undefined)[]): boolean {
+  const x = trailingJobId(a, ...employers);
+  const y = trailingJobId(b, ...employers);
+  return Boolean(x && y && x !== y);
 }
 
 /*

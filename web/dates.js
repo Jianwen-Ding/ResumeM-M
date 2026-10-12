@@ -131,7 +131,7 @@ function parsePoint(raw) {
   if (iso) {
     const month = Number(iso[2]);
     if (month < 1 || month > 12) return null;
-    return { point: { year: Number(iso[1]), month }, how: 'numeric' };
+    return { point: { year: Number(iso[1]), month }, how: 'iso' };
   }
 
   // 07/2024 and 7/2024.
@@ -248,7 +248,7 @@ export function styleOf(raw) {
   // mirrors and is pinned against by date-agreement.test.js.
   for (const month of text.matchAll(/([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/g)) {
     if (!month[1]) {
-      found.month = 'numeric';
+      found.month = /^\d{4}/.test(month[0]) ? 'iso' : 'numeric';
       break;
     }
     const how = monthFromWord(month[1]);
@@ -325,6 +325,7 @@ function formatPoint(point, style) {
   const season = point.season;
   if (season) return `${season[0]?.toUpperCase()}${season.slice(1)} ${point.year}`;
   if (point.month === undefined) return String(point.year);
+  if (style.month === 'iso') return `${point.year}-${String(point.month).padStart(2, '0')}`;
   if (style.month === 'numeric') return `${String(point.month).padStart(2, '0')}/${point.year}`;
   return `${formatMonth(point.month, style.month)} ${point.year}`;
 }

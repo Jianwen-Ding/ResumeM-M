@@ -7,7 +7,7 @@ import type { Application, ApplicationStatus, ResolvedResume } from './types.js'
 import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
 import { syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
-import { cleanRole, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
+import { cleanRole, differentRequisitions, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
 import { looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
 // A cycle (answers.ts reads `employerName` and `localDay` from here), safe
 // because neither side calls the other while its module is loading.
@@ -365,6 +365,22 @@ export function identity(company: string, role: string): string {
   return `${key}\u0000${fingerprint(tidy(employer), tidy(job))}`;
 }
 
+/**
+ * Whether two (employer, role) pairs are one job: one `identity`, and not two
+ * requisitions under one title. `identity` reads the role with its trailing
+ * requisition number cut (`cleanRole`), so "Software Engineer Intern
+ * (12345678)" and "(87654321)" at one employer have one key — and the second
+ * was found as the first's row, and read as already sent when the first was.
+ * A number on one side only still matches: that is what the cut is for.
+ * Compare two roles with this, not `identity(…) === identity(…)`.
+ */
+export function sameIdentity(company: string, role: string, otherCompany: string, otherRole: string): boolean {
+  return (
+    identity(company, role) === identity(otherCompany, otherRole) &&
+    !differentRequisitions(role, otherRole, company, otherCompany)
+  );
+}
+
 /*
  * The same job, by its number, under two spellings of who it is with.
  *
@@ -394,7 +410,7 @@ function sameJobAs(company: string, role: string, url?: string): (row: { company
   const job = slug(rolePart(role, company));
   const named = Boolean(job) && !/^unknown role\b/i.test(role.trim());
   return (row) =>
-    identity(row.company, row.role) === key ||
+    (identity(row.company, row.role) === key && !differentRequisitions(role, row.role, company, row.company)) ||
     (named &&
       Boolean(number) &&
       jobNumberIn(row.url) === number &&
@@ -1150,7 +1166,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
      */
     const byNumberOnly =
       settled !== undefined &&
-      identity(settled.company, settled.role) !== identity(req.company, req.role) &&
+      !sameIdentity(settled.company, settled.role, req.company, req.role) &&
       looksLikeCompanyName(settled.company) &&
       looksLikeRoleTitle(settled.role) &&
       withoutTitleNoise(settled.role) === settled.role;

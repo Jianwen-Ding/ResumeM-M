@@ -36,6 +36,8 @@ const ROUND_TRIPS = [
   'Expected May 2027',
   'Sep. 2022 -- Expected May 2027',
   '09/2022 -- 05/2026',
+  '2022-09 -- 2026-05',
+  '2024-07',
 ];
 
 /*
@@ -45,7 +47,6 @@ const ROUND_TRIPS = [
  * is an entry that cannot be sorted.
  */
 const READABLE_BUT_RESPELT = [
-  ['2022-09 -- 2026-05', { start: { year: 2022, month: 9 }, end: { year: 2026, month: 5 } }],
   ['Sept 2022', { start: { year: 2022, month: 9 } }],
   ['Jan 2023 – Present', { start: { year: 2023, month: 1 }, ongoing: true }],
   ['Jan 2023 — Present', { start: { year: 2023, month: 1 }, ongoing: true }],

@@ -51,7 +51,7 @@ import {
 import { fitResumes, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -771,7 +771,7 @@ function copyIdForPosting(resumes: ResumeSpec[], company: string, role: string):
   const made = resumes.find((r) => {
     const { company: was, role: as } = r.generatedFor ?? {};
     if (r.tier !== 'temporary' || !was) return false;
-    if (identity(was, as ?? 'Unknown role') !== job) return false;
+    if (!sameIdentity(was, as ?? 'Unknown role', company, role)) return false;
     const minted = tailoredResumeId(was, as ?? 'Unknown role');
     return r.id === minted || r.id.startsWith(`${minted}-`) || mintedForJob(r.id, job);
   });
@@ -3408,7 +3408,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
               r.id === specId ||
               (Boolean(r.generatedFor?.company) &&
                 (tailoredResumeId(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role') === thisPosting ||
-                  identity(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role') === identity(employer, role))),
+                  sameIdentity(r.generatedFor!.company!, r.generatedFor!.role ?? 'Unknown role', employer, role))),
           )
         : baseResumeId;
       const baseId = baseForCopy(data.resumes, asked, specId);
