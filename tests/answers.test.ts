@@ -1698,8 +1698,79 @@ describe('an answer whose date has passed', () => {
     }
     // A month and a year covers the month; today is not yet past; nor are
     // things that are not a day on a calendar.
-    for (const text of ['November 2026', '15 November 2026', '2026-11-15', 'Dec. 2026', 'Immediately', 'Two weeks notice', 'Spring 2026', '2025', 'January 5th', '']) {
+    for (const text of ['November 2026', '15 November 2026', '2026-11-15', 'Dec. 2026', 'Immediately', 'Two weeks notice', '2025', 'January 5th', '']) {
       expect(namesPassedDate(text, now), text).toBe(false);
     }
+  });
+
+  /*
+   * The same cases as JobHelper's tests/remembering.mjs, for the same words:
+   * the two regexes are kept identical, and so are the questions they are
+   * held to. "Availability" in a sentence asked about weekends, overtime and
+   * travel as often as about starting, and the common ways of asking when,
+   * how soon or what date were not read at all.
+   */
+  const ASKS_WHEN_YOU_START_CASES: [string, boolean][] = [
+    ['What date can you start?', true],
+    ['When is the earliest you could start?', true],
+    ['How soon can you start?', true],
+    ['How soon could you join?', true],
+    ['Date available', true],
+    ['Date available for employment', true],
+    ['If offered, what date could you start?', true],
+    ['Wann können Sie anfangen?', true],
+    ['Eintrittsdatum', true],
+    ['Date de début', true],
+    ['Date de disponibilité', true],
+    ['Fecha de inicio', true],
+    ['¿Cuándo puede empezar?', true],
+    ['Availability', true],
+    ['What is your availability to work weekends?', false],
+    ['Please describe your availability for overtime', false],
+    ['Do you have any availability constraints for travel?', false],
+    ['Start date', false],
+    ['Job start date', false],
+    ['End date', false],
+  ];
+  it('reads the common ways of asking when somebody can start, and not availability for other things', () => {
+    for (const [q, asks] of ASKS_WHEN_YOU_START_CASES) expect(asksWhenYouStart(q), q).toBe(asks);
+  });
+
+  it('reads a season and a numeric month as dates that pass', () => {
+    const now = new Date(2026, 9, 12, 12); // 12 October 2026, local
+    // A season runs to the end of its last month, and Winter into the next year.
+    for (const text of ['Fall 2025', 'Autumn 2025', 'Summer 2026', 'Spring 2026', 'Winter 2025', 'Available from 11/2025', '2025-11', '09/2026']) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    for (const text of ['Fall 2026', 'Winter 2026', '10/2026', '2026-10', '2026-11-05']) {
+      expect(namesPassedDate(text, now), text).toBe(false);
+    }
+  });
+
+  /*
+   * An answer names a past date for reasons of its own, and only the latest
+   * one it names says whether it still holds. A start given from today never
+   * passes. And "05/11/2026" is the fifth of November as much as the eleventh
+   * of May: it is stale only once both have gone.
+   */
+  it('is judged by the latest date it names', () => {
+    const now = new Date(2026, 9, 12, 12);
+    for (const text of [
+      'Immediately; I left my last role in August 2026',
+      'Two weeks’ notice; my contract ended in May 2026',
+      'Between May 2026 and February 2027',
+      'Available from 05/11/2026',
+      '01/12/2026',
+    ]) {
+      expect(namesPassedDate(text, now), text).toBe(false);
+    }
+    for (const text of ['Between May 2026 and August 2026', '05/09/2026', '13/09/2026', '09/13/2026']) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    at(new Date(2026, 9, 12, 12), () => {
+      const items: AnswerBankItem[] = [];
+      fileSentAnswer(items, { question: 'When can you start?', answer: 'Immediately; I left my last role in August 2026', label: 'Helios Systems', unread: false, newId: () => 'now' });
+      expect(matchAnswer('When can you start?', items, { company: 'Orbital Labs' }).confident).toBe(true);
+    });
   });
 });

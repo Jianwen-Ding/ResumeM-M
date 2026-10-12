@@ -859,6 +859,27 @@ describe('the AI switch-off, where it leaked', () => {
   });
 
   /*
+   * `ai.models` puts a model of its own into the arguments one kind of work
+   * runs with (see `configForTask`), and the comparison read only the shared
+   * command line: a pull that set `models.tailor` changed what every
+   * tailoring ran, and the AI stayed on.
+   */
+  it('switches off for a pull that changes only the model of one kind of work', async () => {
+    await aSetsAi('  enabled: true\n  command: claude\n', 'A: AI on');
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
+
+    for (const task of ['tailor', 'write', 'review', 'author']) {
+      await aSetsAi(`  enabled: true\n  command: claude\n  models:\n    ${task}: some-other-model-${task}\n`, `A: a ${task} model`);
+      const pulled = await repoB.pull();
+      expect(pulled.ok).toBe(true);
+      expect(pulled.aiSwitchedOff, task).toBe(true);
+      expect(pulled.message).toMatch(new RegExp(`its arguments for ${task} went from .* to .*some-other-model-${task}`, 's'));
+      await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
+    }
+  });
+
+  /*
    * While switched off, GET /config says `enabled: false` whatever the file
    * says, and the Settings page sent that back with every save — so
    * changing the timeout committed `enabled: false` into config.yaml, and
@@ -898,7 +919,8 @@ describe('the AI switch-off, where it leaked', () => {
    * switch-off.
    */
   it('is explained by rmm feedback, and answered by rmm config set ai.enabled true', async () => {
-    await aSetsAi('  enabled: true\n  command: /tmp/somebody-else.sh\n', 'A: new AI');
+    // A comment in the file, which a write through `writeYaml` would drop.
+    await aSetsAi('  # The script on the other machine.\n  enabled: true\n  command: /tmp/somebody-else.sh\n', 'A: new AI');
     expect((await repoB.pull()).aiSwitchedOff).toBe(true);
     const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
     const rmm = (args: string[]) =>
@@ -913,10 +935,21 @@ describe('the AI switch-off, where it leaked', () => {
     expect(said.stdout).toMatch(/rmm config set ai\.enabled true/);
     expect(said.stdout).not.toMatch(/ai\.enabled: false/);
 
+    /*
+     * Off while already switched off is no change, and is not written: it
+     * used to rewrite config.yaml without its comments and commit that as
+     * "Update settings", while saying the file was unchanged.
+     */
+    const bytes = fs.readFileSync(path.join(b, 'config.yaml'));
+    const before = head(b);
     const off = await rmm(['config', 'set', 'ai.enabled', 'false']);
     expect(off.stdout).toMatch(/config\.yaml is unchanged/);
-    expect(YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8')).ai.enabled).toBe(true);
+    expect(fs.readFileSync(path.join(b, 'config.yaml')).equals(bytes)).toBe(true);
+    expect(head(b)).toBe(before);
     expect(aiSwitchedOff(b)).toBeDefined();
+    // And the store, asked the same directly, writes nothing either.
+    new Store(b).saveConfig({ ai: { enabled: false } as Parameters<Store['saveConfig']>[0]['ai'] });
+    expect(fs.readFileSync(path.join(b, 'config.yaml')).equals(bytes)).toBe(true);
 
     const on = await rmm(['config', 'set', 'ai.enabled', 'true']);
     expect(on.stdout).toMatch(/AI on — it will run \/tmp\/somebody-else\.sh/);

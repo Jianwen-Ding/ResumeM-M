@@ -913,10 +913,20 @@ function safeToOffer(bank: AnswerBankItem[]): AnswerBankItem[] {
  * Read are the shapes that are plainly a date on a calendar: a month and a
  * year ("November 2026", "Nov. 2026", "Sept 2026"), a day with them ("1
  * December 2026", "December 1st, 2026"), and a numeric full date ("2026-12-01",
- * "12/01/2026"). A month and a year covers the whole month, so "October 2026"
- * has not passed until October has. A numeric date is read month first, as US
- * forms write it, unless the first number cannot be a month. A season, a bare
- * year and "January 5th" are not read: none of them is a day that can pass.
+ * "12/01/2026"), and a numeric month and year ("11/2026", "2026-11"). A month
+ * and a year covers the whole month, so "October 2026" has not passed until
+ * October has. A season and a year covers the season, to the end of its last
+ * month: Spring to May, Summer to August, Fall or Autumn to December, and
+ * Winter to February of the year after, since a winter runs into the next
+ * one. A bare year and "January 5th" are not read: neither is a day that can
+ * pass.
+ *
+ * A numeric date is read month first, as US forms write it, unless the first
+ * number cannot be a month. Where both numbers could be the month,
+ * "05/11/2026" is the fifth of November as much as the eleventh of May: it is
+ * read as the later of the two, so it has passed only once both readings
+ * have. Doubting an answer that is still true is worse than leaving one that
+ * may not be, because the doubt is what stops it being offered.
  */
 const MONTH_WORD =
   String.raw`(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)`;
@@ -926,6 +936,10 @@ const MONTH_DAY_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?\s+(\d{1,2})(?:st
 const MONTH_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?,?\s+(\d{4})\b`, 'gi');
 const ISO_DATE = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g;
 const NUMERIC_DATE = /\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})\b/g;
+const SEASON_YEAR = /\b(spring|summer|fall|autumn|winter)\s+(?:of\s+)?(\d{4})\b/gi;
+const SEASON_ENDS: Record<string, number> = { spring: 5, summer: 8, fall: 12, autumn: 12, winter: 2 };
+const NUMERIC_MONTH_YEAR = /\b(\d{1,2})\/(\d{4})\b/g;
+const ISO_MONTH = /\b(\d{4})-(\d{1,2})\b/g;
 
 function datesIn(text: string): string[] {
   const days: string[] = [];
@@ -945,19 +959,39 @@ function datesIn(text: string): string[] {
     day(Number(y), monthOf(mo), Number(d));
     return ' ';
   });
+  // The month's last day: day 0 of the month after it.
+  const lastOf = (year: number, month: number) => day(year, month, new Date(year, month, 0).getDate());
   rest = rest.replace(MONTH_YEAR, (_m, mo: string, y: string) => {
-    const month = monthOf(mo);
-    // The month's last day: day 0 of the month after it.
-    day(Number(y), month, new Date(Number(y), month, 0).getDate());
+    lastOf(Number(y), monthOf(mo));
+    return ' ';
+  });
+  rest = rest.replace(SEASON_YEAR, (_m, season: string, y: string) => {
+    const month = SEASON_ENDS[season.toLowerCase()] ?? 12;
+    // Winter 2026 is the one that starts in December 2026.
+    lastOf(month === 2 ? Number(y) + 1 : Number(y), month);
     return ' ';
   });
   rest = rest.replace(ISO_DATE, (_m, y: string, mo: string, d: string) => {
     day(Number(y), Number(mo), Number(d));
     return ' ';
   });
-  rest.replace(NUMERIC_DATE, (_m, a: string, b: string, y: string) => {
-    const [month, date] = Number(a) > 12 ? [Number(b), Number(a)] : [Number(a), Number(b)];
-    day(Number(y), month, date);
+  rest = rest.replace(NUMERIC_DATE, (_m, a: string, b: string, y: string) => {
+    const [first, second, year] = [Number(a), Number(b), Number(y)];
+    if (first > 12) day(year, second, first);
+    else if (second > 12) day(year, first, second);
+    // Either could be the month: the later reading, as above.
+    else if (first * 100 + second >= second * 100 + first) day(year, first, second);
+    else day(year, second, first);
+    return ' ';
+  });
+  // A month and a year in numbers, read once the full dates are out, so the
+  // "11/2026" of "05/11/2026" is not read again on its own.
+  rest = rest.replace(NUMERIC_MONTH_YEAR, (_m, mo: string, y: string) => {
+    lastOf(Number(y), Number(mo));
+    return ' ';
+  });
+  rest.replace(ISO_MONTH, (_m, y: string, mo: string) => {
+    lastOf(Number(y), Number(mo));
     return ' ';
   });
   return days;
@@ -968,10 +1002,28 @@ function datesIn(text: string): string[] {
  * person's own calendar (`localDay`, not Greenwich's). A date still to come
  * is no reason to doubt an answer, and one that has passed is a reason to
  * read it before it is sent again.
+ *
+ * Judged by the latest date the answer names, not by any one of them. An
+ * answer names a past date for reasons of its own: "Immediately; I left my
+ * last role in August 2026" is as true in October as it was in September,
+ * and "Between May 2026 and February 2027" still has months to run. Doubted
+ * for its first date, each was held back from the form as stale. Only when
+ * every date named has passed is there nothing left in it still to come.
+ *
+ * And a start given from today ("Immediately", "ASAP", "two weeks' notice")
+ * is a date too, one that never passes: the August in "Immediately; I left my
+ * last role in August 2026" is not when the person starts, and the answer is
+ * as good next year as it is today.
  */
+const STARTS_FROM_TODAY =
+  /\b(immediately|asap|as\s+soon\s+as\s+possible|right\s+away|straight\s+away|at\s+once|(\d+|one|two|three|four|six)\s+(days?|weeks?|months?)[’']?\s+notice)\b/i;
+
 export function namesPassedDate(text: string, now = new Date(Date.now())): boolean {
+  const said = String(text ?? '');
+  if (STARTS_FROM_TODAY.test(said)) return false;
   const today = localDay(now);
-  return datesIn(String(text ?? '')).some((day) => day < today);
+  const days = datesIn(said);
+  return days.length > 0 && days.every((day) => day < today);
 }
 
 /*
@@ -984,18 +1036,32 @@ export function namesPassedDate(text: string, now = new Date(Date.now())): boole
  * "Start date" alone is not enough, because "Start date" in an employment
  * history block asks about the past: it has to be the earliest, desired or
  * available one, or the internship's.
+ *
+ * "Availability" alone is not enough either. It asked about starting as
+ * often as it asked about weekends, overtime or travel, and an answer to
+ * those carries dates that pass without making it untrue. What is read is
+ * the date somebody is available from, a question asking when, how soon or
+ * what date they could start, in the languages forms come in, or the word
+ * on its own as the whole label, which a form asks nothing else with.
  */
 const ASKS_WHEN_YOU_START = new RegExp(
   [
     String.raw`\b(earliest|desired|preferred|expected|anticipated|proposed|possible|potential|available|availability)\s+(start(ing)?|joining|begin(ning)?)\s+date\b`,
-    String.raw`\bwhen\s+(can|could|would|will|are)\s+you\s+(be\s+(able|available)\s+to\s+)?(start|begin|join|commence|available)\b`,
-    String.raw`\bavailab(le|ility)\s+(from|to\s+(start|begin|join|work))\b`,
-    String.raw`\bavailability\b`,
+    String.raw`\b(when|what\s+date|how\s+soon)\s+(can|could|would|will|are)\s+you\s+(be\s+)?((able|available|ready)\s+to\s+)?(start|begin|join|commence|available)\b`,
+    String.raw`\bearliest\s+(that\s+)?you\s+(can|could|would|will)\s+(be\s+able\s+to\s+)?(start|begin|join|commence)\b`,
+    String.raw`\bavailab(le|ility)\s+(from|to\s+(start|begin|join))\b`,
+    String.raw`\b(date\s+(available|of\s+availability)|availability\s+date)\b`,
+    String.raw`^\s*availability[\s:?*]*$`,
     String.raw`\b(join(ing)?\s+date|date\s+of\s+joining)\b`,
     String.raw`\bnotice\s+period\b`,
     String.raw`\b(begin|start|commence)\s+(work(ing)?|employment)\b`,
     String.raw`\b(internship|co-?op)\s+start(\s+date)?\b`,
     String.raw`\bearliest\s+(date|start)\b`,
+    // German, French and Spanish, as the forms of employers there ask it.
+    String.raw`\b(ab\s+wann|wann\s+k(ö|oe|o)nn(en|ten)\s+sie\s+(anfangen|beginnen|starten|eintreten))\b`,
+    String.raw`\beintritts(datum|termin)\b`,
+    String.raw`\b(date\s+de\s+d[ée]but|disponibilit[ée]|quand\s+pouvez[-\s]vous\s+(commencer|d[ée]buter))`,
+    String.raw`\b(fecha\s+de\s+(inicio|incorporaci[óo]n|disponibilidad)|cu[áa]ndo\s+(puede|puedes|podr[íi]as?)\s+(usted\s+)?(empezar|comenzar|incorporarse|incorporarte))`,
   ].join('|'),
   'i',
 );

@@ -729,6 +729,17 @@ async function main(argv: string[]): Promise<number> {
       }
       const enabled = value === 'true';
       const wasSwitchedOff = aiSwitchedOff(store.root);
+      /*
+       * Off while a pull or a clone has it switched off is already the case,
+       * and config.yaml is left as it says it (see `Store.saveConfig`). Said
+       * here before anything is saved: saved anyway, the file was written
+       * back without its comments and committed, under a message saying it
+       * was unchanged.
+       */
+      if (!enabled && wasSwitchedOff) {
+        console.log('AI is already off on this machine, switched off by a pull or a clone; config.yaml is unchanged.');
+        return 0;
+      }
       const saved = await withCommit(repo, store.loadConfig().git.autoCommit, 'Update settings', () =>
         store.saveConfig({ ai: { enabled } as StoreConfig['ai'] }),
       );
@@ -736,9 +747,6 @@ async function main(argv: string[]): Promise<number> {
         console.log(`AI on — it will run ${saved.ai.command} ${saved.ai.args.join(' ')}`.trimEnd());
         if (wasSwitchedOff) console.log('The switch-off from the last pull or clone is cleared.');
         if (!saved.ai.enabled && process.env.RMM_AI === '0') console.log('RMM_AI=0 in the environment still keeps it off.');
-      } else if (wasSwitchedOff) {
-        // Left as config.yaml says it: see `Store.saveConfig`.
-        console.log('AI is already off on this machine, switched off by a pull or a clone; config.yaml is unchanged.');
       } else {
         console.log('AI off — every action hands you the prompt.');
       }

@@ -29,7 +29,7 @@ import {
 
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
-import { aiIsOn, applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
+import { AI_TASKS, aiIsOn, applyModelAndEffort, applyResearch, configForTask, repairAiArgs, type AiTask } from '../ai/presets.js';
 import { extractJob } from '../jobs/extract.js';
 import {
   normalizeAnswers,
@@ -404,6 +404,25 @@ export function effectiveAiCommand(ai: Partial<StoreConfig['ai']>): { command: s
 }
 
 /**
+ * The arguments each kind of AI work actually runs with, from the same `ai`
+ * block: `effectiveAiCommand`'s, with `ai.models` putting its own model in
+ * for the work it names (see `configForTask`). A model that is not a string
+ * is left out, as `effectiveAiCommand` leaves out `ai.model`.
+ */
+function effectiveAiArgsByTask(ai: Partial<StoreConfig['ai']>): Record<AiTask, string[]> {
+  const { command, args } = effectiveAiCommand(ai);
+  const given = ai.models && typeof ai.models === 'object' ? (ai.models as Record<string, unknown>) : {};
+  const models = Object.fromEntries(
+    AI_TASKS.flatMap(({ key }) => (typeof given[key] === 'string' ? [[key, given[key]]] : [])),
+  ) as Partial<Record<AiTask, string>>;
+  const model = typeof ai.model === 'string' ? ai.model : undefined;
+  const effort = ai.effort;
+  return Object.fromEntries(
+    AI_TASKS.map(({ key }) => [key, configForTask({ ai: { command, args, model, models, effort } }, key).ai.args]),
+  ) as Record<AiTask, string[]>;
+}
+
+/**
  * What a change to config.yaml would do to the command this machine runs
  * for AI actions, in words; undefined when it does not change it.
  *
@@ -442,13 +461,35 @@ export function aiCommandChange(before: string | undefined, after: string | unde
    */
   const command = (c: Partial<StoreConfig['ai']>) => effectiveAiCommand(c).command;
   const args = (c: Partial<StoreConfig['ai']>) => JSON.stringify(effectiveAiCommand(c).args);
+  /*
+   * And per kind of work. `ai.models` gives tailoring, writing, reviewing
+   * and drafting each a model of its own, and `configForTask` puts it into
+   * the arguments those actions run with. Compared only as the one command
+   * line, a pull that set `models.tailor` changed what every tailoring ran
+   * and switched nothing off. A kind of work is named only where it runs
+   * with arguments of its own, before or after: one that follows the shared
+   * arguments has already been said with them.
+   */
+  const ownArgs = (c: Partial<StoreConfig['ai']>) =>
+    Object.entries(effectiveAiArgsByTask(c))
+      .filter(([, taskArgs]) => JSON.stringify(taskArgs) !== args(c))
+      .map(([task, taskArgs]) => `${task} runs ${JSON.stringify(taskArgs)}`)
+      .join(', ');
+  const running = (c: Partial<StoreConfig['ai']>) =>
+    `${JSON.stringify(command(c))} ${args(c)}${ownArgs(c) ? ` (${ownArgs(c)})` : ''}`;
   const said: string[] = [];
   if (before === undefined) {
-    said.push(`the AI is switched on, running ${JSON.stringify(command(now))} ${args(now)}`);
+    said.push(`the AI is switched on, running ${running(now)}`);
   } else {
     if (command(was) !== command(now)) said.push(`the command went from ${JSON.stringify(command(was))} to ${JSON.stringify(command(now))}`);
     if (args(was) !== args(now)) said.push(`its arguments went from ${args(was)} to ${args(now)}`);
-    if (!on(was)) said.push(`it was switched on, running ${JSON.stringify(command(now))} ${args(now)}`);
+    const [wasByTask, nowByTask] = [effectiveAiArgsByTask(was), effectiveAiArgsByTask(now)];
+    for (const { key } of AI_TASKS) {
+      const [from, to] = [JSON.stringify(wasByTask[key]), JSON.stringify(nowByTask[key])];
+      if (from === to || (from === args(was) && to === args(now))) continue;
+      said.push(`its arguments for ${key} went from ${from} to ${to}`);
+    }
+    if (!on(was)) said.push(`it was switched on, running ${running(now)}`);
   }
   return said.length ? said.join('; ') : undefined;
 }
@@ -1315,6 +1356,17 @@ export class Store {
     if (patch.ai && 'enabled' in patch.ai && patch.ai.enabled !== true && aiSwitchedOff(this.root) !== undefined) {
       const { enabled: _keptAsTheFileSaysIt, ...rest } = patch.ai;
       patch = { ...patch, ai: rest as StoreConfig['ai'] };
+      /*
+       * And nothing written at all when that was the whole of the patch.
+       * Written anyway, config.yaml came back out of `writeYaml` without its
+       * comments and in its own key order, a change of nobody's making that
+       * the caller then committed as "Update settings" — over a request that
+       * was told it changed nothing.
+       */
+      if (Object.keys(rest).length === 0) {
+        const { ai: _nothingLeft, ...others } = patch;
+        if (Object.values(others).every((v) => v === undefined)) return this.loadConfig();
+      }
     }
     const current = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
     const merged: Partial<StoreConfig> = {
