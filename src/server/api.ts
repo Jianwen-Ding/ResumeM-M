@@ -4140,6 +4140,33 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // empty one means "I had nothing to add here" and not "delete that".
       const typed = (was: string | undefined, before: string | undefined) =>
         was?.trim() ? was : before;
+      const resumeId = body.id ? (body.resumeId ?? existing?.resumeId) : (existing?.resumeId ?? body.resumeId);
+      /*
+       * And a sent row moved on to another resume remembers the one it went
+       * out with.
+       *
+       * Named by id, this route takes the resume it is given — that is what
+       * the paragraph on `resumeId` below is for — and it did so on a row at
+       * `interview` as readily as on one being worked on. The sweep reads
+       * `resumeId` and `sentResumeIds` (see `doneAt` in tiers.ts), so the
+       * resume that had actually been sent was then referenced by nothing,
+       * counted as abandoned, and deleted a week later if it was a temporary
+       * copy. `buildBundle` has the same rule for a sent row filed again with
+       * another resume, and this is that rule: keep the old id, and say in
+       * the history that it changed. Whether the row went out is asked as the
+       * sweep asks it (`wentOut`), because the sweep is what this guards
+       * against.
+       */
+      const swapped =
+        existing !== undefined &&
+        wentOut(existing) &&
+        existing.resumeId !== undefined &&
+        resumeId !== existing.resumeId;
+      const sentResumeIds = swapped
+        ? [...new Set([...(existing!.sentResumeIds ?? []), existing!.resumeId!])]
+        : existing?.sentResumeIds;
+      const label = (rid: string | undefined) =>
+        (rid && store.loadResumes().find((r) => r.id === rid)?.label) || rid || 'none';
       const app: Application = {
         ...existing,
         id: existing?.id ?? body.id ?? freshApplicationId(apps, body.company, body.role, store.outDir()),
@@ -4156,13 +4183,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
          * re-pointed at `base`, became a temporary nobody's application held,
          * and the sweep took it.
          */
-        resumeId: body.id ? (body.resumeId ?? existing?.resumeId) : (existing?.resumeId ?? body.resumeId),
+        resumeId,
         source: body.source ?? existing?.source,
         notes: typed(body.notes, existing?.notes),
         answers: body.answers ?? existing?.answers,
-        history: body.history ?? [
-          ...(existing?.history ?? []),
-          { at: now, status, note: existing ? 'Recorded again by hand' : 'Recorded' },
+        ...(sentResumeIds ? { sentResumeIds } : {}),
+        history: [
+          ...(body.history ?? [
+            ...(existing?.history ?? []),
+            { at: now, status, note: existing ? 'Recorded again by hand' : 'Recorded' },
+          ]),
+          // Even under a history the request supplied: it cannot know the
+          // resume it names is not the one that went out.
+          ...(swapped
+            ? [{ at: now, status, note: `Resume changed after sending: ${label(existing!.resumeId)} → ${label(resumeId)}; the one that went out is kept` }]
+            : []),
         ],
       };
       await withCommit(repo, autoCommit(), `Track application to ${app.company}`, () =>

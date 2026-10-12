@@ -136,6 +136,44 @@ describe('filing again an application that has already gone out', () => {
 });
 
 /*
+ * "Record an application" names the row by id and takes the resume it is
+ * given. On a row that had gone out with `intern` it re-pointed `resumeId` at
+ * `newgrad` and remembered nothing, so the resume that was sent was referenced
+ * by nothing and swept — what `buildBundle` already guards against.
+ */
+describe('recording by hand, by id, a sent application with another resume', () => {
+  const JOB = { company: 'Initech', role: 'Platform Intern', url: 'https://initech.example/jobs/platform-intern' };
+
+  it('keeps the resume that went out from the sweep, and says so in the history', async () => {
+    internIsTemporary();
+    await bundle({ ...JOB, resumeId: 'intern', status: 'applied' }).expect(200);
+    const id = rows()[0]!.id;
+    await request(app).post(`/api/applications/${id}/status`).send({ status: 'interview' }).expect(200);
+
+    await request(app).post('/api/applications').send({ ...JOB, id, resumeId: 'newgrad' }).expect(200);
+
+    const row = rows()[0]!;
+    expect(row.resumeId).toBe('newgrad');
+    expect(row.status).toBe('interview');
+    expect(row.sentResumeIds).toEqual(['intern']);
+    expect(row.history?.at(-1)?.note).toMatch(/Resume changed after sending: Summer intern → .+ is kept/);
+    expect(dueToGo(t.store.load()).map((d) => d.id)).not.toContain('intern');
+  });
+
+  it('remembers nothing for a row not yet sent, or the same resume again', async () => {
+    await bundle({ ...JOB, resumeId: 'intern', status: 'applying' }).expect(200);
+    const id = rows()[0]!.id;
+    await request(app).post('/api/applications').send({ ...JOB, id, resumeId: 'newgrad' }).expect(200);
+    expect(rows()[0]!.sentResumeIds).toBeUndefined();
+
+    await request(app).post(`/api/applications/${id}/status`).send({ status: 'applied' }).expect(200);
+    await request(app).post('/api/applications').send({ ...JOB, id, resumeId: 'newgrad' }).expect(200);
+    expect(rows()[0]!.sentResumeIds).toBeUndefined();
+    expect(rows()[0]!.history?.at(-1)?.note).toBe('Recorded again by hand');
+  });
+});
+
+/*
  * Remove says "the tracker row goes; the files on disk stay". Measured: the
  * sent row's temporary resume became sweepable the moment the row went, and a
  * same-day re-file of the job took the removed row's id — its folder — and
