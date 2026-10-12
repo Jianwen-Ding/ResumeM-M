@@ -6,6 +6,8 @@ import {
   letterId,
   matchAnswer,
   matchAnswers,
+  asksWhenYouStart,
+  namesPassedDate,
   questionSimilarity,
   redactIdentifiers,
   relevantLetters,
@@ -1610,5 +1612,94 @@ describe('two answers filed under one item in the same millisecond', () => {
     const ids = item.variants.map((v) => v.id);
     expect(new Set(ids).size, ids.join(', ')).toBe(3);
     expect(item.variants.find((v) => v.id === item.default)?.text).toBe('Compilers.');
+  });
+});
+
+/*
+ * An answer that names a date stops being true when the date goes by. The
+ * bank keeps no record of when an answer was filed, so "November 2026",
+ * banked as an earliest start date in October, was filled in unread on a form
+ * the next March. Once its date has passed it is offered to be read, not
+ * filled in; a date still to come is as good as it was.
+ */
+describe('an answer whose date has passed', () => {
+  const bank = (): AnswerBankItem[] => {
+    const items: AnswerBankItem[] = [];
+    fileSentAnswer(items, { question: 'What is your earliest start date?', answer: 'November 2026', label: 'Helios Systems', unread: false, newId: () => 'start' });
+    fileSentAnswer(items, { question: 'When are you available to start?', answer: 'Available from 1 December 2026', label: 'Helios Systems', unread: false, newId: () => 'avail' });
+    return items;
+  };
+  const at = (when: Date, run: () => void) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(when);
+      run();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+
+  it('is offered, not filled in, once the date is behind us', () => {
+    at(new Date(2027, 2, 1, 12), () => {
+      for (const q of ['What is your earliest start date?', 'When are you available to start?']) {
+        const m = matchAnswer(q, bank(), { company: 'Orbital Labs' });
+        expect(m.answer, q).toBeTruthy();
+        expect(m.confident, q).toBe(false);
+      }
+    });
+  });
+
+  it('is filled in as before while the date is still to come', () => {
+    at(new Date(2026, 9, 12, 12), () => {
+      for (const q of ['What is your earliest start date?', 'When are you available to start?']) {
+        expect(matchAnswer(q, bank(), { company: 'Orbital Labs' }).confident, q).toBe(true);
+      }
+    });
+  });
+
+  /*
+   * Only a start date goes stale. A graduation date in the past is still the
+   * day somebody graduated, and an answer to it is as good as it ever was.
+   */
+  it('is still filled in when the question asks about something that happened', () => {
+    at(new Date(2027, 2, 1, 12), () => {
+      const items: AnswerBankItem[] = [];
+      fileSentAnswer(items, { question: 'Expected graduation date?', answer: 'May 2024', label: 'Helios Systems', unread: false, newId: () => 'grad' });
+      fileSentAnswer(items, { question: 'Start date', answer: 'June 2023', label: 'Helios Systems', unread: false, newId: () => 'job' });
+      expect(matchAnswer('Expected graduation date?', items, { company: 'Orbital Labs' }).confident).toBe(true);
+      expect(matchAnswer('Start date', items, { company: 'Orbital Labs' }).confident).toBe(true);
+    });
+  });
+
+  it('knows a question about starting from one about the past', () => {
+    for (const q of [
+      'What is your earliest start date?',
+      'When can you start?',
+      'When are you available to start?',
+      'Available from',
+      'Availability',
+      'Desired start date',
+      'Joining date',
+      'When does your notice period end?',
+      'When could you begin work?',
+      'Internship start date',
+    ]) {
+      expect(asksWhenYouStart(q), q).toBe(true);
+    }
+    for (const q of ['Expected graduation date?', 'Start date', 'End date', 'When did you graduate?', 'Date of your last promotion']) {
+      expect(asksWhenYouStart(q), q).toBe(false);
+    }
+  });
+
+  it('reads the dates written in the ordinary ways, against the local day', () => {
+    const now = new Date(2026, 10, 15, 0, 5); // five past midnight, 15 Nov, local
+    for (const text of ['October 2026', 'Oct. 2026', 'Sept 2026', '14 November 2026', 'Nov 14th, 2026', 'November 14, 2026', '2026-11-14', '11/14/2026', '14/11/2026']) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    // A month and a year covers the month; today is not yet past; nor are
+    // things that are not a day on a calendar.
+    for (const text of ['November 2026', '15 November 2026', '2026-11-15', 'Dec. 2026', 'Immediately', 'Two weeks notice', 'Spring 2026', '2025', 'January 5th', '']) {
+      expect(namesPassedDate(text, now), text).toBe(false);
+    }
   });
 });

@@ -9,7 +9,7 @@
  * tracker row or two per run. Pulling inside the server's own commit queue,
  * with writes held off, closes it — and these are the ways it could go wrong.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile, execFileSync } from 'node:child_process';
 import express from 'express';
 import request from 'supertest';
@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import YAML from 'yaml';
+import { runAgent } from '../src/ai/agent.js';
 import { Repo, cloneRepo, withCommit } from '../src/git/repo.js';
 import { cloneProject } from '../src/model/projects.js';
 import { saveStore } from '../src/git/save.js';
@@ -777,5 +778,190 @@ describe('a request part-way through when a pull begins', () => {
     const result = await repoB.pull();
     expect(result.message).not.toMatch(/still being saved/);
     expect(result.ok).toBe(true);
+  });
+});
+
+/*
+ * The switch-off, closed where it leaked.
+ *
+ * Each of these let a pulled or cloned config.yaml run a command this machine
+ * had not been shown, or made the switch-off travel to the other machine.
+ */
+describe('the AI switch-off, where it leaked', () => {
+  /** A replaces config.yaml with this `ai:` block, as text, and pushes it. */
+  async function aSetsAi(aiBlock: string, message: string): Promise<void> {
+    fs.writeFileSync(path.join(a, 'config.yaml'), `ai:\n${aiBlock}git:\n  autoCommit: true\noutput:\n  dir: out\n`);
+    await repoA.commitAll(message);
+    expect((await repoA.push()).ok).toBe(true);
+  }
+
+  /** A command that leaves a mark when it runs, and nothing else. */
+  function markingCommand(): { command: string; ran: () => boolean } {
+    const dir = tempDir('rmm-marking-');
+    const mark = path.join(dir, 'it-ran');
+    const command = path.join(dir, 'run.sh');
+    fs.writeFileSync(command, `#!/bin/sh\necho ran > '${mark}'\necho ready\n`, { mode: 0o755 });
+    return { command, ran: () => fs.existsSync(mark) };
+  }
+
+  /*
+   * YAML 1.2 reads `yes` and `on` as strings and `1` as a number. The
+   * switch-off asked for `=== true` and let them through as "off", while
+   * `loadConfig` and `runAgent` read them by truthiness as "on" — so a pull
+   * that set `enabled: yes` and a new command ran that command.
+   */
+  it('takes only a real true as on, so a pulled `enabled: yes` with a new command runs nothing', async () => {
+    for (const [i, said] of ['yes', '1', '"on"'].entries()) {
+      const { command, ran } = markingCommand();
+      await aSetsAi(`  enabled: ${said}\n  command: ${command}\n  args: []\n`, `A: enabled ${said} (${i})`);
+      expect((await repoB.pull()).ok).toBe(true);
+
+      const config = storeB.loadConfig();
+      expect(config.ai.enabled, `enabled: ${said}`).toBe(false);
+      expect((await runAgent(config, 'hello')).executed).toBe(false);
+      expect(ran()).toBe(false);
+    }
+    // And `runAgent` keeps the same rule for a config that did not come through `loadConfig`.
+    const { command, ran } = markingCommand();
+    const handMade = { ...storeB.loadConfig(), ai: { ...storeB.loadConfig().ai, enabled: 'on' as unknown as boolean, command, args: [] } };
+    expect((await runAgent(handMade, 'hello')).executed).toBe(false);
+    expect(ran()).toBe(false);
+  });
+
+  it('takes only a real true as on in a clone, too', async () => {
+    await aSetsAi('  enabled: yes\n  command: /tmp/somebody-else.sh\n', 'A: enabled yes');
+    const cloned = await cloneProject(remote, path.join(tempDir('rmm-clone-into-'), 'save'), cloneRepo);
+    expect(cloned.loadConfig().ai.enabled).toBe(false);
+  });
+
+  /*
+   * `research`, `model` and `effort` rewrite the arguments the command is
+   * run with, and the switch-off compared only `command` and `args` as
+   * written. `research: true` alone takes WebFetch and WebSearch off the deny
+   * list.
+   */
+  it('switches off for a pull that changes only the research, model or effort setting', async () => {
+    await aSetsAi('  enabled: true\n  command: claude\n', 'A: AI on');
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
+    expect(storeB.loadConfig().ai.enabled).toBe(true);
+
+    await aSetsAi('  enabled: true\n  command: claude\n  research: true\n', 'A: research on');
+    const pulled = await repoB.pull();
+    expect(pulled.ok).toBe(true);
+    expect(pulled.aiSwitchedOff).toBe(true);
+    expect(pulled.message).toMatch(/its arguments went from .*WebSearch.* to /s);
+    expect(storeB.loadConfig().ai.enabled).toBe(false);
+
+    await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
+    await aSetsAi('  enabled: true\n  command: claude\n  research: true\n  model: opus\n', 'A: a model');
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+  });
+
+  /*
+   * While switched off, GET /config says `enabled: false` whatever the file
+   * says, and the Settings page sent that back with every save — so
+   * changing the timeout committed `enabled: false` into config.yaml, and
+   * the next push switched the other machine off. Covered on the server so
+   * that no client can do it.
+   */
+  it('does not write a switch-off into config.yaml when settings are saved while it is in force', async () => {
+    await aSetsAi('  enabled: true\n  command: /tmp/somebody-else.sh\n', 'A: new AI');
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+
+    const shown = (await request(app).get('/api/config').expect(200)).body;
+    expect(shown.ai.enabled).toBe(false);
+    await request(app)
+      .put('/api/config')
+      .send({ ai: { enabled: shown.ai.enabled, command: shown.ai.command, timeoutMs: 240_000 } })
+      .expect(200);
+
+    const file = YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8'));
+    expect(file.ai.enabled).toBe(true);
+    expect(file.ai.timeoutMs).toBe(240_000);
+    expect(git(['show', 'HEAD:config.yaml'], b)).not.toMatch(/enabled: false/);
+    expect(aiSwitchedOff(b)).toBeDefined();
+    expect(storeB.loadConfig().ai.enabled).toBe(false);
+
+    // Turning it on still answers the switch-off.
+    await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
+    expect(aiSwitchedOff(b)).toBeUndefined();
+    expect(storeB.loadConfig().ai.enabled).toBe(true);
+    // And with nothing in force, off is written as asked.
+    await request(app).put('/api/config').send({ ai: { enabled: false } }).expect(200);
+    expect(YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8')).ai.enabled).toBe(false);
+  });
+
+  /*
+   * The CLI said "ai.enabled: false in config.yaml" whatever the reason, and
+   * had no way to turn the AI back on: Settings was the only answer to a
+   * switch-off.
+   */
+  it('is explained by rmm feedback, and answered by rmm config set ai.enabled true', async () => {
+    await aSetsAi('  enabled: true\n  command: /tmp/somebody-else.sh\n', 'A: new AI');
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const rmm = (args: string[]) =>
+      promisify(execFile)(process.execPath, ['node_modules/.bin/tsx', 'src/cli.ts', ...args, '--data', b], {
+        cwd: root,
+        env: { ...process.env, HOME: tempDir('rmm-switch-home-'), RMM_AI: '' },
+        timeout: 60_000,
+      });
+
+    const said = await rmm(['feedback', 'base']);
+    expect(said.stdout).toMatch(/AI is switched off on this machine\. The AI command changed in what was pulled: .*somebody-else/s);
+    expect(said.stdout).toMatch(/rmm config set ai\.enabled true/);
+    expect(said.stdout).not.toMatch(/ai\.enabled: false/);
+
+    const off = await rmm(['config', 'set', 'ai.enabled', 'false']);
+    expect(off.stdout).toMatch(/config\.yaml is unchanged/);
+    expect(YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8')).ai.enabled).toBe(true);
+    expect(aiSwitchedOff(b)).toBeDefined();
+
+    const on = await rmm(['config', 'set', 'ai.enabled', 'true']);
+    expect(on.stdout).toMatch(/AI on — it will run \/tmp\/somebody-else\.sh/);
+    expect(aiSwitchedOff(b)).toBeUndefined();
+    expect(new Store(b).loadConfig().ai.enabled).toBe(true);
+
+    await expect(rmm(['config', 'set', 'ai.command', 'x'])).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringMatching(/ai\.enabled is the one setting/),
+    });
+  }, 120_000);
+});
+
+/*
+ * The whole-object writes' versions, from the one piece they are about.
+ *
+ * `PUT /profile`, `/skills` and `/answers` each called `store.load()` twice —
+ * once for the version to compare, once for the one to hand back — so a
+ * profile save on a store of two hundred resumes read all two hundred twice.
+ */
+describe('the version a whole-object write hands back', () => {
+  it('is the one GET /store reports, and is found without loading the whole store', async () => {
+    // Written in a shape normalisation changes, so a version of the raw file would differ.
+    fs.writeFileSync(path.join(b, 'skills.yaml'), '- id: g1\n  name: Languages\n  items:\n    - id: s_go\n      text: Go\n');
+    const seen = (await request(app).get('/api/store').expect(200)).body;
+    const loads = vi.spyOn(storeB, 'load');
+
+    const profile = await request(app)
+      .put(`/api/profile?basedOn=${seen.profileVersion}`)
+      .send({ ...seen.profile, email: 'next@example.com' })
+      .expect(200);
+    const skills = await request(app)
+      .put(`/api/skills?basedOn=${seen.skillsVersion}`)
+      .send([...seen.skillGroups, { id: 'g2', name: 'Tools', items: [{ id: 's_git', text: 'git' }] }])
+      .expect(200);
+    const answers = await request(app)
+      .put(`/api/answers?basedOn=${seen.answersVersion}`)
+      .send([...seen.answers, { id: 'a_new', question: 'Why here?', answer: 'Because.' }])
+      .expect(200);
+    expect(loads).not.toHaveBeenCalled();
+    loads.mockRestore();
+
+    const now = (await request(app).get('/api/store').expect(200)).body;
+    expect(profile.headers.etag).toBe(`"${now.profileVersion}"`);
+    expect(skills.headers.etag).toBe(`"${now.skillsVersion}"`);
+    expect(answers.headers.etag).toBe(`"${now.answersVersion}"`);
   });
 });

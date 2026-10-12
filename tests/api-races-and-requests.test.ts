@@ -237,6 +237,29 @@ describe('the letter a completed workspace files', () => {
     expect(done.application.letterId).toBe(first.application.letterId);
     expect(letters()).toHaveLength(before + 1);
   });
+
+  /*
+   * The name has the local day in it, so completing again a few minutes after
+   * midnight named a letter that was not there yet and filed a second copy
+   * for the same application. Its own letter is found by the application it
+   * belongs to, before a name is made up.
+   */
+  it('and keeps it when completed again after midnight', async () => {
+    const before = letters().length;
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+    try {
+      vi.setSystemTime(new Date(2026, 9, 11, 23, 58)); // 23:58 local, 11 Oct
+      const first = await complete('Engineer');
+      vi.setSystemTime(new Date(2026, 9, 12, 0, 3)); // 00:03 local, 12 Oct
+      const draft = t.store.loadDrafts().find((d) => d.company === 'Acme')!;
+      const done = (await request(app).post(`/api/workspace/${draft.id}/complete`).send({}).expect(200)).body;
+      expect(done.application.letterId).toBe(first.application.letterId);
+      expect(letters()).toHaveLength(before + 1);
+      expect(letters().filter((l) => l.applicationId === first.application.id)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 /*

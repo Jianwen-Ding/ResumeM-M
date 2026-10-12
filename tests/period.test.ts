@@ -194,6 +194,24 @@ describe('the way a store already writes dates', () => {
     expect(inferStyle(['Various', '2024'])).toEqual(DEFAULT_STYLE);
   });
 
+  /*
+   * "Sept." carries a full stop like "Sep." does, and was counted as undotted,
+   * so a store that writes it — "Sept. 2022 -- May 2026" is how a lot of
+   * people write a degree — inferred `abbr`, and the next date the control
+   * moved came back "Aug 2025" beside its dotted neighbours. It is written
+   * back as the store's "Sep.", as "Sept" is written back as "Sep".
+   */
+  it('hears the full stop on Sept.', () => {
+    expect(styleOf('Sept. 2022 -- May 2026').month).toBe('abbrDot');
+    expect(styleOf('Sept 2022').month).toBe('abbr');
+    const style = inferStyle(['Sept. 2022 -- May 2026', 'Sept. 2023 -- Dec. 2023', 'Sept. 2024 -- Present']);
+    expect(style.month).toBe('abbrDot');
+    expect(formatPeriod({ start: { year: 2025, month: 1 }, end: { year: 2025, month: 8 } }, style)).toBe('Jan. 2025 -- Aug. 2025');
+    expect(formatPeriod(parsePeriod('Sept. 2022 -- May 2026'), { ...DEFAULT_STYLE, ...styleOf('Sept. 2022 -- May 2026') })).toBe(
+      'Sep. 2022 -- May 2026',
+    );
+  });
+
   it('notices a store that writes Current instead of Present', () => {
     expect(inferStyle(['Jan 2023 - Current', 'Mar 2021 - Current']).present).toBe('Current');
   });

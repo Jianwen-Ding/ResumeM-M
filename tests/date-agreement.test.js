@@ -33,6 +33,7 @@ const TEXTS = [
   '09/2022 -- 05/2026',
   '2022-09 -- 2026-05',
   'Sept 2022',
+  'Sept. 2022 -- May 2026',
   'Jan 2023 – Present',
   'Jan 2023 — Present',
   'Jan 2023 to Present',

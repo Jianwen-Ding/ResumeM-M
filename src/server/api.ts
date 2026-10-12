@@ -1709,10 +1709,18 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       // `?commit=0` for the editor's inline edits, which commit on idle like
       // every other auto-save rather than once per keystroke.
       const wantCommit = req.query.commit !== '0' && req.query.commit !== 'false';
-      if (wholeMovedOn(res, 'Your profile', req.query.basedOn, store.load().profile)) return;
+      /*
+       * The profile alone, not `store.load()`: the version is of this one
+       * file, and loading the whole store to look at it — twice per write —
+       * made every profile save cost as much as reading every resume.
+       * `loadProfile` normalises exactly as `load` does, so the versions are
+       * the ones `GET /store` reports.
+       */
+      if (wholeMovedOn(res, 'Your profile', req.query.basedOn, store.loadProfile())) return;
       await withCommit(repo, autoCommit() && wantCommit, 'Update profile', () => store.saveProfile(profile));
-      // Which version this write made, for the next one to be based on.
-      res.setHeader('ETag', `"${contentVersion(store.load().profile)}"`);
+      // Which version this write made, for the next one to be based on: the
+      // profile just written, as a read of it hands it back.
+      res.setHeader('ETag', `"${contentVersion(store.loadProfile())}"`);
       res.json(profile);
     }),
   );
@@ -1953,9 +1961,10 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     handler(async (req, res) => {
       const groups = req.body as SkillGroup[];
       if (!Array.isArray(groups)) throw new Error('Skills have to be a list of groups');
-      if (wholeMovedOn(res, 'The skills list', req.query.basedOn, store.load().skillGroups)) return;
+      // The skill groups alone, as on `PUT /profile`; see `Store.loadSkillGroups`.
+      if (wholeMovedOn(res, 'The skills list', req.query.basedOn, store.loadSkillGroups())) return;
       await withCommit(repo, autoCommit(), 'Update skills', () => store.saveSkillGroups(groups));
-      res.setHeader('ETag', `"${contentVersion(store.load().skillGroups)}"`);
+      res.setHeader('ETag', `"${contentVersion(store.loadSkillGroups())}"`);
       res.json(groups);
     }),
   );
@@ -6041,12 +6050,25 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          * company alone, two roles at one employer sent on one day wrote the
          * same file, and the second letter replaced the first. The same
          * application completed again writes over its own, as it always did.
+         *
+         * Its own is the letter already filed for this application, found by
+         * its `applicationId` before any name is made up. The name has the
+         * day in it, so completing again after midnight named a letter that
+         * did not exist yet, and the application had two — the one its row
+         * had pointed at and a second copy that took the row's link away.
+         * Where an earlier run already left two, the one the row names wins.
          */
-        const named = letterId(draft.company, draft.role);
-        const taken = new Map(store.loadCoverLetters().map((l) => [l.id, l.applicationId]));
-        let candidate = named;
-        for (let n = 2; taken.has(candidate) && taken.get(candidate) !== result.application.id; n++) {
-          candidate = `${named}-${n}`;
+        const letters = store.loadCoverLetters();
+        const mine = letters.filter((l) => l.applicationId === result.application.id);
+        const own = mine.find((l) => l.id === result.application.letterId) ?? mine[0];
+        let candidate = own?.id;
+        if (!candidate) {
+          const named = letterId(draft.company, draft.role);
+          const taken = new Map(letters.map((l) => [l.id, l.applicationId]));
+          candidate = named;
+          for (let n = 2; taken.has(candidate) && taken.get(candidate) !== result.application.id; n++) {
+            candidate = `${named}-${n}`;
+          }
         }
         filedLetterId = candidate;
         const letter: CoverLetter = {
@@ -6251,9 +6273,10 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       // answers.yaml, which reads back as an empty list — the whole answer
       // bank gone, with a 200 and nothing said.
       if (!Array.isArray(answers)) throw new Error('The answer bank has to be a list of answers');
-      if (wholeMovedOn(res, 'The answer bank', req.query.basedOn, store.load().answers)) return;
+      // The answer bank alone, as on `PUT /profile`; see `Store.loadAnswers`.
+      if (wholeMovedOn(res, 'The answer bank', req.query.basedOn, store.loadAnswers())) return;
       await withCommit(repo, autoCommit(), 'Update answer bank', () => store.saveAnswers(answers));
-      res.setHeader('ETag', `"${contentVersion(store.load().answers)}"`);
+      res.setHeader('ETag', `"${contentVersion(store.loadAnswers())}"`);
       res.json(answers);
     }),
   );

@@ -171,38 +171,41 @@ function lookup(env: NodeJS.ProcessEnv, name: string): string | undefined {
 }
 
 /**
- * The environment to start an AI CLI with: `env` with everything not on the
- * allow-list taken out.
+ * Which of `names` Claude Code's own settings file turns on.
  *
- * What the app sets for a run on top of this — the sandbox as PWD and TMPDIR,
- * the tool server's session file, the model probe's terminal settings — is
- * added by the caller afterwards, so it never has to be on the list.
- */
-/**
- * Whether Claude Code's own settings file turns Bedrock on.
+ * `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` can be set in the
+ * shell or in the `env` block of `~/.claude/settings.json`, and the second is
+ * what Claude Code's Bedrock and Vertex set-up guides tell people to do. Read
+ * only from the environment, a setup made the documented way had its AWS
+ * profile and region, or its Google credentials, taken away here and Claude
+ * Code failed to sign in with nothing on screen saying why. Bedrock was looked
+ * for here first and Vertex was not, so a Vertex setup still failed that way;
+ * one reader for every switch keeps the two from drifting apart again.
  *
- * `CLAUDE_CODE_USE_BEDROCK` can be set in the shell or in the `env` block of
- * `~/.claude/settings.json`, and the second is what Claude Code's Bedrock
- * set-up guide tells people to do. Read only from the environment, a setup
- * made the documented way had its AWS profile and region taken away here and
- * Claude Code failed to sign in with nothing on screen saying why. Any error —
- * no file, a file that is not JSON, a folder that cannot be read — is "no",
- * which is what it was before this looked.
+ * Any error — no file, a file that is not JSON, a folder that cannot be read
+ * — is "none of them", which is what it was before this looked. The file is
+ * read once per call, however many names are asked about.
  */
-function bedrockInSettings(env: NodeJS.ProcessEnv): boolean {
+function onInSettings(env: NodeJS.ProcessEnv, names: readonly string[]): Set<string> {
+  const on = new Set<string>();
   const configDir = lookup(env, 'CLAUDE_CONFIG_DIR');
   const home = lookup(env, 'HOME') ?? lookup(env, 'USERPROFILE');
   const dir = configDir || (home ? path.join(home, '.claude') : undefined);
-  if (!dir) return false;
+  if (!dir) return on;
   try {
     const settings = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')) as {
       env?: Record<string, unknown>;
     };
-    const value = settings?.env?.CLAUDE_CODE_USE_BEDROCK;
-    return isOn(typeof value === 'string' ? value : value === undefined || value === null ? undefined : String(value));
+    for (const name of names) {
+      const value = settings?.env?.[name];
+      if (isOn(typeof value === 'string' ? value : value === undefined || value === null ? undefined : String(value))) {
+        on.add(name);
+      }
+    }
   } catch {
-    return false;
+    // As if none of them were set; see above.
   }
+  return on;
 }
 
 /** The configured command is Gemini's CLI, by its file name on any platform. */
@@ -212,6 +215,14 @@ function isGemini(command: string | undefined): boolean {
   return /^gemini(\.(cmd|exe|ps1|js|mjs))?$/i.test(name);
 }
 
+/**
+ * The environment to start an AI CLI with: `env` with everything not on the
+ * allow-list taken out.
+ *
+ * What the app sets for a run on top of this — the sandbox as PWD and TMPDIR,
+ * the tool server's session file, the model probe's terminal settings — is
+ * added by the caller afterwards, so it never has to be on the list.
+ */
 export function envForAgent(
   env: NodeJS.ProcessEnv = process.env,
   /** The AI command about to be started, which is how a Gemini setup is known. */
@@ -235,16 +246,22 @@ export function envForAgent(
    * has them there for that. So they go through only when the owner has said,
    * with CLAUDE_CODE_USE_BEDROCK, that the AI is meant to use them.
    */
-  const bedrock = isOn(lookup(env, 'CLAUDE_CODE_USE_BEDROCK')) || bedrockInSettings(env);
+  const inSettings = onInSettings(env, ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'GOOGLE_GENAI_USE_VERTEXAI']);
+  const bedrock = isOn(lookup(env, 'CLAUDE_CODE_USE_BEDROCK')) || inSettings.has('CLAUDE_CODE_USE_BEDROCK');
 
   /*
    * And Google's account-wide credentials only to a Google setup, for the
    * same reason (see `GOOGLE_CREDENTIALS`): Claude Code told to use Vertex,
    * Gemini told to, or Gemini's CLI itself, which signs in with them when no
-   * API key is set.
+   * API key is set. Either switch counts from Claude Code's settings file as
+   * well as from the shell, as Bedrock's does (see `onInSettings`).
    */
   const google =
-    isOn(lookup(env, 'CLAUDE_CODE_USE_VERTEX')) || isOn(lookup(env, 'GOOGLE_GENAI_USE_VERTEXAI')) || isGemini(command);
+    isOn(lookup(env, 'CLAUDE_CODE_USE_VERTEX')) ||
+    isOn(lookup(env, 'GOOGLE_GENAI_USE_VERTEXAI')) ||
+    inSettings.has('CLAUDE_CODE_USE_VERTEX') ||
+    inSettings.has('GOOGLE_GENAI_USE_VERTEXAI') ||
+    isGemini(command);
 
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {

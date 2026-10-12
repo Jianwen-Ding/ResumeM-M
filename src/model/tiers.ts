@@ -165,7 +165,10 @@ export function doneAt(
     const sent = mine.map((a) => releasedAt(a));
     if (sent.some((at) => at === undefined)) return undefined;
     // The latest, so the week is measured from the last thing that happened.
-    const last = sent.filter((at): at is string => Boolean(at)).sort().pop();
+    // As instants, through `later`: sorted as text, a close written with an
+    // offset ("2026-10-05T23:00:00-07:00", which is 6 October in UTC) came
+    // before "2026-10-06T01:00:00.000Z", and the week started early.
+    const last = sent.reduce<string | undefined>((acc, at) => later(acc, at), undefined);
 
     /*
      * And never before the resume became temporary.

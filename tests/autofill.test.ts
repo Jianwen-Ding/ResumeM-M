@@ -364,6 +364,29 @@ describe('when the degree ends, as the boxes forms ask for it in', () => {
     expect(graduation('Anticipated Dec 2026').graduation_date).toBe('December 2026');
     expect(graduation('2027')).toEqual({ graduation_year: '2027', graduation_date: '2027' });
   });
+
+  /*
+   * A season is given a month so it sorts — Spring is March — and that month
+   * went into the form: "Expected Spring 2026" was filed as graduating in
+   * March 2026, a month the resume never says and a claim about when somebody
+   * can start work. A season reports its year alone, at either end.
+   */
+  it('reports only the year for a season, never the month it sorts by', () => {
+    expect(graduation('Sep. 2022 -- Expected Spring 2026')).toEqual({
+      education_start_year: '2022',
+      education_start_month: 'September',
+      education_start_date: 'September 2022',
+      graduation_year: '2026',
+      graduation_date: '2026',
+    });
+    expect(graduation('Fall 2022 -- Winter 2025')).toEqual({
+      education_start_year: '2022',
+      education_start_date: '2022',
+      graduation_year: '2025',
+      graduation_date: '2025',
+    });
+    expect(graduation('Expected Summer 2027')).toEqual({ graduation_year: '2027', graduation_date: '2027' });
+  });
 });
 
 /*
@@ -541,6 +564,9 @@ describe('the jobs a work-history section asks for', () => {
     expect(jobs[1]).toMatchObject({ company: 'Acme Co.', current: false, description: '' });
     expect(jobs[1]?.start?.year).toBe(2022);
     expect(jobs[1]?.end?.year).toBe(2022);
+    // "Summer" sorts as June, but the resume names no month, so the form gets none.
+    expect(jobs[1]?.start).toEqual({ year: 2022 });
+    expect(jobs[1]?.end).toEqual({ year: 2022 });
   });
 
   /*
@@ -657,6 +683,13 @@ describe('the schools an Education section asks for, one block at a time', () =>
     );
     expect(lone).toEqual({ school: 'Boston University', end: { year: 2028, month: 5 } });
     expect(going).toEqual({ school: 'Northeastern University', start: { year: 2023, month: 9 } });
+  });
+
+  it('gives a season its year and no month, at either end', () => {
+    const [one] = educationHistory(
+      resume([{ id: 'a', kind: 'education', title: 'Northeastern University', dates: 'Fall 2022 -- Expected Spring 2026', bullets: [] }]),
+    );
+    expect(one).toEqual({ school: 'Northeastern University', start: { year: 2022 }, end: { year: 2026 } });
   });
 
   it('offers no degree or discipline for a line that does not split plainly', () => {

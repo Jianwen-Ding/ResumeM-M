@@ -29,7 +29,7 @@ import {
 
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
-import { applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
+import { aiIsOn, applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
 import { extractJob } from '../jobs/extract.js';
 import {
   normalizeAnswers,
@@ -39,7 +39,7 @@ import {
   normalizeSections,
   normalizeSkillGroups,
 } from './normalize.js';
-export { repairAiArgs };
+export { aiIsOn, repairAiArgs };
 
 /** What a value turned out to be, in words, for a message about a file. */
 function describeValue(v: unknown): string {
@@ -385,6 +385,25 @@ export function clearAiSwitchOff(root: string): void {
 }
 
 /**
+ * The command and arguments an `ai` block from config.yaml would actually
+ * run, after the same repairs and settings `loadConfig` applies: the known
+ * argument fixes, the research setting's deny list, and the model and effort
+ * flags. A value of the wrong type falls back to the default rather than
+ * throwing, because this also reads config.yaml files that arrived in a pull.
+ */
+export function effectiveAiCommand(ai: Partial<StoreConfig['ai']>): { command: string; args: string[] } {
+  const command = typeof ai.command === 'string' ? ai.command : DEFAULT_CONFIG.ai.command;
+  const given = Array.isArray(ai.args) ? ai.args.map(String) : DEFAULT_CONFIG.ai.args;
+  let args = repairAiArgs(command, given);
+  args = applyResearch(command, args, Boolean(ai.research));
+  args = applyModelAndEffort(command, args, {
+    model: typeof ai.model === 'string' ? ai.model : undefined,
+    effort: ai.effort,
+  });
+  return { command, args };
+}
+
+/**
  * What a change to config.yaml would do to the command this machine runs
  * for AI actions, in words; undefined when it does not change it.
  *
@@ -413,10 +432,16 @@ export function aiCommandChange(before: string | undefined, after: string | unde
   };
   const was = ai(before);
   const now = ai(after);
-  const on = (c: Partial<StoreConfig['ai']>) => (c.enabled ?? DEFAULT_CONFIG.ai.enabled) === true;
+  const on = (c: Partial<StoreConfig['ai']>) => aiIsOn(c.enabled ?? DEFAULT_CONFIG.ai.enabled);
   if (!on(now)) return undefined;
-  const command = (c: Partial<StoreConfig['ai']>) => String(c.command ?? DEFAULT_CONFIG.ai.command);
-  const args = (c: Partial<StoreConfig['ai']>) => JSON.stringify(c.args ?? DEFAULT_CONFIG.ai.args);
+  /*
+   * The command line as it would actually run, not as config.yaml spells it:
+   * `research`, `model` and `effort` rewrite the arguments on the way (see
+   * `effectiveAiCommand`), so `research: true` alone takes WebFetch and
+   * WebSearch off the deny list without `args` changing by a character.
+   */
+  const command = (c: Partial<StoreConfig['ai']>) => effectiveAiCommand(c).command;
+  const args = (c: Partial<StoreConfig['ai']>) => JSON.stringify(effectiveAiCommand(c).args);
   const said: string[] = [];
   if (before === undefined) {
     said.push(`the AI is switched on, running ${JSON.stringify(command(now))} ${args(now)}`);
@@ -1157,17 +1182,39 @@ export class Store {
     this.parsed.set(full, { key: `${stat.size}:${stat.mtimeMs}`, value });
   }
 
+  /*
+   * The profile, the skill groups and the answer bank on their own, each
+   * normalised exactly as `load` normalises it — `load` is built from these.
+   *
+   * For the writes that guard and version one of them (`PUT /profile`,
+   * `/skills`, `/answers`): the version they compare and hand back has to be
+   * the one `GET /store` reports, and getting it from `load` read every
+   * resume, letter and draft in the store twice per keystroke-save to look at
+   * one file.
+   */
+  loadProfile(): Profile {
+    return normalizeProfile(this.readProfile());
+  }
+
+  loadSkillGroups(): SkillGroup[] {
+    return normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
+  }
+
+  loadAnswers(): AnswerBankItem[] {
+    return normalizeAnswers(this.readYaml<AnswerBankItem[]>('answers.yaml', []));
+  }
+
   /** Read every file in the store into one object. */
   load(): StoreData {
     const config = this.loadConfig();
     const entries = this.loadEntries();
     return {
-      profile: normalizeProfile(this.readProfile()),
+      profile: this.loadProfile(),
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.
       entries,
-      skillGroups: normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', [])),
+      skillGroups: this.loadSkillGroups(),
       /*
        * A section that has never said how it wants to be ordered is asked the
        * one question that can be answered safely — would sorting it change
@@ -1196,7 +1243,7 @@ export class Store {
       coverLetters: this.loadCoverLetters(),
       drafts: this.loadDrafts(),
       samples: this.loadSamples(),
-      answers: normalizeAnswers(this.readYaml<AnswerBankItem[]>('answers.yaml', [])),
+      answers: this.loadAnswers(),
       voice: this.loadVoice(),
       config,
     };
@@ -1214,16 +1261,21 @@ export class Store {
       applications: { ...(raw.applications ?? {}) },
     };
 
-    config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
-    // The deny list follows the research setting, so the two cannot disagree.
-    config.ai.args = applyResearch(config.ai.command, config.ai.args, Boolean(config.ai.research));
-    // And the model and effort flags follow their own settings, for the same
-    // reason: the saved arguments stay the preset's, and the choice is a
-    // setting rather than a hand edit that drifts.
-    config.ai.args = applyModelAndEffort(config.ai.command, config.ai.args, {
-      model: config.ai.model,
-      effort: config.ai.effort,
-    });
+    /*
+     * Repaired arguments; the deny list following the research setting, so
+     * the two cannot disagree; and the model and effort flags following their
+     * own settings, for the same reason: the saved arguments stay the
+     * preset's, and the choice is a setting rather than a hand edit that
+     * drifts. In one place (`effectiveAiCommand`) so that the switch-off
+     * compares exactly the command line this runs.
+     */
+    config.ai.args = effectiveAiCommand(config.ai).args;
+    /*
+     * Only a real `true` turns the AI on (see `aiIsOn`). Normalised here so
+     * that every reader of `config.ai.enabled` downstream, truthiness checks
+     * included, sees the same boolean the switch-off reasoned about.
+     */
+    config.ai.enabled = aiIsOn(config.ai.enabled);
 
     // Escape hatches for automated runs. A test suite driving a real server
     // should be able to leave no commits behind without editing config.yaml.
@@ -1248,6 +1300,22 @@ export class Store {
    * page reported "Settings saved" over a setting that had not changed.
    */
   saveConfig(patch: Partial<StoreConfig>): StoreConfig {
+    /*
+     * While a pull or a clone has the AI switched off here, "off" is this
+     * machine's answer and lives in `.git` (see `aiSwitchOffFile`), and
+     * `loadConfig` reports `enabled: false` whatever config.yaml says. A
+     * client that sends back what it was shown — the Settings page's Save
+     * did, with every change to the timeout — would write that false into
+     * the tracked file and commit it, and the next push would switch the
+     * other machine's AI off too: the travelling switch-off the marker
+     * exists to avoid. So while switched off, anything short of turning the
+     * AI on leaves the file's own value alone. Turning it on (`true`) still
+     * goes through, and clears the switch-off below.
+     */
+    if (patch.ai && 'enabled' in patch.ai && patch.ai.enabled !== true && aiSwitchedOff(this.root) !== undefined) {
+      const { enabled: _keptAsTheFileSaysIt, ...rest } = patch.ai;
+      patch = { ...patch, ai: rest as StoreConfig['ai'] };
+    }
     const current = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
     const merged: Partial<StoreConfig> = {
       ...current,

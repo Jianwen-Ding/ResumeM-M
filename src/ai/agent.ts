@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { redactIdentifiers } from '../jobs/answers.js';
 import { startRun, type RunHandle } from './activity.js';
-import { AI_PRESETS } from './presets.js';
+import { AI_PRESETS, aiIsOn } from './presets.js';
 import { envForAgent } from './env.js';
 import type { StoreConfig } from '../model/types.js';
 
@@ -124,7 +124,12 @@ export async function runAgent(
    * `redactIdentifiers`.
    */
   prompt = redactIdentifiers(prompt).text;
-  if (!config.ai.enabled) {
+  /*
+   * Only a real `true` runs anything (see `aiIsOn`). `loadConfig` already
+   * normalises the setting, but a config built some other way must not get
+   * a command run on the strength of `"on"` or `1`.
+   */
+  if (!aiIsOn(config.ai.enabled)) {
     return { output: prompt, executed: false };
   }
 

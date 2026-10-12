@@ -286,6 +286,21 @@ const MONTHS = [
 ];
 
 /**
+ * The month a date point actually names, if it names one.
+ *
+ * `parsePeriod` gives a season a month — Spring is March, Fall September —
+ * because a season has to sort somewhere among the months beside it. That
+ * month is a sorting aid and nothing more: "Expected Spring 2026" went into a
+ * form's graduation boxes as "March 2026", and "Summer 2025" into Workday's
+ * "From" as June, a month the resume never says. A season reports its year
+ * alone, the same as a date written with no month.
+ */
+function writtenMonth(point: { month?: number; season?: string } | undefined): number | undefined {
+  if (!point || point.season) return undefined;
+  return point.month;
+}
+
+/**
  * When the degree ends, as the three boxes forms ask for it in.
  *
  * Read off the printed dates rather than `period`, because the printed dates
@@ -308,21 +323,23 @@ export function graduation(dates: string): Record<string, string> {
   if (single) {
     const end = period!.start!;
     const year = String(end.year);
-    if (!end.month) return { graduation_year: year, graduation_date: year };
-    const month = MONTHS[end.month - 1]!;
+    const endMonth = writtenMonth(end);
+    if (!endMonth) return { graduation_year: year, graduation_date: year };
+    const month = MONTHS[endMonth - 1]!;
     return { graduation_year: year, graduation_month: month, graduation_date: `${month} ${year}` };
   }
 
   /*
    * And when it began, for the forms whose Education block asks for both ends
    * — Greenhouse's has "Start date month" and "Start date year" beside the end.
-   * Same rule: the month only where it is written.
+   * Same rule: the month only where it is written, and a season writes none.
    */
   const start = period?.start;
   if (start?.year) {
     out.education_start_year = String(start.year);
-    if (start.month) {
-      out.education_start_month = MONTHS[start.month - 1]!;
+    const startMonth = writtenMonth(start);
+    if (startMonth) {
+      out.education_start_month = MONTHS[startMonth - 1]!;
       out.education_start_date = `${out.education_start_month} ${start.year}`;
     } else {
       out.education_start_date = String(start.year);
@@ -332,8 +349,9 @@ export function graduation(dates: string): Record<string, string> {
   const end = period?.ongoing ? undefined : period?.end;
   if (!end?.year) return out;
   const year = String(end.year);
-  if (!end.month) return { ...out, graduation_year: year, graduation_date: year };
-  const month = MONTHS[end.month - 1]!;
+  const endMonth = writtenMonth(end);
+  if (!endMonth) return { ...out, graduation_year: year, graduation_date: year };
+  const month = MONTHS[endMonth - 1]!;
   return { ...out, graduation_year: year, graduation_month: month, graduation_date: `${month} ${year}` };
 }
 
@@ -680,8 +698,13 @@ function plainLine(text: string | undefined): string {
     .trim();
 }
 
-const monthYear = (p?: { year: number; month?: number }) =>
-  p?.year ? { year: p.year, ...(p.month ? { month: p.month } : {}) } : undefined;
+// A season's month is a sorting aid (see `writtenMonth`), so "Summer 2025"
+// fills a form's From with 2025 and leaves its month for the person.
+const monthYear = (p?: { year: number; month?: number; season?: string }) => {
+  if (!p?.year) return undefined;
+  const month = writtenMonth(p);
+  return { year: p.year, ...(month ? { month } : {}) };
+};
 
 /**
  * Every job on the resume being sent, for the work-history blocks a form asks

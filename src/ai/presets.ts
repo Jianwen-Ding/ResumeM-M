@@ -224,6 +224,19 @@ export function matchPreset(command: string, args: string[]): AiPreset | undefin
 }
 
 /**
+ * Whether a value of `ai.enabled` turns the AI on. Only a real `true` does.
+ *
+ * config.yaml is YAML 1.2, where `yes`, `on` and `1` are a string, a string
+ * and a number rather than a boolean. Anything that read the setting by
+ * truthiness took them for "on", while the switch-off (`aiCommandChange`)
+ * asked for `true` and so let them through: a pulled `enabled: yes` with a
+ * new command ran that command. One rule, here, for every reader.
+ */
+export function aiIsOn(enabled: unknown): boolean {
+  return enabled === true;
+}
+
+/**
  * Repair an AI command that cannot work as configured.
  *
  * A preset is copied when it is chosen, not referenced, so a config saved

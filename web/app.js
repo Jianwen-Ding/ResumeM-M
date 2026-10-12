@@ -6109,7 +6109,16 @@ function inSkillsLane(change) {
     // Over the list it was made to, and made again to a newer one: see `inProfileLane`.
     for (let attempt = 0; ; attempt++) {
       const groups = await change(structuredClone(now ?? state.store?.skillGroups ?? []));
-      if (!groups) return undefined;
+      if (!groups) {
+        /*
+         * Nothing to write. After a 409 the page's copy is known to be behind
+         * the server's — the change found nothing to do in the newer list,
+         * typically because what it was for was removed elsewhere — so it is
+         * brought up to date rather than left showing what is gone.
+         */
+        if (attempt > 0) await loadStore();
+        return undefined;
+      }
       try {
         written = await api(`/skills${basedOnQuery(version, '?')}`, {
           method: 'PUT',
@@ -6153,8 +6162,19 @@ async function addSkill(group) {
    * The same grouping `addEntry` has always had.
    */
   await undoGroup(`add ${answer.text.trim()}`, [], async () => {
-    await inSkillsLane((groups) =>
-      groups.map((g) => {
+    await inSkillsLane((groups) => {
+      /*
+       * Forgotten at the start of every attempt. The lane runs this again
+       * when the list moved on under it (a 409), and the id the first attempt
+       * chose belongs to a list that was never written: kept, it named a
+       * skill the store does not have — or, when the group had been deleted
+       * in another tab meanwhile, a skill in a group that is gone, which was
+       * then ticked on this resume and reported as added.
+       */
+      added = undefined;
+      // And no write at all when the group is gone: there is nothing to add to.
+      if (!groups.some((g) => g.id === group.id)) return undefined;
+      return groups.map((g) => {
         if (g.id !== group.id) return g;
         // Against `g`, the group as it now stands, not the copy this button
         // was drawn from: a skill added a moment ago is in one and not the
@@ -6171,11 +6191,17 @@ async function addSkill(group) {
             },
           ],
         };
-      }),
-    );
+      });
+    });
     if (added && !state.masterView) await tickSkillHere(group.id, added, answer.text.trim());
   });
-  setStatus('Skill added');
+  /*
+   * Nothing added when the group was not there to add to: it was deleted
+   * elsewhere between the button being drawn and the write. Saying "Skill
+   * added" over that sent somebody looking for a skill that does not exist.
+   */
+  if (added) setStatus('Skill added');
+  else setStatus(`"${group.name}" is no longer in your skills — it was removed elsewhere, so ${answer.text.trim()} was not added`, true);
   render();
   scheduleRender();
 }
@@ -11924,8 +11950,14 @@ async function loadSettings() {
     await api('/config', {
       method: 'PUT',
       body: JSON.stringify({
+        /*
+         * No `enabled` here. The checkbox saves itself the moment it is
+         * flipped (above), so this button has nothing to add — and while a
+         * pull has the AI switched off on this machine the box shows the
+         * switch-off, not config.yaml, so sending it back from a save about
+         * the timeout wrote that machine-local "off" into the tracked file.
+         */
         ai: {
-          enabled: enabled.checked,
           command: command.value.trim(),
           // The template is whitespace-separated; `{prompt}` becomes the path
           // to a file holding the prompt, `{promptText}` the prompt itself.

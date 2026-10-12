@@ -901,6 +901,109 @@ function safeToOffer(bank: AnswerBankItem[]): AnswerBankItem[] {
   return bank.filter((item) => !item.variants.some((v) => isSensitiveAnswer(v.text)));
 }
 
+/*
+ * The calendar dates an answer names, as the last local day each one covers.
+ *
+ * The bank keeps no date of its own — nothing records when an answer was
+ * filed — so an answer whose words carry a date is the only one that can say
+ * it has gone stale. "Available from November 2026", banked in October, came
+ * back confident the next March and was filled in unread: a start date in the
+ * past, sent to an employer as the person's own word.
+ *
+ * Read are the shapes that are plainly a date on a calendar: a month and a
+ * year ("November 2026", "Nov. 2026", "Sept 2026"), a day with them ("1
+ * December 2026", "December 1st, 2026"), and a numeric full date ("2026-12-01",
+ * "12/01/2026"). A month and a year covers the whole month, so "October 2026"
+ * has not passed until October has. A numeric date is read month first, as US
+ * forms write it, unless the first number cannot be a month. A season, a bare
+ * year and "January 5th" are not read: none of them is a day that can pass.
+ */
+const MONTH_WORD =
+  String.raw`(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)`;
+const MONTH_NUMBER: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const DAY_MONTH_YEAR = new RegExp(String.raw`\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?${MONTH_WORD}\.?,?\s+(\d{4})\b`, 'gi');
+const MONTH_DAY_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b`, 'gi');
+const MONTH_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?,?\s+(\d{4})\b`, 'gi');
+const ISO_DATE = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g;
+const NUMERIC_DATE = /\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})\b/g;
+
+function datesIn(text: string): string[] {
+  const days: string[] = [];
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const day = (year: number, month: number, date: number) => {
+    if (month < 1 || month > 12 || date < 1 || date > 31) return;
+    days.push(`${year}-${pad(month)}-${pad(date)}`);
+  };
+  const monthOf = (word: string) => MONTH_NUMBER[word.slice(0, 3).toLowerCase()] ?? 0;
+  // Each shape takes its words out of the text, so "1 December 2026" is not
+  // read a second time as "December 2026".
+  let rest = text.replace(DAY_MONTH_YEAR, (_m, d: string, mo: string, y: string) => {
+    day(Number(y), monthOf(mo), Number(d));
+    return ' ';
+  });
+  rest = rest.replace(MONTH_DAY_YEAR, (_m, mo: string, d: string, y: string) => {
+    day(Number(y), monthOf(mo), Number(d));
+    return ' ';
+  });
+  rest = rest.replace(MONTH_YEAR, (_m, mo: string, y: string) => {
+    const month = monthOf(mo);
+    // The month's last day: day 0 of the month after it.
+    day(Number(y), month, new Date(Number(y), month, 0).getDate());
+    return ' ';
+  });
+  rest = rest.replace(ISO_DATE, (_m, y: string, mo: string, d: string) => {
+    day(Number(y), Number(mo), Number(d));
+    return ' ';
+  });
+  rest.replace(NUMERIC_DATE, (_m, a: string, b: string, y: string) => {
+    const [month, date] = Number(a) > 12 ? [Number(b), Number(a)] : [Number(a), Number(b)];
+    day(Number(y), month, date);
+    return ' ';
+  });
+  return days;
+}
+
+/**
+ * Whether an answer names a calendar date that is already behind us, on the
+ * person's own calendar (`localDay`, not Greenwich's). A date still to come
+ * is no reason to doubt an answer, and one that has passed is a reason to
+ * read it before it is sent again.
+ */
+export function namesPassedDate(text: string, now = new Date(Date.now())): boolean {
+  const today = localDay(now);
+  return datesIn(String(text ?? '')).some((day) => day < today);
+}
+
+/*
+ * A question about when somebody can start, which is the only kind whose
+ * answer a passing date makes untrue. A graduation date in the past, or the
+ * day a job ended, is a fact that stays a fact; "May 2024" for "Expected
+ * graduation date?" is as good next year as it was this one. "Available from
+ * November 2026" for "When can you start?" is not.
+ *
+ * "Start date" alone is not enough, because "Start date" in an employment
+ * history block asks about the past: it has to be the earliest, desired or
+ * available one, or the internship's.
+ */
+const ASKS_WHEN_YOU_START = new RegExp(
+  [
+    String.raw`\b(earliest|desired|preferred|expected|anticipated|proposed|possible|potential|available|availability)\s+(start(ing)?|joining|begin(ning)?)\s+date\b`,
+    String.raw`\bwhen\s+(can|could|would|will|are)\s+you\s+(be\s+(able|available)\s+to\s+)?(start|begin|join|commence|available)\b`,
+    String.raw`\bavailab(le|ility)\s+(from|to\s+(start|begin|join|work))\b`,
+    String.raw`\bavailability\b`,
+    String.raw`\b(join(ing)?\s+date|date\s+of\s+joining)\b`,
+    String.raw`\bnotice\s+period\b`,
+    String.raw`\b(begin|start|commence)\s+(work(ing)?|employment)\b`,
+    String.raw`\b(internship|co-?op)\s+start(\s+date)?\b`,
+    String.raw`\bearliest\s+(date|start)\b`,
+  ].join('|'),
+  'i',
+);
+
+export function asksWhenYouStart(question: string): boolean {
+  return ASKS_WHEN_YOU_START.test(String(question ?? ''));
+}
+
 /** `matchAnswer` past its checks, against a bank already through `safeToOffer`. */
 function matchInBank(
   question: string,
@@ -991,6 +1094,14 @@ function matchInBank(
        * a suggestion, offered like a loose match rather than filled in.
        */
       !variant?.suggested &&
+      /*
+       * Nor a start date that has passed. "Available from November 2026"
+       * was true when it was banked and is not after November; offered as a
+       * suggestion it is read, and filled in unread it is a start date in
+       * the past. Only for a question about starting: a past graduation date
+       * is still true. See `asksWhenYouStart` and `namesPassedDate`.
+       */
+      !((asksWhenYouStart(question) || asksWhenYouStart(best.item.question)) && namesPassedDate(text)) &&
       // Or the same score with the furniture out of it. See `bare`.
       (best.score >= 0.7 || overlap(bare(question), bare(best.item.question)) >= 0.7) &&
       fullyAsked(question, best.item.question) &&

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
 import { ignoreBrokenPipe } from './cli-io.js';
-import { Repo, cloneRepo } from './git/repo.js';
+import { Repo, cloneRepo, withCommit } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
 import { findProjectRoot, isEmptyStore, resolveStore, seedStore } from './model/location.js';
@@ -15,7 +15,7 @@ import { Store, aiSwitchedOff } from './model/store.js';
 import { currentIgnore } from './model/current.js';
 import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
-import type { WritingSample } from './model/types.js';
+import type { StoreConfig, WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
 
 // Every command here prints as it goes rather than buffering everything up
@@ -69,6 +69,7 @@ const WORKS_IN_A_STORE = new Set([
   'pull',
   'voice',
   'serve',
+  'config',
 ]);
 
 /*
@@ -101,6 +102,9 @@ const USAGE = `rmm — resume mix-and-match
                                   Commit everything in the store to git, then
                                   bring in the remote's changes and send yours
   rmm pull                        Bring in what was pushed from another machine
+  rmm config set ai.enabled <true|false>
+                                  Turn the AI on or off; on also answers a
+                                  pull or clone that switched it off here
   rmm clone <repo> <folder>       Bring a save down from where it is pushed,
                                   and open it
   rmm serve [--port 4600]         Start the editor GUI and extension API
@@ -543,7 +547,25 @@ async function main(argv: string[]): Promise<number> {
       const prompt = feedbackPrompt(data, resolveResume(id, data), arg(rest, 'focus'));
       const result = await runAgent(data.config, prompt);
       if (!result.executed) {
-        console.log('AI is disabled (ai.enabled: false in data/config.yaml).');
+        /*
+         * Why, in the words that fit. "ai.enabled: false in config.yaml" was
+         * said whatever the reason, so somebody whose AI a pull had switched
+         * off went to config.yaml, found `enabled: true` there, and had
+         * nothing to go on. The switch-off says what changed, and how to
+         * answer it from here.
+         */
+        const switchedOff = aiSwitchedOff(store.root);
+        if (switchedOff) {
+          console.log(`AI is switched off on this machine. ${switchedOff}`);
+          console.log(
+            `Look at the command in ${path.join(dataDir, 'config.yaml')}, then turn it back on with ` +
+              '`rmm config set ai.enabled true` (or in Settings in `rmm serve`).',
+          );
+        } else if (process.env.RMM_AI === '0') {
+          console.log('AI is disabled (RMM_AI=0 is set in the environment).');
+        } else {
+          console.log(`AI is disabled (ai.enabled is not true in ${path.join(dataDir, 'config.yaml')}).`);
+        }
         console.log('Here is the prompt it would have run — paste it wherever you like:\n');
       }
       console.log(result.output);
@@ -674,6 +696,51 @@ async function main(argv: string[]): Promise<number> {
         console.log(`${result.remote.url} has never been pushed to — \`rmm save --push\` sends everything.`);
       } else if (result.remote.ahead > 0) {
         console.log(`${plural(result.remote.ahead, 'commit')} not yet pushed to ${result.remote.url} — \`rmm save --push\` sends them.`);
+      }
+      return 0;
+    }
+
+    /**
+     * Change a setting in config.yaml without opening the editor. One setting
+     * for now, `ai.enabled`, because it is the one a terminal-only machine
+     * cannot otherwise answer: a pull or a clone that changes the AI command
+     * switches the AI off here until somebody turns it on (see
+     * `aiCommandChange`), and Settings was the only way back.
+     *
+     * Through `Store.saveConfig` and committed as "Update settings", exactly
+     * as the editor's `PUT /config` does it — so turning it on clears the
+     * switch-off the same way, and turning it off while switched off leaves
+     * config.yaml's own value alone, as there.
+     */
+    case 'config': {
+      const [sub, key, value] = positionals('config', rest);
+      const usage = 'Usage: rmm config set ai.enabled <true|false>';
+      if (sub !== 'set' || key === undefined || value === undefined) {
+        console.error(usage);
+        return 1;
+      }
+      if (key !== 'ai.enabled') {
+        console.error(`${key} cannot be set from here; ai.enabled is the one setting this command changes. Settings in \`rmm serve\` has the rest.\n${usage}`);
+        return 1;
+      }
+      if (value !== 'true' && value !== 'false') {
+        console.error(`ai.enabled is true or false, not ${JSON.stringify(value)}.\n${usage}`);
+        return 1;
+      }
+      const enabled = value === 'true';
+      const wasSwitchedOff = aiSwitchedOff(store.root);
+      const saved = await withCommit(repo, store.loadConfig().git.autoCommit, 'Update settings', () =>
+        store.saveConfig({ ai: { enabled } as StoreConfig['ai'] }),
+      );
+      if (enabled) {
+        console.log(`AI on — it will run ${saved.ai.command} ${saved.ai.args.join(' ')}`.trimEnd());
+        if (wasSwitchedOff) console.log('The switch-off from the last pull or clone is cleared.');
+        if (!saved.ai.enabled && process.env.RMM_AI === '0') console.log('RMM_AI=0 in the environment still keeps it off.');
+      } else if (wasSwitchedOff) {
+        // Left as config.yaml says it: see `Store.saveConfig`.
+        console.log('AI is already off on this machine, switched off by a pull or a clone; config.yaml is unchanged.');
+      } else {
+        console.log('AI off — every action hands you the prompt.');
       }
       return 0;
     }

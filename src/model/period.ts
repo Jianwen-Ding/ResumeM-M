@@ -158,8 +158,11 @@ function monthFromWord(
   if (abbr >= 0) return { month: abbr + 1, how: word.endsWith('.') ? 'abbrDot' : 'abbr' };
 
   // "Sept" is written often enough to be worth knowing, and it is nobody's
-  // three-letter abbreviation.
-  if (clean === 'sept') return { month: 9, how: 'abbr' };
+  // three-letter abbreviation. Its full stop is a vote like any other: "Sept."
+  // was counted as undotted, so a store written "Sept. 2022 -- May 2026"
+  // inferred `abbr` and every date touched afterwards lost its dot. It is
+  // written back as the store's own "Sep.", the way "Sept" comes back "Sep".
+  if (clean === 'sept') return { month: 9, how: word.endsWith('.') ? 'abbrDot' : 'abbr' };
   return null;
 }
 

@@ -96,6 +96,34 @@ describe('envForAgent', () => {
     }
   });
 
+  /*
+   * Claude Code's Vertex guide turns Vertex on in the same settings file as
+   * Bedrock's does, and only Bedrock was looked for there: a Vertex setup
+   * made the documented way lost its Google credentials and could not sign in.
+   */
+  it('lets Google credentials through when ~/.claude/settings.json turns Vertex on', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-env-home-'));
+    try {
+      const creds = { GOOGLE_APPLICATION_CREDENTIALS: '/home/me/vertex-sa.json', CLOUDSDK_CONFIG: '/home/me/.gcloud' };
+      const aws = { AWS_PROFILE: 'deploy' };
+      fs.mkdirSync(path.join(home, '.claude'));
+      const settings = path.join(home, '.claude', 'settings.json');
+
+      for (const flag of ['CLAUDE_CODE_USE_VERTEX', 'GOOGLE_GENAI_USE_VERTEXAI']) {
+        fs.writeFileSync(settings, JSON.stringify({ env: { [flag]: '1' } }));
+        // Google's, and not AWS's: one switch does not open the other.
+        expect(envForAgent({ HOME: home, ...creds, ...aws }, 'claude'), flag).toEqual({ HOME: home, ...creds });
+        fs.writeFileSync(settings, JSON.stringify({ env: { [flag]: 'false' } }));
+        expect(envForAgent({ HOME: home, ...creds }, 'claude'), flag).toEqual({ HOME: home });
+      }
+      // Both in one file: each opens its own.
+      fs.writeFileSync(settings, JSON.stringify({ env: { CLAUDE_CODE_USE_VERTEX: true, CLAUDE_CODE_USE_BEDROCK: 1 } }));
+      expect(envForAgent({ HOME: home, ...creds, ...aws }, 'claude')).toEqual({ HOME: home, ...creds, ...aws });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('lets Google account credentials through only to a Vertex or Gemini setup', () => {
     const creds = { GOOGLE_APPLICATION_CREDENTIALS: '/home/me/deploy-sa.json', CLOUDSDK_CONFIG: '/home/me/.gcloud' };
 

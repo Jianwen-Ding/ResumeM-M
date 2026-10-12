@@ -179,6 +179,22 @@ describe('when a temporary resume is done with', () => {
     expect(doneAt(spec('job-x', made), apps)).toBeUndefined();
   });
 
+  /*
+   * The latest close by the clock, not by the alphabet. A close written with
+   * an offset — by hand, or by another tool — sorts as text before a UTC one
+   * that is really earlier, and the week was counted from the wrong one: here
+   * "2026-10-05T23:00:00-07:00" is 06:00 UTC on the 6th, five hours after the
+   * other, and the resume went five hours early.
+   */
+  it('takes the latest close as an instant, whatever way it is written', () => {
+    const closed = (id: string, when: string) =>
+      app(id, { resumeId: 'job-x', status: 'closed', history: [{ at: '2026-10-01T10:00:00.000Z', status: 'applying' }, { at: when, status: 'closed' }] });
+    const apps = [closed('a1', '2026-10-05T23:00:00-07:00'), closed('a2', '2026-10-06T01:00:00.000Z')];
+    const x = spec('job-x', { tier: 'temporary', temporaryFrom: '2026-09-01T00:00:00.000Z' });
+    expect(doneAt(x, apps)).toBe('2026-10-05T23:00:00-07:00');
+    expect(dueToGo({ resumes: [x], applications: apps } as never, { days: 7, now: at('2026-10-13T03:00:00Z') })).toEqual([]);
+  });
+
   it('falls back to its own date where no application ever used it', () => {
     // A copy made and abandoned. Without this nothing would ever clear it.
     expect(doneAt(spec('job-x', made), [])).toBe('2026-01-01T00:00:00.000Z');

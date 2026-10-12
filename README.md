@@ -325,6 +325,8 @@ rmm track                         The tracker
 rmm voice add <file…>             Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
 rmm save [-m "why"] [--push]      Commit the whole store to git
+rmm config set ai.enabled true    Turn the AI on (also answers a pull or clone
+                                  that switched it off on this machine)
 rmm serve [--port 4600]           Editor GUI and the extension's API
 
 Any command also takes:
@@ -347,6 +349,23 @@ ai:
 
 While disabled, every AI endpoint returns the prompt it *would* have run, so you
 can paste it wherever you like and still not have to rewrite the instructions.
+
+Only `enabled: true` turns it on. `yes`, `on` and `1` are not booleans in
+YAML 1.2 and leave the AI off.
+
+`config.yaml` travels with a save, and `ai.command` is a program this app runs.
+So a pull or a clone that switches the AI on, or changes the command line it
+would run — the command, its arguments, or the `research`, `model` and
+`effort` settings that rewrite them — **switches the AI off on this machine**,
+says what changed, and leaves `config.yaml` as it arrived. The switch-off is
+kept in the save's `.git` folder, so it never travels to another machine, and
+saving other settings while it is in force does not write `enabled: false`
+into `config.yaml`. Look at the command, then turn the AI back on with the
+checkbox in Settings, or from a terminal:
+
+```sh
+rmm config set ai.enabled true
+```
 
 For Antigravity CLI (`agy`), choose **Antigravity (agy)** in Settings → Preset,
 enable AI, then click **Save and test**. Sign in through `agy` first. Its preset
