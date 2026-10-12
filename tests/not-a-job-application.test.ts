@@ -103,6 +103,14 @@ describe('a form that only looks like a job application by its address or a Link
     ['an MBA admission with a LinkedIn placeholder', MBA('<label>Profile URL<input name="url" placeholder="https://linkedin.com/in/you"></label>'), 'https://uni.example/admissions/mba/apply'],
     ['an accelerator’s founder form with a LinkedIn field', ACCELERATOR, 'https://accelerator.example/apply'],
     ['a career-fair registration under /careers', MBA(), 'https://uni.example/careers/events/fair-registration'],
+    // A digit in the address is not a job's number: a cohort or a year.
+    ['an accelerator’s founder form for a cohort', ACCELERATOR, 'https://accelerator.example/apply/s2027'],
+    ['an accelerator’s founder form for a short cohort', ACCELERATOR, 'https://accelerator.example/apply/w27'],
+    ['an MBA admission for a year', ACCELERATOR, 'https://uni.example/apply/mba-2027'],
+    ['an admission for a term', ACCELERATOR, 'https://uni.example/application/fall2027'],
+    // A department-like word under a careers path, with no number to say which job.
+    ['a loan under a jobs. host and /careers', LOAN, 'https://jobs.example-cu.org/careers/loans/apply'],
+    ['a career fair under /careers/events', MBA(), 'https://uni.example/careers/events/register'],
   ])('is not a job application: %s', (_name, html, url) => {
     expect(classifyPage(html, url).kind).toBe('none');
   });
@@ -179,6 +187,23 @@ describe('an application form that is for a job', () => {
     ['Comeet', 'https://www.comeet.com/jobs/acme/12.345/platform-engineer/apply', false],
     ['Zoho Recruit', 'https://acme.zohorecruit.com/jobs/Careers/123/Platform-Engineer/apply', false],
     ['JazzHR', 'https://acme.applytojob.com/apply/abc123/Platform-Engineer', false],
+    /*
+     * A loan's, an event's or an insurer's word that is the start of a role's
+     * name further along, or after a ".", or beside a role noun the list did
+     * not have; or a department under a careers path beside the job's number.
+     */
+    ['a mortgage loan officer', 'https://acme.example/careers/mortgage-loan-officer/apply', false],
+    ['a loan servicing specialist', 'https://acme.example/careers/loan-servicing-specialist/apply', false],
+    ['an insurance sales agent', 'https://acme.example/jobs/insurance-sales-agent-12345', false],
+    ['a fair lending analyst', 'https://acme.example/careers/fair-lending-analyst', false],
+    ['a lease administrator', 'https://acme.example/careers/lease-administrator/apply', false],
+    ['a quotes engineer', 'https://acme.example/careers/quotes-engineer', false],
+    ['an events sales manager', 'https://careers.acme.com/job/4821/events-sales-manager', false],
+    ['event staff', 'https://careers.acme.com/apply/event-staff-4821', false],
+    ['an event coordinator after a dot', 'https://acme.example/jobs/event.coordinator', false],
+    ['a claims adjuster in the insurance department', 'https://acme.example/careers/insurance/claims-adjuster-4821', false],
+    ['a job numbered before its department', 'https://careers.acme.com/job/4821/insurance', false],
+    ['a numbered job under the events team', 'https://acme.example/careers/events/apply/4821', false],
   ])('on %s, asking only who you are', (_name, url, linkedIn) => {
     const html = `<html><head><title>Apply</title></head><body><h1>Your details</h1>
 <form>${WHO}${linkedIn ? '<label>LinkedIn profile<input name="linkedin"></label>' : ''}

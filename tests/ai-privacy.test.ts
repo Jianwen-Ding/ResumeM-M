@@ -245,6 +245,9 @@ describe('personalDetailIn', () => {
     'IDs 12345 67890',
     'tickets 00123 45678',
     'revenue grew 100000 200000',
+    'Order no. 98765 43210',
+    'orders # 98765 43210',
+    'Raised 10000 20000 dollars',
   ])('lets through %j', (text) => {
     expect(personalDetailIn(text)).toBeNull();
   });
@@ -275,6 +278,23 @@ describe('personalDetailIn', () => {
     ['+44 (0) 20 7946 0958', 'a phone number'],
     // Exactly a phone's shape with a country code, whatever it says around it.
     ['grew revenue by +1 234 567 890', 'a phone number'],
+    // A one-digit group straight after a country code, which read as an ISBN's.
+    ['Mobile +33 6 12 34 56 78', 'a phone number'],
+    ['Call me +33 1 42 68 53 00', 'a phone number'],
+    ['Mobile +61 4 1234 5678', 'a phone number'],
+    ['Phone +61 2 9876 5432', 'a phone number'],
+    // After an everyday word that the list of naming words had in it.
+    ['Text me about the job 07700 900123', 'a phone number'],
+    ['For the job: 98765 43210', 'a phone number'],
+    ['Reach me in any case 07700 900123', 'a phone number'],
+    ['Item: 98765 43210', 'a phone number'],
+    ['Ref: 07700 900123', 'a phone number'],
+    ['Contact re PR 07700 900123', 'a phone number'],
+    // A trunk 0 is a phone's whatever word is in front.
+    ['IDs 07700 900123', 'a phone number'],
+    // "00" in place of the "+", and an Indian mobile that read as round figures.
+    ['Call 0049 1520 1234 5678', 'a phone number'],
+    ['Call 90000 80000', 'a phone number'],
   ])('refuses %j', (text, what) => {
     expect(personalDetailIn(text)).toBe(what);
   });

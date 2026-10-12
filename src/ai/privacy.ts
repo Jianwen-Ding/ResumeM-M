@@ -108,9 +108,15 @@ const DIGIT_RUN = /(?<![\w/]|\d[.-]|[\p{L}_]-)\+?\d+(?:[\s().-]{1,3}\d+)*(?!(?!x
  * A word in front of a run of numbers that says what they are, and it is not
  * a phone: "IDs 12345 67890", "order 10000 20000", "tickets 00123 45678".
  * See `phoneIn`.
+ *
+ * Only words that can mean nothing else. The list also had "job", "item",
+ * "ref", "case", "PR", "issue" and "record", which are everyday words in a
+ * letter, so a phone written after one went through: "Text me about the job
+ * 07700 900123", "Ref: 07700 900123", "in any case 07700 900123", "Contact
+ * re PR 07700 900123".
  */
 const NAMED_AS_OTHER =
-  /\b(?:ids?|orders?|tickets?|invoices?|refs?|references?|isbns?|batch(?:es)?|ports?|builds?|versions?|issues?|prs?|skus?|items?|cases?|records?|jobs?)\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:#]?\s*$/i;
+  /\b(?:ids?|orders?|tickets?|invoices?|isbns?|skus?|batch(?:es)?)\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:#]?\s*$/i;
 
 function phoneIn(text: string): boolean {
   for (const found of text.matchAll(DIGIT_RUN)) {
@@ -129,6 +135,14 @@ function phoneIn(text: string): boolean {
         if (digits < 10 || digits > 15) continue;
         const bare = g.map((x) => x.replace('+', ''));
         const plus = g[0]!.startsWith('+');
+        /*
+         * "00" is how a "+" is dialled, and is written in its place: "0049
+         * 1520 1234 5678" is "+49 1520 1234 5678", and went through as a list
+         * of four-digit figures. No figure or identifier starts with "00" and
+         * a digit after it. Used only by the two rules a country code changes
+         * the reading of; "tickets 00123 45678" is still named as tickets.
+         */
+        const intl = plus || /^00[1-9]/.test(bare[0]!);
         /*
          * Not after a "+": a figure is never written with a country code, and
          * a great many phones are written in threes after one — "+34 912 345
@@ -158,13 +172,27 @@ function phoneIn(text: string): boolean {
          *
          * "+1 234 567 890" is left refused: written with a country code it
          * is exactly a phone's shape, whatever the sentence around it says.
+         *
+         * The group straight after a country code is not "after the first":
+         * France writes its mobiles "+33 6 12 34 56 78" and Paris "+33 1 42
+         * 68 53 00", Australia "+61 4 1234 5678" and Sydney "+61 2 9876 5432",
+         * and each of those went through as an ISBN. An ISBN is never written
+         * with a "+" in front.
+         *
+         * Nor is a word in front any evidence against a number that starts
+         * with a trunk 0 ("07700 900123"), which only a phone does; and a
+         * round figure is not "90000 80000", ten digits in fives starting 6
+         * to 9, which is how India writes a mobile.
          */
-        if (bare.some((x, k) => k > 0 && x.length === 1 && !(x === '0' && between[k - 1]!.includes('(')))) continue;
-        if (bare.length >= 3 && bare.every((x) => x.length >= 4)) continue;
+        if (bare.some((x, k) => k > (intl ? 1 : 0) && x.length === 1 && !(x === '0' && between[k - 1]!.includes('(')))) {
+          continue;
+        }
+        if (!intl && bare.length >= 3 && bare.every((x) => x.length >= 4)) continue;
         if (bare.length === 2 && !plus && !between.some((sep) => /[-()]/.test(sep))) {
           if (digits > 11 || bare[0]!.length < 3 || bare[0]!.length > 5) continue;
-          if (named) continue;
-          if (bare.every((x) => /^[1-9]0{3,}$/.test(x))) continue;
+          if (named && !/^0[1-9]/.test(bare[0]!)) continue;
+          const indianMobile = digits === 10 && bare[0]!.length === 5 && /^[6-9]/.test(bare[0]!);
+          if (!indianMobile && bare.every((x) => /^[1-9]0{3,}$/.test(x))) continue;
         }
         const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
         if (bare.length > 1 && bare.every(year)) continue;

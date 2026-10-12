@@ -1770,3 +1770,29 @@ describe('a corrected row found by its old names', () => {
     expect(found(rowUrl, sendUrl)).toBeUndefined();
   });
 });
+
+/*
+ * Greenhouse, SmartRecruiters and Lever number jobs across every board, so
+ * the same long id on one employer's board under two names — `acme` and
+ * `acmeinc` — is one job, and was two rows when the role was named.
+ */
+describe('a job on a board known by two names', () => {
+  const row = (url: string): Application =>
+    ({ id: 'r1', company: 'Acme', role: 'Platform Engineer', url, status: 'applying', appliedAt: '2026-10-01' }) as Application;
+  const found = (rowUrl: string, sendUrl: string) =>
+    findApplication([row(rowUrl)], 'Acme Robotics', 'Platform Engineer', sendUrl)?.id;
+
+  it.each([
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmeinc/jobs/4012345'],
+    ['https://jobs.smartrecruiters.com/Acme/743999012345-platform-engineer', 'https://jobs.smartrecruiters.com/AcmeGroup/743999012345-platform-engineer'],
+  ])('%s is the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBe('r1');
+  });
+
+  it.each([
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/globex/jobs/4012345'],
+    ['https://careers-acme.icims.com/jobs/12345/platform-engineer/job', 'https://careers-acmeinc.icims.com/jobs/12345/platform-engineer/job'],
+  ])('%s is not the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBeUndefined();
+  });
+});

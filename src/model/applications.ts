@@ -474,10 +474,32 @@ function sameAddress(url: string | undefined, other: string | undefined): boolea
  * only by accident of the address's shape. Where the system names an
  * employer in the address (`companyFromUrl`), the two have to name the same.
  */
+/*
+ * But Greenhouse, SmartRecruiters and Lever number their jobs across every
+ * board, not per board: job 4012345 on Greenhouse is one job wherever it is
+ * linked from. An employer's board goes by more than one name — `acme` and
+ * `acmeinc`, `Acme` and `AcmeGroup` — and the same job under the two was two
+ * applications. On those hosts, with the same long id, a board named for the
+ * other with something added is the same employer's. Two unrelated names,
+ * `acme` and `globex`, are still two, as above.
+ */
+const GLOBAL_JOB_IDS = /(?:^|\.)(?:greenhouse\.io|smartrecruiters\.com|lever\.co)$/;
+
 function sameTenant(url: string, other: string): boolean {
-  const one = companyFromUrl(url);
-  const two = companyFromUrl(other);
-  return !one || !two || one.toLowerCase() === two.toLowerCase();
+  const one = companyFromUrl(url)?.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const two = companyFromUrl(other)?.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!one || !two || one === two) return true;
+  const number = jobNumberIn(url);
+  const [shorter, longer] = one.length < two.length ? [one, two] : [two, one];
+  return (
+    GLOBAL_JOB_IDS.test(hostOf(url)) &&
+    GLOBAL_JOB_IDS.test(hostOf(other)) &&
+    Boolean(number) &&
+    (number!.match(/\d/g) ?? []).length >= 7 &&
+    number === jobNumberIn(other) &&
+    shorter.length >= 3 &&
+    longer.startsWith(shorter)
+  );
 }
 
 /*
