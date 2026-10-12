@@ -804,8 +804,13 @@ function employersInBank(bank: AnswerBankItem[], employers?: string[]): string[]
    * guess at one, and a guess that is wrong costs a confident answer.
    */
   const known = (employers ?? []).map((e) => String(e ?? '').trim()).filter((e) => looksLikeCompanyName(e));
-  if (known.length) return [...new Set(known)];
-  const names = new Set<string>();
+  /*
+   * As well as the labels, not instead of them: an answer written for a
+   * company that was never tracked — a "Halewood Group" answer saved from a
+   * form — still names Halewood Group, and with the tracker's list alone it
+   * went confidently into Streamly's form.
+   */
+  const names = new Set<string>(known);
   for (const item of bank) {
     for (const v of item.variants) {
       const label = (v.label ?? '').trim();

@@ -1339,10 +1339,15 @@ describe('a label that says which version of an answer it is', () => {
     expect(matchAnswer('Why do you want to work here?', bank, { company: 'Helios' }).namesAnother).toBe('Acme');
   });
 
-  it('and the employers the caller knows are the ones looked for, when it knows them', () => {
+  it('and the employers the caller knows are looked for as well as the labels', () => {
     const known = { company: 'Helios', employers: ['Helios', 'Globex'] };
-    // "Acme" is a label, never an application: with the list given, it is not looked for.
-    expect(matchAnswer('Why do you want to work here?', bank, known).namesAnother).toBeUndefined();
+    // "Acme" was never tracked, but an answer written for it still names it:
+    // with the list alone it went confidently into another employer's form.
+    const acme = matchAnswer('Why do you want to work here?', bank, known);
+    expect(acme.namesAnother).toBe('Acme');
+    expect(acme.confident).toBe(false);
+    // And a version label is still not an employer with the list given.
+    expect(matchAnswer('Are you looking for full-time work?', bank, known).confident).toBe(true);
     const globex: AnswerBankItem[] = [
       { id: 'ans_why', question: 'Why do you want to work here?', default: 'v_1', variants: [{ id: 'v_1', label: 'Saved', text: 'Globex is where I learned to ship.' }] },
     ];
