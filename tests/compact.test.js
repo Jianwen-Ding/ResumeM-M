@@ -113,6 +113,26 @@ describe('Focus', () => {
     expect(keyOf(skills)).toBe('group:Languages');
   });
 
+  /*
+   * Two skills groups of one name — programming "Languages" and spoken ones.
+   * They were told apart by title, so opening one under Focus opened both.
+   */
+  it('opens only the skills group clicked when another has the same name', () => {
+    const editor = document.querySelector('#editor');
+    editor.insertAdjacentHTML(
+      'beforeend',
+      `<div class="entry" data-group-id="g_code"><div class="entry-head"><span class="title">Languages</span></div></div>
+       <div class="entry" data-group-id="g_spoken"><div class="entry-head"><span class="title">Languages</span></div></div>`,
+    );
+    setupCompact({ win: windowAt(400) });
+    document.querySelector('#btn-focus').click();
+
+    document.querySelector('[data-group-id=g_spoken] .title').dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    const open = [...editor.querySelectorAll('.focus-active')];
+    expect(open).toHaveLength(1);
+    expect(open[0].dataset.groupId).toBe('g_spoken');
+  });
+
   it('holds the chosen heading where it was clicked', () => {
     const win = windowAt(400);
     setupCompact({ win });

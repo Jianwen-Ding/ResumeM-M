@@ -743,8 +743,22 @@ async function stepOnce(direction) {
    *
    * Flushed rather than blocked, because the edit is real: it lands as its own
    * step, and then this undo takes back the thing the person actually did last.
+   *
+   * And only when the flush landed. `flushAutoSave` does not throw: a save the
+   * server refused leaves the edit held here with `state.dirty` still set, and
+   * the undo carried on regardless — replayed the older step, then
+   * `clearEdits` threw the unsaved edit away, under "Undid change". Restore
+   * and `leaveResume` already stop here for the same reason; so does this.
    */
   await flushAutoSave();
+  if (state.dirty) await autoSave().catch(() => {});
+  if (state.dirty) {
+    setStatus(
+      `That change has not saved yet, so nothing is ${direction === 'undo' ? 'undone' : 'redone'} until it does.`,
+      true,
+    );
+    return;
+  }
   const entry = direction === 'undo' ? history.undo() : history.redo();
   if (!entry) {
     setStatus(direction === 'undo' ? 'Nothing to undo' : 'Nothing to redo');
@@ -3683,7 +3697,9 @@ function skillsBlock(section) {
     if (!group) continue;
 
     const picked = state.skillEdits?.[gid] ?? section.items?.[gid] ?? group.items.map((i) => i.id);
-    const box = el('div', { className: 'entry' });
+    // Named by its id for Focus to tell it apart from a group of the same
+    // name: see `keyOf` in compact.js.
+    const box = el('div', { className: 'entry', 'data-group-id': gid });
     box.append(
       el('div', { className: 'entry-head' }, [
         el('span', { className: 'title', textContent: group.name }),
@@ -7613,7 +7629,17 @@ async function loadApplications() {
           title: 'Correct the company or the role',
           onclick: async (ev) => {
             ev.stopPropagation();
-            const values = await form(
+            /*
+             * Through `formThatSaves`, as the other forms that save are.
+             * Its own copy of the loop had no answer for Escape pressed while
+             * the save was out: a refusal came back to a dialog that was gone
+             * and was said nowhere, and a save that landed left the table
+             * showing the old company, because the redraw waited on a form
+             * answer that a dismissed dialog never gives. So the redraw
+             * happens where the save lands, whether or not anyone is still
+             * looking at the dialog.
+             */
+            await formThatSaves(
               'Correct this application',
               [
                 { name: 'company', label: 'Company', value: a.company ?? '' },
@@ -7622,21 +7648,16 @@ async function loadApplications() {
               'The files and the record of what was sent stay where they are.',
               async (v) => {
                 if (!String(v.company ?? '').trim() || !String(v.role ?? '').trim()) return 'A company and a role cannot be left empty.';
-                try {
-                  await api(`/applications/${encodeURIComponent(a.id)}`, {
-                    method: 'PATCH',
-                    body: JSON.stringify({ company: v.company, role: v.role }),
-                  });
-                } catch (err) {
-                  return err.message;
-                }
+                await api(`/applications/${encodeURIComponent(a.id)}`, {
+                  method: 'PATCH',
+                  body: JSON.stringify({ company: v.company, role: v.role }),
+                });
+                setStatus('Application corrected');
+                if (openApplicationId === a.id) openApplication(a.id);
+                else loadApplications();
                 return undefined;
               },
             );
-            if (!values) return;
-            setStatus('Application corrected');
-            if (openApplicationId === a.id) openApplication(a.id);
-            else loadApplications();
           },
         }),
         el('button', {

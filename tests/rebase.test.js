@@ -325,4 +325,59 @@ describe('rebasing one edit onto another', () => {
 
     expect(rebase(base, ours, theirs).tags).toEqual(['c', 'a', 'b', 'd']);
   });
+
+  /*
+   * One side cleared a field — the editor deletes the key — while the other
+   * rewrote it. A deleted key fell through to "ours wins", so the clear took
+   * the rewrite with it: a location typed in another tab, or a whole set of
+   * alternates someone had just made of it.
+   */
+  it('keeps a field the other edit rewrote while this one cleared it', () => {
+    const base = { ...entry(), location: 'Boston, MA' };
+    const ours = { ...base, location: undefined };
+    const theirs = { ...base, location: 'Remote — London, UK' };
+
+    expect(rebase(base, ours, theirs).location).toBe('Remote — London, UK');
+  });
+
+  it('keeps a set of alternates the other edit made of a field this one cleared', () => {
+    const base = { ...entry(), location: 'Boston, MA' };
+    const ours = { ...base, location: undefined };
+    const grown = {
+      default: 'v_1',
+      variants: [
+        { id: 'v_1', label: 'Office', text: 'Boston, MA' },
+        { id: 'v_2', label: 'Remote', text: 'Remote' },
+      ],
+    };
+    const theirs = { ...base, location: grown };
+
+    expect(rebase(base, ours, theirs).location).toEqual(grown);
+  });
+
+  it('keeps only the tags the other edit added when this one cleared them all', () => {
+    const base = { ...entry(), tags: ['a', 'b'] };
+    const ours = { ...base, tags: undefined };
+    const theirs = { ...base, tags: ['a', 'b', 'new'] };
+
+    expect(rebase(base, ours, theirs).tags).toEqual(['new']);
+  });
+
+  it('still clears a list the other edit only took something out of', () => {
+    const base = { ...entry(), tags: ['a', 'b'] };
+    const ours = { ...base, tags: undefined };
+    const theirs = { ...base, tags: ['a'] };
+
+    expect('tags' in rebase(base, ours, theirs)).toBe(false);
+  });
+
+  it('still clears a field the other edit left alone', () => {
+    const base = { ...entry(), location: 'Boston, MA' };
+    const ours = { ...base, location: undefined };
+    const theirs = { ...base, dates: '2023 — 2025' };
+
+    const merged = rebase(base, ours, theirs);
+    expect('location' in merged).toBe(false);
+    expect(merged.dates).toBe('2023 — 2025');
+  });
 });

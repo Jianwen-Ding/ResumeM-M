@@ -98,6 +98,28 @@ export function rebase(base, ours, theirs) {
   if (same(base, ours)) return theirs; // we changed nothing here
   if (same(base, theirs)) return ours; // nothing landed here to preserve
 
+  /*
+   * We took the field away; they changed it.
+   *
+   * This fell through to "ours wins" at the bottom, so the deletion won:
+   * clear a location in one tab while another rewrites it, and the rewrite was
+   * gone — or a whole set of alternates someone had just made of it. It is the
+   * same disagreement a list settles for a deleted member (see below), and
+   * settled the same way: their wording is what cannot be recovered from the
+   * screen, so it stays.
+   *
+   * A list is the exception, because a list can say which part of it they
+   * wrote. Clear every tag while the other edit adds one, and what they did
+   * was add one, not re-assert all the rest: so it is taken as an empty list
+   * and merged, and only their additions survive. Nothing of theirs left, and
+   * the field is gone after all, as we left it.
+   */
+  if (ours === undefined) {
+    if (!Array.isArray(theirs)) return theirs;
+    const kept = rebase(base, [], theirs);
+    return Array.isArray(kept) && kept.length === 0 ? undefined : kept;
+  }
+
   if (keyed(ours) && keyed(theirs)) {
     const inBase = byId(keyed(base) ? base : []);
     const inOurs = byId(ours);

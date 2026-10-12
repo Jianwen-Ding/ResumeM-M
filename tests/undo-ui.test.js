@@ -10,6 +10,7 @@ vi.mock('../web/assets.js', () => ({
 }));
 
 afterEach(() => {
+  refuseAutoSaves = false;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -25,6 +26,8 @@ afterEach(() => {
 let arrange = () => {};
 /** A promise the next resume write waits on before it lands, when set. */
 let holdNextResumeWrite = null;
+/** While set, the resume's auto-saves are refused, as a full disk refuses them. */
+let refuseAutoSaves = false;
 
 describe('undo in the builder', () => {
   let data;
@@ -70,6 +73,8 @@ describe('undo in the builder', () => {
         const id = decodeURIComponent(url.split('?')[0].split('/').slice(-2)[0]);
         data.resumes = data.resumes.map((r) => (r.id === id ? { ...r, label: body.label } : r));
         result = data.resumes.find((r) => r.id === id);
+      } else if (url.startsWith('/api/resumes/') && method === 'PUT' && refuseAutoSaves && /[?&]existing=1/.test(url)) {
+        return { ok: false, status: 500, statusText: 'Internal Server Error', json: async () => ({ error: 'disk full' }) };
       } else if (url.startsWith('/api/resumes/') && method === 'PUT') {
         if (holdNextResumeWrite) {
           const gate = holdNextResumeWrite;
@@ -241,6 +246,53 @@ describe('undo in the builder', () => {
       .toEqual(first);
     expect(document.querySelector('#save-state')?.textContent ?? '')
       .not.toMatch(/unsaved/i);
+  });
+
+  /*
+   * The same press, when the change it flushes is refused.
+   *
+   * `flushAutoSave` does not throw, so a save the server turned away left the
+   * edit held here, still dirty — and the undo carried on: it replayed the
+   * older step, and `clearEdits` threw the unsaved change away under "Undid
+   * change". Neither on disk nor on screen any more, and the step that was
+   * taken back was not the one the person meant.
+   */
+  it('undoes nothing while the change it flushed has not saved', async () => {
+    for (const b of document.querySelectorAll('#tabs button')) b.disabled = false;
+    document.querySelector('button[data-tab="resumes"]').click();
+    await vi.advanceTimersByTimeAsync(100);
+
+    const boxes = () => [...document.querySelectorAll('#editor input[type=checkbox]')].filter((b) => !b.disabled);
+
+    boxes()[0].click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(undoBtn().disabled).toBe(false));
+    const first = structuredClone(spec('newgrad'));
+
+    // A second change, whose save the server refuses, and Ctrl+Z inside its debounce.
+    refuseAutoSaves = true;
+    const second = boxes()[1];
+    const wasChecked = second.checked;
+    second.click();
+    const label = second.closest('label')?.textContent ?? '';
+    await vi.advanceTimersByTimeAsync(100);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }));
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(spec('newgrad'), 'the older step was not replayed').toEqual(first);
+    expect(document.querySelector('#status')?.textContent ?? '').toMatch(/not saved yet/i);
+    const still = boxes().find((b) => (b.closest('label')?.textContent ?? '') === label) ?? boxes()[1];
+    expect(still.checked, 'the unsaved change is still on screen').toBe(!wasChecked);
+
+    // Once the server takes it, the next press saves it first, as its own
+    // step, and then takes that back: the change was kept, not lost.
+    refuseAutoSaves = false;
+    const sent = written('newgrad').length;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true }));
+    await vi.advanceTimersByTimeAsync(3000);
+    const after = written('newgrad').slice(sent).map((w) => JSON.stringify(w));
+    expect(after.some((w) => w !== JSON.stringify(first)), 'the change reached the server').toBe(true);
+    expect(spec('newgrad'), 'and was what the press took back').toEqual(first);
   });
 
   /*
