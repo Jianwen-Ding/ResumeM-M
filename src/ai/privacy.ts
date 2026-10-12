@@ -115,15 +115,59 @@ const DIGIT_RUN = /(?<![\w/]|\d[.-]|[\p{L}_]-)\+?\d+(?:[\s().-]{1,3}\d+)*(?!(?!x
  * 07700 900123", "Ref: 07700 900123", "in any case 07700 900123", "Contact
  * re PR 07700 900123".
  */
+/*
+ * "Serial" as well: a serial number is a device's, never a person's. Not
+ * "account" or "PO", which were asked for in round 16 and are left out on
+ * purpose: a person has an account number and a P.O. box, and "account 12345
+ * 67890" is as likely to be the one an AI was told to paste as an order is
+ * not.
+ */
 const NAMED_AS_OTHER =
-  /\b(?:ids?|orders?|tickets?|invoices?|isbns?|skus?|batch(?:es)?)\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:#]?\s*$/i;
+  /\b(?:ids?|orders?|tickets?|invoices?|isbns?|skus?|serials?|batch(?:es)?)\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:#]?\s*$/i;
+
+/*
+ * And the opposite: a word in front that says the number is a phone. Only
+ * used against the round-figure rule below, which would otherwise let an
+ * Indian mobile written in round fives through ("Call 90000 80000") along
+ * with "Revenue grew 70000 60000". Nothing in the digits tells those two
+ * apart; the word in front does.
+ */
+const NAMED_AS_PHONE =
+  /\b(?:call|phone|mobile|cell|tel|text|whats\s?app|ring|dial|reach)\b(?:\s+(?:me|us))?(?:\s+(?:on|at))?\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:.#]?\s*$/i;
 
 function phoneIn(text: string): boolean {
   for (const found of text.matchAll(DIGIT_RUN)) {
     const run = found[0];
-    const named = NAMED_AS_OTHER.test(text.slice(Math.max(0, found.index! - 40), found.index));
+    const before = text.slice(Math.max(0, found.index! - 40), found.index);
+    const named = NAMED_AS_OTHER.test(before);
+    const called = NAMED_AS_PHONE.test(before);
     const groups = run.match(/\+?\d+/g)!;
     const seps = run.split(/\+?\d+/).slice(1, -1);
+    /*
+     * A list of figures: four or more groups of three digits or more, each
+     * larger than the last, with nothing but a single space between them and
+     * no "+" or trunk "0" in front — "ran 128 256 512 1024 jobs". Its last
+     * three groups are a North American phone's 3-3-4, so every stretch of it
+     * was refused. A phone written with a country code in front of that has a
+     * one- or two-digit code ("1 415 555 1234", "44 20 7946 0958"), a "+", or
+     * "00". Rising, because two phones written one after the other with no
+     * word between, "415 555 1234 650 555 1234", are four long groups too, and
+     * they fall back at the second.
+     */
+    if (
+      groups.length >= 4 &&
+      !/^[+0]/.test(groups[0]!) &&
+      groups.every((x, k) => x.length >= 3 && (k === 0 || Number(x) > Number(groups[k - 1]))) &&
+      seps.every((sep) => sep === ' ')
+    ) {
+      continue;
+    }
+    /*
+     * A number straight after "#", in one piece: "issue #123456789012", "PR
+     * #1234567890". Nobody writes "#" against a phone number, and in one
+     * unbroken run it has no phone's layout to go by either.
+     */
+    if (groups.length === 1 && !groups[0]!.startsWith('+') && text[found.index! - 1] === '#') continue;
     const breakable = (sep: string) => !/[.-]/.test(sep);
     for (let i = 0; i < groups.length; i++) {
       if (i > 0 && !breakable(seps[i - 1]!)) continue;
@@ -179,20 +223,49 @@ function phoneIn(text: string): boolean {
          * and each of those went through as an ISBN. An ISBN is never written
          * with a "+" in front.
          *
-         * Nor is a word in front any evidence against a number that starts
-         * with a trunk 0 ("07700 900123"), which only a phone does; and a
-         * round figure is not "90000 80000", ten digits in fives starting 6
-         * to 9, which is how India writes a mobile.
+         * A word in front that names the numbers is taken at its word, trunk
+         * 0 or not, and a round pair is a figure unless a word in front says
+         * phone; see the two-group rule below.
          */
         if (bare.some((x, k) => k > (intl ? 1 : 0) && x.length === 1 && !(x === '0' && between[k - 1]!.includes('(')))) {
           continue;
         }
-        if (!intl && bare.length >= 3 && bare.every((x) => x.length >= 4)) continue;
+        /*
+         * Groups of four or more after "00" were let through as a phone
+         * however they were named, so "Order 0012 3456 7890" was refused:
+         * "0012" reads as a dialled "+12". A word that names the numbers as
+         * an order is the better evidence; "Call 0049 1520 1234 5678" has no
+         * such word and is still a phone.
+         */
+        if ((!intl || named) && bare.length >= 3 && bare.every((x) => x.length >= 4)) continue;
+        /*
+         * One unbroken run of digits named as something else: "Order ID
+         * 1234567890". A phone is written in groups far more often than not,
+         * and when it is not, nothing in front of it says "order" or "ID".
+         */
+        if (named && !plus && bare.length === 1) continue;
         if (bare.length === 2 && !plus && !between.some((sep) => /[-()]/.test(sep))) {
           if (digits > 11 || bare[0]!.length < 3 || bare[0]!.length > 5) continue;
-          if (named && !/^0[1-9]/.test(bare[0]!)) continue;
-          const indianMobile = digits === 10 && bare[0]!.length === 5 && /^[6-9]/.test(bare[0]!);
-          if (!indianMobile && bare.every((x) => /^[1-9]0{3,}$/.test(x))) continue;
+          /*
+           * Named as IDs, orders or tickets, the numbers are those, trunk 0
+           * or not. Round 16 kept a number starting with a trunk 0 a phone
+           * after any word, for "Ref: 07700 900123" and the other everyday
+           * words the list used to hold; with those gone from
+           * `NAMED_AS_OTHER` the words that are left mean only what they say,
+           * and "IDs 01234 56789" and "order 01234 56789" were refused for
+           * the 0. "IDs 07700 900123" goes through with them: the label is
+           * the only thing that tells it apart from "IDs 01234 56789", and
+           * the label says IDs. "Ref: 07700 900123" is still a phone.
+           */
+          if (named) continue;
+          /*
+           * Round figures, "10000 20000" and "Revenue grew 70000 60000",
+           * unless a word in front says it is a phone: "Call 90000 80000" is
+           * an Indian mobile, which is written in fives and can be round. The
+           * rule used to let every ten digits in fives starting 6 to 9
+           * through as a mobile, round or not, which refused the revenue.
+           */
+          if (!called && bare.every((x) => /^[1-9]0{3,}$/.test(x))) continue;
         }
         const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
         if (bare.length > 1 && bare.every(year)) continue;
@@ -229,9 +302,14 @@ function phoneIn(text: string): boolean {
  * so "led 4 engineers to drive", "mentored 3 Junior Engineers to drive the
  * migration" and "12 Data Scientists in a way" are prose, and "123 Main
  * Street" and "221B Baker Street" are not.
+ *
+ * "Loop" too: "1 Infinite Loop Cupertino" is an address whether or not it is
+ * a famous one, and went through because the list of street words stopped at
+ * "Hwy". A famous address is still somebody's place of work, and the AI has
+ * no need to write it; "10 Downing Street" is refused for the same reason.
  */
 const STREET =
-  /\b\d{1,6}[A-Z]?\s+(?:[A-Z0-9][A-Za-z0-9.'-]*\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Court|Ct|Place|Pl|Terrace|Circle|Cir|Parkway|Pkwy|Highway|Hwy)\b/;
+  /\b\d{1,6}[A-Z]?\s+(?:[A-Z0-9][A-Za-z0-9.'-]*\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Court|Ct|Place|Pl|Terrace|Circle|Cir|Parkway|Pkwy|Highway|Hwy|Loop)\b/;
 
 /**
  * The contact detail or identifier in something an AI wrote, named so it can

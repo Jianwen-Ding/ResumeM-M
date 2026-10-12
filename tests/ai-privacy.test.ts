@@ -248,6 +248,19 @@ describe('personalDetailIn', () => {
     'Order no. 98765 43210',
     'orders # 98765 43210',
     'Raised 10000 20000 dollars',
+    // Named as IDs or an order, trunk 0 or not: the label is the evidence
+    // (round 17). See `NAMED_AS_OTHER` in privacy.ts.
+    'IDs 01234 56789',
+    'order 01234 56789',
+    'IDs 07700 900123',
+    'Order 0012 3456 7890',
+    'Order ID 1234567890',
+    'serial 12345 67890',
+    // Round figures, with no word in front saying phone.
+    'Revenue grew 70000 60000',
+    // A list of figures, and a number written after "#".
+    'ran 128 256 512 1024 jobs',
+    'issue #123456789012',
   ])('lets through %j', (text) => {
     expect(personalDetailIn(text)).toBeNull();
   });
@@ -290,11 +303,15 @@ describe('personalDetailIn', () => {
     ['Item: 98765 43210', 'a phone number'],
     ['Ref: 07700 900123', 'a phone number'],
     ['Contact re PR 07700 900123', 'a phone number'],
-    // A trunk 0 is a phone's whatever word is in front.
-    ['IDs 07700 900123', 'a phone number'],
+    // A person's own numbers, which "account" and "PO" can be (round 17).
+    ['account 12345 67890', 'a phone number'],
+    ['PO 98765 43210', 'a phone number'],
+    // Two phones one after the other, which a list of figures must not swallow.
+    ['415 555 1234 650 555 1234', 'a phone number'],
     // "00" in place of the "+", and an Indian mobile that read as round figures.
     ['Call 0049 1520 1234 5678', 'a phone number'],
     ['Call 90000 80000', 'a phone number'],
+    ['I worked at 1 Infinite Loop Cupertino', 'a street address'],
   ])('refuses %j', (text, what) => {
     expect(personalDetailIn(text)).toBe(what);
   });

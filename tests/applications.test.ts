@@ -1795,4 +1795,32 @@ describe('a job on a board known by two names', () => {
   ])('%s is not the row for a send from %s', (rowUrl, sendUrl) => {
     expect(found(rowUrl, sendUrl)).toBeUndefined();
   });
+
+  /*
+   * Round 17. Lever by the whole UUID, whatever count of digits it happens to
+   * have; Greenhouse only when what is added is a company's own suffix; and
+   * Greenhouse's two hosts for one board are one site.
+   */
+  it.each([
+    // Five digits in the UUID, which the seven-digit rule refused.
+    ['https://jobs.lever.co/acme/0f1e2d3c-4bab-cdcd-efef-abcdefabcdef', 'https://jobs.lever.co/acmeinc/0f1e2d3c-4bab-cdcd-efef-abcdefabcdef'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmecareers/jobs/4012345'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmehq/jobs/4012345'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://job-boards.greenhouse.io/acme/jobs/4012345'],
+    ['https://job-boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmeinc/jobs/4012345'],
+  ])('%s is the row for a send from %s (round 17)', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBe('r1');
+  });
+
+  it.each([
+    // Two UUIDs: two jobs, however many digits each has.
+    ['https://jobs.lever.co/acme/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b', 'https://jobs.lever.co/acmeinc/1f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'],
+    // Not a UUID, so not Lever's job id, whatever its digits.
+    ['https://jobs.lever.co/acme/12345678', 'https://jobs.lever.co/acmeinc/12345678'],
+    // Another employer whose name starts with this one's.
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmesolar/jobs/4012345'],
+    ['https://job-boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmesolar/jobs/4012345'],
+  ])('%s is not the row for a send from %s (round 17)', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBeUndefined();
+  });
 });

@@ -485,21 +485,41 @@ function sameAddress(url: string | undefined, other: string | undefined): boolea
  */
 const GLOBAL_JOB_IDS = /(?:^|\.)(?:greenhouse\.io|smartrecruiters\.com|lever\.co)$/;
 
+/*
+ * Lever's job is a UUID, and only the whole UUID says which. "Seven digits
+ * or more" was the test for every host, which a UUID passes or fails by the
+ * luck of how many of its hex characters are digits, and says nothing about
+ * whether two are the one job.
+ */
+const LEVER_HOST = /(?:^|\.)lever\.co$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/*
+ * On Greenhouse, what is added to the shorter name has to be what a company
+ * adds to its own: `acme` and `acmeinc`, `acmecorp`, `acmegroup`, `acmehq`,
+ * `acmeglobal`, `acmecareers`, `acmeco`. Any addition was enough, so `acme`
+ * and `acmesolar` — two employers, one name the start of the other's — were
+ * one employer whenever their two job ids matched.
+ */
+const GREENHOUSE_HOST = /(?:^|\.)greenhouse\.io$/;
+const CORPORATE_SUFFIX = /^(?:inc|corp|group|hq|global|careers|co)$/;
+
 function sameTenant(url: string, other: string): boolean {
   const one = companyFromUrl(url)?.toLowerCase().replace(/[^a-z0-9]/g, '');
   const two = companyFromUrl(other)?.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!one || !two || one === two) return true;
   const number = jobNumberIn(url);
   const [shorter, longer] = one.length < two.length ? [one, two] : [two, one];
-  return (
-    GLOBAL_JOB_IDS.test(hostOf(url)) &&
-    GLOBAL_JOB_IDS.test(hostOf(other)) &&
-    Boolean(number) &&
-    (number!.match(/\d/g) ?? []).length >= 7 &&
-    number === jobNumberIn(other) &&
-    shorter.length >= 3 &&
-    longer.startsWith(shorter)
-  );
+  const host = hostOf(url);
+  const otherHost = hostOf(other);
+  if (!GLOBAL_JOB_IDS.test(host) || !GLOBAL_JOB_IDS.test(otherHost)) return false;
+  if (!number || number !== jobNumberIn(other) || shorter.length < 3 || !longer.startsWith(shorter)) return false;
+  if (LEVER_HOST.test(host) || LEVER_HOST.test(otherHost)) return UUID.test(number);
+  if ((number.match(/\d/g) ?? []).length < 7) return false;
+  if (GREENHOUSE_HOST.test(host) || GREENHOUSE_HOST.test(otherHost)) {
+    return CORPORATE_SUFFIX.test(longer.slice(shorter.length));
+  }
+  return true;
 }
 
 /*
@@ -552,7 +572,13 @@ function sameJobAs(
 ): (row: { company: string; role: string; url?: string; aliases?: { company: string; role: string }[] }) => boolean {
   const key = identity(company, role);
   const number = jobNumberIn(url);
-  const site = hostOf(url);
+  /*
+   * The host as `postingHost` reads it, so Greenhouse's `job-boards.` and
+   * `boards.` — one board under two hosts, which `sameAddress` already
+   * treated as one — are one site here too. Compared as written, the same
+   * job sent from the other host was a second row.
+   */
+  const site = postingHost(hostOf(url));
   const job = slug(rolePart(role, company));
   const named = Boolean(job) && !/^unknown role\b/i.test(role.trim());
   const byName = (other: { company: string; role: string }) =>
@@ -564,7 +590,7 @@ function sameJobAs(
     (named &&
       Boolean(number) &&
       jobNumberIn(row.url) === number &&
-      hostOf(row.url) === site &&
+      postingHost(hostOf(row.url)) === site &&
       sameTenant(url!, row.url!) &&
       slug(rolePart(row.role, row.company)) === job);
 }

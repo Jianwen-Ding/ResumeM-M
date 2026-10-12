@@ -2304,13 +2304,38 @@ const ROLE_AFTER_A_PURPOSE =
 const NOT_A_JOB_WORD =
   /(?:loans?|mortgages?|admissions?|registrations?|register|enrol(?:l)?(?:ment)?s?|events?|fairs?|insurance|rentals?|lettings?|tenanc(?:y|ies)|leases?|quotes?)/
     .source;
+/*
+ * But not anywhere later in the segment: a role noun four words on was enough,
+ * and so was one after "for", which names who an event is for rather than the
+ * job: `/apply/events-for-developers-48213`, `/apply/fair-for-engineers-55555`
+ * and `/apply/insurance-for-developers-48213` were all read as roles, and
+ * their forms as job applications. At most two words between the purpose word
+ * and the role, and neither of them "for" or "and" — "and" joins a second
+ * thing, `/events-and-staff`, not a longer name for the first.
+ */
+const BETWEEN_PURPOSE_AND_ROLE = /(?:[_.-](?!(?:for|and)(?![a-z0-9]))[a-z0-9]+){0,2}/.source;
 const NOT_A_JOB_PATH = new RegExp(
-  `(?:^|[/_.-])${NOT_A_JOB_WORD}(?![a-z])(?![^/]*?[_.-]${ROLE_AFTER_A_PURPOSE}(?![a-z]))`,
+  `(?:^|[/_.-])${NOT_A_JOB_WORD}(?![a-z])(?!${BETWEEN_PURPOSE_AND_ROLE}[_.-]${ROLE_AFTER_A_PURPOSE}(?![a-z]))`,
 );
 /*
  * The same word as the whole of a segment: a department or a team on an
  * employer's careers site, `/careers/insurance/claims-adjuster-4821`, rather
  * than what the form is for. See `careersAddress`.
+ *
+ * Only a line of business, which is what an employer's departments are
+ * named for: insurance, loans, mortgages, leases, rentals. Every purpose
+ * word was one, so `/careers/events/48213`, `/careers/fairs/12345` and
+ * `/careers/admissions/apply/12345` — a university careers office's fair and
+ * admission forms — had their "events", "fairs" and "admissions" read as the
+ * team the job was in, the number beside them as the job's, and were job
+ * applications. An event, a fair, a registration, an admission or an
+ * enrolment is what a form is for, never who it is hiring for.
+ */
+const BUSINESS_LINE_SEGMENT = /^(?:loans?|mortgages?|insurance|leases?|rentals?)$/;
+/*
+ * And the same word straight after a `/jobs` segment names which jobs: `/careers/jobs/events`
+ * is the events team's openings, as `/jobs/engineering` is engineering's.
+ * After `/careers` it is the careers office's own events, `/careers/events`.
  */
 const NOT_A_JOB_SEGMENT = new RegExp(`^${NOT_A_JOB_WORD}$`);
 
@@ -2630,9 +2655,21 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * of role words reaches — "Barista", "Pharmacist", "Product Owner" — are
    * still one job when the address says which. Only an address that is a
    * job's, by its path or its host: a news story's number is not one.
+   *
+   * Nor one whose path says the number is something else's. A careers
+   * office's fair, `/careers/events/48213` or `/careers/fairs/12345`, has an
+   * event's number under a careers path and describes itself in a posting's
+   * words — requirements, full-time, part-time — and named a role by that
+   * alone, which made its registration form a job application. Read here
+   * from `readCareersAddress`, further down, where the address's other
+   * evidence is weighed.
    */
+  const careersAddress = readCareersAddress();
   const numberedPosting =
-    Boolean(jobNumberIn(url)) && (JOB_PATH.test(link) || onATracker || BOARD.test(hostOf(url))) && described >= 3;
+    Boolean(jobNumberIn(url)) &&
+    !careersAddress.otherPurpose &&
+    (JOB_PATH.test(link) || onATracker || BOARD.test(hostOf(url))) &&
+    described >= 3;
   const namesARole =
     !thread &&
     !notAPosting &&
@@ -2711,7 +2748,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    *   founder form as readily as by an employer, so on its own it says
    *   nothing. It counts with a job's number in the address beside it.
    */
-  const careersAddress = (() => {
+  function readCareersAddress() {
     let parsed: URL;
     try {
       parsed = new URL(url ?? '');
@@ -2722,36 +2759,78 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     const careersHost = /^(?:careers?|jobs?)\./.test(hostOf(url));
     const careers = /\/(?:careers?|jobs?)(?:\/|$)/.test(where) || careersHost;
     /*
-     * A job's number: `jobNumberIn`'s, or four digits or more that are not a
-     * year. "Any digit" was the test, so an accelerator's `/apply/s2027`,
+     * A job's number: four digits or more, or three after a letter or a
+     * hyphen — `r123`, `job-123`, `req-456`, which is how a small employer's
+     * own site numbers its few openings. A bare "123" is still a page's
+     * number, not a job's.
+     *
+     * "Any digit" was the test once, so an accelerator's `/apply/s2027`,
      * `/apply/w27`, an MBA's `/apply/mba-2027` and `/application/fall2027`
      * were all a job's number, and their founder and admission forms, which
-     * ask for a LinkedIn profile too, were job applications.
+     * ask for a LinkedIn profile too, were job applications. Then every year
+     * was refused, which cost `/apply/2027` and `/apply/swe-intern-2027`, the
+     * forms for the class of 2027's roles. A year is the cohort's only when a
+     * cohort's word is in the segment with it: an MBA, a term, "cohort", or
+     * an accelerator's batch, S27, W27 or S2027.
      */
+    const COHORT = /(?:^|[^a-z])(?:mba|fall|spring|summer|winter|autumn|cohort|batch|[sw](?:19|20)?\d\d)(?![a-z])/;
     const numberIn = (segment: string) =>
-      (segment.match(/\d+/g) ?? []).some((run) => run.length >= 4 && !/^(?:19|20)\d\d$/.test(run));
+      [...segment.matchAll(/\d+/g)].some(({ 0: run, index }) => {
+        const prefixed = index! > 0 && /[a-z-]/.test(segment[index! - 1]!);
+        if (run.length < (prefixed ? 3 : 4)) return false;
+        return !(/^(?:19|20)\d\d$/.test(run) && COHORT.test(segment));
+      });
     const segments = where.split('/').filter(Boolean);
     const afterApply = segments.filter((_, k) => k > 0 && /^(?:apply|application|jobs?|careers?)$/.test(segments[k - 1]!));
     const numbered = Boolean(jobNumberIn(url)) || afterApply.some(numberIn);
     /*
-     * And not when a careers address says which job it is. A posting's
-     * number, `/jobs/insurance-12345`, is a job whatever words are beside
-     * it; and the word as a segment of its own under a careers path, beside
-     * a number, is the department the job is in: `/careers/insurance/claims-
-     * adjuster-4821`, `careers.acme.com/job/4821/insurance`,
-     * `/careers/events/apply/4821`. A loan's or a fair's form under a careers
-     * address — `jobs.example-cu.org/loans/apply`, `/careers/events/fair-
-     * registration` — has no number and is still not a job.
+     * What the form is for is said after the careers segment, not before it.
+     * `acme.example/events/careers/apply` is the careers section of a site
+     * that also runs events, and `/careers/jobs/events` is the events team's
+     * openings (see `NOT_A_JOB_SEGMENT`); both were read as an event's form
+     * once "events" anywhere in the path took the careers address away, and
+     * both are quick-apply job forms, as rounds 10 to 14 had them. Neither
+     * reading reaches a purpose word written after `/careers` itself:
+     * `/careers/events/register` is still a fair's form.
      */
-    const firstCareers = careersHost ? -1 : segments.findIndex((seg) => /^(?:careers?|jobs?)$/.test(seg));
-    const withoutDepartments = segments.filter((seg, k) => !(k > firstCareers && NOT_A_JOB_SEGMENT.test(seg)));
+    const firstCareers = segments.findIndex((seg) => /^(?:careers?|jobs?)$/.test(seg));
+    const purposeSegments = segments
+      .slice(Math.max(firstCareers, 0))
+      .filter((seg, k, all) => !(k > 0 && /^jobs?$/.test(all[k - 1]!) && NOT_A_JOB_SEGMENT.test(seg)));
+    const purpose = `/${purposeSegments.join('/')}`;
+    /*
+     * And not when a careers address says which job it is: a business line
+     * as a segment of its own under a careers path, beside a number, is the
+     * department the job is in — `/careers/insurance/claims-adjuster-4821`,
+     * `careers.acme.com/job/4821/insurance`. A loan's or a fair's form under
+     * a careers address — `jobs.example-cu.org/careers/loans/apply`,
+     * `/careers/events/fair-registration` — has no number and is still not a
+     * job.
+     *
+     * Under a careers *path* only. A careers host on its own is no evidence
+     * that the first segment is a department: a credit union's
+     * `jobs.cu.example/loans/apply-online-48213` is its loan form with a
+     * reference number, and was a job application.
+     *
+     * `jobNumberIn(url)` on its own used to say which job too, whatever the
+     * path said the form was for, so a careers office's
+     * `/careers/events/48213` and `/careers/fairs/12345` were job forms by
+     * their event's number. The number has to be beside nothing that says
+     * otherwise. That leaves `/careers/events/apply/4821` with no job on it
+     * unless the page says so: a role in its title, a résumé, an employer's
+     * questions — any of `forAJob`'s other evidence — still make it a job
+     * form, and a page with none of them is as likely the careers office's
+     * event as a job in its events team.
+     */
+    const withoutDepartments =
+      firstCareers < 0
+        ? purposeSegments
+        : purposeSegments.filter((seg, k) => !(k > 0 && BUSINESS_LINE_SEGMENT.test(seg)));
     const sayWhichJob =
-      careers &&
-      (Boolean(jobNumberIn(url)) ||
-        (segments.some(numberIn) && !NOT_A_JOB_PATH.test(`/${withoutDepartments.join('/')}`)));
-    const otherPurpose = NOT_A_JOB_PATH.test(where) && !sayWhichJob;
+      careers && segments.some(numberIn) && !NOT_A_JOB_PATH.test(`/${withoutDepartments.join('/')}`);
+    const otherPurpose = NOT_A_JOB_PATH.test(purpose) && !sayWhichJob;
     return { careers: careers && !otherPurpose, otherPurpose, numbered };
-  })();
+  }
   const asksForLinkedIn =
     /<(?:input|textarea)\b[^>]*\b(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*linked[\s_-]*in/i.test(html) ||
     /<label\b[^>]*>[^<]*linked\s*in\b/i.test(html);

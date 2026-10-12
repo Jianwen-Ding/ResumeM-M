@@ -89,6 +89,13 @@ const ACCELERATOR = `<!doctype html><html><head><title>Apply to the Spring batch
 <label>LinkedIn URL<input name="linkedin_url"></label><label>Company website<input name="site"></label>
 <button>Submit application</button></form></body></html>`;
 
+/** A quick-apply page that asks who you are and nothing else, with or without a LinkedIn field. */
+const QUICK = (linkedIn: boolean, title = 'Apply') => `<html><head><title>${title}</title></head><body><h1>Your details</h1>
+<form><label>First name<input name="first"></label><label>Last name<input name="last"></label>
+<label>Email<input type="email" name="email"></label><label>Phone number<input name="phone"></label>
+${linkedIn ? '<label>LinkedIn profile<input name="linkedin"></label>' : ''}
+<button>Submit application</button></form></body></html>`;
+
 describe('a form that only looks like a job application by its address or a LinkedIn field', () => {
   it.each([
     ['a loan with /careers/ in its query', LOAN, 'https://bank.example/loans/apply?returnTo=/careers/'],
@@ -111,6 +118,15 @@ describe('a form that only looks like a job application by its address or a Link
     // A department-like word under a careers path, with no number to say which job.
     ['a loan under a jobs. host and /careers', LOAN, 'https://jobs.example-cu.org/careers/loans/apply'],
     ['a career fair under /careers/events', MBA(), 'https://uni.example/careers/events/register'],
+    /*
+     * Round 17: an event's, a fair's or an admission's number under a
+     * careers path is not a job's, and "events" is not a department. A
+     * numbered form under /careers/events is the careers office's unless the
+     * page names a job (see the test below).
+     */
+    ['a career-fair form numbered under /careers/events', MBA(), 'https://uni.example/careers/events/48213'],
+    ['a numbered form under the careers office’s events', QUICK(false), 'https://acme.example/careers/events/apply/4821'],
+    ['the same with a LinkedIn field', QUICK(true), 'https://acme.example/careers/events/apply/4821'],
   ])('is not a job application: %s', (_name, html, url) => {
     expect(classifyPage(html, url).kind).toBe('none');
   });
@@ -203,12 +219,19 @@ describe('an application form that is for a job', () => {
     ['an event coordinator after a dot', 'https://acme.example/jobs/event.coordinator', false],
     ['a claims adjuster in the insurance department', 'https://acme.example/careers/insurance/claims-adjuster-4821', false],
     ['a job numbered before its department', 'https://careers.acme.com/job/4821/insurance', false],
-    ['a numbered job under the events team', 'https://acme.example/careers/events/apply/4821', false],
+    // "events" before the careers section, or naming which jobs (round 17).
+    ['a careers section inside an events site', 'https://acme.example/events/careers/apply', false],
+    ['the events team’s openings', 'https://acme.example/careers/jobs/events', true],
   ])('on %s, asking only who you are', (_name, url, linkedIn) => {
     const html = `<html><head><title>Apply</title></head><body><h1>Your details</h1>
 <form>${WHO}${linkedIn ? '<label>LinkedIn profile<input name="linkedin"></label>' : ''}
 <button>Submit application</button></form></body></html>`;
     expect(classifyPage(html, url).kind).toBe('application');
+  });
+
+  it('under /careers/events with a number, when the page names the role', () => {
+    const url = 'https://acme.example/careers/events/apply/4821';
+    expect(classifyPage(QUICK(false, 'Event Coordinator - Acme'), url).kind).toBe('application');
   });
 
   it('by a résumé asked for in another language', () => {
