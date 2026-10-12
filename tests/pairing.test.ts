@@ -38,7 +38,7 @@ describe('a server with pairing', () => {
 
   /** As the extension's service worker asks: its origin on a write, and none on a read. */
   const asExtension = (urlPath: string, { origin = EXT, token, method = 'GET', body }: {
-    origin?: string; token?: string; method?: string; body?: unknown;
+    origin?: string; token?: string | null; method?: string; body?: unknown;
   } = {}) =>
     fetch(`${base}${urlPath}`, {
       method,
@@ -47,7 +47,9 @@ describe('a server with pairing', () => {
         'Sec-Fetch-Site': 'none',
         'Sec-Fetch-Mode': 'cors',
         ...(origin ? { Origin: origin } : {}),
-        ...(token ? { 'X-RMM-Pair': token } : {}),
+        // Every JobHelper that knows about pairing sends the header, empty
+        // until it is paired; `null` is one from before pairing, which sends none.
+        ...(token !== null ? { 'X-RMM-Pair': token ?? '' } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -83,6 +85,32 @@ describe('a server with pairing', () => {
     // And the write did not happen.
     const config = (await (await fetch(`${base}/api/config`)).json()) as { ai: { enabled: boolean } };
     expect(config.ai.enabled).toBe(false);
+  });
+
+  /*
+   * A JobHelper from before pairing sends no pairing header at all, and has
+   * nowhere to enter a code: "make a code, and enter it in the extension"
+   * was a dead end, and its sends went untracked without a word.
+   */
+  it('tells a JobHelper older than pairing to update, rather than to make a code', async () => {
+    for (const [urlPath, method, body] of [
+      ['/api/store', 'GET', undefined],
+      ['/api/extension/sent', 'POST', {}],
+    ] as const) {
+      for (const origin of [EXT, undefined]) {
+        const reply = await asExtension(urlPath, { origin, method, body, token: null });
+        expect(reply.status, `${method} ${urlPath} from ${origin ?? 'no origin'}`).toBe(403);
+        const said = (await reply.json()) as { kind: string; error: string };
+        expect(said.kind).toBe('not-paired');
+        expect(said.error).toBe(
+          'This JobHelper is older than ResumeM-M: update it (reload the unpacked extension from the new version) to pair it.',
+        );
+      }
+    }
+    // Everything else about pairing is as it was: what is open stays open, and a token still pairs.
+    expect((await asExtension('/health', { token: null })).status).toBe(200);
+    const token = await pair();
+    expect((await asExtension('/api/store', { token })).status).toBe(200);
   });
 
   it('refuses the PDFs, the flat folder, and the API however it is spelled', async () => {

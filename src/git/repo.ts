@@ -3,7 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { aiCommandChange, aiSwitchedOff, clearAiSwitchOff, storeFileProblem, switchAiOff } from '../model/store.js';
+import { aiCommandChange, aiSwitchedOff, clearAiSwitchOff, storeFileProblem, switchAiOff, writeAiOff } from '../model/store.js';
 
 const run = promisify(execFile);
 
@@ -1685,6 +1685,12 @@ export class Repo {
       }
       switchedOff = vetted;
     }
+    /*
+     * And the switch-off written into config.yaml, as a commit of its own
+     * after the merge, for the versions that do not read the marker. See
+     * `writeAiOff`. Not counted in what was pulled: it is this machine's.
+     */
+    if (switchedOff) await this.commitAiOff('Switch the AI off: the command changed in what was pulled');
     const files = (await this.git(['-c', 'core.quotePath=false', 'diff', '--name-only', '-z', before, after]).catch(() => ''))
       .split('\0')
       .filter(Boolean);
@@ -1702,6 +1708,31 @@ export class Repo {
             `${outgoing} made here — ${changed}. Push sends the merge back, so the other machine has it too.`) +
         (switchedOff ? ` ${switchedOff}` : ''),
     };
+  }
+
+  /**
+   * Write `ai.enabled: false` into config.yaml and commit that file alone,
+   * under `message`. See `writeAiOff`. True when there was a commit.
+   *
+   * Only config.yaml, whatever else is on disk: this is the app deciding
+   * something on its own, and it has no business committing anything else.
+   * Called from inside the pull's turn in the commit queue, and on a clone
+   * nothing else can see yet, so it does not queue. A commit that fails
+   * leaves the file saying off, which is the safe half to be left with; the
+   * marker holds the AI off here either way.
+   */
+  async commitAiOff(message: string): Promise<boolean> {
+    if (!writeAiOff(this.root)) return false;
+    try {
+      await this.git([
+        '-c', 'user.name=ResumeM-M', '-c', 'user.email=resumem-m@localhost',
+        'commit', '-q', '-m', message, '--', 'config.yaml',
+      ]);
+      return true;
+    } catch (err) {
+      console.warn(`ResumeM-M: the AI was switched off in config.yaml, but it could not be committed: ${(err as Error).message}`);
+      return false;
+    }
   }
 
   /**

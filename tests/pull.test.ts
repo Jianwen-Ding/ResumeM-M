@@ -568,16 +568,25 @@ describe('what a pull would bring in, looked at first', () => {
     expect(res.body.message).toMatch(
       /The AI command changed in what was pulled: the command went from "claude" to "\/tmp\/somebody-else\.sh".*AI is switched off until you turn it on again in Settings\./s,
     );
-    // The pulled file is as it came; the switch-off is this machine's own, and is never committed.
-    expect(YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8')).ai.enabled).toBe(true);
+    /*
+     * And written into config.yaml, as a commit of its own on top of what
+     * was pulled, for a version of the app that does not read the marker.
+     * Measured with the previous build on this clone: it read `enabled:
+     * true` and ran the command that had just arrived.
+     */
+    expect(YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8')).ai.enabled).toBe(false);
+    expect(git(['log', '-1', '--format=%s'], b).trim()).toBe('Switch the AI off: the command changed in what was pulled');
+    // That one line, and nothing else in the file re-spaced or dropped.
+    expect(git(['show', '--numstat', '--format=', 'HEAD'], b).trim()).toBe('1\t1\tconfig.yaml');
     expect(git(['status', '--porcelain'], b)).toBe('');
     expect(storeB.loadConfig().ai.enabled).toBe(false);
     expect((await request(app).get('/api/store').expect(200)).body.config.ai.enabled).toBe(false);
     expect((await request(app).get('/api/config').expect(200)).body.overrides.aiSwitchedOff).toMatch(/somebody-else/);
 
-    // Turned on again in Settings, it is on.
+    // Turned on again in Settings, it is on, and the file says so.
     await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
     expect(storeB.loadConfig().ai.enabled).toBe(true);
+    expect(YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8')).ai.enabled).toBe(true);
 
     // And a pull that leaves the command alone leaves it on.
     await aMarksZetaInterview();
@@ -661,8 +670,13 @@ describe('cloning a save', () => {
 
     expect(cloned.loadConfig().ai.enabled).toBe(false);
     expect(aiSwitchedOff(cloned.root)).toMatch(/cloned with the AI is switched on, running "\/tmp\/somebody-else\.sh"/);
+    // In the file too, committed, for a version that does not read the marker.
+    expect(YAML.parse(fs.readFileSync(path.join(cloned.root, 'config.yaml'), 'utf8')).ai.enabled).toBe(false);
+    expect(git(['log', '-1', '--format=%s'], cloned.root).trim()).toBe('Switch the AI off: it arrived switched on in the clone');
+    expect(git(['status', '--porcelain'], cloned.root)).toBe('');
     cloned.saveConfig({ ai: { enabled: true } as never });
     expect(cloned.loadConfig().ai.enabled).toBe(true);
+    expect(YAML.parse(fs.readFileSync(path.join(cloned.root, 'config.yaml'), 'utf8')).ai.enabled).toBe(true);
   });
 });
 
@@ -841,8 +855,9 @@ describe('the AI switch-off, where it leaked', () => {
    * list.
    */
   it('switches off for a pull that changes only the research, model or effort setting', async () => {
+    // Switched on with the command this save already had: nothing new to look at.
     await aSetsAi('  enabled: true\n  command: claude\n', 'A: AI on');
-    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    expect((await repoB.pull()).aiSwitchedOff).toBeUndefined();
     await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
     expect(storeB.loadConfig().ai.enabled).toBe(true);
 
@@ -865,8 +880,9 @@ describe('the AI switch-off, where it leaked', () => {
    * tailoring ran, and the AI stayed on.
    */
   it('switches off for a pull that changes only the model of one kind of work', async () => {
+    // Switched on with the command this save already had: nothing new to look at.
     await aSetsAi('  enabled: true\n  command: claude\n', 'A: AI on');
-    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    expect((await repoB.pull()).aiSwitchedOff).toBeUndefined();
     await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
 
     for (const task of ['tailor', 'write', 'review', 'author']) {
@@ -880,15 +896,63 @@ describe('the AI switch-off, where it leaked', () => {
   });
 
   /*
+   * The switch-off writes `false` into config.yaml and that travels. When the
+   * other machine's owner turns the AI on again, same command, and this one
+   * pulls it, that is not a new program arriving — counted as one, this
+   * machine switched off and committed `false` again, and the two took turns
+   * for as long as both kept answering.
+   */
+  it('does not switch off again for the other machine turning it back on with the same command', async () => {
+    // B's command arrives at A, which switches off and commits `false`.
+    const onB = YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8'));
+    fs.writeFileSync(path.join(b, 'config.yaml'), YAML.stringify({ ...onB, ai: { ...onB.ai, enabled: true, command: '/tmp/b-script.sh' } }));
+    commitAs(b, 'B: its own AI');
+    expect((await repoB.push()).ok).toBe(true);
+    const atA = await repoA.pull();
+    expect(atA.aiSwitchedOff).toBe(true);
+    expect(git(['log', '-1', '--format=%s'], a).trim()).toBe('Switch the AI off: the command changed in what was pulled');
+    expect((await repoA.push()).ok).toBe(true);
+    // B takes A's `false`, which switches nothing off and leaves B off.
+    expect((await repoB.pull()).aiSwitchedOff).toBeUndefined();
+    expect(storeB.loadConfig().ai.enabled).toBe(false);
+
+    // A's owner has looked at the command and turns it on; A pushes that.
+    new Store(a).saveConfig({ ai: { enabled: true } as Parameters<Store['saveConfig']>[0]['ai'] });
+    await repoA.commitAll('A: AI on again');
+    expect((await repoA.push()).ok).toBe(true);
+
+    const before = head(b);
+    const pulled = await repoB.pull();
+    expect(pulled.ok).toBe(true);
+    expect(pulled.aiSwitchedOff).toBeUndefined();
+    expect(aiSwitchedOff(b)).toBeUndefined();
+    // One commit pulled, and none of B's own on top of it.
+    expect(git(['rev-list', '--count', `${before}..HEAD`], b).trim()).toBe('1');
+    expect(git(['log', '-1', '--format=%s'], b).trim()).toBe('A: AI on again');
+    expect(storeB.loadConfig().ai.enabled).toBe(true);
+    expect(storeB.loadConfig().ai.command).toBe('/tmp/b-script.sh');
+  });
+
+  /*
    * While switched off, GET /config says `enabled: false` whatever the file
    * says, and the Settings page sent that back with every save — so
    * changing the timeout committed `enabled: false` into config.yaml, and
    * the next push switched the other machine off. Covered on the server so
    * that no client can do it.
+   *
+   * The switch-off writes its own `false` now (see `writeAiOff`), so the
+   * file says true under the marker only once something else has put it
+   * back — here, a `git pull` in a terminal bringing the other machine's
+   * "on", which nothing vets. A Settings save is still not a decision about
+   * the AI.
    */
   it('does not write a switch-off into config.yaml when settings are saved while it is in force', async () => {
     await aSetsAi('  enabled: true\n  command: /tmp/somebody-else.sh\n', 'A: new AI');
     expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    const written = YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8'));
+    expect(written.ai.enabled).toBe(false);
+    fs.writeFileSync(path.join(b, 'config.yaml'), YAML.stringify({ ...written, ai: { ...written.ai, enabled: true } }));
+    commitAs(b, 'Terminal: the other machine turned it on');
 
     const shown = (await request(app).get('/api/config').expect(200)).body;
     expect(shown.ai.enabled).toBe(false);

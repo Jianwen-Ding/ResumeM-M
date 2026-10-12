@@ -292,6 +292,18 @@ export interface ResumeSpec {
    */
   temporaryFrom?: string;
   /**
+   * A temporary resume that went out, written to disk as `extended`.
+   *
+   * This version keeps a sent temporary resume however long ago it was sent
+   * (see `wentOut`), and the version before it did not know that: it read
+   * `temporary` on a resume an `applied` row named, started the week, and
+   * deleted it, from the same clone. So the one thing every version honours —
+   * `extended`, never swept — is what the file says, and this flag is how
+   * this version still reads the resume as the temporary copy it is. See
+   * `keptOnDisk` and `asLoaded` in tiers.ts. The store writes and clears it.
+   */
+  keptBecauseSent?: boolean;
+  /**
    * Pinned as a starting point.
    *
    * @deprecated Superseded by `tier: 'base'`. Read by the migration only.

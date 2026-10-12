@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PLACEHOLDER_NAME } from './resolve.js';
-import { Store, aiCommandChange, switchAiOff } from './store.js';
+import { Store, aiCommandChange, switchAiOff, writeAiOff } from './store.js';
 import { currentIgnore } from './current.js';
 import { Repo, refuseClonedLinks } from '../git/repo.js';
 
@@ -231,7 +231,18 @@ export async function cloneProject(
      * repository, chose. Before the load below, which reads the config.
      */
     const change = aiCommandChange(undefined, fs.readFileSync(path.join(stage, 'config.yaml'), 'utf8'));
-    if (change) switchAiOff(stage, `The save was cloned with ${change}.`);
+    if (change) {
+      switchAiOff(stage, `The save was cloned with ${change}.`);
+      /*
+       * And in config.yaml, committed, for a version of the app that does not
+       * read the marker and opens this clone. See `writeAiOff`.
+       */
+      if (fs.existsSync(path.join(stage, '.git'))) {
+        await Repo.forStore(stage).commitAiOff('Switch the AI off: it arrived switched on in the clone');
+      } else {
+        writeAiOff(stage);
+      }
+    }
     const store = new Store(stage);
     store.load(); // Validate before it becomes the open save.
 

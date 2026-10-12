@@ -148,6 +148,29 @@ describe('a write from another site', () => {
     await request(appWith()).post('/api/projects/close').set('Host', '127.0.0.1:4600').set('Origin', ext).expect(403);
   });
 
+  /*
+   * A JobHelper older than pairing sends no pairing header at all, and has no
+   * box to enter a code in. One that knows about pairing always sends it,
+   * empty until paired.
+   */
+  it('tells an extension that sends no pairing header that it is older than pairing', async () => {
+    const ext = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
+    const older = /^This JobHelper is older than ResumeM-M: update it \(reload the unpacked extension from the new version\) to pair it\.$/;
+    const fromOld = await request(appWith()).post('/api/projects/close').set('Host', '127.0.0.1:4600').set('Origin', ext).expect(403);
+    expect(fromOld.body).toMatchObject({ kind: 'not-paired', error: expect.stringMatching(older) });
+    // Its GETs carry no Origin, as Chrome sends them; Sec-Fetch-Site still says a browser.
+    const read = await request(appWith()).get('/api/store').set('Host', '127.0.0.1:4600').set('Sec-Fetch-Site', 'none').expect(403);
+    expect(read.body.error).toMatch(older);
+
+    // An empty header is a JobHelper that knows how to pair, and is told how.
+    const fromNew = await request(appWith()).post('/api/projects/close').set('Host', '127.0.0.1:4600').set('Origin', ext)
+      .set('X-RMM-Pair', '').expect(403);
+    expect(fromNew.body.error).toMatch(/Pair JobHelper.*make a code/);
+    // A web page is refused as before, with nothing about extensions.
+    const page = await request(appWith()).post('/api/projects/close').set('Host', '127.0.0.1:4600').set('Origin', 'https://evil.example').expect(403);
+    expect(page.body.error).not.toMatch(/JobHelper/);
+  });
+
   it('leaves alone anything that is not a browser', async () => {
     // The CLI, the health check, a script: no Origin at all, and a browser
     // always sends one on a write.

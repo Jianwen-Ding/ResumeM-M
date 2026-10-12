@@ -8,7 +8,7 @@ import { flattenResumes, needsFlattening } from './flatten.js';
 import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
 import { legacyTailoredResumeId, tailoredResumeId } from './applications.js';
 import { liftLayout } from './lift-layout.js';
-import { needsTiering, tierResumes } from './tiers.js';
+import { asLoaded, keptOnDisk, needsTiering, newlySent, sentResumes, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
 import {
   DEFAULT_CONFIG,
@@ -343,10 +343,13 @@ export function storeFileProblem(rel: string, raw: string): string | undefined {
  * The file in this machine's `.git` folder that says the AI has been
  * switched off here, and why. See `aiCommandChange`.
  *
- * In `.git` because it is about this machine and must never travel: a
- * switch-off written into config.yaml and committed would be pushed, and the
- * other machine's next pull would switch its AI off in turn. Undefined when
- * the save is not a repository of its own, which nothing can pull into.
+ * In `.git` because it is about this machine: it says why, it holds the AI
+ * off here whatever config.yaml comes to say, and only turning the AI on
+ * here clears it. The switch-off itself is also written into config.yaml
+ * and committed, for the versions that do not read this file (see
+ * `writeAiOff`); nothing else that merely saves settings while switched off
+ * writes `false` there (see `saveConfig`). Undefined when the save is not a
+ * repository of its own, which nothing can pull into.
  */
 export function aiSwitchOffFile(root: string): string | undefined {
   const dotGit = path.join(root, '.git');
@@ -376,6 +379,55 @@ export function switchAiOff(root: string, why: string): boolean {
   if (!file) return false;
   fs.writeFileSync(file, `${why}\n`, 'utf8');
   return true;
+}
+
+/**
+ * Write `ai.enabled: false` into config.yaml itself, for a pull or a clone
+ * that switches the AI off. True when the file changed.
+ *
+ * The marker in `.git` is this version's, and a version that predates it
+ * does not read it: the previous build opened on the same clone after a pull
+ * had switched the AI off found `enabled: true` in config.yaml, and ran the
+ * command that had just arrived. So the switch-off is also written where
+ * every version reads it, and committed on its own (see `Repo.commitAiOff`).
+ * That commit travels with the next push, and switches the AI off on the
+ * other machine too — deliberately: "off" is the answer that cannot run a
+ * command nobody has looked at, and turning it on again there is one click
+ * in Settings, which writes `true` as it always has.
+ *
+ * Edited in place rather than through `writeYaml`, so the comments and the
+ * order of the file survive and the commit is the one line. Nothing is
+ * written to a file that already says off, or that will not parse — the
+ * marker still holds the AI off on this machine either way.
+ */
+export function writeAiOff(root: string): boolean {
+  const file = path.join(root, 'config.yaml');
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const text = withoutBom(raw);
+    const doc = YAML.parseDocument(text);
+    if (doc.errors.length > 0) return false;
+    if (doc.getIn(['ai', 'enabled']) === false) return false;
+    /*
+     * The value's own characters replaced where there is one, so nothing
+     * else in the file is so much as re-spaced. Set through the document
+     * only where there is no such line to change.
+     */
+    const node = doc.getIn(['ai', 'enabled'], true);
+    let next: string;
+    if (YAML.isScalar(node) && node.range) {
+      next = `${text.slice(0, node.range[0])}false${text.slice(node.range[1])}`;
+    } else {
+      doc.setIn(['ai', 'enabled'], false);
+      next = doc.toString({ lineWidth: 0 });
+    }
+    const temp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, next, 'utf8');
+    fs.renameSync(temp, file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** What turning the AI on in Settings does to a switch-off. */
@@ -489,7 +541,16 @@ export function aiCommandChange(before: string | undefined, after: string | unde
       if (from === to || (from === args(was) && to === args(now))) continue;
       said.push(`its arguments for ${key} went from ${from} to ${to}`);
     }
-    if (!on(was)) said.push(`it was switched on, running ${running(now)}`);
+    /*
+     * Switched on with nothing else different is not a new program arriving:
+     * the command and every kind of work's arguments are the ones this save
+     * already had. Since a switch-off also writes `false` into config.yaml
+     * (see `writeAiOff`), counting that as a change made the two machines
+     * take turns: the other one turned it on again, this one pulled that,
+     * switched off and committed `false`, and so on for as long as both
+     * kept answering. Alongside a change to what runs, it is said with it.
+     */
+    if (!on(was) && said.length > 0) said.push(`it was switched on, running ${running(now)}`);
   }
   return said.length ? said.join('; ') : undefined;
 }
@@ -1355,10 +1416,12 @@ export class Store {
      * `loadConfig` reports `enabled: false` whatever config.yaml says. A
      * client that sends back what it was shown — the Settings page's Save
      * did, with every change to the timeout — would write that false into
-     * the tracked file and commit it, and the next push would switch the
-     * other machine's AI off too: the travelling switch-off the marker
-     * exists to avoid. So while switched off, anything short of turning the
-     * AI on leaves the file's own value alone. Turning it on (`true`) still
+     * the tracked file and commit it as "Update settings", a decision about
+     * the AI nobody made. The switch-off writes its own `false`, once and
+     * under its own name (see `writeAiOff`); and once somebody has turned
+     * the AI on again elsewhere and that has been pulled, a timeout changed
+     * here must not switch it off for everybody. So while switched off,
+     * anything short of turning the AI on leaves the file's own value alone. Turning it on (`true`) still
      * goes through, and clears the switch-off below.
      */
     if (patch.ai && 'enabled' in patch.ai && patch.ai.enabled !== true && aiSwitchedOff(this.root) !== undefined) {
@@ -1505,7 +1568,33 @@ export class Store {
      * right way round: the sweep deletes things, and it should not begin
      * until the save has actually been migrated and the date recorded.
      */
-    return tierResumes(flattenResumes(this.loadResumesAsWritten())).tiered;
+    /*
+     * And a sent temporary resume, which is written as `extended` so that a
+     * version that would sweep it does not, read back as the temporary copy
+     * it is here. See `keptOnDisk`.
+     */
+    return tierResumes(flattenResumes(this.loadResumesAsWritten())).tiered.map(asLoaded);
+  }
+
+  /**
+   * Write the keep on every temporary resume the tracker says was sent.
+   *
+   * `saveResume` and `saveApplications` write it from now on; this is for
+   * the resumes already on disk — written before either did, by the version
+   * before this one, or by hand. Run on opening the save, before the sweep.
+   * Returns the ids it wrote, and none on any start after the first.
+   */
+  keepSentResumes(): string[] {
+    const sent = sentResumes(normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])));
+    const kept: string[] = [];
+    for (const spec of this.loadResumesAsWritten()) {
+      // As written: an untiered resume is the tiering migration's to settle,
+      // and that writes through `saveResume` too.
+      if (spec.tier !== 'temporary' || !sent.has(spec.id)) continue;
+      this.writeYaml(['resumes', `${spec.id}.yaml`], keptOnDisk(spec, sent));
+      kept.push(spec.id);
+    }
+    return kept;
   }
 
   /**
@@ -1723,7 +1812,14 @@ export class Store {
   }
 
   saveResume(spec: ResumeSpec): void {
-    this.writeYaml(['resumes', `${spec.id}.yaml`], spec);
+    /*
+     * A temporary resume that went out is written as kept, whoever is
+     * writing it — the card filing its copy again, the editor saving it, a
+     * migration. See `keptOnDisk`: on disk as `temporary`, the previous
+     * version on the same clone sweeps it.
+     */
+    const sent = sentResumes(normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])));
+    this.writeYaml(['resumes', `${spec.id}.yaml`], keptOnDisk(spec, sent));
   }
 
   /**
@@ -2024,7 +2120,26 @@ export class Store {
   }
 
   saveApplications(apps: Application[]): void {
+    const before = normalizeApplications(this.readYaml<Application[]>('applications.yaml', []));
     this.writeYaml('applications.yaml', apps);
+    /*
+     * And a temporary resume this write says went out is written as kept,
+     * in the same write and so the same commit: a row moved to `applied`,
+     * filed at `applied` to begin with, or remembering in `sentResumeIds`
+     * the resume it was sent with before it moved on. See `keptOnDisk` for
+     * why the file has to say it rather than the tracker alone.
+     *
+     * Only on the change, so a write that sends nothing new out does not
+     * also rewrite resumes: the ones already on disk are `keepSentResumes`'s,
+     * on opening the save.
+     */
+    const fresh = newlySent(before, normalizeApplications(apps));
+    if (fresh.length === 0) return;
+    const sent = new Set(fresh);
+    for (const spec of this.loadResumesAsWritten()) {
+      if (spec.tier !== 'temporary' || !sent.has(spec.id)) continue;
+      this.writeYaml(['resumes', `${spec.id}.yaml`], keptOnDisk(spec, sent));
+    }
   }
 
   upsertApplication(app: Application): Application[] {

@@ -126,6 +126,21 @@ export async function openSave(store: Store, repo: Repo): Promise<void> {
   }
 
   /*
+   * The temporary resumes that were sent, written as kept where every
+   * version reads it, before the sweep and before anything is served. See
+   * `keptOnDisk` in model/tiers.ts: a previous version opening this clone
+   * sweeps one that still says `temporary`. Its own commit, and only when
+   * there was one to write — every start after the first finds none.
+   */
+  const kept = store.keepSentResumes();
+  if (autoCommit && kept.length > 0) {
+    await commitQuietly(repo, `Keep ${kept.length} sent resume(s) for every version of the app`, ['resumes']);
+  }
+  if (kept.length > 0) {
+    console.log(`ResumeM-M: marked ${kept.length} sent temporary resume(s) kept on disk — ${kept.join(', ')}.`);
+  }
+
+  /*
    * Before the sweep: a close starts the resume's week, and the sweep counts
    * that week from the close — so this cannot take a resume tonight, only
    * start its clock.

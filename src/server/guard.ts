@@ -153,6 +153,18 @@ export const NOT_PAIRED =
   'This browser extension is not paired with ResumeM-M. In ResumeM-M, open Save & Files → Pair JobHelper, ' +
   'make a code, and enter it in the extension.';
 
+/**
+ * What an extension hears when it sends no pairing header at all.
+ *
+ * Every JobHelper that knows about pairing sends `X-RMM-Pair` on every
+ * request, empty until it is paired. One that sends none was built before
+ * pairing existed, and has nowhere to enter a code: told to "make a code, and
+ * enter it in the extension", its owner made one and found no box to type it
+ * in. Its sends went untracked in the meantime, and nothing said why.
+ */
+export const OLDER_EXTENSION =
+  'This JobHelper is older than ResumeM-M: update it (reload the unpacked extension from the new version) to pair it.';
+
 export function localOnly({ host, allowHosts = [], paired = () => false, editorFile = () => false }: GuardOptions = {}): RequestHandler {
   const allowed = new Set([
     ...LOOPBACK,
@@ -208,13 +220,23 @@ export function localOnly({ host, allowHosts = [], paired = () => false, editorF
       if (!pairedNow && !shell && !openToUnpaired(req.method, req.path)) {
         if (EXTENSION.test(foreign)) res.setHeader('Access-Control-Allow-Origin', foreign);
         res.setHeader('Vary', 'Origin');
+        /*
+         * No header at all, rather than an empty one, from an extension: an
+         * extension older than pairing. See `OLDER_EXTENSION`. From its
+         * origin, or with none on loopback, which is how Chrome sends an
+         * extension's GET (see `foreignCaller`); not on another name, where
+         * "none" is as likely a typed address.
+         */
+        const older = !(PAIR_HEADER.toLowerCase() in req.headers) && (EXTENSION.test(foreign) || (foreign === '' && !anonymous));
         res.status(403).json({
           kind: 'not-paired',
           error: token
             ? `${NOT_PAIRED} The pairing this extension has was removed, or was made with another ResumeM-M.`
-            : anonymous
-              ? `${NOT_PAIRED} If this is not an extension: open the editor at http://${header}/ and go from there.`
-              : NOT_PAIRED,
+            : older
+              ? OLDER_EXTENSION
+              : anonymous
+                ? `${NOT_PAIRED} If this is not an extension: open the editor at http://${header}/ and go from there.`
+                : NOT_PAIRED,
         });
         return;
       }

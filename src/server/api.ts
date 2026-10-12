@@ -1286,6 +1286,13 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        */
       if (tier === 'temporary') spec.temporaryFrom ??= new Date().toISOString();
       else delete spec.temporaryFrom;
+      /*
+       * A tier chosen here is somebody's choice, and no longer the store's
+       * reading of a sent copy (see `keptOnDisk` in tiers.ts). Marked Kept,
+       * it is kept and listed as kept. Marked temporary, it is temporary —
+       * and if it was sent, the store writes the keep again on saving it.
+       */
+      delete spec.keptBecauseSent;
 
       const said = { base: 'a base', extended: 'kept', temporary: 'temporary' }[tier];
       // Tagged as written, before the commit's awaits let another write in.
@@ -1317,6 +1324,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       spec.tier = tier;
       delete spec.base;
       delete spec.temporaryFrom;
+      delete spec.keptBecauseSent;
 
       await withCommit(repo, autoCommit(), `${tier === 'base' ? 'Mark' : 'Unmark'} "${spec.label}" as a base`, () =>
         store.saveResume(spec),
@@ -4545,6 +4553,8 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         for (const spec of toKeep) {
           spec.tier = 'extended';
           delete spec.temporaryFrom;
+          // Kept for good now, and no longer the store's reading of a sent copy.
+          delete spec.keptBecauseSent;
           store.saveResume(spec);
         }
       });
@@ -6857,9 +6867,12 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         delete restored.tier;
         delete restored.temporaryFrom;
         delete restored.base;
+        delete restored.keptBecauseSent;
         if (standing.tier !== undefined) restored.tier = standing.tier;
         if (standing.temporaryFrom !== undefined) restored.temporaryFrom = standing.temporaryFrom;
         if (standing.base !== undefined) restored.base = standing.base;
+        // Part of the tier as it is written: see `keptOnDisk` in tiers.ts.
+        if (standing.keptBecauseSent !== undefined) restored.keptBecauseSent = standing.keptBecauseSent;
       }
 
       /*

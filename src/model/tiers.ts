@@ -252,6 +252,76 @@ export function wentOut(app: Application): boolean {
 }
 
 /**
+ * The resumes the tracker says went out: every one a sent row names, and
+ * every one a row remembers sending before it moved on (`sentResumeIds`).
+ * The same two questions `doneAt` asks before it keeps one.
+ */
+export function sentResumes(applications: Application[]): Set<string> {
+  const sent = new Set<string>();
+  for (const app of applications) {
+    for (const id of app.sentResumeIds ?? []) sent.add(id);
+    if (app.resumeId && wentOut(app)) sent.add(app.resumeId);
+  }
+  return sent;
+}
+
+/**
+ * Which resumes were not sent before this write and are after it.
+ *
+ * The moment a row moves past Applying, or names a resume in
+ * `sentResumeIds`, is the moment its temporary resume has to stop looking
+ * temporary on disk — see `keptOnDisk`.
+ */
+export function newlySent(before: Application[], after: Application[]): string[] {
+  const was = sentResumes(before);
+  return [...sentResumes(after)].filter((id) => !was.has(id));
+}
+
+/**
+ * A resume as it is written, for every version that may open the save.
+ *
+ * This version keeps a temporary resume that was sent, for good: see
+ * `wentOut`. The version before it did not, and still does not — it starts
+ * the week at `applied` — and two versions on one clone is ordinary: the
+ * same save synced to a laptop that has not updated, or opened by the
+ * previous build while this one is being tried. Measured with both on one
+ * save: this version started and kept the sent copy, the previous one
+ * started a minute later, swept it, and committed the deletion. The resume
+ * was the only record in the history of what was sent.
+ *
+ * So the keep is written where every version reads it: `extended`, which
+ * nothing has ever swept, with the clock forgotten, exactly as removing a
+ * sent row and marking a resume Kept already write it. `keptBecauseSent`
+ * says it was this and not somebody's choice, and `asLoaded` reads it back
+ * as the temporary copy it still is here — listed with the posting's other
+ * copies, written over by tailoring that posting again, never offered as
+ * the default for another one — so nothing in this version behaves
+ * differently for it being on disk this way.
+ *
+ * Anything else is written exactly as it is.
+ */
+export function keptOnDisk(spec: ResumeSpec, sent: ReadonlySet<string>): ResumeSpec {
+  if (tierOf(spec) !== 'temporary' || !sent.has(spec.id)) return spec;
+  const kept: ResumeSpec = { ...spec, tier: 'extended', keptBecauseSent: true };
+  delete kept.temporaryFrom;
+  return kept;
+}
+
+/**
+ * A resume as this version means it: one `keptOnDisk` wrote as `extended`
+ * because it was sent reads as the temporary copy it was. The sweep still
+ * keeps it, for the reason it always did — it was sent.
+ *
+ * Only while the file still says `extended`. A version that knows nothing of
+ * the flag and marks the resume temporary leaves it behind, and the file's
+ * own tier is the answer then.
+ */
+export function asLoaded(spec: ResumeSpec): ResumeSpec {
+  if (!spec.keptBecauseSent || spec.tier !== 'extended') return spec;
+  return { ...spec, tier: 'temporary' };
+}
+
+/**
  * When an application stopped needing its resume, or `undefined` while it
  * still does.
  *
