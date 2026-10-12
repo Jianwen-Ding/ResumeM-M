@@ -61,7 +61,7 @@ import { FRAME_ANCESTORS } from './guard.js';
 import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
-import { isSnapshotFile, parseSnapshot, type StoreSnapshot } from '../model/snapshot.js';
+import { readSnapshot, type ParsedYaml, type StoreSnapshot } from '../model/snapshot.js';
 import { buildMaster, PROFILE_NAME_KEY, resolveProfile, resolveResume } from '../model/resolve.js';
 import { readRepo } from '../ingest/repo.js';
 import { Store, withoutBom } from '../model/store.js';
@@ -6063,23 +6063,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // first visit to a long history pays; every visit after it is free.
       const live = store.load();
 
-      // Blobs are content-addressed, so the same unchanged file across fifty
-      // commits is read exactly once.
-      const blobs = new Map<string, string>();
-      const readSnapshot = async (hash: string): Promise<StoreSnapshot | undefined> => {
-        const tree = await repo.treeAt(hash);
-        const files = new Map<string, string>();
-        for (const [file, objectId] of tree) {
-          if (!isSnapshotFile(file)) continue;
-          let text = blobs.get(objectId);
-          if (text === undefined) {
-            text = await repo.blob(objectId);
-            blobs.set(objectId, text);
-          }
-          files.set(file, text);
-        }
-        return files.size === 0 ? undefined : parseSnapshot(files);
-      };
+      /*
+       * Blobs are content-addressed, so the same unchanged file across fifty
+       * commits is read and parsed exactly once.
+       *
+       * Parsed, not only read. This kept the text by blob id and then parsed
+       * every resume in the save again at every commit — on a save of 260
+       * resumes, eighteen seconds before the timeline first opened, and
+       * forty-five on a real one with a longer history, nearly all of it YAML
+       * that had no bearing on the resume being asked about. `readSnapshot`
+       * reads only what this resume resolves against, through one git process
+       * per commit, and keeps each parse by blob id here. See snapshot.ts.
+       */
+      const parsed = new Map<string, ParsedYaml>();
+      const snapshotAt = async (hash: string): Promise<StoreSnapshot | undefined> =>
+        readSnapshot(await repo.treeAt(hash), (ids) => repo.blobs(ids), id, parsed);
 
       // Oldest first, so each version is diffed against the one before it.
       const chronological = [...commits].reverse();
@@ -6091,7 +6089,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         let resolved = documentCache.get(key);
 
         if (resolved === undefined) {
-          const snapshot = await readSnapshot(c.hash);
+          const snapshot = await snapshotAt(c.hash);
           try {
             // `null` is a real answer — the resume did not exist yet, or was
             // broken at this commit — and worth remembering as one.
@@ -6357,12 +6355,14 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        */
       const warnings: string[] = [];
       try {
-        const files = new Map<string, string>();
-        for (const [file, objectId] of tree) {
-          if (isSnapshotFile(file)) files.set(file, await repo.blob(objectId));
-        }
+        // Only what this resume resolves against, as the timeline reads it:
+        // the same document, without parsing every resume in the commit.
+        const snapshot = await readSnapshot(tree, (ids) => repo.blobs(ids), id, new Map());
+        // An empty snapshot resolved to nothing and was caught below, so the
+        // commit with nothing to read is the same courtesy declined.
+        if (!snapshot) throw new Error('Nothing to compare');
         const live = store.load();
-        const then = resolveResume(id, { ...live, ...parseSnapshot(files) });
+        const then = resolveResume(id, { ...live, ...snapshot });
         const now = resolveResume(id, store.load());
         if (!sameDocument(then, now)) {
           warnings.push(

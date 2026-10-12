@@ -1657,3 +1657,67 @@ describe('an employer is the same employer with or without "Inc."', () => {
     expect(findApplication([row('co', 'Co')] as Parameters<typeof findApplication>[0], 'Acme', 'Platform Engineer')).toBeUndefined();
   });
 });
+
+/*
+ * The upload folder is rebuilt from the list just written, not from a second
+ * read of the tracker.
+ *
+ * `advance` and `closeStale` used to call `syncCurrent(store)`, which loads
+ * the whole store to get the tracker back — the file written one line before,
+ * parsed again from scratch. A thousand applications made that most of a
+ * second on every status change. Handing over the list must leave the folder
+ * exactly as a sync from the file on disk would, which is what these check.
+ */
+describe('the upload folder after a status change', () => {
+  /** An in-flight application with one file already in its bundle folder. */
+  function inFlight(id: string, status: Application['status'] = 'applying') {
+    const dir = path.join(t.store.outDir(), 'applications', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${id}-Resume.pdf`), `%PDF ${id}`);
+    t.store.upsertApplication({
+      id,
+      company: `Company ${id}`,
+      role: 'Intern',
+      status,
+      snapshotDir: path.relative(t.store.outDir(), dir),
+      history: [{ at: '2026-01-01T00:00:00Z', status }],
+    });
+  }
+  const folder = () => {
+    const dir = path.join(t.store.outDir(), 'current');
+    return fs.existsSync(dir) ? visible(dir).sort() : [];
+  };
+
+  it('is what a sync from the tracker on disk would leave, and the store is loaded once', () => {
+    inFlight('a1');
+    inFlight('a2');
+    // Typed by hand as "Applying", which the read normalises; the list handed
+    // over must be read the same way or this one drops out of the folder.
+    inFlight('a3');
+    t.write(
+      'applications.yaml',
+      (t.read('applications.yaml') as Application[]).map((a) => (a.id === 'a3' ? { ...a, status: 'Applying' } : a)),
+    );
+    syncCurrent(t.store);
+    expect(folder()).toEqual(['a1-Resume.pdf', 'a2-Resume.pdf', 'a3-Resume.pdf']);
+
+    let loads = 0;
+    const load = t.store.load.bind(t.store);
+    t.store.load = () => (loads++, load());
+    advance(t.store, 'a1', 'closed');
+    expect(loads).toBe(1);
+
+    const left = folder();
+    expect(left).toEqual(['a2-Resume.pdf', 'a3-Resume.pdf']);
+    syncCurrent(t.store);
+    expect(folder()).toEqual(left);
+  });
+
+  it('keeps an application that is still being sent', () => {
+    inFlight('a1');
+    advance(t.store, 'a1', 'applying', 'still on it');
+    expect(folder()).toEqual(['a1-Resume.pdf']);
+    syncCurrent(t.store);
+    expect(folder()).toEqual(['a1-Resume.pdf']);
+  });
+});

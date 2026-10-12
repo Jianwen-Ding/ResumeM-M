@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
-import { Store } from '../src/model/store.js';
+import { asReadBack, Store } from '../src/model/store.js';
 
 /*
  * Not re-parsing the whole save on every call, and the two ways that could go
@@ -325,5 +325,134 @@ describe('reading the workspace (drafts) more than once', () => {
     const fresh = store.loadDrafts();
     expect(fresh[0]?.status).toBe('drafting');
     expect(fresh[0]?.questions).toHaveLength(0);
+  });
+});
+
+/*
+ * A file the store has just written is not parsed back from disk.
+ *
+ * The write moves the file's size and time, so the cache let go of what it
+ * held, and the next read — usually the next line — parsed the file again to
+ * learn what the store had in its hand a moment before. A thousand
+ * applications made that most of a second on every status change. The write
+ * now leaves its own value in the cache, and these hold that value to what a
+ * read from disk would have given: the same answer as a store that has never
+ * seen the file, and no way for the writer to reach into it afterwards.
+ */
+describe('a file the store has just written', () => {
+  const fresh = (dir: string) => new Store(dir);
+
+  it('is not read back from disk', () => {
+    const { store, dir } = aStore(3);
+    const apps = store.load().applications;
+    store.saveApplications([...apps, { id: 'new', company: 'New Co', role: 'R', status: 'interested' } as never]);
+
+    const spy = vi.spyOn(fs, 'readFileSync');
+    try {
+      const after = store.load().applications;
+      expect(after.map((a) => a.id)).toContain('new');
+      expect(spy.mock.calls.some((args) => args[0] === path.join(dir, 'applications.yaml'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(store.load()).toEqual(fresh(dir).load());
+  });
+
+  it('reads back what parsing the file would have given', () => {
+    const { store, dir } = aStore(0);
+    store.saveApplications([
+      {
+        id: 'odd',
+        company: 'yes',
+        role: '  padded  ',
+        status: 'applied',
+        notes: 'two\nlines\n',
+        url: undefined,
+        history: [{ at: '2026-01-01T00:00:00Z', status: 'applied', note: undefined }],
+        answers: [{ question: '1.0', answer: '~' }],
+      } as never,
+    ]);
+    expect(store.load().applications).toEqual(fresh(dir).load().applications);
+    expect(JSON.stringify(store.load().applications)).toBe(JSON.stringify(fresh(dir).load().applications));
+  });
+
+  it('cannot be changed by the writer changing what it wrote', () => {
+    const { store, dir } = aStore(2);
+    const apps = store.load().applications;
+    store.saveApplications(apps);
+    apps[0]!.company = 'Changed after the write';
+    (apps[1] as { history?: unknown[] }).history = [{ at: 'x', status: 'closed' }];
+    apps.push({ id: 'late', company: 'Late', role: 'R', status: 'applied' } as never);
+
+    expect(store.load().applications).toEqual(fresh(dir).load().applications);
+    expect(store.load().applications.map((a) => a.company)).not.toContain('Changed after the write');
+  });
+
+  it('still parses what it cannot vouch for, and gets it right', () => {
+    const { store, dir } = aStore(0);
+    const shared = { at: '2026-01-01T00:00:00Z', status: 'applied' };
+    store.saveApplications([{ id: 'a', company: 'A', role: 'R', status: 'applied', history: [shared, shared] } as never]);
+    expect(store.load().applications).toEqual(fresh(dir).load().applications);
+  });
+
+  it('leaves the profile to its own reader, which keeps autofill as written', () => {
+    const { store, dir } = aStore(0);
+    store.saveProfile({ name: 'Someone', autofill: { over_18: true, address_zip: '02115' } } as never);
+    expect(store.load().profile).toEqual(fresh(dir).load().profile);
+    expect(store.load().profile.autofill?.over_18).toBe('true');
+  });
+
+  it('sees a change made behind its back after the write', () => {
+    const { store, dir } = aStore(2);
+    store.saveApplications(store.load().applications);
+    editBehindItsBack(dir, 'applications.yaml', YAML.stringify([{ id: 'x', company: 'Other', role: 'R', status: 'applied' }]));
+    expect(store.load().applications.map((a) => a.company)).toEqual(['Other']);
+  });
+});
+
+describe('asReadBack', () => {
+  const roundTrip = (v: unknown) => YAML.parse(YAML.stringify(v, { lineWidth: 0 }));
+
+  it('is what a YAML round trip gives, for plain data', () => {
+    for (const value of [
+      [],
+      {},
+      [undefined, null, 1, 'a'],
+      { a: undefined, b: null, c: [1, 2, { d: undefined }] },
+      ['  lead', 'trail  ', 'a\n', '\n\n', '', 'yes', 'no', '~', 'null', '1.0', '0x10', '- x', 'a: b', '#', '<<', '\t', 'é', '\r\n'],
+      { '1': 1, '': 2, 'a b': 3, yes: 4, '<<': { x: 1 } },
+      [1e21, 0.1, -5, 12345678901234567890, 5e-324, true, false],
+    ]) {
+      expect(asReadBack(value)).toEqual(roundTrip(value));
+      expect(JSON.stringify(asReadBack(value))).toBe(JSON.stringify(roundTrip(value)));
+    }
+  });
+
+  it('declines anything a round trip would change some other way', () => {
+    const shared = { x: 1 };
+    for (const value of [
+      [new Date(0)],
+      [NaN],
+      [-0],
+      [Infinity],
+      [shared, shared],
+      JSON.parse('{"__proto__": {"x": 1}}'),
+      [() => 1],
+      'top-level string',
+      null,
+      undefined,
+      // eslint-disable-next-line no-sparse-arrays
+      [1, , 3],
+    ]) {
+      expect(asReadBack(value)).toBeUndefined();
+    }
+  });
+
+  it('is a copy', () => {
+    const value = { list: [{ a: 1 }] };
+    const back = asReadBack(value) as typeof value;
+    expect(back).toEqual(value);
+    expect(back.list).not.toBe(value.list);
+    expect(back.list[0]).not.toBe(value.list[0]);
   });
 });

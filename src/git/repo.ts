@@ -92,8 +92,11 @@ export class Repo {
     return new Repo(path.resolve(storeDir), ['.'], rebuilt);
   }
 
+  /** The most output one git command may hand back; see `blobs`, which keeps to it too. */
+  static readonly MAX_BUFFER = 8 * 1024 * 1024;
+
   private async git(args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
-    const { stdout } = await run('git', args, { cwd: this.root, maxBuffer: 8 * 1024 * 1024, ...(env ? { env } : {}) });
+    const { stdout } = await run('git', args, { cwd: this.root, maxBuffer: Repo.MAX_BUFFER, ...(env ? { env } : {}) });
     return stdout;
   }
 
@@ -600,6 +603,55 @@ export class Repo {
   /** One blob's contents. Blobs are content-addressed, so callers can cache. */
   async blob(objectId: string): Promise<string> {
     return this.git(['cat-file', 'blob', objectId]).catch(() => '');
+  }
+
+  /**
+   * Many blobs' contents, through one `git cat-file --batch`.
+   *
+   * `blob` above is a process per object, which is fine for one file. Version
+   * history reads several for each of hundreds of commits, and starting git
+   * costs more than reading the file, so this asks for all of a commit's on
+   * one process's stdin.
+   *
+   * It answers as `blob` would, object by object, so a caller can use either:
+   * an id git does not have, an object that is not a blob, and a blob over the
+   * size `git` would have refused to buffer are all absent from the map, which
+   * a caller reads as the `''` `blob` gives back. A process that fails outright
+   * leaves out whatever it had not yet answered, the same way.
+   */
+  async blobs(objectIds: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    // Ids come out of `ls-tree`, but a newline in one would be a second
+    // request on the same line, so anything that is not a hash is not asked.
+    const asking = [...new Set(objectIds)].filter((id) => /^[0-9a-fA-F]{4,64}$/.test(id));
+    if (asking.length === 0) return out;
+
+    const raw = await new Promise<Buffer>((resolve) => {
+      const child = spawn('git', ['cat-file', '--batch'], { cwd: this.root, stdio: ['pipe', 'pipe', 'ignore'] });
+      const chunks: Buffer[] = [];
+      child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+      child.once('error', () => resolve(Buffer.concat(chunks)));
+      child.once('close', () => resolve(Buffer.concat(chunks)));
+      // A process that died before reading its input is the close above.
+      child.stdin.on('error', () => undefined);
+      child.stdin.end(`${asking.join('\n')}\n`);
+    });
+
+    // "<oid> <type> <size>\n<contents>\n" per object, or "<id> missing\n",
+    // one answer per line asked and in the order asked.
+    let at = 0;
+    for (const asked of asking) {
+      const eol = raw.indexOf(0x0a, at);
+      if (eol < 0) break; // Cut off: the rest was not answered.
+      const [, type = '', size = ''] = raw.toString('utf8', at, eol).split(' ');
+      at = eol + 1;
+      if (!/^\d+$/.test(size)) continue;
+      const length = Number(size);
+      if (at + length > raw.length) break;
+      if (type === 'blob' && length <= Repo.MAX_BUFFER) out.set(asked, raw.toString('utf8', at, at + length));
+      at += length + 1;
+    }
+    return out;
   }
 
   /* ---- Remotes ---------------------------------------------------- *

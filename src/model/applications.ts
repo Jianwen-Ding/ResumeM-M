@@ -7,6 +7,7 @@ import type { Application, ApplicationStatus, ResolvedResume } from './types.js'
 import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
 import { letterText } from '../render/letter.js';
 import { clipToBytes, fileNameKey, MAX_NAME_BYTES, syncCurrent } from './current.js';
+import { normalizeApplications } from './normalize.js';
 import { resolveResume, unsendableReason } from './resolve.js';
 import { cleanRole, differentRequisitions, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
 import { looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
@@ -1386,7 +1387,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
           ? touched
           : [...(settled?.history ?? []), { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' }],
     };
-    store.upsertApplication(application);
+    const written = store.upsertApplication(application);
     /*
      * The files also land in the flat folder, ready for the upload dialog that
      * is probably already open — and this one keeps the plain name where two
@@ -1396,7 +1397,13 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
     // Not claiming the plain names: a build is often a tab rebuilding in
     // the background as its letter saves, and taking them then renamed the
     // file another tab had just copied the path to. See `uniqueNames`.
-    syncCurrent(store);
+    //
+    // Handed the list that was just written, read the way `load` reads it.
+    // Without it `syncCurrent` loads the whole store to get the tracker back,
+    // and the tracker it gets back is the file written one line up — parsed
+    // again from scratch, because the write moved it. With a thousand
+    // applications that second parse was most of a second on every build.
+    syncCurrent(store, normalizeApplications(written));
 
     return {
       application,
@@ -1477,9 +1484,9 @@ export function advance(store: Store, id: string, status: ApplicationStatus, not
 
   app.status = status;
   app.history = [...(app.history ?? []), { at: new Date().toISOString(), status, note }];
-  store.upsertApplication(app);
   // An application that has moved past sending takes its files out of the way.
-  syncCurrent(store);
+  // From the list just written, for the reason the build gives.
+  syncCurrent(store, normalizeApplications(store.upsertApplication(app)));
   return app;
 }
 
@@ -1574,7 +1581,8 @@ export function closeStale(store: Store, stale: GoneStale[], days: number): Appl
   if (closed.length === 0) return [];
   store.saveApplications(apps);
   // Out of the upload folder with them, which carries only what is in flight.
-  syncCurrent(store);
+  // From the list just written, for the reason the build gives.
+  syncCurrent(store, normalizeApplications(apps));
   return closed;
 }
 

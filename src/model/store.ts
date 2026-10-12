@@ -161,6 +161,74 @@ function autofillAsWritten(profile: Profile, raw: string): Profile {
   return { ...profile, autofill: autofill as Record<string, string> };
 }
 
+/**
+ * `data` as parsing its YAML back would give it — a fresh copy — or
+ * `undefined` where that is not certain.
+ *
+ * For `Store.rememberWritten`, which keeps this in place of parsing a file it
+ * has just written. Certain for plain data: strings, finite numbers, true and
+ * false, null, arrays and plain objects, where YAML's round trip is JSON's —
+ * a key set to `undefined` is left out and an `undefined` in a list comes
+ * back as null. Not attempted for anything else: a Date, a class, a -0, a
+ * NaN, a key named `__proto__`, or an object reached twice, which YAML writes
+ * as an anchor and reads back as one shared object. Those are left for the
+ * read to parse, which is always right and only slower.
+ *
+ * The top level is a list or a mapping, as every file this is used for is;
+ * anything else is left alone, since a read turns an empty one into the
+ * reader's own fallback.
+ */
+export function asReadBack(data: unknown): unknown {
+  const unsure = Symbol('unsure');
+  const seen = new Set<object>();
+  const copy = (value: unknown, inList: boolean): unknown => {
+    switch (typeof value) {
+      case 'string':
+      case 'boolean':
+        return value;
+      case 'number':
+        if (!Number.isFinite(value) || Object.is(value, -0)) throw unsure;
+        return value;
+      case 'undefined':
+        if (inList) return null;
+        throw unsure; // Only reached at the top level; a key is dropped below.
+      case 'object': {
+        if (value === null) return null;
+        if (seen.has(value)) throw unsure;
+        seen.add(value);
+        if (Array.isArray(value)) {
+          if (Object.getPrototypeOf(value) !== Array.prototype) throw unsure;
+          const out: unknown[] = [];
+          for (let i = 0; i < value.length; i++) {
+            if (!(i in value)) throw unsure;
+            out.push(copy(value[i], true));
+          }
+          return out;
+        }
+        const proto = Object.getPrototypeOf(value);
+        if (proto !== Object.prototype && proto !== null) throw unsure;
+        if (Object.getOwnPropertySymbols(value).length > 0) throw unsure;
+        const out: Record<string, unknown> = {};
+        for (const [key, item] of Object.entries(value)) {
+          if (key === '__proto__') throw unsure;
+          if (item === undefined) continue;
+          out[key] = copy(item, false);
+        }
+        return out;
+      }
+      default:
+        throw unsure;
+    }
+  };
+  if (data === null || typeof data !== 'object') return undefined;
+  try {
+    return copy(data, false);
+  } catch (err) {
+    if (err === unsure) return undefined;
+    throw err;
+  }
+}
+
 export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
   /*
    * A byte-order mark is how Notepad and a good many Windows tools start a
@@ -814,7 +882,47 @@ export class Store {
     const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
     // lineWidth 0 keeps long bullet text on one line so diffs stay per-bullet
     // instead of reflowing a whole paragraph every time a word changes.
-    this.writeAtomic(f, YAML.stringify(data, { lineWidth: 0 }));
+    const text = YAML.stringify(data, { lineWidth: 0 });
+    this.writeAtomic(f, text);
+    this.rememberWritten(f, text, rel === 'profile.yaml' ? undefined : data);
+  }
+
+  /*
+   * And the parse of what was just written, kept as if it had been read.
+   *
+   * The write moves the file's size and time, so the cache above rightly
+   * stops trusting what it held — and the next read, which is usually the
+   * next line, parsed the file back from scratch to learn what this method
+   * had in its hand a moment ago. On a tracker of a thousand applications
+   * that is most of a second, on every write: `syncCurrent` after a status
+   * change, the tracker list after a save.
+   *
+   * Only where what was written is exactly what a read would hand back:
+   *
+   * - Plain data, which YAML gives back as JSON would — see `asReadBack`.
+   *   Anything else is left for the read to parse, as before.
+   * - Not profile.yaml, whose reader takes the autofill block from the
+   *   file's own text rather than from the parse; see `readProfile`.
+   * - Keyed by the stat taken after the write, and only when that stat is
+   *   the size of what was written, so a second process that wrote the file
+   *   in between is read, not papered over.
+   *
+   * What is kept is a copy, like everything the cache hands out: the caller
+   * still has `data`, and changing it afterwards must not change what the
+   * next read finds.
+   */
+  private rememberWritten(full: string, text: string, data: unknown): void {
+    this.parsed.delete(full);
+    const value = asReadBack(data);
+    if (value === undefined) return;
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      return;
+    }
+    if (stat.size !== Buffer.byteLength(text)) return;
+    this.parsed.set(full, { key: `${stat.size}:${stat.mtimeMs}`, value });
   }
 
   /** Read every file in the store into one object. */
@@ -1267,13 +1375,20 @@ export class Store {
    * brought up to date first, and only then is one of them removed. It costs
    * one pass over a folder of small files, once, on the first delete after an
    * upgrade.
+   *
+   * Except that finding out there is nothing to fold is itself a read of every
+   * resume, and so is looking up the label — nothing for one deletion, and
+   * most of the sweep's time when it deleted ninety in a row. So a caller
+   * deleting many may fold once itself and say so with `migrated`, and hand
+   * over the `label` it already has. The label is only the name a failed
+   * unlink is reported under.
    */
-  deleteResume(id: string): void {
-    this.migrateResumes();
+  deleteResume(id: string, { migrated = false, label }: { migrated?: boolean; label?: string } = {}): void {
+    if (!migrated) this.migrateResumes();
 
-    const named = this.loadResumes().find((r) => r.id === id);
+    const named = label ?? this.loadResumes().find((r) => r.id === id)?.label ?? id;
     for (const ext of Store.RESUME_SPELLINGS) {
-      removeFile(this.file('resumes', `${id}.${ext}`), `"${named?.label ?? id}"`);
+      removeFile(this.file('resumes', `${id}.${ext}`), `"${named}"`);
     }
   }
 

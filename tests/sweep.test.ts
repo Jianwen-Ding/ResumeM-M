@@ -4,6 +4,7 @@ import path from 'node:path';
 import { Repo } from '../src/git/repo.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from '../src/server/sweep.js';
 import { makeTempStore } from './helpers.js';
+import { resolveResume } from '../src/model/resolve.js';
 import type { Application, ResumeSpec } from '../src/model/types.js';
 
 /*
@@ -524,6 +525,93 @@ describe('a resume that changes while the sweep is waiting on git', () => {
     expect(swept).toEqual([]);
     expect(held.map((d) => d.id)).toEqual(['job-old']);
     expect(temp.store.loadResumes().find((r) => r.id === 'job-old')?.label).toMatch(/second round/);
+  });
+
+  /*
+   * "Still due" is asked once for the whole batch now, rather than once per
+   * resume — each asking was a load of the whole save. These hold it to
+   * what the per-resume question did.
+   */
+  function due(n: number) {
+    for (let i = 1; i <= n; i++) {
+      temp.write(`resumes/job-${i}.yaml`, {
+        id: `job-${i}`,
+        label: `Role ${i}`,
+        tier: 'temporary',
+        temporaryFrom: daysAgo(30),
+        sections: [{ kind: 'education', entries: ['edu_neu'] }],
+      });
+    }
+    temp.write('applications.yaml', []);
+  }
+
+  it('keeps the one whose application came back, and takes the rest of the batch', async () => {
+    due(4);
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+    // Nothing about the resume's own file moves: only the tracker does.
+    meanwhile(repo, () =>
+      temp.write('applications.yaml', [
+        { id: 'a2', company: 'Acme', role: 'Role 2', status: 'interview', resumeId: 'job-2', appliedAt: daysAgo(60) },
+      ]),
+    );
+
+    const { swept, held } = await sweepTemporary(temp.store, repo);
+
+    expect(swept.map((d) => d.id)).toEqual(['job-1', 'job-3', 'job-4']);
+    expect(held.map((d) => d.id)).toEqual(['job-2']);
+    expect(temp.exists('resumes/job-2.yaml')).toBe(true);
+    expect(temp.exists('resumes/job-1.yaml')).toBe(false);
+  });
+
+  it('asks once however many go, not once per resume', async () => {
+    due(6);
+    // Brought up to date first, as any save that has been opened once is; a
+    // fold that changes something is asked again after, which is the next test.
+    temp.store.migrateResumes();
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+    const store = temp.store;
+    let loads = 0;
+    let folds = 0;
+    meanwhile(repo, () => {
+      const load = store.load.bind(store);
+      const migrate = store.migrateResumes.bind(store);
+      store.load = () => (loads++, load());
+      store.migrateResumes = () => (folds++, migrate());
+    });
+
+    const { swept } = await sweepTemporary(store, repo);
+
+    expect(swept).toHaveLength(6);
+    expect(loads).toBe(1);
+    expect(folds).toBe(1);
+  });
+
+  it('still folds an older save before taking a base, and the variation keeps what it inherited', async () => {
+    temp.write('resumes/job-base.yaml', {
+      id: 'job-base',
+      label: 'Base for Acme',
+      tier: 'temporary',
+      temporaryFrom: daysAgo(30),
+      sections: [{ kind: 'education', entries: ['edu_neu'] }],
+    });
+    temp.write('resumes/kept.yaml', { id: 'kept', label: 'Kept', tier: 'extended', extends: 'job-base' });
+    temp.write('applications.yaml', []);
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+    const before = resolveResume('kept', temp.store.load());
+
+    const { swept } = await sweepTemporary(temp.store, repo);
+
+    expect(swept.map((d) => d.id)).toEqual(['job-base']);
+    expect(temp.exists('resumes/job-base.yaml')).toBe(false);
+    const after = resolveResume('kept', temp.store.load());
+    expect(after.sections).toEqual(before.sections);
+    expect(after.sections[0]?.entries.length).toBeGreaterThan(0);
   });
 });
 

@@ -109,6 +109,25 @@ export async function sweepTemporary(
   const found = new Map(due.map((d) => [d.id, JSON.stringify(read(d.id))]));
   const changed: DueToGo[] = [];
 
+  /*
+   * "Still due" is asked once, at the first deletion, and the answer kept for
+   * the rest.
+   *
+   * It was asked once per resume, and asking is a whole `store.load()` — every
+   * resume, the tracker, the letters, the drafts — so sweeping ninety resumes
+   * out of a save with a thousand applications loaded that save ninety times
+   * and took three times as long as the sweep it replaced. The re-check is
+   * there for what can land while git is busy, and nothing can land between
+   * one deletion and the next: `removeWhatIsFiled` calls this for every resume
+   * in one synchronous loop, so the answer taken at the first is still the
+   * answer at the last. Nor does a deletion change it for the others — whether
+   * a resume is due reads that resume, the tracker and the workspaces, never
+   * another resume. The per-file comparison stays per resume, because it is a
+   * read of two small files and it is the half that catches an edit.
+   */
+  let stillDue: Set<string> | undefined;
+  let migrated = false;
+
   const { removed, held } = await removeWhatIsFiled(
     repo,
     store.root,
@@ -120,9 +139,24 @@ export async function sweepTemporary(
       removing: (swept) => `Sweep ${naming(swept)} — temporary, and done with`,
     },
     (d) => {
-      const stillDue = dueToGo(store.load(), { days, now }).some((x) => x.id === d.id);
-      if (stillDue && JSON.stringify(read(d.id)) === found.get(d.id)) store.deleteResume(d.id);
-      else changed.push(d);
+      stillDue ??= new Set(dueToGo(store.load(), { days, now }).map((x) => x.id));
+      if (stillDue.has(d.id) && JSON.stringify(read(d.id)) === found.get(d.id)) {
+        /*
+         * And the fold `deleteResume` does before every deletion, done here
+         * once, before the first. It reads every resume in the save to find
+         * out that there is nothing to fold, which is the answer every time
+         * after the first. A fold that did change something is the one thing
+         * that could move the answer above, so that answer is asked again.
+         */
+        if (!migrated) {
+          migrated = true;
+          const folded = store.migrateResumes();
+          if (folded.flattened.length + folded.tiered.length + folded.lifted.length > 0) stillDue = undefined;
+        }
+        // The label is only for the message if the file will not go, and
+        // `due` has it already; see `deleteResume`.
+        store.deleteResume(d.id, { migrated: true, label: d.label });
+      } else changed.push(d);
     },
   );
   return { swept: removed.filter((d) => !changed.includes(d)), held: [...held, ...changed], days };
