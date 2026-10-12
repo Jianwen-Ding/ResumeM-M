@@ -235,6 +235,7 @@ describe('personalDetailIn', () => {
     'I grew the team to 12 Data Scientists in a way that scaled.',
     'At Google I led 4 Senior Engineers to drive adoption.',
     'I led 4 engineers to drive adoption.',
+    'Req ID: 2024 0012345',
   ])('lets through %j', (text) => {
     expect(personalDetailIn(text)).toBeNull();
   });
@@ -254,6 +255,12 @@ describe('personalDetailIn', () => {
     ['https://example.com/?contact=jane@example.com', 'an email address'],
     ['I live at 123 Main Street.', 'a street address'],
     ['I live at 221B Baker Street.', 'a street address'],
+    // Phones written in threes after a country code, which read as a figure.
+    ['+34 912 345 678', 'a phone number'],
+    ['+31 612 345 678', 'a phone number'],
+    // Two groups with a space between, which read as a requisition.
+    ['07700 900123', 'a phone number'],
+    ['Call 98765 43210 after six.', 'a phone number'],
   ])('refuses %j', (text, what) => {
     expect(personalDetailIn(text)).toBe(what);
   });

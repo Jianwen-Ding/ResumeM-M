@@ -95,12 +95,14 @@ const DIGIT_RUN = /(?<![\w/]|\d[.-]|[\p{L}_]-)\+?\d+(?:[\s().-]{1,3}\d+)*(?!(?!x
  * "a-b", which is one token), holds 10 to 15 digits — E.164 stops at 15 — and
  * is none of the numbers that have that many digits and are not phones:
  *
- * - "1.000.000.000" and "1 234 567 890": a figure in groups of three;
+ * - "1.000.000.000" and "1 234 567 890": a figure in groups of three, with
+ *   no "+" in front;
  * - "3.11.4" and "2023.10.1": a version, a group of one digit after a dot;
  * - "2020 2021 2022": years;
  * - "2024-0012345": a requisition, a group of five or more digits beside
- *   others, unless the rest is no more than a country or area code
- *   ("+1 4155551234", "(415) 5551234").
+ *   others joined by a dash or beside a year, unless the rest is no more
+ *   than a country or area code ("+1 4155551234", "(415) 5551234"), or the
+ *   number starts with a trunk 0 ("07700 900123").
  */
 function phoneIn(text: string): boolean {
   for (const run of text.match(DIGIT_RUN) ?? []) {
@@ -117,11 +119,35 @@ function phoneIn(text: string): boolean {
         if (digits < 10 || digits > 15) continue;
         const bare = g.map((x) => x.replace('+', ''));
         const plus = g[0]!.startsWith('+');
-        if (bare.length > 2 && bare[0]!.length <= 3 && bare.slice(1).every((x) => x.length === 3)) continue;
+        /*
+         * Not after a "+": a figure is never written with a country code, and
+         * a great many phones are written in threes after one — "+34 912 345
+         * 678", "+31 612 345 678" — which this let through as a figure.
+         */
+        if (!plus && bare.length > 2 && bare[0]!.length <= 3 && bare.slice(1).every((x) => x.length === 3)) continue;
         if (bare.some((x, k) => k > 0 && x.length === 1 && between[k - 1]!.includes('.'))) continue;
-        if (bare.length > 1 && bare.every((x) => /^(?:19|20)\d\d$/.test(x))) continue;
+        const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
+        if (bare.length > 1 && bare.every(year)) continue;
+        /*
+         * A requisition only when something says so: a dash between the
+         * groups ("2024-0012345") or a year beside the long one ("2024
+         * 0012345"). Two groups with a space between are how half the world
+         * writes a phone — "07700 900123", "98765 43210" — and a leading 0 is
+         * a trunk prefix, which no reference number starts with.
+         */
         const long = bare.findIndex((x) => x.length >= 5);
-        if (bare.length > 1 && long >= 0 && !plus && bare.filter((_, k) => k !== long).join('').length > 3) continue;
+        const marked =
+          between.some((sep) => sep.includes('-')) || bare.some((x, k) => k !== long && year(x));
+        if (
+          bare.length > 1 &&
+          long >= 0 &&
+          !plus &&
+          marked &&
+          !bare[0]!.startsWith('0') &&
+          bare.filter((_, k) => k !== long).join('').length > 3
+        ) {
+          continue;
+        }
         return true;
       }
     }

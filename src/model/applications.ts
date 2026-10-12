@@ -409,21 +409,49 @@ export function sameIdentity(company: string, role: string, otherCompany: string
  * address on either side is not a match: "same host" alone would have let
  * every Lever or Greenhouse posting with the same misread names in.
  */
+/*
+ * "The same address" as the same posting, not the same string.
+ *
+ * Compared as written, one posting reached two ordinary ways was two
+ * addresses: the row's link and the send's differed by a trailing slash, a
+ * `www.`, the case of the host, a tracking parameter a board or a mailing
+ * list puts on every link (`utm_*`, Greenhouse's `gh_src`, `source`, `ref`),
+ * or by Greenhouse's two hosts — `boards.greenhouse.io` and
+ * `job-boards.greenhouse.io` serve the same board and the same job number.
+ * Each of those left a corrected row behind and made a second one. What is
+ * dropped is only what never names a different posting; every other
+ * parameter, and the path, still has to agree.
+ */
+const TRACKING_PARAM = /^(?:utm_.*|gh_src|source|ref)$/i;
+
+function postingHost(host: string): string {
+  return host.toLowerCase().replace(/^www\./, '').replace(/^job-boards\.((?:eu\.)?greenhouse\.io)$/, 'boards.$1');
+}
+
+function postingAddress(u: string): string {
+  try {
+    const parsed = new URL(u.trim());
+    parsed.hash = '';
+    parsed.hostname = postingHost(parsed.hostname);
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (TRACKING_PARAM.test(key)) parsed.searchParams.delete(key);
+    }
+    if (parsed.pathname.length > 1) parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    return parsed.href;
+  } catch {
+    return u.trim();
+  }
+}
+
 function sameAddress(url: string | undefined, other: string | undefined): boolean {
   if (!url || !other) return false;
   const number = jobNumberIn(url);
   const otherNumber = jobNumberIn(other);
-  if (number && otherNumber) return number === otherNumber && hostOf(url) === hostOf(other) && hostOf(url) !== '';
-  const bare = (u: string) => {
-    try {
-      const parsed = new URL(u.trim());
-      parsed.hash = '';
-      return parsed.href;
-    } catch {
-      return u.trim();
-    }
-  };
-  return bare(url) === bare(other);
+  if (number && otherNumber) {
+    const host = postingHost(hostOf(url));
+    return number === otherNumber && host === postingHost(hostOf(other)) && host !== '';
+  }
+  return postingAddress(url) === postingAddress(other);
 }
 
 /*

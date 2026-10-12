@@ -136,7 +136,7 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
        * comparison and it is the only thing standing between a preview that
        * contradicts itself and a user being told an impossible "fits".
        */
-      const pathological = resume(6, { marginIn: 4.6, autoFit: false });
+      const pathological = resume(6, { marginIn: 4.2, autoFit: false });
       const result = await compileResume(pathological, { mode: 'preview' });
       const trusted = await compileResume(pathological, { mode: 'final' });
 

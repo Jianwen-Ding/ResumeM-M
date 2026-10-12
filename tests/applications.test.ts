@@ -1721,3 +1721,46 @@ describe('the upload folder after a status change', () => {
     expect(folder()).toEqual(['a1-Resume.pdf']);
   });
 });
+
+/*
+ * A row found by a name it was corrected from only when the send is from the
+ * same posting — and the same posting is reached by addresses that differ in
+ * ways that name nothing: a trailing slash, `www.`, the host's case, a
+ * tracking parameter, and Greenhouse's two hosts for one board. Each of those
+ * missed the row and made a second one.
+ */
+describe('a corrected row found by its old names', () => {
+  const row = (url: string): Application =>
+    ({
+      id: 'r1',
+      company: 'Acme',
+      role: 'Software Engineer Intern',
+      url,
+      status: 'applying',
+      appliedAt: '2026-10-01',
+      aliases: [{ company: 'Summer 2027', role: 'Software Engineer Intern' }],
+    }) as Application;
+  const found = (rowUrl: string, sendUrl: string) =>
+    findApplication([row(rowUrl)], 'Summer 2027', 'Software Engineer Intern', sendUrl)?.id;
+
+  it.each([
+    ['https://acme.com/careers/software-engineer-intern', 'https://acme.com/careers/software-engineer-intern/'],
+    ['https://acme.com/careers/software-engineer-intern', 'https://www.acme.com/careers/software-engineer-intern'],
+    ['https://acme.com/careers/software-engineer-intern', 'https://ACME.com/careers/software-engineer-intern'],
+    ['https://acme.com/careers/software-engineer-intern', 'https://acme.com/careers/software-engineer-intern?utm_source=linkedin&utm_medium=x'],
+    ['https://acme.com/careers/software-engineer-intern?ref=home', 'https://acme.com/careers/software-engineer-intern?source=mail'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acme/jobs/4012345?gh_src=abc'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://job-boards.greenhouse.io/acme/jobs/4012345'],
+  ])('%s is the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBe('r1');
+  });
+
+  it.each([
+    ['https://acme.com/careers/software-engineer-intern', 'https://acme.com/careers/firmware-intern'],
+    ['https://acme.com/careers/software-engineer-intern?id=1', 'https://acme.com/careers/software-engineer-intern?id=2'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acme/jobs/4012346'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://jobs.lever.co/globex/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'],
+  ])('%s is not the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBeUndefined();
+  });
+});

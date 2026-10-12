@@ -36,7 +36,7 @@ import type { SessionState } from '../mcp/session.js';
 import type { AuthoringState } from '../mcp/authoring.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
-import { Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
+import { GitBusyError, Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion, fileSentAnswer, newVariantId } from '../jobs/answers.js';
 import { UNKNOWN_COMPANY, classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
@@ -1243,21 +1243,32 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * name with no extension would be officious; refusing one with a path
        * in it happens in `Store.file`, where every other name is checked.
        */
-      const saved = store.saveDocument(name, Buffer.from(body.data, 'base64'));
       /*
-       * Into the upload folder straight away, so it is attachable without
-       * waiting for the next application to be built — and the answer is
-       * read, not dropped.
+       * The write happens inside `withCommit`, not before it.
        *
-       * `syncCurrent` reports rather than throws: a file of the user's
-       * already holding that name in the folder means the copy did not
-       * happen, and the document is then in the save and not where anything
-       * can attach it. That came back as a plain 200 and the panel said
-       * "ready to attach", which was the one thing it was not.
+       * It used to be written first and committed after with an empty `fn`,
+       * and `withCommit` checks for a pull in progress before it runs `fn`
+       * — so with a merge stopped on a conflict the file was already in
+       * `documents/` when the check refused, and the answer was a 400
+       * saying "Not saved" about a document that was saved. Inside, the
+       * check comes first and a refusal really has written nothing.
        */
-      const folder = syncCurrent(store);
-      const trouble = (folder.problems ?? []).filter((said) => said.includes(`"${saved.name}"`));
-      await withCommit(repo, autoCommit(), `Add document "${saved.name}"`, () => undefined);
+      const { saved, trouble } = await withCommit(repo, autoCommit(), `Add document "${name.normalize('NFC')}"`, () => {
+        const saved = store.saveDocument(name, Buffer.from(body.data as string, 'base64'));
+        /*
+         * Into the upload folder straight away, so it is attachable without
+         * waiting for the next application to be built — and the answer is
+         * read, not dropped.
+         *
+         * `syncCurrent` reports rather than throws: a file of the user's
+         * already holding that name in the folder means the copy did not
+         * happen, and the document is then in the save and not where anything
+         * can attach it. That came back as a plain 200 and the panel said
+         * "ready to attach", which was the one thing it was not.
+         */
+        const folder = syncCurrent(store);
+        return { saved, trouble: (folder.problems ?? []).filter((said) => said.includes(`"${saved.name}"`)) };
+      });
       res.json({ ...saved, ...(trouble.length ? { problems: trouble } : {}) });
     }),
   );
@@ -1266,6 +1277,15 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/documents/:name',
     handler(async (req, res) => {
       const name = String(req.params.name);
+      /*
+       * Asked before the file goes, for the reason the upload above writes
+       * inside `withCommit`: checked only at the commit, a delete refused
+       * for a pull in progress had already taken the file off the disk and
+       * said "Not saved" about it — and the panel went on listing a
+       * document that was gone. The commit is still made only when there
+       * was something to remove.
+       */
+      repo.assertNoOutsideGit();
       const gone = store.deleteDocument(name);
       let problems: string[] = [];
       if (gone) {
@@ -4611,6 +4631,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         refuseAsSent(sentBefore);
         return;
       }
+      /*
+       * And not while a pull is half done, asked before anything is written.
+       *
+       * Without a posting-specific spec nothing below goes through
+       * `withCommit` until the end, so a bundle, a tracker row and a filed
+       * workspace were all written during a merge stopped on a conflict —
+       * exactly the writes the pull is about to overwrite. Refused here, a
+       * refusal still means nothing was written.
+       */
+      repo.assertNoOutsideGit();
 
       // A posting-specific spec from the extension is saved first so the
       // snapshot refers to something that still exists later.
@@ -5824,6 +5854,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       // after sending. Every space is kept now, so a caller still sending it
       // is agreeing with what happens anyway.
       const { saveAnswersToBank = true } = req.body as { saveAnswersToBank?: boolean };
+      /*
+       * Before the bundle is built, not only at `reviseDraft` at the end.
+       *
+       * That was the first `withCommit` this route reached, after the bundle,
+       * the filed letter, the tracker row and the answer bank had all been
+       * written — so a merge stopped on a conflict turned an application
+       * that had been filed into a 400 saying "Not saved", and it was
+       * completed again into a second one.
+       */
+      repo.assertNoOutsideGit();
 
       const answered = draft.questions.filter((q) => q.answer.trim());
       const result = await buildBundle(store, {
@@ -5947,9 +5987,21 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * than opening the thing you wrote. It stays, below the live ones, and
        * `retireStaleDrafts` lets it go two weeks later if nobody comes back.
        */
-      await reviseDraft(id, `Mark ${draft.company} as submitted`, (fresh) => {
-        fresh.status = 'submitted';
-      });
+      /*
+       * A pull that began while the bundle compiled is still caught here, and
+       * by now the application has been filed: a refusal is a warning on a
+       * 200 rather than a 400 that says it was not saved.
+       */
+      try {
+        await reviseDraft(id, `Mark ${draft.company} as submitted`, (fresh) => {
+          fresh.status = 'submitted';
+        });
+      } catch (err) {
+        if (!(err instanceof GitBusyError)) throw err;
+        warnings.push(
+          `The application was filed, but its space could not be marked as submitted: ${err.message}`,
+        );
+      }
       if (typedSince.length) {
         warnings.push(
           `The ${typedSince.join(' and ')} changed while this was compiling, so what was sent does ` +

@@ -40,7 +40,7 @@ describe('a save the server keeps refusing', () => {
     const data = fixture.store.load();
     fixture.cleanup();
 
-    const server = { refuse: true, puts: 0 };
+    const server = { refuse: true, puts: 0, delay: 0 };
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url, options = {}) => {
@@ -51,6 +51,7 @@ describe('a save the server keeps refusing', () => {
           result = { pages: 1, fits: true, adjustments: [], warnings: [], lost: [], pdfUrl: '/pdf/x.pdf' };
         } else if (String(url).startsWith('/api/resumes/') && options.method === 'PUT') {
           server.puts++;
+          if (server.delay) await new Promise((done) => setTimeout(done, server.delay));
           if (server.refuse) {
             return { ok: false, status: 500, statusText: 'Internal Server Error', json: async () => ({ error: 'disk full' }) };
           }
@@ -134,6 +135,27 @@ describe('a save the server keeps refusing', () => {
     expect(stuck().hidden).toBe(true);
     expect(box().checked).toBe(!was);
     expect(data.resumes.find((r) => r.id === 'intern')).toBeTruthy();
+  });
+
+  /*
+   * Discard pressed while a Retry is still out, and the Retry lands. The edit
+   * is saved; the page used to say "Unsaved change discarded" over it.
+   */
+  it('says the change saved, not that it was discarded, when a Retry in flight lands first', async () => {
+    const { server } = await boot();
+    const was = box().checked;
+    await refusedEdit();
+
+    server.refuse = false;
+    server.delay = 300;
+    document.querySelector('#btn-save-retry').click();
+    await new Promise((done) => setTimeout(done, 50));
+    document.querySelector('#btn-save-discard').click();
+
+    await vi.waitFor(() => expect(document.querySelector('#status').textContent).toMatch(/already saved/i), { timeout: 4000 });
+    expect(document.querySelector('#status').textContent).not.toMatch(/discarded/i);
+    expect(chip().textContent).toBe('All changes saved');
+    expect(box().checked, 'the saved edit is still on screen').toBe(!was);
   });
 
   it('is not offered for a server that cannot be reached, which is retried on its own', async () => {

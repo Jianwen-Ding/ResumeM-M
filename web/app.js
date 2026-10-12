@@ -2064,13 +2064,24 @@ function showSaveStuck(on) {
 /** The end of a "has not saved yet" refusal: where the way out is, when there is one. */
 const stuckHint = () => (saveStuck ? ' Retry it or discard it beside “Not saved”.' : '');
 
+/** A Retry still out, for Discard to wait for. See `discardStuckSave`. */
+let retryingStuck = null;
+
 /** Send the refused edit again. */
 async function retryStuckSave() {
   if (!state.resumeId) return;
-  // A refused save leaves `state.dirty` set; this is that edit, sent again.
-  state.dirty = true;
-  await autoSave().catch(() => {});
-  if (!state.dirty) setStatus('Saved.');
+  const mine = (async () => {
+    // A refused save leaves `state.dirty` set; this is that edit, sent again.
+    state.dirty = true;
+    await autoSave().catch(() => {});
+    if (!state.dirty) setStatus('Saved.');
+  })();
+  retryingStuck = mine;
+  try {
+    await mine;
+  } finally {
+    if (retryingStuck === mine) retryingStuck = null;
+  }
 }
 
 /**
@@ -2087,8 +2098,24 @@ async function discardStuckSave() {
   const id = state.resumeId;
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
-  // A Retry still out finishes first; whatever it did, this then undoes on screen.
-  if (autoSaving) await autoSaving.catch(() => undefined);
+  /*
+   * A Retry still out finishes first. And if it landed, there is nothing left
+   * to discard: the edit is saved, and saying "Unsaved change discarded" over
+   * it — the screen then redrawn from the store, the edit still on it because
+   * the store has it — told the person a change was gone that was kept. So
+   * when nothing is unsaved after the wait, that is what is said, and nothing
+   * is thrown away.
+   */
+  if (autoSaving || retryingStuck) {
+    // The Retry as a whole, so what it says has been said before this does.
+    await retryingStuck?.catch(() => undefined);
+    await autoSaving?.catch(() => undefined);
+    if (!state.dirty) {
+      setSaveState('saved');
+      setStatus('The change had already saved, so there was nothing to discard.');
+      return;
+    }
+  }
   clearEdits();
   if (rebasedOnto?.id === id) rebasedOnto = null;
   if (id) dropRescue(id);

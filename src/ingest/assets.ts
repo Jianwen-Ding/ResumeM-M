@@ -64,6 +64,10 @@ export class Assets {
     if (fs.existsSync(this.file(id))) return Promise.resolve(this.get(id));
     name = path.basename(name.replace(/\\/g, '/')).replace(/[\x00-\x1f]/g, '').slice(0, 180) || 'file';
     if (name === '.' || name === '..') name = 'file';
+    // Not while a pull is half done, and asked before the original and its
+    // record are written rather than only at the commit in `run`, which came
+    // after both and answered "Not saved" about a file that was.
+    this.repo.assertNoOutsideGit();
     const original = path.join('originals', id, name);
     fs.mkdirSync(path.dirname(path.join(this.root, original)), { recursive: true });
     fs.writeFileSync(path.join(this.root, original), bytes);
@@ -78,6 +82,7 @@ export class Assets {
   retry(id: string, generate = true): Promise<Asset> {
     if (this.pending.has(id)) return this.pending.get(id)!;
     const asset = this.get(id);
+    this.repo.assertNoOutsideGit(); // Before `run` writes the record; see `import`.
     return this.run(asset, async () => {
       if (!asset.text) {
         const result = await ingestFile(this.store.loadConfig(), asset.name, fs.readFileSync(path.join(this.root, asset.original)));

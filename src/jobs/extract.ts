@@ -2257,7 +2257,12 @@ export interface PageVerdict {
   why: string[];
 }
 
-const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|successfactors|brassring|myjobs\.adp|workforcenow\.adp|recruiting\.adp)\b/i;
+/*
+ * Pinpoint, Personio, Comeet, Zoho Recruit and JazzHR's applytojob hosts were
+ * missing, and once the form had to show a job somewhere (see `forAJob`) the
+ * tracker's address was the only evidence their quick-apply pages carried.
+ */
+const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|applytojob|successfactors|brassring|pinpointhq|personio|comeet|zohorecruit|myjobs\.adp|workforcenow\.adp|recruiting\.adp)\b/i;
 const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y|ies)|apply|application|hiring|req|requisition)(\/|$|[?#])/i;
 const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
 /** What a hiring thread calls itself: "[Hiring]", "Who is hiring?", "We're hiring". */
@@ -2449,7 +2454,8 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   const uploadsResume =
     !thread &&
     /<input[^>]+type=["']?file/i.test(html) &&
-    /\bcv\b|résum|resum/i.test(text) &&
+    // And in the languages a form most often asks for one in.
+    /\bcv\b|résum|resum|lebenslauf|currículum|简历/i.test(text) &&
     asksWhoYouAre;
   if (uploadsResume) add(3, 'asks for a resume file');
 
@@ -2608,10 +2614,33 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * collecting you for something else, and asking for a name, an email and
    * an income is exactly what that something else does.
    */
+  /*
+   * Three more, because the list above missed real job forms that it used to
+   * catch: an employer's own quick-apply page — careers.acme.com/apply/4821,
+   * jobs.acme.com/careers/apply?step=1 — asks who you are and for your
+   * LinkedIn and says nothing else, and the trackers whose names `ATS` did not
+   * know carried no evidence but their address.
+   *
+   * - an address any of `companyFromUrl`'s systems would read an employer
+   *   from, which is a tracker's address by construction;
+   * - a careers address: a `/careers` or `/jobs` segment in the path, or a
+   *   `careers.` or `jobs.` host. Not `/apply` or `/application` alone,
+   *   which is where the bank's loan form lives;
+   * - a LinkedIn profile field, which a loan, a lease, an insurer and a
+   *   university have no use for.
+   */
+  const careersAddress = /\/(?:careers?|jobs?)(?:\/|$|[?#])/i.test(link.replace(/^[a-z]+:\/\/[^/]*/i, '')) ||
+    /^(?:careers?|jobs?)\./.test(hostOf(url));
+  const asksForLinkedIn =
+    /<(?:input|textarea)\b[^>]*\b(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*linked[\s_-]*in/i.test(html) ||
+    /<label\b[^>]*>[^<]*linked\s*in\b/i.test(html);
   const forAJob =
     /"@type"\s*:\s*"?JobPosting/i.test(html) ||
     ATS.test(link) ||
     BOARD.test(hostOf(url)) ||
+    Boolean(companyFromUrl(url)) ||
+    careersAddress ||
+    asksForLinkedIn ||
     uploadsResume ||
     namesARole ||
     countIn(text, JOB_FORM_WORDS) > 0;

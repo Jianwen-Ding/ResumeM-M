@@ -7,7 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
-import { Repo, commitQuietly, redactUrl, withCommit } from '../src/git/repo.js';
+import { Repo, commitQuietly, redactUrl, redactUrls, withCommit } from '../src/git/repo.js';
 import { saveStore } from '../src/git/save.js';
 import { normalizeApplications } from '../src/model/normalize.js';
 import { parseStoreYaml } from '../src/model/store.js';
@@ -140,6 +140,54 @@ describe('an outside git in the middle of a pull', () => {
     expect(repo.lastCommitError?.message).toMatch(/minute\(s\) old.*delete .*index\.lock/s);
   });
 
+  /*
+   * A fetch is not a pull. `FETCH_HEAD` fresh on its own — the app's own
+   * fetch after a refused push, an editor's autofetch — made every write
+   * after it wait out `WRITE_WAIT_MS`, synchronously, with the server
+   * answering nothing in the meantime.
+   */
+  it('does not hold a write for a fetch that no merge followed', async () => {
+    const repo = await withOtherBranch();
+    const remote = path.join(root, '..', `${path.basename(root)}-remote.git`);
+    execFileSync('git', ['clone', '-q', '--bare', root, remote]);
+    try {
+      git(['remote', 'add', 'origin', remote]);
+      git(['fetch', '-q', 'origin']);
+      expect(repo.outsideGit()).toBeUndefined();
+      const started = Date.now();
+      await withCommit(repo, false, 'x', () => write('a.txt', 'a'));
+      expect(Date.now() - started).toBeLessThan(500);
+
+      // A merge that has begun still counts, by its ORIG_HEAD.
+      git(['update-ref', 'ORIG_HEAD', 'HEAD']);
+      expect(repo.outsideGit()?.kind).toBe('pull');
+    } finally {
+      fs.rmSync(remote, { recursive: true, force: true });
+    }
+  });
+
+  it('does not hold the next write after its own fetch, when a push is refused', async () => {
+    const remote = path.join(root, 'remote.git');
+    execFileSync('git', ['init', '--bare', '-q', remote]);
+    const a = new Repo(path.join(root, 'a'));
+    fs.mkdirSync(a.root);
+    await a.ensure();
+    await a.setRemote(remote);
+    expect((await a.push()).ok).toBe(true);
+    const b = path.join(root, 'b');
+    execFileSync('git', ['clone', '-q', remote, b]);
+    fs.writeFileSync(path.join(b, 'voice.md'), 'from B\n');
+    await new Repo(b).commitAll('B');
+    expect((await new Repo(b).push()).ok).toBe(true);
+    fs.writeFileSync(path.join(a.root, 'profile.yaml'), 'name: A\n');
+    await a.commitAll('A');
+    expect((await a.push()).ok).toBe(false); // refused, and fetched
+
+    const started = Date.now();
+    await withCommit(a, false, 'x', () => fs.writeFileSync(path.join(a.root, 'kept.txt'), 'kept'));
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   it('is answered as an error through the API, not 200', async () => {
     const t: TempStore = makeTempStore({ config: { ai: { enabled: false }, git: { autoCommit: true }, output: { dir: 'out' } } });
     try {
@@ -217,7 +265,7 @@ describe('a remote with a token in its address', () => {
     await repo.setRemote(secret);
 
     const status = await repo.remoteStatus();
-    expect(status.url).toBe('https://127.0.0.1:9/me/save.git');
+    expect(status.url).toBe('https://alice:•••@127.0.0.1:9/me/save.git');
     expect(JSON.stringify(status)).not.toContain('ghp_');
 
     const saved = await saveStore(repo, { push: true });
@@ -240,7 +288,39 @@ describe('a remote with a token in its address', () => {
   it('leaves an SSH address alone', () => {
     expect(redactUrl('git@github.com:me/save.git')).toBe('git@github.com:me/save.git');
     expect(redactUrl('ssh://git@github.com/me/save.git')).toBe('ssh://git@github.com/me/save.git');
-    expect(redactUrl('http://tok@example.com/a.git')).toBe('http://example.com/a.git');
+    expect(redactUrl('http://tok@example.com/a.git')).toBe('http://•••@example.com/a.git');
+  });
+
+  /*
+   * The shown address used to be the address with no token at all, so it had
+   * to be taken as "unchanged" — and saving the address without the token,
+   * which is how anybody would try to remove it, kept it.
+   */
+  it('takes the token off when the address is saved without one', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await repo.setRemote(secret);
+
+    await repo.setRemote('https://127.0.0.1:9/me/save.git');
+    expect(await repo.getRemote()).toBe('https://127.0.0.1:9/me/save.git');
+    expect((await repo.remoteStatus()).url).toBe('https://127.0.0.1:9/me/save.git');
+  });
+
+  it('keeps the token behind the mask when the rest of the address is edited', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await repo.setRemote(secret);
+    await repo.setRemote('https://alice:•••@127.0.0.1:9/me/renamed.git');
+    expect(await repo.getRemote()).toBe('https://alice:ghp_SECRETTOKEN123@127.0.0.1:9/me/renamed.git');
+  });
+
+  it('masks an SSH password, and a token with an unencoded ? or # in it', () => {
+    expect(redactUrl('ssh://user:secretpw@example.com/a/b.git')).toBe('ssh://user:•••@example.com/a/b.git');
+    expect(redactUrl('https://oauth2:tok?en@gitlab.com/a/b.git')).toBe('https://oauth2:•••@gitlab.com/a/b.git');
+    expect(redactUrl('https://x-access-token:t#k@github.com/a/b.git')).toBe('https://x-access-token:•••@github.com/a/b.git');
+    expect(redactUrls("fatal: unable to access 'https://oauth2:tok?en@gitlab.com/a/b.git/': x")).not.toContain('tok?en');
+    expect(redactUrls('to ssh://user:secretpw@example.com/a.git')).toBe('to ssh://user:•••@example.com/a.git');
+    expect(redactUrls('to ssh://git@example.com/a.git')).toBe('to ssh://git@example.com/a.git');
   });
 });
 
@@ -267,6 +347,50 @@ describe('pushing', () => {
       for (const socket of held) socket.destroy();
       server.close();
     }
+  }, 20_000);
+
+  it('reports a push that landed as landed, when a slow post-receive hook outlasts the timeout', async () => {
+    // The remote moves its branch and then runs the hook, which takes its time.
+    const remote = path.join(root, 'slow.git');
+    execFileSync('git', ['init', '--bare', '-q', remote]);
+    fs.writeFileSync(path.join(remote, 'hooks', 'post-receive'), '#!/bin/sh\nsleep 30\n', { mode: 0o755 });
+    const repo = new Repo(path.join(root, 'here'));
+    fs.mkdirSync(repo.root);
+    await repo.ensure();
+    await repo.setRemote(remote);
+
+    const result = await repo.push(1500);
+
+    const branch = await repo.currentBranch();
+    const landed = git(['rev-parse', `refs/heads/${branch}`], remote).trim() === git(['rev-parse', 'HEAD'], repo.root).trim();
+    expect(landed).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.output).not.toMatch(/Nothing was changed on the remote/);
+    expect((await repo.remoteStatus()).ahead).toBe(0);
+  }, 20_000);
+
+  it('does not wait on an SSH master that keeps stderr open after the push has finished', async () => {
+    // Like ssh with ControlPersist: a background process, in a session of its
+    // own, that inherited git's stderr and outlives the push.
+    const ssh = path.join(root, 'fake-ssh.sh');
+    fs.writeFileSync(
+      ssh,
+      '#!/bin/sh\n( setsid sleep 6 & )\nwhile [ $# -gt 1 ]; do shift; done\nexec sh -c "$1"\n',
+      { mode: 0o755 },
+    );
+    const remote = path.join(root, 'ssh.git');
+    execFileSync('git', ['init', '--bare', '-q', remote]);
+    const repo = new Repo(path.join(root, 'here'));
+    fs.mkdirSync(repo.root);
+    await repo.ensure();
+    git(['config', 'core.sshCommand', ssh], repo.root);
+    await repo.setRemote(`ssh://localhost${remote}`);
+
+    const started = Date.now();
+    const result = await repo.push(3000);
+
+    expect(result.ok).toBe(true);
+    expect(Date.now() - started).toBeLessThan(2500);
   }, 20_000);
 
   it('says what a refused push means here, and that the remote is ahead', async () => {

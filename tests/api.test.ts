@@ -2150,7 +2150,7 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
       .post('/api/render')
       .send({
         strict: true,
-        spec: { id: 'tiny', label: 'Tiny', extends: 'base', layout: { marginIn: 4.6, autoFit: false } },
+        spec: { id: 'tiny', label: 'Tiny', extends: 'base', layout: { marginIn: 4.2, autoFit: false } },
       })
       .expect(422);
     expect(res.body.kind).toBe('overflow');
@@ -2175,7 +2175,9 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     extends: 'base',
     // The margin the overflow test below proves spills this store's base
     // resume. A gentler one did not, and the assertions passed vacuously.
-    layout: { marginIn: 4.6 },
+    // Under the 4.25in a letter page can take at all (`checkLayoutNumbers`):
+    // 4.6 left a negative text width, which is now refused before TeX sees it.
+    layout: { marginIn: 4.2 },
   };
 
   it('reports the real spill when asked for the document as written', async () => {

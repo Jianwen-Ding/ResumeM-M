@@ -111,6 +111,34 @@ describe('an application form that is for a job', () => {
     expect(classifyPage(html, 'https://acme.example/apply').kind).toBe('application');
   });
 
+  /*
+   * Quick-apply pages that ask who you are and nothing a loan would not, and
+   * were missed once the job had to be on the form: the job is in the address
+   * or in the LinkedIn field, and nowhere else.
+   */
+  it.each([
+    ['an employer’s careers host, by its LinkedIn field', 'https://careers.acme.com/apply/4821', true],
+    ['an employer’s own /apply, by its LinkedIn field alone', 'https://acme.example/apply', true],
+    ['an employer’s jobs host with /careers in the path', 'https://jobs.acme.com/careers/apply?step=1', false],
+    ['Pinpoint', 'https://acme.pinpointhq.com/en/postings/abc/applications/new', false],
+    ['Personio', 'https://acme.jobs.personio.de/job/12345/apply', false],
+    ['Comeet', 'https://www.comeet.com/jobs/acme/12.345/platform-engineer/apply', false],
+    ['Zoho Recruit', 'https://acme.zohorecruit.com/jobs/Careers/123/Platform-Engineer/apply', false],
+    ['JazzHR', 'https://acme.applytojob.com/apply/abc123/Platform-Engineer', false],
+  ])('on %s, asking only who you are', (_name, url, linkedIn) => {
+    const html = `<html><head><title>Apply</title></head><body><h1>Your details</h1>
+<form>${WHO}${linkedIn ? '<label>LinkedIn profile<input name="linkedin"></label>' : ''}
+<button>Submit application</button></form></body></html>`;
+    expect(classifyPage(html, url).kind).toBe('application');
+  });
+
+  it('by a résumé asked for in another language', () => {
+    const upload = (word: string) => `<html><head><title>Bewerbung</title></head><body>
+<form>${WHO}<label>${word}<input type="file" name="doc"></label></form></body></html>`;
+    expect(classifyPage(upload('Lebenslauf'), 'https://acme.example/bewerbung').kind).toBe('application');
+    expect(classifyPage(upload('简历'), 'https://hr.acme.example/apply/123').kind).toBe('application');
+  });
+
   it('when the page declares a JobPosting', () => {
     const html = `<html><head><title>Apply — Acme</title>
 <script type="application/ld+json">{"@type":"JobPosting","title":"Platform Engineer"}</script></head><body>

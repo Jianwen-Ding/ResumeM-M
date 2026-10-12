@@ -246,6 +246,7 @@ export class Repo {
    * and no `MERGE_HEAD` to see. What a pull does leave is its timestamps:
    * `FETCH_HEAD` is written as the fetch hands over to the merge, and
    * `ORIG_HEAD` as a merge begins. Either one younger than `PULL_SETTLE_MS`
+   * — `FETCH_HEAD` only with a sign a merge follows it, see `justPulled` —
    * is a pull or merge that may still be running, and a write or commit waits
    * that long rather than land in the middle of it.
    */
@@ -274,16 +275,55 @@ export class Repo {
     return undefined;
   }
 
-  /** A pull or merge began within `PULL_SETTLE_MS`. See `outsideGit`. */
+  /**
+   * A pull or merge began within `PULL_SETTLE_MS`. See `outsideGit`.
+   *
+   * `ORIG_HEAD` on its own, because a merge writes it as it begins. A fresh
+   * `FETCH_HEAD` only with something to say a merge is following it — a fresh
+   * `ORIG_HEAD`, or a `MERGE_HEAD` or `index.lock` — because a fetch on its
+   * own changes nothing in the working tree, and they are common: the app's
+   * own fetch after a refused push, an editor's background autofetch, a
+   * `git fetch` in a terminal. Counted on its own, each of those made the
+   * next write wait out the whole `WRITE_WAIT_MS` in `assertNoOutsideGit`,
+   * which waits synchronously — a second and a half in which the server
+   * answered nothing at all. And the app's own fetch is recorded when it
+   * makes it (`ownFetch`) and not counted even then.
+   */
   private justPulled(dir = this.gitDir()): boolean {
     if (!dir) return false;
-    return ['FETCH_HEAD', 'ORIG_HEAD'].some((name) => {
+    const age = (name: string) => {
       try {
-        return Date.now() - fs.statSync(path.join(dir, name)).mtimeMs < Repo.PULL_SETTLE_MS;
+        return Date.now() - fs.statSync(path.join(dir, name)).mtimeMs;
       } catch {
-        return false; // Never pulled, which is fine.
+        return Infinity; // Never pulled, which is fine.
       }
-    });
+    };
+    if (age('ORIG_HEAD') < Repo.PULL_SETTLE_MS) return true;
+    if (!(age('FETCH_HEAD') < Repo.PULL_SETTLE_MS)) return false;
+    if (this.isOwnFetch(dir)) return false;
+    return fs.existsSync(path.join(dir, 'MERGE_HEAD')) || age('index.lock') < Repo.STALE_LOCK_MS;
+  }
+
+  /** `FETCH_HEAD` as this server's own fetch left it, per store. See `justPulled`. */
+  private static readonly ownFetches = new Map<string, number>();
+
+  private isOwnFetch(dir: string): boolean {
+    try {
+      return Repo.ownFetches.get(this.root) === fs.statSync(path.join(dir, 'FETCH_HEAD')).mtimeMs;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Remember the `FETCH_HEAD` this server's own fetch has just written. */
+  private ownFetch(): void {
+    const dir = this.gitDir();
+    if (!dir) return;
+    try {
+      Repo.ownFetches.set(this.root, fs.statSync(path.join(dir, 'FETCH_HEAD')).mtimeMs);
+    } catch {
+      // No FETCH_HEAD: the fetch failed, and there is nothing to ignore.
+    }
   }
 
   /**
@@ -891,13 +931,26 @@ export class Repo {
     }
     const existing = await this.getRemote();
     /*
-     * The address as it is shown is the address without its token (see
-     * `redactUrl`), and the settings panel sends back what it shows. Saved
-     * as given, that took the token off the real remote and the next push
-     * failed to sign in. The shown form of the remote that is already there
-     * is that remote, unchanged.
+     * The address as it is shown has its token masked (see `redactUrl`), and
+     * the settings panel sends back what it shows. Saved as given, that put
+     * the dots in place of the token and the next push failed to sign in.
+     * The shown form of the remote that is already there is that remote,
+     * unchanged — that exact form only, so an address with no token in it
+     * really does take the token off.
+     *
+     * And the masked token with the rest of the address edited — a new
+     * repository name typed over the old one — keeps the token it stands for,
+     * rather than saving three dots as a password.
      */
-    if (existing && url !== existing && url === redactUrl(existing)) return;
+    if (existing && url !== existing) {
+      const shown = redactUrl(existing);
+      if (url === shown) return;
+      const masked = USERINFO.exec(shown)?.[2];
+      if (masked?.includes(REMOTE_MASK) && USERINFO.exec(url)?.[2] === masked) {
+        const real = USERINFO.exec(existing)![2]!;
+        url = url.replace(USERINFO, (_all, scheme: string) => `${scheme}${real}@`);
+      }
+    }
     await this.git(existing ? ['remote', 'set-url', 'origin', url] : ['remote', 'add', 'origin', url]);
   }
 
@@ -969,15 +1022,7 @@ export class Repo {
       return { ok: true, output: redactUrls(stdout.trim()) || `Pushed ${branch} to origin.` };
     } catch (err) {
       const e = err as { stderr?: string; message?: string; timedOut?: boolean };
-      if (e.timedOut) {
-        return {
-          ok: false,
-          output:
-            `The push took longer than ${Math.round(timeout / 1000)} seconds and was stopped: ${redactUrl(url)} ` +
-            'stopped answering. Nothing was changed on the remote, and the save here is as it was. ' +
-            'Check the address and your connection, and push again.',
-        };
-      }
+      if (e.timedOut) return this.afterTimedOutPush(branch, url, timeout, Boolean(ownSsh));
       const said = redactUrls((e.stderr || e.message || 'Push failed').trim());
       /*
        * Rejected because the remote has commits this save does not.
@@ -990,6 +1035,7 @@ export class Repo {
        */
       if (/\[rejected\]|non-fast-forward|fetch first/i.test(said)) {
         await gitWithin(['fetch', '--quiet', 'origin', branch], this.root, FETCH_TIMEOUT_MS, Boolean(ownSsh)).catch(() => undefined);
+        this.ownFetch(); // Not somebody's pull: see `justPulled`.
         return {
           ok: false,
           output:
@@ -1000,6 +1046,73 @@ export class Repo {
       }
       return { ok: false, output: said };
     }
+  }
+
+  /**
+   * A push that was stopped for taking too long, asked about rather than
+   * assumed about.
+   *
+   * This used to say "Nothing was changed on the remote", and that is not
+   * something a timeout knows. The remote moves its branch before it runs
+   * its `post-receive` hook, so a hook that takes its time — a CI trigger, a
+   * mirror — holds `git push` open after the push has landed, and the
+   * timeout then reported a push that had happened as one that had not. The
+   * person pushes again, is told "Everything up-to-date", and stops trusting
+   * either answer.
+   *
+   * So the remote is asked, briefly, with `git ls-remote`: if its branch is
+   * this save's commit, the push landed, and the tracking ref and upstream
+   * that `push -u` would have recorded are recorded here. If it is not, the
+   * push did not land. And if the remote will not answer that either, the
+   * message says what is known — that it may or may not have reached it.
+   */
+  private async afterTimedOutPush(
+    branch: string,
+    url: string,
+    timeout: number,
+    keepSsh: boolean,
+  ): Promise<{ ok: boolean; output: string }> {
+    const took = `The push took longer than ${Math.round(timeout / 1000)} seconds and was stopped`;
+    const shown = redactUrl(url);
+    const local = (await this.git(['rev-parse', 'HEAD']).catch(() => '')).trim();
+    let remote: string | undefined;
+    try {
+      const { stdout } = await gitWithin(
+        ['ls-remote', 'origin', `refs/heads/${branch}`],
+        this.root,
+        Math.min(VERIFY_TIMEOUT_MS, timeout),
+        keepSsh,
+      );
+      remote = stdout.split(/\s/)[0] ?? '';
+    } catch {
+      remote = undefined;
+    }
+    if (local && remote === local) {
+      await this.git(['update-ref', `refs/remotes/origin/${branch}`, local]).catch(() => undefined);
+      await this.git(['config', `branch.${branch}.remote`, 'origin']).catch(() => undefined);
+      await this.git(['config', `branch.${branch}.merge`, `refs/heads/${branch}`]).catch(() => undefined);
+      return {
+        ok: true,
+        output:
+          `Pushed ${branch} to origin. ${shown} was slow to finish answering, so the push was stopped after ` +
+          `${Math.round(timeout / 1000)} seconds — but asked afterwards, the remote has this save's latest commit.`,
+      };
+    }
+    if (remote !== undefined) {
+      return {
+        ok: false,
+        output:
+          `${took}: ${shown} stopped answering. Asked afterwards, the remote does not have this save's latest ` +
+          'commit, so the push did not land; the save here is as it was. Check the address and your connection, and push again.',
+      };
+    }
+    return {
+      ok: false,
+      output:
+        `${took}: ${shown} stopped answering, and did not answer when asked afterwards either, so the push may ` +
+        'or may not have reached the remote. The save here is as it was. Check the address and your connection, ' +
+        'and push again — if it had landed, git will say everything is up to date.',
+    };
   }
 
   /**
@@ -1234,8 +1347,8 @@ export async function commitQuietly(repo: Repo, message: string, paths?: string[
 }
 
 /**
- * A remote's address as it can be shown: an http(s) URL without the
- * `user:token@` in front of the host.
+ * A remote's address as it can be shown: the token in front of the host
+ * masked, `https://alice:•••@host/…`.
  *
  * A GitHub token pasted into the remote is the usual way to push over HTTPS
  * without a credential helper, and git keeps it in `.git/config` as typed.
@@ -1243,19 +1356,46 @@ export async function commitQuietly(repo: Repo, message: string, paths?: string[
  * `GET /api/config/store`, sat in plain sight in the settings field, and was
  * printed by `rmm save` — "3 commits not yet pushed to
  * https://alice:ghp_…@…". The remote keeps it; nothing that shows the address
- * does. Only http(s): in `git@github.com:me/save.git` the `git@` is the SSH
- * login every GitHub remote shares, not a secret, and the address is not
- * recognisable without it.
+ * does. Not a bare SSH login: in `git@github.com:me/save.git` the `git@` is
+ * the SSH login every GitHub remote shares, not a secret, and the address is
+ * not recognisable without it.
  */
+/*
+ * Masked rather than dropped: `https://alice:•••@github.com/me/save.git`.
+ *
+ * Dropped, the address shown was the address with no token, and the settings
+ * panel sends back what it shows — so `setRemote` had to take the token-free
+ * address as "unchanged", and then there was no way to say "take the token
+ * off" from Settings at all: saving the address without it kept it. Masked,
+ * only the masked address coming back is "unchanged", and an address with no
+ * userinfo is exactly what it looks like.
+ *
+ * And not only http(s): `ssh://user:password@host` carries a password the
+ * same way. A bare SSH login (`ssh://git@…`) stays, as in the scp form, and
+ * a bare http(s) user is masked whole, since that is where a token pasted on
+ * its own goes. The userinfo runs to the last "@" before the first "/", so a
+ * token holding an unencoded "?", "#" or "@" is masked whole too, where
+ * `[^/?#]*@` stopped at the "?" and showed it.
+ */
+export const REMOTE_MASK = '•••';
+const USERINFO = /^([a-z][a-z0-9+.-]*:\/\/)([^/]*)@/i;
+const USERINFO_IN_TEXT = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/'"]*)@/gi;
+
+function maskUserinfo(all: string, scheme: string, info: string): string {
+  const colon = info.indexOf(':');
+  if (colon >= 0) return `${scheme}${info.slice(0, colon)}:${REMOTE_MASK}@`;
+  return /^https?:\/\/$/i.test(scheme) ? `${scheme}${REMOTE_MASK}@` : all;
+}
+
 export function redactUrl(url: string): string;
 export function redactUrl(url: string | undefined): string | undefined;
 export function redactUrl(url: string | undefined): string | undefined {
-  return url?.replace(/^(https?:\/\/)[^/?#]*@/i, '$1');
+  return url?.replace(USERINFO, maskUserinfo);
 }
 
 /** The same, for any address inside git's own output. See `redactUrl`. */
 export function redactUrls(text: string): string {
-  return text.replace(/(https?:\/\/)[^\s/?#@'"]*@/gi, '$1');
+  return text.replace(USERINFO_IN_TEXT, maskUserinfo);
 }
 
 /** Git with nobody to answer it: a missing credential is refused, not asked for. */
@@ -1324,17 +1464,53 @@ function gitWithin(
         child.kill('SIGKILL');
       }
     }, timeout);
-    child.once('error', (err) => {
+    /*
+     * Settled when git exits, not when its pipes close.
+     *
+     * 'close' waits for every holder of stdout and stderr to let go, and git
+     * is not the only holder: an SSH with `ControlPersist` leaves a master
+     * running in the background (in a session of its own, so the group kill
+     * does not reach it) that inherited git's stderr and keeps it for as long
+     * as it persists. A push that had finished and exited 0 then sat waiting
+     * on that master until the timeout fired, and was reported as a push that
+     * timed out. So 'exit' stops the clock, and what is still to be read is
+     * given a moment to arrive; whichever of that moment and 'close' comes
+     * first decides, and an exit code of 0 is a success.
+     */
+    let settled = false;
+    let exitCode: number | null = null;
+    let drain: NodeJS.Timeout | undefined;
+    const settle = (code: number | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(drain);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(Object.assign(new Error(`git ${args[0]} exited with ${code}`), { stderr, timedOut }));
+    };
+    child.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(drain);
       reject(err);
     });
-    child.once('close', (code) => {
+    child.once('exit', (code) => {
       clearTimeout(timer);
-      if (code === 0 && !timedOut) resolve({ stdout, stderr });
-      else reject(Object.assign(new Error(`git ${args[0]} exited with ${code}`), { stderr, timedOut }));
+      exitCode = code;
+      drain = setTimeout(() => settle(code), DRAIN_GRACE_MS);
     });
+    child.once('close', (code) => settle(code ?? exitCode));
   });
 }
+
+/** How long output still in the pipes is waited for once git has exited. See `gitWithin`. */
+const DRAIN_GRACE_MS = 250;
+
+/** How long a push that timed out spends asking the remote whether it landed. */
+const VERIFY_TIMEOUT_MS = 15 * 1000;
 
 /**
  * How long a push may take in all. A save is YAML and prose, and pushes in
