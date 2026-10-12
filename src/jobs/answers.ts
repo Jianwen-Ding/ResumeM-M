@@ -428,8 +428,19 @@ const SENSITIVE_QUESTION = [
   /\bdob\b/i,
   /\bpassport(\s*(number|no\.?|#))?\b/i,
   /\b(home|mailing|residential|street|postal)\s*address\b/i,
-  // And the address in parts, which is the same address a box at a time.
-  /\baddress\s*(line|[12])\b/i,
+  // And the address in parts, which is the same address a box at a time —
+  // "Address Line1" too, where no word break falls between the line and its
+  // number, and which `(line|[12])\b` therefore never reached.
+  /\baddress\s*(line\s*\d*|\d)\b/i,
+  /*
+   * And the address however else it is qualified: "What is your current full
+   * address?", "Permanent address", "Your address". Each qualifier is one
+   * that only a place to live takes — "your email address" and "current
+   * email address" are left alone, because `email` stands between.
+   */
+  /\b(current|full|permanent|present|physical|residence|legal)\s+((current|full|permanent|home|residential|street|mailing|postal|physical)\s+)*address\b/i,
+  /\byour\s+address\b/i,
+  /^\s*address\s*[:*?]?\s*$/i,
   /\b(zip|postal)\s*(code)?\b|\bpostcode\b/i,
   /\b(apartment|apt)\b/i,
   /\b(birth\s*date|birthday)\b/i,

@@ -399,6 +399,120 @@ export function withDatesFrom(entry: Entry, store: Store): Entry {
   return text ? { ...entry, dates: text } : entry;
 }
 
+/**
+ * Refuse a date no resume can print.
+ *
+ * The editor's year box accepted 2023.5 — `Number` reads it, and it sits
+ * between 1900 and 2100 — and the server formatted it into "Jul. 2023.5",
+ * on the page that goes to an employer. A year is a whole number in a
+ * plausible range and a month is one of twelve, and anything else is a
+ * mistake to say now rather than a date to print. Only what a caller sends
+ * is checked: a hand-edited file is not refused for an unrelated edit.
+ */
+export function checkPeriod(period: unknown): void {
+  if (period === undefined || period === null) return;
+  if (typeof period !== 'object' || Array.isArray(period)) throw new Error('A date must be a start and an end');
+  for (const which of ['start', 'end'] as const) {
+    const point = (period as Record<string, unknown>)[which];
+    if (point === undefined || point === null) continue;
+    if (typeof point !== 'object' || Array.isArray(point)) throw new Error(`The ${which} of a date must be a year and a month`);
+    const { year, month } = point as { year?: unknown; month?: unknown };
+    if (typeof year !== 'number' || !Number.isInteger(year) || year < 1900 || year > 2100) {
+      throw new Error(`The ${which} year must be a whole year between 1900 and 2100, not ${JSON.stringify(year)}`);
+    }
+    if (month !== undefined && (typeof month !== 'number' || !Number.isInteger(month) || month < 1 || month > 12)) {
+      throw new Error(`The ${which} month must be 1 to 12, not ${JSON.stringify(month)}`);
+    }
+  }
+}
+
+/**
+ * And the date written as words, on each of its alternates.
+ *
+ * An alternate of `dates` is written by the editor from a period of its own,
+ * so the server never sees that period — only the text made from it. A year
+ * with a fraction in it ("Jul. 2023.5") is the one thing that text can carry
+ * which no date means, so it is refused here as `checkPeriod` refuses it.
+ */
+function checkDateText(dates: unknown, stored: unknown): void {
+  const texts = (field: unknown): unknown[] =>
+    field && typeof field === 'object' && Array.isArray((field as { variants?: unknown }).variants)
+      ? (field as { variants: { text?: unknown }[] }).variants.map((v) => v?.text)
+      : [];
+  /*
+   * Only alternates. A plain `dates` string is rewritten from the period,
+   * which `checkPeriod` has already held to whole years — and refusing the
+   * string would refuse the very save that corrects one written before this.
+   * And only text that is new: an alternate already in the file is not the
+   * caller's to answer for, and the editor sends every one on each save.
+   */
+  const already = new Set(texts(stored));
+  for (const text of texts(dates)) {
+    if (typeof text === 'string' && !already.has(text) && /\b\d{4}\.\d/.test(text)) {
+      throw new Error(`"${text}" has a year with a fraction in it. A year must be a whole number.`);
+    }
+  }
+}
+
+/**
+ * The numbers a settings patch may carry, and what each may be.
+ *
+ * The Page settings sent `Number('')` — 0 — for a box somebody emptied,
+ * and this wrote it: a 0pt font on every resume in the save, or a sweep
+ * switched off by clearing a box. The editor now reverts an empty box and
+ * holds the same limits, and this is the second lock for any other caller.
+ * `null` is always allowed: it means "back to the default".
+ */
+const LAYOUT_LIMITS: Record<string, [number, number]> = {
+  fontSizePt: [8, 14],
+  marginIn: [0.3, 1.5],
+  spacing: [0.8, 1.5],
+};
+const BOUND_LIMITS: Record<string, [number, number]> = {
+  minFontSizePt: [8, 14],
+  maxFontSizePt: [8, 14],
+  minMarginIn: [0.3, 1.5],
+  maxMarginIn: [0.3, 1.5],
+  minSpacing: [0.8, 1.5],
+  maxSpacing: [0.8, 1.5],
+};
+
+function checkNumber(what: string, value: unknown, [min, max]: [number, number], whole = false): void {
+  if (value === undefined || value === null) return;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max || (whole && !Number.isInteger(value))) {
+    throw new Error(`${what} must be ${whole ? 'a whole number ' : ''}between ${min} and ${max}, not ${JSON.stringify(value)}`);
+  }
+}
+
+export function checkConfigPatch(patch: unknown): void {
+  if (!patch || typeof patch !== 'object') return;
+  const { layout, resumes, applications } = patch as Record<string, unknown>;
+  if (layout && typeof layout === 'object') {
+    const l = layout as Record<string, unknown>;
+    for (const [key, range] of Object.entries(LAYOUT_LIMITS)) checkNumber(`The ${key} setting`, l[key], range);
+    checkNumber('The maxPages setting', l.maxPages, [1, 10], true);
+    if (l.paper !== undefined && l.paper !== null && l.paper !== 'letter' && l.paper !== 'a4') {
+      throw new Error(`Paper must be "letter" or "a4", not ${JSON.stringify(l.paper)}`);
+    }
+    if (l.autoFit !== undefined && l.autoFit !== null && typeof l.autoFit !== 'boolean') {
+      throw new Error('autoFit must be true or false');
+    }
+    for (const bounds of ['fitBounds', 'growBounds']) {
+      const b = l[bounds];
+      if (!b || typeof b !== 'object') continue;
+      for (const [key, range] of Object.entries(BOUND_LIMITS)) {
+        checkNumber(`The ${bounds}.${key} setting`, (b as Record<string, unknown>)[key], range);
+      }
+    }
+  }
+  if (resumes && typeof resumes === 'object') {
+    checkNumber('Days to keep a temporary resume', (resumes as Record<string, unknown>).temporaryDays, [0, 3650], true);
+  }
+  if (applications && typeof applications === 'object') {
+    checkNumber('Days an application may sit at Applying', (applications as Record<string, unknown>).applyingDays, [0, 3650], true);
+  }
+}
+
 /** Two periods meaning the same thing, ignoring how they were spelt. */
 function samePeriod(a: Period, b: Period): boolean {
   // The season is part of a point now — either end can name one — so it is
@@ -1509,7 +1623,9 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
        * the lines"; an empty list means "there are none", and an entry whose
        * lines have all been deleted has to remain sayable.
        */
+      checkPeriod(body.period);
       const stored = store.load().entries.find((e) => e.id === id);
+      checkDateText(body.dates, stored?.dates);
       /*
        * And the same for every other field, when the body is not a whole
        * entry.
@@ -1785,6 +1901,7 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/config',
     handler(async (req, res) => {
       const patch = req.body as Parameters<typeof store.saveConfig>[0];
+      checkConfigPatch(patch);
       const saved = await withCommit(repo, autoCommit(), 'Update settings', () => store.saveConfig(patch));
       res.json(saved);
     }),
@@ -2073,16 +2190,30 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
       const body = req.body as Partial<WritingSample>;
       if (!body.text?.trim()) throw new Error('A sample needs some text');
 
-      const sample: WritingSample = {
-        id: String(req.params.id),
-        title: body.title?.trim() || 'Untitled',
-        kind: body.kind ?? 'other',
+      const id = String(req.params.id);
+      /*
+       * Laid over the sample already stored, not rebuilt from a list of
+       * fields. `loadSamples` keeps every key in a sample's front matter —
+       * a sample is a file somebody wrote, and a key this version does not
+       * know is not one to delete for them — and this route then wrote back
+       * only the seven it named, so editing the text dropped the rest. A
+       * field the caller sends replaces the stored one, and `null` clears it.
+       */
+      const stored = store.loadSamples().find((s) => s.id === id);
+      const merged: Record<string, unknown> = { ...(stored ?? {}) };
+      for (const key of ['writtenAt', 'tags', 'archived'] as const) {
+        if (!(key in body)) continue;
+        if (body[key] === null) delete merged[key];
+        else merged[key] = body[key];
+      }
+      const sample = {
+        ...merged,
+        id,
+        title: body.title?.trim() || stored?.title || 'Untitled',
+        kind: body.kind ?? stored?.kind ?? 'other',
         text: body.text,
-        createdAt: body.createdAt ?? new Date().toISOString(),
-        writtenAt: body.writtenAt,
-        tags: body.tags,
-        archived: body.archived,
-      };
+        createdAt: body.createdAt ?? (stored?.createdAt || new Date().toISOString()),
+      } as WritingSample;
       await withCommit(repo, autoCommit(), `Add writing sample "${sample.id}"`, () => store.saveSample(sample));
       res.json(sample);
     }),

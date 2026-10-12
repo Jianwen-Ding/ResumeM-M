@@ -428,6 +428,23 @@ function onDiskSpelling(full: string): string {
 }
 
 /**
+ * Remove from `target` every key the patch set to `null`, following the patch
+ * into nested objects. The merge has already copied those nulls across; this
+ * turns each one into "no value", which is what a default is.
+ */
+function dropNulls(target: Record<string, unknown>, patch: unknown): void {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return;
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    if (value === null) {
+      delete target[key];
+    } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const inner = target[key];
+      if (inner && typeof inner === 'object' && !Array.isArray(inner)) dropNulls(inner as Record<string, unknown>, value);
+    }
+  }
+}
+
+/**
  * The store is a directory of YAML files under git. It is deliberately dumb:
  * read everything, hand out plain objects, write back whole files. A resume
  * store is a few hundred kilobytes; there is no reason for an index or a
@@ -881,6 +898,12 @@ export class Store {
   /**
    * Write config.yaml. Only the fields the caller supplies are changed, so a
    * GUI that knows about the AI settings cannot clobber the LaTeX ones.
+   *
+   * A field sent as `null` is removed, at whatever depth it sits. Without
+   * that there was no way back to a default: "As it comes" effort and the
+   * auto-detected engine are the *absence* of a value, JSON drops an
+   * `undefined`, and a merge keeps whatever the file already said — so the
+   * page reported "Settings saved" over a setting that had not changed.
    */
   saveConfig(patch: Partial<StoreConfig>): StoreConfig {
     const current = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
@@ -913,6 +936,7 @@ export class Store {
           }
         : {}),
     };
+    dropNulls(merged as Record<string, unknown>, patch);
     this.writeYaml('config.yaml', merged);
     return this.loadConfig();
   }

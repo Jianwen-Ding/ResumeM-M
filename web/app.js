@@ -4343,6 +4343,57 @@ async function waitForJob(id, every = 2000) {
  * asking about a bullet you did not write.
  */
 async function readMaterial(notes) {
+  let job;
+  try {
+    /*
+     * A background job, like feedback, because this is the longest-running
+     * thing in the product: four files read end to end and an entry proposed
+     * out of each. A request held open for four minutes is one a proxy or a
+     * browser gives up on while the work carries on invisibly.
+     */
+    ({ job } = await api('/ai/read-material', { method: 'POST', body: JSON.stringify({}) }));
+  } catch (err) {
+    setChildren(notes, el('div', { className: 'err', textContent: err.message }));
+    return;
+  }
+  return reviewMaterialJob(notes, job.id);
+}
+
+/**
+ * The material jobs this page is already waiting on or walking through, so
+ * the results chip can bring the person back to one rather than start a
+ * second review of the same proposal beside it.
+ */
+const materialInHand = new Set();
+
+/**
+ * A "read my material" job, from the results chip.
+ *
+ * This used to go through `openJob`, which is the feedback panel's: it
+ * fetched the job (marking it read), found no feedback text in it, and showed
+ * an empty critique — so the proposal was lost and the chip stopped offering
+ * it. A material job belongs to the review step it was started for, and the
+ * server keeps its result, so that step can be run again from here — after a
+ * reload too.
+ */
+function openMaterialJob(job) {
+  showTab('voice');
+  if (materialInHand.has(job.id)) return;
+  const notes = $('#read-material-notes');
+  if (notes) reviewMaterialJob(notes, job.id);
+}
+
+/** Wait for a material job, then offer what it proposes one at a time. */
+async function reviewMaterialJob(notes, jobId) {
+  materialInHand.add(jobId);
+  try {
+    return await reviewMaterialJobInHand(notes, jobId);
+  } finally {
+    materialInHand.delete(jobId);
+  }
+}
+
+async function reviewMaterialJobInHand(notes, jobId) {
   const stop = showAiProgress(
     notes,
     'Reading your material',
@@ -4351,14 +4402,7 @@ async function readMaterial(notes) {
   );
   let result;
   try {
-    /*
-     * A background job, like feedback, because this is the longest-running
-     * thing in the product: four files read end to end and an entry proposed
-     * out of each. A request held open for four minutes is one a proxy or a
-     * browser gives up on while the work carries on invisibly.
-     */
-    const { job } = await api('/ai/read-material', { method: 'POST', body: JSON.stringify({}) });
-    result = await waitForJob(job.id);
+    result = await waitForJob(jobId);
   } catch (err) {
     setChildren(notes, el('div', { className: 'err', textContent: err.message }));
     return;
@@ -5127,9 +5171,22 @@ function datesControl(from, onChange, name) {
       // Being redrawn, with the typing going on to the new box. Not a year
       // anybody finished typing.
       if ('handedOn' in year.dataset) return;
+      const typed = year.value.trim();
+      const n = Number(typed);
+      /*
+       * A whole year only. 2023.5 is inside the range, and `Number` reads it,
+       * so it was saved and printed on the resume as "Jul. 2023.5". A year
+       * that is not one is put back rather than sent — and rather than read
+       * as an emptied box, which on the far end would drop the end date.
+       */
+      if (typed !== '' && !(Number.isInteger(n) && n >= 1900 && n <= 2100)) {
+        year.value = value().year ? String(value().year) : '';
+        year.dataset.stored = year.value;
+        setStatus('A year is a whole number between 1900 and 2100.', true);
+        return;
+      }
       year.dataset.stored = year.value;
-      const n = Number(year.value);
-      if (n >= 1900 && n <= 2100) period[which] = { ...value(), year: n };
+      if (typed !== '') period[which] = { ...value(), year: n };
       else delete period[which];
       commit();
     };
@@ -7066,7 +7123,7 @@ function renderJobChip(jobs) {
   if (running.length === 0 && ready.length === 0) {
     chip.className = jobs.length ? 'jobs-chip' : 'jobs-chip hidden';
     chip.textContent = jobs.length ? 'Feedback Results' : '';
-    chip.onclick = () => { if (jobs[0]) openJob(jobs[0]); };
+    chip.onclick = () => { if (jobs[0]) openAnyJob(jobs[0]); };
     return;
   }
 
@@ -7075,7 +7132,17 @@ function renderJobChip(jobs) {
     ready.length > 0
       ? `${plural(ready.length, 'result')} ready`
       : `Thinking about ${running[0].about}…`;
-  chip.onclick = () => openJob(ready[0] ?? running[0]);
+  chip.onclick = () => openAnyJob(ready[0] ?? running[0]);
+}
+
+/*
+ * Each kind of job to the place that knows what its result is. The chip
+ * counts every job, but only feedback reads as feedback: a "read my material"
+ * job opened in the feedback panel was marked read and its proposal lost.
+ */
+function openAnyJob(job) {
+  if (job.kind === 'material') return openMaterialJob(job);
+  return openJob(job);
 }
 
 async function openJob(job, reveal = true) {
@@ -7813,10 +7880,41 @@ let openDraftId = null;
  */
 let draftsInList = 0;
 
+/*
+ * Sent workspaces quiet for two weeks are closed by the server when a save is
+ * opened, or when asked — and no longer by `GET /workspace`, which made
+ * reading the list a write. Nothing asked, so a save left open for days kept
+ * every stale space in the list. The Workspace view asks the first time it is
+ * opened in a page, and redraws the list only if that removed something it is
+ * showing. `listed` is the list load started beside it, so the two are
+ * compared once both have answered, whichever order they did it in.
+ */
+let workspacesRetireAsked = false;
+
+async function retireStaleWorkspaces(listed) {
+  if (workspacesRetireAsked) return;
+  workspacesRetireAsked = true;
+  try {
+    const [{ drafts }] = await Promise.all([
+      api('/workspace/retire', { method: 'POST' }),
+      Promise.resolve(listed).catch(() => {}),
+    ]);
+    const left = new Set((drafts ?? []).map((d) => d.id));
+    if (draftIdsInList.some((id) => !left.has(id))) await loadDrafts();
+  } catch {
+    // Housekeeping. The list is already on screen; a save whose git will not
+    // answer still shows its workspaces.
+  }
+}
+
+/** The ids the list was last drawn with, for `retireStaleWorkspaces`. */
+let draftIdsInList = [];
+
 async function loadDrafts() {
   const { drafts } = await api('/workspace');
   const list = $('#draft-list');
   draftsInList = drafts.length;
+  draftIdsInList = drafts.map((d) => d.id);
 
   if (drafts.length === 0) {
     setChildren(
@@ -9554,7 +9652,10 @@ async function editAnswer(item) {
           : {
               ...a,
               variants: a.variants.map((x) =>
-                x.id === v.id ? { ...x, text: answer.answer.trim(), ...(label ? { label } : {}) } : x,
+                // An emptied box clears the label: `undefined` leaves the key
+                // out of the JSON, and the bank is written as sent. Spreading
+                // only a non-empty label kept the old one, whatever was typed.
+                x.id === v.id ? { ...x, text: answer.answer.trim(), label: label || undefined } : x,
               ),
             },
       );
@@ -10223,10 +10324,15 @@ function pageDefaults(config) {
   // on rather than blanks that mean "whatever the app thinks".
   const inForce = { fontSizePt: 10.5, marginIn: 0.45, spacing: 1, paper: 'letter', ...now };
 
+  /*
+   * `inForce` follows each save that lands, so a later one that fails puts
+   * the box back to what is saved now, not to what the panel was drawn with.
+   */
   const save = async (patch, revert) => {
     try {
       const saved = await api('/config', { method: 'PUT', body: JSON.stringify({ layout: patch }) });
       if (state.store?.config) state.store.config.layout = saved.layout;
+      Object.assign(inForce, patch);
       setStatus('Page settings saved');
       // Every resume is set on this, including the one on screen.
       scheduleRender();
@@ -10237,12 +10343,26 @@ function pageDefaults(config) {
   };
 
   const number = (key, label, attrs, hint) => {
-    const was = String(inForce[key]);
-    const box = el('input', { type: 'number', value: was, ...attrs });
+    const box = el('input', { type: 'number', value: String(inForce[key]), ...attrs });
+    const revert = () => { box.value = String(inForce[key]); };
     box.onchange = () => {
-      const n = Number(box.value);
-      if (!Number.isFinite(n)) { box.value = was; return; }
-      save({ [key]: n }, () => { box.value = was; });
+      /*
+       * An empty box is not a number: `Number('')` is 0, and 0pt type on
+       * every resume in the save is not what clearing a box means. Nor is a
+       * value outside the box's own min and max, which the browser shows but
+       * does not enforce on a typed value.
+       */
+      const typed = box.value.trim();
+      const n = Number(typed);
+      const min = Number(attrs.min);
+      const max = Number(attrs.max);
+      if (typed === '' || !Number.isFinite(n)) { revert(); return; }
+      if (n < min || n > max) {
+        revert();
+        setStatus(`${label} must be between ${min} and ${max}`, true);
+        return;
+      }
+      save({ [key]: n }, revert);
     };
     return el('label', { className: 'f' }, [
       el('div', { className: 'lbl', textContent: label }),
@@ -10257,8 +10377,7 @@ function pageDefaults(config) {
   ]);
   paper.value = inForce.paper;
   paper.onchange = () => {
-    const was = inForce.paper;
-    save({ paper: paper.value }, () => { paper.value = was; });
+    save({ paper: paper.value }, () => { paper.value = inForce.paper; });
   };
 
   return el('div', { className: 'page-defaults' }, [
@@ -10293,7 +10412,9 @@ function pageDefaults(config) {
  * without having to work it out from a date.
  */
 function temporaryLife(config, expiring) {
-  const was = String(config.resumes?.temporaryDays ?? 7);
+  // What is saved, kept up to date by each save that lands, so a later one
+  // that fails puts back what is saved now rather than what was drawn.
+  let was = String(config.resumes?.temporaryDays ?? 7);
   const box = el('input', { type: 'number', value: was, step: '1', min: '0', max: '3650' });
 
   const due = expiring?.due ?? [];
@@ -10309,10 +10430,22 @@ function temporaryLife(config, expiring) {
   });
 
   box.onchange = async () => {
-    const n = Number(box.value);
-    if (!Number.isFinite(n)) { box.value = was; return; }
+    /*
+     * An empty box puts back what is saved. `Number('')` is 0, and 0 here
+     * switches the sweep off — the one setting whose value deletes things,
+     * changed by clearing a box to type a new number into it.
+     */
+    const typed = box.value.trim();
+    const n = Number(typed);
+    if (typed === '' || !Number.isFinite(n)) { box.value = was; return; }
+    if (!Number.isInteger(n) || n < 0 || n > 3650) {
+      box.value = was;
+      setStatus('Days to keep them must be a whole number from 0 to 3650', true);
+      return;
+    }
     try {
       await api('/config', { method: 'PUT', body: JSON.stringify({ resumes: { temporaryDays: n } }) });
+      was = String(n);
       setStatus(n > 0 ? `Temporary resumes go after ${plural(n, 'day')}` : 'Temporary resumes are no longer swept');
       loadProjectSettings().catch(() => {});
     } catch (err) {
@@ -10469,6 +10602,21 @@ async function loadProjectSettings() {
         : 'Everything is saved.',
   });
 
+  const pushButton = el('button', {
+    className: 'primary',
+    textContent: 'Push Backup',
+    disabled: !info.remote.url,
+    onclick: async () => {
+      setResult('Pushing…');
+      try {
+        const res = await api('/config/store/push', { method: 'POST' });
+        setResult(res.output, res.ok ? 'ok' : 'bad');
+      } catch (err) {
+        setResult(err.message, 'bad');
+      }
+    },
+  });
+
   setChildren(
     box,
     el('label', { className: 'row' }, [autoCommit, el('span', { textContent: 'Automatically Save History' })]),
@@ -10531,25 +10679,19 @@ async function loadProjectSettings() {
               body: JSON.stringify({ url: remote.value.trim() }),
             });
             setResult(status.url ? describeRemote(status) : 'Remote removed. The save is local only.', 'ok');
+            /*
+             * The push button was drawn from the remote this panel opened
+             * with, so a remote saved just now left it greyed out until the
+             * panel was rebuilt — and one removed left it live, pushing to
+             * nothing. It follows what is saved.
+             */
+            pushButton.disabled = !status.url;
           } catch (err) {
             setResult(err.message, 'bad');
           }
         },
       }),
-      el('button', {
-        className: 'primary',
-        textContent: 'Push Backup',
-        disabled: !info.remote.url,
-        onclick: async () => {
-          setResult('Pushing…');
-          try {
-            const res = await api('/config/store/push', { method: 'POST' });
-            setResult(res.output, res.ok ? 'ok' : 'bad');
-          } catch (err) {
-            setResult(err.message, 'bad');
-          }
-        },
-      }),
+      pushButton,
     ]),
     result,
   );
@@ -11157,10 +11299,14 @@ async function loadSettings() {
           args: args.value.split(/\s+/).filter(Boolean),
           model: model.value.trim(),
           models: Object.fromEntries([...perTask].map(([key, box]) => [key, box.value.trim()])),
-          effort: effortValue() || undefined,
+          // `null`, not `undefined`: JSON drops an undefined, and the server
+          // merges, so "As it comes" used to leave the old effort in force.
+          // A null tells it to remove the key and go back to the default.
+          effort: effortValue() || null,
           timeoutMs: Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 180_000,
         },
-        latex: { engine: engine.value || undefined },
+        // And "Auto-detect" is the absence of an engine, for the same reason.
+        latex: { engine: engine.value || null },
       }),
     });
     /*
@@ -12619,7 +12765,9 @@ function setupTabs() {
         // open draft was drawn. See `drawResumeChoices`.
         const picker = $('#draft-editor select.draft-resume');
         if (picker && draftSave.current) drawResumeChoices(picker, draftSave.current);
-        loadDrafts().catch((e) => setStatus(e.message, true));
+        const listed = loadDrafts();
+        listed.catch((e) => setStatus(e.message, true));
+        retireStaleWorkspaces(listed);
       }
       if (btn.dataset.tab === 'applications') loadApplications().catch((e) => setStatus(e.message, true));
       if (btn.dataset.tab === 'letters') loadLetters().catch((e) => setStatus(e.message, true));

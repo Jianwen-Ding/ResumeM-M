@@ -1351,3 +1351,44 @@ describe('a label that says which version of an answer it is', () => {
     expect(m.confident).toBe(false);
   });
 });
+
+/*
+ * An address asked for a box at a time, or qualified some other way.
+ * "Address Line1" has no word break between the line and its number, so
+ * `address\s*(line|[12])\b` never reached it; and "current full address"
+ * names no word the list knew.
+ */
+describe('an address however a form asks for it', () => {
+  it('refuses the wordings the list missed, and still the ones it had', () => {
+    for (const q of [
+      'Address Line1',
+      'Address Line2',
+      'address line1*',
+      'What is your current full address?',
+      'Current address',
+      'Permanent address',
+      'What is your address?',
+      'Address',
+      // The ones it already refused.
+      'Address Line 1',
+      'Address Line 2',
+      'Address 1',
+      'What is your home address?',
+      'Please give your mailing address.',
+      'Street address',
+      'Zip code',
+    ]) {
+      expect(isSensitiveQuestion(q), q).toBe(true);
+    }
+    // And still not an email or a web address.
+    for (const q of [
+      'What is your email address for this application?',
+      'Current email address',
+      'Your email address',
+      'Website address',
+      'Why do you want to work here?',
+    ]) {
+      expect(isSensitiveQuestion(q), q).toBe(false);
+    }
+  });
+});
