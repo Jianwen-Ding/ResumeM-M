@@ -1268,8 +1268,11 @@ function alreadyThere(items, text, where) {
  * — the preview flickers and the fit line goes to "Compiling…" because
  * somebody collapsed a heading.
  */
+/** Edits made on screen, counted; see `discardStuckSave`. */
+let editsMade = 0;
 function markDirty(message = 'Changed', { recompile = true } = {}) {
   state.dirty = true;
+  editsMade++;
   /*
    * An edit past a redo throws the redo away — now, not when the save lands.
    *
@@ -2096,6 +2099,7 @@ async function retryStuckSave() {
  */
 async function discardStuckSave() {
   const id = state.resumeId;
+  const edits = editsMade;
   clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
   /*
@@ -2110,6 +2114,23 @@ async function discardStuckSave() {
     // The Retry as a whole, so what it says has been said before this does.
     await retryingStuck?.catch(() => undefined);
     await autoSaving?.catch(() => undefined);
+    /*
+     * And what is unsaved after the wait has to still be the edit that was
+     * refused. `id` was read before it, and the wait is as long as a save:
+     * an edit typed meanwhile, or another resume opened once the Retry had
+     * landed, left `state.dirty` set — and the discard then threw away an
+     * edit nobody had seen refused, or the other resume's. So a different
+     * resume, or an edit made since Discard was pressed, stops it, and says
+     * why; that edit saves as edits do.
+     */
+    if (state.resumeId !== id) {
+      setStatus('Another resume was opened while the retry finished, so nothing was discarded.');
+      return;
+    }
+    if (editsMade !== edits) {
+      setStatus('The resume was edited while the retry finished, so nothing was discarded.');
+      return;
+    }
     if (!state.dirty) {
       setSaveState('saved');
       setStatus('The change had already saved, so there was nothing to discard.');

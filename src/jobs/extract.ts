@@ -1179,9 +1179,31 @@ export function companyFromUrl(url: string | undefined): string | undefined {
     const named = board?.trim() ? (knownEmployer(board) ?? titleCased(board)) : undefined;
     return named && !isRegion(named) && !isSeasonPhrase(named) && !isFieldOfWork(named) ? named : undefined;
   }
+  /*
+   * Read off the host and the path only, and only where the system's own host
+   * is the page's host.
+   *
+   * Matched anywhere in the address, a tracker named in a query string —
+   * `?ref=acme.csod.com`, `?next=https://acme.homerun.co/x`, a bank's
+   * `?partner=acme.icims.com` — made a loan form an employer's careers page,
+   * and so a job application. So each pattern is tried against the host and
+   * path together, with no query or fragment, and has to start at the start
+   * of the host or of one of its labels and run to the end of the host: the
+   * same address in the path of somebody else's site is not that system.
+   */
+  let host = '';
+  let target = '';
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`);
+    host = parsed.hostname.toLowerCase();
+    target = host + parsed.pathname;
+  } catch {
+    return undefined;
+  }
   for (const [re, group] of patterns) {
-    const m = re.exec(url);
-    const raw = m?.[group];
+    const m = re.exec(target);
+    const onTheHost = m && m.index < host.length && (m.index === 0 || target[m.index - 1] === '.') && m.index + m[0].length >= host.length;
+    const raw = onTheHost ? m?.[group] : undefined;
     if (raw) {
       /*
        * iCIMS names a tenant for the careers site as often as for the
@@ -1189,7 +1211,7 @@ export function companyFromUrl(url: string | undefined): string | undefined {
        * front are the site's. Atlassian's Americas portal, taken as it came,
        * filed a job under "Careers Americas".
        */
-      const word = /\.icims\.com/i.test(url)
+      const word = /\.icims\.com$/i.test(host)
         ? raw.replace(/^(?:(?:careers?|jobs?)(?:-?(?:us|usa|na|global|intl|international))?|uscareers|external|internal|campus)-(?=[\w-]{2,})/i, '')
         : raw;
       /*
@@ -2262,6 +2284,22 @@ export interface PageVerdict {
  * missing, and once the form had to show a job somewhere (see `forAJob`) the
  * tracker's address was the only evidence their quick-apply pages carried.
  */
+/*
+ * Words in an address's path that say the form is for something other than a
+ * job — see `careersAddress` in `classifyPage` — unless a role's name follows,
+ * as in `/jobs/loan-officer`.
+ */
+const NOT_A_JOB_PATH =
+  /(?:^|[/_.-])(?:loans?|mortgages?|admissions?|registrations?|register|enrol(?:l)?(?:ment)?s?|events?|fairs?|insurance|rentals?|lettings?|tenanc(?:y|ies)|leases?|quotes?)(?![a-z])(?![_-](?:officers?|advis[eo]rs?|analysts?|specialists?|agents?|underwriters?|processors?|managers?|coordinators?|consultants?|representatives?|associates?|assistants?|planners?|brokers?|clerks?|leads?|directors?|counsel(?:l?ors?)?|recruiters?|officer))/;
+
+function decodeURIComponentSafe(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
 const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|applytojob|successfactors|brassring|pinpointhq|personio|comeet|zohorecruit|myjobs\.adp|workforcenow\.adp|recruiting\.adp)\b/i;
 const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y|ies)|apply|application|hiring|req|requisition)(\/|$|[?#])/i;
 const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
@@ -2388,7 +2426,13 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   };
 
   if (/"@type"\s*:\s*"?JobPosting/i.test(html)) add(6, 'structured JobPosting data');
-  if (ATS.test(link)) add(4, 'applicant tracking system');
+  /*
+   * By the host, as the boards below are. Read anywhere in the address, a
+   * tracker's name in a query string — `?partner=acme.icims.com`, a
+   * `?ref=jobs.lever.co/acme` — counted a bank's loan form as on a tracker.
+   */
+  const onATracker = ATS.test(hostOf(url));
+  if (onATracker) add(4, 'applicant tracking system');
   /*
    * By the host. The whole address said "LinkedIn" for any posting a board
    * sent you to: ADP tags its links `?rb=LINKEDIN`, and Lever and Greenhouse
@@ -2566,7 +2610,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * job's, by its path or its host: a news story's number is not one.
    */
   const numberedPosting =
-    Boolean(jobNumberIn(url)) && (JOB_PATH.test(link) || ATS.test(link) || BOARD.test(hostOf(url))) && described >= 3;
+    Boolean(jobNumberIn(url)) && (JOB_PATH.test(link) || onATracker || BOARD.test(hostOf(url))) && described >= 3;
   const namesARole =
     !thread &&
     !notAPosting &&
@@ -2628,19 +2672,46 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    *   which is where the bank's loan form lives;
    * - a LinkedIn profile field, which a loan, a lease, an insurer and a
    *   university have no use for.
+   *
+   * Each of those was then found reading too much as a job:
+   *
+   * - the careers address was tested on the whole address, so a loan form
+   *   at `/loans/apply?returnTo=/careers/` or `#jobs` had one. It is the path
+   *   and the host now, nothing after them;
+   * - and a careers-looking host or path is not enough when the path says
+   *   what else it is for: a credit union's `jobs.example-cu.org/loans/apply`,
+   *   `/job/loan-application`, a university's
+   *   `/careers/events/fair-registration`. A loan, a mortgage, an admission,
+   *   a registration, an event or fair, insurance or a rental in the path
+   *   takes the careers address away — unless the word is the start of a
+   *   role's name, `/jobs/loan-officer`, `/careers/admissions-counselor`;
+   * - a LinkedIn field asked for by an MBA admission or an accelerator's
+   *   founder form as readily as by an employer, so on its own it says
+   *   nothing. It counts with a job's number in the address beside it.
    */
-  const careersAddress = /\/(?:careers?|jobs?)(?:\/|$|[?#])/i.test(link.replace(/^[a-z]+:\/\/[^/]*/i, '')) ||
-    /^(?:careers?|jobs?)\./.test(hostOf(url));
+  const careersAddress = (() => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url ?? '');
+    } catch {
+      return { careers: false, otherPurpose: false, numbered: false };
+    }
+    const where = decodeURIComponentSafe(parsed.pathname).toLowerCase();
+    const otherPurpose = NOT_A_JOB_PATH.test(where);
+    const careers = /\/(?:careers?|jobs?)(?:\/|$)/.test(where) || /^(?:careers?|jobs?)\./.test(hostOf(url));
+    const numbered = Boolean(jobNumberIn(url)) || /\/(?:apply|application|jobs?|careers?)\/[a-z0-9_-]*\d/.test(where);
+    return { careers: careers && !otherPurpose, otherPurpose, numbered };
+  })();
   const asksForLinkedIn =
     /<(?:input|textarea)\b[^>]*\b(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*linked[\s_-]*in/i.test(html) ||
     /<label\b[^>]*>[^<]*linked\s*in\b/i.test(html);
   const forAJob =
     /"@type"\s*:\s*"?JobPosting/i.test(html) ||
-    ATS.test(link) ||
+    onATracker ||
     BOARD.test(hostOf(url)) ||
     Boolean(companyFromUrl(url)) ||
-    careersAddress ||
-    asksForLinkedIn ||
+    careersAddress.careers ||
+    (asksForLinkedIn && careersAddress.numbered && !careersAddress.otherPurpose) ||
     uploadsResume ||
     namesARole ||
     countIn(text, JOB_FORM_WORDS) > 0;

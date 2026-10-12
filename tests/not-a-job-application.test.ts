@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyPage, JOB_SHAPED } from '../src/jobs/extract.js';
+import { classifyPage, companyFromUrl, JOB_SHAPED } from '../src/jobs/extract.js';
 
 /*
  * Forms that are applications, but not for a job.
@@ -66,6 +66,58 @@ describe('an application form that is not for a job', () => {
 });
 
 /*
+ * And the ones that came back once quick-apply pages were let in by their
+ * address and a LinkedIn field. The careers address was read off the whole
+ * URL, query and fragment too; a tracker's name in a query string made the
+ * page that tracker; a `jobs.` host or a `/job/` segment counted whatever the
+ * rest of the path said; and a LinkedIn field counted on its own, which an
+ * MBA admission and an accelerator's founder form both ask for.
+ */
+const MBA = (extra = '') => `<!doctype html><html><head><title>MBA application | Example University</title></head><body>
+<h1>Apply for the MBA programme</h1>
+<p>Requirements: transcripts and two references. Full-time and part-time study.</p>
+<form><label>First name<input name="first_name"></label><label>Last name<input name="last_name"></label>
+<label>Email<input type="email" name="email"></label><label>Phone number<input name="phone"></label>
+${extra}
+<label>Why do you want to study here?<textarea name="why"></textarea></label>
+<button>Submit application</button></form></body></html>`;
+
+const ACCELERATOR = `<!doctype html><html><head><title>Apply to the Spring batch | Example Accelerator</title></head><body>
+<h1>Founder application</h1><p>Requirements: a working prototype.</p>
+<form><label>First name<input name="first_name"></label><label>Last name<input name="last_name"></label>
+<label>Email<input type="email" name="email"></label><label>Phone number<input name="phone"></label>
+<label>LinkedIn URL<input name="linkedin_url"></label><label>Company website<input name="site"></label>
+<button>Submit application</button></form></body></html>`;
+
+describe('a form that only looks like a job application by its address or a LinkedIn field', () => {
+  it.each([
+    ['a loan with /careers/ in its query', LOAN, 'https://bank.example/loans/apply?returnTo=/careers/'],
+    ['a loan with #jobs', LOAN, 'https://bank.example/loans/apply#jobs'],
+    ['a loan under a jobs. host', LOAN, 'https://jobs.example-cu.org/loans/apply'],
+    ['a loan on a /job/ segment', LOAN, 'https://bank.example/job/loan-application'],
+    ['a loan with a tracker’s host in its query', LOAN, 'https://bank.example/loans/apply?partner=acme.icims.com'],
+    ['a loan with a Lever address in its query', LOAN, 'https://bank.example/loans/apply?utm_campaign=leverage&ref=jobs.lever.co/acme'],
+    ['a loan with a Cornerstone tenant in its query', LOAN, 'https://bank.example/loans/apply?ref=acme.csod.com'],
+    ['a loan with a Homerun address to go on to', LOAN, 'https://bank.example/loans/apply?next=https://acme.homerun.co/x'],
+    ['an MBA admission with a LinkedIn field', MBA('<label>LinkedIn profile<input name="linkedin"></label>'), 'https://uni.example/admissions/mba/apply'],
+    ['an MBA admission with a LinkedIn placeholder', MBA('<label>Profile URL<input name="url" placeholder="https://linkedin.com/in/you"></label>'), 'https://uni.example/admissions/mba/apply'],
+    ['an accelerator’s founder form with a LinkedIn field', ACCELERATOR, 'https://accelerator.example/apply'],
+    ['a career-fair registration under /careers', MBA(), 'https://uni.example/careers/events/fair-registration'],
+  ])('is not a job application: %s', (_name, html, url) => {
+    expect(classifyPage(html, url).kind).toBe('none');
+  });
+
+  it('reads an employer from a tracker’s own host only', () => {
+    expect(companyFromUrl('https://bank.example/loans/apply?ref=acme.csod.com')).toBeUndefined();
+    expect(companyFromUrl('https://bank.example/loans/apply?next=https://acme.homerun.co/x')).toBeUndefined();
+    expect(companyFromUrl('https://bank.example/acme.icims.com/apply')).toBeUndefined();
+    expect(companyFromUrl('https://acme.homerun.co.example.net/x')).toBeUndefined();
+    expect(companyFromUrl('https://acme.csod.com/ux/ats/careersite/1/home')).toBe('Acme');
+    expect(companyFromUrl('https://boards.greenhouse.io/acme/jobs/123')).toBe('Acme');
+  });
+});
+
+/*
  * And the forms that are, which have to stay so. Each carries at least one
  * thing only a job application has — a résumé, a tracker's address, a job's
  * own questions — and some carry only one.
@@ -118,7 +170,9 @@ describe('an application form that is for a job', () => {
    */
   it.each([
     ['an employer’s careers host, by its LinkedIn field', 'https://careers.acme.com/apply/4821', true],
-    ['an employer’s own /apply, by its LinkedIn field alone', 'https://acme.example/apply', true],
+    // A LinkedIn field alone is not enough (see below): with a job's number beside it, it is.
+    ['an employer’s own /apply, by its LinkedIn field and the job’s number', 'https://acme.example/apply/48213', true],
+    ['a careers host whose role starts with "loan"', 'https://careers.bank.example/jobs/loan-officer/apply', false],
     ['an employer’s jobs host with /careers in the path', 'https://jobs.acme.com/careers/apply?step=1', false],
     ['Pinpoint', 'https://acme.pinpointhq.com/en/postings/abc/applications/new', false],
     ['Personio', 'https://acme.jobs.personio.de/job/12345/apply', false],

@@ -271,7 +271,7 @@ export class Repo {
         // No lock, which is the usual answer.
       }
     }
-    if (this.justPulled(dir)) return { kind: 'pull', what: 'a git pull or merge has only just started in the save' };
+    if (this.justPulled(dir, ownLock)) return { kind: 'pull', what: 'a git pull or merge has only just started in the save' };
     return undefined;
   }
 
@@ -288,8 +288,13 @@ export class Repo {
    * which waits synchronously — a second and a half in which the server
    * answered nothing at all. And the app's own fetch is recorded when it
    * makes it (`ownFetch`) and not counted even then.
+   *
+   * Nor is the lock this server's own commit is holding (`ownLock`, as in
+   * `outsideGit`). It was counted here when `outsideGit` had already set it
+   * aside, so the app's own commit and an editor's background fetch together
+   * read as a pull starting, and the write waited for nothing.
    */
-  private justPulled(dir = this.gitDir()): boolean {
+  private justPulled(dir = this.gitDir(), ownLock = Repo.commits.has(this.root)): boolean {
     if (!dir) return false;
     const age = (name: string) => {
       try {
@@ -301,7 +306,8 @@ export class Repo {
     if (age('ORIG_HEAD') < Repo.PULL_SETTLE_MS) return true;
     if (!(age('FETCH_HEAD') < Repo.PULL_SETTLE_MS)) return false;
     if (this.isOwnFetch(dir)) return false;
-    return fs.existsSync(path.join(dir, 'MERGE_HEAD')) || age('index.lock') < Repo.STALE_LOCK_MS;
+    if (fs.existsSync(path.join(dir, 'MERGE_HEAD'))) return true;
+    return !ownLock && age('index.lock') < Repo.STALE_LOCK_MS;
   }
 
   /** `FETCH_HEAD` as this server's own fetch left it, per store. See `justPulled`. */
@@ -941,15 +947,31 @@ export class Repo {
      * And the masked token with the rest of the address edited — a new
      * repository name typed over the old one — keeps the token it stands for,
      * rather than saving three dots as a password.
+     *
+     * But only while it still goes to the same place. The token was put back
+     * whatever else had changed, so `https://alice:•••@gitlab.example.net/…`
+     * or `ssh://alice:•••@attacker.example/…` was saved with the GitHub token
+     * in it, and the next push handed that token to another server. The
+     * secret is put back only when the scheme, host, port and user name are
+     * the ones it was typed for; a path edit on the same host keeps it, as
+     * before. Anywhere else the dots are refused rather than saved: they are
+     * not a password, and quietly dropping them would push without one.
      */
     if (existing && url !== existing) {
       const shown = redactUrl(existing);
       if (url === shown) return;
       const masked = USERINFO.exec(shown)?.[2];
-      if (masked?.includes(REMOTE_MASK) && USERINFO.exec(url)?.[2] === masked) {
+      const given = USERINFO.exec(url)?.[2];
+      if (masked?.includes(REMOTE_MASK) && given === masked && sameServer(url, existing)) {
         const real = USERINFO.exec(existing)![2]!;
         url = url.replace(USERINFO, (_all, scheme: string) => `${scheme}${real}@`);
       }
+    }
+    if (USERINFO.exec(url)?.[2]?.includes(REMOTE_MASK)) {
+      throw new Error(
+        `The address still has the hidden token (${REMOTE_MASK}) in it, but it no longer points at the server that token was saved for. ` +
+          'Type the token into the address again (or leave it out), so it is not sent somewhere it was not meant for.',
+      );
     }
     await this.git(existing ? ['remote', 'set-url', 'origin', url] : ['remote', 'add', 'origin', url]);
   }
@@ -1017,12 +1039,14 @@ export class Repo {
      * `GIT_SSH_COMMAND` is: the environment variable would override it.
      */
     const ownSsh = (await this.git(['config', '--get', 'core.sshCommand']).catch(() => '')).trim();
+    // The commit being pushed, as it is now: see `afterTimedOutPush`.
+    const pushing = (await this.git(['rev-parse', `refs/heads/${branch}`]).catch(() => '')).trim();
     try {
       const { stdout } = await gitWithin(['push', '-u', 'origin', branch], this.root, timeout, Boolean(ownSsh));
       return { ok: true, output: redactUrls(stdout.trim()) || `Pushed ${branch} to origin.` };
     } catch (err) {
       const e = err as { stderr?: string; message?: string; timedOut?: boolean };
-      if (e.timedOut) return this.afterTimedOutPush(branch, url, timeout, Boolean(ownSsh));
+      if (e.timedOut) return this.afterTimedOutPush(branch, pushing, url, timeout, Boolean(ownSsh));
       const said = redactUrls((e.stderr || e.message || 'Push failed').trim());
       /*
        * Rejected because the remote has commits this save does not.
@@ -1061,20 +1085,31 @@ export class Repo {
    * either answer.
    *
    * So the remote is asked, briefly, with `git ls-remote`: if its branch is
-   * this save's commit, the push landed, and the tracking ref and upstream
-   * that `push -u` would have recorded are recorded here. If it is not, the
-   * push did not land. And if the remote will not answer that either, the
-   * message says what is known — that it may or may not have reached it.
+   * the commit that was pushed, the push landed, and the tracking ref and
+   * upstream that `push -u` would have recorded are recorded here.
+   *
+   * If it is not, that is not a "did not land" either, though it used to be
+   * said as one. A `pre-receive` hook that takes its time — a server-side
+   * check — runs before the branch moves, so the remote can still be about to
+   * take the push when it is asked; measured, it landed seconds after being
+   * reported as not landed. So it is said as what was seen: not there yet
+   * when asked, and worth checking again. A branch the remote does not have
+   * at all, or a remote that will not answer, is the same "may or may not".
+   *
+   * And it is compared with the commit that was pushed, taken before the
+   * push, not with HEAD afterwards: an auto-commit made while the push was
+   * waiting moves HEAD on, and the push that did land was then reported as
+   * not landing, its tracking ref left behind.
    */
   private async afterTimedOutPush(
     branch: string,
+    pushed: string,
     url: string,
     timeout: number,
     keepSsh: boolean,
   ): Promise<{ ok: boolean; output: string }> {
     const took = `The push took longer than ${Math.round(timeout / 1000)} seconds and was stopped`;
     const shown = redactUrl(url);
-    const local = (await this.git(['rev-parse', 'HEAD']).catch(() => '')).trim();
     let remote: string | undefined;
     try {
       const { stdout } = await gitWithin(
@@ -1083,35 +1118,37 @@ export class Repo {
         Math.min(VERIFY_TIMEOUT_MS, timeout),
         keepSsh,
       );
-      remote = stdout.split(/\s/)[0] ?? '';
+      remote = stdout.split(/\s/)[0] || undefined;
     } catch {
       remote = undefined;
     }
-    if (local && remote === local) {
-      await this.git(['update-ref', `refs/remotes/origin/${branch}`, local]).catch(() => undefined);
+    if (pushed && remote === pushed) {
+      await this.git(['update-ref', `refs/remotes/origin/${branch}`, pushed]).catch(() => undefined);
       await this.git(['config', `branch.${branch}.remote`, 'origin']).catch(() => undefined);
       await this.git(['config', `branch.${branch}.merge`, `refs/heads/${branch}`]).catch(() => undefined);
       return {
         ok: true,
         output:
           `Pushed ${branch} to origin. ${shown} was slow to finish answering, so the push was stopped after ` +
-          `${Math.round(timeout / 1000)} seconds — but asked afterwards, the remote has this save's latest commit.`,
+          `${Math.round(timeout / 1000)} seconds — but asked afterwards, the remote has the commit that was pushed.`,
       };
     }
     if (remote !== undefined) {
       return {
         ok: false,
         output:
-          `${took}: ${shown} stopped answering. Asked afterwards, the remote does not have this save's latest ` +
-          'commit, so the push did not land; the save here is as it was. Check the address and your connection, and push again.',
+          `${took}: ${shown} stopped answering. Asked afterwards, the remote did not have the commit that was ` +
+          'pushed yet — it had not landed when checked, but a remote that is still working on it may take it ' +
+          'shortly. The save here is as it was. Check again in a minute by pushing again: if it has landed, git ' +
+          'will say everything is up to date.',
       };
     }
     return {
       ok: false,
       output:
-        `${took}: ${shown} stopped answering, and did not answer when asked afterwards either, so the push may ` +
-        'or may not have reached the remote. The save here is as it was. Check the address and your connection, ' +
-        'and push again — if it had landed, git will say everything is up to date.',
+        `${took}: ${shown} stopped answering, and asked afterwards did not say whether it has the commit, so the ` +
+        'push may or may not have reached the remote. The save here is as it was. Check the address and your ' +
+        'connection, and push again — if it had landed, git will say everything is up to date.',
     };
   }
 
@@ -1385,6 +1422,30 @@ function maskUserinfo(all: string, scheme: string, info: string): string {
   const colon = info.indexOf(':');
   if (colon >= 0) return `${scheme}${info.slice(0, colon)}:${REMOTE_MASK}@`;
   return /^https?:\/\/$/i.test(scheme) ? `${scheme}${REMOTE_MASK}@` : all;
+}
+
+/*
+ * Whether two remote addresses go to the same server: the same scheme, host
+ * and port (a port left out counts as that scheme's usual one). The user name
+ * is compared by the caller, through the masked userinfo. See `setRemote`,
+ * which uses this to decide whether a masked token may be put back.
+ */
+const SERVER = /^([a-z][a-z0-9+.-]*):\/\/(?:[^/]*@)?([^/?#]*)/i;
+const USUAL_PORT: Record<string, string> = { http: '80', https: '443', ssh: '22', git: '9418' };
+
+function server(url: string): string | undefined {
+  const m = SERVER.exec(url);
+  if (!m) return undefined;
+  const scheme = m[1]!.toLowerCase();
+  const hostPort = /^(\[[^\]]*\]|[^:]*)(?::(\d*))?$/.exec(m[2]!.toLowerCase());
+  if (!hostPort) return undefined;
+  const host = hostPort[1]!.replace(/\.$/, '');
+  return `${scheme}://${host}:${hostPort[2] || USUAL_PORT[scheme] || ''}`;
+}
+
+function sameServer(a: string, b: string): boolean {
+  const one = server(a);
+  return one !== undefined && one === server(b);
 }
 
 export function redactUrl(url: string): string;

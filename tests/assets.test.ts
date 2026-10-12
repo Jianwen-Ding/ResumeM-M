@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -88,5 +89,34 @@ describe('project assets', () => {
     expect(assets.list()).toHaveLength(1);
     expect(assets.list()[0]?.prompt).toBeUndefined();
     expect(fs.existsSync(file)).toBe(true);
+  });
+
+  /*
+   * A `git pull` that stops on a conflict while a file is being read stops
+   * its record being written, and the record stayed "processing": read back
+   * as an error, and returned as that error by every later import of the
+   * same file, for good.
+   */
+  it('reads a file again on re-import when a pull stopped its record being written', async () => {
+    const { t, assets } = setup();
+    const repo = Repo.forStore(t.dir);
+    await repo.ensure();
+    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], { cwd: repo.root }).toString().trim();
+    const importing = assets.import('notes.md', Buffer.from(text));
+    fs.writeFileSync(path.join(gitDir, 'MERGE_HEAD'), `${'0'.repeat(40)}\n`);
+    await expect(importing).rejects.toThrow(/Saved, not committed: notes\.md is kept.*import the file again/s);
+    fs.rmSync(path.join(gitDir, 'MERGE_HEAD'));
+
+    const [stuck] = assets.list();
+    expect(fs.existsSync(path.join(assets.root, stuck!.original))).toBe(true);
+    const again = await assets.import('notes.md', Buffer.from(text));
+    expect(again.status).toBe('ready');
+    expect(again.items[0]?.text).toBe(text);
+    expect(assets.list()).toHaveLength(1);
+    // And a file that failed for a reason of its own is not read again on every import.
+    const broken = await assets.import('broken.pdf', Buffer.from('this is not a pdf'));
+    const spy = vi.spyOn(assets as unknown as { run: () => unknown }, 'run');
+    expect((await assets.import('broken.pdf', Buffer.from('this is not a pdf'))).status).toBe(broken.status);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

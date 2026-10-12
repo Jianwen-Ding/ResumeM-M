@@ -104,8 +104,18 @@ const DIGIT_RUN = /(?<![\w/]|\d[.-]|[\p{L}_]-)\+?\d+(?:[\s().-]{1,3}\d+)*(?!(?!x
  *   than a country or area code ("+1 4155551234", "(415) 5551234"), or the
  *   number starts with a trunk 0 ("07700 900123").
  */
+/*
+ * A word in front of a run of numbers that says what they are, and it is not
+ * a phone: "IDs 12345 67890", "order 10000 20000", "tickets 00123 45678".
+ * See `phoneIn`.
+ */
+const NAMED_AS_OTHER =
+  /\b(?:ids?|orders?|tickets?|invoices?|refs?|references?|isbns?|batch(?:es)?|ports?|builds?|versions?|issues?|prs?|skus?|items?|cases?|records?|jobs?)\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:#]?\s*$/i;
+
 function phoneIn(text: string): boolean {
-  for (const run of text.match(DIGIT_RUN) ?? []) {
+  for (const found of text.matchAll(DIGIT_RUN)) {
+    const run = found[0];
+    const named = NAMED_AS_OTHER.test(text.slice(Math.max(0, found.index! - 40), found.index));
     const groups = run.match(/\+?\d+/g)!;
     const seps = run.split(/\+?\d+/).slice(1, -1);
     const breakable = (sep: string) => !/[.-]/.test(sep);
@@ -126,6 +136,36 @@ function phoneIn(text: string): boolean {
          */
         if (!plus && bare.length > 2 && bare[0]!.length <= 3 && bare.slice(1).every((x) => x.length === 3)) continue;
         if (bare.some((x, k) => k > 0 && x.length === 1 && between[k - 1]!.includes('.'))) continue;
+        /*
+         * Figures and identifiers in a phone's digit count, which the two
+         * rules below the "+" one let through once they stopped being read as
+         * requisitions: "ISBN 978 0 13 468599 1", "batch 4096 8192 16384",
+         * "order 10000 20000", "IDs 12345 67890".
+         *
+         * - A group of one digit after the first: an ISBN's group or a
+         *   check digit. A phone's one-digit group is the country code or
+         *   trunk at the front ("+1 415…", "1 800…"), or the "(0)" a trunk
+         *   is bracketed as after a country code ("+49 (0)30 1234567").
+         * - Three or more groups of four digits or more each: a list of
+         *   figures. A phone is written in twos, threes and fours, and at
+         *   most two of them are long.
+         * - Two groups with no "+", no dash and no bracket: only in a
+         *   phone's own layout, 10 or 11 digits with a first group of 3 to 5
+         *   ("07700 900123", "98765 43210", "030 12345678"); and not when
+         *   every long group is a round figure ("10000 20000"), or the word
+         *   in front names the numbers as something else ("IDs", "order",
+         *   "tickets").
+         *
+         * "+1 234 567 890" is left refused: written with a country code it
+         * is exactly a phone's shape, whatever the sentence around it says.
+         */
+        if (bare.some((x, k) => k > 0 && x.length === 1 && !(x === '0' && between[k - 1]!.includes('(')))) continue;
+        if (bare.length >= 3 && bare.every((x) => x.length >= 4)) continue;
+        if (bare.length === 2 && !plus && !between.some((sep) => /[-()]/.test(sep))) {
+          if (digits > 11 || bare[0]!.length < 3 || bare[0]!.length > 5) continue;
+          if (named) continue;
+          if (bare.every((x) => /^[1-9]0{3,}$/.test(x))) continue;
+        }
         const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
         if (bare.length > 1 && bare.every(year)) continue;
         /*

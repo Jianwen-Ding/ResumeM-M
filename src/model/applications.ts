@@ -10,7 +10,7 @@ import { clipToBytes, fileNameKey, MAX_NAME_BYTES, syncCurrent } from './current
 import { normalizeApplications } from './normalize.js';
 import { resolveResume, unsendableReason } from './resolve.js';
 import { cleanRole, differentRequisitions, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
-import { looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
+import { companyFromUrl, looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
 // A cycle (answers.ts reads `employerName` and `localDay` from here), safe
 // because neither side calls the other while its module is loading.
 import { sameQuestion } from '../jobs/answers.js';
@@ -422,7 +422,16 @@ export function sameIdentity(company: string, role: string, otherCompany: string
  * dropped is only what never names a different posting; every other
  * parameter, and the path, still has to agree.
  */
-const TRACKING_PARAM = /^(?:utm_.*|gh_src|source|ref)$/i;
+/*
+ * But `ref` and `source` are not always tracking. An employer's own site can
+ * carry the job in them — `/careers/apply?ref=SE-2041`, `/job?source=4821` —
+ * and with both dropped, SE-2041 and SE-3377 were one address, so a send for
+ * the second posting was filed into the first's row. They are dropped only
+ * when their value has no digit in it: `ref=linkedin`, `source=newsletter`
+ * name where the link came from, and a job's id has a number in it.
+ */
+const TRACKING_PARAM = /^(?:utm_.*|gh_src)$/i;
+const TRACKING_UNLESS_NUMBERED = /^(?:source|ref)$/i;
 
 function postingHost(host: string): string {
   return host.toLowerCase().replace(/^www\./, '').replace(/^job-boards\.((?:eu\.)?greenhouse\.io)$/, 'boards.$1');
@@ -434,7 +443,10 @@ function postingAddress(u: string): string {
     parsed.hash = '';
     parsed.hostname = postingHost(parsed.hostname);
     for (const key of [...parsed.searchParams.keys()]) {
-      if (TRACKING_PARAM.test(key)) parsed.searchParams.delete(key);
+      const values = parsed.searchParams.getAll(key);
+      if (TRACKING_PARAM.test(key) || (TRACKING_UNLESS_NUMBERED.test(key) && !values.some((v) => /\d/.test(v)))) {
+        parsed.searchParams.delete(key);
+      }
     }
     if (parsed.pathname.length > 1) parsed.pathname = parsed.pathname.replace(/\/+$/, '');
     return parsed.href;
@@ -449,9 +461,23 @@ function sameAddress(url: string | undefined, other: string | undefined): boolea
   const otherNumber = jobNumberIn(other);
   if (number && otherNumber) {
     const host = postingHost(hostOf(url));
-    return number === otherNumber && host === postingHost(hostOf(other)) && host !== '';
+    return number === otherNumber && host === postingHost(hostOf(other)) && host !== '' && sameTenant(url, other);
   }
   return postingAddress(url) === postingAddress(other);
+}
+
+/*
+ * One site, but not one employer's. Greenhouse and Lever serve every
+ * employer's board from one host and put the employer in the path —
+ * `boards.greenhouse.io/acme/jobs/4012345` — so "the same number on the same
+ * host" matched Globex's posting to Acme's row, with the number the same
+ * only by accident of the address's shape. Where the system names an
+ * employer in the address (`companyFromUrl`), the two have to name the same.
+ */
+function sameTenant(url: string, other: string): boolean {
+  const one = companyFromUrl(url);
+  const two = companyFromUrl(other);
+  return !one || !two || one.toLowerCase() === two.toLowerCase();
 }
 
 /*
@@ -517,6 +543,7 @@ function sameJobAs(
       Boolean(number) &&
       jobNumberIn(row.url) === number &&
       hostOf(row.url) === site &&
+      sameTenant(url!, row.url!) &&
       slug(rolePart(row.role, row.company)) === job);
 }
 

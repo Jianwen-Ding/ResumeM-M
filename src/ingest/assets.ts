@@ -6,7 +6,7 @@ import { READABLE } from './text.js';
 import { runAgent, extractJson } from '../ai/agent.js';
 import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { Store } from '../model/store.js';
-import { Repo, withCommit } from '../git/repo.js';
+import { GitBusyError, Repo, withCommit } from '../git/repo.js';
 
 export interface AssetPoint {
   id: string; text: string; evidence: string; entryId?: string;
@@ -61,7 +61,26 @@ export class Assets {
     const id = createHash('sha256').update(bytes).digest('hex');
     const pending = this.pending.get(id);
     if (pending) return pending;
-    if (fs.existsSync(this.file(id))) return Promise.resolve(this.get(id));
+    /*
+     * A record left at "processing" with nothing running is one whose reading
+     * never got written down — the server stopped, or a `git pull` began while
+     * the file was being read and the record could not be saved over (see
+     * `run`). Returned as it was, it came back as "interrupted" from every
+     * import of the same file, for good. Importing it again reads it again,
+     * from the original already kept; any other record is returned as it is,
+     * so the inbox scan does not redo every file that failed for a reason of
+     * its own.
+     */
+    if (fs.existsSync(this.file(id))) {
+      if (!this.interrupted(id)) return Promise.resolve(this.get(id));
+      this.repo.assertNoOutsideGit();
+      const asset = this.get(id);
+      return this.run(asset, async () => {
+        const result = await ingestFile(this.store.loadConfig(), asset.name, fs.readFileSync(path.join(this.root, asset.original)));
+        Object.assign(asset, { text: result.text, items: result.items, usedAi: result.usedAi, aiError: result.aiError });
+        if (generate) await this.draft(asset);
+      });
+    }
     name = path.basename(name.replace(/\\/g, '/')).replace(/[\x00-\x1f]/g, '').slice(0, 180) || 'file';
     if (name === '.' || name === '..') name = 'file';
     // Not while a pull is half done, and asked before the original and its
@@ -91,13 +110,41 @@ export class Assets {
       if (generate) await this.draft(asset);
     });
   }
+  /** On disk as "processing" with nothing running: see `import`. */
+  private interrupted(id: string): boolean {
+    if (this.pending.has(id)) return false;
+    try {
+      return (JSON.parse(fs.readFileSync(this.file(id), 'utf8')) as Asset).status === 'processing';
+    } catch {
+      return false;
+    }
+  }
   private run(asset: Asset, work: () => Promise<void>): Promise<Asset> {
     asset.status = 'processing'; delete asset.error;
     this.save(asset);
     const result = Promise.resolve().then(async () => {
       try { await work(); asset.status = 'ready'; }
       catch (error) { asset.status = 'error'; asset.error = (error as Error).message; }
-      await withCommit(this.repo, this.store.loadConfig().git.autoCommit, `Import asset: ${asset.name}`, () => this.save(asset));
+      /*
+       * A pull that began while the file was being read stops the record
+       * being written (`withCommit` will not write in the middle of one), and
+       * the record stayed at "processing", read back as an error that every
+       * later import of the file returned. It is left at "processing" on
+       * purpose — that is what lets importing the file again, or Retry, read
+       * it again (see `import`) — and the answer says what did happen: the
+       * file is kept, and the reading of it was not recorded.
+       */
+      try {
+        await withCommit(this.repo, this.store.loadConfig().git.autoCommit, `Import asset: ${asset.name}`, () => this.save(asset));
+      } catch (error) {
+        if (!(error instanceof GitBusyError)) throw error;
+        const what = this.repo.outsideGit()?.what ?? 'a git pull or merge is in progress in the save';
+        throw new Error(
+          `Saved, not committed: ${asset.name} is kept, but ${what}, so what was read from it could not be recorded. ` +
+            `Finish the pull in a terminal first (in ${this.repo.root}, resolve any conflicts and run git commit, or ` +
+            'git merge --abort / git rebase --abort to undo it), then import the file again or press Retry, and it will be read again.',
+        );
+      }
       return asset;
     }).finally(() => this.pending.delete(asset.id));
     this.pending.set(asset.id, result);

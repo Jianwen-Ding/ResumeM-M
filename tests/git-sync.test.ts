@@ -166,6 +166,25 @@ describe('an outside git in the middle of a pull', () => {
     }
   });
 
+  /*
+   * `outsideGit` set the app's own commit lock aside, but `justPulled` did not
+   * get told, so that same lock plus an editor's fetch read as a pull starting.
+   */
+  it("does not take its own commit's lock, with an outside fetch, for a pull", async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    const dir = path.join(root, '.git');
+    fs.writeFileSync(path.join(dir, 'FETCH_HEAD'), 'x');
+    fs.writeFileSync(path.join(dir, 'index.lock'), '');
+    try {
+      expect(repo.outsideGit(true)).toBeUndefined();
+      // Somebody else's lock is still another git at work.
+      expect(repo.outsideGit(false)?.kind).toBe('lock');
+    } finally {
+      fs.rmSync(path.join(dir, 'index.lock'));
+    }
+  });
+
   it('does not hold the next write after its own fetch, when a push is refused', async () => {
     const remote = path.join(root, 'remote.git');
     execFileSync('git', ['init', '--bare', '-q', remote]);
@@ -314,6 +333,34 @@ describe('a remote with a token in its address', () => {
     expect(await repo.getRemote()).toBe('https://alice:ghp_SECRETTOKEN123@127.0.0.1:9/me/renamed.git');
   });
 
+  /*
+   * The token was put back whatever else had changed, so a masked address
+   * pointed at another host or scheme was saved with the real token in it,
+   * and the next push sent that token to the other server.
+   */
+  it('does not put the token back when the address points somewhere else', async () => {
+    const repo = new Repo(root);
+    await repo.ensure();
+    await repo.setRemote(secret);
+    const edits = [
+      'https://alice:•••@gitlab.example.net/me/save.git',
+      'ssh://alice:•••@attacker.example:2222/x.git',
+      'http://alice:•••@127.0.0.1:9/me/save.git',
+      'https://alice:•••@127.0.0.1:10/me/save.git',
+      'https://bob:•••@127.0.0.1:9/me/save.git',
+    ];
+    for (const edit of edits) {
+      await expect(repo.setRemote(edit)).rejects.toThrow(/Type the token into the address again/);
+      expect(await repo.getRemote()).toBe(secret);
+    }
+    // Same server, the host's case and the usual port spelled out: still the same place.
+    await repo.setRemote('https://alice:•••@127.0.0.1:9/me/other.git');
+    expect(await repo.getRemote()).toBe('https://alice:ghp_SECRETTOKEN123@127.0.0.1:9/me/other.git');
+    await repo.setRemote('https://alice:tok2@Example.COM/me/save.git');
+    await repo.setRemote('https://alice:•••@example.com:443/me/save.git');
+    expect(await repo.getRemote()).toBe('https://alice:tok2@example.com:443/me/save.git');
+  });
+
   it('masks an SSH password, and a token with an unencoded ? or # in it', () => {
     expect(redactUrl('ssh://user:secretpw@example.com/a/b.git')).toBe('ssh://user:•••@example.com/a/b.git');
     expect(redactUrl('https://oauth2:tok?en@gitlab.com/a/b.git')).toBe('https://oauth2:•••@gitlab.com/a/b.git');
@@ -367,6 +414,72 @@ describe('pushing', () => {
     expect(result.ok).toBe(true);
     expect(result.output).not.toMatch(/Nothing was changed on the remote/);
     expect((await repo.remoteStatus()).ahead).toBe(0);
+  }, 20_000);
+
+  /*
+   * A slow pre-receive hook runs before the branch moves, so the remote asked
+   * straight after the timeout does not have the commit yet, and takes it a
+   * few seconds later. That was reported as "the push did not land" — and so
+   * was a remote with no branch at all, which says nothing either way.
+   */
+  it('does not call a push that a slow pre-receive hook is still checking one that did not land', async () => {
+    const remote = path.join(root, 'slow.git');
+    execFileSync('git', ['init', '--bare', '-q', remote]);
+    const repo = new Repo(path.join(root, 'here'));
+    fs.mkdirSync(repo.root);
+    await repo.ensure();
+    await repo.setRemote(remote);
+    const branch = (await repo.currentBranch())!;
+    // Like a real server, whose receive-pack is not in this push's process group.
+    git(['config', 'remote.origin.receivepack', 'setsid git-receive-pack'], repo.root);
+    fs.writeFileSync(path.join(remote, 'hooks', 'pre-receive'), '#!/bin/sh\nsleep 3\n', { mode: 0o755 });
+
+    // A remote with no branch yet: unknown, not "did not land".
+    const first = await repo.push(1000);
+    expect(first.ok).toBe(false);
+    expect(first.output).toMatch(/may or may not have reached the remote/);
+    expect(first.output).not.toMatch(/did not land/);
+    await new Promise((done) => setTimeout(done, 3500));
+    expect(git(['rev-parse', `refs/heads/${branch}`], remote).trim()).toBe(git(['rev-parse', 'HEAD'], repo.root).trim());
+
+    // A remote on an older commit: not there yet, worth checking again.
+    fs.writeFileSync(path.join(repo.root, 'b.txt'), 'b\n');
+    await repo.commitAll('b');
+    const second = await repo.push(1000);
+    expect(second.ok).toBe(false);
+    expect(second.output).toMatch(/had not landed when checked/);
+    expect(second.output).toMatch(/may take it shortly/);
+    expect(second.output).not.toMatch(/did not land/);
+    await new Promise((done) => setTimeout(done, 3500));
+    expect(git(['rev-parse', `refs/heads/${branch}`], remote).trim()).toBe(git(['rev-parse', 'HEAD'], repo.root).trim());
+  }, 30_000);
+
+  /*
+   * The remote was compared with HEAD after the timeout, and an auto-commit
+   * made while the push was waiting had moved HEAD on: the push that landed
+   * was reported as not landing.
+   */
+  it('compares the remote with the commit that was pushed, not a later one', async () => {
+    const remote = path.join(root, 'slow.git');
+    execFileSync('git', ['init', '--bare', '-q', remote]);
+    const repo = new Repo(path.join(root, 'here'));
+    fs.mkdirSync(repo.root);
+    await repo.ensure();
+    await repo.setRemote(remote);
+    // The branch moves, then a commit is made here while the hook holds the push open.
+    fs.writeFileSync(
+      path.join(remote, 'hooks', 'post-receive'),
+      `#!/bin/sh\nenv -i PATH="$PATH" HOME="$HOME" git -C '${repo.root}' -c user.name=t -c user.email=t@t commit -q --allow-empty -m later\nsleep 30\n`,
+      { mode: 0o755 },
+    );
+    const pushed = git(['rev-parse', 'HEAD'], repo.root).trim();
+    const branch = (await repo.currentBranch())!;
+
+    const result = await repo.push(1500);
+
+    expect(git(['rev-parse', 'HEAD'], repo.root).trim()).not.toBe(pushed);
+    expect(result.ok).toBe(true);
+    expect(git(['rev-parse', `refs/remotes/origin/${branch}`], repo.root).trim()).toBe(pushed);
   }, 20_000);
 
   it('does not wait on an SSH master that keeps stderr open after the push has finished', async () => {

@@ -236,6 +236,15 @@ describe('personalDetailIn', () => {
     'At Google I led 4 Senior Engineers to drive adoption.',
     'I led 4 engineers to drive adoption.',
     'Req ID: 2024 0012345',
+    // Figures and identifiers in a phone's digit count, refused once two
+    // spaced groups stopped reading as a requisition.
+    'ISBN 978 0 13 468599 1',
+    'batch 4096 8192 16384',
+    'ports 8080 8443 9090',
+    'order 10000 20000',
+    'IDs 12345 67890',
+    'tickets 00123 45678',
+    'revenue grew 100000 200000',
   ])('lets through %j', (text) => {
     expect(personalDetailIn(text)).toBeNull();
   });
@@ -261,6 +270,11 @@ describe('personalDetailIn', () => {
     // Two groups with a space between, which read as a requisition.
     ['07700 900123', 'a phone number'],
     ['Call 98765 43210 after six.', 'a phone number'],
+    ['030 12345678', 'a phone number'],
+    ['+49 (0)30 1234567', 'a phone number'],
+    ['+44 (0) 20 7946 0958', 'a phone number'],
+    // Exactly a phone's shape with a country code, whatever it says around it.
+    ['grew revenue by +1 234 567 890', 'a phone number'],
   ])('refuses %j', (text, what) => {
     expect(personalDetailIn(text)).toBe(what);
   });

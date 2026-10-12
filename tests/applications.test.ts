@@ -1760,6 +1760,12 @@ describe('a corrected row found by its old names', () => {
     ['https://acme.com/careers/software-engineer-intern?id=1', 'https://acme.com/careers/software-engineer-intern?id=2'],
     ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acme/jobs/4012346'],
     ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://jobs.lever.co/globex/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'],
+    // `ref` and `source` carrying the job, not where the link came from: two postings.
+    ['https://acme.com/careers/apply?ref=SE-2041', 'https://acme.com/careers/apply?ref=SE-3377'],
+    ['https://careers.acme.com/job?source=4821', 'https://careers.acme.com/job?source=9932'],
+    // One host and one number, but two employers' boards.
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://job-boards.greenhouse.io/globex/jobs/4012345'],
+    ['https://jobs.lever.co/acme/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b', 'https://jobs.lever.co/globex/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'],
   ])('%s is not the row for a send from %s', (rowUrl, sendUrl) => {
     expect(found(rowUrl, sendUrl)).toBeUndefined();
   });

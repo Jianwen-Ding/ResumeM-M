@@ -158,6 +158,31 @@ describe('a save the server keeps refusing', () => {
     expect(box().checked, 'the saved edit is still on screen').toBe(!was);
   });
 
+  /*
+   * And an edit made while Discard waited for that Retry. The Retry landed,
+   * the new edit left the resume unsaved again, and Discard went on and threw
+   * the new edit away — one nobody had seen refused.
+   */
+  it('does not discard an edit made while it waited for a Retry', async () => {
+    const { data, server } = await boot();
+    const was = box().checked;
+    await refusedEdit();
+
+    server.refuse = false;
+    server.delay = 300;
+    document.querySelector('#btn-save-retry').click();
+    await new Promise((done) => setTimeout(done, 50));
+    document.querySelector('#btn-save-discard').click();
+    await new Promise((done) => setTimeout(done, 50));
+    box().click(); // a new edit, back the other way
+
+    await vi.waitFor(() => expect(document.querySelector('#status').textContent).toMatch(/nothing was discarded/i), { timeout: 4000 });
+    expect(box().checked, 'the new edit is still on screen').toBe(was);
+    await vi.waitFor(() => expect(chip().textContent).toBe('All changes saved'), { timeout: 4000 });
+    expect(data.resumes.find((r) => r.id === 'intern'), 'and it saved').toBeTruthy();
+    expect(box().checked).toBe(was);
+  });
+
   it('is not offered for a server that cannot be reached, which is retried on its own', async () => {
     await boot();
     vi.stubGlobal(
