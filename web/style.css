@@ -406,6 +406,9 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .save.saving { color: var(--faint); }
 .save.unsaved { color: var(--muted); }
 .save.failed { color: var(--bad); font-weight: 500; }
+/* The way out of a save that was refused for good: next to the words that say
+   so, because that is where anyone looking for one will look. */
+.save-stuck { display: inline-flex; gap: 4px; align-items: center; }
 
 /* Docs says "All changes saved in Drive" as quiet text, not as a badge. Same
    here: the state matters, the decoration does not. */
@@ -2071,6 +2074,9 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   #narrow-view { order: 2; }
   #btn-more { order: 3; }
   #save-state { order: 5; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; }
+  /* A row of its own, under the chip: beside it, the chip was squeezed to
+     "N…" and the one thing the buttons answer could not be read. */
+  #save-stuck { order: 9; flex-basis: 100%; }
   #live-state { order: 6; }
   #btn-focus { order: 7; }
   #btn-undo, #btn-redo { order: 8; }
@@ -2289,6 +2295,7 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   .embedded .sticky-toolbar::before { display: none; }
   .embedded .sticky-toolbar { gap: 4px; padding-top: 4px; padding-bottom: 4px; }
   .embedded #save-state { order: 1; flex: none; }
+  .embedded #save-stuck { order: 9; flex-basis: 100%; }
   .embedded #live-state { order: 2; font-size: 0; gap: 0; padding: 4px 6px; }
   .embedded #narrow-view { order: 3; }
   .embedded #btn-focus { order: 4; }

@@ -1063,10 +1063,30 @@ export function fileSentAnswer(
     if (mayLead(already)) existing.default = already.id;
     return;
   }
-  const vid = `v_${Date.now().toString(36)}`;
+  /*
+   * Unique within the item, not merely likely to be. A completion files every
+   * answer it holds in one go, so two answers filed under one item in the
+   * same millisecond were both called `v_<now>`: the default then named
+   * whichever of the two came first rather than the one just filed, and the
+   * editor, which finds the version to change by its id, wrote an edit of one
+   * over both.
+   */
+  const vid = newVariantId(existing.variants, `v_${Date.now().toString(36)}`);
   const added: Variant = { id: vid, label: sent.label, text: sent.answer, ...mark };
   existing.variants.push(added);
   if (mayLead(added)) existing.default = vid;
+}
+
+/**
+ * `stem`, or `stem-2`, `stem-3`… — the first that no variant of the item has.
+ *
+ * A variant is found by its id (the item's `default`, the editor's edit), so
+ * two of one id inside an item are one variant to everything that reads them.
+ */
+export function newVariantId(variants: readonly Pick<Variant, 'id'>[], stem: string): string {
+  let id = stem;
+  for (let n = 2; variants.some((v) => v.id === id); n++) id = `${stem}-${n}`;
+  return id;
 }
 
 export function matchAnswers(

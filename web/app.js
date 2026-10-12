@@ -243,6 +243,16 @@ function draftedFrom(kind) {
  * unless the resume it is pending on has been deleted: see `showWhatIsLeft`.
  */
 async function refreshOnReturn() {
+  /*
+   * The tracker too, when it is the tab on screen. Its list is read when the
+   * tab is opened and then kept, and the extension files and corrects rows
+   * while this tab is away. An Edit made on the kept list started from names
+   * that were no longer the row's. Read only when it is showing: the list is
+   * read again anyway whenever the tab is opened.
+   */
+  if (lastApplications && $('#tab-applications')?.classList.contains('active')) {
+    loadApplications().catch(() => undefined);
+  }
   if (!state.store || state.masterView) return;
   const pending = () => Boolean(state.dirty || autoSaveTimer || autoSaving || inlineSaves.size > 0);
   const had = state.resumeId;
@@ -754,7 +764,7 @@ async function stepOnce(direction) {
   if (state.dirty) await autoSave().catch(() => {});
   if (state.dirty) {
     setStatus(
-      `That change has not saved yet, so nothing is ${direction === 'undo' ? 'undone' : 'redone'} until it does.`,
+      `That change has not saved yet, so nothing is ${direction === 'undo' ? 'undone' : 'redone'} until it does.${stuckHint()}`,
       true,
     );
     return;
@@ -1464,6 +1474,8 @@ async function autoSave({ leaving = false } = {}) {
         state.dirty = true; // it did not land; try again on the next edit
         if (!unreachable(err)) {
           setSaveState('failed', err.message);
+          // Nothing will send it again on its own, so say how. See `showSaveStuck`.
+          showSaveStuck(true);
           return;
         }
         /*
@@ -2001,6 +2013,9 @@ const readStoreNow = () => unlessLeaving(api('/store').catch(() => undefined));
 function setSaveState(mode, detail) {
   const chip = $('#save-state');
   if (!chip) return;
+  // Whatever the chip says next, the refused save it offered a way out of is
+  // no longer what it is about. `autoSave` puts the way out back when it is.
+  showSaveStuck(false);
   // The resume saving says nothing about a line edited in place that has not.
   if (mode === 'saved' && inlineRetrying.size > 0) {
     mode = 'failed';
@@ -2016,6 +2031,80 @@ function setSaveState(mode, detail) {
           ? `Not saved — ${detail ?? 'the server did not accept it'}`
           : 'Unsaved changes';
   embed?.announce();
+}
+
+/**
+ * A save of the resume the server refused for good, and the way out of it.
+ *
+ * Undo, switching resumes, Restore and asking for feedback each wait for the
+ * edit on screen to save first, and rightly: going on would throw the edit
+ * away under a word that says otherwise. But a save refused for a reason
+ * that does not pass by itself — the server failing (a 500), or a resume
+ * changed elsewhere three times over while this edit was rebased onto it —
+ * was only ever tried again on the next edit. Every one of those actions
+ * then said "has not saved yet" and stopped, and nothing on the screen said
+ * what to do about it: reloading the page was the only way out, and nobody
+ * would guess it.
+ *
+ * So the chip is joined by the two ways out there are. Retry sends the edit
+ * again, for a server that has got over it. Discard gives the edit up, on
+ * purpose and said so, and puts the editor back on what is saved.
+ *
+ * Not for a server that cannot be reached. That one is already asked again
+ * on a timer, and the chip says so; offering to discard there would invite
+ * throwing away an edit that is about to save on its own.
+ */
+let saveStuck = false;
+function showSaveStuck(on) {
+  saveStuck = on;
+  const box = $('#save-stuck');
+  if (box) box.hidden = !on;
+}
+
+/** The end of a "has not saved yet" refusal: where the way out is, when there is one. */
+const stuckHint = () => (saveStuck ? ' Retry it or discard it beside “Not saved”.' : '');
+
+/** Send the refused edit again. */
+async function retryStuckSave() {
+  if (!state.resumeId) return;
+  // A refused save leaves `state.dirty` set; this is that edit, sent again.
+  state.dirty = true;
+  await autoSave().catch(() => {});
+  if (!state.dirty) setStatus('Saved.');
+}
+
+/**
+ * Give up the refused edit and go back to the resume as it is saved.
+ *
+ * Every place it is still held goes: the overlay on screen (`clearEdits`),
+ * the copy rebased onto a newer save that only this page had
+ * (`rebasedOnto`, which `adoptStore` would otherwise keep over the reload),
+ * a save still counting down, and the copy kept in this browser for a rescue
+ * (`dropRescue`), which would otherwise offer the edit back on the next
+ * visit. Then the store is read again, so what is drawn is what is saved.
+ */
+async function discardStuckSave() {
+  const id = state.resumeId;
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  // A Retry still out finishes first; whatever it did, this then undoes on screen.
+  if (autoSaving) await autoSaving.catch(() => undefined);
+  clearEdits();
+  if (rebasedOnto?.id === id) rebasedOnto = null;
+  if (id) dropRescue(id);
+  try {
+    await loadStore();
+  } catch (err) {
+    setStatus(`The change was dropped, but the saved resume could not be read again: ${err.message}`, true);
+    render();
+    return;
+  }
+  clearTimeout(renderTimer);
+  renderToken++;
+  setSaveState('saved');
+  render();
+  scheduleRender();
+  setStatus('Unsaved change discarded.');
 }
 
 /* ------------------------------------------------------------------ *
@@ -7172,7 +7261,7 @@ async function askFeedback(master = false) {
   button.disabled = true;
   try {
     await flushEdits();
-    if (state.dirty) throw new Error('Save your edits before requesting feedback');
+    if (state.dirty) throw new Error(`Save your edits before requesting feedback.${stuckHint()}`);
     setStatus(master ? 'Preparing Master Feedback…' : 'Preparing feedback…');
     const { job } = await api('/ai/feedback', {
       method: 'POST',
@@ -7320,7 +7409,7 @@ async function askBulletFeedback(entry, bullet) {
 async function askSourceFeedback(target) {
   try {
     await flushEdits();
-    if (state.dirty) throw new Error('Save your edits before requesting feedback');
+    if (state.dirty) throw new Error(`Save your edits before requesting feedback.${stuckHint()}`);
     const { job } = await api('/ai/feedback', {
       method: 'POST',
       body: JSON.stringify({ ...target, background: true }),
@@ -7679,9 +7768,28 @@ function drawApplications({ applications, stats, current }) {
               'The files and the record of what was sent stay where they are.',
               async (v) => {
                 if (!String(v.company ?? '').trim() || !String(v.role ?? '').trim()) return 'A company and a role cannot be left empty.';
+                /*
+                 * Only what was changed in the form, measured against what the
+                 * form opened with.
+                 *
+                 * The row the form is filled from is the list as it was last
+                 * drawn, which can be a while ago: the card, the CLI or another
+                 * tab may have corrected the company since. Sending both names
+                 * every time wrote the old company straight back over that
+                 * correction when only the role had been touched here, with
+                 * nothing to say it had happened.
+                 */
+                const changed = {};
+                for (const name of ['company', 'role']) {
+                  if (String(v[name] ?? '').trim() !== String(a[name] ?? '').trim()) changed[name] = v[name];
+                }
+                if (Object.keys(changed).length === 0) {
+                  loadApplications().catch(() => undefined);
+                  return undefined;
+                }
                 await api(`/applications/${encodeURIComponent(a.id)}`, {
                   method: 'PATCH',
-                  body: JSON.stringify({ company: v.company, role: v.role }),
+                  body: JSON.stringify(changed),
                 });
                 setStatus('Application corrected');
                 if (openApplicationId === a.id) openApplication(a.id);
@@ -9827,18 +9935,31 @@ async function editAnswer(item) {
         body: JSON.stringify({ itemId: item.id, question: item.question, answer: answer.answer, label: named }),
       });
     } else {
+      /*
+       * Only what was changed in the box, measured against what it opened
+       * with, put onto the version as the server has it now.
+       *
+       * The box is filled from the bank as it was last drawn, and the
+       * extension keeps answers into that bank while this tab sits open. The
+       * whole bank is read again before writing, but the version was then
+       * given both the text and the label from the box — so fixing a typo
+       * here put back the label the version had when the list was drawn,
+       * over a new one set elsewhere since, and the other way about.
+       */
+      const changed = {};
+      if (answer.answer.trim() !== String(v?.text ?? '').trim()) changed.text = answer.answer.trim();
+      // An emptied box clears the label: `undefined` leaves the key out of
+      // the JSON, and the bank is written as sent. Spreading only a non-empty
+      // label kept the old one, whatever was typed.
+      if (label !== String(v?.label ?? '').trim()) changed.label = label || undefined;
+      if (Object.keys(changed).length === 0) {
+        loadLetters();
+        return undefined;
+      }
       const answers = (await api('/store')).answers.map((a) =>
         a.id !== item.id
           ? a
-          : {
-              ...a,
-              variants: a.variants.map((x) =>
-                // An emptied box clears the label: `undefined` leaves the key
-                // out of the JSON, and the bank is written as sent. Spreading
-                // only a non-empty label kept the old one, whatever was typed.
-                x.id === v.id ? { ...x, text: answer.answer.trim(), label: label || undefined } : x,
-              ),
-            },
+          : { ...a, variants: a.variants.map((x) => (x.id === v.id ? { ...x, ...changed } : x)) },
       );
       await api('/answers', { method: 'PUT', body: JSON.stringify(answers) });
     }
@@ -11981,7 +12102,7 @@ async function restoreResumeVersion(hash) {
       const landed = await flushEdits();
       if (state.dirty) await autoSave().catch(() => {});
       if (state.dirty || !landed) {
-        setStatus('That change has not saved yet, so nothing is restored until it does.', true);
+        setStatus(`That change has not saved yet, so nothing is restored until it does.${stuckHint()}`, true);
         return;
       }
     }
@@ -13030,7 +13151,7 @@ async function leaveResume(go) {
     const landed = await flushEdits();
     if (state.dirty) await autoSave().catch(() => {});
     if (state.dirty || !landed) {
-      setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
+      setStatus(`That change has not saved yet, so the resume on screen stays until it does.${stuckHint()}`, true);
       return false;
     }
 
@@ -13331,6 +13452,8 @@ async function boot() {
     loadVoice();
   };
 
+  if ($('#btn-save-retry')) $('#btn-save-retry').onclick = () => retryStuckSave();
+  if ($('#btn-save-discard')) $('#btn-save-discard').onclick = () => discardStuckSave().catch((e) => setStatus(e.message, true));
   $('#btn-undo').onclick = () => stepHistory('undo');
   $('#btn-redo').onclick = () => stepHistory('redo');
   paintUndo();

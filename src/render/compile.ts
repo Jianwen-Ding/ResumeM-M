@@ -571,9 +571,55 @@ function describe(base: LayoutOptions, used: LayoutOptions): string[] {
  * searched for exactly as one without is. A knob the author already set past
  * its ceiling, or under its floor, stays where they put it.
  */
-function layoutAt(base: LayoutOptions, t: number): LayoutOptions {
+/**
+ * The fit and grow bounds, as numbers the engine will take.
+ *
+ * The layout as written is held to `checkLayoutNumbers` (latex.ts), which
+ * refuses a font, margin or spacing TeX cannot set, with a sentence that
+ * names the setting. The bounds are not the layout, though: they are only how
+ * far the search may go. A hand-edited `fitBounds.minFontSizePt: 2`, a
+ * `growBounds.maxFontSizePt: 48` or a `minSpacing: 0` built fine before that
+ * check, and after it refused the whole build — and said the *font size*
+ * was wrong, quoting a number that appears nowhere as the font size. So a
+ * bound past what can be set is taken as the furthest that can, and one that
+ * is not a number at all (`null`, a word) as the default, and the search
+ * never hands the check a layout it would refuse because of a bound.
+ *
+ * The margin ceiling leaves two inches of type across the page: legal below
+ * half the paper is not the same as settable, and a grow search reaching for
+ * a margin that leaves no line at all would only be spending compiles.
+ */
+export function legalBounds(base: LayoutOptions): {
+  fit: LayoutOptions['fitBounds'];
+  grow: LayoutOptions['growBounds'];
+} {
+  const paper = base.paper === 'a4' ? { w: 8.27, h: 11.69 } : { w: 8.5, h: 11 };
+  const widestMargin = Math.min(paper.w, paper.h) / 2 - 1;
+  const legal = (v: unknown, fallback: number, lo: number, hi: number): number => {
+    const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+    return Math.min(hi, Math.max(lo, n));
+  };
+  const fit: Partial<LayoutOptions['fitBounds']> = base.fitBounds ?? {};
+  const grow: Partial<LayoutOptions['growBounds']> = base.growBounds ?? {};
+  const fitDefault = DEFAULT_LAYOUT.fitBounds;
+  const growDefault = DEFAULT_LAYOUT.growBounds;
+  return {
+    fit: {
+      minFontSizePt: legal(fit.minFontSizePt, fitDefault.minFontSizePt, 4, 40),
+      minSpacing: legal(fit.minSpacing, fitDefault.minSpacing, 0.1, 10),
+      minMarginIn: legal(fit.minMarginIn, fitDefault.minMarginIn, 0, widestMargin),
+    },
+    grow: {
+      maxFontSizePt: legal(grow.maxFontSizePt, growDefault.maxFontSizePt, 4, 40),
+      maxSpacing: legal(grow.maxSpacing, growDefault.maxSpacing, 0.1, 10),
+      maxMarginIn: legal(grow.maxMarginIn, growDefault.maxMarginIn, 0, widestMargin),
+    },
+  };
+}
+
+export function layoutAt(base: LayoutOptions, t: number): LayoutOptions {
   if (t < 0) {
-    const { maxFontSizePt, maxSpacing, maxMarginIn } = base.growBounds ?? DEFAULT_LAYOUT.growBounds;
+    const { maxFontSizePt, maxSpacing, maxMarginIn } = legalBounds(base).grow;
     const grow = (from: number, to: number) => from + (to - from) * -t;
     return {
       ...base,
@@ -582,7 +628,7 @@ function layoutAt(base: LayoutOptions, t: number): LayoutOptions {
       marginIn: round(grow(base.marginIn, Math.max(maxMarginIn, base.marginIn)), 3),
     };
   }
-  const { minFontSizePt, minSpacing, minMarginIn } = base.fitBounds;
+  const { minFontSizePt, minSpacing, minMarginIn } = legalBounds(base).fit;
   const lerp = (from: number, to: number) => from + (to - from) * t;
   return {
     ...base,
@@ -594,7 +640,7 @@ function layoutAt(base: LayoutOptions, t: number): LayoutOptions {
 
 /** Whether there is any room above the layout as written to grow into. */
 function canGrow(base: LayoutOptions): boolean {
-  const g = base.growBounds ?? DEFAULT_LAYOUT.growBounds;
+  const g = legalBounds(base).grow;
   return g.maxFontSizePt > base.fontSizePt || g.maxSpacing > base.spacing || g.maxMarginIn > base.marginIn;
 }
 
@@ -735,7 +781,7 @@ async function fitSearch<A extends Tried>(
       }
     }
 
-    const ceiling = Math.max((base.growBounds ?? DEFAULT_LAYOUT.growBounds).maxSpacing, fit.a.layout.spacing);
+    const ceiling = Math.max(legalBounds(base).grow.maxSpacing, fit.a.layout.spacing);
     const from = fit.a.layout.spacing;
     if (left <= 0 || ceiling - from < 0.01 || fill(fit.a) >= NEARLY_FULL) return fit.a;
     const spaced = (spacing: number) => ({ ...fit.a.layout, spacing: round(spacing, 3) });

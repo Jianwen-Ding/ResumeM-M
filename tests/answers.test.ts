@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   fileSentAnswer,
   isSensitiveAnswer,
@@ -1580,5 +1580,35 @@ describe('matchAnswers', () => {
     const one = qs.map((q) => matchAnswer(q, bank, { company: 'Acme' }));
     expect(matchAnswers(qs, bank, { company: 'Acme' })).toEqual(one);
     expect(matchAnswers(qs, bank, 0.3)).toEqual(qs.map((q) => matchAnswer(q, bank, 0.3)));
+  });
+});
+
+/*
+ * Two answers filed under one item by one completion.
+ *
+ * A completion files everything it holds in one go, so two answers taken
+ * from the same bank item (a form asking the question twice, long and short)
+ * both got `v_<now>`, the same millisecond. The default then named the first
+ * of the two rather than the one just filed, and the editor, which finds the
+ * version to change by its id, wrote an edit of one over both.
+ */
+describe('two answers filed under one item in the same millisecond', () => {
+  it('get ids of their own, and the last one filed leads', () => {
+    const bank: AnswerBankItem[] = [
+      { id: 'why_us', question: 'Why do you want to work here?', default: 'v_1', variants: [{ id: 'v_1', label: 'Initech', text: 'About Initech.' }] },
+    ];
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      for (const answer of ['Because Acme builds compilers I use daily.', 'Compilers.']) {
+        fileSentAnswer(bank, { question: 'Why do you want to work here?', answer, fromAnswerId: 'why_us', label: 'Acme', unread: false, newId: () => 'new' });
+      }
+    } finally {
+      clock.mockRestore();
+    }
+    const item = bank[0]!;
+    const ids = item.variants.map((v) => v.id);
+    expect(new Set(ids).size, ids.join(', ')).toBe(3);
+    expect(item.variants.find((v) => v.id === item.default)?.text).toBe('Compilers.');
   });
 });

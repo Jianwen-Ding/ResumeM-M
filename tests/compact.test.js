@@ -173,6 +173,9 @@ describe('More', () => {
     const orderOf = (b) => Number(getComputedStyle(b).order || 0);
     const ids = [...document.querySelectorAll('#tab-resumes .sticky-toolbar button')]
       .filter((b) => !b.closest('.narrow-only') && !b.classList.contains('narrow-only'))
+      // Retry and Discard belong to the save chip, shown only while a save is
+      // refused; they are not toolbar buttons and sit beside the chip.
+      .filter((b) => !b.closest('#save-stuck'))
       .map((b, i) => ({ b, i }))
       .sort((x, y) => orderOf(x.b) - orderOf(y.b) || x.i - y.i)
       .map(({ b }) => b.id);
