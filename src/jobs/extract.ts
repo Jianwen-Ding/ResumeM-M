@@ -2341,6 +2341,23 @@ const LISTING_WORDS = [
   'results found', 'jobs found', 'sort by', 'view all openings', 'browse jobs',
 ];
 
+/**
+ * Words only an employer's form says: the questions about the job itself
+ * rather than about you. See `forAJob` in `classifyPage`.
+ *
+ * Not "job title" or "employer", which a loan, a lease and an insurance quote
+ * all ask about the job you already have; and not "visa", which is half of
+ * what an embassy's form is about. Sponsorship is asked of a candidate in
+ * words a visa form does not use.
+ */
+const JOB_FORM_WORDS = [
+  'cover letter', 'work authorization', 'authorized to work', 'authorised to work', 'legally authorized',
+  'require sponsorship', 'requires sponsorship', 'visa sponsorship', 'sponsorship for employment',
+  'voluntary self-identification', 'equal opportunity employer', 'employment history', 'work history',
+  'requisition', 'job id', 'this position', 'the position', 'position you', 'position applied',
+  'this role', 'the role', 'why do you want to work', 'desired salary', 'salary expectations',
+];
+
 /** Pages that look busy but are not about a job at all. */
 const AGAINST = [
   'add to cart', 'checkout', 'privacy policy', 'terms of service', 'cookie preferences',
@@ -2568,11 +2585,43 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * was satisfied by any page with a textarea that discussed applications
    * three times, which is a chat window, a pull request, and a support thread.
    */
+  /*
+   * And the job has to be on the form somewhere.
+   *
+   * Reported from life: a bank's personal-loan application came back as a job
+   * application with a score of 8, and when the user pressed Submit the
+   * tracker gained an "applied" row for "Bank / Personal loan application"
+   * and the answer bank gained their annual income. Every test above passed
+   * on it honestly. It asked who you are; it said "first name", "last name"
+   * and "submit application", which is three of a form's words; it lived
+   * under /application/; and "requirements" and "benefits" in its blurb read
+   * as a posting's. So does an insurance quote, a university's admission
+   * form and a letting agent's rental application — each is an application
+   * form, and the word "application" is all the rule was looking at.
+   *
+   * What none of them has is a job. A job application gives itself away in
+   * at least one of a handful of ways: it wants a résumé, it is on a
+   * tracker's or a board's address, it declares a JobPosting, its title names
+   * the role, or it asks the questions only an employer asks — a cover
+   * letter, whether you may work here, the position or requisition you are
+   * applying for, where you have worked before. A form with none of these is
+   * collecting you for something else, and asking for a name, an email and
+   * an income is exactly what that something else does.
+   */
+  const forAJob =
+    /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    ATS.test(link) ||
+    BOARD.test(hostOf(url)) ||
+    uploadsResume ||
+    namesARole ||
+    countIn(text, JOB_FORM_WORDS) > 0;
+  const fillsInAJobForm = formish >= 3 && hasFields && asksWhoYouAre && forAJob;
+
   const actionable =
     /"@type"\s*:\s*"?JobPosting/i.test(html) ||
     (uploadsResume && !notAPosting) ||
     namesARole ||
-    (formish >= 3 && hasFields && asksWhoYouAre && !notAPosting);
+    (fillsInAJobForm && !notAPosting);
   if (namesARole) why.push('names a role');
   else if (actionable) why.push('somewhere to apply');
   else if (thread) why.push('a comment thread, whatever it is about');
@@ -2581,7 +2630,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   // wins over a description, because the form is what you are about to fill
   // in — and a page that is both is still, at this moment, the form.
   let kind: PageKind = 'none';
-  if ((formish >= 3 && hasFields && asksWhoYouAre) || uploadsResume) kind = 'application';
+  if (fillsInAJobForm || uploadsResume) kind = 'application';
   else if (described >= 3 || /"@type"\s*:\s*"?JobPosting/i.test(html)) kind = 'posting';
   else if (listish >= 2) kind = 'listing';
   else if (forumHiring) kind = 'discussion';
