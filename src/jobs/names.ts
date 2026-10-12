@@ -950,8 +950,17 @@ const REQUISITION_PARAM = /^(jobreqid|career_job_req_id|requisitionid|reqid|req)
  * Workday ends a job's address with its requisition after the title's words:
  * `…/job/Raleigh/Software-Engineer-Intern_R-059038`, `…_JR0286834`.
  */
+/*
+ * But not with what comes after it. Workday numbers each posting of one
+ * requisition — `_R-059038-1`, `_JR0286834-1`, `_R0164451-9` — and that "-1"
+ * was read into the number, so `R-059038-1` was "r0590381" and never the
+ * "(R-059038)" in LinkedIn's title for the same job: the two were vetoed as
+ * two requisitions, and the sent row was nothing to the posting. One or two
+ * digits after a hyphen at the very end are the posting's count and are
+ * dropped; a longer group (`JR-2026-0412`) is part of the number and kept.
+ */
 const WORKDAY_HOST = /(?:^|\.)myworkday(?:jobs|site)\.com$/i;
-const WORKDAY_REQUISITION = /_([a-z]{0,4}[-_]?\d{4,}(?:-\d+)?)$/i;
+const WORKDAY_REQUISITION = /_([a-z]{0,4}[-_]?\d{4,}(?:-\d{3,})*)(?:-\d{1,2})?$/i;
 
 /**
  * The requisition number an address names, lower case and letters and digits
@@ -982,4 +991,82 @@ export function requisitionInUrl(url?: string): string | undefined {
     if (req) return tidy(req);
   }
   return undefined;
+}
+
+/*
+ * The ATSs that number a job once for everybody, and the places that number
+ * turns up.
+ *
+ * Greenhouse's job 6143238004 is that job on the board
+ * (`job-boards.greenhouse.io/figma/jobs/6143238004`), in its embedded form
+ * (`boards.greenhouse.io/embed/job_app?for=figma&token=6143238004`) and on
+ * the employer's own careers page, which carries it as `gh_jid`
+ * (`figma.com/careers/job/?gh_jid=6143238004`). Lever's and Ashby's are a
+ * UUID in the path (Ashby's embedded board passes it as `ashby_jid`), and
+ * SmartRecruiters' is the long number its posting's path starts with
+ * (`/Visa/744000087654321-software-engineer-intern`); its one-click form
+ * names the posting by another id, a publication UUID, which is compared only
+ * with itself.
+ */
+const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GREENHOUSE = /(?:^|\.)greenhouse\.io$/i;
+const LEVER = /(?:^|\.)lever\.co$/i;
+const ASHBY = /(?:^|\.)ashbyhq\.com$/i;
+const SMARTRECRUITERS = /(?:^|\.)smartrecruiters\.com$/i;
+
+/**
+ * The job an address names by an id its ATS gives it across every board and
+ * every site — "greenhouse:6143238004", "lever:<uuid>" — or undefined.
+ *
+ * `jobNumberIn` reads a number on one site and leaves it there: the same
+ * number on two hosts is two jobs as far as it knows, since iCIMS, Taleo and
+ * Workday count each employer's jobs from their own start. These ids are
+ * not like that. The same one is the same job wherever it is linked from, so
+ * the employer's careers page with `gh_jid` and the Greenhouse board are one
+ * posting; and two of them from one ATS are two jobs.
+ */
+export function globalJobId(url?: string): string | undefined {
+  if (!url) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const param = (name: string) => {
+    for (const [key, value] of parsed.searchParams) if (key.toLowerCase() === name) return value.trim();
+    return undefined;
+  };
+  const segments = parsed.pathname.split('/').filter(Boolean);
+  const ghJid = param('gh_jid');
+  if (ghJid && /^\d{5,}$/.test(ghJid)) return `greenhouse:${ghJid}`;
+  const ashbyJid = param('ashby_jid');
+  if (ashbyJid && UUID_SEGMENT.test(ashbyJid)) return `ashby:${ashbyJid.toLowerCase()}`;
+  if (GREENHOUSE.test(host)) {
+    const token = param('token');
+    if (token && /^\d{5,}$/.test(token)) return `greenhouse:${token}`;
+    const at = segments.findIndex((s) => s.toLowerCase() === 'jobs');
+    const id = at >= 0 ? segments[at + 1] : undefined;
+    return id && /^\d{5,}$/.test(id) ? `greenhouse:${id}` : undefined;
+  }
+  if (LEVER.test(host) || ASHBY.test(host)) {
+    const id = segments.find((s) => UUID_SEGMENT.test(s));
+    return id ? `${LEVER.test(host) ? 'lever' : 'ashby'}:${id.toLowerCase()}` : undefined;
+  }
+  if (SMARTRECRUITERS.test(host)) {
+    const at = segments.findIndex((s) => s.toLowerCase() === 'publication');
+    const publication = at >= 0 ? segments[at + 1] : undefined;
+    if (publication && UUID_SEGMENT.test(publication)) return `smartrecruiters-publication:${publication.toLowerCase()}`;
+    for (const s of segments) {
+      const id = /^(\d{10,})(?:-|$)/.exec(s)?.[1];
+      if (id) return `smartrecruiters:${id}`;
+    }
+  }
+  return undefined;
+}
+
+/** The ATS a `globalJobId` is from: two ids from different ones say nothing about each other. */
+export function globalJobKind(id: string): string {
+  return id.slice(0, id.indexOf(':'));
 }

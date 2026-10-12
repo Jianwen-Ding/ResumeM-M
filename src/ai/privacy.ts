@@ -445,16 +445,46 @@ export function withoutContactDetails(text: string): string {
    * in a path, a token with a "/" earlier in it: "/api/v2/1234567890",
    * "example.org/p/2024/4155550123".
    */
+  /*
+   * And all of them at once, not one "/" at a time. Asked about one with the
+   * others left in, a number between two "/"s never stood alone — a run of
+   * digits cannot end at a "/" either — so in "415-555-0123/650-555-0100/
+   * 212-555-0199" neither "/" had a phone on both sides, and all three went
+   * to the AI. Every "/" between digits outside a path is broken in the
+   * probe, and each is then kept broken only if a phone ends at it and
+   * another starts after it — a "(" in between, as in "(415) 555-0123/(650)
+   * 555-0100", included.
+   *
+   * And a phone with its last digits written again after a "/", "415-555-
+   * 0123/0199": the other line of the same number. The short half alone is
+   * no phone, so the "/" was never a break, the first number could not end
+   * at it, and the whole thing went through. Up to four digits after a phone,
+   * with nothing that goes on after them, are taken with it (`suffixes`) —
+   * but not after a word that says the number is something else
+   * (`NAMED_AS_OTHER`): "Ticket 123-456-7890/1" is a ticket and its part, and
+   * keeps both.
+   */
+  const suffixes = new Map<number, number>();
   const slashBySlash = (t: string) => {
+    const slashes = [...t.matchAll(/(?<=\d)\/(?=\(?\+?\d)/g)]
+      .map((found) => found.index!)
+      // Not in a path: a token with a "/" earlier in it that is not one of these.
+      .filter((at) => !t.slice(t.slice(0, at).search(/[^\s\u0001]*$/), at).replace(/(?<=\d)\/(?=\(?\+?\d)/g, '').includes('/'));
+    let probe = t;
+    for (const at of slashes) probe = `${probe.slice(0, at)}\u0001${probe.slice(at + 1)}`;
+    const runs = phoneRunsIn(probe);
     let out = t;
-    for (const found of t.matchAll(/(?<=\d)\/(?=\+?\d)/g)) {
-      const at = found.index!;
-      const token = t.slice(0, at).search(/[^\s\u0001]*$/);
-      if (t.slice(token, at).includes('/')) continue;
-      const probe = `${t.slice(0, at)}\u0001${t.slice(at + 1)}`;
-      const runs = phoneRunsIn(probe);
-      if (runs.some((r) => r.at + r.length === at) && runs.some((r) => r.at === at + 1)) {
+    for (const at of slashes) {
+      const after = t[at + 1] === '(' ? at + 2 : at + 1;
+      const ending = runs.find((r) => r.at + r.length === at);
+      if (!ending) continue;
+      const suffix = /^\d{1,4}(?![\w/]|[.-]\w)/.exec(t.slice(at + 1))?.[0];
+      const namedOther = NAMED_AS_OTHER.test(t.slice(Math.max(0, ending.at - 40), ending.at));
+      if (runs.some((r) => r.at === after)) {
         out = `${out.slice(0, at)}\u0001${out.slice(at + 1)}`;
+      } else if (suffix && !namedOther && !runs.some((r) => r.at <= at + 1 && r.at + r.length > at + 1)) {
+        out = `${out.slice(0, at)}\u0001${out.slice(at + 1)}`;
+        suffixes.set(at, 1 + suffix.length);
       }
     }
     return out;
@@ -467,9 +497,10 @@ export function withoutContactDetails(text: string): string {
    */
   out = replace(out, SCRUBBED.phone, (t) =>
     phoneRunsIn(slashBySlash(lineByLine(prose(t)))).map(({ at, length }) => {
-      if (t[at - 1] === '(' && /^\d+\)/.test(t.slice(at, at + length))) return { at: at - 1, length: length + 1 };
-      if (t[at - 1] === '+') return { at: at - 1, length: length + 1 };
-      return { at, length };
+      const whole = length + (suffixes.get(at + length) ?? 0);
+      if (t[at - 1] === '(' && /^\d+\)/.test(t.slice(at, at + length))) return { at: at - 1, length: whole + 1 };
+      if (t[at - 1] === '+') return { at: at - 1, length: whole + 1 };
+      return { at, length: whole };
     }),
   );
   return replace(out, SCRUBBED.street, (t) => matches(street)(prose(t)));

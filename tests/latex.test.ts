@@ -213,6 +213,12 @@ describe('inline markup', () => {
       ['example.com', 'https://example.com'],
       ['example.com:8080/a?b=c', 'https://example.com:8080/a?b=c'],
       ['example.com/cv.pdf', 'https://example.com/cv.pdf'],
+      // Real domains on what are also file extensions, and any name a path follows.
+      ['bun.sh', 'https://bun.sh'],
+      ['jane.sh/projects', 'https://jane.sh/projects'],
+      ['jane.zip/x', 'https://jane.zip/x'],
+      ['cool.mov/x', 'https://cool.mov/x'],
+      ['jane.md', 'https://jane.md'],
     ]) {
       expect(inlineTex(`[ok](${url})`), url).toContain(`\\href{${href}}`);
     }
@@ -222,6 +228,7 @@ describe('inline markup', () => {
       'calc.exe',
       '//attacker.example/share/x.pdf',
       '../../secret.pdf#page=1',
+      '../x.pdf',
       '/etc/passwd',
       'cv',
       'run:calc.exe',

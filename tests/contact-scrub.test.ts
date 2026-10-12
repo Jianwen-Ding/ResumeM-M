@@ -76,6 +76,26 @@ describe('withoutContactDetails', () => {
   });
 
   /*
+   * Three or more in a chain, a bracketed area code after the "/", and a
+   * phone with its last digits written again after one. Each was asked about
+   * one "/" at a time with the others left in, so a number between two "/"s
+   * never stood alone and the older numbers went to the AI whole.
+   */
+  it('takes out every number of a chain, a bracketed pair, and a short second ending', () => {
+    for (const [text, want] of [
+      ['Phones: 415-555-0123/650-555-0100/212-555-0199', 'Phones: [phone number]/[phone number]/[phone number]'],
+      ['Tel 4155550123/6505550100/2125550199', 'Tel [phone number]/[phone number]/[phone number]'],
+      ['Tel: (415) 555-0123/(650) 555-0100', 'Tel: [phone number]/[phone number]'],
+      ['Cell 415-555-0123/0199', 'Cell [phone number]'],
+      ['Cell 415-555-0123/99, evenings', 'Cell [phone number], evenings'],
+    ]) {
+      expect(withoutContactDetails(text!), text).toBe(want);
+    }
+    // And what `personalDetailIn` says of them is what it said before.
+    expect(personalDetailIn('Phones: 415-555-0123/650-555-0100/212-555-0199')).toBe(personalDetailIn('Phones: 415-555-0123/650-555-0100'));
+  });
+
+  /*
    * Split at every "/" between digits, the half after an order number, a
    * year or a build was a phone on its own, and the identifier became
    * "[phone number]". A "/" is a break only between two numbers that are
@@ -88,6 +108,8 @@ describe('withoutContactDetails', () => {
       'see /api/v2/1234567890',
       'build 2/0123456789 passed',
       'Ticket 123-456-7890/1',
+      'Ticket 123-456-7890/12/3',
+      'Order 4155550123/0199',
       'Case no. 3/2024/12345678',
       'Coverage 98/100000000',
       'Project page: example.org/p/2024/4155550123',

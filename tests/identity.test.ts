@@ -26,6 +26,20 @@ import request from 'supertest';
  */
 
 /*
+ * Round 23: and asks.
+ *
+ * Said nothing, a weak match to a sent row was as good as no match: 126 of
+ * 128 sent rows in a real tracker were nothing to the same job's LinkedIn
+ * posting, and a stage there filed a second row. Now a sent row with the
+ * same names is "maybe sent" (`maybeSent`): the card says when and where it
+ * went, an automatic stage is refused with `maybe` until somebody says it is
+ * another job, and then it is filed as a new row — never into the sent one.
+ * And the ATSs whose ids are global (Greenhouse, Lever, Ashby,
+ * SmartRecruiters) are sure across hosts: the employer's page with `gh_jid`
+ * and the Greenhouse board are one job.
+ */
+
+/*
  * The compile, stood in for: these are about which row and which folder a
  * build lands in, not about the PDF. Each PDF says which resume it came from,
  * so a replaced file can be told apart.
@@ -307,17 +321,33 @@ describe('a second requisition at one employer, through the routes', () => {
     };
     const html = `<html><head><title>Software Engineer Intern - R-111111</title><script type="application/ld+json">${JSON.stringify(ld)}</script></head><body><h1>Software Engineer Intern</h1><div>${ld.description}</div><a>Apply</a></body></html>`;
     const r = await api.post('/api/extension/analyze').send({ url: BOSTON, title: 'Software Engineer Intern - R-111111', html, tailor: 'none' }).expect(200);
-    expect(r.body.applied).toBeUndefined();
+    // Not "you applied": "you may have", with when and where, so it can be told apart.
+    expect(r.body.applied).toMatchObject({ maybe: true, id: RALEIGH_ROW.id, url: RALEIGH });
+    expect(r.body.applied.at).toBeTruthy();
     expect(r.body.application.id).not.toBe(RALEIGH_ROW.id);
     expect(r.body.application.resumeId).toBeUndefined();
   });
 
-  it('stages without being refused as already sent', async () => {
+  /*
+   * Asked, not refused for good and not filed silently: the automatic stage
+   * is held as "maybe sent", and told it is another job it files a row of
+   * its own, the sent one as it was.
+   */
+  it('asks before staging, and once told it is another job files a new row', async () => {
     const api = serve([RALEIGH_ROW]);
-    const r = await api.post('/api/applications/bundle').send({ ...BOSTON_JOB, url: `${BOSTON}/apply`, resumeId: 'base', status: 'applying' });
+    const job = { ...BOSTON_JOB, url: `${BOSTON}/apply`, resumeId: 'base', status: 'applying' };
+    const asked = await api.post('/api/applications/bundle').send(job);
+    expect(asked.status).toBe(409);
+    expect(asked.body).toMatchObject({ kind: 'already-sent', maybe: true, application: { id: RALEIGH_ROW.id } });
+    expect(asked.body.error).toMatch(/may be the same job/);
+    expect(rows()).toHaveLength(1);
+
+    const r = await api.post('/api/applications/bundle').send({ ...job, evenIfSent: true });
     expect(r.status).toBe(200);
     expect(r.body.application.id).not.toBe(RALEIGH_ROW.id);
-    expect(row(RALEIGH_ROW.id)).toMatchObject({ status: 'applied', resumeId: 'intern' });
+    expect(rows()).toHaveLength(2);
+    expect(row(RALEIGH_ROW.id)).toMatchObject({ status: 'applied', resumeId: 'intern', url: RALEIGH, coverLetter: RALEIGH_ROW.coverLetter });
+    expect(row(RALEIGH_ROW.id)?.history).toHaveLength(2);
   });
 
   it('records a send with a bare title at another requisition as its own row', async () => {
@@ -362,15 +392,29 @@ describe('two jobs one title, through the other routes', () => {
     expect(rows()).toHaveLength(1);
   });
 
-  it('keeps the address and notes of a row found only by its name', async () => {
+  /*
+   * Kept, and what was typed added to it: the note under the row's own, the
+   * address as one more the row is found at. Both used to be dropped.
+   */
+  it('keeps the address and notes of a row found only by its name, adding what was typed', async () => {
     const working = { ...INTERVIEW, id: 'ivo', company: 'Ivo', role: 'Software Engineer, Backend', url: 'https://jobs.ashbyhq.com/ivo/4a5b', status: 'applying', notes: 'Referred by Sam' };
     const api = serve([working]);
+    const linkedIn = 'https://www.linkedin.com/jobs/view/4470000001';
     await api
       .post('/api/applications')
-      .send({ company: 'Ivo', role: 'Software Engineer, Backend', url: 'https://www.linkedin.com/jobs/view/4470000001', notes: 'Applied on LinkedIn' })
+      .send({ company: 'Ivo', role: 'Software Engineer, Backend', url: linkedIn, notes: 'Applied on LinkedIn' })
       .expect(200);
     expect(rows()).toHaveLength(1);
-    expect(row('ivo')).toMatchObject({ url: working.url, notes: 'Referred by Sam' });
+    expect(row('ivo')).toMatchObject({ url: working.url, notes: 'Referred by Sam\nApplied on LinkedIn' });
+    expect(row('ivo')?.aliases).toEqual([{ company: 'Ivo', role: 'Software Engineer, Backend', url: linkedIn }]);
+    // A note the row already says is not said twice.
+    await api
+      .post('/api/applications')
+      .send({ company: 'Ivo', role: 'Software Engineer, Backend', url: 'https://ivo.example/careers/backend', notes: 'Referred by Sam' })
+      .expect(200);
+    expect(rows()).toHaveLength(1);
+    expect(row('ivo')?.notes).toBe('Referred by Sam\nApplied on LinkedIn');
+    expect(row('ivo')?.aliases).toHaveLength(2);
   });
 
   it("does not swallow this year's send into last year's row at another job number", async () => {
@@ -489,5 +533,221 @@ describe('one job written two ways is one row', () => {
     await api.post('/api/workspace').send({ company: 'Ivo', role: 'Software Engineer, Backend (Remote)', url: 'https://www.linkedin.com/jobs/view/4470000001', resumeId: 'base' }).expect(200);
     await api.post('/api/extension/sent').send({ company: 'Ivo', role: 'Software Engineer, Backend', url: 'https://www.linkedin.com/jobs/view/4470000777' }).expect(200);
     expect(rows()).toHaveLength(2);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Round 23: one job's other page, and asking                          *
+ * ------------------------------------------------------------------ */
+
+const { maybeSent, applicationToWrite, findApplicationMatch } = applications;
+const { requisitionInUrl, globalJobId } = await import('../src/jobs/names.js');
+
+const sentRow = (o: Partial<Application> & { id: string; company: string; role: string }) =>
+  ({ status: 'applied', appliedAt: ago(10), history: [{ at: ago(10), status: 'applied', note: 'Recorded' }], ...o }) as Application;
+
+/*
+ * The ATSs that number a job once for everybody: the same id is the same
+ * job on any host, the board and the employer's careers page alike; two of
+ * them are two jobs.
+ */
+describe('an id an ATS gives a job everywhere', () => {
+  const SAME: [string, string, string][] = [
+    ['Greenhouse board, and the employer page with gh_jid', 'https://job-boards.greenhouse.io/figma/jobs/6143238004/confirmation?gh_src=28109e334us', 'https://www.figma.com/careers/job/?gh_jid=6143238004'],
+    ["the employer's page, and the board", 'https://www.epicgames.com/site/careers/jobs/6152263004?gh_jid=6152263004&gh_src=32b5d0474us', 'https://job-boards.greenhouse.io/epicgames/jobs/6152263004'],
+    ['the board, and the embedded form by token', 'https://job-boards.greenhouse.io/figma/jobs/6143238004', 'https://boards.greenhouse.io/embed/job_app?for=figma&token=6143238004'],
+    ['a SmartRecruiters posting with and without its words', 'https://jobs.smartrecruiters.com/Visa/744000087654321-software-engineer-intern', 'https://jobs.smartrecruiters.com/Visa/744000087654321'],
+    ['Lever, posting and form', 'https://jobs.lever.co/acme/1a2b3c4d-1111-2222-3333-444455556666', 'https://jobs.lever.co/acme/1a2b3c4d-1111-2222-3333-444455556666/apply?lever-source=LinkedIn'],
+    ['Ashby, posting and form', 'https://jobs.ashbyhq.com/acme/1a2b3c4d-1111-2222-3333-444455556666', 'https://jobs.ashbyhq.com/acme/1a2b3c4d-1111-2222-3333-444455556666/application'],
+  ];
+  for (const [name, sentAt, visit] of SAME) {
+    it(`${name}: already sent`, () => {
+      const rows = [sentRow({ id: 'x', company: 'Figma', role: 'Software Engineer Intern', url: sentAt })];
+      expect(findApplicationMatch(rows, 'Figma', 'Software Engineer Intern', visit)?.strength).toBe('strong');
+      expect(alreadySent(rows, 'Figma', 'Software Engineer Intern', visit)?.id).toBe('x');
+    });
+  }
+
+  it('reads the ids', () => {
+    expect(globalJobId('https://www.figma.com/careers/job/?gh_jid=6143238004')).toBe('greenhouse:6143238004');
+    expect(globalJobId('https://boards.greenhouse.io/embed/job_app?for=figma&token=6143238004')).toBe('greenhouse:6143238004');
+    expect(globalJobId('https://jobs.smartrecruiters.com/oneclick-ui/company/Visa/publication/5b5d5d70-1c2e-4a6f-9d0b-123456789abc?dcr_ci=Visa')).toBe(
+      'smartrecruiters-publication:5b5d5d70-1c2e-4a6f-9d0b-123456789abc',
+    );
+    expect(globalJobId('https://www.linkedin.com/jobs/view/4461337126/')).toBeUndefined();
+  });
+
+  it('reads two Greenhouse ids across hosts as two jobs, which only asks', () => {
+    const rows = [sentRow({ id: 'x', company: 'Figma', role: 'Software Engineer Intern', url: 'https://job-boards.greenhouse.io/figma/jobs/6143238004' })];
+    const visit = 'https://www.figma.com/careers/job/?gh_jid=6999999004';
+    expect(findApplicationMatch(rows, 'Figma', 'Software Engineer Intern', visit)).toBeUndefined();
+    expect(alreadySent(rows, 'Figma', 'Software Engineer Intern', visit)).toBeUndefined();
+    expect(maybeSent(rows, 'Figma', 'Software Engineer Intern', visit)?.id).toBe('x');
+  });
+});
+
+/*
+ * Workday numbers each posting of a requisition, "_R-059038-1"; the count
+ * is not the requisition. Real addresses from a tracker.
+ */
+describe("a Workday posting's count after its requisition", () => {
+  it.each([
+    ['https://redhat.wd5.myworkdayjobs.com/en-US/jobs/job/Raleigh/Software-Engineer-Intern_R-059038-1/apply', 'r059038'],
+    ['https://intel.wd1.myworkdayjobs.com/External/job/US-Oregon-Hillsboro/Software-Engineering-Intern_JR0286834-1/apply', 'jr0286834'],
+    ['https://pae.wd1.myworkdayjobs.com/en-US/Amentum_Careers/job/US-TX-Houston/Mission-Design-Tools-Software-Engineer_R0164451-9/apply/autofillWithResume?source=www.google.com', 'r0164451'],
+    ['https://kla.wd1.myworkdayjobs.com/en-US/Search/job/Milpitas%2C-CA/Software-Engineering-Intern_2641581-1/apply/autofillWithResume?bid=370&source=Job_Board_LinkedIn', '2641581'],
+    ['https://allegion.wd5.myworkdayjobs.com/en-US/careers/job/Golden%2C-CO/Summer-Intern---Software-Engineering_JR37795-1/apply/autofillWithResume?source=linkedin', 'jr37795'],
+    ['https://redhat.wd5.myworkdayjobs.com/en-US/jobs/job/Raleigh/Software-Engineer-Intern_R-059038', 'r059038'],
+    ['https://acme.wd5.myworkdayjobs.com/en-US/jobs/job/X/Engineer_JR-2026-0412', 'jr20260412'],
+  ])('%s is %s', (url, req) => {
+    expect(requisitionInUrl(url)).toBe(req);
+  });
+
+  it("is the same job as LinkedIn's title with the requisition", () => {
+    const rows = [sentRow({ id: 'wd', company: 'Red Hat', role: 'Software Engineer Intern', url: 'https://redhat.wd5.myworkdayjobs.com/en-US/jobs/job/Raleigh/Software-Engineer-Intern_R-059038-1/apply' })];
+    expect(alreadySent(rows, 'Red Hat', 'Software Engineer Intern (R-059038)', 'https://www.linkedin.com/jobs/view/4461337126/')?.id).toBe('wd');
+  });
+});
+
+describe('a sent row the names alone tie to: maybe sent', () => {
+  const STRIPE = sentRow({ id: 'stripe', company: 'Stripe', role: 'Software Engineer, Intern (Summer or Winter)', url: 'https://www.linkedin.com/jobs/view/4462047454/' });
+  const FORM = 'https://stripe.com/jobs/listing/software-engineer-intern-summer-or-winter/7210115';
+
+  it('is not "already sent", is "maybe sent", and nothing writes into it', () => {
+    const rows = [STRIPE];
+    expect(alreadySent(rows, STRIPE.company, STRIPE.role, FORM)).toBeUndefined();
+    expect(maybeSent(rows, STRIPE.company, STRIPE.role, FORM)?.id).toBe('stripe');
+    expect(applicationToWrite(rows, STRIPE.company, STRIPE.role, FORM)).toBeUndefined();
+  });
+
+  it('is not asked about when the job surely has its own row being worked on', () => {
+    const working = { ...STRIPE, id: 'working', status: 'applying', url: FORM } as Application;
+    expect(maybeSent([STRIPE, working], STRIPE.company, STRIPE.role, FORM)).toBeUndefined();
+  });
+
+  it('nor when it was sent more than half a year ago', () => {
+    const old = { ...STRIPE, appliedAt: ago(200), history: [{ at: ago(200), status: 'applied' as const }] };
+    expect(maybeSent([old], STRIPE.company, STRIPE.role, FORM)).toBeUndefined();
+  });
+
+  it('is said on the card with when and where', async () => {
+    const api = serve([STRIPE]);
+    const html = `<html><head><title>Software Engineer, Intern (Summer or Winter) | Stripe</title></head><body><h1>Software Engineer, Intern (Summer or Winter)</h1><p>${'Stripe is hiring interns to build payments infrastructure in Ruby, Go and Java. '.repeat(12)}</p><a>Apply</a></body></html>`;
+    const r = await api.post('/api/extension/analyze').send({ url: FORM, title: 'Software Engineer, Intern (Summer or Winter) | Stripe', html, tailor: 'none', company: 'Stripe', role: STRIPE.role }).expect(200);
+    expect(r.body.applied).toMatchObject({ maybe: true, id: 'stripe', url: STRIPE.url });
+  });
+
+  it('a strong match still re-files into the sent row with evenIfSent', async () => {
+    const api = serve([{ ...STRIPE, resumeId: 'intern' }]);
+    const job = { company: STRIPE.company, role: STRIPE.role, url: STRIPE.url, resumeId: 'base', status: 'applying' };
+    const refused = await api.post('/api/applications/bundle').send(job);
+    expect(refused.status).toBe(409);
+    expect(refused.body.maybe).toBeUndefined();
+    const r = await api.post('/api/applications/bundle').send({ ...job, evenIfSent: true }).expect(200);
+    expect(r.body.application.id).toBe('stripe');
+    expect(rows()).toHaveLength(1);
+  });
+
+  it('a send from the other page records a new row, and leaves the sent one alone', async () => {
+    const api = serve([STRIPE]);
+    const r = await api.post('/api/extension/sent').send({ company: STRIPE.company, role: STRIPE.role, url: FORM }).expect(200);
+    expect(r.body.application.id).not.toBe('stripe');
+    expect(row('stripe')).toMatchObject({ url: STRIPE.url, status: 'applied' });
+    expect(row('stripe')?.history).toHaveLength(1);
+  });
+
+  /*
+   * "Record an application" for a job sent from LinkedIn, with the
+   * employer's address and a note: the person says it is the one they sent,
+   * by its exact names. The row is updated — the address kept as an alias,
+   * the note added — rather than a "-2" beside it.
+   */
+  it('recorded by hand with its exact names and the employer address, updates the sent row', async () => {
+    const api = serve([STRIPE]);
+    await api.post('/api/applications').send({ company: STRIPE.company, role: STRIPE.role, url: FORM, notes: 'Recruiter: Jane' }).expect(200);
+    expect(rows()).toHaveLength(1);
+    expect(row('stripe')).toMatchObject({ status: 'applied', url: STRIPE.url, notes: 'Recruiter: Jane' });
+    expect(row('stripe')?.aliases).toEqual([{ company: STRIPE.company, role: STRIPE.role, url: FORM }]);
+    // And the employer's page is the row's now: already sent there.
+    expect(alreadySent(rows(), STRIPE.company, STRIPE.role, FORM)?.id).toBe('stripe');
+  });
+
+  it('but a posting the address says is another stays another', async () => {
+    const api = serve([STRIPE]);
+    await api.post('/api/applications').send({ company: STRIPE.company, role: STRIPE.role, url: 'https://www.linkedin.com/jobs/view/4462040000/', notes: 'The other one' }).expect(200);
+    expect(rows()).toHaveLength(2);
+    expect(row('stripe')?.notes).toBeUndefined();
+  });
+});
+
+/*
+ * The LinkedIn posting staged into a row, and the employer's form filling it
+ * — a match by the names alone. The row moves to the form's address, and
+ * keeps LinkedIn's as an alias, so the posting is still the row's after.
+ */
+describe("a row staged on LinkedIn, filled from the employer's form", () => {
+  it("keeps LinkedIn's address as an alias", async () => {
+    const linkedIn = 'https://www.linkedin.com/jobs/view/4462045886/';
+    const ashby = 'https://jobs.ashbyhq.com/ramp/0f6e1c2a-1111-2222-3333-444455556666/application';
+    const api = serve();
+    const job = { company: 'Ramp', role: 'Software Engineering Intern, Backend', resumeId: 'base' };
+    const first = await api.post('/api/applications/bundle').send({ ...job, url: linkedIn, status: 'applying' }).expect(200);
+    const id = first.body.application.id;
+    await api.post('/api/applications/bundle').send({ ...job, url: ashby, status: 'applied' }).expect(200);
+    expect(rows()).toHaveLength(1);
+    expect(row(id)).toMatchObject({ url: ashby, status: 'applied' });
+    expect(row(id)?.aliases).toEqual([{ company: 'Ramp', role: job.role, url: linkedIn }]);
+    expect(alreadySent(rows(), 'Ramp', job.role, linkedIn)?.id).toBe(id);
+  });
+});
+
+/*
+ * Found by replaying round 22 on a real history: lookups that found no row,
+ * so a duplicate was filed, six of them against sent rows.
+ */
+describe('one job, by what its addresses really look like', () => {
+  const at = (url: string, o: Partial<Application> = {}) => [{ ...sentRow({ id: 'r', company: 'Adobe', role: '2027 Intern - Software Engineer', url }), ...o } as Application];
+
+  it("is not told apart by LinkedIn's currentJobId, which is a search page's selection", () => {
+    const rows = at('https://www.linkedin.com/jobs/search-results/?currentJobId=4462058113&keywords=intern', { status: 'applying' });
+    const q = ['Adobe', '2027 Intern - Software Engineer', 'https://www.linkedin.com/jobs/search-results/?currentJobId=4466497170&keywords=intern'] as const;
+    expect(findApplicationMatch(rows, ...q)?.strength).toBe('weak');
+    // And sent, it is asked about rather than nothing.
+    const sent = at(rows[0]!.url!);
+    expect(alreadySent(sent, ...q)).toBeUndefined();
+    expect(maybeSent(sent, ...q)?.id).toBe('r');
+  });
+
+  it('reads one number spelt two ways on one site as one job', () => {
+    expect(
+      findApplicationMatch(
+        at('https://careers.adobe.com/us/en/job/ADOBUSR171666EXTERNALENUS/2027-Intern-Software-Engineer?utm_source=linkedin', { status: 'applying' }),
+        'Adobe',
+        '2027 Intern - Software Engineer',
+        'https://careers.adobe.com/us/en/job/R171666/2027-Intern-Software-Engineer',
+      )?.row.id,
+    ).toBe('r');
+    const tesla = [sentRow({ id: 't', company: 'Tesla', role: 'Internship, Fullstack C++ Engineer, Vehicle User Interface (Winter/Spring 2027)', url: 'https://www.tesla.com/careers/search/job/apply/280604', status: 'applying' })];
+    expect(
+      findApplicationMatch(tesla, 'Tesla', tesla[0]!.role, 'https://www.tesla.com/careers/search/job/internship-fullstack-c-engineer-vehicle-user-interface-winter-spring-2027-280604')?.row.id,
+    ).toBe('t');
+  });
+
+  it("is sure of an Eightfold posting and its form's pid", () => {
+    const posting = 'https://bostonscientific.eightfold.ai/careers/job/563602813674232';
+    const rows = [sentRow({ id: 'bsx', company: 'Boston Scientific', role: 'Software Engineer Intern', url: posting })];
+    for (const form of [
+      'https://bostonscientific.eightfold.ai/careers/apply/success?domain=bostonscientific.com&pid=563602813674232',
+      'https://bostonscientific.eightfold.ai/careers/apply?pid=563602813674232&domain=bostonscientific.com',
+    ]) {
+      expect(findApplicationMatch(rows, 'Boston Scientific', 'Software Engineer Intern', form)?.strength, form).toBe('strong');
+      expect(alreadySent(rows, 'Boston Scientific', 'Software Engineer Intern', form)?.id, form).toBe('bsx');
+    }
+    // The form and the page after it.
+    const formRow = [{ ...rows[0]!, url: 'https://bostonscientific.eightfold.ai/careers/apply?pid=563602813674232&domain=bostonscientific.com' }];
+    expect(alreadySent(formRow, 'Boston Scientific', 'Software Engineer Intern', 'https://bostonscientific.eightfold.ai/careers/apply/success?domain=bostonscientific.com&pid=563602813674232')?.id).toBe('bsx');
+    // Another pid is not this job's, sure or otherwise: only asked about.
+    const other = 'https://bostonscientific.eightfold.ai/careers/apply/success?domain=bostonscientific.com&pid=563602813567960';
+    expect(alreadySent(rows, 'Boston Scientific', 'Software Engineer Intern', other)).toBeUndefined();
   });
 });

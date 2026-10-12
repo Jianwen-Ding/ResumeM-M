@@ -562,8 +562,14 @@ export interface Application {
    * same posting, still says "Summer 2027". Without these a send under the
    * old names found no row and filed a second one beside the corrected one.
    * See `sameJobAs`.
+   *
+   * And the other addresses the row is the job at, with what that page
+   * called it: the LinkedIn posting a row was staged from before the
+   * employer's form filled it, or the employer's address recorded by hand
+   * for a row sent from LinkedIn. A visit to one of them is this row's
+   * posting (`aliasAddresses` in applications.ts), not only a name-alike.
    */
-  aliases?: { company: string; role: string }[];
+  aliases?: { company: string; role: string; url?: string }[];
   source?: string;
   notes?: string;
   /** Free-form per-application answers, useful when a company re-asks. */

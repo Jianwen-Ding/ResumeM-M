@@ -52,7 +52,7 @@ import {
 import { fitResumes, forgetPrintedText, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, localDay, alreadySent, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, localDay, alreadySent, maybeSent, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -545,13 +545,20 @@ function sentBefore(
   company: string | undefined,
   role: string | undefined,
   url?: string,
-): { id: string; at: string; status: ApplicationStatus } | undefined {
+): { id: string; at: string; status: ApplicationStatus; maybe?: true; url?: string } | undefined {
   if (!company?.trim() || !role?.trim()) return undefined;
-  const past = alreadySent(applications, company, role, url);
+  /*
+   * Or "you may have", for a sent row only the names tie to this posting
+   * (`maybeSent`): said with where it went, so whoever reads it can tell
+   * whether it is this job.
+   */
+  const sure = alreadySent(applications, company, role, url);
+  const past = sure ?? maybeSent(applications, company, role, url);
   if (!past) return undefined;
   const went = (past.history ?? []).find((h) => h.status === 'applied');
   const at = went?.at ?? past.appliedAt;
-  return at ? { id: past.id, at, status: past.status } : undefined;
+  if (!at) return undefined;
+  return sure ? { id: past.id, at, status: past.status } : { id: past.id, at, status: past.status, maybe: true, url: past.url };
 }
 
 /**
@@ -4446,10 +4453,23 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * this one over it moved its status and replaced its address and notes.
        * And how surely, for what follows.
        */
+      /*
+       * But a sent row with exactly the names typed is the one being
+       * recorded, however weakly the addresses tie them. "Record an
+       * application" is somebody saying what they did: Stripe's internship
+       * sent from LinkedIn, recorded again with Stripe's own address and a
+       * note, was filed as a second row ("-2") beside the first, with the
+       * note on neither. Exactly the names, not merely the same job by
+       * `identity`: and never against a row whose address says it is
+       * another posting, which is no match at all.
+       */
       const apps = store.load().applications;
       const match = body.id ? undefined : findApplicationMatch(apps, body.company, body.role, body.url);
-      const existing = body.id ? apps.find((a) => a.id === body.id) : forWriting(match);
-      const weak = !body.id && match?.strength === 'weak';
+      const said = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase();
+      const namedExactly =
+        match?.strength === 'weak' && said(match.row.company) === said(body.company) && said(match.row.role) === said(body.role);
+      const existing = body.id ? apps.find((a) => a.id === body.id) : (forWriting(match) ?? (namedExactly ? match!.row : undefined));
+      const weak = !body.id && existing !== undefined && match?.strength === 'weak';
 
       const now = new Date().toISOString();
       /*
@@ -4473,6 +4493,25 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * typing says this one is the same. Filled when it has none.
        */
       const kept = (was: string | undefined, before: string | undefined) => (weak && before?.trim() ? before : typed(was, before));
+      /*
+       * But what was typed is not thrown away for it. The note goes under the
+       * row's own, on a line of its own, unless the row says it already; the
+       * address is kept as one more the row is found at (`aliasesWith`), so
+       * the next visit there is this row's. Both were dropped, so whatever
+       * somebody typed into "Record an application" for a job the tracker
+       * knew by name alone went nowhere.
+       */
+      const noteTyped = body.notes?.trim();
+      const notes =
+        weak && noteTyped && existing?.notes?.trim()
+          ? existing.notes.includes(noteTyped)
+            ? existing.notes
+            : `${existing.notes.replace(/\s+$/, '')}\n${noteTyped}`
+          : kept(body.notes, existing?.notes);
+      const aliases =
+        weak && existing?.url?.trim() && body.url?.trim()
+          ? aliasesWith(existing, { company: body.company, role: body.role, url: body.url })
+          : existing?.aliases;
       const resumeId = body.id ? (body.resumeId ?? existing?.resumeId) : (existing?.resumeId ?? body.resumeId);
       /*
        * And a sent row moved on to another resume remembers the one it went
@@ -4518,7 +4557,8 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          */
         resumeId,
         source: body.source ?? existing?.source,
-        notes: kept(body.notes, existing?.notes),
+        notes,
+        ...(aliases ? { aliases } : {}),
         answers: body.answers ?? existing?.answers,
         ...(sentResumeIds ? { sentResumeIds } : {}),
         history: [
@@ -4914,11 +4954,21 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * before anything is written, and again as the files are handed over,
        * since the send can land while this compiles. See `AlreadySent`.
        */
-      const refuseAsSent = (application: Application) =>
-        res.status(409).json({ kind: 'already-sent', error: new AlreadySent(application).message, application });
+      /*
+       * And one that only may have been (`maybeSent`) is refused as one, with
+       * `maybe` so the card can ask rather than say: confirmed, it comes back
+       * with `evenIfSent` and is filed as a new row.
+       */
+      const refuseAsSent = (application: Application, maybe = false) =>
+        res.status(409).json({
+          kind: 'already-sent',
+          error: new AlreadySent(application, maybe).message,
+          application,
+          ...(maybe ? { maybe: true } : {}),
+        });
       const sentBefore = refusedAsSent(store, body);
       if (sentBefore) {
-        refuseAsSent(sentBefore);
+        refuseAsSent(sentBefore.application, sentBefore.maybe);
         return;
       }
       /*
@@ -4959,7 +5009,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         result = await buildBundle(store, body);
       } catch (err) {
         if (!(err instanceof AlreadySent)) throw err;
-        refuseAsSent(err.application);
+        refuseAsSent(err.application, err.maybe);
         return;
       }
 

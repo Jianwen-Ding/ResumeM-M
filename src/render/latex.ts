@@ -371,16 +371,27 @@ function linkTarget(url: string): string | undefined {
  * file's extension, so `cv.pdf`, `calc.exe` and `notes.txt` are files and
  * `example.com` is a site.
  */
-const WEB_ADDRESS = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z](?:[a-z0-9-]*[a-z0-9])?)(?::\d{1,5})?(?:[/?#][^\s]*)?$/i;
+/*
+ * But only a name with nothing after it is a file's. `bun.sh`, `jane.zip/x`
+ * and `cool.mov/x` are sites — `.sh`, `.zip`, `.mov` and `.md` are real
+ * top-level domains people have their pages on — and a name followed by a
+ * port, a path, a query or a fragment is a host whatever its last label
+ * says: a file is not served from `cv.pdf/…`. Every one of them was read as a
+ * file and printed unlinked. And those four are not in the list at all,
+ * since `bun.sh` alone is as plainly a site as `example.com`; the rest are
+ * extensions far more often than places anybody lives on the web.
+ */
+const WEB_ADDRESS = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z](?:[a-z0-9-]*[a-z0-9])?)((?::\d{1,5})?(?:[/?#][^\s]*)?)$/i;
 const FILE_EXTENSIONS = new Set([
-  'pdf', 'exe', 'bat', 'cmd', 'msi', 'scr', 'vbs', 'js', 'jar', 'dmg', 'pkg', 'sh', 'ps1', 'lnk',
-  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'rtf', 'txt', 'tex', 'md', 'csv', 'json', 'xml', 'yaml', 'yml',
-  'html', 'htm', 'zip', 'rar', 'gz', 'tar', '7z', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'mp3', 'mp4', 'mov',
+  'pdf', 'exe', 'bat', 'cmd', 'msi', 'scr', 'vbs', 'js', 'jar', 'dmg', 'pkg', 'ps1', 'lnk',
+  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'rtf', 'txt', 'tex', 'csv', 'json', 'xml', 'yaml', 'yml',
+  'html', 'htm', 'rar', 'gz', 'tar', '7z', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'mp3', 'mp4',
 ]);
 
 function webAddress(target: string): boolean {
   const m = WEB_ADDRESS.exec(target);
-  return Boolean(m) && !FILE_EXTENSIONS.has(m![1]!.toLowerCase());
+  if (!m) return false;
+  return m[2] !== '' || !FILE_EXTENSIONS.has(m[1]!.toLowerCase());
 }
 
 function markup(s: string, depth: number): string {
