@@ -11101,6 +11101,19 @@ async function loadProjectSettings() {
     },
   });
 
+  /*
+   * Bring in what another machine pushed, beside the Push that sends this
+   * one's. Before it, catching up meant `git pull` in a terminal while the
+   * server ran, which could lose a tracker row written at the wrong moment;
+   * the server's own pull holds writes off while it merges. See `pullSave`.
+   */
+  const pullButton = el('button', {
+    textContent: 'Pull',
+    title: 'Bring in what was pushed from another machine',
+    disabled: !info.remote.url,
+    onclick: () => pullSave(setResult),
+  });
+
   setChildren(
     box,
     el('label', { className: 'row' }, [autoCommit, el('span', { textContent: 'Automatically Save History' })]),
@@ -11170,26 +11183,91 @@ async function loadProjectSettings() {
              * nothing. It follows what is saved.
              */
             pushButton.disabled = !status.url;
+            pullButton.disabled = !status.url;
           } catch (err) {
             setResult(err.message, 'bad');
           }
         },
       }),
+      pullButton,
       pushButton,
     ]),
     result,
   );
 }
 
+/**
+ * Pull, from the Save & Files panel: bring in what another machine pushed,
+ * then show it.
+ *
+ * Not over an edit that has not saved. The pull commits what is on disk and
+ * merges into it, and an edit held only on this page is on neither side of
+ * that merge: written afterwards, it is written whole over whatever the pull
+ * brought in to the same resume. So the edit waiting out the auto-save's
+ * pause is sent first, as Restore sends it; one the server would not take is
+ * a refusal, with the way out the "Not saved" chip already offers.
+ *
+ * After a pull that brought something in, the store is read again and
+ * redrawn on the resume that was open, as after a sweep — and the undo stack
+ * goes for the same reason: its entries describe documents the pull may
+ * just have replaced.
+ */
+async function pullSave(setResult) {
+  const landed = await flushEdits();
+  if (state.dirty) await autoSave().catch(() => {});
+  if (state.dirty || !landed) {
+    const said = `Not pulled: a change you made has not saved yet. Save it or discard it first, then pull.${stuckHint()}`;
+    setResult(said, 'bad');
+    setStatus(said, true);
+    return;
+  }
+  setResult('Pulling…');
+  let res;
+  try {
+    res = await api('/config/store/pull', { method: 'POST' });
+  } catch (err) {
+    setResult(err.message, 'bad');
+    return;
+  }
+  const where = res.remote?.url ? `\n${describeRemote(res.remote)}` : '';
+  setResult(`${res.message}${where}`, res.ok ? 'ok' : 'bad');
+  if (!res.ok) {
+    setStatus(res.conflict?.length ? `Not pulled: ${res.conflict.join(', ')} conflict — see Save & Files` : 'Not pulled — see Save & Files', true);
+    return;
+  }
+  if (res.pulled === 0) {
+    setStatus('Already up to date');
+    return;
+  }
+  forgetHistory();
+  paintUndo();
+  try {
+    await loadStore();
+  } catch (err) {
+    setStatus(`Pulled, but the save could not be read again: ${err.message}`, true);
+    return;
+  }
+  render();
+  scheduleRender();
+  // A list drawn before the pull is a list from before it.
+  if (lastApplications) loadApplications().catch(() => undefined);
+  setStatus(`Pulled ${plural(res.pulled, 'commit')} — ${plural(res.files.length, 'file')} changed`);
+}
+
 function describeRemote(remote) {
   if (!remote.tracked) return `${remote.url} — never pushed.`;
-  // Nothing to push, as of the last time the remote was reached: the editor
-  // does not fetch to look, so "up to date" claimed more than it knew while
-  // another machine had pushed since.
-  if (remote.ahead === 0 && remote.behind === 0) return `${remote.url} — nothing to push (as of the last push).`;
+  /*
+   * Nothing to push or pull, as of the last time the remote was reached —
+   * a push or a pull: the editor does not fetch to look, so "up to date"
+   * claimed more than it knew while another machine had pushed since. Pull
+   * is how to ask.
+   */
+  if (remote.ahead === 0 && remote.behind === 0) {
+    return `${remote.url} — in step, as of the last push or pull. Pull to check for changes from another machine.`;
+  }
   const bits = [];
   if (remote.ahead) bits.push(`${plural(remote.ahead, 'commit')} to push`);
-  if (remote.behind) bits.push(`${plural(remote.behind, 'commit')} behind`);
+  if (remote.behind) bits.push(`${plural(remote.behind, 'commit')} to pull`);
   return `${remote.url} — ${bits.join(', ')}.`;
 }
 

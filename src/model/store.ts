@@ -638,6 +638,25 @@ export class Store {
     }
   }
 
+  /**
+   * Forget every parse this store is holding, so the next read of each file
+   * reads it again.
+   *
+   * For a pull (`Repo.pull`), which rewrites files underneath this process.
+   * The cache asks each file for its size and time on every read, and that
+   * is right for an edit — but it is all it asks, and `rememberWritten` keeps
+   * a parse keyed on the stat taken straight after this process wrote. A
+   * pulled file the same size as the one written here, landing within the
+   * same tick of the file system's clock — a second on some file systems, two
+   * on FAT, and a pull is over in well under one — was handed back as the
+   * parse of the old file: the row the other machine changed came back as
+   * it had been here, and the next whole-file write put it back that way on
+   * disk. A pull is rare and a re-parse is cheap; nothing is worth that.
+   */
+  forgetReads(): void {
+    this.parsed.clear();
+  }
+
   private cached<T>(full: string, parse: (raw: string) => T, missing: T): T {
     let stat;
     try {

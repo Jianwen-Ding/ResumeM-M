@@ -49,7 +49,7 @@ import {
   skillsOnThePage,
   skillsSectionOf,
 } from '../jobs/aiPlan.js';
-import { fitResumes, recommend } from '../jobs/fit.js';
+import { fitResumes, forgetPrintedText, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
 import { AlreadySent, advance, localDay, alreadySent, buildBundle, refusedAsSent, closedAsStale, draftForJob, findApplication, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
@@ -244,6 +244,8 @@ const POSTING_CAP = 2_000_000;
 /** Wrap an async handler so a rejection becomes a 4xx/5xx instead of a hang. */
 function handler(fn: (req: Request, res: Response) => Promise<unknown>) {
   return (req: Request, res: Response) => {
+    // The writes it checks in for are let go when it is done; see `createApi`.
+    res.locals.writesHandled = true;
     fn(req, res).catch((err: unknown) => {
       if (res.headersSent) return;
       if (err instanceof OverflowError) {
@@ -254,7 +256,10 @@ function handler(fn: (req: Request, res: Response) => Promise<unknown>) {
         const message = err instanceof Error ? err.message : String(err);
         res.status(400).json({ error: message });
       }
-    }).finally(() => res.locals.finishProjectRequest?.());
+    }).finally(() => {
+      res.locals.finishProjectRequest?.();
+      res.locals.releaseWrites?.();
+    });
   };
 }
 
@@ -262,6 +267,12 @@ export interface ApiDeps {
   store: Store;
   repo: Repo;
   jobs?: Jobs;
+  /**
+   * What the server does to a save when it opens one (`openSave`), run again
+   * after a pull has brought new files in. Passed in rather than imported,
+   * because it lives in the module that imports this one.
+   */
+  afterPull?: () => Promise<void>;
 }
 
 /**
@@ -810,9 +821,37 @@ function mintedForJob(id: string, job: string): boolean {
   return false;
 }
 
-export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
+export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps): Router {
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
+  /*
+   * Every write a request checks in for (`assertNoOutsideGit`) is counted
+   * until the request is answered, so a Pull pressed meanwhile waits for it
+   * rather than merging under it. See `Repo.holdForRequest`. A read checks
+   * in for nothing and costs nothing here.
+   */
+  api.use((req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      next();
+      return;
+    }
+    /*
+     * Let go when the handler is done, not when the reply has gone: a
+     * browser that gives up on a request closes it while the handler is
+     * still writing, and a pull let through then would merge under that
+     * write. A route not wrapped in `handler` is let go when its reply is
+     * finished or its connection closes, so that no hold outlives it.
+     */
+    const finished = Repo.writesOfRequest(() => {
+      res.locals.releaseWrites = () => finished();
+      next();
+    });
+    const unlessHandled = () => {
+      if (!res.locals.writesHandled) finished();
+    };
+    res.once('finish', unlessHandled);
+    res.once('close', unlessHandled);
+  });
 
   const autoCommit = () => store.loadConfig().git.autoCommit;
 
@@ -2076,6 +2115,46 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
     '/config/store/push',
     handler(async (_req, res) => {
       const result = await repo.push();
+      res.json({ ...result, remote: await repo.remoteStatus() });
+    }),
+  );
+
+  /**
+   * Bring the save up to date from its remote — what a second machine used
+   * to do with `git pull` in a terminal while this server ran, and lost
+   * tracker rows doing. See `Repo.pull`.
+   *
+   * Answered 200 whatever happened, as Push is: a conflict or an unreachable
+   * remote is news for the person to read, in `message`, not a broken request.
+   */
+  api.post(
+    '/config/store/pull',
+    handler(async (_req, res) => {
+      const result = await repo.pull();
+      /*
+       * Everything this process remembers about the files, forgotten, even
+       * when nothing came in — a merge that was undone has rewritten the
+       * files it touched, with what they held before, and that is cheap to
+       * read again. The parses (`Store.forgetReads`), the printed text the
+       * fit scores are built from, and the version history's resolved
+       * documents, which are resolved against the live save as well as
+       * the commit.
+       */
+      store.forgetReads();
+      forgetPrintedText(store);
+      documentCache.clear();
+      /*
+       * And what opening the save does, when something did come in: the
+       * pulled files may be from a machine running an older version, and
+       * the server brings a save up to date as it opens it. Awaited, so the
+       * editor's reload after this sees the result; not allowed to turn a
+       * pull that worked into a failed one.
+       */
+      if (result.ok && result.pulled > 0 && afterPull) {
+        await afterPull().catch((err: unknown) => {
+          console.warn(`ResumeM-M: after the pull: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
       res.json({ ...result, remote: await repo.remoteStatus() });
     }),
   );

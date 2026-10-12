@@ -528,7 +528,7 @@ describe('pushing', () => {
     const refused = await repoA.push();
 
     expect(refused.ok).toBe(false);
-    expect(refused.output).toMatch(/remote has changes this save does not have.*git pull in /s);
+    expect(refused.output).toMatch(/remote has changes this save does not have.*Pull them in first.*rmm pull/s);
     expect((await repoA.remoteStatus()).behind).toBe(1);
   });
 });

@@ -60,7 +60,7 @@ function projectSession(store: Store) {
   void openSave(store, repo).catch((err) => {
     console.warn(`ResumeM-M: ${err instanceof Error ? err.message : String(err)}`);
   });
-  return { store, assets, jobs, api: createApi({ store, repo, jobs }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store), current: createCurrentRouter(store) };
+  return { store, assets, jobs, api: createApi({ store, repo, jobs, afterPull: () => openSave(store, repo) }), assetsApi: assetsApi(assets), pdf: createPdfRouter(store), current: createCurrentRouter(store) };
 }
 
 /**

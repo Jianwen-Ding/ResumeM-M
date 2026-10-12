@@ -66,6 +66,7 @@ const WORKS_IN_A_STORE = new Set([
   'apply',
   'track',
   'save',
+  'pull',
   'voice',
   'serve',
 ]);
@@ -96,7 +97,10 @@ const USAGE = `rmm — resume mix-and-match
   rmm voice add <file…> [--dry-run] [--no-ai]
                                   Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
-  rmm save [-m "why"] [--push]    Commit everything in the store to git
+  rmm save [-m "why"] [--pull] [--push]
+                                  Commit everything in the store to git, then
+                                  bring in the remote's changes and send yours
+  rmm pull                        Bring in what was pushed from another machine
   rmm clone <repo> <folder>       Bring a save down from where it is pushed,
                                   and open it
   rmm serve [--port 4600]         Start the editor GUI and extension API
@@ -136,7 +140,7 @@ const TAKES: Record<string, { value?: string[]; bare?: string[] }> = {
   build: { bare: ['all'] },
   feedback: { value: ['focus'] },
   apply: { value: ['company', 'role', 'url'] },
-  save: { value: ['message', 'm'], bare: ['push'] },
+  save: { value: ['message', 'm'], bare: ['push', 'pull'] },
   voice: { bare: ['dry-run', 'no-ai'] },
   serve: { value: ['port'] },
 };
@@ -639,6 +643,7 @@ async function main(argv: string[]): Promise<number> {
       const result = await saveStore(repo, {
         message: arg(rest, 'message') ?? arg(rest, 'm') ?? shortFlag(rest, '-m'),
         push: rest.includes('--push'),
+        pull: rest.includes('--pull'),
       });
 
       if (result.initialised) console.log(`Initialised a git repository at ${dataDir}`);
@@ -652,6 +657,14 @@ async function main(argv: string[]): Promise<number> {
         console.log('Everything is already saved — nothing had changed.');
       }
 
+      if (result.pulled) {
+        if (!result.pulled.ok) {
+          console.error(`Pull failed: ${result.pulled.message}`);
+          if (rest.includes('--push')) console.error('Nothing was pushed, since the pull did not go through.');
+          return 1;
+        }
+        console.log(result.pulled.message);
+      }
       if (result.pushed) {
         console.log(result.pushed.ok ? result.pushed.output : `Push failed: ${result.pushed.output}`);
         if (!result.pushed.ok) return 1;
@@ -662,6 +675,31 @@ async function main(argv: string[]): Promise<number> {
       } else if (result.remote.ahead > 0) {
         console.log(`${plural(result.remote.ahead, 'commit')} not yet pushed to ${result.remote.url} — \`rmm save --push\` sends them.`);
       }
+      return 0;
+    }
+
+    /**
+     * Bring in what another machine pushed: `Repo.pull`, the same as the
+     * editor's Pull button. Exits non-zero for anything but a pull that went
+     * through, a conflict included, so a script syncing two machines stops
+     * there rather than pushing a save that is about to be merged by hand.
+     *
+     * With a server running on this same save, its Pull button is the better
+     * way: from here the pull is a git outside that server, which it guards
+     * against but cannot hold its own writes off for.
+     */
+    case 'pull': {
+      const result = await repo.pull();
+      if (!result.ok) {
+        console.error(result.message);
+        if (result.conflict?.length) {
+          for (const file of result.conflict) console.error(`  conflict: ${file}`);
+        }
+        return 1;
+      }
+      console.log(result.message);
+      for (const file of result.files.slice(0, 20)) console.log(`  ${file}`);
+      if (result.files.length > 20) console.log(`  … and ${result.files.length - 20} more`);
       return 0;
     }
 

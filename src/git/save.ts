@@ -1,4 +1,4 @@
-import type { PendingChange, RemoteStatus, Repo } from './repo.js';
+import type { PendingChange, PullResult, RemoteStatus, Repo } from './repo.js';
 
 /**
  * One deliberate "save everything" for the store.
@@ -17,6 +17,11 @@ export interface SaveOptions {
   message?: string;
   /** Also push to `origin` afterwards. */
   push?: boolean;
+  /**
+   * Also pull from `origin` afterwards — before the push, when both are
+   * asked, so the push is not refused for the very changes the pull brings.
+   */
+  pull?: boolean;
 }
 
 export interface SaveResult {
@@ -31,6 +36,8 @@ export interface SaveResult {
   remote: RemoteStatus;
   /** Present only when a push was asked for. */
   pushed?: { ok: boolean; output: string };
+  /** Present only when a pull was asked for. */
+  pulled?: PullResult;
 }
 
 /**
@@ -130,6 +137,23 @@ export async function saveStore(repo: Repo, opts: SaveOptions = {}): Promise<Sav
     files,
     remote: await repo.remoteStatus(),
   };
+
+  /*
+   * A pull that fails is a failed pull, not a failed save, for the reason a
+   * push is (below): the commit above is made and is reported. And a push
+   * after a pull that did not work is not attempted — it would be refused
+   * for the same changes, or, after a conflict, send a save that is about to
+   * be merged by hand.
+   */
+  if (opts.pull) {
+    try {
+      result.pulled = await repo.pull();
+    } catch (err) {
+      result.pulled = { ok: false, pulled: 0, files: [], message: err instanceof Error ? err.message : String(err) };
+    }
+    result.remote = await repo.remoteStatus();
+    if (!result.pulled.ok) return result;
+  }
 
   if (opts.push) {
     // Pushing with nothing new locally is still worth doing: an earlier save
