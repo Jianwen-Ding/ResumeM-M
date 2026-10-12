@@ -1,13 +1,10 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { runInGroup } from '../process-group.js';
 import type { LayoutOptions, ResolvedResume } from '../model/types.js';
 import { renderLatexFastBody, runtimeSetup, stablePreamble } from './latex.js';
-
-const run = promisify(execFile);
 
 /**
  * How much longer a process gets after its own `timeout` before it is killed
@@ -35,20 +32,10 @@ async function runTimed(
   args: string[],
   opts: { cwd?: string; timeout: number; maxBuffer?: number },
 ): Promise<{ stdout: string; stderr: string }> {
-  const pending = run(cmd, args, opts);
-  const forceKill = setTimeout(() => {
-    try {
-      pending.child.kill('SIGKILL');
-    } catch {
-      // Already gone, which is the outcome this wanted.
-    }
-  }, opts.timeout + STUBBORN_GRACE_MS);
-  forceKill.unref?.();
-  try {
-    return await pending;
-  } finally {
-    clearTimeout(forceKill);
-  }
+  // In a process group of its own, so the timeout reaches what the engine
+  // started as well: `latexmk` is a Perl script that runs `pdflatex`. See
+  // `runInGroup`.
+  return runInGroup(cmd, args, { ...opts, graceMs: STUBBORN_GRACE_MS });
 }
 
 /**
@@ -101,6 +88,87 @@ export function runTimedForTest(
 function cacheDir(): string {
   return process.env.RMM_FMT_CACHE || path.join(os.tmpdir(), 'rmm-fmt-cache');
 }
+
+/*
+ * How many formats the cache keeps, and how much room they may take.
+ *
+ * Nothing used to delete a format. One is about 7MB, and the key is a hash of
+ * the layout, so every font size, margin and spacing the editor was ever
+ * shown left one behind: measured, thirty font sizes tried through the
+ * editor's render left thirty formats and 205MB in the temp directory, and it
+ * only went on growing. A layout once used and then changed is seldom asked
+ * for again.
+ *
+ * So the least recently used go, once there are more than `FORMATS_KEPT` or
+ * they take more than `FORMATS_BYTES`. Twelve covers both paper sizes and every
+ * layout a person flips between in a sitting; rebuilding one that was swept
+ * costs one cold build, a second or two. Use is recorded by touching the
+ * file (`touchFormat`), so a format this process and every other one keeps
+ * using stays the newest.
+ */
+const FORMATS_KEPT = 12;
+const FORMATS_BYTES = 120 * 1024 * 1024;
+
+/** Test-only: the caps above, so a test can build past them. */
+export const FORMAT_CACHE_LIMITS = { kept: FORMATS_KEPT, bytes: FORMATS_BYTES };
+
+/**
+ * Mark a format as just used. False when it is not there any more — another
+ * process's sweep took it — so the caller builds it again rather than handing
+ * pdftex a path to nothing.
+ */
+function touchFormat(fmtPath: string): boolean {
+  try {
+    const now = new Date();
+    fs.utimesSync(fmtPath, now, now);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Oldest out first, until what is left fits under both caps, the way
+ * `sweepCache` in `compile.ts` keeps the compile cache in bounds. `keep` is the
+ * format just built, which is the one about to be used and never goes,
+ * whatever it weighs.
+ *
+ * Staged copies from a build that died part-way (see `buildFormat`) are
+ * swept too, once they are old enough that no build can still be writing one.
+ */
+function sweepFormats(dir: string, keep: string): void {
+  try {
+    const now = Date.now();
+    const found = fs
+      .readdirSync(dir)
+      .map((f) => ({ f, stat: fs.statSync(path.join(dir, f), { throwIfNoEntry: false }) }))
+      .filter((e): e is { f: string; stat: fs.Stats } => e.stat !== undefined && e.stat.isFile());
+    for (const { f, stat } of found) {
+      if (!f.endsWith('.fmt') && /\.fmt\./.test(f) && now - stat.mtimeMs > STALE_STAGED_MS) {
+        fs.rmSync(path.join(dir, f), { force: true });
+      }
+    }
+    const newestFirst = found.filter((e) => e.f.endsWith('.fmt')).sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+    const kept = newestFirst.find((e) => path.join(dir, e.f) === keep);
+    let count = kept ? 1 : 0;
+    let bytes = kept ? kept.stat.size : 0;
+    for (const { f, stat } of newestFirst) {
+      const at = path.join(dir, f);
+      if (at === keep) continue;
+      if (count + 1 <= FORMATS_KEPT && bytes + stat.size <= FORMATS_BYTES) {
+        count++;
+        bytes += stat.size;
+        continue;
+      }
+      fs.rmSync(at, { force: true });
+    }
+  } catch {
+    // A cache that cannot be tidied is not an error; the next build tries again.
+  }
+}
+
+/** How old a staged copy must be before it is taken for one a dead build left. */
+const STALE_STAGED_MS = 10 * 60 * 1000;
 
 let available: boolean | undefined;
 
@@ -160,7 +228,21 @@ async function getFormat(paper: LayoutOptions['paper'], layout: LayoutOptions): 
   const preambleText = `${stablePreamble(paper)}\n${runtimeSetup(layout)}`;
   const key = hashOf(preambleText);
   const existing = formats.get(key);
-  if (existing) return existing;
+  /*
+   * Touched on every use, so the sweep knows it is wanted — and if the touch
+   * finds nothing, a sweep (here or in another process) has taken it, and it
+   * is built again rather than handed to pdftex as a path to nothing. A
+   * build still in flight has nothing to touch yet, and is simply waited on.
+   */
+  if (existing) {
+    const ready = await existing.then(
+      (got) => got,
+      () => undefined,
+    );
+    if (!ready || touchFormat(ready.path)) return existing;
+    if (formats.get(key) === existing) formats.delete(key);
+    return getFormat(paper, layout);
+  }
 
   const promise = buildFormat(paper, preambleText, key).catch((err) => {
     formats.delete(key); // do not cache a failed build
@@ -181,7 +263,7 @@ async function buildFormat(
   const jobname = `rmm-${paper}-${key}`;
   const fmtPath = path.join(into, `${jobname}.fmt`);
 
-  if (fs.existsSync(fmtPath)) return { path: fmtPath };
+  if (touchFormat(fmtPath)) return { path: fmtPath };
 
   const buildDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-fmtbuild-'));
   try {
@@ -223,6 +305,7 @@ async function buildFormat(
       fs.rmSync(staged, { force: true });
       throw err;
     }
+    sweepFormats(into, fmtPath);
     return { path: fmtPath };
   } finally {
     fs.rmSync(buildDir, { recursive: true, force: true });

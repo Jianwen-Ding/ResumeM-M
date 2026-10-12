@@ -1,15 +1,12 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { redactIdentifiers } from '../jobs/answers.js';
 import { startRun, type RunHandle } from './activity.js';
 import { AI_PRESETS, aiIsOn } from './presets.js';
 import { envForAgent } from './env.js';
+import { runInGroup } from '../process-group.js';
 import type { StoreConfig } from '../model/types.js';
-
-const run = promisify(execFile);
 
 /**
  * How long a child gets to honour SIGTERM before it is killed outright.
@@ -210,12 +207,17 @@ export async function runAgent(
    * a command is not a run to show.
    */
   let watching: RunHandle | null = null;
-  /** Cancels the forced kill; set once the child exists. See below. */
-  let stopForcing: (() => void) | null = null;
 
   try {
-    const pending = run(config.ai.command, args, {
+    /*
+     * In a process group of its own, and the timeout's signals go to the
+     * group: a CLI started through a wrapper script that does not `exec` it
+     * used to outlive its own 502 — the wrapper died, the CLI under it carried
+     * on. See `runInGroup`, which also sends the forced kill below.
+     */
+    const pending = runInGroup(config.ai.command, args, {
       timeout: config.ai.timeoutMs,
+      graceMs: STUBBORN_GRACE_MS,
       maxBuffer: 32 * 1024 * 1024,
       // The confinement: an empty directory with only the prompt in it, never
       // the server's own working directory.
@@ -253,20 +255,11 @@ export async function runAgent(
      * still going for ever. A background job never finishes and the card
      * spins; a foreground request never answers at all.
      *
-     * So: a grace period after the polite signal, then one it cannot refuse.
-     * `killed` is set either way, so this arrives at the same "it ran out of
-     * time" sentence below rather than at a new kind of failure. `unref` so a
-     * pending timer cannot be the thing that keeps the process up.
+     * So: a grace period after the polite signal, then one it cannot refuse —
+     * `graceMs` above; `runInGroup` sends both, to the whole group. `killed`
+     * is set either way, so this arrives at the same "it ran out of time"
+     * sentence below rather than at a new kind of failure.
      */
-    const forceAfter = setTimeout(() => {
-      try {
-        pending.child.kill('SIGKILL');
-      } catch {
-        // Already gone, which is the outcome this wanted.
-      }
-    }, config.ai.timeoutMs + STUBBORN_GRACE_MS);
-    forceAfter.unref?.();
-    stopForcing = () => clearTimeout(forceAfter);
 
     /*
      * Close the child's stdin — always, and explicitly.
@@ -472,7 +465,6 @@ export async function runAgent(
     watching?.ended('failed', why);
     throw new AgentError(why, e.stdout);
   } finally {
-    stopForcing?.();
     // Whatever left the try another way still closes the record; `ended` keeps
     // the first outcome, so this only catches what nothing else named.
     watching?.ended('failed', 'The run ended without saying why.');

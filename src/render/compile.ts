@@ -1,16 +1,13 @@
-import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { runInGroup } from '../process-group.js';
 import { DEFAULT_LAYOUT, type LayoutOptions, type ResolvedResume } from '../model/types.js';
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
 import { renderLatex, unrenderableReason } from './latex.js';
 import { letterLayout, renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
 import { namePlaceholders, placeholdersIn } from '../model/placeholders.js';
-
-const run = promisify(execFile);
 
 const SP_PER_PT = 65536;
 const PT_PER_IN = 72;
@@ -83,20 +80,10 @@ async function runTimed(
   args: string[],
   opts: { cwd?: string; timeout: number; maxBuffer?: number },
 ): Promise<{ stdout: string; stderr: string }> {
-  const pending = run(cmd, args, opts);
-  const forceKill = setTimeout(() => {
-    try {
-      pending.child.kill('SIGKILL');
-    } catch {
-      // Already gone, which is the outcome this wanted.
-    }
-  }, opts.timeout + STUBBORN_GRACE_MS);
-  forceKill.unref?.();
-  try {
-    return await pending;
-  } finally {
-    clearTimeout(forceKill);
-  }
+  // In a process group of its own, so the timeout reaches what the engine
+  // started as well: `latexmk` is a Perl script that runs `pdflatex`. See
+  // `runInGroup`.
+  return runInGroup(cmd, args, { ...opts, graceMs: STUBBORN_GRACE_MS });
 }
 
 /**
