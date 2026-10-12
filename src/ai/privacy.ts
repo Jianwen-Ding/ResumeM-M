@@ -60,6 +60,85 @@ export function answersForAi<T extends AnswerBankItem>(answers: readonly T[] | u
   return out;
 }
 
+/*
+ * What `personalDetailIn` takes out before it looks for numbers: links, and
+ * the identifiers a letter or a "Website" answer cites. Each is replaced by a
+ * space, so the words either side stay apart.
+ */
+const GIT_REMOTE = /\bgit@[\w-]+(?:\.[\w-]+)+:[^\s@]+/g;
+const URL_LIKE = [
+  // Anything with a scheme: https://, http://, ftp://.
+  /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi,
+  /\bwww\.\S+/gi,
+  // A bare domain with a path: github.com/jane, orcid.org/0000-…
+  /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S*/gi,
+  // DOIs, arXiv ids and ORCID iDs written without a link.
+  /\bdoi:\s*\S+/gi,
+  /\b10\.\d{4,9}\/\S+/g,
+  /\barxiv:\s*\S+/gi,
+  /\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b/g,
+];
+
+/*
+ * A run of digit groups, with nothing that makes it part of a longer token
+ * on either side: no letter, digit or "/" touching it, and no "." or "-"
+ * that goes on into one ("1234." at the end of a sentence is still the end).
+ * Two exceptions, both phones: "Tel.415…" (a word and a dot before it), and
+ * "…1234x22", an extension. Between groups, up to three of space, brackets,
+ * dot or dash.
+ */
+const DIGIT_RUN = /(?<![\w/]|\d[.-]|[\p{L}_]-)\+?\d+(?:[\s().-]{1,3}\d+)*(?!(?!x\d)[\w/]|[.-]\w)/gu;
+
+/*
+ * Whether some stretch of a digit run is a phone number. A stretch starts and
+ * ends at the run's ends or at a space or bracket (never inside "a.b" or
+ * "a-b", which is one token), holds 10 to 15 digits — E.164 stops at 15 — and
+ * is none of the numbers that have that many digits and are not phones:
+ *
+ * - "1.000.000.000" and "1 234 567 890": a figure in groups of three;
+ * - "3.11.4" and "2023.10.1": a version, a group of one digit after a dot;
+ * - "2020 2021 2022": years;
+ * - "2024-0012345": a requisition, a group of five or more digits beside
+ *   others, unless the rest is no more than a country or area code
+ *   ("+1 4155551234", "(415) 5551234").
+ */
+function phoneIn(text: string): boolean {
+  for (const run of text.match(DIGIT_RUN) ?? []) {
+    const groups = run.match(/\+?\d+/g)!;
+    const seps = run.split(/\+?\d+/).slice(1, -1);
+    const breakable = (sep: string) => !/[.-]/.test(sep);
+    for (let i = 0; i < groups.length; i++) {
+      if (i > 0 && !breakable(seps[i - 1]!)) continue;
+      for (let j = i; j < groups.length; j++) {
+        if (j < groups.length - 1 && !breakable(seps[j]!)) continue;
+        const g = groups.slice(i, j + 1);
+        const between = seps.slice(i, j);
+        const digits = g.join('').replace(/\D/g, '').length;
+        if (digits < 10 || digits > 15) continue;
+        const bare = g.map((x) => x.replace('+', ''));
+        const plus = g[0]!.startsWith('+');
+        if (bare.length > 2 && bare[0]!.length <= 3 && bare.slice(1).every((x) => x.length === 3)) continue;
+        if (bare.some((x, k) => k > 0 && x.length === 1 && between[k - 1]!.includes('.'))) continue;
+        if (bare.length > 1 && bare.every((x) => /^(?:19|20)\d\d$/.test(x))) continue;
+        const long = bare.findIndex((x) => x.length >= 5);
+        if (bare.length > 1 && long >= 0 && !plus && bare.filter((_, k) => k !== long).join('').length > 3) continue;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/*
+ * A street address as a letter would write one: a house number, one to four
+ * capitalised words, and the street word itself capitalised. Case-sensitive,
+ * so "led 4 engineers to drive", "mentored 3 Junior Engineers to drive the
+ * migration" and "12 Data Scientists in a way" are prose, and "123 Main
+ * Street" and "221B Baker Street" are not.
+ */
+const STREET =
+  /\b\d{1,6}[A-Z]?\s+(?:[A-Z0-9][A-Za-z0-9.'-]*\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Court|Ct|Place|Pl|Terrace|Circle|Cir|Parkway|Pkwy|Highway|Hwy)\b/;
+
 /**
  * The contact detail or identifier in something an AI wrote, named so it can
  * be told what to take out; null when there is none.
@@ -73,20 +152,36 @@ export function answersForAi<T extends AnswerBankItem>(answers: readonly T[] | u
  * needs a phone number, an email address, a home address or a national
  * number; the form's own contact fields are filled from the profile.
  *
- * The same shapes as everywhere else here and no new ones, so a letter that
- * names the employer, a year or a figure, and an answer that is a LinkedIn or
- * portfolio link, are what they were. Except one: the street-address shape
- * reads "led 4 engineers to drive" as an address, which in a bank answer
- * costs a reusable answer but in a letter costs the letter, so here the name
- * before the street word has to be written as a name is, with capitals.
+ * Narrower shapes than `CONTACT_ANSWER`, which may cost a bank answer when it
+ * is wrong; here a wrong refusal costs the letter, or a link that was the
+ * whole answer. The phone and street shapes there refused, in real text: a
+ * DOI, an ORCID iD, a LinkedIn or commit address, "requisition
+ * 2024-0012345", "1.000.000.000 events", "Python 3.11.4 2023.10.1", a run of
+ * years, "mentored 3 Junior Engineers to drive the migration" and "grew the
+ * team to 12 Data Scientists in a way that scaled". See `phoneIn` and
+ * `STREET`. Real numbers — "(555) 555-5555", "+1 415 555 1234",
+ * "415.555.1234" — and "123 Main Street" are still refused.
  */
 export function personalDetailIn(text: string): string | null {
   const body = String(text ?? '');
-  const [email, phone, street] = CONTACT_ANSWER;
-  if (email!.test(body)) return 'an email address';
-  if (phone!.test(body)) return 'a phone number';
-  const address = body.match(new RegExp(street!.source, 'gi')) ?? [];
-  if (address.some((m) => /^\d{1,6}\s+(?:[A-Z0-9][A-Za-z0-9.'-]*\s+){1,4}[A-Z]/.test(m))) return 'a street address';
+  const [email] = CONTACT_ANSWER;
+  /*
+   * `git@github.com:jane/repo.git` is the address of a repository, not of a
+   * person, though the email shape reads "git@github.com" in it.
+   */
+  const noGit = body.replace(GIT_REMOTE, ' ');
+  if (email!.test(noGit)) return 'an email address';
+  /*
+   * Links and identifiers out before the number shapes are looked for. A
+   * DOI ("10.1145/3292500.3330701"), an ORCID iD, a LinkedIn address ending
+   * in "-1234567890" and a GitHub commit are all ten digits or more with dots
+   * and dashes between, and every one of them was refused as a phone number —
+   * in the answer to "Website", which is where a link is the whole answer.
+   * An email inside a link was already looked for above.
+   */
+  const prose = URL_LIKE.reduce((t, re) => t.replace(re, ' '), noGit);
+  if (phoneIn(prose)) return 'a phone number';
+  if (STREET.test(prose)) return 'a street address';
   if (isSensitiveAnswer(body)) return 'an identifier (a national, tax, passport or card number, or a date of birth)';
   return null;
 }

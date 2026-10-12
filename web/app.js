@@ -7480,8 +7480,23 @@ let appFilter = { text: '', status: '' };
  */
 let lastApplications = null;
 
+/*
+ * And only the newest load is drawn, as with `loadLetters`.
+ *
+ * The list is loaded again after every status change, and two changes in
+ * quick succession — or a change while the tab's own load is still out —
+ * put two requests in flight. The server answers them in order, but they can
+ * come back over two connections in either order, and the older answer
+ * landing last drew the list from before the second change, and kept it as
+ * `lastApplications` for the search box to narrow.
+ */
+let applicationLoads = 0;
+
 async function loadApplications() {
-  lastApplications = await api('/applications');
+  const mine = ++applicationLoads;
+  const list = await api('/applications');
+  if (mine !== applicationLoads) return;
+  lastApplications = list;
   drawApplications(lastApplications);
 }
 
@@ -12987,22 +13002,49 @@ async function applyHash() {
  *
  * Returns whether it moved.
  */
-async function leaveResume(go) {
-  const landed = await flushEdits();
-  if (state.dirty) await autoSave().catch(() => {});
-  if (state.dirty || !landed) {
-    setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
-    return false;
-  }
+/*
+ * And nothing on the resume being left can be changed while it is left.
+ *
+ * The writes above take a request or two — with auto-commit on, `flushEdits`
+ * always asks for a commit — and the old resume stays drawn, and clickable,
+ * until they come back. A click in that gap edited the resume being left: it
+ * was saved behind the person's back, and the switch landed on top of it, so
+ * the change they made was to a resume they were no longer looking at. The
+ * editor walk's "A skill switched off and on again" clicked the new resume's
+ * chip as soon as it could see one with that name, which was the old
+ * resume's, and failed whenever the commit was slow. Inert, the old resume is
+ * still there to read and takes no clicks or typing; the dropdown, the
+ * `#resumes/<id>` link and `#master` all come through here.
+ *
+ * Counted, because two moves can overlap (a link followed while the dropdown's
+ * move is still saving) and the first to finish must not hand the editor
+ * back while the second is still writing.
+ */
+let leavingResume = 0;
 
-  clearTimeout(renderTimer);
-  renderToken++;
-  go();
-  clearEdits();
-  setSaveState('saved');
-  render();
-  scheduleRender();
-  return true;
+async function leaveResume(go) {
+  const editor = $('#editor');
+  leavingResume++;
+  if (editor) editor.inert = true;
+  try {
+    const landed = await flushEdits();
+    if (state.dirty) await autoSave().catch(() => {});
+    if (state.dirty || !landed) {
+      setStatus('That change has not saved yet, so the resume on screen stays until it does.', true);
+      return false;
+    }
+
+    clearTimeout(renderTimer);
+    renderToken++;
+    go();
+    clearEdits();
+    setSaveState('saved');
+    render();
+    scheduleRender();
+    return true;
+  } finally {
+    if (--leavingResume === 0 && editor) editor.inert = false;
+  }
 }
 
 function setupTabs() {

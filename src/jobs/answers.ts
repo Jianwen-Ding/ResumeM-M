@@ -1,6 +1,7 @@
 import type { AnswerBankItem, CoverLetter, Variant } from '../model/types.js';
 import { employerName, localDay } from '../model/applications.js';
 import { looksLikeCompanyName } from './extract.js';
+import { requisitionOf } from './names.js';
 
 /**
  * Reusing what you already wrote, without an AI call.
@@ -1044,20 +1045,28 @@ export function fileSentAnswer(
   // The same wording saved twice — a form resubmitted, a workspace completed
   // twice — is not a second variant. See `/answers/save`.
   const already = existing.variants.find((v) => v.text.trim() === sent.answer.trim());
-  if (already) {
-    existing.default = already.id;
-    if (!sent.unread) delete already.suggested;
-    return;
-  }
-  const vid = `v_${Date.now().toString(36)}`;
-  existing.variants.push({ id: vid, label: sent.label, text: sent.answer, ...mark });
   /*
    * And an unread draft does not push a reviewed answer out of the default:
    * the next form for somebody else would lose the answer the person stood
    * behind and be offered one they never read.
    */
   const current = existing.variants.find((v) => v.id === existing.default);
-  if (!sent.unread || !current || current.suggested) existing.default = vid;
+  const mayLead = (v: Variant) => !v.suggested || !current || current.suggested;
+  if (already) {
+    if (!sent.unread) delete already.suggested;
+    /*
+     * The same rule when the draft is already there. This branch made it the
+     * default whatever it was, so the same unread draft sent a second time —
+     * a second form asking the same thing — took the default from the
+     * reviewed answer the first send had been kept from displacing.
+     */
+    if (mayLead(already)) existing.default = already.id;
+    return;
+  }
+  const vid = `v_${Date.now().toString(36)}`;
+  const added: Variant = { id: vid, label: sent.label, text: sent.answer, ...mark };
+  existing.variants.push(added);
+  if (mayLead(added)) existing.default = vid;
 }
 
 export function matchAnswers(
@@ -1109,9 +1118,49 @@ export function letterId(company: string | undefined, role: string | undefined, 
    * Japanese or Cyrillic slugged to nothing, so two such letters on one day
    * were both "2026-10-11" and the second was saved over the first.
    */
-  const slug = (s: string) =>
-    s.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 30);
-  return [localDay(at), company && slug(company), role && slug(role)]
+  const whole = (s: string) =>
+    s.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+  const slug = (s: string) => whole(s).slice(0, 30);
+  return [localDay(at), company && slug(company), role && roleSlug(role, company, whole)]
     .filter(Boolean)
     .join('-');
+}
+
+/*
+ * The role's part of a letter's id, with its requisition number kept.
+ *
+ * The role was cut to 30 characters like the company, and on a long title the
+ * cut took the number: "Senior Software Engineer, Platform (12345678)" and
+ * "(87654321)" at one employer on one day were both
+ * "…-senior-software-engineer-platf", and the second letter was saved over
+ * the first. Two requisitions under one title are two jobs
+ * (`differentRequisitions`), so they are two letters.
+ *
+ * The rule, exactly — JobHelper's offline `letterId` mirrors it:
+ *
+ * 1. `full` is the role slugged whole: NFKC, lower case, every run of
+ *    characters that are not letters or digits (`[^\p{L}\p{N}]+`, Unicode)
+ *    to one "-", a leading and a trailing "-" taken off.
+ * 2. If `full` is 30 characters or fewer, or the role carries no requisition
+ *    number (`requisitionOf(role, company)`), the part is `full.slice(0, 30)`
+ *    — the id it always had, so no letter already saved changes its id.
+ * 3. Otherwise `number` is that requisition slugged the same way (it is
+ *    letters and digits only: "12345678", "jr0286834", "r22724"). Take the
+ *    last whole "-"-separated occurrence of `number` out of `full` (in
+ *    "-" + full + "-", the last "-number-" becomes "-"; then the "-" either
+ *    end off again); if it is not there as a whole token, `full` is used as
+ *    it is. Cut that to 30 characters, take any trailing "-" off, and add
+ *    "-" + `number` — never cut, so it cannot be lost.
+ */
+function roleSlug(role: string, company: string | undefined, whole: (s: string) => string): string {
+  const full = whole(role);
+  const req = full.length > 30 ? requisitionOf(role, company) : undefined;
+  if (!req) return full.slice(0, 30);
+  const number = whole(req);
+  const padded = `-${full}-`;
+  const at = padded.lastIndexOf(`-${number}-`);
+  const without =
+    at < 0 ? full : `${padded.slice(0, at)}-${padded.slice(at + number.length + 2)}`.replace(/^-+|-+$/g, '');
+  const kept = without.slice(0, 30).replace(/-+$/, '');
+  return kept ? `${kept}-${number}` : number;
 }

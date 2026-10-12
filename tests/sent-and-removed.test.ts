@@ -244,6 +244,23 @@ describe('a row whose names were corrected in the tracker', () => {
     expect(rows()[0]).toMatchObject({ company: 'Zeta Motors', status: 'applied' });
   });
 
+  /*
+   * The old names are the extractor's misreads, and it misreads another
+   * employer's posting the same way. Globex's send under "Summer 2026" was
+   * filed into Zeta's corrected row — moving it to applied for a job nobody
+   * sent there — because the alias was matched by name alone.
+   */
+  it('is not the row another employer’s posting under the same old names belongs to', async () => {
+    await bundle({ company: 'Summer 2026', role: 'Firmware Intern', url: URL, resumeId: 'intern', status: 'applying' }).expect(200);
+    const id = rows()[0]!.id;
+    await request(app).patch(`/api/applications/${id}`).send({ company: 'Zeta Motors', role: 'Firmware Intern' }).expect(200);
+
+    const other = 'https://jobs.lever.co/globex/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b';
+    const sent = await request(app).post('/api/extension/sent').send({ company: 'Summer 2026', role: 'Firmware Intern', url: other }).expect(200);
+    expect(sent.body.application.id).not.toBe(id);
+    expect(rows().find((r) => r.id === id)).toMatchObject({ company: 'Zeta Motors', status: 'applying' });
+  });
+
   it('keeps the corrected names when the page builds it again under the old ones', async () => {
     await bundle({ company: 'Summer 2026', role: 'Firmware Intern', url: URL, resumeId: 'intern', status: 'applying' }).expect(200);
     const id = rows()[0]!.id;

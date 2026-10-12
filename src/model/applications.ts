@@ -401,6 +401,32 @@ export function sameIdentity(company: string, role: string, otherCompany: string
 }
 
 /*
+ * Whether two addresses are one posting, for matching a row by a name it was
+ * corrected from. When both carry a job number, that number on the same site
+ * (one job is often reached by several addresses there); otherwise the same
+ * address exactly, less any `#fragment` — the case this exists for is a send
+ * from the card still open on the page the row was staged from. A missing
+ * address on either side is not a match: "same host" alone would have let
+ * every Lever or Greenhouse posting with the same misread names in.
+ */
+function sameAddress(url: string | undefined, other: string | undefined): boolean {
+  if (!url || !other) return false;
+  const number = jobNumberIn(url);
+  const otherNumber = jobNumberIn(other);
+  if (number && otherNumber) return number === otherNumber && hostOf(url) === hostOf(other) && hostOf(url) !== '';
+  const bare = (u: string) => {
+    try {
+      const parsed = new URL(u.trim());
+      parsed.hash = '';
+      return parsed.href;
+    } catch {
+      return u.trim();
+    }
+  };
+  return bare(url) === bare(other);
+}
+
+/*
  * The same job, by its number, under two spellings of who it is with.
  *
  * Electronic Arts posts its studios' jobs on its own board, and one job there
@@ -434,6 +460,14 @@ export function sameIdentity(company: string, role: string, otherCompany: string
  * number, where nothing else could tie the two together. The row keeps the
  * names it was corrected from (`aliases`, written by `PATCH
  * /applications/:id`), and they are the row's names too.
+ *
+ * But only at the row's own address. The names that get corrected are the
+ * extractor's misreads — a season, a board's name — and it misreads another
+ * employer's posting the same way: Globex's "Summer 2027" / "Software
+ * Engineer Intern" matched Acme's corrected row by its old names, so Globex's
+ * send was filed as Acme's, or its files replaced the ones Acme was sent. A
+ * name somebody has already said is wrong is no evidence on its own; the
+ * address is what says it is the same page. See `sameAddress`.
  */
 function sameJobAs(
   company: string,
@@ -449,7 +483,8 @@ function sameJobAs(
     identity(other.company, other.role) === key && !differentRequisitions(role, other.role, company, other.company);
   return (row) =>
     byName(row) ||
-    (row.aliases ?? []).some((was) => typeof was?.company === 'string' && typeof was?.role === 'string' && byName(was)) ||
+    ((row.aliases ?? []).some((was) => typeof was?.company === 'string' && typeof was?.role === 'string' && byName(was)) &&
+      sameAddress(url, row.url)) ||
     (named &&
       Boolean(number) &&
       jobNumberIn(row.url) === number &&

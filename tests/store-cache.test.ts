@@ -443,6 +443,9 @@ describe('asReadBack', () => {
       undefined,
       // eslint-disable-next-line no-sparse-arrays
       [1, , 3],
+      // The read strips a byte-order mark at the start of the file, and an
+      // unquoted first key is the start of the file.
+      { '\uFEFFbom': 1 },
     ]) {
       expect(asReadBack(value)).toBeUndefined();
     }

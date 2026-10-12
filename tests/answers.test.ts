@@ -154,6 +154,31 @@ describe('letterId', () => {
     expect(mercari).toBe('2026-10-11-株式会社メルカリ-ソフトウェアエンジニア');
     expect(yandex).toBe('2026-10-11-яндекс-разработчик');
   });
+
+  /*
+   * The role was cut to 30 characters and the cut took the number, so two
+   * requisitions under one long title on one day were one id, and the
+   * second letter was saved over the first.
+   */
+  it('keeps the requisition number of a long title, so two requisitions are two letters', () => {
+    const day = new Date(2026, 9, 11);
+    const first = letterId('Helios', 'Senior Software Engineer, Platform (12345678)', day);
+    const second = letterId('Helios', 'Senior Software Engineer, Platform (87654321)', day);
+    expect(first).toBe('2026-10-11-helios-senior-software-engineer-platf-12345678');
+    expect(second).toBe('2026-10-11-helios-senior-software-engineer-platf-87654321');
+    // After a separator too, and in the case it was written.
+    expect(letterId('Helios', 'Senior Software Engineer, Platform Infrastructure - JR0286834', day)).toBe(
+      '2026-10-11-helios-senior-software-engineer-platf-jr0286834',
+    );
+  });
+
+  it('is the id it always was for a short title with a number, and for a title with none', () => {
+    const day = new Date(2026, 9, 11);
+    expect(letterId('Helios', 'Engineer (12345678)', day)).toBe('2026-10-11-helios-engineer-12345678');
+    expect(letterId('Helios', 'Senior Software Engineer, Platform Infrastructure', day)).toBe(
+      '2026-10-11-helios-senior-software-engineer-platf',
+    );
+  });
 });
 
 /*
@@ -1434,6 +1459,15 @@ describe('an AI-written answer filed from a completed application', () => {
     const m = matchAnswer(Q, bank, { company: 'Plaid' });
     expect(m.answer).toBe('My own answer.');
     expect(matchAnswer(Q, bank, { company: 'Streamly' }).confident).toBe(false);
+  });
+
+  it('does not push it out when the same unread draft is sent a second time', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'My own answer.', false, 'Acme');
+    file(bank, 'The AI answer.', true, 'Streamly');
+    file(bank, 'The AI answer.', true, 'Globex');
+    expect(bank[0]!.variants).toHaveLength(2);
+    expect(matchAnswer(Q, bank, { company: 'Plaid' })).toMatchObject({ answer: 'My own answer.', confident: true });
   });
 
   it('is filled once the person has sent it having read it', () => {

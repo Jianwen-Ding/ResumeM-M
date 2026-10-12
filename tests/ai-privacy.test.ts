@@ -11,7 +11,7 @@ import {
   feedbackPrompt,
 } from '../src/ai/prompts.js';
 import { collectSamples } from '../src/ai/voice.js';
-import { answersForAi } from '../src/ai/privacy.js';
+import { answersForAi, personalDetailIn } from '../src/ai/privacy.js';
 import { wireUp } from '../src/mcp/launch.js';
 import { build, type SessionFile } from '../src/mcp/main.js';
 import { WritingSession } from '../src/mcp/writing.js';
@@ -203,5 +203,62 @@ describe('the session file in the AI’s working directory', () => {
     }
     const { file } = written('tailor');
     expect(file.resume?.profile).toEqual({ name: 'Test Person' });
+  });
+});
+
+/*
+ * What the writing session refuses to save, and what it must not.
+ *
+ * The phone shape read any ten digits with dots and dashes between as a phone
+ * number, so a DOI, an ORCID iD, a LinkedIn or commit address, a requisition
+ * number, "1.000.000.000" and a version string were refused — the link being
+ * the whole answer to "Website". The street shape read "mentored 3 Junior
+ * Engineers to drive" as an address, and `git@github.com:` as an email.
+ */
+describe('personalDetailIn', () => {
+  it.each([
+    'My paper (https://doi.org/10.1145/3292500.3330701) introduced the method.',
+    'DOI: 10.1145/3292500.3330701',
+    'arXiv:2310.12345 describes it',
+    'ORCID: 0000-0002-1825-0097',
+    'https://orcid.org/0000-0002-1825-0097',
+    'https://www.linkedin.com/in/jane-doe-1234567890',
+    'linkedin.com/in/jane-doe-1234567890',
+    'https://github.com/jane/repo/commit/1234567890abcdef',
+    'git@github.com:jane/repo.git',
+    'I am applying for requisition 2024-0012345 posted on your site.',
+    'We processed 1.000.000.000 events a day.',
+    'served 1 234 567 890 requests',
+    'Python 3.11.4 2023.10.1 versions',
+    'Between 2015 and 2019, 2020 2021 2022 were busy.',
+    'I mentored 3 Junior Engineers to drive the migration.',
+    'I grew the team to 12 Data Scientists in a way that scaled.',
+    'At Google I led 4 Senior Engineers to drive adoption.',
+    'I led 4 engineers to drive adoption.',
+  ])('lets through %j', (text) => {
+    expect(personalDetailIn(text)).toBeNull();
+  });
+
+  it.each([
+    ['Call me at (555) 555-5555.', 'a phone number'],
+    ['+1 415 555 1234', 'a phone number'],
+    ['Reach me on 415.555.1234.', 'a phone number'],
+    ['phone: 415-555-1234 anytime', 'a phone number'],
+    ['My number is 4155551234', 'a phone number'],
+    ['call 415 555 1234 2 times', 'a phone number'],
+    ['Tel.415.555.1234', 'a phone number'],
+    ['415-555-1234x22', 'a phone number'],
+    ['Reach me at 555-555-5555 or https://github.com/jane', 'a phone number'],
+    ['someone@example.edu', 'an email address'],
+    ['Email me@example.com: thanks', 'an email address'],
+    ['https://example.com/?contact=jane@example.com', 'an email address'],
+    ['I live at 123 Main Street.', 'a street address'],
+    ['I live at 221B Baker Street.', 'a street address'],
+  ])('refuses %j', (text, what) => {
+    expect(personalDetailIn(text)).toBe(what);
+  });
+
+  it('refuses a national number', () => {
+    expect(personalDetailIn('my SSN is 123-45-6789')).toMatch(/identifier/);
   });
 });

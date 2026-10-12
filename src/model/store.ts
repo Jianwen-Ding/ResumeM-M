@@ -221,6 +221,14 @@ export function asReadBack(data: unknown): unknown {
     }
   };
   if (data === null || typeof data !== 'object') return undefined;
+  /*
+   * Nor a mapping whose first key begins with a byte-order mark. YAML writes
+   * that key unquoted as the file's first characters, and the read takes
+   * them for the file's own mark and strips it (`withoutBom`), so the key
+   * comes back without it — and the cache would have held the one the file
+   * does not.
+   */
+  if (!Array.isArray(data) && Object.keys(data)[0]?.startsWith('\uFEFF')) return undefined;
   try {
     return copy(data, false);
   } catch (err) {

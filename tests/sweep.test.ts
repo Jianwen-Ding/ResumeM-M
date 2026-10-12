@@ -590,6 +590,45 @@ describe('a resume that changes while the sweep is waiting on git', () => {
     expect(folds).toBe(1);
   });
 
+  /*
+   * The answer is asked before the fold, and the first resume is taken on it.
+   * That is safe only because the fold cannot move it: `load` reads every
+   * resume through the same flattening and tiering the fold writes, so what
+   * is due before it is what is due after. Held to that here, on a save
+   * that needs every fold — a resume with no tier, one inheriting from the
+   * resume being taken — so a fold that one day decides something `load`
+   * does not would fail this rather than delete on a stale answer.
+   */
+  it('takes the first on an answer the fold does not change', async () => {
+    planted();
+    temp.write('resumes/handmade.yaml', {
+      id: 'handmade',
+      label: 'Written by hand',
+      generatedFor: { company: 'Acme', role: 'Dev', at: daysAgo(400) },
+    });
+    temp.write('resumes/kept.yaml', { id: 'kept', label: 'Kept', tier: 'extended', extends: 'job-old' });
+    const repo = Repo.forStore(temp.dir);
+    await repo.ensure();
+    await repo.commitAll('Before the sweep');
+    const before = wouldSweep(temp.store).map((d) => d.id);
+    let afterFold: string[] | undefined;
+    const store = temp.store;
+    const migrate = store.migrateResumes.bind(store);
+    store.migrateResumes = () => {
+      const folded = migrate();
+      afterFold ??= wouldSweep(store).map((d) => d.id);
+      return folded;
+    };
+
+    const { swept } = await sweepTemporary(store, repo);
+
+    expect(before).toEqual(['job-old']);
+    expect(afterFold).toEqual(before);
+    expect(swept.map((d) => d.id)).toEqual(['job-old']);
+    expect(temp.exists('resumes/handmade.yaml')).toBe(true);
+    expect(temp.exists('resumes/kept.yaml')).toBe(true);
+  });
+
   it('still folds an older save before taking a base, and the variation keeps what it inherited', async () => {
     temp.write('resumes/job-base.yaml', {
       id: 'job-base',

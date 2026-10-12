@@ -477,7 +477,10 @@ export class WritingSession {
      * Whatever the question is called. "Website" is where a planted
      * instruction put a phone number and an email address, and the form
      * would have taken them; a question that asks for a link still takes the
-     * link, because a URL is none of the shapes `personalDetailIn` looks for.
+     * link: `personalDetailIn` takes links and identifiers (a DOI, an ORCID
+     * iD) out of the text before it looks for a phone number or a street, so
+     * the digits in a LinkedIn or commit address are not read as either. It
+     * did not once, and a URL was refused as a phone number.
      */
     const detail = personalDetailIn(text);
     if (detail) return no(leaveOut(detail));
