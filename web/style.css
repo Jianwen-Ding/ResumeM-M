@@ -2294,7 +2294,10 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   .embedded #btn-focus { order: 4; }
   .embedded #btn-undo, .embedded #btn-redo { order: 5; }
   .embedded #btn-more { order: 7; margin-left: auto; }
-  .embedded .segmented button { padding: 4px 8px; }
+  /* Edit/Preview a little tighter than elsewhere: at 8px a side, a 360px
+     panel set in Inter (and so, near enough, SF Pro) came 2px short, and
+     More wrapped onto a row of its own. */
+  .embedded .segmented button { padding: 4px 6px; }
   .embedded .sticky-toolbar button.tiny { padding: 4px 7px; }
   /* Said short: the whole sentence is its title, and "Not saved — …" keeps
      every word, because that one is asking for something. */
@@ -2310,8 +2313,8 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 /* A 320px panel keeps the same single row, a little closer together. */
 @media (max-width: 340px) {
   .embedded .sticky-toolbar { gap: 2px; }
-  .embedded .segmented button { padding: 4px 6px; }
-  .embedded .sticky-toolbar button.tiny { padding: 4px 5px; }
+  .embedded .segmented button { padding: 4px 4px; }
+  .embedded .sticky-toolbar button.tiny { padding: 4px 4px; }
   .embedded #btn-undo, .embedded #btn-redo, .embedded #btn-more { min-width: 28px; }
 }
 
