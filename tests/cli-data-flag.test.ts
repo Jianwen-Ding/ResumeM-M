@@ -21,7 +21,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { hasLatex } from './helpers.js';
+
 const run = promisify(execFile);
+const latex = await hasLatex();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
@@ -347,6 +350,37 @@ describe('rmm --data', () => {
   });
 
   /*
+   * And a letter that runs to a second page is not a clean run either.
+   *
+   * The resume's fit was in the exit condition and the letter's was not, so
+   * a bundle whose letter came out two pages long — attached beside the
+   * resume, and as much the wrong shape to send — exited 0. `rmm apply`
+   * rebuilds the letter the tracker already holds, which is how it is given
+   * one here.
+   */
+  it.skipIf(!latex)('fails apply when the cover letter runs past one page', { timeout: 180_000 }, async () => {
+    const paragraph = 'I would like to work on the ingest pipeline, and here is a long account of why. '.repeat(8);
+    fs.writeFileSync(
+      path.join(save, 'applications.yaml'),
+      JSON.stringify([
+        {
+          id: '2026-01-01-acme-engineer',
+          company: 'Acme',
+          role: 'Engineer',
+          status: 'applying',
+          coverLetter: Array.from({ length: 14 }, () => paragraph).join('\n\n'),
+        },
+      ]),
+      'utf8',
+    );
+    const id = 'the-folder-on-the-command-line';
+    const applied = await rmm(['apply', id, '--company', 'Acme', '--role', 'Engineer', '--data', save]).catch((e) => e);
+    expect(applied.stderr).toMatch(/cover letter is \d+ pages/);
+    expect(applied.code, 'and it does not call that a clean run').toBe(1);
+    expect(applied.stderr).toContain('filed — but not cleanly');
+  });
+
+  /*
    * And each resume's warnings go under its own name, once.
    *
    * `resolved.warnings` was printed *before* the header line, and
@@ -488,10 +522,10 @@ describe('rmm --data, however it is written', () => {
   });
 
   // Run from an empty folder, so a folder made by mistake is plain to see.
-  const rmm = (args: string[]) =>
+  const rmm = (args: string[], env: NodeJS.ProcessEnv = {}) =>
     run(process.execPath, [path.join(root, 'node_modules/.bin/tsx'), path.join(root, 'src/cli.ts'), ...args], {
       cwd,
-      env: { ...process.env, RMM_AUTOCOMMIT: '0' },
+      env: { ...process.env, RMM_AUTOCOMMIT: '0', ...env },
       timeout: 60_000,
     }).then(
       (r) => ({ code: 0, out: r.stdout, err: r.stderr }),
@@ -525,6 +559,37 @@ describe('rmm --data, however it is written', () => {
     const r = await rmm(['save', '-m', '--first line of a message', '--data', save]);
     expect(r.code).toBe(0);
     expect(r.out).toContain('--first line of a message');
+  });
+
+  /*
+   * `--data=~/saves/work` reaches the program with its tilde, because the
+   * shell only expands one at the start of a word. It made `./~/saves/work`
+   * and seeded a new save there, inside whatever folder the command ran from.
+   */
+  it('reads ~ in --data=~/folder as the home folder, and makes no ./~', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-home-'));
+    try {
+      const r = await rmm(['list', '--data=~/saves/work'], { HOME: home, USERPROFILE: home, RMM_PROJECTS_FILE: path.join(home, 'none.json') });
+      expect(r.code, r.err).toBe(0);
+      expect(fs.readdirSync(cwd), 'no folder called ~ here').toEqual([]);
+      expect(fs.existsSync(path.join(home, 'saves', 'work', 'profile.yaml'))).toBe(true);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * `clone` names its folder as an argument, and accepted `--data` as well and
+   * ignored it: the save went into one folder while the person had named
+   * another. Refused, rather than guessing which of the two was meant.
+   */
+  it('refuses --data on clone rather than cloning somewhere else', async () => {
+    for (const flag of [['--data', save], [`--data=${save}-other`]]) {
+      const r = await rmm(['clone', 'https://example.invalid/save.git', 'here', ...flag]);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain('does not take --data');
+      expect(fs.readdirSync(cwd)).toEqual([]);
+    }
   });
 
   it('takes --data before the command, as git takes -C', async () => {

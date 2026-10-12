@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type Router } from 'express';
+import contentDisposition from 'content-disposition';
 import { extractText } from '../ingest/text.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -1303,7 +1304,16 @@ export function createApi({ store, repo, jobs = new Jobs() }: ApiDeps): Router {
         return;
       }
       res.type(name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
-      res.setHeader('Content-Disposition', `inline; filename="${name.replace(/"/g, '')}"`);
+      /*
+       * Through `content-disposition`, which is what Express's own
+       * `res.attachment` uses. Written by hand as `filename="…"`, a name with
+       * any character past U+00FF — "Transcript – Fall 2025.pdf", with its
+       * en dash, or one in Chinese — is not a legal header value, Node threw
+       * on setting it, and the document came back as a 400 to the extension
+       * that asked for it. The package gives a Latin-1 `filename=` for old
+       * clients and the real name as RFC 5987 `filename*=UTF-8''…`.
+       */
+      res.setHeader('Content-Disposition', contentDisposition(name, { type: 'inline' }));
       res.send(bytes);
     }),
   );

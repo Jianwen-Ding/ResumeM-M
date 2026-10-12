@@ -320,6 +320,62 @@ function readSources(dir: string): Record<string, string> {
  * name stays with whoever has it (`heldBy`), or goes to the application
  * touched most recently, the one somebody is likeliest to be uploading.
  */
+/**
+ * A file name as a filesystem that ignores case compares it.
+ *
+ * macOS and Windows both do, by default: `SWE-Intern` and `SWE-intern` are one
+ * name there, and so are the precomposed and decomposed spellings of an
+ * accented letter (APFS normalises; NTFS keeps them apart but the bundles are
+ * built NFC anyway). Two names this folds together cannot both be files in
+ * one folder on the machines most of these folders are on.
+ */
+export function fileNameKey(name: string): string {
+  return name.normalize('NFC').toLowerCase();
+}
+
+/**
+ * How long a name may be, in UTF-8 bytes, and what is cut to keep it there.
+ *
+ * Every filesystem these folders live on caps one name at 255 bytes — not
+ * characters: APFS, ext4 and NTFS all count the encoding — and a role is
+ * whatever the posting called itself. "Senior Staff Principal … Remote,
+ * United States or Canada, Req 2026-12345" came through whole, and a title
+ * in Chinese, three bytes a character, reached the limit at eighty-odd
+ * characters: the build stopped at ENAMETOOLONG with a message that named a
+ * temporary folder. 200 leaves room for what the flat folder adds to a name
+ * that clashes (`SUFFIX_BYTES`, and a counter) without going past 255.
+ */
+export const MAX_NAME_BYTES = 200;
+const SUFFIX_BYTES = 48;
+
+/**
+ * The longest start of `s` that fits in `max` UTF-8 bytes, cut between
+ * characters — `for…of` walks code points, so a character outside the Basic
+ * Multilingual Plane is never split into half a surrogate pair, which would
+ * not be a name at all. A hyphen left hanging off the end goes too.
+ */
+export function clipToBytes(s: string, max: number): string {
+  let out = '';
+  let used = 0;
+  for (const ch of s) {
+    const size = Buffer.byteLength(ch, 'utf8');
+    if (used + size > max) break;
+    out += ch;
+    used += size;
+  }
+  return out.length < s.length ? out.replace(/-+$/, '') : out;
+}
+
+/*
+ * Clashing is decided by `fileNameKey`, not by exact spelling.
+ *
+ * The folder lives on a Mac or a Windows machine as often as not, and there
+ * `Jane-Doe-SWE-Intern-Resume.pdf` and `Jane-Doe-SWE-intern-Resume.pdf` are
+ * one file: two applications whose roles were typed with a different capital
+ * were given their plain names each, the second copy landed on top of the
+ * first, and the folder held one resume where the tracker promised two — the
+ * other job's, under this one's name. `heldBy` is keyed the same way.
+ */
 function uniqueNames(
   claims: { name: string; app: Application }[],
   working?: string,
@@ -327,9 +383,10 @@ function uniqueNames(
 ): Map<string, string> {
   const groups = new Map<string, { name: string; app: Application }[]>();
   for (const claim of claims) {
-    const group = groups.get(claim.name) ?? [];
+    const key = fileNameKey(claim.name);
+    const group = groups.get(key) ?? [];
     group.push(claim);
-    groups.set(claim.name, group);
+    groups.set(key, group);
   }
 
   const out = new Map<string, string>(); // `${app.id} ${name}` → final name
@@ -341,21 +398,26 @@ function uniqueNames(
    * copy of the first the third one's name, and the folder is keyed on the
    * name — so one of the two simply was not there, with nothing to say so.
    */
-  const taken = new Set(claims.map((c) => c.name));
+  const taken = new Set(claims.map((c) => fileNameKey(c.name)));
 
-  for (const [name, group] of groups) {
+  for (const [key, group] of groups) {
     if (group.length === 1) {
-      out.set(`${group[0]!.app.id} ${name}`, name);
+      out.set(`${group[0]!.app.id} ${group[0]!.name}`, group[0]!.name);
       continue;
     }
 
-    const ext = path.extname(name);
-    const stem = name.slice(0, name.length - ext.length);
+    // Each keeps its own spelling: they agree on everything but case.
+    const ext = path.extname(group[0]!.name);
+    const stemOf = (name: string) => name.slice(0, name.length - path.extname(name).length);
+    // Each one short enough not to take the name past what a filesystem
+    // allows — see `MAX_NAME_BYTES`. One cut too short to tell them apart
+    // simply is not chosen, as any other that does not.
+    const short = (s: string | undefined) => clipToBytes(forFilename(s), SUFFIX_BYTES);
     const candidates: ((a: Application) => string)[] = [
-      (a) => forFilename(a.role),
-      (a) => forFilename(a.company),
-      (a) => forFilename(`${a.role ?? ''} ${a.company ?? ''}`),
-      (a) => forFilename(a.id),
+      (a) => short(a.role),
+      (a) => short(a.company),
+      (a) => short(`${a.role ?? ''} ${a.company ?? ''}`),
+      (a) => short(a.id),
     ];
 
     // The first suffix that gives every one of them a name of its own.
@@ -364,25 +426,26 @@ function uniqueNames(
         const made = group.map((c) => of(c.app));
         return (
           made.every(Boolean) &&
-          new Set(made).size === group.length &&
-          made.every((m) => !taken.has(`${stem}-${m}${ext}`))
+          new Set(made.map(fileNameKey)).size === group.length &&
+          group.every((c, i) => !taken.has(fileNameKey(`${stemOf(c.name)}-${made[i]}${ext}`)))
         );
-      }) ?? ((a: Application) => forFilename(a.id));
+      }) ?? ((a: Application) => short(a.id));
 
     // The plain name goes to the one in hand — always — and with nobody in
     // hand stays where it is. See `working` and `heldBy` above.
-    const plainTo = group.some((c) => c.app.id === working) ? working : heldBy.get(name);
+    const plainTo = group.some((c) => c.app.id === working) ? working : heldBy.get(key);
     for (const claim of group) {
       if (claim.app.id === plainTo) {
-        out.set(`${claim.app.id} ${name}`, name);
+        out.set(`${claim.app.id} ${claim.name}`, claim.name);
         continue;
       }
       // Counted on past anything still taken, which only the id fallback can
       // reach: two applications whose ids reduce to the same characters.
+      const stem = stemOf(claim.name);
       let renamed = `${stem}-${suffix(claim.app)}${ext}`;
-      for (let n = 2; taken.has(renamed); n++) renamed = `${stem}-${suffix(claim.app)}-${n}${ext}`;
-      taken.add(renamed);
-      out.set(`${claim.app.id} ${name}`, renamed);
+      for (let n = 2; taken.has(fileNameKey(renamed)); n++) renamed = `${stem}-${suffix(claim.app)}-${n}${ext}`;
+      taken.add(fileNameKey(renamed));
+      out.set(`${claim.app.id} ${claim.name}`, renamed);
     }
   }
   return out;
@@ -482,17 +545,22 @@ export function syncCurrent(
    */
   const lastFrom = readSources(dir);
   const heldBy = new Map<string, string>();
+  // Grouped as `uniqueNames` groups them: two spellings one filesystem
+  // cannot tell apart are one name to hold.
   const byName = new Map<string, typeof claims>();
-  for (const claim of claims) byName.set(claim.name, [...(byName.get(claim.name) ?? []), claim]);
-  for (const [name, group] of byName) {
-    const holder = group.find((c) => lastFrom[name] === c.from);
+  for (const claim of claims) {
+    const key = fileNameKey(claim.name);
+    byName.set(key, [...(byName.get(key) ?? []), claim]);
+  }
+  for (const [key, group] of byName) {
+    const holder = group.find((c) => lastFrom[c.name] === c.from);
     if (holder) {
-      heldBy.set(name, holder.app.id);
+      heldBy.set(key, holder.app.id);
       continue;
     }
     const newest = Math.max(...group.map((c) => lastTouched(c.app)));
     const latest = group.filter((c) => lastTouched(c.app) === newest);
-    if (newest > 0 && latest.length === 1) heldBy.set(name, latest[0]!.app.id);
+    if (newest > 0 && latest.length === 1) heldBy.set(key, latest[0]!.app.id);
   }
   const renamed = uniqueNames(claims, working, heldBy);
   const wanted = new Map<string, string>(); // final name → where to copy it from
@@ -520,8 +588,11 @@ export function syncCurrent(
    * anything, and somebody who has put `Resume.pdf` in `documents/` has said
    * what they want to happen on the applications that build no resume.
    */
+  const built = new Set([...wanted.keys()].map(fileNameKey));
   for (const doc of store.listDocuments()) {
-    if (wanted.has(doc.name)) continue;
+    // On the same terms as the clash above: `resume.pdf` in documents/ is
+    // the built `Resume.pdf` on a Mac, and would have been copied over it.
+    if (built.has(fileNameKey(doc.name))) continue;
     const from = store.documentPath(doc.name);
     if (!from) continue;
     wanted.set(doc.name, from);

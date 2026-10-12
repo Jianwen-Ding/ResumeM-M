@@ -208,6 +208,21 @@ describe('keeping a transcript in the save', () => {
     expect(t.store.loadConfig().ai).toBeDefined();
   });
 
+  /*
+   * A name with a character past Latin-1 in it — the en dash a word processor
+   * puts in "Fall 2025", or a name in Chinese — is not a legal header value
+   * when written as `filename="…"`, and Node refused it: the extension asking
+   * for the transcript got a 400. Encoded, the name comes back whole.
+   */
+  it('hands back a document whose name is not Latin-1', async () => {
+    for (const name of ['Transcript – Fall 2025.pdf', '成绩单.pdf']) {
+      await request(app).post('/api/documents').send({ name, data: pdf('t') }).expect(200);
+      const got = await request(app).get(`/api/documents/${encodeURIComponent(name)}/file`).expect(200);
+      expect(got.headers['content-disposition']).toMatch(/^inline;/);
+      expect(got.headers['content-disposition']).toContain(`filename*=UTF-8''${encodeURIComponent(name)}`);
+    }
+  });
+
   it('says plainly when a document is not there', async () => {
     const missing = await request(app).get('/api/documents/Nothing.pdf/file').expect(404);
     expect(missing.body.error).toMatch(/not in this save/i);

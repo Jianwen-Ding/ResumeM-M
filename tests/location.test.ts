@@ -71,6 +71,25 @@ describe('resolveStoreDir', () => {
     expect(resolveStoreDir(projectRoot)).toBe(path.resolve('somewhere/relative'));
   });
 
+  /*
+   * A `~` the shell never saw. `--data=~/x` is not expanded by the shell —
+   * the tilde is not at the start of a word — and neither is one in an
+   * RMM_DATA set by a launcher. It was resolved as `./~/x`, and a new save was
+   * seeded in a folder called `~` wherever the command happened to run.
+   */
+  it('reads a leading ~ as the home folder, from the flag and from RMM_DATA', () => {
+    delete process.env.RMM_DATA;
+    expect(resolveStoreDir(projectRoot, '~/saves/work')).toBe(path.join(os.homedir(), 'saves', 'work'));
+    expect(resolveStoreDir(projectRoot, '~')).toBe(os.homedir());
+    // Another user's home is not this program's to look up, and a ~ later on
+    // is part of the name.
+    expect(resolveStoreDir(projectRoot, '~morgan/x')).toBe(path.resolve('~morgan/x'));
+    expect(resolveStoreDir(projectRoot, 'a/~/b')).toBe(path.resolve('a/~/b'));
+
+    process.env.RMM_DATA = '~/from-env';
+    expect(resolveStoreDir(projectRoot)).toBe(path.join(os.homedir(), 'from-env'));
+  });
+
   it('keeps an in-tree ./data that is already its own git repo', () => {
     delete process.env.RMM_DATA;
     const bundled = path.join(projectRoot, 'data');

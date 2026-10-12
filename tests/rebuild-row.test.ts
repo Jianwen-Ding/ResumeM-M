@@ -8,14 +8,28 @@ import request from 'supertest';
  * The compile, stood in for: these are about what a rebuild writes on the
  * tracker row, not about the PDF. The same stand-in as stage-after-sent.
  */
+/*
+ * The letter too, and both of them saying which engine they were asked for —
+ * see 'what a bundle is built with' below. `letterPages` is how long the
+ * stand-in says the next letter came out.
+ */
+const seen = vi.hoisted(() => ({ engines: [] as string[], letterPages: 1 }));
 vi.mock('../src/render/compile.js', async (actual) => {
   const real = await actual<typeof import('../src/render/compile.js')>();
   return {
     ...real,
-    compileResume: async (_resolved: unknown, { pdfPath }: { pdfPath: string }) => {
+    compileResume: async (_resolved: unknown, { pdfPath, engine }: { pdfPath: string; engine?: string }) => {
+      seen.engines.push(`resume: ${engine ?? 'auto'}`);
       fs.mkdirSync(path.dirname(pdfPath), { recursive: true });
       fs.writeFileSync(pdfPath, '%PDF stand-in');
       return { fits: true, pages: 1, usedPt: 0, availablePt: 0, overflowPt: 0, overflowLines: 0, layout: {}, adjustments: [], tex: '', engine: 'pdflatex', warnings: [] };
+    },
+    compileLetter: async (_letter: unknown, _layout: unknown, { pdfPath, engine }: { pdfPath: string; engine?: string }) => {
+      seen.engines.push(`letter: ${engine ?? 'auto'}`);
+      fs.mkdirSync(path.dirname(pdfPath), { recursive: true });
+      fs.writeFileSync(pdfPath, '%PDF stand-in');
+      const pages = seen.letterPages;
+      return { pdfPath, tex: '', engine: 'pdflatex', pages, fits: pages === 1, overflowLines: pages === 1 ? -5 : 6, warnings: [], fastPath: false };
     },
   };
 });
@@ -24,6 +38,7 @@ vi.resetModules();
 const { createApi } = await import('../src/server/api.js');
 const { Repo } = await import('../src/git/repo.js');
 const { makeTempStore } = await import('./helpers.js');
+const { buildBundle } = await import('../src/model/applications.js');
 type TempStore = ReturnType<typeof makeTempStore>;
 
 let t: TempStore;
@@ -267,5 +282,81 @@ describe('the history of an application rebuilt again and again', () => {
     await bundle({ ...JOB, status: 'applying' }).expect(200);
     await bundle({ ...JOB, status: 'applying' }).expect(200);
     expect((await repo.log(100)).length).toBe(before);
+  });
+});
+
+/*
+ * What a bundle is built with, and what it says it built.
+ *
+ * The bundle is the file that gets attached, so it is the one place the
+ * settings have to be obeyed — and it was the one place they were not: the
+ * preview and `rmm build` passed the configured engine, and the bundle's two
+ * compiles let auto-detection choose. With tectonic installed and pdflatex
+ * chosen, what was previewed and what was sent were set by different
+ * programs.
+ */
+describe('what a bundle is built with', () => {
+  const JOB = { company: 'Acme', role: 'Platform Engineer', resumeId: 'intern' };
+
+  beforeEach(() => {
+    seen.engines = [];
+    seen.letterPages = 1;
+  });
+
+  it('typesets the resume and the letter with the engine the settings name', async () => {
+    t.store.saveConfig({ latex: { engine: 'pdflatex' } });
+    await buildBundle(t.store, { ...JOB, coverLetter: 'I would like to work on ingest.' });
+    expect(seen.engines).toEqual(['resume: pdflatex', 'letter: pdflatex']);
+  });
+
+  /*
+   * The plain-text copy is the letter the PDF is.
+   *
+   * It was the body exactly as typed: no "Dear Acme Hiring Team," where the
+   * PDF opens with one, no "Sincerely," and no name where the PDF closes with
+   * them — so the letter pasted into a portal's box was unsigned — and the
+   * markdown kept, so the box showed the asterisks round "**2M events/day**".
+   */
+  it('writes the plain-text letter with the greeting, the sign-off and none of the markup', async () => {
+    const result = await buildBundle(t.store, {
+      ...JOB,
+      coverLetter: 'I handled **2M events/day** in `Kafka`, _alone_.\n\n## Why Acme\n\n- One\n- Two, see [my code](https://example.com/me).',
+    });
+    const text = fs.readFileSync(path.join(result.dir, 'Test-Person-Cover-Letter.txt'), 'utf8');
+    expect(text).toBe(
+      'Dear Acme Hiring Team,\n\n' +
+        'I handled 2M events/day in Kafka, alone.\n\n' +
+        'Why Acme\n\n' +
+        '• One\n• Two, see my code (https://example.com/me).\n\n' +
+        'Sincerely,\nTest Person\n',
+    );
+  });
+
+  it('keeps the greeting and closing the writer typed, once each', async () => {
+    const result = await buildBundle(t.store, {
+      ...JOB,
+      coverLetter: 'Hi Morgan,\nI would like to\nwork on ingest.\n\nBest wishes,\nTest',
+    });
+    const text = fs.readFileSync(path.join(result.dir, 'Test-Person-Cover-Letter.txt'), 'utf8');
+    expect(text).toBe('Hi Morgan,\n\nI would like to work on ingest.\n\nBest wishes,\nTest\n');
+  });
+
+  /*
+   * And whether the letter fit, which `rmm apply` needs for its exit code.
+   * Only the resume's `fits` came back, so a two-page letter was a line of
+   * warning on a run that exited 0.
+   */
+  it('says whether the letter fit on its page', async () => {
+    seen.letterPages = 2;
+    const long = await buildBundle(t.store, { ...JOB, coverLetter: 'A long letter.' });
+    expect(long.letterFits).toBe(false);
+    expect(long.letterPages).toBe(2);
+
+    seen.letterPages = 1;
+    const short = await buildBundle(t.store, { ...JOB, coverLetter: 'A short one.' });
+    expect(short.letterFits).toBe(true);
+
+    const none = await buildBundle(t.store, { ...JOB, coverLetter: '' });
+    expect(none.letterFits).toBeUndefined();
   });
 });

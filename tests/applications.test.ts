@@ -66,6 +66,42 @@ describe('file naming', () => {
       'Morgan-Testwell-Software-Engineer-Resume-Acme-Co.pdf',
     );
   });
+
+  /*
+   * No longer than a filesystem allows.
+   *
+   * A name is capped at 255 bytes — bytes, not characters — and a role is
+   * whatever the posting called itself. A title in Chinese, three bytes a
+   * character, stopped the build at ENAMETOOLONG. The role gives way; the
+   * person, the document type and the extension are what the name is read by.
+   */
+  it('cuts a long role short, on a whole character, and keeps the end of the name', () => {
+    const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+    const english = bundleFileName('Morgan Testwell', 'Senior Staff Principal Software Engineer '.repeat(10), 'Cover Letter');
+    expect(bytes(english)).toBeLessThanOrEqual(200);
+    expect(english).toMatch(/^Morgan-Testwell-Senior-Staff-.*[^-]-Cover-Letter\.pdf$/);
+
+    const chinese = bundleFileName('Morgan Testwell', '高级软件工程师机器学习基础设施平台可靠性'.repeat(5), 'Resume');
+    expect(bytes(chinese)).toBeLessThanOrEqual(200);
+    expect(chinese.startsWith('Morgan-Testwell-高级')).toBe(true);
+    expect(chinese.endsWith('-Resume.pdf')).toBe(true);
+
+    // Four bytes a character, and two UTF-16 units: never half of one.
+    const astral = bundleFileName('Morgan Testwell', '𝒜𝒷𝒸'.repeat(40), 'Answers', { extension: '.md', disambiguator: 'Acme' });
+    expect(bytes(astral)).toBeLessThanOrEqual(200);
+    expect(astral).not.toMatch(loneSurrogate);
+    expect(astral.endsWith('-Answers-Acme.md')).toBe(true);
+
+    // A name typed by hand is held to the same length.
+    const typed = bundleFileNames('Morgan Testwell', 'SWE', [{ kind: 'Resume' }], 'type', { Resume: 'é'.repeat(300) })[0]!;
+    expect(bytes(typed)).toBeLessThanOrEqual(200);
+    expect(typed.endsWith('é.pdf')).toBe(true);
+
+    // And a name that was short enough is not touched.
+    expect(bundleFileName('Morgan Testwell', 'Software Engineer', 'Resume')).toBe('Morgan-Testwell-Software-Engineer-Resume.pdf');
+  });
 });
 
 /*
@@ -144,6 +180,17 @@ describe('naming one application\'s documents', () => {
     expect(() =>
       bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { 'Cover Letter': 'Morgan-Testwell-Resume' }),
     ).toThrow(/Morgan-Testwell-Resume\.pdf/);
+  });
+
+  /*
+   * Including one that differs only in case. On a Mac or a PC — where most
+   * of these folders are — `morgan-testwell-resume.pdf` is the resume's file,
+   * and the letter written under it replaced the resume.
+   */
+  it('refuses it when the two differ only in case, which most filesystems cannot tell apart', () => {
+    expect(() =>
+      bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { 'Cover Letter': 'morgan-testwell-resume' }),
+    ).toThrow(/already called/);
   });
 
   /*
@@ -999,6 +1046,36 @@ describe('one application taking over another’s filename', () => {
     expect(held()).toBe('BETA');
     // And the manifest is the new shape now, so the next sync is exact.
     expect(JSON.parse(fs.readFileSync(manifest, 'utf8')).from[NAME]).toContain('beta');
+  });
+
+  /*
+   * Two names that differ only in case are one name on a Mac or a PC.
+   *
+   * "SWE-Intern" at Acme and "SWE-intern" at Globex gave two plain names, so
+   * both were copied into the folder — where on those machines the second
+   * landed on top of the first, and the folder held one resume under the
+   * other job's name.
+   */
+  it('treats names that differ only in case as the same name', () => {
+    const write = (dir: string, name: string, body: string) => {
+      const full = path.join(t.store.outDir(), 'applications', dir);
+      fs.mkdirSync(full, { recursive: true });
+      fs.writeFileSync(path.join(full, name), body);
+      return `applications/${dir}`;
+    };
+    const acme = write('acme', 'Test-Person-SWE-Intern-Resume.pdf', 'ACME');
+    const globex = write('globex', 'Test-Person-SWE-intern-Resume.pdf', 'GLOBEX');
+    const apps = [
+      { id: 'acme', company: 'Acme', role: 'SWE-Intern', status: 'applying', snapshotDir: acme },
+      { id: 'globex', company: 'Globex', role: 'SWE-intern', status: 'applying', snapshotDir: globex },
+    ] as unknown as Application[];
+
+    const folder = syncCurrent(t.store, apps, 'acme');
+    const folded = folder.files.map((f) => f.normalize('NFC').toLowerCase());
+    expect(new Set(folded).size, folder.files.join(', ')).toBe(folder.files.length);
+    // The one in hand keeps its plain name; the other is told apart by its company.
+    expect(folder.files).toContain('Test-Person-SWE-Intern-Resume.pdf');
+    expect(folder.files).toContain('Test-Person-SWE-intern-Resume-Globex.pdf');
   });
 });
 

@@ -1,5 +1,5 @@
 import type { LayoutOptions, ResolvedProfile } from '../model/types.js';
-import { inlineTex, lineTex, runtimeSetup, stablePreamble, tex, texHref } from './latex.js';
+import { MARKUP, inlineTex, lineTex, runtimeSetup, stablePreamble, tex, texHref } from './latex.js';
 
 /**
  * A cover letter, typeset to match the resume.
@@ -234,19 +234,30 @@ function header(p: ResolvedProfile, layout: LayoutOptions): string {
  * Turn typed prose into paragraphs. Blank lines separate them; a single
  * newline inside a paragraph is a wrap, not a break, which is how every text
  * editor and every word processor treats it — except in a list, see
- * `LIST_ITEM`. Returned as TeX.
+ * `LIST_ITEM`.
+ *
+ * Read into blocks first and set afterwards, because the letter is set twice:
+ * as TeX for the PDF and as plain text for the copy beside it that gets pasted
+ * into a portal's box. The two used to be built separately — the text was the
+ * body exactly as typed — and disagreed; reading the letter once is what keeps
+ * them the same letter.
  */
-function paragraphs(body: string): string[] {
-  const out: string[] = [];
+type Block =
+  | { kind: 'prose'; text: string }
+  | { kind: 'heading'; text: string }
+  | { kind: 'list'; items: { label: string; numbered: boolean; text: string }[] };
+
+function blocksOf(body: string): Block[] {
+  const out: Block[] = [];
   for (const block of body.replace(/\r\n?/g, '\n').split(/\n\s*\n/)) {
     let prose: string[] = [];
-    let items: { label: string; text: string }[] = [];
+    let items: { label: string; numbered: boolean; text: string }[] = [];
     const endProse = () => {
-      if (prose.length) out.push(proseTex(prose.join(' ')));
+      if (prose.length) out.push({ kind: 'prose', text: prose.join(' ') });
       prose = [];
     };
     const endList = () => {
-      if (items.length) out.push(listTex(items));
+      if (items.length) out.push({ kind: 'list', items });
       items = [];
     };
     for (const line of block.split('\n')) {
@@ -256,10 +267,10 @@ function paragraphs(body: string): string[] {
       if (heading) {
         endProse();
         endList();
-        out.push(`\\textbf{${proseTex(heading[1]!)}}`);
+        out.push({ kind: 'heading', text: heading[1]! });
       } else if (item) {
         endProse();
-        items.push({ label: item[2] ? `${item[2]}${item[3]}` : '\\textbullet', text: item[4]! });
+        items.push(item[2] ? { label: `${item[2]}${item[3]}`, numbered: true, text: item[4]! } : { label: '', numbered: false, text: item[4]! });
       } else if (items.length) {
         // A line under an item without a marker of its own carries it on.
         items[items.length - 1]!.text += ` ${line.trim()}`;
@@ -271,6 +282,17 @@ function paragraphs(body: string): string[] {
     endList();
   }
   return out;
+}
+
+/** The letter's paragraphs as TeX. */
+function paragraphs(body: string): string[] {
+  return blocksOf(body).map((b) =>
+    b.kind === 'heading'
+      ? `\\textbf{${proseTex(b.text)}}`
+      : b.kind === 'list'
+        ? listTex(b.items.map((i) => ({ label: i.numbered ? i.label : '\\textbullet', text: i.text })))
+        : proseTex(b.text),
+  );
 }
 
 /**
@@ -331,6 +353,82 @@ function proseTex(text: string): string {
   return inlineTex(marked).replaceAll(BREAK, '\\penalty100{}');
 }
 
+/** The greeting the letter adds when the writer did not type one. */
+function greetingFor(letter: LetterContent): string {
+  return letter.greeting ?? (letter.company ? `Dear ${letter.company} Hiring Team,` : 'Dear Hiring Team,');
+}
+
+/** The sign-off the letter adds when the writer did not type one. */
+function signOffFor(letter: LetterContent): string {
+  return letter.signOff ?? 'Sincerely,';
+}
+
+/**
+ * The letter as plain text: the copy that goes beside the PDF for a portal
+ * that wants it pasted into a box rather than attached.
+ *
+ * It was the body exactly as typed, so it was not the letter the PDF is. The
+ * PDF opens with "Dear Acme Hiring Team," and closes with "Sincerely," over
+ * the sender's name when the writer did not type their own; the text had
+ * neither, and whoever pasted it sent a letter with no greeting and no name
+ * on it. And it kept the markdown — "**2M events/day**", "## Why Acme",
+ * `[my code](https://…)` — which the PDF sets as bold, a heading and a link,
+ * and which a text box prints as asterisks, hashes and brackets.
+ *
+ * So it is built by the same rules, read by the same helpers: the writer's own
+ * greeting and closing taken off as `letterBody` takes them, the ones the
+ * letter would add put in their place, the paragraphs read by `blocksOf`, and
+ * the inline markup taken off by the rule `inlineTex` sets it by (see `textOf`).
+ * The one thing it keeps that the page does not show is a link's address: on
+ * paper the label is underlined and clickable, and in a text box the label on
+ * its own leads nowhere.
+ *
+ * The letterhead, the date and the addressee are left out. A box on a portal
+ * is already that company's, and the name and contact details are in fields
+ * of their own on the same form.
+ */
+export function letterText(letter: LetterContent): string {
+  const name = letter.profile.name;
+  const own = ownParts(letter.body ?? '', name);
+  const line = (s: string) => textOf(s.trim());
+
+  const blocks: string[] = [own.greeting ? line(own.greeting) : greetingFor(letter)];
+
+  for (const b of blocksOf(own.body)) {
+    if (b.kind === 'list') blocks.push(b.items.map((i) => `${i.numbered ? i.label : '•'} ${line(i.text)}`).join('\n'));
+    else blocks.push(line(b.text));
+  }
+
+  if (!own.closing) {
+    blocks.push(`${signOffFor(letter)}\n${name}`);
+  } else {
+    // As `letterBody`: a sign-off with nothing under it still gets the name.
+    const [first, ...rest] = own.closing.map(line);
+    const signed = SIGN_OFF_LINE.test(own.closing[0]!) && !rest.length ? [name] : rest;
+    blocks.push([first, ...signed].join('\n'));
+  }
+
+  return `${blocks.filter(Boolean).join('\n\n')}\n`;
+}
+
+/**
+ * A line's words as the PDF prints them, with a link's address kept beside its
+ * label. `plainText`'s rule, read by the same `MARKUP`, with that one
+ * difference — which is why it is not simply `plainText`.
+ */
+function textOf(s: string, depth = 4): string {
+  if (depth <= 0) return s;
+  return s.replace(new RegExp(MARKUP.source, 'g'), (_whole, label, url, strongem, bold, starItalic, underItalic, code) => {
+    if (code !== undefined) return code as string;
+    if (label !== undefined) {
+      const shown = textOf(label as string, depth - 1);
+      const to = String(url ?? '').trim();
+      return !to || shown.trim() === to ? shown : `${shown} (${to})`;
+    }
+    return textOf((strongem ?? bold ?? starItalic ?? underItalic) as string, depth - 1);
+  });
+}
+
 /**
  * Everything inside `\begin{document}`, shared by both compile paths.
  *
@@ -372,8 +470,7 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
   if (own.greeting) {
     blocks.push(inlineTex(own.greeting));
   } else {
-    const greeting = letter.greeting ?? (letter.company ? `Dear ${letter.company} Hiring Team,` : 'Dear Hiring Team,');
-    blocks.push(tex(greeting));
+    blocks.push(tex(greetingFor(letter)));
   }
 
   const written = paragraphs(own.body);
@@ -392,7 +489,7 @@ function letterBody(letter: LetterContent, layout: LayoutOptions, setup = '', le
   // Room under the sign-off where a signature would go.
   const signature = `\\\\[${(2.2 * layout.fontSizePt * layout.spacing).toFixed(1)}pt]\n`;
   if (!own.closing) {
-    blocks.push(`${tex(letter.signOff ?? 'Sincerely,')} ${signature}${tex(p.name)}`);
+    blocks.push(`${tex(signOffFor(letter))} ${signature}${tex(p.name)}`);
   } else {
     // The writer's own closing, a line to a line, with the same room under
     // their sign-off as under the one the letter would have added.

@@ -71,9 +71,27 @@ export function resolveStoreDir(projectRoot: string, chosen?: string): string {
  */
 export type StoreSource = 'flag' | 'env' | 'remembered' | 'bundled' | 'home';
 
+/**
+ * A leading `~` as the home folder, the way a shell would have read it.
+ *
+ * The shell expands `--data ~/x` before this program sees it, and does not
+ * expand `--data=~/x` — the tilde is not at the start of a word — nor a `~`
+ * in an `RMM_DATA` set in a launcher or a `.env` file. Those arrived as a
+ * literal `~/x`, `path.resolve` made it `./~/x`, and a new save was seeded
+ * in a folder called `~` inside whatever directory the command ran from,
+ * reported as "Started a new save" and nowhere near the save that was meant.
+ * Only `~` on its own or followed by a separator: `~morgan/x` is another
+ * user's home, which is not this program's to look up.
+ */
+export function expandHome(p: string): string {
+  if (p === '~') return os.homedir();
+  if (/^~[\\/]/.test(p)) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
 export function resolveStore(projectRoot: string, chosen?: string): { dir: string; from: StoreSource } {
-  if (chosen?.trim()) return { dir: path.resolve(chosen.trim()), from: 'flag' };
-  if (process.env.RMM_DATA) return { dir: path.resolve(process.env.RMM_DATA), from: 'env' };
+  if (chosen?.trim()) return { dir: path.resolve(expandHome(chosen.trim())), from: 'flag' };
+  if (process.env.RMM_DATA) return { dir: path.resolve(expandHome(process.env.RMM_DATA)), from: 'env' };
 
   const preferences = readProjects();
   const selected = preferences.defaultFolder || preferences.active;

@@ -595,7 +595,9 @@ async function main(argv: string[]): Promise<number> {
        * the state of what happened, it does not undo it. Hence the line
        * saying so, rather than leaving the number to speak for itself.
        */
-      if (!result.fits || result.missing) {
+      // The letter too: it is attached beside the resume, and a two-page one
+      // is as much "not cleanly" as a two-page resume.
+      if (!result.fits || result.letterFits === false || result.missing) {
         console.warn('The bundle is written and the application is filed — but not cleanly. See above.');
         return 1;
       }
@@ -727,6 +729,21 @@ async function main(argv: string[]): Promise<number> {
      * laptop, before there is anything to open.
      */
     case 'clone': {
+      /*
+       * `--data` is every other command's way of naming a save, and this one
+       * accepted it and ignored it: `rmm clone <repo> here --data there`
+       * cloned into `here`, said so in one line, and `there` — the folder the
+       * person had asked for — was never made. The folder is the second
+       * argument; asked for twice, in two places, there is no saying which
+       * one was meant, so neither is guessed at.
+       */
+      if (rest.some((a) => a === '--data' || a.startsWith('--data='))) {
+        console.error(
+          '`rmm clone` does not take --data: the folder to clone into is its second argument. ' +
+            'Try `rmm clone <repository> <folder>`.',
+        );
+        return 1;
+      }
       const [url, into] = positionals('clone', rest);
       if (!url || !into) {
         console.error('Usage: rmm clone <repository> <folder>');

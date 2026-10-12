@@ -5,7 +5,8 @@ import YAML from 'yaml';
 import type { Store } from './store.js';
 import type { Application, ApplicationStatus, ResolvedResume } from './types.js';
 import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
-import { syncCurrent } from './current.js';
+import { letterText } from '../render/letter.js';
+import { clipToBytes, fileNameKey, MAX_NAME_BYTES, syncCurrent } from './current.js';
 import { resolveResume, unsendableReason } from './resolve.js';
 import { cleanRole, differentRequisitions, employerKey, hostOf, jobNumberIn, withoutTitleNoise } from '../jobs/names.js';
 import { looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
@@ -58,8 +59,22 @@ export function bundleFileName(
   kind: DocumentKind | undefined,
   { extension = '.pdf', disambiguator }: { extension?: string; disambiguator?: string } = {},
 ): string {
-  const parts = [namePart(name), namePart(role), namePart(kind), namePart(disambiguator)];
-  return parts.filter(Boolean).join('-') + extension;
+  /*
+   * No longer than a filesystem allows, and cut from the role.
+   *
+   * The role is the only part of unbounded length — it is whatever the
+   * posting called itself, req number, locations and all — and a name past
+   * 255 bytes is not a file anybody can write. The end of the name is what
+   * a portal and a person read it by, so the document type, the
+   * disambiguator and the extension are kept whole and the role gives way;
+   * the person's own name only if it alone is somehow too long.
+   */
+  const tail = [namePart(kind), namePart(disambiguator)].filter(Boolean).join('-');
+  const room = MAX_NAME_BYTES - Buffer.byteLength(extension, 'utf8') - (tail ? Buffer.byteLength(tail, 'utf8') + 1 : 0);
+  const person = clipToBytes(namePart(name), Math.max(0, room));
+  const left = room - Buffer.byteLength(person, 'utf8') - (person ? 1 : 0);
+  const title = clipToBytes(namePart(role), Math.max(0, left));
+  return [person, title, tail].filter(Boolean).join('-') + extension;
 }
 
 /** The three shapes the setting offers, and what each one puts in a name. */
@@ -103,7 +118,8 @@ export type CustomFileNames = Partial<Record<DocumentKind, string>>;
  * can see.
  */
 function typedName(said: string, extension: string): string | undefined {
-  const stem = namePart(said);
+  // And held to the same length as every other name. See `bundleFileName`.
+  const stem = clipToBytes(namePart(said), MAX_NAME_BYTES - Buffer.byteLength(extension, 'utf8'));
   return stem ? stem + extension : undefined;
 }
 
@@ -141,7 +157,9 @@ export function bundleFileNames(
     const settled = short.map((n, i) => byHand[i] ?? n);
     for (let i = 0; i < settled.length; i++) {
       if (!byHand[i]) continue;
-      const clash = settled.findIndex((n, j) => j !== i && n === settled[i]);
+      // As the filesystem compares them, which on a Mac or a PC ignores case:
+      // a resume typed as `jane-doe-cover-letter` is the letter's file there.
+      const clash = settled.findIndex((n, j) => j !== i && fileNameKey(n) === fileNameKey(settled[i]!));
       if (clash >= 0) {
         throw new Error(
           `"${documents[clash]!.kind}" is already called ${settled[i]}. Two files in one folder cannot ` +
@@ -698,6 +716,17 @@ export interface BundleResult {
   files: string[];
   pages: number;
   fits: boolean;
+  /**
+   * Whether the cover letter stayed on one page, and how many it took —
+   * absent when the bundle has no letter.
+   *
+   * Only `fits` was returned, and that is the resume's. A letter that ran to
+   * a second page reached the caller as a line in `warnings` and nothing
+   * else, so `rmm apply` exited 0 on a bundle whose letter was the wrong
+   * shape to send — the one thing its exit code is there to say.
+   */
+  letterFits?: boolean;
+  letterPages?: number;
   warnings: string[];
   /**
    * What the resume asked for and the store no longer has, in a sentence.
@@ -1002,9 +1031,22 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
 
   try {
     const pdfPath = path.join(stage, resumeName);
+    /*
+     * With the engine the settings name, as `rmm build` and the preview use.
+     *
+     * Both compiles here went without it, so the engine was whatever
+     * auto-detection found first. Set pdflatex in Voice & AI and the preview
+     * and `rmm build` used pdflatex while the bundle — the file that actually
+     * gets attached — came from tectonic: a different font set, different
+     * line breaks, and sometimes a second page nobody had seen. Or, with
+     * tectonic installed and broken, `rmm apply` failed outright on a store
+     * whose every build had worked.
+     */
+    const engine = data.config.latex.engine;
     const compiled = await compileResume(resolved, {
       pdfPath,
       texPath: path.join(stage, 'source', 'resume.tex'),
+      engine,
     });
 
     const files = [resumeName];
@@ -1016,20 +1058,26 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       // that gets uploaded, so it never takes the preview shortcut. The plain
       // text goes alongside it, because as many portals want a letter pasted
       // into a box as want one attached.
+      const content = {
+        profile: resolved.profile,
+        company: req.company,
+        role: req.role,
+        body: letter,
+      };
       letterOut = await compileLetter(
-        {
-          profile: resolved.profile,
-          company: req.company,
-          role: req.role,
-          body: letter,
-        },
+        content,
         resolved.layout,
-        { pdfPath: path.join(stage, letterName), texPath: path.join(stage, 'source', 'cover-letter.tex') },
+        { pdfPath: path.join(stage, letterName), texPath: path.join(stage, 'source', 'cover-letter.tex'), engine },
       );
       files.push(letterName);
 
       const textPath = path.join(stage, letterName.replace(/\.pdf$/, '.txt'));
-      fs.writeFileSync(textPath, letter, 'utf8');
+      /*
+       * The letter the PDF is, not the body as typed: that had no greeting
+       * and no name under it where the PDF adds them, and printed its
+       * markdown as asterisks. See `letterText`.
+       */
+      fs.writeFileSync(textPath, letterText(content), 'utf8');
       files.push(path.basename(textPath));
     }
 
@@ -1270,6 +1318,8 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       files,
       pages: compiled.pages,
       fits: compiled.fits,
+      letterFits: letterOut?.fits,
+      letterPages: letterOut?.pages,
       /*
        * The letter's too, which were computed and thrown away.
        *
