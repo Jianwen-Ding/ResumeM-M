@@ -81,3 +81,17 @@ describe('a compile process that will not stop when it is asked', () => {
     expect(stdout).toBe('ok');
   });
 });
+
+/*
+ * Tectonic writes no .log unless it is told to keep one, and every check the
+ * compile reads off the log — a line past the right-hand edge, a heading the
+ * growing wrapped, the page fill, a font that fell back — then saw nothing.
+ * Under a real tectonic a 100-character link was "widest by 66pt" under
+ * latexmk and `warnings: []` under tectonic.
+ */
+describe('the engine the final builds use', () => {
+  it('keeps the log every check after the compile reads', async () => {
+    const { argsForTest } = await import('../src/render/compile.js');
+    expect(argsForTest('tectonic')).toContain('--keep-logs');
+  });
+});

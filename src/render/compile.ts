@@ -155,11 +155,18 @@ async function hasBinary(name: string): Promise<boolean> {
   }
 }
 
+/** Test-only: the arguments each engine is run with. */
+export const argsForTest = (engine: Engine): string[] => argsFor(engine, 'resume.tex', 'out');
+
 function argsFor(engine: Engine, texFile: string, outDir: string): string[] {
   switch (engine) {
     case 'tectonic':
       // Tectonic resolves packages itself and reruns until labels settle.
-      return ['--keep-intermediates', '--synctex=0', '--outdir', outDir, texFile];
+      // `--keep-logs`, or it writes no .log: every check read off the log —
+      // a line past the right-hand edge, a heading wrapped by growing, the
+      // page fill, a font that fell back — then saw nothing and said nothing,
+      // on the engine tried first and used for the builds that get sent.
+      return ['--keep-intermediates', '--keep-logs', '--synctex=0', '--outdir', outDir, texFile];
     case 'latexmk':
       return ['-pdf', '-interaction=nonstopmode', '-halt-on-error', `-outdir=${outDir}`, texFile];
     case 'pdflatex':
@@ -237,6 +244,10 @@ async function cacheKey(tex: string, engine: Engine, via = 'engine'): Promise<st
      * believed — so one must never be handed back under the other's name.
      */
     .update(via)
+    .update('\0')
+    // And what it was asked: entries made under other arguments — tectonic's
+    // before it kept its log, with no warnings in them — are not this run's.
+    .update(argsFor(engine, '', '').join(' '))
     .update('\0')
     .update(tex)
     .digest('hex');
