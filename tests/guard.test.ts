@@ -153,9 +153,10 @@ describe('a write from another site', () => {
    * box to enter a code in. One that knows about pairing always sends it,
    * empty until paired.
    */
-  it('tells an extension that sends no pairing header that it is older than pairing', async () => {
+  it('tells an extension that sends no pairing header where to pair it, or that it is older than pairing', async () => {
     const ext = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
-    const older = /^This JobHelper is older than ResumeM-M: update it \(reload the unpacked extension from the new version\) to pair it\.$/;
+    const older =
+      /^This JobHelper did not send a pairing code\. If its popup has a pairing box, make a code in ResumeM-M \(Save & Files → Pair JobHelper\) and enter it there; if it has none, it is older than ResumeM-M: update it \(reload the unpacked extension from the new version\)\.$/;
     const fromOld = await request(appWith()).post('/api/projects/close').set('Host', '127.0.0.1:4600').set('Origin', ext).expect(403);
     expect(fromOld.body).toMatchObject({ kind: 'not-paired', error: expect.stringMatching(older) });
     // Its GETs carry no Origin, as Chrome sends them; Sec-Fetch-Site still says a browser.

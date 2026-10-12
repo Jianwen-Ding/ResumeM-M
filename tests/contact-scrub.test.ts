@@ -76,6 +76,30 @@ describe('withoutContactDetails', () => {
   });
 
   /*
+   * Split at every "/" between digits, the half after an order number, a
+   * year or a build was a phone on its own, and the identifier became
+   * "[phone number]". A "/" is a break only between two numbers that are
+   * each a phone, and never inside a path.
+   */
+  it('leaves an identifier with a "/" in it alone', () => {
+    for (const text of [
+      'Order 42/0012345678 shipped',
+      'Ref 2024/1234567890',
+      'see /api/v2/1234567890',
+      'build 2/0123456789 passed',
+      'Ticket 123-456-7890/1',
+      'Case no. 3/2024/12345678',
+      'Coverage 98/100000000',
+      'Project page: example.org/p/2024/4155550123',
+    ]) {
+      expect(withoutContactDetails(text), text).toBe(text);
+    }
+    // And still two phones, written with spaces in them.
+    expect(withoutContactDetails('Call 617 555 0199/617 555 0100 any time')).toBe('Call [phone number]/[phone number] any time');
+    expect(withoutContactDetails('+1 415 555 1234/+1 415 555 9876')).toBe('[phone number]/[phone number]');
+  });
+
+  /*
    * The same shapes `personalDetailIn` refuses, so the corpus of its verdicts
    * holds for this too: text it lets through is left exactly as it was, and
    * text it refuses for a phone, an email or a street is no longer refused

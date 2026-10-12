@@ -92,7 +92,11 @@ describe('a server with pairing', () => {
    * nowhere to enter a code: "make a code, and enter it in the extension"
    * was a dead end, and its sends went untracked without a word.
    */
-  it('tells a JobHelper older than pairing to update, rather than to make a code', async () => {
+  /*
+   * By what its popup shows: one with a pairing box was told to "update",
+   * and was not out of date.
+   */
+  it('tells a JobHelper that sent no pairing code both what to do with a pairing box and without one', async () => {
     for (const [urlPath, method, body] of [
       ['/api/store', 'GET', undefined],
       ['/api/extension/sent', 'POST', {}],
@@ -103,7 +107,9 @@ describe('a server with pairing', () => {
         const said = (await reply.json()) as { kind: string; error: string };
         expect(said.kind).toBe('not-paired');
         expect(said.error).toBe(
-          'This JobHelper is older than ResumeM-M: update it (reload the unpacked extension from the new version) to pair it.',
+          'This JobHelper did not send a pairing code. If its popup has a pairing box, make a code in ResumeM-M ' +
+            '(Save & Files → Pair JobHelper) and enter it there; if it has none, it is older than ResumeM-M: update it ' +
+            '(reload the unpacked extension from the new version).',
         );
       }
     }

@@ -60,7 +60,35 @@ export function temporaryDays(store: Store): number {
  * cannot drift apart, which is the way a preview usually goes wrong.
  */
 export function wouldSweep(store: Store, now = Date.now()): DueToGo[] {
-  return dueToGo(store.load(), { days: temporaryDays(store), now });
+  return dueNow(store, temporaryDays(store), now);
+}
+
+/**
+ * `dueToGo`, less every resume whose file says `extended`.
+ *
+ * A sent temporary resume is written as `extended` with `keptBecauseSent`
+ * (`keptOnDisk` in model/tiers.ts) and read back by `asLoaded` as the
+ * temporary copy it is, and "the sweep still keeps it, for the reason it
+ * always did — it was sent" was true only while a row said so. Delete the
+ * application, or file it again from another resume without the row
+ * remembering this one, and nothing named it: `doneAt` counted it as a copy
+ * made and abandoned, from the day it was made, and the sweep took the one
+ * record of what was sent. What is on disk is the keep, and it is the
+ * promise made to every other version of the app that opens this save —
+ * `extended` is never swept — so this version keeps it too, whatever
+ * `asLoaded` shows. Read as written, because the loaded tier is the one
+ * thing that cannot tell the two apart.
+ */
+function dueNow(store: Store, days: number, now: number): DueToGo[] {
+  const due = dueToGo(store.load(), { days, now });
+  if (due.length === 0) return due;
+  const extended = new Set(
+    store
+      .loadResumesAsWritten()
+      .filter((spec) => spec.tier === 'extended')
+      .map((spec) => spec.id),
+  );
+  return due.filter((d) => !extended.has(d.id));
 }
 
 /** "Alpha", "Alpha, Beta" — and a count once a list would be a wall. */
@@ -83,7 +111,7 @@ export async function sweepTemporary(
   { now = Date.now() }: { now?: number } = {},
 ): Promise<SweepResult> {
   const days = temporaryDays(store);
-  const due = dueToGo(store.load(), { days, now });
+  const due = dueNow(store, days, now);
   if (due.length === 0) return { swept: [], held: [], days };
 
   /*
@@ -139,7 +167,7 @@ export async function sweepTemporary(
       removing: (swept) => `Sweep ${naming(swept)} — temporary, and done with`,
     },
     (d) => {
-      stillDue ??= new Set(dueToGo(store.load(), { days, now }).map((x) => x.id));
+      stillDue ??= new Set(dueNow(store, days, now).map((x) => x.id));
       if (stillDue.has(d.id) && JSON.stringify(read(d.id)) === found.get(d.id)) {
         /*
          * And the fold `deleteResume` does before every deletion, done here

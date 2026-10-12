@@ -161,9 +161,17 @@ export const NOT_PAIRED =
  * pairing existed, and has nowhere to enter a code: told to "make a code, and
  * enter it in the extension", its owner made one and found no box to type it
  * in. Its sends went untracked in the meantime, and nothing said why.
+ *
+ * But "none" is also what a JobHelper with a pairing box sends on the one
+ * request it makes without the header — and what a store reached by some
+ * other route sees — so "update it" sent somebody whose popup had a box for
+ * the code off to reinstall an extension that was not out of date. Both
+ * answers are given, by what the popup shows.
  */
 export const OLDER_EXTENSION =
-  'This JobHelper is older than ResumeM-M: update it (reload the unpacked extension from the new version) to pair it.';
+  'This JobHelper did not send a pairing code. If its popup has a pairing box, make a code in ResumeM-M ' +
+  '(Save & Files → Pair JobHelper) and enter it there; if it has none, it is older than ResumeM-M: update it ' +
+  '(reload the unpacked extension from the new version).';
 
 export function localOnly({ host, allowHosts = [], paired = () => false, editorFile = () => false }: GuardOptions = {}): RequestHandler {
   const allowed = new Set([

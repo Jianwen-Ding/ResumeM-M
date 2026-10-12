@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 
 /**
  * A command with a time limit that reaches everything it started.
@@ -56,43 +57,122 @@ export type TimedRun = Promise<{ stdout: string; stderr: string }> & { child: Ch
  * finished on its own. Measured with a `sleep 300` under `sh`: the server gone,
  * the sleep reparented to init and still there.
  *
- * So each group is noted while it runs, and SIGINT, SIGTERM and SIGHUP, and
- * the process exiting any other way, send SIGTERM to every one still noted.
+ * So each group is noted while it runs, and SIGINT, SIGTERM and SIGHUP send
+ * SIGTERM to every one still noted, wait up to `SIGNAL_GRACE_MS` for them to
+ * go, and SIGKILL what is left. SIGTERM alone was sent and the process went
+ * on to die at once, and a CLI that traps SIGTERM — as one that wants to tidy
+ * up before it stops will — carried on, reparented to init, with nothing left
+ * to send the second signal: the forced kill a timeout arms is a timer in
+ * this process. The wait is a timer that is not `unref`'d, polling until the
+ * groups are gone, because an `unref`'d one is exactly what does not keep the
+ * process up long enough to fire. The process exiting any other way — where
+ * nothing can wait — sends SIGKILL straight away.
+ *
  * After that a signal is let do what it did before: the handler takes itself
  * off and the signal is sent again, so the process dies of it with the same
  * exit status a shell reads as "interrupted" — unless something else in the
  * process listens for it too, in which case that listener decides, as it did.
+ * A second Ctrl-C during the wait does not wait any longer.
  *
  * Installed the first time a group is started, not on import: a handler for
  * SIGINT changes what Ctrl-C does to any process that loads this module, and
  * one that never runs a command should not be touched.
+ *
+ * `noteGroup` is for a detached group started anywhere else — the model
+ * picker's `script` terminal in ai/models.ts is one — so that it goes too.
  */
 const liveGroups = new Set<number>();
 let handlersInstalled = false;
+let ending = false;
 
-function endLiveGroups(): void {
+/** How long a signal waits for the groups it sent SIGTERM to, before SIGKILL. */
+export const SIGNAL_GRACE_MS = 1_500;
+
+function signalGroups(sig: NodeJS.Signals): void {
   for (const pid of liveGroups) {
     try {
-      process.kill(-pid, 'SIGTERM');
+      process.kill(-pid, sig);
     } catch {
       // Already gone, which is the outcome this wanted.
+      liveGroups.delete(pid);
     }
   }
+}
+
+/* Whether anything of the group is left that is not a zombie: one is gone, only waiting to be reaped. */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+  } catch {
+    return false;
+  }
+  try {
+    for (const entry of fs.readdirSync('/proc')) {
+      if (!/^\d+$/.test(entry)) continue;
+      let stat: string;
+      try {
+        stat = fs.readFileSync(`/proc/${entry}/stat`, 'utf8');
+      } catch {
+        continue;
+      }
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      // state, ppid, pgrp
+      if (Number(fields[2]) === pid && fields[0] !== 'Z') return true;
+    }
+    return false;
+  } catch {
+    // No /proc to read (macOS): the signal's answer is the one there is.
+    return true;
+  }
+}
+
+function killLiveGroups(): void {
+  signalGroups('SIGKILL');
   liveGroups.clear();
 }
 
 function installGroupCleanup(): void {
   if (handlersInstalled) return;
   handlersInstalled = true;
-  process.on('exit', endLiveGroups);
+  process.on('exit', killLiveGroups);
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
-    const onSignal = () => {
-      endLiveGroups();
+    let waiting: NodeJS.Timeout | undefined;
+    const finish = () => {
+      if (waiting) clearInterval(waiting);
+      waiting = undefined;
+      killLiveGroups();
+      ending = false;
       process.removeListener(sig, onSignal);
       if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
     };
+    const onSignal = () => {
+      if (ending) {
+        // Asked again while waiting: no more waiting.
+        if (waiting) finish();
+        return;
+      }
+      ending = true;
+      signalGroups('SIGTERM');
+      if (![...liveGroups].some(groupAlive)) return finish();
+      const until = Date.now() + SIGNAL_GRACE_MS;
+      waiting = setInterval(() => {
+        if (Date.now() >= until || ![...liveGroups].some(groupAlive)) finish();
+      }, 25);
+    };
     process.on(sig, onSignal);
   }
+}
+
+/** Note a detached group started elsewhere, for the signals above to reach. */
+export function noteGroup(pid: number | undefined): void {
+  if (!pid || process.platform === 'win32') return;
+  installGroupCleanup();
+  liveGroups.add(pid);
+}
+
+/** And forget it once it is over. */
+export function forgetGroup(pid: number | undefined): void {
+  if (pid) liveGroups.delete(pid);
 }
 
 export function runInGroup(cmd: string, args: string[], opts: TimedOptions): TimedRun {

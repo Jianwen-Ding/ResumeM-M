@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PLACEHOLDER_NAME } from './resolve.js';
-import { Store, aiCommandChange, switchAiOff, writeAiOff } from './store.js';
+import { Store, aiCommandChange, reportAiOffNotWritten, switchAiOff, writeAiOff } from './store.js';
 import { currentIgnore } from './current.js';
 import { Repo, refuseClonedLinks } from '../git/repo.js';
 
@@ -242,6 +242,8 @@ export async function cloneProject(
       } else {
         writeAiOff(stage);
       }
+      // Said with the switch-off, when the file could not be made to say it.
+      reportAiOffNotWritten(stage);
     }
     const store = new Store(stage);
     store.load(); // Validate before it becomes the open save.

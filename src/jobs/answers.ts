@@ -1079,10 +1079,15 @@ const ASKS_WHEN_YOU_START = new RegExp(
      * "Disponibilité" as English "availability" is: the word alone asked
      * about weekends ("Disponibilité le week-end") and travel ("disponibilité
      * pour les déplacements") as well. Read with a start beside it, or as the
-     * whole label.
+     * whole label — and the whole label is also "Votre disponibilité",
+     * "Quelle est votre disponibilité ?", "Disponibilité (date)" and
+     * "Disponibilité / préavis" or "et préavis", which the narrower reading
+     * missed, with "À partir de quand êtes-vous disponible ?". Not "à
+     * partir" after a letter: no `\b` reads in front of an "à".
      */
     String.raw`\b(date\s+de\s+(d[ée]but|disponibilit[ée])|disponib(ilit[ée]|le)\s+[àa]\s+partir|disponibilit[ée]\s+pour\s+(commencer|d[ée]buter)|quand\s+pouvez[-\s]vous\s+(commencer|d[ée]buter))`,
-    String.raw`^\s*disponibilit[ée][\s:?*]*$`,
+    String.raw`(^|[^a-zà-ÿ])[àa]\s+partir\s+de\s+quand\b`,
+    String.raw`^\s*((quelle\s+est\s+)?votre\s+)?disponibilit[ée](\s*\(\s*date\s*\)|\s*(\/|et|&)\s*pr[ée]avis)?[\s:?*]*$`,
     String.raw`\b(fecha\s+de\s+(inicio|incorporaci[óo]n|disponibilidad)|cu[áa]ndo\s+(puede|puedes|podr[íi]as?)\s+(usted\s+)?(empezar|comenzar|incorporarse|incorporarte))`,
   ].join('|'),
   'i',

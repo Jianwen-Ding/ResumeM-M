@@ -891,7 +891,31 @@ async function putBack(docKey, back, from) {
    * (`editSent=1`, see `PUT /letters/:id`): the step being taken back is an
    * edit made here, in the letters tab, which said the same.
    */
-  if (String(docKey).startsWith('letter:') && options.method === 'PUT') path = `${path}&editSent=1`;
+  if (String(docKey).startsWith('letter:') && options.method === 'PUT') {
+    path = `${path}&editSent=1`;
+    /*
+     * But only over the letter the step left, once it is one that was sent.
+     *
+     * `editSent=1` is the editor saying "I mean to change a sent letter", and
+     * an undo said it whatever had happened since: edit a letter here, send
+     * the application with it (the extension, the tracker), press Ctrl+Z, and
+     * the text the employer got was replaced by the one before the edit, with
+     * "Undid edit a letter" for the only word about it. So the letter is read
+     * first, as the DELETE below does, and one now filed with an application
+     * that went out (`sentLetterNow`) whose text is no longer what the step
+     * left is refused, with the step kept on the stack. One whose text is
+     * still the step's own is the edit being taken back, which is what the
+     * undo is for.
+     */
+    const store = await api('/store');
+    const now = readDoc(store, docKey);
+    if (now && sentLetterNow(store, now) && now.body !== back?.body && now.body !== from?.body) {
+      const name = now.title || String(docKey).slice('letter:'.length);
+      throw new Error(
+        `Nothing was undone: “${name}” has been sent with an application since it was edited, so it was not written over.`,
+      );
+    }
+  }
   /*
    * A letter the step added is taken away only as the step left it.
    *
@@ -941,6 +965,23 @@ async function putBack(docKey, back, from) {
       basedOn = err.body.version ?? undefined;
     }
   }
+}
+
+/**
+ * Whether `letter` is filed with an application that went out — the server's
+ * `wentOut` (src/model/tiers.ts), read off the store the editor just fetched:
+ * applied, interviewing or at an offer, or closed after one of those (or
+ * closed with no history to say otherwise).
+ */
+function sentLetterNow(store, letter) {
+  if (!letter?.applicationId) return false;
+  const app = (store?.applications ?? []).find((a) => a.id === letter.applicationId);
+  if (!app) return false;
+  const sent = ['applied', 'interview', 'offer'];
+  if (sent.includes(app.status)) return true;
+  if (app.status !== 'closed') return false;
+  const before = [...(app.history ?? [])].reverse().find((h) => h.status !== 'closed');
+  return !before || sent.includes(before.status);
 }
 
 /**

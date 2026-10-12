@@ -63,11 +63,13 @@ afterEach(() => {
  * written its PID, say so on stdout, and then either wait to be signalled or
  * exit on its own.
  */
-function writeScript(mode: 'wait' | 'exit'): { script: string; pidFile: string } {
+function writeScript(mode: 'wait' | 'exit', { ignoresTerm = false } = {}): { script: string; pidFile: string } {
   const pidFile = path.join(dir, 'child.pid');
   const child = path.join(dir, 'slow-cli');
   // `exec`, so the PID written is the sleep's own and nothing outlives a kill of it.
-  fs.writeFileSync(child, `#!/bin/bash\necho $$ > '${pidFile}'\nexec sleep 60\n`, 'utf8');
+  // An ignored SIGTERM is kept across `exec`, so the sleep ignores it too.
+  const trap = ignoresTerm ? `trap '' TERM\n` : '';
+  fs.writeFileSync(child, `#!/bin/bash\n${trap}echo $$ > '${pidFile}'\nexec sleep 60\n`, 'utf8');
   fs.chmodSync(child, 0o755);
   const wrapper = path.join(dir, 'wrapper');
   fs.writeFileSync(wrapper, `#!/bin/bash\n'${child}'\n`, 'utf8');
@@ -128,8 +130,78 @@ describe.skipIf(!unix)('a server stopped while a command it started is running',
     }, 30_000);
   }
 
+  /*
+   * SIGTERM to the group, and the server died at once: a CLI that traps
+   * SIGTERM carried on, reparented to init, with nobody left to send the
+   * SIGKILL. Now the signal waits for the group, and kills what stays.
+   */
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    it(`takes down a command that ignores SIGTERM on ${sig}, and still dies of ${sig}`, async () => {
+      const { script, pidFile } = writeScript('wait', { ignoresTerm: true });
+      const { proc, ready, exited } = start(script);
+      await ready;
+      const child = Number(fs.readFileSync(pidFile, 'utf8').trim());
+      pids.push(child);
+
+      const sent = Date.now();
+      proc.kill(sig);
+      expect(await exited).toEqual({ code: null, signal: sig });
+      expect(await goneSoon(child)).toBe(true);
+      // Waited for, and not for long.
+      expect(Date.now() - sent).toBeLessThan(10_000);
+    }, 30_000);
+  }
+
+  /*
+   * The model picker in Settings starts the CLI in a detached group of its
+   * own too (a `script` terminal on Linux), and it was not one of the groups
+   * noted: Ctrl-C while Settings was listing models left the CLI running.
+   */
+  it('takes down the model picker on SIGINT', async () => {
+    const pidFile = path.join(dir, 'child.pid');
+    const cli = path.join(dir, 'fake-cli');
+    fs.writeFileSync(cli, `#!/bin/bash\ntrap '' TERM\necho $$ > '${pidFile}'\nexec sleep 60\n`, 'utf8');
+    fs.chmodSync(cli, 0o755);
+    const script = path.join(dir, 'picker.ts');
+    const models = path.resolve(__dirname, '../src/ai/models.ts');
+    fs.writeFileSync(
+      script,
+      [
+        `import fs from 'node:fs';`,
+        `import { captureModelPicker } from ${JSON.stringify(models)};`,
+        `captureModelPicker(${JSON.stringify(cli)}, { mode: 'command', args: ['models'], parser: 'claude' } as never, ${JSON.stringify(dir)}).catch(() => {});`,
+        `const ready = setInterval(() => {`,
+        `  if (!fs.existsSync(${JSON.stringify(pidFile)}) || !fs.readFileSync(${JSON.stringify(pidFile)}, 'utf8').trim()) return;`,
+        `  clearInterval(ready);`,
+        `  console.log('ready');`,
+        `  setInterval(() => {}, 1000);`,
+        `}, 20);`,
+      ].join('\n'),
+      'utf8',
+    );
+    const { proc, ready, exited } = start(script);
+    await ready;
+    const child = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    pids.push(child);
+    expect(alive(child)).toBe(true);
+
+    proc.kill('SIGINT');
+    expect(await exited).toEqual({ code: null, signal: 'SIGINT' });
+    expect(await goneSoon(child)).toBe(true);
+  }, 30_000);
+
   it('takes the command down when the server exits on its own', async () => {
     const { script, pidFile } = writeScript('exit');
+    const { ready, exited } = start(script);
+    await ready;
+    const child = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    pids.push(child);
+    expect(await exited).toEqual({ code: 3, signal: null });
+    expect(await goneSoon(child)).toBe(true);
+  }, 30_000);
+
+  it('takes down a command that ignores SIGTERM when the server exits on its own', async () => {
+    const { script, pidFile } = writeScript('exit', { ignoresTerm: true });
     const { ready, exited } = start(script);
     await ready;
     const child = Number(fs.readFileSync(pidFile, 'utf8').trim());

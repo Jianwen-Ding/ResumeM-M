@@ -184,3 +184,60 @@ describe('opening a save whose sent resumes are still written as temporary', () 
     expect(onDisk('job-acme').tier).toBe('temporary');
   });
 });
+
+/*
+ * Kept on disk, and nothing in the tracker naming it any more: the row
+ * deleted, or filed again from another resume without remembering this one.
+ * `asLoaded` read it back as temporary, `doneAt` dated it from the day it was
+ * made, and the sweep took the only record of what was sent — the one thing
+ * `extended` on the file promises no version of the app will do.
+ */
+describe('a resume kept on disk for being sent, once no row names it', () => {
+  it('is not swept', async () => {
+    const { sweepTemporary } = await import('../src/server/sweep.js');
+    t = makeTempStore({ config: { ai: { enabled: false }, git: { autoCommit: true }, output: { dir: 'out' } } });
+    t.write('resumes/job-acme.yaml', {
+      id: 'job-acme',
+      label: 'Backend Engineer — Acme',
+      tier: 'extended',
+      keptBecauseSent: true,
+      generatedFor: { company: 'Acme', role: 'Backend Engineer', at: daysAgo(90) },
+      sections: [{ kind: 'education', entries: ['edu_neu'] }],
+    });
+    t.write('applications.yaml', []);
+    const repo = Repo.forStore(t.dir);
+    await repo.ensure();
+    await repo.commitAll('Before');
+
+    expect(t.store.loadResumes().find((r) => r.id === 'job-acme')!.tier).toBe('temporary');
+    expect(wouldSweep(t.store)).toEqual([]);
+    const { swept } = await sweepTemporary(t.store, repo);
+    expect(swept).toEqual([]);
+    expect(onDisk('job-acme').tier).toBe('extended');
+  });
+
+  it('is not swept after its row is deleted', () => {
+    seed('applying');
+    advance(t.store, 'a1', 'applied');
+    t.store.saveApplications([]);
+    expect(onDisk('job-acme').tier).toBe('extended');
+    expect(wouldSweep(t.store)).toEqual([]);
+  });
+
+  it('is swept once the file itself says temporary again', () => {
+    // A version that knows nothing of the flag marked it temporary: the
+    // file's own tier is the answer then (see `asLoaded`).
+    t = makeTempStore();
+    t.write('resumes/job-acme.yaml', {
+      id: 'job-acme',
+      label: 'Backend Engineer — Acme',
+      tier: 'temporary',
+      keptBecauseSent: true,
+      temporaryFrom: daysAgo(30),
+      generatedFor: { company: 'Acme', role: 'Backend Engineer', at: daysAgo(90) },
+      sections: [{ kind: 'education', entries: ['edu_neu'] }],
+    });
+    t.write('applications.yaml', []);
+    expect(wouldSweep(t.store).map((d) => d.id)).toEqual(['job-acme']);
+  });
+});

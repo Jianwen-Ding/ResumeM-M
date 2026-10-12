@@ -407,20 +407,61 @@ export function writeAiOff(root: string): boolean {
     const text = withoutBom(raw);
     const doc = YAML.parseDocument(text);
     if (doc.errors.length > 0) return false;
-    if (doc.getIn(['ai', 'enabled']) === false) return false;
+    if (saysAiOff(text)) return false;
     /*
      * The value's own characters replaced where there is one, so nothing
      * else in the file is so much as re-spaced. Set through the document
      * only where there is no such line to change.
      */
+    const ai = doc.get('ai', true);
     const node = doc.getIn(['ai', 'enabled'], true);
     let next: string;
-    if (YAML.isScalar(node) && node.range) {
+    if (plainAiMap(ai) && YAML.isScalar(node) && !node.anchor && node.range) {
       next = `${text.slice(0, node.range[0])}false${text.slice(node.range[1])}`;
-    } else {
+    } else if (plainAiMap(ai) && node === undefined) {
       doc.setIn(['ai', 'enabled'], false);
       next = doc.toString({ lineWidth: 0 });
+    } else {
+      /*
+       * Anything else — `ai: *shared`, `ai: &shared` that something else
+       * names, `enabled: *on`, `enabled: &on true`, a `<<` merge key, `ai:`
+       * with nothing under it — is the `ai` block written out again, from
+       * what it reads as, with `enabled: false`.
+       *
+       * Edited where it was, an alias is a node somewhere else: `setIn`
+       * through `ai: *a` refused, the switch-off wrote nothing, and a version
+       * that does not read the marker found the AI on and ran the command
+       * that had just arrived. And writing through an anchor switches off
+       * whatever else shares it, or changes nothing (a merge key's value is
+       * overridden by the map it is merged into). So the block is replaced
+       * outright, and every alias elsewhere to an anchor inside it is first
+       * written out as the value it stood for, so that nothing else in the
+       * file reads any differently.
+       */
+      const resolved = (doc.toJS() as Record<string, unknown> | null)?.ai;
+      const was = resolved && typeof resolved === 'object' && !Array.isArray(resolved) ? resolved : {};
+      const anchored = new Map<string, YAML.Node>();
+      if (YAML.isNode(ai)) {
+        YAML.visit(ai, (_key, n) => {
+          if (YAML.isNode(n) && n.anchor) anchored.set(n.anchor, n);
+        });
+      }
+      if (anchored.size > 0) {
+        YAML.visit(doc, (_key, n) => {
+          if (n === ai) return YAML.visit.SKIP;
+          if (YAML.isAlias(n) && anchored.has(n.source)) {
+            const copy = anchored.get(n.source)!.clone() as YAML.Node;
+            copy.anchor = undefined;
+            return copy;
+          }
+          return undefined;
+        });
+      }
+      doc.set('ai', doc.createNode({ ...was, enabled: false }, { aliasDuplicateObjects: false }));
+      next = doc.toString({ lineWidth: 0 });
     }
+    // Only a file that reads as off, and reads the rest as it did, is written.
+    if (!saysAiOff(next) || !sameApartFromAi(text, next)) return false;
     const temp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(temp, next, 'utf8');
     fs.renameSync(temp, file);
@@ -428,6 +469,73 @@ export function writeAiOff(root: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * An `ai:` that is a map of its own, written out in the file: not an alias,
+ * not anchored for something else to name, and with no merge key in it. The
+ * one shape a single value can be changed in place in.
+ */
+function plainAiMap(ai: unknown): boolean {
+  if (!YAML.isMap(ai) || ai.anchor) return false;
+  return !ai.items.some((pair) => (YAML.isScalar(pair.key) ? pair.key.value : pair.key) === '<<' || YAML.isAlias(pair.value));
+}
+
+/**
+ * Whether config.yaml's text says `ai.enabled: false` in so many words. Not
+ * "is not on as this version reads it": `enabled: "true"` is off here and on
+ * to a version that read it by truthiness, and that version is who the line
+ * in the file is for.
+ */
+function saysAiOff(text: string): boolean {
+  try {
+    const parsed = parseStoreYaml<Partial<StoreConfig>>('config.yaml', text, {});
+    return Boolean(parsed.ai && typeof parsed.ai === 'object' && parsed.ai.enabled === false);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether two config.yaml texts read the same everywhere but under `ai`. */
+function sameApartFromAi(a: string, b: string): boolean {
+  const rest = (text: string) => {
+    const { ai: _ai, ...others } = (YAML.parse(text) ?? {}) as Record<string, unknown>;
+    return JSON.stringify(others);
+  };
+  return rest(a) === rest(b);
+}
+
+/**
+ * Whether config.yaml at `root` says `ai.enabled: false`, for a pull or a
+ * clone to check that `writeAiOff` left it saying so.
+ */
+export function aiOffInFile(root: string): boolean {
+  try {
+    return saysAiOff(fs.readFileSync(path.join(root, 'config.yaml'), 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What a pull or a clone that switched the AI off says when `writeAiOff`
+ * could not make config.yaml say so too. The marker still holds the AI off
+ * here; this is for the version that does not read it.
+ */
+export const AI_OFF_NOT_WRITTEN =
+  'config.yaml could not be changed to say `enabled: false`, so the AI is off on this machine only: a version of the app ' +
+  'from before this switch-off, opened on this save, would still find it on. Set `enabled: false` under `ai:` in config.yaml by hand.';
+
+/**
+ * After a switch-off has tried to write config.yaml: when the file still does
+ * not say off, the marker says so as well, and the sentence comes back for
+ * the caller's message. Undefined when the file says off.
+ */
+export function reportAiOffNotWritten(root: string): string | undefined {
+  if (aiOffInFile(root)) return undefined;
+  const why = aiSwitchedOff(root);
+  if (why && !why.includes(AI_OFF_NOT_WRITTEN)) switchAiOff(root, `${why} ${AI_OFF_NOT_WRITTEN}`);
+  return AI_OFF_NOT_WRITTEN;
 }
 
 /** What turning the AI on in Settings does to a switch-off. */
@@ -491,7 +599,11 @@ function effectiveAiArgsByTask(ai: Partial<StoreConfig['ai']>): Record<AiTask, s
  * `before` undefined is a save that had no config.yaml here — a clone — so
  * any AI that arrives switched on is new to this machine.
  */
-export function aiCommandChange(before: string | undefined, after: string | undefined): string | undefined {
+export function aiCommandChange(
+  before: string | undefined,
+  after: string | undefined,
+  { offBySwitchOff = false }: { offBySwitchOff?: boolean } = {},
+): string | undefined {
   const ai = (raw: string | undefined): Partial<StoreConfig['ai']> => {
     if (raw === undefined) return {};
     try {
@@ -542,15 +654,22 @@ export function aiCommandChange(before: string | undefined, after: string | unde
       said.push(`its arguments for ${key} went from ${from} to ${to}`);
     }
     /*
-     * Switched on with nothing else different is not a new program arriving:
-     * the command and every kind of work's arguments are the ones this save
-     * already had. Since a switch-off also writes `false` into config.yaml
-     * (see `writeAiOff`), counting that as a change made the two machines
-     * take turns: the other one turned it on again, this one pulled that,
-     * switched off and committed `false`, and so on for as long as both
-     * kept answering. Alongside a change to what runs, it is said with it.
+     * Switched on with nothing else different is not a new program arriving
+     * — when the `false` it replaces is a switch-off's. Since a switch-off
+     * also writes `false` into config.yaml (see `writeAiOff`), counting that
+     * as a change made the two machines take turns: the other one turned it
+     * on again, this one pulled that, switched off and committed `false`, and
+     * so on for as long as both kept answering. Alongside a change to what
+     * runs, it is said with it.
+     *
+     * Only then (`offBySwitchOff`: the last commit to config.yaml before the
+     * merge is a switch-off's, made here or on the other machine). Exempted
+     * whatever the `false` was, a pull that changed nothing but `enabled`
+     * switched the AI on here — from the shipped `enabled: false` that
+     * nobody on this machine had ever turned on, running a command nobody
+     * here had looked at. That is the one thing the switch-off is for.
      */
-    if (!on(was) && said.length > 0) said.push(`it was switched on, running ${running(now)}`);
+    if (!on(was) && (said.length > 0 || !offBySwitchOff)) said.push(`it was switched on, running ${running(now)}`);
   }
   return said.length ? said.join('; ') : undefined;
 }

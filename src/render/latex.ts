@@ -336,18 +336,51 @@ export function texHref(url: string): string {
 }
 
 /**
- * Whether a markdown link's target may become a link in the PDF.
+ * What a markdown link's target becomes in the PDF, or undefined when it may
+ * not become a link at all.
  *
  * The PDF is what goes to an employer, and a letter or a bullet can carry
  * text that came from somewhere else — a posting, an AI draft. Any scheme
  * written there became a live link annotation: `[here](javascript:…)` was
  * a `javascript:` URI in the document sent out. Only the schemes a reader's
- * PDF viewer should open are linked — the web, mail and phone, and a bare
- * address with no scheme at all — as the editor's own links already are.
+ * PDF viewer should open are linked — the web, mail and phone — as the
+ * editor's own links already are.
+ *
+ * And not a target with no scheme at all, as it is written. hyperref makes
+ * one of those a link to a file — `[cv](evil.pdf)` and
+ * `[x](//attacker.example/share/x.pdf)` were GoToR actions, which a viewer
+ * opens from the reader's disk or a network share, and `[run](calc.exe)` a
+ * Launch. One that looks like a web address — `example.com/x`,
+ * `www.example.org` — is what somebody meant by it, and is linked as
+ * `https://` and the address, the way the profile's links are (see
+ * `header`). Anything else — a relative path, a file, `//host/share`, a
+ * stray character in front of a scheme — keeps only its words.
  */
-function linkable(url: string): boolean {
-  const scheme = /^\s*([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase();
-  return scheme === undefined || ['http', 'https', 'mailto', 'tel'].includes(scheme);
+function linkTarget(url: string): string | undefined {
+  const target = url.trim();
+  // First, because `example.com:8080/x` reads as a scheme called `example.com`.
+  if (webAddress(target)) return `https://${target}`;
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(target)?.[1]?.toLowerCase();
+  return scheme !== undefined && ['http', 'https', 'mailto', 'tel'].includes(scheme) ? target : undefined;
+}
+
+/*
+ * A host name of two labels or more, then optionally a port and a path,
+ * query or fragment — and a last label that starts with a letter (not an IP
+ * address, which is somebody's machine more often than a site) and is not a
+ * file's extension, so `cv.pdf`, `calc.exe` and `notes.txt` are files and
+ * `example.com` is a site.
+ */
+const WEB_ADDRESS = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z](?:[a-z0-9-]*[a-z0-9])?)(?::\d{1,5})?(?:[/?#][^\s]*)?$/i;
+const FILE_EXTENSIONS = new Set([
+  'pdf', 'exe', 'bat', 'cmd', 'msi', 'scr', 'vbs', 'js', 'jar', 'dmg', 'pkg', 'sh', 'ps1', 'lnk',
+  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'rtf', 'txt', 'tex', 'md', 'csv', 'json', 'xml', 'yaml', 'yml',
+  'html', 'htm', 'zip', 'rar', 'gz', 'tar', '7z', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'mp3', 'mp4', 'mov',
+]);
+
+function webAddress(target: string): boolean {
+  const m = WEB_ADDRESS.exec(target);
+  return Boolean(m) && !FILE_EXTENSIONS.has(m![1]!.toLowerCase());
 }
 
 function markup(s: string, depth: number): string {
@@ -363,12 +396,13 @@ function markup(s: string, depth: number): string {
     const [whole, label, url, strongem, bold, starItalic, underItalic, code] = m;
     const italic = starItalic ?? underItalic;
 
-    if (label !== undefined && !linkable(url!)) {
+    const target = label !== undefined ? linkTarget(url!) : undefined;
+    if (label !== undefined && target === undefined) {
       // A link to anything but a web page or an address: kept as its words.
-      // See `linkable`.
+      // See `linkTarget`.
       out += markup(label, depth - 1);
     } else if (label !== undefined) {
-      out += `\\href{${texHref(url!)}}{\\underline{${markup(label, depth - 1)}}}`;
+      out += `\\href{${texHref(target!)}}{\\underline{${markup(label, depth - 1)}}}`;
     } else if (strongem !== undefined) {
       out += `\\textbf{\\textit{${markup(strongem, depth - 1)}}}`;
     } else if (bold !== undefined) {

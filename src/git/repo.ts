@@ -3,7 +3,15 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { aiCommandChange, aiSwitchedOff, clearAiSwitchOff, storeFileProblem, switchAiOff, writeAiOff } from '../model/store.js';
+import {
+  aiCommandChange,
+  aiSwitchedOff,
+  clearAiSwitchOff,
+  reportAiOffNotWritten,
+  storeFileProblem,
+  switchAiOff,
+  writeAiOff,
+} from '../model/store.js';
 
 const run = promisify(execFile);
 
@@ -1690,7 +1698,16 @@ export class Repo {
      * after the merge, for the versions that do not read the marker. See
      * `writeAiOff`. Not counted in what was pulled: it is this machine's.
      */
-    if (switchedOff) await this.commitAiOff('Switch the AI off: the command changed in what was pulled');
+    if (switchedOff) {
+      await this.commitAiOff('Switch the AI off: the command changed in what was pulled');
+      /*
+       * And said, when config.yaml could not be made to say off — a file
+       * `writeAiOff` cannot rewrite and still have it read the same. The
+       * marker keeps the AI off here whatever the file says.
+       */
+      const notWritten = reportAiOffNotWritten(this.root);
+      if (notWritten) switchedOff = `${switchedOff} ${notWritten}`;
+    }
     const files = (await this.git(['-c', 'core.quotePath=false', 'diff', '--name-only', '-z', before, after]).catch(() => ''))
       .split('\0')
       .filter(Boolean);
@@ -1806,7 +1823,17 @@ export class Repo {
     // The AI command, after the checks: a pull that is refused switches nothing off.
     if (!changed.includes('config.yaml')) return undefined;
     const config = async (at: string) => this.git(['cat-file', 'blob', `${at}:config.yaml`]).catch(() => undefined);
-    const change = aiCommandChange(await config(base), await config(tree));
+    /*
+     * Whether the `false` a pull may turn on is a switch-off's, which is the
+     * one `false` that turning on with the same command does not need looking
+     * at again (see `aiCommandChange`): the last commit to config.yaml before
+     * the merge, by its subject — `commitAiOff`'s, here or on the other
+     * machine, which every one of them starts with.
+     */
+    const lastSaid = await this.git(['log', '-1', '--format=%s', base, '--', 'config.yaml']).catch(() => '');
+    const change = aiCommandChange(await config(base), await config(tree), {
+      offBySwitchOff: lastSaid.startsWith('Switch the AI off'),
+    });
     if (!change) return undefined;
     switchAiOff(this.root, `The AI command changed in what was pulled: ${change}.`);
     return `The AI command changed in what was pulled: ${change}. AI is switched off until you turn it on again in Settings.`;

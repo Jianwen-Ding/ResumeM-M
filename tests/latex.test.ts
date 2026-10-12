@@ -194,8 +194,44 @@ describe('inline markup', () => {
       expect(out, url).not.toContain('\\href');
       expect(out, url).toContain('click');
     }
-    for (const url of ['https://example.com', 'http://a.b', 'mailto:a@example.com', 'tel:+15550100', 'example.com/x']) {
-      expect(inlineTex(`[ok](${url})`), url).toContain('\\href{');
+    for (const url of ['https://example.com', 'http://a.b', 'mailto:a@example.com', 'tel:+15550100']) {
+      expect(inlineTex(`[ok](${url})`), url).toContain(`\\href{${url}}`);
+    }
+  });
+
+  /*
+   * A target with no scheme was let through as it was written, and hyperref
+   * makes one a link to a file: `evil.pdf` and `//host/share/x.pdf` were
+   * GoToR actions in the PDF sent out, which a viewer opens from the
+   * reader's disk or a network share. A web address is linked as one, the
+   * way the profile's links are; anything else keeps its words.
+   */
+  it('links a bare web address as https, and keeps a path or a file as its words', () => {
+    for (const [url, href] of [
+      ['example.com/x', 'https://example.com/x'],
+      ['www.x.y', 'https://www.x.y'],
+      ['example.com', 'https://example.com'],
+      ['example.com:8080/a?b=c', 'https://example.com:8080/a?b=c'],
+      ['example.com/cv.pdf', 'https://example.com/cv.pdf'],
+    ]) {
+      expect(inlineTex(`[ok](${url})`), url).toContain(`\\href{${href}}`);
+    }
+    for (const url of [
+      'evil.pdf',
+      'launch.pdf',
+      'calc.exe',
+      '//attacker.example/share/x.pdf',
+      '../../secret.pdf#page=1',
+      '/etc/passwd',
+      'cv',
+      'run:calc.exe',
+      '\u0001javascript:alert(1)',
+      '\u200bjavascript:alert(1)',
+      '10.0.0.1/x',
+    ]) {
+      const out = inlineTex(`[words](${url})`);
+      expect(out, url).not.toContain('\\href');
+      expect(out, url).toContain('words');
     }
   });
 });

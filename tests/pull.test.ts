@@ -23,7 +23,7 @@ import { runAgent } from '../src/ai/agent.js';
 import { Repo, cloneRepo, withCommit } from '../src/git/repo.js';
 import { cloneProject } from '../src/model/projects.js';
 import { saveStore } from '../src/git/save.js';
-import { Store, aiSwitchedOff } from '../src/model/store.js';
+import { Store, aiSwitchedOff, reportAiOffNotWritten, switchAiOff } from '../src/model/store.js';
 import { createApi } from '../src/server/api.js';
 import { makeTempStore, tempDir, type TempStore } from './helpers.js';
 
@@ -855,9 +855,10 @@ describe('the AI switch-off, where it leaked', () => {
    * list.
    */
   it('switches off for a pull that changes only the research, model or effort setting', async () => {
-    // Switched on with the command this save already had: nothing new to look at.
+    // Switched on from the shipped `false`, which is switched off here too:
+    // see "switches off for a pull that only switches it on".
     await aSetsAi('  enabled: true\n  command: claude\n', 'A: AI on');
-    expect((await repoB.pull()).aiSwitchedOff).toBeUndefined();
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
     await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
     expect(storeB.loadConfig().ai.enabled).toBe(true);
 
@@ -880,9 +881,10 @@ describe('the AI switch-off, where it leaked', () => {
    * tailoring ran, and the AI stayed on.
    */
   it('switches off for a pull that changes only the model of one kind of work', async () => {
-    // Switched on with the command this save already had: nothing new to look at.
+    // Switched on from the shipped `false`, which is switched off here too:
+    // see "switches off for a pull that only switches it on".
     await aSetsAi('  enabled: true\n  command: claude\n', 'A: AI on');
-    expect((await repoB.pull()).aiSwitchedOff).toBeUndefined();
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
     await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
 
     for (const task of ['tailor', 'write', 'review', 'author']) {
@@ -893,6 +895,96 @@ describe('the AI switch-off, where it leaked', () => {
       expect(pulled.message).toMatch(new RegExp(`its arguments for ${task} went from .* to .*some-other-model-${task}`, 's'));
       await request(app).put('/api/config').send({ ai: { enabled: true } }).expect(200);
     }
+  });
+
+  /*
+   * Turning on from a `false` is exempted only when that `false` is a
+   * switch-off's (the ping-pong below). Exempted whatever it was, a pull that
+   * changed nothing but `enabled` switched the AI on from the shipped
+   * `enabled: false`, running a command nobody on this machine had looked at.
+   */
+  it('switches off for a pull that only switches it on, from the shipped false', async () => {
+    const shipped = YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8'));
+    expect(shipped.ai.enabled).toBe(false);
+    expect(git(['log', '-1', '--format=%s', '--', 'config.yaml'], b)).not.toMatch(/^Switch the AI off/);
+    const onA = YAML.parse(fs.readFileSync(path.join(a, 'config.yaml'), 'utf8'));
+    fs.writeFileSync(path.join(a, 'config.yaml'), YAML.stringify({ ...onA, ai: { ...onA.ai, enabled: true } }));
+    await repoA.commitAll('A: AI on');
+    expect((await repoA.push()).ok).toBe(true);
+
+    const pulled = await repoB.pull();
+    expect(pulled.ok).toBe(true);
+    expect(pulled.aiSwitchedOff).toBe(true);
+    expect(pulled.message).toMatch(/it was switched on, running "claude"/);
+    expect(storeB.loadConfig().ai.enabled).toBe(false);
+    expect(aiSwitchedOff(b)).toMatch(/switched on/);
+  });
+
+  /*
+   * `ai: *shared` is an alias, and `writeAiOff` set `enabled` through it,
+   * which the YAML library refused: nothing was written, nothing said so,
+   * and a version that does not read the marker ran the pulled command.
+   */
+  it('writes the switch-off into config.yaml when `ai:` is an alias', async () => {
+    const { command, ran } = markingCommand();
+    fs.writeFileSync(
+      path.join(a, 'config.yaml'),
+      `x: &a\n  command: ${command}\n  args: []\n  enabled: true\nai: *a\ngit:\n  autoCommit: true\noutput:\n  dir: out\n`,
+    );
+    await repoA.commitAll('A: an aliased AI');
+    expect((await repoA.push()).ok).toBe(true);
+
+    const pulled = await repoB.pull();
+    expect(pulled.ok).toBe(true);
+    expect(pulled.aiSwitchedOff).toBe(true);
+    expect(pulled.message).not.toMatch(/could not be changed/);
+    const written = YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8'));
+    expect(written.ai).toEqual({ command, args: [], enabled: false });
+    expect(written.x.enabled).toBe(true);
+    expect(git(['log', '-1', '--format=%s'], b).trim()).toBe('Switch the AI off: the command changed in what was pulled');
+    expect(git(['status', '--porcelain'], b)).toBe('');
+    expect((await runAgent(storeB.loadConfig(), 'hello')).executed).toBe(false);
+    expect(ran()).toBe(false);
+  });
+
+  it('writes it when `ai:` shares an alias with something else, and leaves that alone', async () => {
+    fs.writeFileSync(
+      path.join(a, 'config.yaml'),
+      'shared: &a\n  command: /tmp/somebody-else.sh\n  enabled: true\nai: *a\nother: *a\ngit:\n  autoCommit: true\noutput:\n  dir: out\n',
+    );
+    await repoA.commitAll('A: a shared alias');
+    expect((await repoA.push()).ok).toBe(true);
+
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    const written = YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8'));
+    expect(written.ai).toEqual({ command: '/tmp/somebody-else.sh', enabled: false });
+    expect(written.shared).toEqual({ command: '/tmp/somebody-else.sh', enabled: true });
+    expect(written.other).toEqual({ command: '/tmp/somebody-else.sh', enabled: true });
+    expect(storeB.loadConfig().ai.enabled).toBe(false);
+  });
+
+  it('writes it through an anchor on `ai:` that something else names, without changing that', async () => {
+    fs.writeFileSync(
+      path.join(a, 'config.yaml'),
+      'ai: &a\n  command: /tmp/somebody-else.sh\n  enabled: &on true\nother: *a\nflag: *on\ngit:\n  autoCommit: true\noutput:\n  dir: out\n',
+    );
+    await repoA.commitAll('A: an anchored AI');
+    expect((await repoA.push()).ok).toBe(true);
+
+    expect((await repoB.pull()).aiSwitchedOff).toBe(true);
+    const written = YAML.parse(fs.readFileSync(path.join(b, 'config.yaml'), 'utf8'));
+    expect(written.ai).toEqual({ command: '/tmp/somebody-else.sh', enabled: false });
+    expect(written.other).toEqual({ command: '/tmp/somebody-else.sh', enabled: true });
+    expect(written.flag).toBe(true);
+  });
+
+  it('says so, and keeps the marker, when config.yaml still does not say off', () => {
+    fs.writeFileSync(path.join(b, 'config.yaml'), 'ai:\n  command: /tmp/somebody-else.sh\n  enabled: true\n');
+    switchAiOff(b, 'The AI command changed in what was pulled.');
+    const said = reportAiOffNotWritten(b);
+    expect(said).toMatch(/config\.yaml could not be changed/);
+    expect(aiSwitchedOff(b)).toMatch(/^The AI command changed in what was pulled\. config\.yaml could not be changed/);
+    expect(storeB.loadConfig().ai.enabled).toBe(false);
   });
 
   /*

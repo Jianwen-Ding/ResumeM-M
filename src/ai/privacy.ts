@@ -434,8 +434,31 @@ export function withoutContactDetails(text: string): string {
    * numbers side by side. In the text looked through only, as the line
    * breaks are: `personalDetailIn` reads the text as it was, and refuses
    * what it refused before.
+   *
+   * Only where both sides are phone numbers on their own, though. Split at
+   * every "/" between digits, the half after an order number, a year or a
+   * build counted alone: "Order 42/0012345678", "Ref 2024/1234567890" and
+   * "build 2/0123456789" lost their identifiers to "[phone number]", and so
+   * did the ticket in "Ticket 123-456-7890/1", which was its first half. So
+   * a "/" is a break only when the number that ends at it and the one that
+   * starts after it would each be scrubbed with the "/" a break — and never
+   * in a path, a token with a "/" earlier in it: "/api/v2/1234567890",
+   * "example.org/p/2024/4155550123".
    */
-  const slashBySlash = (t: string) => t.replace(/(?<=\d)\/(?=\+?\d)/g, '\u0001');
+  const slashBySlash = (t: string) => {
+    let out = t;
+    for (const found of t.matchAll(/(?<=\d)\/(?=\+?\d)/g)) {
+      const at = found.index!;
+      const token = t.slice(0, at).search(/[^\s\u0001]*$/);
+      if (t.slice(token, at).includes('/')) continue;
+      const probe = `${t.slice(0, at)}\u0001${t.slice(at + 1)}`;
+      const runs = phoneRunsIn(probe);
+      if (runs.some((r) => r.at + r.length === at) && runs.some((r) => r.at === at + 1)) {
+        out = `${out.slice(0, at)}\u0001${out.slice(at + 1)}`;
+      }
+    }
+    return out;
+  };
   /*
    * The bracket in front of an area code with it: the run of digits starts
    * after the "(" (see `DIGIT_RUN`), and "([phone number]" is half a

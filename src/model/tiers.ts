@@ -310,7 +310,9 @@ export function keptOnDisk(spec: ResumeSpec, sent: ReadonlySet<string>): ResumeS
 /**
  * A resume as this version means it: one `keptOnDisk` wrote as `extended`
  * because it was sent reads as the temporary copy it was. The sweep still
- * keeps it, for the reason it always did — it was sent.
+ * keeps it, for the reason it always did — it was sent — and, once no row
+ * says so any more, for its tier on disk: see `dueNow` in server/sweep.ts,
+ * which never takes a resume whose file says `extended`.
  *
  * Only while the file still says `extended`. A version that knows nothing of
  * the flag and marks the resume temporary leaves it behind, and the file's

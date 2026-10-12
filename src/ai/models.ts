@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { AI_PRESETS, type AiModelPicker } from './presets.js';
 import { envForAgent } from './env.js';
+import { forgetGroup, noteGroup } from '../process-group.js';
 
 /** What the installed CLI's own model picker offered. */
 export interface ModelList {
@@ -177,6 +178,13 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    /*
+     * Noted with the groups a run starts (see process-group.ts), so that
+     * Ctrl-C on the server takes the picker's terminal and the CLI under it
+     * too. In a group of its own the terminal's signal never reached it, and
+     * `stop` below is a timer in a process that had just died.
+     */
+    noteGroup(child.pid);
     let output = '';
     let settled = false;
     const timers: NodeJS.Timeout[] = [];
@@ -204,6 +212,8 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
 
     child.on('error', (error) => stop(error));
     child.on('close', () => stop());
+    // Forgotten once the bridge has gone and let go of its output.
+    child.on('close', () => forgetGroup(child.pid));
 
     // On Linux script forwards stdin to its PTY. Expect sends the same input
     // itself on macOS because the GUI server has no terminal to forward.
