@@ -663,11 +663,13 @@ interface Tried {
  * And a grown page has to be no wider than the one as written, as well as no
  * taller. Larger type and wider margins both take room from every line, and
  * a line TeX has nowhere to break — a link, a path — is set past the
- * right-hand edge, where it is not in the PDF at all. A resume with a design
- * doc's link in it that set cleanly as written was grown until the link ran
- * 30pt off the paper. Growing is a nicety; losing text is the one thing this
- * must not do, so a layout that runs further past the edge than the one as
- * written counts as not fitting. When that is what stops it, the margins give
+ * right-hand edge of the text, and past the edge of the paper it is not in
+ * the PDF at all. A resume with a design doc's link in it that set cleanly as
+ * written was grown until the link ran 30pt off the paper. Growing is a
+ * nicety; losing text is the one thing this must not do, so a layout that
+ * runs further off the paper than the one as written counts as not fitting.
+ * Into the margin, where the glyphs are still on the sheet, it may go — see
+ * `noFurtherOffPaper`. When the paper is what stops it, the margins give
  * their width back and the type goes on growing into it.
  */
 async function fitSearch<A extends Tried>(
@@ -714,11 +716,11 @@ async function fitSearch<A extends Tried>(
   if (fitsAt(first)) {
     if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
     // On its page, and losing nothing off the side of it the page as written kept.
-    const edges = pastEdge(first.raw.log).sort((x, y) => y - x);
+    const edges = offPaper(first.raw.log, first.layout);
     // Nor wrapping a heading row onto more lines than the page as written
     // did: larger type would otherwise buy itself two- and three-line titles.
     const wrapped = wrappedRows(first.raw.log);
-    const wide = (a: Tried) => !noFurtherPastEdge(a.raw.log, edges) || wrappedRows(a.raw.log) > wrapped;
+    const wide = (a: Tried) => !noFurtherOffPaper(a.raw.log, a.layout, edges) || wrappedRows(a.raw.log) > wrapped;
     const tall = (a: Tried) => a.m.pages > pages;
     const roomy = (a: Tried) => !tall(a) && !wide(a);
     /*
@@ -1074,7 +1076,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     texPath: opts.texPath,
     tex: best.tex,
     engine,
-    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log), ...tooWideWarnings(best.raw.log)],
+    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log), ...tooWideWarnings(best.raw.log, best.layout)],
     log: tail(best.raw.log, 30),
     fastPath: best.fast,
   };
@@ -1128,29 +1130,63 @@ function fontWarnings(log: string): string[] {
  * a resume they could still send. But it has to be said, because losing text
  * silently is the one thing a document tool must not do.
  *
+ * Said of the right lines. TeX measures an overfull box against the text
+ * block, not the paper: "18pt too wide" inside 0.45in margins is a line that
+ * ends 18pt into a 32pt margin, every glyph of it on the sheet and in the
+ * PDF — `pdftotext` finds the whole link. This told that line's author that
+ * "whatever is past the edge is not in the PDF at all", and they went looking
+ * for text that was all there. The paper's edge is `marginIn` past the text
+ * block's, so a line is lost from where it runs past *that*, less a few
+ * points of bleed: a glyph set against the very edge of the sheet is cut by
+ * the printer, and a reader crops to the page box. Short of it, the line is
+ * only into the margin, which is said more mildly.
+ *
  * Above `\hfuzz` and then some. TeX reports an overfull box at 0.1pt, which is
- * a hairline nobody can see and nothing is lost to; a couple of points in is
- * where a glyph starts going missing.
+ * a hairline nobody can see; a couple of points is where a line is noticeably
+ * past where the others end.
  */
 const TOO_WIDE = /^Overfull \\hbox \(([\d.]+)pt too wide\)/gm;
 const NOTICEABLE_PT = 2;
 
+/** How near the paper's edge a glyph may be set and still be counted as on it. */
+const BLEED_PT = 4;
+
+/** How far each noticeably too-wide line runs past the text block, in points. */
 function pastEdge(log: string): number[] {
   return [...log.matchAll(TOO_WIDE)].map((m) => Number(m[1])).filter((pt) => pt >= NOTICEABLE_PT);
 }
 
 /**
- * Whether no line runs further past the edge than the page as written had one
+ * How far each of those lines runs past the edge of the paper itself —
+ * negative while it is still in the margin — widest first.
+ */
+function offPaper(log: string, layout: LayoutOptions): number[] {
+  const margin = layout.marginIn * PT_PER_IN;
+  return pastEdge(log)
+    .map((pt) => pt - margin)
+    .sort((x, y) => y - x);
+}
+
+/** Off the paper, or near enough its edge to be cut: text that is gone. */
+const lost = (offPaperPt: number) => offPaperPt > -BLEED_PT;
+
+/**
+ * Whether no line runs further off the paper than the page as written had one
  * run: no more such lines, and the widest no wider than the widest was, the
- * next no wider than the next, and so on (`before` sorted widest first).
+ * next no wider than the next, and so on (`before` from `offPaper`, so widest
+ * first).
  *
  * Measured, not a yes-or-no. A link already off the side as written is the
  * author's to shorten, and must not stop the page growing so long as growing
- * does not push it further — nor excuse a second line going over.
+ * does not push it further — nor excuse a second line going over. Into the
+ * margin is not over: a line that larger type sets a few points past the
+ * text block, still on the paper, loses nothing, and growing may put it
+ * there. It is the paper's edge that growth may not push a line across.
  */
-function noFurtherPastEdge(log: string, before: readonly number[]): boolean {
-  const now = pastEdge(log).sort((x, y) => y - x);
-  return now.length <= before.length && now.every((pt, i) => pt <= before[i]! + EDGE_SLACK_PT);
+function noFurtherOffPaper(log: string, layout: LayoutOptions, before: readonly number[]): boolean {
+  const now = offPaper(log, layout).filter(lost);
+  const was = before.filter(lost);
+  return now.length <= was.length && now.every((pt, i) => pt <= was[i]! + EDGE_SLACK_PT);
 }
 
 /** Noise in the width TeX reports for the same line at another size. */
@@ -1161,16 +1197,30 @@ function wrappedRows(log: string): number {
   return [...log.matchAll(/RMM-ROW-LINES: (\d+)/g)].reduce((sum, m) => sum + Number(m[1]) - 1, 0);
 }
 
-function tooWideWarnings(log: string): string[] {
-  const worst = pastEdge(log).sort((a, b) => b - a);
-  if (worst.length === 0) return [];
+function tooWideWarnings(log: string, layout: LayoutOptions): string[] {
+  const over = offPaper(log, layout);
+  const gone = over.filter(lost);
+  const inMargin = over.filter((pt) => !lost(pt));
+  const usually =
+    'This is usually one long unbroken thing: a link, a file path, a token. ' +
+    'Shorten it, or put it behind a few words of link text.';
+  const runs = (n: number) => (n > 1 ? `${n} lines run` : 'A line runs');
 
-  const many = worst.length > 1 ? `${worst.length} lines run` : 'A line runs';
-  return [
-    `${many} past the right-hand edge of the page — the widest by ${Math.round(worst[0]!)}pt — and ` +
-      'whatever is past the edge is not in the PDF at all. This is usually one long unbroken ' +
-      'thing: a link, a file path, a token. Shorten it, or put it behind a few words of link text.',
-  ];
+  const warnings: string[] = [];
+  if (gone.length > 0) {
+    warnings.push(
+      `${runs(gone.length)} past the right-hand edge of the page — the widest by ${Math.max(1, Math.round(gone[0]!))}pt — and ` +
+        `whatever is past the edge is not in the PDF at all. ${usually}`,
+    );
+  }
+  if (inMargin.length > 0) {
+    const margin = layout.marginIn * PT_PER_IN;
+    warnings.push(
+      `${runs(inMargin.length)} into the right-hand margin — the widest by ${Math.round(inMargin[0]! + margin)}pt — ` +
+        `still on the paper, so nothing is lost, but set past where the other lines end. ${usually}`,
+    );
+  }
+  return warnings;
 }
 
 /** The last page's natural height and the total shrink of its glue, as `\\AtEndDocument` reported them. */
@@ -1362,7 +1412,7 @@ export async function compileLetter(
     texPath: opts.texPath,
     tex,
     engine,
-    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log), ...placeholderWarnings(letter)],
+    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log, used), ...placeholderWarnings(letter)],
     pages: m.pages,
     fits,
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

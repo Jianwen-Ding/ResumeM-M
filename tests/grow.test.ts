@@ -74,17 +74,30 @@ describe.skipIf(!hasEngine)('a resume with room to spare', () => {
    * Type grows in steps: a little larger and every one-line bullet wraps onto
    * two. A resume that stops there still has room, and the line spacing,
    * which never moves a line break, takes it.
+   *
+   * Unless there is none left to take. The aimed search can land the type on
+   * a page it fills to the line — six entries came out 99.9% full at 11.12pt
+   * — and the spacing step is then rightly skipped: the room it would spend
+   * is not there. So the outcome is asserted either way: the page is nearly
+   * full, or the spacing is past what the joint growth carried.
    */
   it('and spends what the type could not on line spacing', async () => {
     const r = await compileResume(resume(6));
     expect(r.fits).toBe(true);
+    expect(r.grew).toBe(true);
     // More than the type's own growth carries with it: font, spacing and
     // margins grow together, so this much spacing goes with the size it
     // reached, and anything past it is the page's leftover room.
     const { maxFontSizePt, maxSpacing } = DEFAULT_LAYOUT.growBounds;
     const grown = (r.layout.fontSizePt - DEFAULT_LAYOUT.fontSizePt) / (maxFontSizePt - DEFAULT_LAYOUT.fontSizePt);
     expect(grown).toBeLessThan(1);
-    expect(r.layout.spacing).toBeGreaterThan(DEFAULT_LAYOUT.spacing + grown * (maxSpacing - DEFAULT_LAYOUT.spacing) + 0.01);
+    const carried = DEFAULT_LAYOUT.spacing + grown * (maxSpacing - DEFAULT_LAYOUT.spacing);
+    // The same mark the search stops growing at (`NEARLY_FULL` in compile.ts).
+    const nearlyFull = r.usedPt / r.availablePt >= 0.97;
+    expect(
+      nearlyFull || r.layout.spacing > carried + 0.01,
+      `page ${((r.usedPt / r.availablePt) * 100).toFixed(1)}% full, spacing ×${r.layout.spacing} against ×${carried.toFixed(3)} carried`,
+    ).toBe(true);
   }, 90_000);
 
   /*
@@ -405,23 +418,48 @@ describe.skipIf(!hasEngine)('a page too wide at the ceiling, with room left on i
   }, 120_000);
 
   /*
-   * A link already past the edge as written is the author's to shorten. It
-   * held the type at 10.5pt, though larger type at the same margins sets it
-   * no further over.
+   * A link already past the edge of the text as written is the author's to
+   * shorten, and it is measured against the paper, not the text block. This
+   * one ends 18pt into a 32pt margin: every glyph of it is on the sheet, so
+   * it is not lost, and larger type that sets it further into the margin
+   * loses nothing either. It used to hold the type at 10.5pt, with the
+   * warning saying its text was gone.
    */
-  it('and a line already past the edge as written does not stop it, as long as it goes no further', async () => {
-    const link = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz/edit';
+  const link = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz/edit';
+  const gone = (warnings: string[]) => {
+    const w = warnings.find((x) => /past the right-hand edge/.test(x));
+    return w ? { lines: /(\d+) lines run/.exec(w)?.[1] ?? '1', widest: Number(/widest by (\d+)pt/.exec(w)?.[1]) } : undefined;
+  };
+  const intoMargin = (warnings: string[]) => warnings.filter((x) => /into the right-hand margin/.test(x));
+
+  it('and a line already into the margin as written does not stop it, as long as it stays on the paper', async () => {
     const r = withProject(`Design doc: ${link}`);
-    const over = (warnings: string[]) => {
-      const w = warnings.find((x) => /right-hand edge/.test(x));
-      return w ? { lines: /(\d+) lines run/.exec(w)?.[1] ?? '1', widest: Number(/widest by (\d+)pt/.exec(w)?.[1]) } : undefined;
-    };
-    const asWritten = over((await compileResume({ ...r, layout: { ...r.layout, autoFit: false } })).warnings);
-    expect(asWritten).toBeDefined();
+    const asWritten = await compileResume({ ...r, layout: { ...r.layout, autoFit: false } });
+    expect(intoMargin(asWritten.warnings)).toHaveLength(1);
+    expect(gone(asWritten.warnings)).toBeUndefined();
+
     const fitted = await compileResume(r);
     expect(fitted.pages).toBe(1);
-    expect(fitted.layout.fontSizePt).toBeGreaterThan(11);
-    const now = over(fitted.warnings)!;
+    expect(fitted.grew).toBe(true);
+    expect(fitted.layout.fontSizePt).toBeGreaterThan(DEFAULT_LAYOUT.fontSizePt);
+    // Further into the margin, and no further than that.
+    expect(gone(fitted.warnings)).toBeUndefined();
+  }, 120_000);
+
+  /*
+   * While one already off the paper as written goes with the type, so every
+   * step of the type is rightly refused — and the line spacing, which moves
+   * no line sideways, still takes the room the page has.
+   */
+  it('while one already off the paper is pushed no further, and the spacing still grows', async () => {
+    const r = withProject(`Design doc: ${link}${'X'.repeat(8)}`);
+    const asWritten = gone((await compileResume({ ...r, layout: { ...r.layout, autoFit: false } })).warnings);
+    expect(asWritten).toBeDefined();
+
+    const fitted = await compileResume(r);
+    expect(fitted.pages).toBe(1);
+    expect(fitted.layout.spacing).toBeGreaterThan(DEFAULT_LAYOUT.spacing);
+    const now = gone(fitted.warnings)!;
     expect(now.lines).toBe(asWritten!.lines);
     expect(now.widest).toBeLessThanOrEqual(asWritten!.widest + 1);
   }, 120_000);

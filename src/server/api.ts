@@ -2048,6 +2048,16 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         latex: c.latex,
         git: c.git,
         output: c.output,
+        /*
+         * The page every resume in the save is set on unless it says
+         * otherwise. `GET /store` leaves config down to git and the AI
+         * switch, so this is the only place the editor can read it: the Page
+         * settings panel draws its boxes from it, and the live preview reads
+         * `autoFit` off it to know whether a second, fitted compile is coming
+         * at all. Left out, both saw the built-in defaults whatever the save
+         * said.
+         */
+        layout: c.layout ?? {},
         // Environment overrides win over the file, so say when one is active
         // rather than letting the GUI show a setting that is not in effect.
         overrides: {
@@ -2675,6 +2685,13 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       res.json({
         pages: result.pages,
         fits: result.fits,
+        /*
+         * And how many it was allowed, so "fits" can be said with the right
+         * number of pages: the editor and the card said "Fits on one page"
+         * of a two-page resume allowed two. The resolved layout's, which is
+         * the resume's own or the save-wide setting under it.
+         */
+        maxPages: result.layout.maxPages,
         overflowPt: result.overflowPt,
         overflowLines: result.overflowLines,
         usedPt: result.usedPt,

@@ -424,14 +424,31 @@ function clean(err: unknown): string {
   return said.replace(/,\s*\w+\s+'[^']*'\s*$/, '');
 }
 
-function fmtFit(r: { pages: number; fits: boolean; overflowPt: number; overflowLines: number; adjustments: string[] }): string {
+/**
+ * The verdict, with the page count the PDF really has.
+ *
+ * This said "✓ 1 page" of anything that fitted — a resume allowed two pages
+ * and set across both of them included, which is the one case where the
+ * count is news. The count is the compile's, and how many pages were allowed
+ * is said beside it whenever that is more than the one this tool is named
+ * for, so "2 pages" reads as permitted rather than as a mistake.
+ */
+function fmtFit(r: {
+  pages: number;
+  fits: boolean;
+  overflowPt: number;
+  overflowLines: number;
+  adjustments: string[];
+  layout: { maxPages: number };
+}): string {
   if (!r.fits) {
     return `✗ ${r.pages} pages — over by ${r.overflowPt.toFixed(0)}pt (~${r.overflowLines} lines)`;
   }
   const slack = Math.abs(r.overflowLines);
-  const room = r.overflowPt < 0 ? `, ~${slack} line${slack === 1 ? '' : 's'} of room left` : '';
+  const room = r.overflowPt < 0 ? `, ~${plural(slack, 'line')} of room left` : '';
   const adj = r.adjustments.length > 0 ? ` [auto-fit: ${r.adjustments.join('; ')}]` : '';
-  return `✓ 1 page${room}${adj}`;
+  const allowed = r.layout.maxPages > 1 ? ` (allowed ${r.layout.maxPages})` : '';
+  return `✓ ${plural(r.pages, 'page')}${allowed}${room}${adj}`;
 }
 
 async function main(argv: string[]): Promise<number> {

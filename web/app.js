@@ -6412,6 +6412,7 @@ let renderToken = 0;
 function scheduleRender({ delay = LIVE_DELAY_MS } = {}) {
   clearTimeout(renderTimer);
   setLive('working');
+  forgetFit();
   renderTimer = setTimeout(() => {
     renderTimer = null;
     renderPreview();
@@ -6898,7 +6899,7 @@ function fitSummary(fit, result, { master, fitting = false } = {}) {
     master
       ? `Master Document · ${plural(result.pages, 'page')} · All source phrasings; may exceed two pages`
       : result.fits
-        ? `Fits on one page${
+        ? `Fits on ${onPages(result)}${
             result.overflowLines < 0 ? ` — room for about ${plural(Math.abs(result.overflowLines), 'more line')}` : ''
           }`
         : `${plural(result.pages, 'page')} — about ${plural(result.overflowLines, 'line')} too long. Pick a shorter phrasing or drop a bullet.`,
@@ -6926,6 +6927,40 @@ function fitSummary(fit, result, { master, fitting = false } = {}) {
       ]),
     );
   }
+}
+
+/**
+ * "one page", or the count the PDF really has — with how many were allowed,
+ * when that is more than the one this tool is named for.
+ *
+ * "Fits on one page" was said of every resume that fitted, a two-page resume
+ * allowed two pages included. The server says how many it allowed beside the
+ * count; an older one does not, and the layout in force here says the same.
+ */
+function onPages(result) {
+  const allowed = result.maxPages ?? pageLayout().maxPages ?? 1;
+  const pages = result.pages === 1 ? 'one page' : plural(result.pages, 'page');
+  return allowed > 1 ? `${pages} (${allowed} allowed)` : pages;
+}
+
+/**
+ * The fit chip back to not knowing, from the moment a compile is asked for.
+ *
+ * Only `renderPreview` wrote the chip, and only once an answer came, so
+ * between asking and answering it kept saying whatever it said last. On a
+ * switch of resume that was the previous resume's verdict: "Fits on one page"
+ * stood over a two-page resume for the second or six its compile took, and
+ * whoever looked then — a person, or a test polling the chip — was told the
+ * wrong document fitted. A change to the Page settings was the same, the old
+ * page's verdict over the new page. `renderPreview` already turns an idle
+ * chip into "Compiling…"; this makes it idle whenever a compile is scheduled,
+ * so the chip never carries a verdict about anything but what it is over.
+ */
+function forgetFit() {
+  const fit = $('#fit');
+  if (!fit) return;
+  fit.className = 'fit idle';
+  fit.textContent = 'Compiling…';
 }
 
 /**
@@ -7129,10 +7164,27 @@ async function dropOrphan(lost) {
   markDirty(`Removed "${id}" from this resume`);
 }
 
+/**
+ * The page settings in force for the resume on screen: its own over the
+ * save's, as `layoutFor` resolves them on the server.
+ *
+ * The save-wide half is not in `GET /store`, which keeps config down to git
+ * and the AI switch, so it is read from `/config` alongside the store and
+ * kept here; the Page settings panel puts what it saves in the same place.
+ * Read off the resume alone, a save whose config.yaml said `autoFit: false`
+ * looked like one with it on: the preview asked for a fitted compile the
+ * server would only answer as written, and said "Squeezing it onto one
+ * page…" over a resume nothing was going to squeeze.
+ */
+let saveLayout = {};
+
+function pageLayout() {
+  return { ...saveLayout, ...(resumeById(state.resumeId)?.layout ?? {}) };
+}
+
 /** Whether this resume is allowed to shrink itself to fit. */
 function autoFitOn() {
-  const spec = resumeById(state.resumeId);
-  return spec?.layout?.autoFit ?? true;
+  return pageLayout().autoFit ?? true;
 }
 
 /**
@@ -11019,6 +11071,7 @@ function pageDefaults(config) {
     try {
       const saved = await api('/config', { method: 'PUT', body: JSON.stringify({ layout: patch }) });
       if (state.store?.config) state.store.config.layout = saved.layout;
+      saveLayout = saved.layout ?? {};
       Object.assign(inForce, patch);
       setStatus('Page settings saved');
       // Every resume is set on this, including the one on screen.
@@ -13142,7 +13195,11 @@ function renderBaseButton() {
 }
 
 async function loadStore() {
-  adoptStore(await api('/store'));
+  // The save-wide page settings with it; see `pageLayout`. Not fatal: an
+  // older server has no layout to give, and the store is worth having without it.
+  const [fresh, config] = await Promise.all([api('/store'), api('/config').catch(() => null)]);
+  if (config?.layout) saveLayout = config.layout;
+  adoptStore(fresh);
 }
 
 /**

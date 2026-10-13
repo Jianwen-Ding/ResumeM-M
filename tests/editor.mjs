@@ -1491,6 +1491,17 @@ async function main() {
         await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
         await page.locator('#resume-select').selectOption(squeezed);
 
+        /*
+         * The chip goes idle the moment the switch schedules its compile,
+         * and only then answers. Waited for in that order: polled for a
+         * settled answer alone, this read the previous resume's "Fits on one
+         * page" — settled, and about the wrong document — in the moments
+         * before the switch had asked for anything.
+         */
+        await page.waitForFunction(() => document.querySelector('#fit')?.classList.contains('idle'), null, {
+          timeout: 30_000,
+          polling: 50,
+        });
         await page.waitForFunction(
           () => {
             const chip = document.querySelector('#fit');
