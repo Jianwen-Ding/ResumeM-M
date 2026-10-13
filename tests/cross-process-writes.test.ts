@@ -22,6 +22,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import express from 'express';
@@ -372,5 +373,177 @@ describe('committing beside another process', () => {
     expect(said.stderr).toContain('rmm save');
     expect(said.code).toBe(0);
     expect(fs.readdirSync(path.join(save, 'corpus')).length).toBeGreaterThan(0);
+  });
+});
+
+/*
+ * Round 24. The lock worked, and the waiting for it did not.
+ *
+ * The store's synchronous wait is `Atomics.wait` on the main thread. In the
+ * server that is the event loop standing still: with `rmm apply` committing
+ * through a hook that slept seven seconds, every GET waited five, and the
+ * PATCH that was waiting then failed — with a sentence ending "remove
+ * …/rmm-write.lock", about a lock whose holder was alive and busy. Now
+ * `withCommit` takes the lock asynchronously, around the write and the
+ * commit, and waits longer than a synchronous write does; the sentence says
+ * who is writing and to wait when the holder is alive on this machine. And
+ * a waiter's file is refreshed while it waits and judged by that, so one
+ * left by a killed waiter whose pid lives on does not keep every writer out
+ * for `STALE_MS` with no lock anywhere.
+ */
+describe('a slow commit in the other process', () => {
+  it('keeps the server answering while a request waits for the lock, and the request then lands', async () => {
+    SaveLock.WAIT_MS = 300; // A synchronous write would give up here; `withCommit` waits on.
+    const holder = other(t.store.root, 'hold', 1500);
+    const { lock } = SaveLock.where(t.store.root);
+    while (!fs.existsSync(lock)) {
+      if (!holder.running()) throw new Error('the other process never took the lock');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const started = Date.now();
+    const patch = request(app)
+      .patch('/api/applications/seed')
+      .send({ answers: [{ question: 'n', answer: 'waited' }] });
+    const patchDone = patch.then((r) => ({ status: r.status, after: Date.now() - started }));
+    // Reads while the write waits: with the thread blocked, these took as long as the hold.
+    await new Promise((r) => setTimeout(r, 100));
+    const reads: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const t0 = Date.now();
+      const r = await request(app).get('/api/applications');
+      expect(r.status).toBe(200);
+      reads.push(Date.now() - t0);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(Math.max(...reads)).toBeLessThan(500);
+    const landed = await patchDone;
+    expect(landed.status).toBe(200);
+    expect(landed.after).toBeGreaterThan(1000);
+    await holder.done;
+    expect((t.read('applications.yaml') as { id: string; answers?: { answer: string }[] }[]).find((r) => r.id === 'seed')?.answers?.[0]?.answer).toBe('waited');
+  });
+
+  it('says who is writing, and to wait, when the holder is alive on this machine', () => {
+    const { lock } = SaveLock.where(t.store.root);
+    fs.writeFileSync(lock, `${process.ppid} ${os.hostname()} ${new Date().toISOString()} rmm serve --port 4788\n`);
+    SaveLock.WAIT_MS = 200;
+    let thrown: Error | undefined;
+    try {
+      t.store.upsertApplication({ ...SEED, id: 'blocked' } as never);
+    } catch (err) {
+      thrown = err as Error;
+    }
+    expect(thrown).toBeInstanceOf(SaveBusyError);
+    expect(thrown!.message).toContain(`pid ${process.ppid}`);
+    expect(thrown!.message).toContain('`rmm serve --port 4788`');
+    expect(thrown!.message).toMatch(/wait a moment/i);
+    expect(thrown!.message).not.toContain('remove');
+    fs.rmSync(lock);
+  });
+});
+
+describe("a waiter's file", () => {
+  const wantFile = (pid: number) => {
+    const at = SaveLock.where(t.store.root);
+    return path.join(at.dir, `${at.wantPrefix}${pid}${at.wantSuffix}`);
+  };
+
+  it('is refreshed while its process waits', async () => {
+    const holder = other(t.store.root, 'hold', 1500);
+    const { lock } = SaveLock.where(t.store.root);
+    while (!fs.existsSync(lock)) {
+      if (!holder.running()) throw new Error('the other process never took the lock');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const waiting = holdSave(t.store.root, async () => undefined);
+    await new Promise((r) => setTimeout(r, 300));
+    const first = fs.statSync(wantFile(process.pid)).mtimeMs;
+    await new Promise((r) => setTimeout(r, 600));
+    const later = fs.statSync(wantFile(process.pid)).mtimeMs;
+    expect(later).toBeGreaterThan(first);
+    await waiting;
+    await holder.done;
+    expect(fs.existsSync(wantFile(process.pid))).toBe(false);
+  });
+
+  it('whose process is alive but which nobody refreshes is out of the way once its wait would be over, and named until then', () => {
+    // Left by a waiter killed mid-wait, whose pid has since gone to a program that lives on.
+    const stale = wantFile(process.ppid);
+    fs.writeFileSync(stale, `${process.ppid} ${os.hostname()} ${Date.now()}\n`);
+    const then = new Date(Date.now() - SaveLock.WANT_STALE_MS - 500);
+    fs.utimesSync(stale, then, then);
+    const started = Date.now();
+    t.store.upsertApplication({ ...SEED, id: 'through' } as never);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(fs.existsSync(stale)).toBe(false);
+
+    // One still fresh keeps its place in line — and with no lock to name, the sentence names it.
+    fs.writeFileSync(stale, `${process.ppid} ${os.hostname()} ${Date.now()}\n`);
+    SaveLock.WAIT_MS = 200;
+    let thrown: Error | undefined;
+    try {
+      t.store.upsertApplication({ ...SEED, id: 'behind' } as never);
+    } catch (err) {
+      thrown = err as Error;
+    }
+    expect(thrown).toBeInstanceOf(SaveBusyError);
+    expect(thrown!.message).toContain(stale);
+    expect(thrown!.message).not.toContain(SaveLock.where(t.store.root).lock);
+    fs.rmSync(stale);
+  });
+
+  it('and a lock moved aside by a process that died are swept once they are old', () => {
+    const { lock } = SaveLock.where(t.store.root);
+    const old = `${lock}.99999.abc.stale`;
+    const fresh = `${lock}.99998.def.stale`;
+    fs.writeFileSync(old, 'x');
+    fs.writeFileSync(fresh, 'x');
+    const then = new Date(Date.now() - SaveLock.STALE_MS - 1_000);
+    fs.utimesSync(old, then, then);
+    t.store.upsertApplication({ ...SEED, id: 'sweeping' } as never);
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+    fs.rmSync(fresh);
+  });
+});
+
+describe('writing without the lock', () => {
+  it('says so, once, when the lock cannot be created for a reason other than another holder', () => {
+    /*
+     * A `.git` file pointing into a file: the lock's folder can neither be
+     * found nor made. The ordinary case is a read-only `.git`, which a test
+     * run as root cannot set up.
+     */
+    fs.writeFileSync(path.join(t.store.root, 'blocker'), '');
+    fs.writeFileSync(path.join(t.store.root, '.git'), 'gitdir: ./blocker/git\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    t.store.upsertApplication({ ...SEED, id: 'unlocked-1' } as never);
+    t.store.upsertApplication({ ...SEED, id: 'unlocked-2' } as never);
+    const said = warn.mock.calls.flat().filter((line) => String(line).includes('write lock'));
+    warn.mockRestore();
+    expect(said).toHaveLength(1);
+    expect(String(said[0])).toContain('writing without it');
+    const ids = (t.read('applications.yaml') as { id: string }[]).map((r) => r.id);
+    expect(ids).toContain('unlocked-1');
+    expect(ids).toContain('unlocked-2');
+    fs.rmSync(path.join(t.store.root, '.git'));
+  });
+
+  it('`rmm config set` says the history did not get it the way `apply` does, and exits 0', async () => {
+    const save = t.store.root;
+    t.write('config.yaml', { ai: { enabled: false }, git: { autoCommit: true }, output: { dir: 'out' } });
+    await Repo.forStore(save).ensure();
+    fs.writeFileSync(path.join(save, '.git', 'hooks', 'commit-msg'), '#!/bin/sh\necho "refused by a hook" >&2\nexit 1\n', { mode: 0o755 });
+    const said = await run(process.execPath, [tsx, path.join(root, 'src/cli.ts'), 'config', 'set', 'ai.enabled', 'true', '--data', save], {
+      cwd: root,
+      env: { ...process.env, RMM_AI: '0' },
+    }).then(
+      (r) => ({ code: 0, ...r }),
+      (e: { code: number; stdout: string; stderr: string }) => e,
+    );
+    expect(said.code).toBe(0);
+    expect(said.stderr).toContain('not in the version history yet');
+    expect(said.stderr).toContain('rmm save');
+    expect((t.read('config.yaml') as { ai: { enabled: boolean } }).ai.enabled).toBe(true);
   });
 });

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
 import { ignoreBrokenPipe } from './cli-io.js';
-import { Repo, cloneRepo, commitQuietly, withCommit } from './git/repo.js';
+import { Repo, cloneRepo, commitQuietly } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
 import { findProjectRoot, isEmptyStore, resolveStore, seedStore } from './model/location.js';
@@ -800,14 +800,17 @@ async function main(argv: string[]): Promise<number> {
         console.log('AI is already off on this machine, switched off by a pull or a clone; config.yaml is unchanged.');
         return 0;
       }
-      const saved = await withCommit(
-        repo,
-        store.loadConfig().git.autoCommit,
-        'Update settings',
-        () => store.saveConfig({ ai: { enabled } as StoreConfig['ai'] }),
-        // Only the one file this wrote, as `apply` does.
-        ['config.yaml'],
-      );
+      /*
+       * Written, then committed as `apply` and `voice add` commit: through
+       * `commitFromTerminal`, whose failure is a line saying the history did
+       * not get it and how to put it there. Through `withCommit` it was the
+       * server's line — "[rmm] auto-commit failed: …" and `lastCommitError`,
+       * which nothing in a terminal reads — and a commit the server's own had
+       * emptied a moment before (see `SaveLock`) read as a failure.
+       */
+      const saved = store.saveConfig({ ai: { enabled } as StoreConfig['ai'] });
+      // Only the one file this wrote, as `apply` does.
+      if (store.loadConfig().git.autoCommit) await commitFromTerminal(repo, 'Update settings', ['config.yaml']);
       if (enabled) {
         console.log(`AI on — it will run ${saved.ai.command} ${saved.ai.args.join(' ')}`.trimEnd());
         if (wasSwitchedOff) console.log('The switch-off from the last pull or clone is cleared.');

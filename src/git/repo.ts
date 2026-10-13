@@ -12,7 +12,7 @@ import {
   switchAiOff,
   writeAiOff,
 } from '../model/store.js';
-import { holdSave } from '../model/save-lock.js';
+import { holdSave, holdSaveForCommit } from '../model/save-lock.js';
 
 const run = promisify(execFile);
 
@@ -723,7 +723,14 @@ export class Repo {
      * runs in twelve, its application filed. Held from the add to the commit,
      * so no write of the other process's lands between the two either.
      * Waited for after the outside-git check, which can take seconds, so the
-     * other process is not kept waiting through that as well.
+     * other process is not kept waiting through that as well. Inside
+     * `withCommit` the lock is this process's already, taken around the
+     * write that this commits (see there), and this hold only counts.
+     *
+     * Held from the add to the commit, the other process's uncommitted files
+     * may still go into this commit: a `.`-scoped add takes whatever is on
+     * disk, under this commit's message. That is the documented shape of two
+     * processes sharing one history — see `SaveLock` — and not a lost write.
      */
     return holdSave(this.root, () => this.commitHeld(message, paths, auto));
   }
@@ -2129,20 +2136,48 @@ export async function withCommit<T>(
    */
   repo.assertNoOutsideGit();
   /*
-   * And counted as under way until `fn` is done, for a pull starting now to
-   * wait for — when no request is holding it already. See `holdWrite`.
-   * Released before the commit, which the pull does not need to wait for:
-   * it is queued, and the pull's merge is queued behind it.
+   * Under the save's lock from the write to the end of the commit, taken
+   * asynchronously (see `SaveLock`). The store's own writes take it
+   * synchronously, and in the server that is the event loop standing still
+   * while the other process finishes: with `rmm apply` committing through a
+   * hook that slept seven seconds, every GET on the server waited five, and
+   * the PATCH that was waiting then failed with "remove …/rmm-write.lock".
+   * Taken here first, the write inside finds the lock held by this process
+   * and goes straight through, and when the other process has it this
+   * request alone waits — for longer (`COMMIT_WAIT_MS`), since nothing else
+   * is kept waiting with it — while the server goes on answering.
+   *
+   * When the lock is free, `fn` runs before the first await, so the
+   * handler's check-then-write is still one step. When another process
+   * holds it, this request waits across ticks, and a check the handler made
+   * before calling this (a resume's version, say) is as old as the wait by
+   * the time `fn` runs; the one thing another request of this server can
+   * have done meanwhile is a write of its own, which is what the versions
+   * the editor and the extension send are there to catch on their next save.
+   *
+   * The commit is inside the hold too, as it was in `commitNow` (which is
+   * re-entrant here), so no write of the other process's lands between the
+   * `add` and the `commit`. The commit queue keeps this server's commits in
+   * order; the lock is only about the other process. See `SaveLock` for
+   * what the other process's files may do under this commit's message.
    */
-  const release = repo.holdWriteOutsideRequest();
-  let result: T;
-  try {
-    result = await fn();
-  } finally {
-    release();
-  }
-  if (enabled) await commitQuietly(repo, message, paths);
-  return result;
+  return holdSaveForCommit(repo.root, async () => {
+    /*
+     * And counted as under way until `fn` is done, for a pull starting now to
+     * wait for — when no request is holding it already. See `holdWrite`.
+     * Released before the commit, which the pull does not need to wait for:
+     * it is queued, and the pull's merge is queued behind it.
+     */
+    const release = repo.holdWriteOutsideRequest();
+    let result: T;
+    try {
+      result = await fn();
+    } finally {
+      release();
+    }
+    if (enabled) await commitQuietly(repo, message, paths);
+    return result;
+  });
 }
 
 /**

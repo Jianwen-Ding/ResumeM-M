@@ -40,7 +40,7 @@ import { GitBusyError, Repo, commitQuietly, removeWhatIsFiled, withCommit } from
 import { saveStore } from '../git/save.js';
 import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion, fileSentAnswer, newVariantId } from '../jobs/answers.js';
 import { UNKNOWN_COMPANY, classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
-import { jobNumberIn, withRequisition } from '../jobs/names.js';
+import { globalJobId, jobNumberIn, withRequisition } from '../jobs/names.js';
 import {
   applyInclusion,
   sanitizeAiPlan,
@@ -52,7 +52,7 @@ import {
 import { fitResumes, forgetPrintedText, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, localDay, alreadySent, maybeSent, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, advance, localDay, alreadySent, maybeSent, sendOf, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -555,8 +555,8 @@ function sentBefore(
   const sure = alreadySent(applications, company, role, url);
   const past = sure ?? maybeSent(applications, company, role, url);
   if (!past) return undefined;
-  const went = (past.history ?? []).find((h) => h.status === 'applied');
-  const at = went?.at ?? past.appliedAt;
+  // The day it went: the history's first sent line (`sendOf`), not the day the row was made.
+  const at = sendOf(past)?.at;
   if (!at) return undefined;
   return sure ? { id: past.id, at, status: past.status } : { id: past.id, at, status: past.status, maybe: true, url: past.url };
 }
@@ -4490,12 +4490,33 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * note on neither. Exactly the names, not merely the same job by
        * `identity`: and never against a row whose address says it is
        * another posting, which is no match at all.
+       *
+       * Unless the typed address names a job of its own. A posting's number
+       * or its ATS's id (`jobNumberIn`, `globalJobId`) is the one thing in
+       * an address that says which job, and typed beside names the tracker
+       * has, it is the person saying which: Stripe's internship sent from
+       * the employer's page, recorded again at a LinkedIn posting with
+       * another number, was merged into the sent row, and the posting's
+       * address became the row's alias — strong evidence, from then on, that
+       * the other job had been sent. So the typed address is laid over the
+       * row only when it names no job, or the same job the row's does; two
+       * numbers are two rows, whatever their sites, and the person who
+       * knows better records the second with the first's id.
        */
       const apps = store.load().applications;
       const match = body.id ? undefined : findApplicationMatch(apps, body.company, body.role, body.url);
       const said = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase();
+      const sameNumbers = (typed: string | undefined, rows: string | undefined) => {
+        const number = jobNumberIn(typed);
+        const id = globalJobId(typed);
+        if (!number && !id) return true;
+        return Boolean((id && id === globalJobId(rows)) || (number && number === jobNumberIn(rows)));
+      };
       const namedExactly =
-        match?.strength === 'weak' && said(match.row.company) === said(body.company) && said(match.row.role) === said(body.role);
+        match?.strength === 'weak' &&
+        said(match.row.company) === said(body.company) &&
+        said(match.row.role) === said(body.role) &&
+        sameNumbers(body.url, match.row.url);
       const existing = body.id ? apps.find((a) => a.id === body.id) : (forWriting(match) ?? (namedExactly ? match!.row : undefined));
       const weak = !body.id && existing !== undefined && match?.strength === 'weak';
 
@@ -4567,13 +4588,21 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         : existing?.sentResumeIds;
       const label = (rid: string | undefined) =>
         (rid && store.loadResumes().find((r) => r.id === rid)?.label) || rid || 'none';
+      /*
+       * `appliedAt` only for a row recorded as sent. Stamped on every row, a
+       * row recorded at `applying` carried a date that read as the day it
+       * went out — "was sent on <date>", of a job never sent (see
+       * `maybeSent`). The history carries the day it was recorded either
+       * way; the tracker's date column is blank for it until it goes.
+       */
+      const SENT: Application['status'][] = ['applied', 'interview', 'offer'];
       const app: Application = {
         ...existing,
         id: existing?.id ?? body.id ?? freshApplicationId(apps, body.company, body.role, store.outDir()),
         company: body.company,
         role: body.role,
         url: kept(body.url, existing?.url),
-        appliedAt: body.appliedAt ?? existing?.appliedAt ?? now,
+        appliedAt: body.appliedAt ?? existing?.appliedAt ?? (SENT.includes(status) ? now : undefined),
         status,
         /*
          * The row's own, unless the request named the row by id. The editor's

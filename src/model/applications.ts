@@ -1121,15 +1121,74 @@ export function alreadySent(apps: Application[], company: string, role: string, 
  * (`WEAK_MATCH_DAYS`), as with every match by name. Two different job
  * numbers or requisitions in the addresses still ask: one job is reposted
  * under a new number often enough that the person should be the one to say.
+ *
+ * Only a row that really went out (`sendOf`). Every status past `applying`
+ * was taken for a send, and `closed` is not one: a row recorded at
+ * `applying` and closed by hand — "Decided not to apply" — was offered as
+ * "You may have applied to this already … was sent on <date>", with the day
+ * it was recorded for the day it went. The history says whether anything
+ * went, and when.
+ *
+ * And not once the person has answered. "It's another job" files a new row
+ * at `applying` beside the sent one, and the next page of that application
+ * — its form, its confirmation — asked the same question again, because the
+ * new row is a match by name only (another address) and the sent row was
+ * still there under the same names. A live row by these names that began
+ * after the send is the application the person said is different, and it
+ * answers for the question; one that began before the send does not (iCIMS's
+ * steps sit beside the sent row under its names, and hid it).
  */
 export function maybeSent(apps: Application[], company: string, role: string, url?: string): Application | undefined {
   if (alreadySent(apps, company, role, url) || findApplicationMatch(apps, company, role, url)?.strength === 'strong') return undefined;
   const byName = sameNamesAs(company, role);
-  return apps
-    .filter((a) => byName(a) && a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
-    .filter((a) => !tooOldForAWeakMatch(a))
-    .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
+  const named = apps.filter((a) => byName(a) && !tooOldForAWeakMatch(a));
+  const sent = named
+    .filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a) && sendOf(a) !== undefined)
+    .sort((a, b) => (sentAt(b) ?? '').localeCompare(sentAt(a) ?? ''))[0];
+  if (!sent) return undefined;
+  const went = Date.parse(sentAt(sent) ?? '');
+  const answered = named.some((a) => a.status === 'applying' && Number.isFinite(went) && beganAt(a) > went);
+  return answered ? undefined : sent;
 }
+
+/** When a row went out, as `sendOf` reads it. */
+function sentAt(app: Application): string | undefined {
+  return sendOf(app)?.at;
+}
+
+/** When a row was begun: its first history line, or the date it carries; 0 when nothing says. */
+function beganAt(app: Application): number {
+  const stamps = [app.history?.[0]?.at, app.appliedAt];
+  let first = Number.POSITIVE_INFINITY;
+  for (const at of stamps) {
+    const t = at ? Date.parse(at) : NaN;
+    if (Number.isFinite(t) && t < first) first = t;
+  }
+  return Number.isFinite(first) ? first : 0;
+}
+
+/**
+ * Whether an application really went out, and when.
+ *
+ * The history is what says so: the first line at `applied`, `interview` or
+ * `offer` is the send, and its date is the day it went. `appliedAt` is not —
+ * it is stamped when the row is made, which for anything begun from the
+ * extension or recorded while still applying is days before the send, or
+ * never followed by one. A row at a sent status with no such line is one
+ * from before the history was kept, or one filed straight as sent, and its
+ * `appliedAt` is the best date there is; a `closed` row with no history at
+ * all is kept as sent for the same reason `wentOut` keeps it. A `closed` row
+ * whose history never passed `applying` never went.
+ */
+export function sendOf(app: Application): { at?: string } | undefined {
+  const went = (app.history ?? []).find((h) => SENT_STATUSES.has(h.status));
+  if (went) return { at: went.at };
+  if (SENT_STATUSES.has(app.status)) return { at: app.appliedAt };
+  if (app.status === 'closed' && !(app.history ?? []).length) return { at: app.appliedAt };
+  return undefined;
+}
+
+const SENT_STATUSES: ReadonlySet<ApplicationStatus> = new Set(['applied', 'interview', 'offer']);
 
 /** The same question about a workspace, whose id is made the same way. */
 export function findDraft<T extends { id: string; company: string; role: string; status: string; updatedAt?: string; url?: string }>(
@@ -1286,7 +1345,8 @@ export class AlreadySent extends Error {
     super(
       maybe
         ? `You may have applied to this already: ${application.company} — ${application.role} was sent` +
-            `${application.appliedAt ? ` on ${localDay(new Date(application.appliedAt))}` : ''}` +
+            // The day it went, which the history knows (`sendOf`); `appliedAt` is the day the row was made.
+            `${sendOf(application)?.at ? ` on ${localDay(new Date(sendOf(application)!.at!))}` : ''}` +
             `${application.url ? ` (${application.url})` : ''}, and this may be the same job. ` +
             'Nothing was staged. Say it is another job to file it as a new application.'
         : `${application.company} — ${application.role} has already been sent, so its files were not rebuilt. ` +
