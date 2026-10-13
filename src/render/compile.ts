@@ -5,7 +5,7 @@ import path from 'node:path';
 import { runInGroup } from '../process-group.js';
 import { DEFAULT_LAYOUT, type LayoutOptions, type ResolvedResume } from '../model/types.js';
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
-import { renderLatex, unrenderableReason } from './latex.js';
+import { renderLatex, unrenderableReason, type OwnField } from './latex.js';
 import { letterLayout, renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
 import { namePlaceholders, placeholdersIn } from '../model/placeholders.js';
 
@@ -460,7 +460,7 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
 function assertRenderable(
   tex: string,
   what: 'resume' | 'cover letter' = 'resume',
-  own: readonly (string | undefined)[] = [],
+  own: readonly OwnField[] = [],
 ): void {
   const reason = unrenderableReason(tex, what, own);
   if (reason) throw new LatexError(reason, reason);
@@ -934,13 +934,14 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
       ...section.skillGroups.flatMap((group) => [group.name, ...group.items]),
       section.heading,
     ]),
-    p.name,
-    p.phone,
-    p.email,
-    p.location,
-    p.linkedin,
-    p.github,
-    p.website,
+    // Named, so the message can say which field and, for the name, what to do.
+    { field: 'profile.name', text: p.name },
+    { field: 'profile.phone', text: p.phone },
+    { field: 'profile.email', text: p.email },
+    { field: 'profile.location', text: p.location },
+    { field: 'profile.linkedin', text: p.linkedin },
+    { field: 'profile.github', text: p.github },
+    { field: 'profile.website', text: p.website },
   ]);
 
   // The fast path is only ever a preview convenience. If it is unavailable, or
@@ -1349,13 +1350,13 @@ export async function compileLetter(
     letter.greeting,
     letter.signOff,
     letter.date,
-    p.name,
-    p.phone,
-    p.email,
-    p.location,
-    p.linkedin,
-    p.github,
-    p.website,
+    { field: 'profile.name', text: p.name },
+    { field: 'profile.phone', text: p.phone },
+    { field: 'profile.email', text: p.email },
+    { field: 'profile.location', text: p.location },
+    { field: 'profile.linkedin', text: p.linkedin },
+    { field: 'profile.github', text: p.github },
+    { field: 'profile.website', text: p.website },
   ]);
 
   type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };

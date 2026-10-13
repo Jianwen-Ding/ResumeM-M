@@ -1,3 +1,4 @@
+import { unsupportedCharacters } from '../render/latex.js';
 import { flattenOne } from './flatten.js';
 import { endsBeforeItStarts, sortKey, startKey } from './period.js';
 import {
@@ -100,14 +101,43 @@ export function unsendableReason(profile: ResolvedProfile): string | undefined {
   return undefined;
 }
 
-/** The profile with its name decided. */
+/**
+ * The profile with its name decided.
+ *
+ * `printable` is for the name that goes at the top of a PDF. The engine sets
+ * Latin scripts only, so a name written in Chinese or Cyrillic stopped every
+ * resume in the save with no way out but changing the name — and the store
+ * very often already holds the way out, as an alternate: the Latin spelling
+ * kept for the degree certificate, or the one the person goes by. Where the
+ * name chosen cannot be set and an alternate can, the alternate is printed
+ * and a warning says so, naming the choice so it can be pinned instead. Only
+ * for printing: the forms the extension fills in get the name as chosen
+ * (`legalNameChoice` in api.ts asks without this), because the original is
+ * what a form wants.
+ */
 export function resolveProfile(
   profile: Profile,
   choices: Record<string, string>,
   warnings: string[],
   note?: NoteLost,
+  { printable = false } = {},
 ): ResolvedProfile {
-  return { ...profile, name: pickField(profile.name, PROFILE_NAME_KEY, choices, warnings, note) ?? '' };
+  const name = pickField(profile.name, PROFILE_NAME_KEY, choices, warnings, note) ?? '';
+  if (!printable || !isVariantField(profile.name) || unsupportedCharacters(name).length === 0) return { ...profile, name };
+  const alternate = profile.name.variants.find(
+    (v) => String(v.text).trim() && String(v.text) !== name && unsupportedCharacters(String(v.text)).length === 0,
+  );
+  if (!alternate) return { ...profile, name };
+  const bad = unsupportedCharacters(name)
+    .slice(0, 3)
+    .map((c) => `${c.char} (${c.codePoint})`)
+    .join(', ');
+  warnings.push(
+    `Printed the name "${alternate.text}" (${alternate.label || alternate.id}) rather than "${name}": the LaTeX engine ` +
+      `cannot set ${bad}. Pin that alternate on this resume to choose it yourself, or give the name a Latin spelling; ` +
+      `forms still get "${name}".`,
+  );
+  return { ...profile, name: String(alternate.text) };
 }
 
 /**
@@ -666,7 +696,7 @@ export function resolveResume(specOrId: ResumeSpec | string, data: StoreData): R
   return {
     id: flat.id,
     label: flat.label ?? flat.id,
-    profile: resolveProfile(data.profile, choices, warnings, note),
+    profile: resolveProfile(data.profile, choices, warnings, note, { printable: true }),
     sections,
     layout,
     warnings,
@@ -764,7 +794,7 @@ export function buildMaster(data: StoreData): ResolvedResume {
     id: '__master__',
     label: 'Master document — everything in the store',
     // The master shows the pinned name; it is the store, not a selection.
-    profile: resolveProfile(data.profile, {}, warnings),
+    profile: resolveProfile(data.profile, {}, warnings, undefined, { printable: true }),
     sections: [
       entrySection('education'),
       entrySection('experience'),

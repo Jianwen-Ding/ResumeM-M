@@ -192,12 +192,37 @@ const STATE_NAMES = new Set(
  * the ways people write their own that are not the ISO name.
  */
 const COUNTRY_CODES = new Set<string>(['UK', 'USA']);
+/*
+ * And a country as its own people write it. The runtime's region names are
+ * English, so "München, Deutschland", "Madrid, España", "Amsterdam,
+ * Nederland" and "Москва, Россия" — which is how somebody whose resume is
+ * in their own language writes where they live — split into no boxes at all
+ * while "Munich, Germany" did. The endonyms of the countries whose forms
+ * this meets, with the spellings their neighbours use for the shared ones.
+ */
+const ENDONYMS = [
+  'Deutschland', 'Österreich', 'Schweiz', 'Suisse', 'Svizzera', 'España', 'Brasil', 'Nederland', 'Italia', 'Polska',
+  'Россия', 'Российская Федерация', '日本', '中国', '中华人民共和国', '한국', '대한민국', 'France', 'Belgique', 'België',
+  'Sverige', 'Norge', 'Danmark', 'Suomi', 'Portugal', 'México', 'Argentina', 'Chile', 'Colombia', 'Perú',
+  'Türkiye', 'Ελλάδα', 'Česko', 'Česká republika', 'Magyarország', 'România', 'Україна', 'Éire', 'Ísland',
+  'Hrvatska', 'Slovensko', 'Slovenija', 'Lietuva', 'Latvija', 'Eesti', 'Luxembourg', 'Lëtzebuerg', 'ישראל',
+  'مصر', 'المغرب', 'भारत', 'ประเทศไทย', 'Việt Nam', 'Indonesia', 'Pilipinas', 'Malaysia', 'Singapura',
+  'Estados Unidos', 'Vereinigte Staaten', 'États-Unis', 'Reino Unido', 'Royaume-Uni', 'Großbritannien', 'Canadá', 'Kanada',
+  'Australien', 'Австралия', 'Niederlande', 'Países Bajos', 'Pays-Bas', 'Frankreich', 'Francia', 'Alemania', 'Allemagne',
+  'Alemanha', 'Germania', 'Italien', 'Italie', 'Spanien', 'Espagne', 'Espanha', 'Schweden', 'Suède', 'Suecia', 'Noruega',
+  'Norwegen', 'Norvège', 'Dänemark', 'Danemark', 'Dinamarca', 'Finnland', 'Finlande', 'Finlandia', 'Polen', 'Pologne', 'Polonia',
+  'Griechenland', 'Grèce', 'Grecia', 'Russland', 'Russie', 'Rusia', 'Rússia', 'Japan', 'Japon', 'Japón', 'Japão', 'China', 'Chine',
+  'Türkei', 'Turquie', 'Turquía', 'Belgien', 'Bélgica', 'Portugal', 'Mexiko', 'Mexique', 'Argentinien', 'Argentine', 'Chili',
+  'Kolumbien', 'Colombie', 'Brasilien', 'Brésil', 'Südkorea', 'Corée du Sud', 'Corea del Sur', 'Coreia do Sul', 'Irland',
+  'Irlande', 'Irlanda', 'Schottland', 'Écosse', 'Escocia', 'Inglaterra', 'Angleterre', 'Tschechien', 'Tchéquie', 'Chequia',
+];
 const COUNTRY_NAMES = new Set<string>(
   [
     'USA', 'U.S.A.', 'U.S.', 'UK', 'U.K.', 'United States of America', 'America', 'England', 'Scotland',
     'Wales', 'Northern Ireland', 'Great Britain', 'Britain', 'Czech Republic', 'Republic of Korea',
     'Korea', 'Holland', 'The Netherlands', 'UAE', 'Russia', 'Vietnam', 'Türkiye', 'Turkey',
-  ].map((n) => n.toLowerCase()),
+    ...ENDONYMS,
+  ].map((n) => n.normalize('NFC').toLowerCase()),
 );
 try {
   const regions = new Intl.DisplayNames(['en'], { type: 'region' });
@@ -218,7 +243,15 @@ const plain = (s: string) => s.replace(/\./g, '').trim();
 const isStateCode = (s: string) => POSTAL_CODE.test(plain(s)) && STATE_CODES.has(plain(s).toUpperCase());
 const isStateName = (s: string) => STATE_NAMES.has(s.toLowerCase());
 const isCountry = (s: string) =>
-  COUNTRY_NAMES.has(s.toLowerCase()) || COUNTRY_CODES.has(plain(s).toUpperCase()) && /^[A-Za-z.]{2,6}$/.test(s);
+  COUNTRY_NAMES.has(s.normalize('NFC').toLowerCase()) || COUNTRY_CODES.has(plain(s).toUpperCase()) && /^[A-Za-z.]{2,6}$/.test(s);
+
+/*
+ * A Japanese address is written largest first and with no commas: 東京都渋谷区
+ * is the prefecture 東京都 and then the ward 渋谷区. The prefecture ends in
+ * one of four characters, and what follows it is the city or ward a form's
+ * City box takes.
+ */
+const JP_PREFECTURE = /^(.{1,4}[都道府県])(.+)$/u;
 
 /** Where somebody works that is not a place: never a city. */
 const NOT_A_CITY = /^(?:remote|hybrid|anywhere|on-?site|in[- ]office|wfh|work from home|various|multiple locations?)$/i;
@@ -241,9 +274,14 @@ export function splitLocation(
   location: string,
 ): { city?: string; state?: string; country?: string } | undefined {
   const said = tidy(location);
-  if (!said || !said.includes(',')) return undefined;
+  if (!said) return undefined;
+  if (!said.includes(',')) {
+    const jp = JP_PREFECTURE.exec(said);
+    return jp && /\p{Script=Han}/u.test(jp[2]!) ? { city: jp[2]!, state: jp[1]! } : undefined;
+  }
 
-  const parts = said.split(',').map(tidy).filter(Boolean);
+  // The full-width comma a Japanese or Chinese location is written with.
+  const parts = said.split(/[,、，]/).map(tidy).filter(Boolean);
   const town = (city: string) => (NOT_A_CITY.test(city) ? {} : { city });
   /*
    * A state's code before a country's, because the two overlap — "CA",

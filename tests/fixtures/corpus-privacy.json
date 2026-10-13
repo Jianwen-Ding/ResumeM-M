@@ -1467,6 +1467,118 @@
    "expect": "a phone number",
    "round": "r17",
    "source": "r17 fix: a round pair after a phone word"
+  },
+  {
+   "id": "privacy-r24-01",
+   "input": "Sie erreichen mich unter Telefon 0176 12345678.",
+   "expect": "a phone number",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German mobile, four and eight"
+  },
+  {
+   "id": "privacy-r24-02",
+   "input": "Mobil: 0176/12345678",
+   "expect": "a phone number",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German area code and number around a slash"
+  },
+  {
+   "id": "privacy-r24-03",
+   "input": "Puede contactarme en el 612 34 56 78.",
+   "expect": "a phone number",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Spanish number in threes and twos"
+  },
+  {
+   "id": "privacy-r24-04",
+   "input": "Me ligue: (11) 91234-5678.",
+   "expect": "a phone number",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Brazilian mobile with its area code in brackets"
+  },
+  {
+   "id": "privacy-r24-05",
+   "input": "Vous pouvez me joindre au 06 12 34 56 78.",
+   "expect": "a phone number",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a French mobile in twos"
+  },
+  {
+   "id": "privacy-r24-06",
+   "input": "Post bitte an Hauptstraße 12, 80331 München.",
+   "expect": "a street address",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German street, word on the end"
+  },
+  {
+   "id": "privacy-r24-07",
+   "input": "Berliner Str. 4, 10115 Berlin",
+   "expect": "a street address",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German street abbreviated"
+  },
+  {
+   "id": "privacy-r24-08",
+   "input": "Adresse : 12 rue de la Paix, 75002 Paris.",
+   "expect": "a street address",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a French street, number first, lower-case street word"
+  },
+  {
+   "id": "privacy-r24-09",
+   "input": "Dirección: Calle Mayor 5, 28013 Madrid.",
+   "expect": "a street address",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Spanish street, word first"
+  },
+  {
+   "id": "privacy-r24-10",
+   "input": "Endereço: Rua Augusta, 1500, São Paulo.",
+   "expect": "a street address",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Portuguese street"
+  },
+  {
+   "id": "privacy-r24-11",
+   "input": "Adres: Keizersgracht 123, 1015 CJ Amsterdam.",
+   "expect": "a street address",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Dutch canal address"
+  },
+  {
+   "id": "privacy-r24-12",
+   "input": "Адрес: ул. Ленина, д. 10, Москва.",
+   "expect": "a street address",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Russian street"
+  },
+  {
+   "id": "privacy-r24-13",
+   "input": "Started 01/2024 and shipped 3 releases.",
+   "expect": null,
+   "round": "r24",
+   "source": "round 24 i18n hunt: a date with a slash is no German phone"
+  },
+  {
+   "id": "privacy-r24-14",
+   "input": "We finished in 12 place and kept a 2 avenue strategy.",
+   "expect": null,
+   "round": "r24",
+   "source": "round 24 i18n hunt: lower-case street words in prose are not a French address"
+  },
+  {
+   "id": "privacy-r24-15",
+   "input": "Revenue grew 128 25 51 20 percent over four years.",
+   "expect": null,
+   "round": "r24",
+   "source": "round 24 i18n hunt: a list of figures in threes and twos is not a Spanish phone"
+  },
+  {
+   "id": "privacy-r24-16",
+   "input": "Mentored 4 Studenten in der Platz-Reservierung.",
+   "expect": null,
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German word ending in -platz without a number is prose"
   }
  ]
 }

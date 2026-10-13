@@ -1748,9 +1748,43 @@ describe('an answer whose date has passed', () => {
     ['Start date', false],
     ['Job start date', false],
     ['End date', false],
+  // Round 24: the rest of what German, Spanish, Portuguese, Dutch and Japanese forms ask.
+  ['Gewünschtes Startdatum', true],
+  ['Startdatum', true],
+  ['Verfügbar ab', true],
+  ['Wann könnten Sie bei uns anfangen?', true],
+  ['Disponibilidad para incorporarse', true],
+  ['Data de início', true],
+  ['Quando você pode começar?', true],
+  ['Quando pode começar?', true],
+  ['Per wanneer ben je beschikbaar?', true],
+  ['Beschikbaar vanaf', true],
+  ['Gewenste startdatum', true],
+  ['入社可能日', true],
+  ['入社希望日', true],
+  ['Verfügbarkeit am Wochenende', false],
+  ['Disponibilidad para viajar', false],
+  ['Geburtsdatum', false],
   ];
   it('reads the common ways of asking when somebody can start, and not availability for other things', () => {
     for (const [q, asks] of ASKS_WHEN_YOU_START_CASES) expect(asksWhenYouStart(q), q).toBe(asks);
+  });
+
+  /*
+   * Round 24: a month as German, French, Spanish, Portuguese and Dutch forms
+   * write it, and as Japanese does. "Juni 2025" for "Gewünschtes Startdatum"
+   * was no date at all, and a start eighteen months gone was offered as good.
+   * JobHelper's remembering.mjs asks the same of `onlyAPassedDate`.
+   */
+  it('reads a month written in another language, or in Japanese, as a date that passes', () => {
+    const now = new Date(2026, 9, 12, 12);
+    for (const text of ['Juni 2025', 'juin 2025', 'junio de 2025', 'junho de 2025', 'juni 2025', 'mei 2025', 'März 2026', 'août 2026', '2025年6月', '1. Juni 2025', '15 de junio de 2025', '2026年9月30日']) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    for (const text of ['Juni 2027', 'juillet 2027', 'Oktober 2026', '2026年10月', 'diciembre de 2026']) {
+      expect(namesPassedDate(text, now), text).toBe(false);
+    }
+    expect(asksWhenYouStart('Gewünschtes Startdatum') && namesPassedDate('Juni 2025', now)).toBe(true);
   });
 
   it('reads a season and a numeric month as dates that pass', () => {

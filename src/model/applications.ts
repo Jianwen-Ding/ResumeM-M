@@ -9,7 +9,7 @@ import { letterText } from '../render/letter.js';
 import { clipToBytes, fileNameKey, MAX_NAME_BYTES, syncCurrent } from './current.js';
 import { normalizeApplications } from './normalize.js';
 import { resolveResume, unsendableReason } from './resolve.js';
-import { cleanRole, differentPlaces, differentRequisitions, employerKey, globalJobId, globalJobKind, hostOf, isJobBoardHost, jobNumberIn, requisitionInUrl, trailingJobId, withoutTitleNoise } from '../jobs/names.js';
+import { cleanRole, differentPlaces, differentRequisitions, employerKey, globalJobId, globalJobKind, hostOf, isJobBoardHost, jobNumberIn, requisitionInUrl, trailingJobId, withoutGenderTag, withoutTitleNoise } from '../jobs/names.js';
 import { companyFromUrl, looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
 // A cycle (answers.ts reads `employerName` and `localDay` from here), safe
 // because neither side calls the other while its module is loading.
@@ -181,8 +181,25 @@ export function bundleFileNames(
   return short.map((n, i) => ((counts.get(n) ?? 0) > 1 ? full[i]! : n));
 }
 
+/*
+ * Accents come off before the letters are kept, so "Société Générale" is
+ * `societe-generale` rather than `soci-t-g-n-rale` — and, which matters more,
+ * the same name composed (one é) and decomposed (an e and a combining accent,
+ * as a Mac or a PDF hands it over) slug alike. They did not: the NFC row's id
+ * was `soci-t-g-n-rale` and the NFD one's `socie-te-ge-ne-rale`, and since
+ * `identity` is built on this slug the two were two jobs, each unable to
+ * find the other's row. NFKD also folds the compatibility forms (a ligature,
+ * a full-width letter) to their plain letters.
+ *
+ * Only new ids for names with non-ASCII letters change shape: an ASCII name
+ * slugs exactly as it did, and the finders compare keys computed from the
+ * names on the row rather than from its stored id, so a row minted under the
+ * old spelling still matches whatever its id says.
+ */
 export function slug(s: string): string {
   return s
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
@@ -387,11 +404,20 @@ function rolePart(role: string, company: string): string {
  * shows is the one it was given. Two postings with different job numbers are
  * still two jobs: see the address veto in `sameJobAs`.
  */
-const WORK_MODE_SUFFIX = /(?:\s*\(\s*(?:remote|hybrid|on-?site)\s*\)|\s+[-–—|]\s+(?:remote|hybrid|on-?site))$/i;
+/*
+ * And a gender tag — "(m/w/d)", "(H/F)", "(all genders)" — which a German or
+ * French posting adds and the employer's form leaves off (`withoutGenderTag`
+ * in names.ts, where the suffix shapes are listed). Taken off wherever it is,
+ * and the work mode as often as it is on the end, so "(m/w/d) (Remote)" and
+ * "(Remote) (m/w/d)" read the same.
+ */
+const WORK_MODE_SUFFIX = /(?:\s*\(\s*(?:remote|hybrid|on-?site|in[- ]office)\s*\)|\s+[-–—|]\s+(?:remote|hybrid|on-?site|in[- ]office))$/i;
 const YEAR_THEN_SEASON = /\b((?:19|20)\d\d)\s+(summer|fall|autumn|winter|spring)\b/gi;
 
 function sameWorkAnyWay(role: string): string {
-  return role.replace(WORK_MODE_SUFFIX, '').replace(YEAR_THEN_SEASON, '$2 $1').trim() || role;
+  let out = withoutGenderTag(role);
+  for (let next = out.replace(WORK_MODE_SUFFIX, ''); next !== out; next = out.replace(WORK_MODE_SUFFIX, '')) out = next;
+  return out.replace(YEAR_THEN_SEASON, '$2 $1').trim() || role;
 }
 
 export function identity(company: string, role: string): string {
