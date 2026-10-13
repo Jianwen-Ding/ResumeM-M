@@ -5,6 +5,28 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
   let importing = false;
   let signature = '';
   let shown = [];
+  /*
+   * What has been typed into each draft point and not yet added, by asset
+   * and point. The list is drawn again from the server whenever anything in
+   * it changes, and adding one point is such a change: every other point's
+   * box came back holding the server's wording, and the rewrites made to
+   * them while reviewing were gone. So the boxes are filled from here first.
+   *
+   * And everything else chosen for a point while reviewing it, for the same
+   * reason: the entry it is going to, the name and kind of a "+ New Entry",
+   * and whether its evidence is open. Only the wording was kept, so the poll
+   * every five seconds, or adding another point, put each of them back to
+   * "Choose an Entry…" with its evidence folded — and a point added after
+   * that went nowhere until it was chosen again, if anyone noticed. Each is
+   * held here only while it differs from how a point is first drawn.
+   */
+  const drafts = new Map();
+  const remember = (key, patch) => {
+    const next = { ...(drafts.get(key) ?? {}), ...patch };
+    for (const field of Object.keys(next)) if (next[field] === undefined) delete next[field];
+    if (Object.keys(next).length) drafts.set(key, next);
+    else drafts.delete(key);
+  };
   const report = error => status(error.message, true);
   const action = fn => async event => {
     const button = event.currentTarget;
@@ -141,7 +163,7 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
      * button which does nothing visible reads as a button that did not work.
      */
     if (mode === 'clone') status('Cloning the save…');
-    await api('/projects/switch', {
+    const switched = await api('/projects/switch', {
       method: 'POST',
       body: JSON.stringify({
         dir: $('#project-path').value.trim(),
@@ -149,6 +171,8 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
         ...(mode === 'clone' ? { url: $('#project-url')?.value.trim() ?? '' } : {}),
       }),
     });
+    // A clone that arrived with its AI switched on has had it switched off here; said before the reload takes the page away.
+    if (switched?.notice) window.alert(switched.notice);
     // A fresh page clears previews, cached selections, and all project-specific UI.
     location.hash = 'save';
     location.reload();
@@ -185,8 +209,16 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
           known.add(asset.id);
           if (asset.error) failures.push(`${file.name}: ${asset.error}`);
         } catch (error) { failures.push(`${file.name}: ${error.message}`); }
-        await refresh();
+        /*
+         * Not while someone is working in the list. Each file of a batch
+         * redrew it, and a redraw rebuilds every draft point: a sentence being
+         * typed into one lost its cursor mid-word, and the rest of it went to
+         * the page. The poll already waits for focus to leave; this did not.
+         * The list catches up once, below, when the batch is done.
+         */
+        if (!$('#asset-list').contains(document.activeElement)) await refresh();
       }
+      await refresh();
       progress.textContent = `Finished ${files.length} files${duplicates ? ` · ${duplicates} duplicates skipped` : ''}.${failures.length ? '\n' + failures.join('\n') : ' Ready to review below.'}`;
     } finally { importing = false; $('#asset-drop').classList.remove('busy'); }
   }
@@ -200,6 +232,16 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
       : 'AI is off. Files are sorted with local rules; generation provides a prompt to copy. Enable AI in Voice & AI to generate points here.';
     const filter = $('#asset-filter').value;
     const assets = data.assets.filter(a => !filter || (filter === 'error' ? a.status === 'error' : a.items.some(item => item.kind === filter)));
+    /*
+     * The box being typed in, to give its cursor back after the redraw. The
+     * end of an import batch has to redraw (see `importFiles`), and the person
+     * may still be typing; with the wording kept in `drafts`, only the focus
+     * and the caret were left to lose.
+     */
+    const typing = document.activeElement;
+    const caret = $('#asset-list').contains(typing) && typing.dataset?.draft
+      ? { draft: typing.dataset.draft, field: typing.dataset.field, start: typing.selectionStart, end: typing.selectionEnd }
+      : null;
     setChildren($('#asset-list'), assets.length ? assets.map(asset => {
       const generate = el('button', { textContent: asset.status === 'error' ? 'Retry / Generate Points' : 'Generate Points', disabled: asset.status === 'processing', onclick: action(async () => {
         status(`Generating points from ${asset.name}…`);
@@ -227,14 +269,29 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
         }) }) : null,
         !asset.points.length ? el('p', { className: 'hint', textContent: 'No draft points yet. Generate points to turn evidence of your work into resume bullets.' }) : null,
         ...asset.points.map(point => {
-          const text = el('textarea', { value: point.text, rows: 3, disabled: Boolean(point.entryId), 'ariaLabel': 'Draft resume point' });
+          const draftKey = `${asset.id}/${point.id}`;
+          if (point.entryId) drafts.delete(draftKey);
+          const kept = drafts.get(draftKey) ?? {};
+          const text = el('textarea', { value: kept.text ?? point.text, rows: 3, disabled: Boolean(point.entryId), 'ariaLabel': 'Draft resume point' });
+          text.oninput = () => remember(draftKey, { text: text.value === point.text ? undefined : text.value });
           const target = el('select', { title: 'Entry to add this point to' }, [el('option', { value: '', textContent: 'Choose an Entry…' }),
             ...store.entries.filter(e => !e.archived).map(e => el('option', { value: e.id, textContent: entryName(e) })),
             el('option', { value: '__new', textContent: '+ New Entry…' })]);
-          const title = el('input', { placeholder: 'Company, project, or school name', hidden: true });
-          const kind = el('select', { hidden: true }, ['project', 'experience', 'education', 'custom'].map(value => el('option', { value, textContent: value[0].toUpperCase() + value.slice(1) })));
-          target.onchange = () => { title.hidden = kind.hidden = target.value !== '__new'; };
-          return el('div', { className: 'asset-point' }, [text, detail('Source evidence — check the claim against this', point.evidence),
+          // An entry archived or deleted since it was chosen is not chosen any more.
+          if (kept.entry && [...target.options].some(o => o.value === kept.entry)) target.value = kept.entry;
+          const title = el('input', { placeholder: 'Company, project, or school name', value: kept.title ?? '' });
+          const kind = el('select', {}, ['project', 'experience', 'education', 'custom'].map(value => el('option', { value, textContent: value[0].toUpperCase() + value.slice(1) })));
+          if (kept.kind) kind.value = kept.kind;
+          const showNew = () => { title.hidden = kind.hidden = target.value !== '__new'; };
+          showNew();
+          target.onchange = () => { showNew(); remember(draftKey, { entry: target.value || undefined }); };
+          title.oninput = () => remember(draftKey, { title: title.value || undefined });
+          kind.onchange = () => remember(draftKey, { kind: kind.value === 'project' ? undefined : kind.value });
+          for (const [field, node] of [['text', text], ['title', title]]) { node.dataset.draft = draftKey; node.dataset.field = field; }
+          const evidence = detail('Source evidence — check the claim against this', point.evidence);
+          evidence.open = Boolean(kept.evidenceOpen);
+          evidence.ontoggle = () => remember(draftKey, { evidenceOpen: evidence.open || undefined });
+          return el('div', { className: 'asset-point' }, [text, evidence,
             point.entryId ? el('p', { className: 'hint', textContent: `Added to ${entryName(store.entries.find(e => e.id === point.entryId) || { title: point.entryId })}` })
               : el('div', { className: 'toolbar' }, [target, title, kind, el('button', { textContent: 'Add Reviewed Point', onclick: action(async () => {
                 let entryId = target.value;
@@ -253,6 +310,14 @@ export function setupAssets({ api, el, setChildren, readAsBase64, flushEdits, is
         }),
       ]);
     }) : el('div', { className: 'empty' }, [el('b', { textContent: 'Your source library starts here' }), 'Drop resumes, project notes, reviews, and past applications above. Originals and draft points stay with this save.']));
+    if (caret) {
+      const back = [...$('#asset-list').querySelectorAll('[data-draft]')]
+        .find(node => node.dataset.draft === caret.draft && node.dataset.field === caret.field);
+      if (back && !back.disabled) {
+        back.focus();
+        try { back.setSelectionRange(caret.start, caret.end); } catch { /* not a text box after all */ }
+      }
+    }
   }
   async function refresh(force = false) {
     if (!project?.current) return;

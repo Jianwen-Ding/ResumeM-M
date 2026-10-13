@@ -83,9 +83,11 @@ process.stdin.on('end', () => {
 `;
 
 /*
- * Codex: `exec [flags] <prompt>` with the prompt inline, and — this is the one
- * that bit us — it drains stdin before doing anything, and refuses to run
- * outside a git repository unless told not to check.
+ * Codex: `exec [flags] [prompt]`, and — this is the one that bit us — it
+ * drains stdin before doing anything, and refuses to run outside a git
+ * repository unless told not to check. A prompt of `-`, or none, is read from
+ * stdin, as `codex exec --help` says; one given inline has piped stdin
+ * appended to it.
  */
 const CODEX = `
 const argv = process.argv.slice(2);
@@ -100,13 +102,20 @@ if (!argv.includes('--skip-git-repo-check')) {
 }
 const sandbox = argv[argv.indexOf('--sandbox') + 1];
 const cd = argv[argv.indexOf('--cd') + 1];
-const prompt = argv[argv.length - 1];
+const last = argv[argv.length - 1];
+const inline = last === '-' || last.startsWith('-') || last === cd ? undefined : last;
 // Codex reads stdin even when the prompt came in on argv; if it is never
 // closed this hangs until the caller's timeout.
 let read = 0;
-process.stdin.on('data', (d) => { read += d.length; });
+let piped = '';
+process.stdin.on('data', (d) => { read += d.length; piped += d; });
 process.stdin.on('end', () => {
-  process.stdout.write(JSON.stringify({ cli: 'codex', sandbox, cd, cwd: process.cwd(), prompt, read }));
+  const prompt = inline === undefined ? piped : piped ? inline + '\\n<stdin>' + piped + '</stdin>' : inline;
+  if (!prompt) {
+    process.stderr.write('No prompt provided via stdin.');
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify({ cli: 'codex', sandbox, cd, cwd: process.cwd(), prompt, read, argv }));
 });
 `;
 
@@ -252,9 +261,32 @@ describe('every preset hands its CLI a prompt it can actually use', () => {
 
     expect(seen.sandbox).toBe('read-only');
     expect(seen.cd).toBe(seen.cwd);
-    expect(seen.read).toBe(0);
+    // The prompt arrived on stdin, once, and stdin was closed after it.
+    expect(seen.read).toBe(Buffer.byteLength(PROMPT));
     // The stand-in only reaches this line once stdin has been closed for it.
     expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  /*
+   * Off the command line. Inline, the whole prompt — resume, posting, letters
+   * — was one argv entry, which any other user on the machine reads with
+   * `ps`. Codex takes `-` as "read the prompt from stdin".
+   */
+  it('gives Codex the prompt on stdin, never in argv', { timeout: 30_000 }, async () => {
+    const preset = AI_PRESETS.find((p) => p.label === 'Codex CLI')!;
+    expect(preset.args.join(' ')).not.toContain('{promptText}');
+    const { command, prefix } = stub('codex', CODEX);
+    const result = await runAgent(config(command, [...prefix, ...applyModelAndEffort('codex', preset.args, { model: 'gpt-5', effort: 'high' })]), PROMPT);
+    const seen = JSON.parse(result.output) as { prompt: string; argv: string[] };
+    expect(seen.prompt).toBe(PROMPT);
+    expect(seen.argv.join('\n')).not.toContain('Task: say something.');
+    // And the flags that came after the preset went in front of the `-`.
+    expect(seen.argv.at(-1)).toBe('-');
+  });
+
+  it('moves a saved Codex config’s inline prompt onto stdin', () => {
+    const saved = ['exec', '--ephemeral', '--skip-git-repo-check', '--output-last-message', '{sandbox}/last-message.txt', '{promptText}'];
+    expect(repairAiArgs('codex', saved)).toEqual([...saved.slice(0, -1), '-']);
   });
 
   /*
@@ -429,7 +461,8 @@ describe('choosing a model and an effort level', () => {
    */
   it('puts the flag in front of the prompt, never after it', () => {
     const out = applyModelAndEffort('codex', codex.args, { model: 'gpt-5' });
-    const prompt = out.findIndex((a) => a.includes('{promptText}'));
+    // Codex's prompt is `-`, read from stdin; it still marks where the prompt goes.
+    const prompt = out.findIndex((a) => a.includes('{promptText}') || a === '-');
     const flag = out.indexOf('--model');
     expect(flag).toBeGreaterThanOrEqual(0);
     expect(flag).toBeLessThan(prompt);

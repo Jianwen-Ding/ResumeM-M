@@ -67,19 +67,58 @@ function bothAdded(id, ours, theirs, taken) {
 }
 
 /**
+ * Whether `side` put the members it shares with the other two lists in a
+ * different order from `base`.
+ *
+ * Only the members all three lists have are compared. Comparing the whole list
+ * counted an addition or a deletion as a reorder: this edit added a bullet, its
+ * list no longer matched the base, so it was taken to have chosen an order —
+ * and the order the other edit had just dragged into place was thrown away.
+ */
+function reordered(base, side, other, key) {
+  const inSide = new Set(side.map(key));
+  const inOther = new Set(other.map(key));
+  const shared = (list) => list.map(key).filter((k) => inSide.has(k) && inOther.has(k));
+  const was = shared(base);
+  const now = shared(side);
+  return was.length !== now.length || was.some((k, i) => k !== now[i]);
+}
+
+/**
  * The order to lay the result out in: whichever side moved things around, and
  * the edit being made now when both did. On a resume, bullet order is content.
  */
 function skeleton(base, ours, theirs) {
-  const order = (list) => (list ?? []).map((x) => x.id).join('\u0000');
   if (!keyed(base)) return ours;
-  return order(ours) === order(base) ? theirs : ours;
+  return reordered(base, ours, theirs, (x) => x.id) ? ours : theirs;
 }
 
 export function rebase(base, ours, theirs) {
   if (same(ours, theirs)) return ours;
   if (same(base, ours)) return theirs; // we changed nothing here
   if (same(base, theirs)) return ours; // nothing landed here to preserve
+
+  /*
+   * We took the field away; they changed it.
+   *
+   * This fell through to "ours wins" at the bottom, so the deletion won:
+   * clear a location in one tab while another rewrites it, and the rewrite was
+   * gone — or a whole set of alternates someone had just made of it. It is the
+   * same disagreement a list settles for a deleted member (see below), and
+   * settled the same way: their wording is what cannot be recovered from the
+   * screen, so it stays.
+   *
+   * A list is the exception, because a list can say which part of it they
+   * wrote. Clear every tag while the other edit adds one, and what they did
+   * was add one, not re-assert all the rest: so it is taken as an empty list
+   * and merged, and only their additions survive. Nothing of theirs left, and
+   * the field is gone after all, as we left it.
+   */
+  if (ours === undefined) {
+    if (!Array.isArray(theirs)) return theirs;
+    const kept = rebase(base, [], theirs);
+    return Array.isArray(kept) && kept.length === 0 ? undefined : kept;
+  }
 
   if (keyed(ours) && keyed(theirs)) {
     const inBase = byId(keyed(base) ? base : []);
@@ -139,13 +178,23 @@ export function rebase(base, ours, theirs) {
      * them would move them: a bullet inserted at the top of an entry came back
      * at the bottom of it. Each goes after whatever it followed on its own
      * side instead.
+     *
+     * Except an addition at the end. "After whatever it followed" is only right
+     * while that neighbour is still where it was; once the skeleton has moved
+     * it, a bullet added to the bottom of an entry followed it up into the
+     * middle. Nothing that was already there came after it on its own side, so
+     * it goes at the end.
      */
     const otherSide = frame === ours ? theirs : ours;
+    const framed = new Set(placed);
     otherSide.forEach((item, i) => {
       if (placed.has(item.id) || !merged.has(item.id)) return;
       placed.add(item.id);
+      const atEnd =
+        otherSide.slice(0, i).some((x) => framed.has(x.id)) && otherSide.slice(i + 1).every((x) => !framed.has(x.id));
       const after = out.findIndex((x) => x.id === otherSide[i - 1]?.id);
-      if (after >= 0) out.splice(after + 1, 0, merged.get(item.id));
+      if (atEnd) out.push(merged.get(item.id));
+      else if (after >= 0) out.splice(after + 1, 0, merged.get(item.id));
       else if (i === 0) out.unshift(merged.get(item.id));
       else out.push(merged.get(item.id));
     });
@@ -159,12 +208,17 @@ export function rebase(base, ours, theirs) {
     // anything either of them removed.
     // Their removals too: a line the other write switched off while this one
     // switched off another beside it came back on.
+    //
+    // Ours' order unless only they reordered: a line this edit switched on, put
+    // beside a reorder the other one made, undid the reorder.
     const wasThere = new Set(flat(base) ? base : []);
-    const mine = new Set(ours);
-    const kept = new Set(theirs);
+    const theyMoved = flat(base) && !reordered(base, ours, theirs, (v) => v) && reordered(base, theirs, ours, (v) => v);
+    const [frame, other] = theyMoved ? [theirs, ours] : [ours, theirs];
+    const inFrame = new Set(frame);
+    const inOther = new Set(other);
     return [
-      ...ours.filter((v) => kept.has(v) || !wasThere.has(v)),
-      ...theirs.filter((v) => !mine.has(v) && !wasThere.has(v)),
+      ...frame.filter((v) => inOther.has(v) || !wasThere.has(v)),
+      ...other.filter((v) => !inFrame.has(v) && !wasThere.has(v)),
     ];
   }
 

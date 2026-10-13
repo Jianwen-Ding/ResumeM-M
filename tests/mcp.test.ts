@@ -812,6 +812,53 @@ describe('framing', () => {
     expect(replies[1]?.id).toBe(3);
   });
 
+  /*
+   * `null` is valid JSON and not a request; neither is an object whose method
+   * is a number. Each threw inside `handle`, which rejected the queue every
+   * later request is chained onto — so nothing after it was ever answered,
+   * and the rejection went unhandled.
+   */
+  it('answers a request that is not an object, and keeps going', async () => {
+    const replies = await exchange([`null\n${JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' })}\n`]);
+    expect(replies).toHaveLength(2);
+    expect(replies[0]).toMatchObject({ id: null, error: { code: -32600 } });
+    expect(replies[1]).toMatchObject({ id: 4, result: {} });
+  });
+
+  it('answers a request whose method is not a string, and keeps going', async () => {
+    const replies = await exchange([
+      `${JSON.stringify({ jsonrpc: '2.0', id: 5, method: 7 })}\n${JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'ping' })}\n`,
+    ]);
+    expect(replies).toHaveLength(2);
+    expect(replies[0]).toMatchObject({ id: 5, error: { code: -32600 } });
+    expect(replies[1]).toMatchObject({ id: 6, result: {} });
+  });
+
+  it('answers when handling a request throws, and keeps going', async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const chunks: string[] = [];
+    output.on('data', (c: Buffer) => chunks.push(c.toString()));
+    // A tool that cannot even be listed: `tools/list` throws inside `handle`.
+    const broken = {
+      name: 'broken',
+      description: '',
+      get inputSchema(): Record<string, unknown> {
+        throw new Error('no schema');
+      },
+      run: () => ({ text: '' }),
+    } as ToolDefinition;
+    const done = serve(input, output, [broken], INFO);
+    input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`);
+    input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })}\n`);
+    input.end();
+    await done;
+    const replies = chunks.join('').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(replies).toHaveLength(2);
+    expect(replies[0]).toMatchObject({ id: 1, error: { code: -32603 } });
+    expect(replies[1]).toMatchObject({ id: 2, result: {} });
+  });
+
   it('writes nothing at all for a notification', async () => {
     const replies = await exchange([`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`]);
     expect(replies).toEqual([]);

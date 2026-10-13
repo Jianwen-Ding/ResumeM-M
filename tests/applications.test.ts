@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { AlreadySent, advance, alreadySent, applicationId, buildBundle, bundleFileName, bundleFileNames, describeLost, findApplication, findDraft, freshApplicationId, slug, stats } from '../src/model/applications.js';
+import { AlreadySent, advance, alreadySent, applicationId, buildBundle, localDay, bundleFileName, bundleFileNames, describeLost, findApplication, findDraft, freshApplicationId, slug, stats } from '../src/model/applications.js';
 import { syncCurrent } from '../src/model/current.js';
 import type { Application } from '../src/model/types.js';
 import { forgetCompiled } from '../src/render/compile.js';
@@ -36,6 +36,12 @@ describe('file naming', () => {
     );
   });
 
+  it('keeps the marks that complete a letter in a name', () => {
+    expect(bundleFileName('प्रिया शर्मा', undefined, 'Resume')).toBe('प्रिया-शर्मा-Resume.pdf');
+    expect(bundleFileName('สมชาย ใจดี', undefined, 'Resume')).toBe('สมชาย-ใจดี-Resume.pdf');
+    expect(bundleFileName('Nguye\u0302\u0303n An', undefined, 'Resume')).toBe('Nguyễn-An-Resume.pdf');
+  });
+
   it('omits the job title when there is not one', () => {
     expect(bundleFileName('Morgan Testwell', undefined, 'Resume')).toBe('Morgan-Testwell-Resume.pdf');
     expect(bundleFileName('Morgan Testwell', '   ', 'Resume')).toBe('Morgan-Testwell-Resume.pdf');
@@ -59,6 +65,42 @@ describe('file naming', () => {
     expect(bundleFileName('Morgan Testwell', 'Software Engineer', 'Resume', { disambiguator: 'Acme Co.' })).toBe(
       'Morgan-Testwell-Software-Engineer-Resume-Acme-Co.pdf',
     );
+  });
+
+  /*
+   * No longer than a filesystem allows.
+   *
+   * A name is capped at 255 bytes — bytes, not characters — and a role is
+   * whatever the posting called itself. A title in Chinese, three bytes a
+   * character, stopped the build at ENAMETOOLONG. The role gives way; the
+   * person, the document type and the extension are what the name is read by.
+   */
+  it('cuts a long role short, on a whole character, and keeps the end of the name', () => {
+    const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+    const english = bundleFileName('Morgan Testwell', 'Senior Staff Principal Software Engineer '.repeat(10), 'Cover Letter');
+    expect(bytes(english)).toBeLessThanOrEqual(200);
+    expect(english).toMatch(/^Morgan-Testwell-Senior-Staff-.*[^-]-Cover-Letter\.pdf$/);
+
+    const chinese = bundleFileName('Morgan Testwell', '高级软件工程师机器学习基础设施平台可靠性'.repeat(5), 'Resume');
+    expect(bytes(chinese)).toBeLessThanOrEqual(200);
+    expect(chinese.startsWith('Morgan-Testwell-高级')).toBe(true);
+    expect(chinese.endsWith('-Resume.pdf')).toBe(true);
+
+    // Four bytes a character, and two UTF-16 units: never half of one.
+    const astral = bundleFileName('Morgan Testwell', '𝒜𝒷𝒸'.repeat(40), 'Answers', { extension: '.md', disambiguator: 'Acme' });
+    expect(bytes(astral)).toBeLessThanOrEqual(200);
+    expect(astral).not.toMatch(loneSurrogate);
+    expect(astral.endsWith('-Answers-Acme.md')).toBe(true);
+
+    // A name typed by hand is held to the same length.
+    const typed = bundleFileNames('Morgan Testwell', 'SWE', [{ kind: 'Resume' }], 'type', { Resume: 'é'.repeat(300) })[0]!;
+    expect(bytes(typed)).toBeLessThanOrEqual(200);
+    expect(typed.endsWith('é.pdf')).toBe(true);
+
+    // And a name that was short enough is not touched.
+    expect(bundleFileName('Morgan Testwell', 'Software Engineer', 'Resume')).toBe('Morgan-Testwell-Software-Engineer-Resume.pdf');
   });
 });
 
@@ -141,6 +183,17 @@ describe('naming one application\'s documents', () => {
   });
 
   /*
+   * Including one that differs only in case. On a Mac or a PC — where most
+   * of these folders are — `morgan-testwell-resume.pdf` is the resume's file,
+   * and the letter written under it replaced the resume.
+   */
+  it('refuses it when the two differ only in case, which most filesystems cannot tell apart', () => {
+    expect(() =>
+      bundleFileNames('Morgan Testwell', 'SWE', three, 'type', { 'Cover Letter': 'morgan-testwell-resume' }),
+    ).toThrow(/already called/);
+  });
+
+  /*
    * But the default shape goes on sorting itself out. `'title'` cannot tell a
    * resume from a cover letter, and adding the type back to the two that
    * clash is the store's own business — nobody typed those, so there is
@@ -167,18 +220,25 @@ describe('slug and id', () => {
   });
 
   it('builds a dated, readable application id', () => {
-    expect(applicationId('Streamly', 'SWE Intern', new Date('2026-09-16T00:00:00Z'))).toBe(
+    expect(applicationId('Streamly', 'SWE Intern', new Date(2026, 8, 16))).toBe(
       '2026-09-16-streamly-swe-intern',
     );
+  });
+
+  it('dates the id by the day where the person is, not by the day in Greenwich', () => {
+    // Ten at night on the 9th is the 9th, whatever UTC says it is.
+    expect(applicationId('Moog', 'Intern', new Date(2026, 9, 9, 22, 30))).toBe('2026-10-09-moog-intern');
+    expect(localDay(new Date(2026, 9, 9, 23, 59))).toBe('2026-10-09');
+    expect(localDay(new Date(2026, 0, 1, 0, 0))).toBe('2026-01-01');
   });
 
   it('does not leave a trailing dash when the role is unprintable', () => {
     // A role the slug cannot represent gets a fingerprint instead, because
     // `!!!` and `???` are two different roles and the slug says so about
     // neither. What it must not do is trail off after the company.
-    const id = applicationId('Acme', '!!!', new Date('2026-09-16T00:00:00Z'));
+    const id = applicationId('Acme', '!!!', new Date(2026, 8, 16));
     expect(id).toMatch(/^2026-09-16-acme-[0-9a-f]{8}$/);
-    expect(id).not.toBe(applicationId('Acme', '???', new Date('2026-09-16T00:00:00Z')));
+    expect(id).not.toBe(applicationId('Acme', '???', new Date(2026, 8, 16)));
   });
 });
 
@@ -987,6 +1047,36 @@ describe('one application taking over another’s filename', () => {
     // And the manifest is the new shape now, so the next sync is exact.
     expect(JSON.parse(fs.readFileSync(manifest, 'utf8')).from[NAME]).toContain('beta');
   });
+
+  /*
+   * Two names that differ only in case are one name on a Mac or a PC.
+   *
+   * "SWE-Intern" at Acme and "SWE-intern" at Globex gave two plain names, so
+   * both were copied into the folder — where on those machines the second
+   * landed on top of the first, and the folder held one resume under the
+   * other job's name.
+   */
+  it('treats names that differ only in case as the same name', () => {
+    const write = (dir: string, name: string, body: string) => {
+      const full = path.join(t.store.outDir(), 'applications', dir);
+      fs.mkdirSync(full, { recursive: true });
+      fs.writeFileSync(path.join(full, name), body);
+      return `applications/${dir}`;
+    };
+    const acme = write('acme', 'Test-Person-SWE-Intern-Resume.pdf', 'ACME');
+    const globex = write('globex', 'Test-Person-SWE-intern-Resume.pdf', 'GLOBEX');
+    const apps = [
+      { id: 'acme', company: 'Acme', role: 'SWE-Intern', status: 'applying', snapshotDir: acme },
+      { id: 'globex', company: 'Globex', role: 'SWE-intern', status: 'applying', snapshotDir: globex },
+    ] as unknown as Application[];
+
+    const folder = syncCurrent(t.store, apps, 'acme');
+    const folded = folder.files.map((f) => f.normalize('NFC').toLowerCase());
+    expect(new Set(folded).size, folder.files.join(', ')).toBe(folder.files.length);
+    // The one in hand keeps its plain name; the other is told apart by its company.
+    expect(folder.files).toContain('Test-Person-SWE-Intern-Resume.pdf');
+    expect(folder.files).toContain('Test-Person-SWE-intern-Resume-Globex.pdf');
+  });
 });
 
 describe.skipIf(!latex)('the flat folder of what is in flight', { timeout: 180_000 }, () => {
@@ -1565,5 +1655,172 @@ describe('an employer is the same employer with or without "Inc."', () => {
     expect(findApplication(rows, 'Northwind, Inc.', 'Platform Engineer')).toBeUndefined();
     // A name that is only a legal form keeps its word, rather than matching everything.
     expect(findApplication([row('co', 'Co')] as Parameters<typeof findApplication>[0], 'Acme', 'Platform Engineer')).toBeUndefined();
+  });
+});
+
+/*
+ * The upload folder is rebuilt from the list just written, not from a second
+ * read of the tracker.
+ *
+ * `advance` and `closeStale` used to call `syncCurrent(store)`, which loads
+ * the whole store to get the tracker back — the file written one line before,
+ * parsed again from scratch. A thousand applications made that most of a
+ * second on every status change. Handing over the list must leave the folder
+ * exactly as a sync from the file on disk would, which is what these check.
+ */
+describe('the upload folder after a status change', () => {
+  /** An in-flight application with one file already in its bundle folder. */
+  function inFlight(id: string, status: Application['status'] = 'applying') {
+    const dir = path.join(t.store.outDir(), 'applications', id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${id}-Resume.pdf`), `%PDF ${id}`);
+    t.store.upsertApplication({
+      id,
+      company: `Company ${id}`,
+      role: 'Intern',
+      status,
+      snapshotDir: path.relative(t.store.outDir(), dir),
+      history: [{ at: '2026-01-01T00:00:00Z', status }],
+    });
+  }
+  const folder = () => {
+    const dir = path.join(t.store.outDir(), 'current');
+    return fs.existsSync(dir) ? visible(dir).sort() : [];
+  };
+
+  it('is what a sync from the tracker on disk would leave, and the store is loaded once', () => {
+    inFlight('a1');
+    inFlight('a2');
+    // Typed by hand as "Applying", which the read normalises; the list handed
+    // over must be read the same way or this one drops out of the folder.
+    inFlight('a3');
+    t.write(
+      'applications.yaml',
+      (t.read('applications.yaml') as Application[]).map((a) => (a.id === 'a3' ? { ...a, status: 'Applying' } : a)),
+    );
+    syncCurrent(t.store);
+    expect(folder()).toEqual(['a1-Resume.pdf', 'a2-Resume.pdf', 'a3-Resume.pdf']);
+
+    let loads = 0;
+    const load = t.store.load.bind(t.store);
+    t.store.load = () => (loads++, load());
+    advance(t.store, 'a1', 'closed');
+    expect(loads).toBe(1);
+
+    const left = folder();
+    expect(left).toEqual(['a2-Resume.pdf', 'a3-Resume.pdf']);
+    syncCurrent(t.store);
+    expect(folder()).toEqual(left);
+  });
+
+  it('keeps an application that is still being sent', () => {
+    inFlight('a1');
+    advance(t.store, 'a1', 'applying', 'still on it');
+    expect(folder()).toEqual(['a1-Resume.pdf']);
+    syncCurrent(t.store);
+    expect(folder()).toEqual(['a1-Resume.pdf']);
+  });
+});
+
+/*
+ * A row found by a name it was corrected from only when the send is from the
+ * same posting — and the same posting is reached by addresses that differ in
+ * ways that name nothing: a trailing slash, `www.`, the host's case, a
+ * tracking parameter, and Greenhouse's two hosts for one board. Each of those
+ * missed the row and made a second one.
+ */
+describe('a corrected row found by its old names', () => {
+  const row = (url: string): Application =>
+    ({
+      id: 'r1',
+      company: 'Acme',
+      role: 'Software Engineer Intern',
+      url,
+      status: 'applying',
+      appliedAt: '2026-10-01',
+      aliases: [{ company: 'Summer 2027', role: 'Software Engineer Intern' }],
+    }) as Application;
+  const found = (rowUrl: string, sendUrl: string) =>
+    findApplication([row(rowUrl)], 'Summer 2027', 'Software Engineer Intern', sendUrl)?.id;
+
+  it.each([
+    ['https://acme.com/careers/software-engineer-intern', 'https://acme.com/careers/software-engineer-intern/'],
+    ['https://acme.com/careers/software-engineer-intern', 'https://www.acme.com/careers/software-engineer-intern'],
+    ['https://acme.com/careers/software-engineer-intern', 'https://ACME.com/careers/software-engineer-intern'],
+    ['https://acme.com/careers/software-engineer-intern', 'https://acme.com/careers/software-engineer-intern?utm_source=linkedin&utm_medium=x'],
+    ['https://acme.com/careers/software-engineer-intern?ref=home', 'https://acme.com/careers/software-engineer-intern?source=mail'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acme/jobs/4012345?gh_src=abc'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://job-boards.greenhouse.io/acme/jobs/4012345'],
+  ])('%s is the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBe('r1');
+  });
+
+  it.each([
+    ['https://acme.com/careers/software-engineer-intern', 'https://acme.com/careers/firmware-intern'],
+    ['https://acme.com/careers/software-engineer-intern?id=1', 'https://acme.com/careers/software-engineer-intern?id=2'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acme/jobs/4012346'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://jobs.lever.co/globex/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'],
+    // `ref` and `source` carrying the job, not where the link came from: two postings.
+    ['https://acme.com/careers/apply?ref=SE-2041', 'https://acme.com/careers/apply?ref=SE-3377'],
+    ['https://careers.acme.com/job?source=4821', 'https://careers.acme.com/job?source=9932'],
+    // One host and one number, but two employers' boards.
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://job-boards.greenhouse.io/globex/jobs/4012345'],
+    ['https://jobs.lever.co/acme/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b', 'https://jobs.lever.co/globex/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'],
+  ])('%s is not the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBeUndefined();
+  });
+});
+
+/*
+ * Greenhouse, SmartRecruiters and Lever number jobs across every board, so
+ * the same long id on one employer's board under two names — `acme` and
+ * `acmeinc` — is one job, and was two rows when the role was named.
+ */
+describe('a job on a board known by two names', () => {
+  const row = (url: string): Application =>
+    ({ id: 'r1', company: 'Acme', role: 'Platform Engineer', url, status: 'applying', appliedAt: '2026-10-01' }) as Application;
+  const found = (rowUrl: string, sendUrl: string) =>
+    findApplication([row(rowUrl)], 'Acme Robotics', 'Platform Engineer', sendUrl)?.id;
+
+  it.each([
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmeinc/jobs/4012345'],
+    ['https://jobs.smartrecruiters.com/Acme/743999012345-platform-engineer', 'https://jobs.smartrecruiters.com/AcmeGroup/743999012345-platform-engineer'],
+  ])('%s is the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBe('r1');
+  });
+
+  it.each([
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/globex/jobs/4012345'],
+    ['https://careers-acme.icims.com/jobs/12345/platform-engineer/job', 'https://careers-acmeinc.icims.com/jobs/12345/platform-engineer/job'],
+  ])('%s is not the row for a send from %s', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBeUndefined();
+  });
+
+  /*
+   * Round 17. Lever by the whole UUID, whatever count of digits it happens to
+   * have; Greenhouse only when what is added is a company's own suffix; and
+   * Greenhouse's two hosts for one board are one site.
+   */
+  it.each([
+    // Five digits in the UUID, which the seven-digit rule refused.
+    ['https://jobs.lever.co/acme/0f1e2d3c-4bab-cdcd-efef-abcdefabcdef', 'https://jobs.lever.co/acmeinc/0f1e2d3c-4bab-cdcd-efef-abcdefabcdef'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmecareers/jobs/4012345'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmehq/jobs/4012345'],
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://job-boards.greenhouse.io/acme/jobs/4012345'],
+    ['https://job-boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmeinc/jobs/4012345'],
+  ])('%s is the row for a send from %s (round 17)', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBe('r1');
+  });
+
+  it.each([
+    // Two UUIDs: two jobs, however many digits each has.
+    ['https://jobs.lever.co/acme/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b', 'https://jobs.lever.co/acmeinc/1f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b'],
+    // Not a UUID, so not Lever's job id, whatever its digits.
+    ['https://jobs.lever.co/acme/12345678', 'https://jobs.lever.co/acmeinc/12345678'],
+    // Another employer whose name starts with this one's.
+    ['https://boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmesolar/jobs/4012345'],
+    ['https://job-boards.greenhouse.io/acme/jobs/4012345', 'https://boards.greenhouse.io/acmesolar/jobs/4012345'],
+  ])('%s is not the row for a send from %s (round 17)', (rowUrl, sendUrl) => {
+    expect(found(rowUrl, sendUrl)).toBeUndefined();
   });
 });

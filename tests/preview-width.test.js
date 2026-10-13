@@ -10,20 +10,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const drawn = [];
+/** Which PDF each page drawn came from. */
+const drawnFrom = [];
+/** A PDF still downloading, until the test lets it arrive: url → promise. */
+const loading = new Map();
 vi.mock('../web/vendor/pdf.min.mjs', () => ({
   GlobalWorkerOptions: {},
-  getDocument: () => ({
-    promise: Promise.resolve({
+  getDocument: ({ url }) => ({
+    promise: (loading.get(url) ?? Promise.resolve()).then(() => ({
       numPages: 1,
       destroy() {},
       getPage: async () => ({
         getViewport: ({ scale }) => ({ width: 612 * scale, height: 792 * scale }),
         render: ({ viewport }) => {
           drawn.push(viewport.width);
+          drawnFrom.push(url);
           return { promise: Promise.resolve() };
         },
       }),
-    }),
+    })),
   }),
 }));
 
@@ -43,6 +48,8 @@ const settle = async () => {
 
 beforeEach(() => {
   drawn.length = 0;
+  drawnFrom.length = 0;
+  loading.clear();
   observed = [];
   vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   HTMLCanvasElement.prototype.getContext = () => ({});
@@ -115,5 +122,31 @@ describe('the preview’s width', () => {
     await p.setZoom('fit');
     expect(pages.classList.contains('zoomed')).toBe(false);
     expect(pages.querySelector('canvas').style.width).toBe('300px');
+  });
+
+  /*
+   * A resize while the next PDF was still downloading redrew the one on
+   * screen, and that newer draw took over from the download: the preview
+   * stayed on the page before the edit until something else was compiled.
+   */
+  it('redraws the PDF still loading, not the one it is replacing', async () => {
+    let now = 400;
+    const { p } = await preview(() => now);
+    await p.show('/pdf/a.pdf');
+
+    let arrive;
+    loading.set('/pdf/b.pdf', new Promise((go) => (arrive = go)));
+    const showing = p.show('/pdf/b.pdf');
+    now = 300;
+    observed[0].fn();
+    await vi.advanceTimersByTimeAsync(200);
+    await settle();
+    arrive();
+    await showing;
+    await vi.advanceTimersByTimeAsync(200);
+    await settle();
+
+    expect(drawnFrom.at(-1)).toBe('/pdf/b.pdf');
+    expect(drawn.at(-1)).toBe(300);
   });
 });

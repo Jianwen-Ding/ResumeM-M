@@ -1,14 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  fileSentAnswer,
   isSensitiveAnswer,
   isSensitiveQuestion,
   letterId,
   matchAnswer,
   matchAnswers,
+  asksWhenYouStart,
+  namesPassedDate,
   questionSimilarity,
   redactIdentifiers,
   relevantLetters,
   sameQuestion,
+  tidyQuestion,
 } from '../src/jobs/answers.js';
 import type { AnswerBankItem, CoverLetter } from '../src/model/types.js';
 import { SAMPLE_ANSWERS } from './helpers.js';
@@ -137,12 +141,45 @@ describe('relevantLetters', () => {
 
 describe('letterId', () => {
   it('is readable in a directory listing', () => {
-    const id = letterId('Acme Co.', 'Software Engineer Intern', new Date('2026-03-04T00:00:00Z'));
+    const id = letterId('Acme Co.', 'Software Engineer Intern', new Date(2026, 2, 4));
     expect(id).toBe('2026-03-04-acme-co-software-engineer-intern');
   });
 
   it('copes with a missing company or role', () => {
-    expect(letterId(undefined, undefined, new Date('2026-03-04T00:00:00Z'))).toBe('2026-03-04');
+    expect(letterId(undefined, undefined, new Date(2026, 2, 4))).toBe('2026-03-04');
+  });
+
+  it('keeps names in other scripts, so two such letters on one day are two letters', () => {
+    const day = new Date(2026, 9, 11);
+    const mercari = letterId('株式会社メルカリ', 'ソフトウェアエンジニア', day);
+    const yandex = letterId('Яндекс', 'Разработчик', day);
+    expect(mercari).toBe('2026-10-11-株式会社メルカリ-ソフトウェアエンジニア');
+    expect(yandex).toBe('2026-10-11-яндекс-разработчик');
+  });
+
+  /*
+   * The role was cut to 30 characters and the cut took the number, so two
+   * requisitions under one long title on one day were one id, and the
+   * second letter was saved over the first.
+   */
+  it('keeps the requisition number of a long title, so two requisitions are two letters', () => {
+    const day = new Date(2026, 9, 11);
+    const first = letterId('Helios', 'Senior Software Engineer, Platform (12345678)', day);
+    const second = letterId('Helios', 'Senior Software Engineer, Platform (87654321)', day);
+    expect(first).toBe('2026-10-11-helios-senior-software-engineer-platf-12345678');
+    expect(second).toBe('2026-10-11-helios-senior-software-engineer-platf-87654321');
+    // After a separator too, and in the case it was written.
+    expect(letterId('Helios', 'Senior Software Engineer, Platform Infrastructure - JR0286834', day)).toBe(
+      '2026-10-11-helios-senior-software-engineer-platf-jr0286834',
+    );
+  });
+
+  it('is the id it always was for a short title with a number, and for a title with none', () => {
+    const day = new Date(2026, 9, 11);
+    expect(letterId('Helios', 'Engineer (12345678)', day)).toBe('2026-10-11-helios-engineer-12345678');
+    expect(letterId('Helios', 'Senior Software Engineer, Platform Infrastructure', day)).toBe(
+      '2026-10-11-helios-senior-software-engineer-platf',
+    );
   });
 });
 
@@ -680,6 +717,12 @@ describe('a question asking for something the bank must never hold', () => {
     'Zip code',
     'Postal Code',
     'Apartment/Suite',
+    // The self-identification block, as the bank had it banked.
+    'Veterans Status',
+    'What is your Veterans Status?',
+    'Are you Hispanic/Latino?',
+    'Do you have a disability?',
+    'Gender',
   ];
 
   it('recognises the questions this must refuse', () => {
@@ -785,6 +828,66 @@ describe('sameQuestion', () => {
 
   it('treats an actual change in wording as a different question', () => {
     expect(sameQuestion('Why do you want to work here?', 'Why do you want to leave your current job?')).toBe(false);
+  });
+
+  // Each of these was a separate row in a real bank, saved from a form.
+  it('treats the required marker and a label read twice as the same question', () => {
+    expect(sameQuestion('Discipline*', 'Discipline')).toBe(true);
+    expect(sameQuestion('Discipline *', 'Discipline*')).toBe(true);
+    expect(sameQuestion('DisciplineDiscipline', 'Discipline')).toBe(true);
+    expect(
+      sameQuestion(
+        'Are you legally authorized to work in the country where this position is located?Are you legally authorized to work in the country where this position is located? Required',
+        'Are you legally authorized to work in the country where this position is located?',
+      ),
+    ).toBe(true);
+    expect(sameQuestion('Discipline*', 'Degree*')).toBe(false);
+  });
+});
+
+describe('tidyQuestion', () => {
+  it('takes off what a form adds at the ends: the required marker, in its usual spellings', () => {
+    expect(tidyQuestion('End date month*')).toBe('End date month');
+    expect(tidyQuestion('Active Security Clearance(s) *')).toBe('Active Security Clearance(s)');
+    expect(tidyQuestion('Are you willing to relocate?*')).toBe('Are you willing to relocate?');
+    expect(tidyQuestion('* Phone Device Type')).toBe('Phone Device Type');
+    expect(tidyQuestion('Phone Device Type (required)')).toBe('Phone Device Type');
+    expect(tidyQuestion('Will you require sponsorship? Required')).toBe('Will you require sponsorship?');
+  });
+
+  it('keeps "required" when it is a word of the question', () => {
+    expect(tidyQuestion('Is visa sponsorship required?')).toBe('Is visa sponsorship required?');
+    expect(tidyQuestion('Will visa sponsorship be required')).toBe('Will visa sponsorship be required');
+  });
+
+  it('reads a label read twice as once', () => {
+    expect(tidyQuestion('SchoolSchool')).toBe('School');
+    expect(tidyQuestion('Walla Walla')).toBe('Walla Walla');
+    expect(tidyQuestion('Security clearance (TS/SCI) required')).toBe('Security clearance (TS/SCI) required');
+    expect(tidyQuestion('**Are you one of the following?** Citizen')).toBe('**Are you one of the following?** Citizen');
+    expect(tidyQuestion('Location (city)Location (city)')).toBe('Location (city)');
+    expect(tidyQuestion('How did you hear about this job?How did you hear about this job?')).toBe(
+      'How did you hear about this job?',
+    );
+    expect(tidyQuestion('I am available to begin in 2028I am available to begin in 2028 Required')).toBe(
+      'I am available to begin in 2028',
+    );
+    // A word that merely repeats inside a longer question is left alone.
+    expect(tidyQuestion('Yes or no: yes or no?')).toBe('Yes or no: yes or no?');
+    expect(tidyQuestion('Bye bye')).toBe('Bye bye');
+  });
+
+  it('lets a row kept with the markup on it be found by the question as asked', () => {
+    const bank = [
+      { id: 'a1', question: 'SchoolSchool', default: 'v_1', variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'Northeastern University' }] },
+      { id: 'a2', question: 'Discipline*', default: 'v_1', variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'Computer Science' }] },
+    ];
+    const school = matchAnswer('School', bank);
+    expect(school.item?.id).toBe('a1');
+    expect(school.confident).toBe(true);
+    const discipline = matchAnswer('Discipline', bank);
+    expect(discipline.item?.id).toBe('a2');
+    expect(discipline.confident).toBe(true);
   });
 });
 
@@ -1188,4 +1291,532 @@ describe('the identifiers the extension refuses, refused here as well', () => {
       expect(isSensitiveQuestion(q)).toBe(false);
     },
   );
+});
+
+describe('a question that asks about a different number', () => {
+  const one = (question: string, text = 'Yes'): AnswerBankItem[] => [
+    { id: 'ans_n', question, default: 'v_1', variants: [{ id: 'v_1', label: 'Saved', text }] },
+  ];
+
+  it('is not answered confidently with what was said about another number', () => {
+    expect(matchAnswer('Do you have 3 years of experience?', one('Do you have 5 years of experience?')).confident).toBe(false);
+    expect(matchAnswer('Is your GPA above 3.0?', one('Is your GPA above 3.5?')).confident).toBe(false);
+    expect(
+      matchAnswer('Are you able to work in the office 3 days a week?', one('Are you able to work in the office 5 days a week?'))
+        .confident,
+    ).toBe(false);
+  });
+
+  it('while the same number, and a length limit beside the box, still match', () => {
+    expect(matchAnswer('Do you have 5 years of experience?', one('Do you have 5 years of experience?')).confident).toBe(true);
+    expect(matchAnswer('Is your GPA above 3.0?', one('Is your GPA above 3?')).confident).toBe(true);
+    expect(
+      matchAnswer('Why do you want this job? (500 characters max)', one('Why do you want this job?', 'The work.')).confident,
+    ).toBe(true);
+  });
+});
+
+describe('an employer label with its legal form on it', () => {
+  it('still vetoes an answer that names that employer for somebody else', () => {
+    const bank: AnswerBankItem[] = [
+      {
+        id: 'ans_why',
+        question: 'Why do you want to work here?',
+        default: 'v_1',
+        variants: [{ id: 'v_1', label: 'Stripe, Inc.', text: 'I want to join Stripe because payments infrastructure excites me.' }],
+      },
+    ];
+    const m = matchAnswer('Why do you want to work here?', bank, { company: 'Plaid' });
+    expect(m.namesAnother).toBe('Stripe, Inc.');
+    expect(m.confident).toBe(false);
+    // And written for these people, it is theirs.
+    expect(matchAnswer('Why do you want to work here?', bank, { company: 'Stripe' }).confident).toBe(true);
+  });
+});
+
+describe('a label that says which version of an answer it is', () => {
+  const bank: AnswerBankItem[] = [
+    {
+      id: 'ans_type',
+      question: 'Are you looking for full-time work?',
+      default: 'v_full',
+      variants: [
+        { id: 'v_full', label: 'Full', text: 'Full-time, starting in June.' },
+        { id: 'v_short', label: 'Short (two lines)', text: 'Short answer: full-time.' },
+      ],
+    },
+    {
+      id: 'ans_link',
+      question: 'LinkedIn profile',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Profile URL', text: 'https://www.linkedin.com/in/someone' }],
+    },
+    {
+      id: 'ans_why',
+      question: 'Why do you want to work here?',
+      default: 'v_1',
+      variants: [{ id: 'v_1', label: 'Acme', text: 'Acme builds the rockets I grew up watching.' }],
+    },
+  ];
+
+  it('is not taken for an employer', () => {
+    const m = matchAnswer('Are you looking for full-time work?', bank, { company: 'Helios' });
+    expect(m.namesAnother).toBeUndefined();
+    expect(m.confident).toBe(true);
+    // While a company's name still is.
+    expect(matchAnswer('Why do you want to work here?', bank, { company: 'Helios' }).namesAnother).toBe('Acme');
+  });
+
+  it('and the employers the caller knows are looked for as well as the labels', () => {
+    const known = { company: 'Helios', employers: ['Helios', 'Globex'] };
+    // "Acme" was never tracked, but an answer written for it still names it:
+    // with the list alone it went confidently into another employer's form.
+    const acme = matchAnswer('Why do you want to work here?', bank, known);
+    expect(acme.namesAnother).toBe('Acme');
+    expect(acme.confident).toBe(false);
+    // And a version label is still not an employer with the list given.
+    expect(matchAnswer('Are you looking for full-time work?', bank, known).confident).toBe(true);
+    const globex: AnswerBankItem[] = [
+      { id: 'ans_why', question: 'Why do you want to work here?', default: 'v_1', variants: [{ id: 'v_1', label: 'Saved', text: 'Globex is where I learned to ship.' }] },
+    ];
+    const m = matchAnswer('Why do you want to work here?', globex, known);
+    expect(m.namesAnother).toBe('Globex');
+    expect(m.confident).toBe(false);
+  });
+});
+
+/*
+ * An address asked for a box at a time, or qualified some other way.
+ * "Address Line1" has no word break between the line and its number, so
+ * `address\s*(line|[12])\b` never reached it; and "current full address"
+ * names no word the list knew.
+ */
+describe('an address however a form asks for it', () => {
+  it('refuses the wordings the list missed, and still the ones it had', () => {
+    for (const q of [
+      'Address Line1',
+      'Address Line2',
+      'address line1*',
+      'What is your current full address?',
+      'Current address',
+      'Permanent address',
+      'What is your address?',
+      'Address',
+      // The ones it already refused.
+      'Address Line 1',
+      'Address Line 2',
+      'Address 1',
+      'What is your home address?',
+      'Please give your mailing address.',
+      'Street address',
+      'Zip code',
+    ]) {
+      expect(isSensitiveQuestion(q), q).toBe(true);
+    }
+    // And still not an email or a web address.
+    for (const q of [
+      'What is your email address for this application?',
+      'Current email address',
+      'Your email address',
+      'Website address',
+      'Why do you want to work here?',
+    ]) {
+      expect(isSensitiveQuestion(q), q).toBe(false);
+    }
+  });
+});
+
+/*
+ * Every answer not taken from the bank was filed into it on completion,
+ * the AI's drafts as if the person had written them, so the next form asking
+ * the same question had the AI's text filled in confidently and unread. A
+ * draft still word for word as written is filed as a suggestion, and offered
+ * like a loose match; one the person typed or edited is filed as before.
+ */
+describe('an AI-written answer filed from a completed application', () => {
+  const Q = 'Why do you want to work at a streaming company?';
+  const file = (bank: AnswerBankItem[], answer: string, unread: boolean, label = 'Streamly') =>
+    fileSentAnswer(bank, { question: Q, answer, label, unread, newId: () => 'ans_new' });
+
+  it('is offered next time, not filled in', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'Because streaming is the work I want to do.', true);
+    expect(bank).toHaveLength(1);
+    const m = matchAnswer(Q, bank);
+    expect(m.answer).toBe('Because streaming is the work I want to do.');
+    expect(m.confident).toBe(false);
+  });
+
+  it('but one the person typed or edited is filled as before', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'Because I edited this one myself.', false);
+    expect(matchAnswer(Q, bank).confident).toBe(true);
+  });
+
+  it('does not push a reviewed answer out of the default', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'My own answer.', false, 'Acme');
+    file(bank, 'The AI answer.', true, 'Streamly');
+    expect(bank[0]!.variants).toHaveLength(2);
+    const m = matchAnswer(Q, bank, { company: 'Plaid' });
+    expect(m.answer).toBe('My own answer.');
+    expect(matchAnswer(Q, bank, { company: 'Streamly' }).confident).toBe(false);
+  });
+
+  it('does not push it out when the same unread draft is sent a second time', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'My own answer.', false, 'Acme');
+    file(bank, 'The AI answer.', true, 'Streamly');
+    file(bank, 'The AI answer.', true, 'Globex');
+    expect(bank[0]!.variants).toHaveLength(2);
+    expect(matchAnswer(Q, bank, { company: 'Plaid' })).toMatchObject({ answer: 'My own answer.', confident: true });
+  });
+
+  it('is filled once the person has sent it having read it', () => {
+    const bank: AnswerBankItem[] = [];
+    file(bank, 'Because streaming is the work I want to do.', true);
+    file(bank, 'Because streaming is the work I want to do.', false);
+    expect(matchAnswer(Q, bank).confident).toBe(true);
+  });
+});
+
+describe('the stored question that is the question asked', () => {
+  const item = (id: string, question: string, text: string): AnswerBankItem => ({
+    id,
+    question,
+    default: 'v1',
+    variants: [{ id: 'v1', label: 'Base', text }],
+  });
+
+  it('answers it, even when a near-duplicate scoring the same comes first', () => {
+    // "desired" and "expected" are one word to the matcher, so both score 1.
+    const bank = [
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?', '$110,000'),
+    ];
+    expect(questionSimilarity('What is your desired salary?', bank[0]!.question)).toBe(
+      questionSimilarity('What is your desired salary?', bank[1]!.question),
+    );
+    const m = matchAnswer('What is your desired salary?', bank);
+    expect(m.item?.id).toBe('desired');
+    expect(m.answer).toBe('$110,000');
+    expect(matchAnswer('What is your expected salary?', bank).item?.id).toBe('expected');
+  });
+
+  it('as sameQuestion reads it: case, spacing and a required marker aside', () => {
+    const bank = [
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?*', '$110,000'),
+    ];
+    expect(matchAnswer('what is your  desired salary? ', bank).item?.id).toBe('desired');
+  });
+
+  it('and the same through matchAnswers, for a whole form at once', () => {
+    const bank = [
+      item('m05', 'month 2027-05', 'May'),
+      item('m12', 'month 2027-12', 'December'),
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?', '$110,000'),
+    ];
+    const ms = matchAnswers(bank.map((b) => b.question), bank);
+    expect(ms.map((m) => m.item?.id)).toEqual(['m05', 'm12', 'expected', 'desired']);
+  });
+
+  it('without one, equal scores go to the first in the bank every time', () => {
+    const bank = [
+      item('expected', 'What is your expected salary?', '$90,000'),
+      item('desired', 'What is your desired salary?', '$110,000'),
+    ];
+    expect(matchAnswer('Your desired salary', bank).item?.id).toBe('expected');
+    expect(matchAnswer('Your desired salary', [...bank].reverse()).item?.id).toBe('desired');
+  });
+});
+
+describe('C, C# and C++', () => {
+  const bank: AnswerBankItem[] = ['C', 'C#', 'C++'].map((lang) => ({
+    id: lang,
+    question: `${lang} Skill Proficiency Levels`,
+    default: 'v1',
+    variants: [{ id: 'v1', label: 'Base', text: `My ${lang} is solid.` }],
+  }));
+
+  it('are three different words to the matcher', () => {
+    expect(questionSimilarity('C# Skill Proficiency Levels', 'C Skill Proficiency Levels')).toBeLessThan(1);
+    expect(questionSimilarity('C++ Skill Proficiency Levels', 'C Skill Proficiency Levels')).toBeLessThan(1);
+    expect(questionSimilarity('C# Skill Proficiency Levels', 'C++ Skill Proficiency Levels')).toBeLessThan(1);
+  });
+
+  it('each find their own answer, in any order in the bank', () => {
+    for (const order of [bank, [...bank].reverse()]) {
+      for (const lang of ['C', 'C#', 'C++']) {
+        expect(matchAnswer(`${lang} Skill Proficiency Levels`, order).item?.id).toBe(lang);
+        // Worded past `sameQuestion`, so found by score alone.
+        expect(matchAnswer(`Please rate your ${lang} skill proficiency levels`, order).item?.id).toBe(lang);
+      }
+    }
+  });
+
+  it('and C# asked is never confidently answered with C', () => {
+    const m = matchAnswer('Please rate your C# skill proficiency levels', [bank[0]!]);
+    expect(m.confident).toBe(false);
+  });
+});
+
+describe('matchAnswers', () => {
+  it('matches each question as matchAnswer does, sensitive ones and stored identifiers included', () => {
+    const bank: AnswerBankItem[] = [
+      ...SAMPLE_ANSWERS,
+      {
+        id: 'dob',
+        question: 'Anything else we should know?',
+        default: 'v1',
+        variants: [{ id: 'v1', label: 'Base', text: 'DOB: 04/02/1999' }],
+      },
+    ];
+    const qs = [
+      ...bank.map((b) => b.question),
+      'What is your Social Security number?',
+      'Anything else we should know?',
+      'Why us?',
+    ];
+    const one = qs.map((q) => matchAnswer(q, bank, { company: 'Acme' }));
+    expect(matchAnswers(qs, bank, { company: 'Acme' })).toEqual(one);
+    expect(matchAnswers(qs, bank, 0.3)).toEqual(qs.map((q) => matchAnswer(q, bank, 0.3)));
+  });
+});
+
+/*
+ * Two answers filed under one item by one completion.
+ *
+ * A completion files everything it holds in one go, so two answers taken
+ * from the same bank item (a form asking the question twice, long and short)
+ * both got `v_<now>`, the same millisecond. The default then named the first
+ * of the two rather than the one just filed, and the editor, which finds the
+ * version to change by its id, wrote an edit of one over both.
+ */
+describe('two answers filed under one item in the same millisecond', () => {
+  it('get ids of their own, and the last one filed leads', () => {
+    const bank: AnswerBankItem[] = [
+      { id: 'why_us', question: 'Why do you want to work here?', default: 'v_1', variants: [{ id: 'v_1', label: 'Initech', text: 'About Initech.' }] },
+    ];
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      for (const answer of ['Because Acme builds compilers I use daily.', 'Compilers.']) {
+        fileSentAnswer(bank, { question: 'Why do you want to work here?', answer, fromAnswerId: 'why_us', label: 'Acme', unread: false, newId: () => 'new' });
+      }
+    } finally {
+      clock.mockRestore();
+    }
+    const item = bank[0]!;
+    const ids = item.variants.map((v) => v.id);
+    expect(new Set(ids).size, ids.join(', ')).toBe(3);
+    expect(item.variants.find((v) => v.id === item.default)?.text).toBe('Compilers.');
+  });
+});
+
+/*
+ * An answer that names a date stops being true when the date goes by. The
+ * bank keeps no record of when an answer was filed, so "November 2026",
+ * banked as an earliest start date in October, was filled in unread on a form
+ * the next March. Once its date has passed it is offered to be read, not
+ * filled in; a date still to come is as good as it was.
+ */
+describe('an answer whose date has passed', () => {
+  const bank = (): AnswerBankItem[] => {
+    const items: AnswerBankItem[] = [];
+    fileSentAnswer(items, { question: 'What is your earliest start date?', answer: 'November 2026', label: 'Helios Systems', unread: false, newId: () => 'start' });
+    fileSentAnswer(items, { question: 'When are you available to start?', answer: 'Available from 1 December 2026', label: 'Helios Systems', unread: false, newId: () => 'avail' });
+    return items;
+  };
+  const at = (when: Date, run: () => void) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(when);
+      run();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+
+  it('is offered, not filled in, once the date is behind us', () => {
+    at(new Date(2027, 2, 1, 12), () => {
+      for (const q of ['What is your earliest start date?', 'When are you available to start?']) {
+        const m = matchAnswer(q, bank(), { company: 'Orbital Labs' });
+        expect(m.answer, q).toBeTruthy();
+        expect(m.confident, q).toBe(false);
+      }
+    });
+  });
+
+  it('is filled in as before while the date is still to come', () => {
+    at(new Date(2026, 9, 12, 12), () => {
+      for (const q of ['What is your earliest start date?', 'When are you available to start?']) {
+        expect(matchAnswer(q, bank(), { company: 'Orbital Labs' }).confident, q).toBe(true);
+      }
+    });
+  });
+
+  /*
+   * Only a start date goes stale. A graduation date in the past is still the
+   * day somebody graduated, and an answer to it is as good as it ever was.
+   */
+  it('is still filled in when the question asks about something that happened', () => {
+    at(new Date(2027, 2, 1, 12), () => {
+      const items: AnswerBankItem[] = [];
+      fileSentAnswer(items, { question: 'Expected graduation date?', answer: 'May 2024', label: 'Helios Systems', unread: false, newId: () => 'grad' });
+      fileSentAnswer(items, { question: 'Start date', answer: 'June 2023', label: 'Helios Systems', unread: false, newId: () => 'job' });
+      expect(matchAnswer('Expected graduation date?', items, { company: 'Orbital Labs' }).confident).toBe(true);
+      expect(matchAnswer('Start date', items, { company: 'Orbital Labs' }).confident).toBe(true);
+    });
+  });
+
+  it('knows a question about starting from one about the past', () => {
+    for (const q of [
+      'What is your earliest start date?',
+      'When can you start?',
+      'When are you available to start?',
+      'Available from',
+      'Availability',
+      'Desired start date',
+      'Joining date',
+      'When does your notice period end?',
+      'When could you begin work?',
+      'Internship start date',
+    ]) {
+      expect(asksWhenYouStart(q), q).toBe(true);
+    }
+    for (const q of ['Expected graduation date?', 'Start date', 'End date', 'When did you graduate?', 'Date of your last promotion']) {
+      expect(asksWhenYouStart(q), q).toBe(false);
+    }
+  });
+
+  it('reads the dates written in the ordinary ways, against the local day', () => {
+    const now = new Date(2026, 10, 15, 0, 5); // five past midnight, 15 Nov, local
+    for (const text of ['October 2026', 'Oct. 2026', 'Sept 2026', '14 November 2026', 'Nov 14th, 2026', 'November 14, 2026', '2026-11-14', '11/14/2026', '14/11/2026']) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    // A month and a year covers the month; today is not yet past; nor are
+    // things that are not a day on a calendar.
+    for (const text of ['November 2026', '15 November 2026', '2026-11-15', 'Dec. 2026', 'Immediately', 'Two weeks notice', '2025', 'January 5th', '']) {
+      expect(namesPassedDate(text, now), text).toBe(false);
+    }
+  });
+
+  /*
+   * The same cases as JobHelper's tests/remembering.mjs, for the same words:
+   * the two regexes are kept identical, and so are the questions they are
+   * held to. "Availability" in a sentence asked about weekends, overtime and
+   * travel as often as about starting, and the common ways of asking when,
+   * how soon or what date were not read at all.
+   */
+  const ASKS_WHEN_YOU_START_CASES: [string, boolean][] = [
+    ['What date can you start?', true],
+    ['When is the earliest you could start?', true],
+    ['How soon can you start?', true],
+    ['How soon could you join?', true],
+    ['Date available', true],
+    ['Date available for employment', true],
+    ['If offered, what date could you start?', true],
+    ['Wann können Sie anfangen?', true],
+    ['Eintrittsdatum', true],
+    ['Date de début', true],
+    ['Date de disponibilité', true],
+  ['Disponibilité', true],
+  ['Disponibilité :', true],
+  ['Disponibilité à partir du', true],
+  ['Disponible à partir de quand ?', true],
+  ['Disponibilité pour commencer', true],
+  ['Votre disponibilité pour débuter le poste', true],
+  ['Votre disponibilité', true],
+  ['Quelle est votre disponibilité ?', true],
+  ['Disponibilité (date)', true],
+  ['Disponibilité / préavis', true],
+  ['Disponibilité et préavis', true],
+  ['À partir de quand êtes-vous disponible ?', true],
+  ['Votre disponibilité le week-end', false],
+  ['Quelle est votre disponibilité pour les déplacements ?', false],
+  ['Disponibilité le week-end', false],
+  ['Disponibilité pour les déplacements', false],
+  ['Êtes-vous disponible le soir et le week-end ?', false],
+    ['Fecha de inicio', true],
+    ['¿Cuándo puede empezar?', true],
+    ['Availability', true],
+    ['What is your availability to work weekends?', false],
+    ['Please describe your availability for overtime', false],
+    ['Do you have any availability constraints for travel?', false],
+    ['Start date', false],
+    ['Job start date', false],
+    ['End date', false],
+  ];
+  it('reads the common ways of asking when somebody can start, and not availability for other things', () => {
+    for (const [q, asks] of ASKS_WHEN_YOU_START_CASES) expect(asksWhenYouStart(q), q).toBe(asks);
+  });
+
+  it('reads a season and a numeric month as dates that pass', () => {
+    const now = new Date(2026, 9, 12, 12); // 12 October 2026, local
+    // A season runs to the end of its last month, and Winter into the next year.
+    for (const text of ['Fall 2025', 'Autumn 2025', 'Summer 2026', 'Spring 2026', 'Winter 2025', 'Available from 11/2025', '2025-11', '09/2026']) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    for (const text of ['Fall 2026', 'Winter 2026', '10/2026', '2026-10', '2026-11-05']) {
+      expect(namesPassedDate(text, now), text).toBe(false);
+    }
+  });
+
+  /*
+   * An answer names a past date for reasons of its own, and only the latest
+   * one it names says whether it still holds. A start given from today never
+   * passes. And "05/11/2026" is the fifth of November as much as the eleventh
+   * of May: it is stale only once both have gone.
+   */
+  it('is judged by the latest date it names', () => {
+    const now = new Date(2026, 9, 12, 12);
+    for (const text of [
+      'Immediately',
+      'Two weeks’ notice',
+      'One month\'s notice',
+      'Between May 2026 and February 2027',
+      'Available from 05/11/2026',
+      '01/12/2026',
+    ]) {
+      expect(namesPassedDate(text, now), text).toBe(false);
+    }
+    for (const text of ['Between May 2026 and August 2026', '05/09/2026', '13/09/2026', '09/13/2026']) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    at(new Date(2026, 9, 12, 12), () => {
+      const items: AnswerBankItem[] = [];
+      fileSentAnswer(items, { question: 'When can you start?', answer: 'Two weeks’ notice', label: 'Helios Systems', unread: false, newId: () => 'now' });
+      expect(matchAnswer('When can you start?', items, { company: 'Orbital Labs' }).confident).toBe(true);
+    });
+  });
+
+  /*
+   * A start from today excused every date beside it, so a notice counted
+   * from a day eighteen months gone was offered as good, unread. It holds
+   * only when the answer names no date at all; one that does is judged by its
+   * dates — the August in "Immediately; I left my last role in August 2026"
+   * included, which is the price of it.
+   */
+  it('judges an answer that starts from today by the dates it names beside it', () => {
+    const now = new Date(2026, 9, 12, 12);
+    for (const text of [
+      'Available from 1 March 2025, after two weeks\' notice',
+      'I can start on 3 March 2025 with 2 weeks notice',
+      'Available from 1 March 2025, after one month\'s notice',
+      'Immediately after my contract ends on 31 March 2025',
+      'ASAP after graduating in May 2025',
+      'Immediately; I left my last role in August 2026',
+      'Two weeks’ notice; my contract ended in May 2026',
+    ]) {
+      expect(namesPassedDate(text, now), text).toBe(true);
+    }
+    expect(namesPassedDate('Two weeks’ notice from 1 December 2026', now)).toBe(false);
+    at(new Date(2026, 9, 12, 12), () => {
+      const items: AnswerBankItem[] = [];
+      fileSentAnswer(items, { question: 'When can you start?', answer: 'Available from 1 March 2025, after one month\'s notice', label: 'Helios Systems', unread: false, newId: () => 'then' });
+      expect(matchAnswer('When can you start?', items, { company: 'Orbital Labs' }).confident).toBe(false);
+    });
+  });
 });

@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { AI_PRESETS, type AiModelPicker } from './presets.js';
+import { envForAgent } from './env.js';
+import { forgetGroup, noteGroup } from '../process-group.js';
 
 /** What the installed CLI's own model picker offered. */
 export interface ModelList {
@@ -155,8 +157,14 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
     const child = spawn(bridge, bridgeArgs, {
       cwd,
       detached: true,
+      /*
+       * The same allow-list a run gets. This starts the very same CLI, signed
+       * in the same way, and a picker it opens is no reason to hand it the
+       * server's other tokens. The bridge and the PTY runner pass this on as
+       * they find it, so filtering here covers the CLI underneath them too.
+       */
       env: {
-        ...process.env,
+        ...envForAgent(process.env, command),
         TERM: 'xterm-256color',
         NO_COLOR: '1',
         RMM_MODEL_COMMAND: command,
@@ -170,6 +178,13 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    /*
+     * Noted with the groups a run starts (see process-group.ts), so that
+     * Ctrl-C on the server takes the picker's terminal and the CLI under it
+     * too. In a group of its own the terminal's signal never reached it, and
+     * `stop` below is a timer in a process that had just died.
+     */
+    noteGroup(child.pid);
     let output = '';
     let settled = false;
     const timers: NodeJS.Timeout[] = [];
@@ -197,6 +212,8 @@ export const captureModelPicker: ModelProbe = (command, picker, cwd) =>
 
     child.on('error', (error) => stop(error));
     child.on('close', () => stop());
+    // Forgotten once the bridge has gone and let go of its output.
+    child.on('close', () => forgetGroup(child.pid));
 
     // On Linux script forwards stdin to its PTY. Expect sends the same input
     // itself on macOS because the GUI server has no terminal to forward.
@@ -326,6 +343,31 @@ const presetFor = (command: string) => {
   const base = path.basename(command.trim()).replace(/\.exe$/i, '');
   return AI_PRESETS.find((preset) => preset.command.toLowerCase() === base.toLowerCase());
 };
+
+/**
+ * Which command a request may have asked for models from — or why not.
+ *
+ * Asking for models runs the command. The settings page asks before the
+ * setting is saved, so it may name a command that is not configured yet; but
+ * anything it may name is either what is configured already or one of the
+ * known CLIs by its bare name, found on PATH the way the run itself would
+ * find it. A path is refused unless it is the configured one: `presetFor`
+ * matches on the basename alone, so `/tmp/anything/codex` passed as a preset
+ * and was run. Throws, with the reason, for anything else.
+ */
+export function commandToAsk(requested: unknown, configured: string): string {
+  const asked = typeof requested === 'string' ? requested.trim() : '';
+  const current = (configured ?? '').trim();
+  if (!asked || asked === current) return current;
+  const bare = !/[\\/]/.test(asked) && AI_PRESETS.some((p) => p.command.toLowerCase() === asked.toLowerCase());
+  if (!bare) {
+    throw new Error(
+      `Models can be listed for the configured command or for a known AI CLI by name (${AI_PRESETS.map((p) => p.command).join(', ')}), ` +
+        'not for a path. Save the setting first to ask a command at a path.',
+    );
+  }
+  return asked;
+}
 
 /**
  * Ask the configured command's live model source. Failure deliberately does

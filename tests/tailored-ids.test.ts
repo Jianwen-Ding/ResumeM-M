@@ -124,6 +124,15 @@ describe('renaming the tailored copies a save already holds', () => {
     expect(t.store.getResume('job-acme-c-engineer-v2')?.copiedFrom).toBe(want);
   });
 
+  // A rename the migration made is not an edit: the drafts list sorts on this
+  // date and the sweep ages workspaces by it.
+  it('leaves the date on a workspace it points at the new id', () => {
+    t = saveWithOldIds();
+    t.store.migrateTailoredIds();
+    expect(t.store.getDraft('d1')?.resumeId).toBe(tailoredResumeId('Acme', 'C++ Engineer'));
+    expect(t.store.getDraft('d1')?.updatedAt).toBe('2026-09-01T00:00:00.000Z');
+  });
+
   /*
    * A save old enough to still hold `extends` can hold one naming a copy this
    * renames. Left pointing at the old id, the resume's base is gone: the fold

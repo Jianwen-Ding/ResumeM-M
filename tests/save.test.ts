@@ -388,3 +388,47 @@ describe('a save that could not look', () => {
     }
   });
 });
+
+/*
+ * A pull that ends in a conflict leaves the markers in the file and the merge
+ * open. The save used to `git add` everything and commit, which is exactly how
+ * a merge is concluded — markers and all — and report it as saved work.
+ */
+describe('a save in the middle of a conflicted merge', () => {
+  const git = (args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: 'pipe' });
+
+  const conflict = async () => {
+    write('profile.yaml', 'name: First\n');
+    await saveStore(repo, { message: 'first' });
+    git(['checkout', '-q', '-b', 'other']);
+    write('profile.yaml', 'name: Other\n');
+    await saveStore(repo, { message: 'other side' });
+    git(['checkout', '-q', '-']);
+    write('profile.yaml', 'name: Mine\n');
+    await saveStore(repo, { message: 'my side' });
+    expect(() => git(['merge', 'other'])).toThrow();
+    expect(fs.readFileSync(path.join(root, 'profile.yaml'), 'utf8')).toContain('<<<<<<<');
+  };
+
+  it('refuses, naming the file, and leaves the merge open', async () => {
+    await conflict();
+    const head = git(['rev-parse', 'HEAD']).trim();
+
+    await expect(saveStore(repo, { message: 'keep my work' })).rejects.toThrow(/conflict.*profile\.yaml/);
+
+    expect(git(['rev-parse', 'HEAD']).trim()).toBe(head);
+    expect(fs.existsSync(path.join(root, '.git', 'MERGE_HEAD'))).toBe(true);
+    expect(git(['ls-files', '-u'])).toContain('profile.yaml');
+  });
+
+  it('saves once the markers are edited out', async () => {
+    await conflict();
+    write('profile.yaml', 'name: Resolved\n');
+
+    const result = await saveStore(repo, { message: 'resolved' });
+
+    expect(result.saved).toBe(true);
+    expect(fs.existsSync(path.join(root, '.git', 'MERGE_HEAD'))).toBe(false);
+    expect(git(['show', 'HEAD:profile.yaml'])).toBe('name: Resolved\n');
+  });
+});

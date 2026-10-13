@@ -179,6 +179,32 @@ describe('cover letters', () => {
     expect(letter?.body).toContain('here is a letter I wrote before');
   });
 
+  /*
+   * A byte-order mark is how Notepad and Word start a UTF-8 file, and with
+   * one in front of the first fence the header was read as the body: the
+   * title, the company and the link to the application were gone, and the
+   * next save wrote a second header above the first. "---" straight after
+   * "---" is a header with nothing in it, and was the same prose.
+   */
+  it('reads the header of a letter that starts with a byte-order mark, and saves it once', () => {
+    t.write('letters/bom.md', '﻿---\r\ntitle: Engineer — Globex\r\ncompany: Globex\r\napplicationId: app-globex\r\n---\r\nDear Globex team,\r\n');
+    const bom = t.store.loadCoverLetters().find((l) => l.id === 'bom')!;
+    expect(bom).toMatchObject({ title: 'Engineer — Globex', company: 'Globex', applicationId: 'app-globex' });
+    expect(bom.body).toBe('Dear Globex team,\r\n');
+    t.store.saveCoverLetter({ ...bom });
+    const raw = fs.readFileSync(path.join(t.dir, 'letters', 'bom.md'), 'utf8');
+    expect(raw.match(/^---$/gm)).toHaveLength(2);
+    expect(t.store.loadCoverLetters().find((l) => l.id === 'bom')?.body).toBe(bom.body);
+  });
+
+  it('reads a header with nothing at all between its fences', () => {
+    t.write('letters/bare-head.md', '---\n---\nJust a body\n');
+    const letter = t.store.loadCoverLetters().find((l) => l.id === 'bare-head')!;
+    expect(letter.body).toBe('Just a body\n');
+    t.write('corpus/bare-head.md', '﻿---\n---\nJust a sample\n');
+    expect(t.store.loadSamples().find((s) => s.id === 'bare-head')?.text).toBe('Just a sample\n');
+  });
+
   it('handles a letter with no front matter at all', () => {
     t.write('letters/bare.md', 'Just a body, no header.');
     const bare = t.store.loadCoverLetters().find((l) => l.id === 'bare');
@@ -439,6 +465,38 @@ describe('a store file with a byte-order mark and Windows line endings', () => {
       expect(data.skillGroups.length).toBeGreaterThan(0);
       expect(data.skillGroups[0]!.name.startsWith('﻿')).toBe(false);
       expect(data.resumes.find((r) => r.id === 'crlf')?.label).toBe('Windows edited');
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe('autofill values in profile.yaml, as they were typed', () => {
+  it('keeps a ZIP code, an extension and a scale as their own characters', () => {
+    const t = makeTempStore();
+    try {
+      t.write(
+        'profile.yaml',
+        [
+          'name: Test Person',
+          'autofill:',
+          '  address_zip: 02115',
+          '  phone_ext: 0042',
+          '  gpa_scale: 4.0',
+          '  over_18: true',
+          '  start_date: 2026-06-01',
+          '  school: "Northeastern University"',
+          '',
+        ].join('\n'),
+      );
+      expect(t.store.load().profile.autofill).toEqual({
+        address_zip: '02115',
+        phone_ext: '0042',
+        gpa_scale: '4.0',
+        over_18: 'true',
+        start_date: '2026-06-01',
+        school: 'Northeastern University',
+      });
     } finally {
       t.cleanup();
     }

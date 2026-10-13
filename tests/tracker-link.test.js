@@ -218,6 +218,51 @@ describe('narrowing the tracker', () => {
     await vi.waitFor(() => expect(companies()).toEqual(['Lyra']));
   });
 
+  /*
+   * `GET /applications` brings the upload folder up to date as it answers,
+   * which writes to out/current. The search box asked it again on every
+   * keystroke, so typing a name rewrote the folder a file dialog may be open
+   * over, once per letter, to show a view of a list already loaded.
+   */
+  it('narrows the list it already has, without asking the server on each keystroke', async () => {
+    const asked = () => globalThis.fetch.mock.calls.filter(([url]) => url === '/api/applications').length;
+    const before = asked();
+    const find = document.querySelector('#app-find');
+    for (const typed of ['h', 'he', 'hel', 'helios']) {
+      find.value = typed;
+      find.dispatchEvent(new window.Event('input'));
+    }
+    const stage = document.querySelector('#app-status');
+    stage.value = 'applied';
+    stage.dispatchEvent(new window.Event('change'));
+    await vi.waitFor(() => expect(companies()).toEqual(['Helios']));
+    expect(asked()).toBe(before);
+  });
+
+  /*
+   * Every keystroke rebuilt every row of the tracker, the first one — which
+   * still matches nearly everything — most of all. The box waits for a pause
+   * in the typing and draws once.
+   */
+  it('draws once somebody stops typing, not once a letter', async () => {
+    const find = document.querySelector('#app-find');
+    const table = document.querySelector('#apps-wrap');
+    let redraws = 0;
+    const seen = new window.MutationObserver((changes) => {
+      if (changes.some((c) => c.target === table)) redraws++;
+    });
+    seen.observe(table, { childList: true });
+    for (const typed of ['h', 'he', 'hel', 'helios']) {
+      find.value = typed;
+      find.dispatchEvent(new window.Event('input'));
+    }
+    expect(rows()).toHaveLength(3);
+    await vi.waitFor(() => expect(rows()).toHaveLength(2));
+    await new Promise((r) => setTimeout(r, 200));
+    seen.disconnect();
+    expect(redraws).toBe(1);
+  });
+
   it('narrows to one stage', async () => {
     const stage = document.querySelector('#app-status');
     stage.value = 'interview';

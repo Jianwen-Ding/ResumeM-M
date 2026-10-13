@@ -96,9 +96,36 @@ describe('the order a picker shows them in', () => {
 describe('when a temporary resume is done with', () => {
   const made = { tier: 'temporary' as const, temporaryFrom: '2026-01-01T00:00:00.000Z' };
 
-  it('counts from the day the application went out', () => {
-    const apps = [app('a1', { resumeId: 'job-x', appliedAt: '2026-03-01T00:00:00.000Z' })];
-    expect(doneAt(spec('job-x', made), apps)).toBe('2026-03-01T00:00:00.000Z');
+  /*
+   * Not once it has gone out, either. The bundle folder that holds what was
+   * sent is under `out/`, which a save does not track, so the resume is the
+   * only record in the history of what went out. Measured: a sweep a week
+   * after sending deleted three resumes whose rows still read `applied`, and
+   * a hundred such rows named resumes that were no longer there.
+   */
+  it('never starts counting on an application that went out', () => {
+    for (const status of ['applied', 'interview', 'offer'] as const) {
+      const apps = [app('a1', { resumeId: 'job-x', status, appliedAt: '2026-03-01T00:00:00.000Z' })];
+      expect(doneAt(spec('job-x', made), apps), status).toBeUndefined();
+    }
+  });
+
+  it('keeps one whose application went out and has since closed', () => {
+    const apps = [
+      app('a1', {
+        resumeId: 'job-x',
+        status: 'closed',
+        appliedAt: '2026-03-01T00:00:00.000Z',
+        history: [
+          { at: '2026-02-28T00:00:00.000Z', status: 'applying' },
+          { at: '2026-03-01T00:00:00.000Z', status: 'applied' },
+          { at: '2026-05-01T00:00:00.000Z', status: 'closed' },
+        ],
+      }),
+    ];
+    expect(doneAt(spec('job-x', made), apps)).toBeUndefined();
+    // And one closed with no history to say whether it went out: kept.
+    expect(doneAt(spec('job-x', made), [app('a1', { resumeId: 'job-x', status: 'closed' })])).toBeUndefined();
   });
 
   /*
@@ -125,14 +152,14 @@ describe('when a temporary resume is done with', () => {
     }
   });
 
-  it('counts a closed application from when it closed, not from when it was sent', () => {
+  it('counts an application closed without going out from when it closed', () => {
     const apps = [
       app('a1', {
         resumeId: 'job-x',
         status: 'closed',
         appliedAt: '2026-03-01T00:00:00.000Z',
         history: [
-          { at: '2026-03-01T00:00:00.000Z', status: 'applied' },
+          { at: '2026-03-01T00:00:00.000Z', status: 'applying' },
           { at: '2026-05-01T00:00:00.000Z', status: 'closed' },
         ],
       }),
@@ -146,10 +173,26 @@ describe('when a temporary resume is done with', () => {
    */
   it('waits for every application that used it, not just the first', () => {
     const apps = [
-      app('a1', { resumeId: 'job-x', status: 'closed', appliedAt: '2026-03-01T00:00:00.000Z' }),
-      app('a2', { resumeId: 'job-x', status: 'interview', appliedAt: '2026-04-01T00:00:00.000Z' }),
+      app('a1', { resumeId: 'job-x', status: 'closed', appliedAt: '2026-03-01T00:00:00.000Z', history: [{ at: '2026-03-01T00:00:00.000Z', status: 'applying' }, { at: '2026-03-20T00:00:00.000Z', status: 'closed' }] }),
+      app('a2', { resumeId: 'job-x', status: 'applying', appliedAt: '2026-04-01T00:00:00.000Z' }),
     ];
     expect(doneAt(spec('job-x', made), apps)).toBeUndefined();
+  });
+
+  /*
+   * The latest close by the clock, not by the alphabet. A close written with
+   * an offset — by hand, or by another tool — sorts as text before a UTC one
+   * that is really earlier, and the week was counted from the wrong one: here
+   * "2026-10-05T23:00:00-07:00" is 06:00 UTC on the 6th, five hours after the
+   * other, and the resume went five hours early.
+   */
+  it('takes the latest close as an instant, whatever way it is written', () => {
+    const closed = (id: string, when: string) =>
+      app(id, { resumeId: 'job-x', status: 'closed', history: [{ at: '2026-10-01T10:00:00.000Z', status: 'applying' }, { at: when, status: 'closed' }] });
+    const apps = [closed('a1', '2026-10-05T23:00:00-07:00'), closed('a2', '2026-10-06T01:00:00.000Z')];
+    const x = spec('job-x', { tier: 'temporary', temporaryFrom: '2026-09-01T00:00:00.000Z' });
+    expect(doneAt(x, apps)).toBe('2026-10-05T23:00:00-07:00');
+    expect(dueToGo({ resumes: [x], applications: apps } as never, { days: 7, now: at('2026-10-13T03:00:00Z') })).toEqual([]);
   });
 
   it('falls back to its own date where no application ever used it', () => {
@@ -198,19 +241,33 @@ describe('when a temporary resume is done with', () => {
 describe('which temporary resumes have run out their week', () => {
   const now = at('2026-09-19T00:00:00.000Z');
   const store = (resumes: ResumeSpec[], applications: Application[] = []) => ({ resumes, applications });
+  // Closed without going out, on the day given: the case the week runs for.
+  const unsent = (closedAt: string, extra: Partial<Application> = {}) =>
+    app('a1', {
+      resumeId: 'job-x',
+      status: 'closed',
+      appliedAt: closedAt,
+      history: [
+        { at: closedAt, status: 'applying' },
+        { at: closedAt, status: 'closed' },
+      ],
+      ...extra,
+    });
 
-  it('takes the ones a week past their application', () => {
-    const data = store(
-      [spec('job-x', { tier: 'temporary' })],
-      [app('a1', { resumeId: 'job-x', appliedAt: new Date(now - 8 * DAY).toISOString() })],
-    );
+  it('takes the ones a week past their application closing unsent', () => {
+    const data = store([spec('job-x', { tier: 'temporary' })], [unsent(new Date(now - 8 * DAY).toISOString())]);
     expect(dueToGo(data, { now }).map((d) => d.id)).toEqual(['job-x']);
   });
 
   it('leaves the ones whose week is not up', () => {
+    const data = store([spec('job-x', { tier: 'temporary' })], [unsent(new Date(now - 6 * DAY).toISOString())]);
+    expect(dueToGo(data, { now })).toEqual([]);
+  });
+
+  it('never takes one whose application was sent, however long ago', () => {
     const data = store(
       [spec('job-x', { tier: 'temporary' })],
-      [app('a1', { resumeId: 'job-x', appliedAt: new Date(now - 6 * DAY).toISOString() })],
+      [app('a1', { resumeId: 'job-x', status: 'applied', appliedAt: new Date(now - 90 * DAY).toISOString() })],
     );
     expect(dueToGo(data, { now })).toEqual([]);
   });
@@ -238,7 +295,7 @@ describe('which temporary resumes have run out their week', () => {
 
   it('says when each one goes, so the list can be shown before it happens', () => {
     const applied = new Date(now - 8 * DAY).toISOString();
-    const data = store([spec('job-x', { tier: 'temporary' })], [app('a1', { resumeId: 'job-x', appliedAt: applied })]);
+    const data = store([spec('job-x', { tier: 'temporary' })], [unsent(applied)]);
     const [due] = dueToGo(data, { now });
     expect(due?.since).toBe(applied);
     expect(Date.parse(due!.at)).toBe(Date.parse(applied) + 7 * DAY);
@@ -252,7 +309,7 @@ describe('which temporary resumes have run out their week', () => {
   it('is switched off by a window of zero or less, not made instant', () => {
     const data = store(
       [spec('job-x', { tier: 'temporary' })],
-      [app('a1', { resumeId: 'job-x', appliedAt: new Date(now - 400 * DAY).toISOString() })],
+      [unsent(new Date(now - 400 * DAY).toISOString())],
     );
     expect(dueToGo(data, { now, days: 0 })).toEqual([]);
     expect(dueToGo(data, { now, days: -5 })).toEqual([]);
@@ -319,13 +376,25 @@ describe('a save being read before it has been migrated', () => {
 describe('a save upgraded today', () => {
   const MIGRATED = '2026-06-01T00:00:00.000Z';
   const LONG_AGO = '2026-03-01T00:00:00.000Z';
+  // Closed long ago without going out: the kind of application the week runs
+  // for. One that went out keeps its resume whatever the dates say.
+  const closedLongAgo = (resumeId: string) =>
+    app('a1', {
+      resumeId,
+      status: 'closed',
+      appliedAt: LONG_AGO,
+      history: [
+        { at: LONG_AGO, status: 'applying' },
+        { at: LONG_AGO, status: 'closed' },
+      ],
+    });
 
   /** What the extension leaves behind: a resume for a posting, and its row. */
   const fromAnOlderVersion = () => {
     const { tiered } = tierResumes([spec('job-acme', { generatedFor: { company: 'Acme', at: LONG_AGO } })], MIGRATED);
     return {
       resumes: tiered,
-      applications: [app('a1', { resumeId: 'job-acme', status: 'applied', appliedAt: LONG_AGO })],
+      applications: [closedLongAgo('job-acme')],
       drafts: [],
     };
   };
@@ -362,7 +431,7 @@ describe('a save upgraded today', () => {
   it('gives a resume marked temporary today its week, however old the application is', () => {
     const data = {
       resumes: [spec('old-one', { tier: 'temporary', temporaryFrom: MIGRATED })],
-      applications: [app('a1', { resumeId: 'old-one', status: 'applied', appliedAt: LONG_AGO })],
+      applications: [closedLongAgo('old-one')],
       drafts: [],
     };
     expect(dueToGo(data, { now: at(MIGRATED) })).toEqual([]);
@@ -374,7 +443,7 @@ describe('a save upgraded today', () => {
     // application is the only clock there is, and it is the right one.
     const data = {
       resumes: [spec('job-zen', { tier: 'temporary' })],
-      applications: [app('a1', { resumeId: 'job-zen', status: 'applied', appliedAt: LONG_AGO })],
+      applications: [closedLongAgo('job-zen')],
       drafts: [],
     };
     expect(dueToGo(data, { now: at(LONG_AGO) + 8 * DAY }).map((d) => d.id)).toEqual(['job-zen']);

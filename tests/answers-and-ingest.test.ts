@@ -544,3 +544,25 @@ describe('a repository read whose extras fail', () => {
     expect(facts.languages).toBeUndefined();
   });
 });
+
+/*
+ * A new version saved under a label with nothing a slug keeps.
+ *
+ * `v_${slug(label)}` is never empty — the "v_" sees to that — so the fallback
+ * after it could not be reached, and a label of "—" made the id a bare "v_".
+ * A second such save then clashed with it and was told apart by the clock.
+ */
+describe('a version saved under a label that slugs to nothing', () => {
+  it('still gets an id of its own', async () => {
+    const Q = 'Why do you want to work here?';
+    t.write('answers.yaml', []);
+    await request(app).post('/api/answers/save').send({ question: Q, answer: 'First.', label: 'Acme' }).expect(200);
+    await request(app).post('/api/answers/save').send({ question: Q, answer: 'Second.', label: '—' }).expect(200);
+    const saved = await request(app).post('/api/answers/save').send({ question: Q, answer: 'Third.', label: '！' }).expect(200);
+    const item = (saved.body.answers as AnswerBankItem[]).find((a) => a.question === Q)!;
+    const ids = item.variants.map((v) => v.id);
+    expect(ids).not.toContain('v_');
+    expect(new Set(ids).size, ids.join(', ')).toBe(3);
+    expect(item.variants.find((v) => v.id === item.default)?.text).toBe('Third.');
+  });
+});

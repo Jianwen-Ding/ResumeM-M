@@ -199,23 +199,25 @@ describe('links and lists that point elsewhere', () => {
    * the store's content outside the store and outside git, and would overwrite
    * whatever the link points at.
    *
-   * The atomic write settles it by construction — a temp file renamed over the
-   * name replaces the link itself — and that is worth a test, because it is a
-   * guarantee somebody could undo by making this a plain `writeFileSync` on a
-   * quiet afternoon.
+   * It used to be read through and then replaced by the first save (the
+   * atomic write renames a temp file over the name, which replaces the link
+   * itself). The read was the half that was wrong: a save is a git
+   * repository, a pull can bring a link in, and one that leads to a key file
+   * was shown in the editor and sent to the AI as a resume. So a link in the
+   * save is now refused outright, for a read and for a write, and what it
+   * points at is never touched. See `Store.assertNoLink`.
    */
-  it('replaces a symlink in the store rather than writing through it', () => {
+  it('refuses a symlink in the store rather than reading or writing through it', () => {
     const theirs = elsewhere();
     const target = path.join(theirs, 'kept-in-dropbox.yaml');
     fs.writeFileSync(target, 'label: Theirs\n', 'utf8');
     fs.symlinkSync(target, path.join(t.dir, 'resumes', 'linked.yaml'));
 
-    expect(t.store.getResume('linked')?.label).toBe('Theirs');
-    t.store.saveResume({ id: 'linked', label: 'Saved from the app' });
+    expect(() => t.store.getResume('linked')).toThrow(/symbolic link/);
+    expect(() => t.store.saveResume({ id: 'linked', label: 'Saved from the app' })).toThrow(/symbolic link/);
 
     expect(fs.readFileSync(target, 'utf8')).toBe('label: Theirs\n');
-    expect(fs.lstatSync(path.join(t.dir, 'resumes', 'linked.yaml')).isSymbolicLink()).toBe(false);
-    expect(t.store.getResume('linked')?.label).toBe('Saved from the app');
+    expect(fs.lstatSync(path.join(t.dir, 'resumes', 'linked.yaml')).isSymbolicLink()).toBe(true);
   });
 
   /*

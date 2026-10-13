@@ -2555,7 +2555,9 @@ async function main() {
       await typedCard.waitFor({ timeout: 10_000 });
 
       const refuseWrite = (route) => (route.request().method() === 'PUT' ? route.abort('connectionrefused') : route.fallback());
-      await page.route('**/api/answers', refuseWrite);
+      // The bank's own path, with or without the `?basedOn=` its writes now carry; not `/answers/save`.
+      const theBank = (url) => url.pathname === '/api/answers';
+      await page.route(theBank, refuseWrite);
       await typedCard.locator('button', { hasText: 'Edit' }).click();
       await dialogUp();
       const labelShown = await page.locator('#f_label').inputValue();
@@ -2582,7 +2584,7 @@ async function main() {
       check('and a delete that fails says so, leaving the answer listed',
         (await page.locator('#status.err').count()) > 0 && (await typedCard.count()) === 1,
         await page.locator('#status').innerText().catch(() => ''));
-      await page.unroute('**/api/answers', refuseWrite);
+      await page.unroute(theBank, refuseWrite);
 
       /*
        * And the label. The box was there on every edit and read only when

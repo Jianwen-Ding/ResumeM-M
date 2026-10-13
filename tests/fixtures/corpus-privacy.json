@@ -1,0 +1,1472 @@
+{
+ "check": "privacy",
+ "comment": "Built from /tmp/claude-0/hunt17-corpus/privacy.json in round 17. expect: null (allowed), \"refuse\" (any refusal), the exact refusal, or {\"match\": text} for a refusal containing text. Cases the corpus only probed are left out. \"round\" and \"source\" say where each case came from; \"comment\" records a decision; \"todo\" marks an open gap the code does not yet handle. A value stored as {\"parts\": [...]} is joined with \"\" at runtime.",
+ "cases": [
+  {
+   "id": "privacy-001",
+   "input": "My paper (https://doi.org/10.1145/3292500.3330701) introduced the method.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:220 (de84021) [test]; r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-002",
+   "input": "DOI: 10.1145/3292500.3330701",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:221 (de84021) [test]"
+  },
+  {
+   "id": "privacy-003",
+   "input": "arXiv:2310.12345 describes it",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:222 (de84021) [test]; r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-004",
+   "input": "ORCID: 0000-0002-1825-0097",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:223 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-005",
+   "input": "https://orcid.org/0000-0002-1825-0097",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:224 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-006",
+   "input": "https://www.linkedin.com/in/jane-doe-1234567890",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:225 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-007",
+   "input": "linkedin.com/in/jane-doe-1234567890",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:225 (de84021) [test]"
+  },
+  {
+   "id": "privacy-008",
+   "input": "https://github.com/jane/repo/commit/1234567890abcdef",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:227 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-009",
+   "input": "git@github.com:jane/repo.git",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:228 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-010",
+   "input": "I am applying for requisition 2024-0012345 posted on your site.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:229 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-011",
+   "input": "We processed 1.000.000.000 events a day.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:230 (de84021) [test]; r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-012",
+   "input": "served 1 234 567 890 requests",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:231 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-013",
+   "input": "Python 3.11.4 2023.10.1 versions",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:232 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-014",
+   "input": "Between 2015 and 2019, 2020 2021 2022 were busy.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:233 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-015",
+   "input": "I mentored 3 Junior Engineers to drive the migration.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:234 (de84021) [test]; r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-016",
+   "input": "I grew the team to 12 Data Scientists in a way that scaled.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:235 (de84021) [test]; r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-017",
+   "input": "At Google I led 4 Senior Engineers to drive adoption.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:236 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-018",
+   "input": "I led 4 engineers to drive adoption.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:237 (de84021) [test]; r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-019",
+   "input": "Req ID: 2024 0012345",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/ai-privacy.test.ts:238 (b5697f8) [test]; r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-020",
+   "input": "ISBN 978 0 13 468599 1",
+   "expect": null,
+   "round": "r14, r15, r16",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:241 (f94fe4c) [test]; r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]; r15 hunt15-rmm/phone.ts + report [report]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-021",
+   "input": "batch 4096 8192 16384",
+   "expect": null,
+   "round": "r15, r16",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:242 (f94fe4c) [test]; r15 hunt15-rmm/phone.ts + report [report]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-022",
+   "input": "ports 8080 8443 9090",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:243 (f94fe4c) [test]; r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-023",
+   "input": "order 10000 20000",
+   "expect": null,
+   "round": "r15, r16",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:244 (f94fe4c) [test]; r15 hunt15-rmm/phone.ts + report [report]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-024",
+   "input": "IDs 12345 67890",
+   "expect": null,
+   "round": "r15, r16",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:245 (f94fe4c) [test]; r15 hunt15-rmm/phone.ts + report [report]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-025",
+   "input": "tickets 00123 45678",
+   "expect": null,
+   "round": "r15, r16",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:246 (f94fe4c) [test]; r15 hunt15-rmm/phone.ts + report [list]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-026",
+   "input": "revenue grew 100000 200000",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:247 (f94fe4c) [test]; r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-027",
+   "input": "Order no. 98765 43210",
+   "expect": null,
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:248 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-028",
+   "input": "orders # 98765 43210",
+   "expect": null,
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:249 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-029",
+   "input": "Raised 10000 20000 dollars",
+   "expect": null,
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:250 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-030",
+   "input": "Call me at (555) 555-5555.",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:256 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-031",
+   "input": "+1 415 555 1234",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:257 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-032",
+   "input": "Reach me on 415.555.1234.",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:258 (de84021) [test]"
+  },
+  {
+   "id": "privacy-033",
+   "input": "phone: 415-555-1234 anytime",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:259 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-034",
+   "input": "My number is 4155551234",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:260 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-035",
+   "input": "call 415 555 1234 2 times",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:261 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-036",
+   "input": "Tel.415.555.1234",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:262 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-037",
+   "input": "415-555-1234x22",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:263 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-038",
+   "input": "Reach me at 555-555-5555 or https://github.com/jane",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:264 (de84021) [test]"
+  },
+  {
+   "id": "privacy-039",
+   "input": "someone@example.edu",
+   "expect": "an email address",
+   "round": "r10, r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:265 (de84021) [test]; r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]"
+  },
+  {
+   "id": "privacy-040",
+   "input": "Email me@example.com: thanks",
+   "expect": "an email address",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:266 (de84021) [test]"
+  },
+  {
+   "id": "privacy-041",
+   "input": "https://example.com/?contact=jane@example.com",
+   "expect": "an email address",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:267 (de84021) [test]"
+  },
+  {
+   "id": "privacy-042",
+   "input": "I live at 123 Main Street.",
+   "expect": "a street address",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:268 (de84021) [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-043",
+   "input": "I live at 221B Baker Street.",
+   "expect": "a street address",
+   "round": "r12",
+   "source": "r12 ResumeM-M tests/ai-privacy.test.ts:269 (de84021) [test]; r12 hunt12-rmm/privacy.test.ts [list]"
+  },
+  {
+   "id": "privacy-044",
+   "input": "+34 912 345 678",
+   "expect": "a phone number",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/ai-privacy.test.ts:271 (b5697f8) [test]; r14 hunt14-rmm/phone2.test.ts [report]"
+  },
+  {
+   "id": "privacy-045",
+   "input": "+31 612 345 678",
+   "expect": "a phone number",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/ai-privacy.test.ts:272 (b5697f8) [test]; r14 hunt14-rmm/phone2.test.ts [report]"
+  },
+  {
+   "id": "privacy-046",
+   "input": "07700 900123",
+   "expect": "a phone number",
+   "round": "r14, r15",
+   "source": "r14 ResumeM-M tests/ai-privacy.test.ts:274 (b5697f8) [test]; r14 hunt14-rmm/phone.test.ts (phones) [report]; r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-047",
+   "input": "Call 98765 43210 after six.",
+   "expect": "a phone number",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/ai-privacy.test.ts:275 (b5697f8) [test]"
+  },
+  {
+   "id": "privacy-048",
+   "input": "030 12345678",
+   "expect": "a phone number",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:276 (f94fe4c) [test]"
+  },
+  {
+   "id": "privacy-049",
+   "input": "+49 (0)30 1234567",
+   "expect": "a phone number",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:277 (f94fe4c) [test]"
+  },
+  {
+   "id": "privacy-050",
+   "input": "+44 (0) 20 7946 0958",
+   "expect": "a phone number",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:278 (f94fe4c) [test]"
+  },
+  {
+   "id": "privacy-051",
+   "input": "grew revenue by +1 234 567 890",
+   "expect": "a phone number",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/ai-privacy.test.ts:280 (f94fe4c) [test]; r15 hunt15-rmm/phone.ts + report [report]",
+   "comment": "Round 17 decision: privacy wins. Written with a country code it is exactly a phone's shape."
+  },
+  {
+   "id": "privacy-052",
+   "input": "Mobile +33 6 12 34 56 78",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:282 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-053",
+   "input": "Call me +33 1 42 68 53 00",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:283 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-054",
+   "input": "Mobile +61 4 1234 5678",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:284 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-055",
+   "input": "Phone +61 2 9876 5432",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:285 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-056",
+   "input": "Text me about the job 07700 900123",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:287 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-057",
+   "input": "For the job: 98765 43210",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:288 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-058",
+   "input": "Reach me in any case 07700 900123",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:289 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-059",
+   "input": "Item: 98765 43210",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:290 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-060",
+   "input": "Ref: 07700 900123",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:291 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-061",
+   "input": "Contact re PR 07700 900123",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:292 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-062",
+   "input": "IDs 07700 900123",
+   "expect": null,
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:294 (7f3b297) [test]",
+   "comment": "Round 17 decision: named as IDs, trunk 0 or not; the label is the only thing that tells it from \"IDs 01234 56789\". Overrides the r16 test."
+  },
+  {
+   "id": "privacy-063",
+   "input": "Call 0049 1520 1234 5678",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:296 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-064",
+   "input": "Call 90000 80000",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/ai-privacy.test.ts:297 (7f3b297) [test]; r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-065",
+   "input": "my SSN is 123-45-6789",
+   "expect": {
+    "match": "identifier"
+   },
+   "round": "pre-r8 (883d48d)",
+   "source": "pre-r8 (883d48d) ResumeM-M tests/ai-privacy.test.ts:49 (883d48d) [test]"
+  },
+  {
+   "id": "privacy-066",
+   "input": "Call me at (555) 555-5555, someone@example.edu",
+   "expect": "an email address",
+   "round": "r10, r12",
+   "source": "r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]; r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-067",
+   "input": "My number is +1 617 555 0142",
+   "expect": "a phone number",
+   "round": "r10",
+   "source": "r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]"
+  },
+  {
+   "id": "privacy-068",
+   "input": "I live at 12 Harbor Street, Boston",
+   "expect": "a street address",
+   "round": "r10",
+   "source": "r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]"
+  },
+  {
+   "id": "privacy-069",
+   "input": "SSN: 123-45-6789",
+   "expect": {
+    "match": "identifier"
+   },
+   "round": "r10",
+   "source": "r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]"
+  },
+  {
+   "id": "privacy-070",
+   "input": "https://www.linkedin.com/in/someone-123456",
+   "expect": null,
+   "round": "r10",
+   "source": "r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]"
+  },
+  {
+   "id": "privacy-071",
+   "input": "https://medium.com/@someone",
+   "expect": null,
+   "round": "r10",
+   "source": "r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]"
+  },
+  {
+   "id": "privacy-072",
+   "input": "At Helios Robotics the ingest path is the product, and I have spent 2023 and 2024 building one. I led 4 engineers to drive p99 latency from 1200 ms to 300 ms across 3 regions, and moved 2 teams onto one Kafka cluster. ",
+   "expect": null,
+   "round": "r10",
+   "source": "r10 ResumeM-M tests/mcp-writing.test.ts (5064b3c), via save_answer/save_letter [test]"
+  },
+  {
+   "id": "privacy-073",
+   "input": "Our team grew from 2018 2019 to 2020.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-075",
+   "input": "In 2021 I joined 3 Acme Way projects.",
+   "expect": "refuse",
+   "round": "r12",
+   "source": "r12 fix12 report: \"still refused, which I think is correct\" [decision]"
+  },
+  {
+   "id": "privacy-076",
+   "input": "Reach me via github.com/jane",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-077",
+   "input": "I reduced build time from 1200 to 300 seconds, and 1000000 users.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-078",
+   "input": "Handled 1,234,567,890 requests per day.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-079",
+   "input": "https://scholar.google.com/citations?user=abc&hl=en&oi=ao 12345678901",
+   "expect": "refuse",
+   "round": "r12",
+   "source": "r12 fix12 report: \"still refused, which I think is correct\" [decision]"
+  },
+  {
+   "id": "privacy-080",
+   "input": "I joined 10 Downing Street staff",
+   "expect": "a street address",
+   "round": "r12",
+   "source": "r12 fix12 report: \"still refused, which I think is correct\" [decision]",
+   "comment": "Round 17 decision: a famous address is still a street address, refused."
+  },
+  {
+   "id": "privacy-081",
+   "input": "Our 2 Main Street stores",
+   "expect": "refuse",
+   "round": "r12",
+   "source": "r12 fix12 report: \"still refused, which I think is correct\" [decision]"
+  },
+  {
+   "id": "privacy-082",
+   "input": "I managed 3 Product Lanes in 5 Regions to deliver",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-083",
+   "input": "Wrote about it at https://medium.com/@jane.doe/post-123",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-084",
+   "input": "I hired 5 New Grads to drive our roadmap.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-085",
+   "input": "We shipped 2 iOS Apps in place of the old web app.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-086",
+   "input": "Over 3 Google Cloud regions, the way we deployed changed.",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 hunt12-rmm/privacy2.test.ts (review: legitimate text refused) [report]"
+  },
+  {
+   "id": "privacy-087",
+   "input": "415.555.1234",
+   "expect": "a phone number",
+   "round": "r12, r14",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]; r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-088",
+   "input": "Reach 415.555.1234.",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-089",
+   "input": "+44 20 7946 0958",
+   "expect": "a phone number",
+   "round": "r12, r14, r15",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]; r14 hunt14-rmm/phone.test.ts (phones) [report]; r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-090",
+   "input": "01.23.45.67.89",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-091",
+   "input": "+33 1 23 45 67 89",
+   "expect": "a phone number",
+   "round": "r12, r14",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]; r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-092",
+   "input": "me@example.com: thanks",
+   "expect": "an email address",
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-094",
+   "input": "SSN 123-45-6789",
+   "expect": {
+    "match": "identifier"
+   },
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-095",
+   "input": "(415) 5551234",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-096",
+   "input": "+1 4155551234",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-097",
+   "input": "https://x.com/?e=a@b.com",
+   "expect": "an email address",
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-098",
+   "input": "Reach me at 555-555-5555 or https://github.com/a",
+   "expect": "a phone number",
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-099",
+   "input": "jane-doe-1234567890",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-100",
+   "input": "v2.1234567890",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-101",
+   "input": "id_1234567890",
+   "expect": null,
+   "round": "r12",
+   "source": "r12 fix12/p.test.ts + fix12 report [report]"
+  },
+  {
+   "id": "privacy-102",
+   "input": "Call 555-123-4567",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [report]"
+  },
+  {
+   "id": "privacy-103",
+   "input": "Call me at 555-123-4567.",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-104",
+   "input": "415 555 1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [report]"
+  },
+  {
+   "id": "privacy-105",
+   "input": "(415) 555-1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-106",
+   "input": "415-555-1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-107",
+   "input": "+1-415-555-1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-108",
+   "input": "+1.415.555.1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-109",
+   "input": "4155551234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-110",
+   "input": "Tel: 020 7946 0958",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-111",
+   "input": "+49 30 12345678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-112",
+   "input": "+49 (0)30 1234 5678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-113",
+   "input": "01 23 45 67 89",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-114",
+   "input": "+86 138 0013 8000",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-115",
+   "input": "13800138000",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-116",
+   "input": "+91 98765 43210",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-117",
+   "input": "98765 43210",
+   "expect": "a phone number",
+   "round": "r14, r15",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [report]; r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-118",
+   "input": "555-1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]",
+   "todo": "Never right in any round. A seven-digit local number is the shape of a range like \"250-5000\" or \"100-1000\"; no rule found that refuses the one without the other."
+  },
+  {
+   "id": "privacy-119",
+   "input": "reach me on 415-555-1234x22",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-120",
+   "input": "phone:4155551234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-121",
+   "input": "ph 415 555 1234.",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-122",
+   "input": "+1 (415) 555-1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-123",
+   "input": "1-800-555-1234",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-124",
+   "input": "+61 2 9374 4000",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-125",
+   "input": "+44 7700 900123",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-126",
+   "input": "Improved p99 latency from 1200 ms to 300 ms across 4 regions in 2023 and 2024.",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-127",
+   "input": "Handled 10,000,000 requests per day",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-128",
+   "input": "Served 1 000 000 users",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-129",
+   "input": "Released v2.3.1 on 2023-10-01",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-130",
+   "input": "Order ID 1234567890",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [report] (review: \"still refused although legitimate (also refused before)\")",
+   "comment": "Never right before round 17 (open gap); passes now."
+  },
+  {
+   "id": "privacy-131",
+   "input": "Grew ARR from $1.2M to $4.5M (2021-2023)",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-132",
+   "input": "Reduced cost by 30% for 12 teams over 18 months, 2019 2020 2021",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-133",
+   "input": "Patent US 10,123,456 B2",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-134",
+   "input": "Patent US10123456B2",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-135",
+   "input": "ISBN 978-0-13-468599-1",
+   "expect": null,
+   "round": "r14, r15",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]; r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-136",
+   "input": "Built for 2 000 000 customers in 150 countries",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-137",
+   "input": "ran 24 7 365 operations",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-138",
+   "input": "from 2015 to 2020 at 3 companies",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-139",
+   "input": "Lead 15 engineers across 3 timezones 2018 2019",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-140",
+   "input": "CVE-2023-12345",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-141",
+   "input": "issue #123456789012",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [report] (review: \"still refused although legitimate (also refused before)\")",
+   "comment": "Never right before round 17 (open gap); passes now."
+  },
+  {
+   "id": "privacy-142",
+   "input": "requisition R-2024-0012345",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-143",
+   "input": "Job ID 2024 12345",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-144",
+   "input": "I worked at 1 Infinite Loop Cupertino",
+   "expect": "a street address",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]",
+   "comment": "Round 17 decision: overrides the r14 list. \"Loop\" is a street word."
+  },
+  {
+   "id": "privacy-145",
+   "input": "see RFC 7231 and RFC 9110 sections 4 and 6",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-146",
+   "input": "between 2019 and 2021 I shipped 3 4 5 releases",
+   "expect": null,
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone.test.ts (\"// legit\") [list]"
+  },
+  {
+   "id": "privacy-147",
+   "input": "+34 612 345 678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [report]"
+  },
+  {
+   "id": "privacy-148",
+   "input": "+39 333 123 4567",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-149",
+   "input": "+81 3-1234-5678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-150",
+   "input": "03-1234-5678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-151",
+   "input": "+44 (0) 7700 900123",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-152",
+   "input": "07700900123",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-153",
+   "input": "0207 946 0958",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-154",
+   "input": "+1 650 253 0000",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-155",
+   "input": "650-253-0000 ext. 12",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-156",
+   "input": "+7 912 345 67 89",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-157",
+   "input": "+41 44 668 18 00",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-158",
+   "input": "+353 1 234 5678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-159",
+   "input": "+852 2123 4567",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-160",
+   "input": "+65 6123 4567",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-161",
+   "input": "+86 10 1234 5678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-162",
+   "input": "+55 11 91234-5678",
+   "expect": "refuse",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/phone2.test.ts [list]"
+  },
+  {
+   "id": "privacy-163",
+   "input": "led a $1.5 million program",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-164",
+   "input": "+20% growth",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-165",
+   "input": "2023-2024",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-166",
+   "input": "reduced p99 latency from 450 ms to 120 ms",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-167",
+   "input": "Call me at +1 415 555 1234",
+   "expect": "a phone number",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [report]"
+  },
+  {
+   "id": "privacy-168",
+   "input": "served 1 234 567 890 users",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-169",
+   "input": "served 12 345 678 901 users",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-170",
+   "input": "cut costs from 120 000 to 95 000",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-171",
+   "input": "between 2019 and 2023 we shipped 2 500 000 units",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-172",
+   "input": "Req 2024 0012345",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-173",
+   "input": "processed 50000 records in 12345 ms",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-174",
+   "input": "from 45000 to 120000 rps",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-175",
+   "input": "served 25000 to 150000 users",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-176",
+   "input": "in 2023 handled 1500000 requests",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-177",
+   "input": "scaled 2023 2024 to 1000000",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-178",
+   "input": "grew from 10 000 000 to 25 000 000",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-179",
+   "input": "raised $12 500 000",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-180",
+   "input": "between 2015 and 2020, 15 000 000 users",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-181",
+   "input": "ran 128 256 512 1024 jobs",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]",
+   "comment": "Never right before round 17 (open gap); passes now."
+  },
+  {
+   "id": "privacy-182",
+   "input": "from 1024 to 4096 to 16384 nodes",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-183",
+   "input": "+15% QoQ, 3 000 000 users",
+   "expect": null,
+   "round": "r15",
+   "source": "r15 hunt15-rmm/phone.ts + report [list]"
+  },
+  {
+   "id": "privacy-184",
+   "input": "Phone IDs 555 123 4567",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-185",
+   "input": "order 415 555 1234",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-186",
+   "input": "batch: call 020 7946 0958",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-187",
+   "input": "+1 800 000 0000",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-188",
+   "input": "0800 000 0000",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-189",
+   "input": "1 800 000 0000",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-190",
+   "input": "Mobile: 06 12 34 56 78",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-191",
+   "input": "Phone +27 21 123 4567",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-192",
+   "input": "Call 91 9876543210",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-193",
+   "input": "Call 0091 9876543210",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-194",
+   "input": "Call 44 7700900123",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-195",
+   "input": "Call 98000 70000",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-196",
+   "input": "Tel: 0161 496 0000",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-197",
+   "input": "Tel 020 7946 0000",
+   "expect": "a phone number",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (phones) [list]"
+  },
+  {
+   "id": "privacy-198",
+   "input": "serial 12345 67890",
+   "expect": null,
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]",
+   "comment": "Round 17 decision: \"serial\" names a device's number, never a person's, so it may be allowed."
+  },
+  {
+   "id": "privacy-199",
+   "input": "account 12345 67890",
+   "expect": "refuse",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]",
+   "comment": "Round 17 decision: overrides the r16 list. An account number can be a person's."
+  },
+  {
+   "id": "privacy-200",
+   "input": "grew users from 10000 to 20000",
+   "expect": null,
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]"
+  },
+  {
+   "id": "privacy-201",
+   "input": "PO 98765 43210",
+   "expect": "refuse",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/phone.test.ts (\"should NOT be phones\") [list]",
+   "comment": "Round 17 decision: overrides the r16 list. \"PO\" can be a person's (a P.O. box)."
+  },
+  {
+   "id": "privacy-r17-01",
+   "input": "IDs 01234 56789",
+   "expect": null,
+   "round": "r17",
+   "source": "r17 review: named as IDs, refused for the trunk 0"
+  },
+  {
+   "id": "privacy-r17-02",
+   "input": "order 01234 56789",
+   "expect": null,
+   "round": "r17",
+   "source": "r17 review: named as an order, refused for the trunk 0"
+  },
+  {
+   "id": "privacy-r17-03",
+   "input": "Order 0012 3456 7890",
+   "expect": null,
+   "round": "r17",
+   "source": "r17 review: \"0012\" read as a dialled +12"
+  },
+  {
+   "id": "privacy-r17-04",
+   "input": "Revenue grew 70000 60000",
+   "expect": null,
+   "round": "r17",
+   "source": "r17 review: round figures read as an Indian mobile"
+  },
+  {
+   "id": "privacy-r17-05",
+   "input": "+33 6 12 34 56 78",
+   "expect": "a phone number",
+   "round": "r17",
+   "source": "r17 review: keep refusing the round-16 phones"
+  },
+  {
+   "id": "privacy-r17-06",
+   "input": "+61 4 1234 5678",
+   "expect": "a phone number",
+   "round": "r17",
+   "source": "r17 review: keep refusing the round-16 phones"
+  },
+  {
+   "id": "privacy-r17-07",
+   "input": "415 555 1234 650 555 1234",
+   "expect": "a phone number",
+   "round": "r17",
+   "source": "r17 fix: two phones in a row are not a list of figures"
+  },
+  {
+   "id": "privacy-r17-08",
+   "input": "Phone: 90000 80000",
+   "expect": "a phone number",
+   "round": "r17",
+   "source": "r17 fix: a round pair after a phone word"
+  }
+ ]
+}

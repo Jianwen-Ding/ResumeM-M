@@ -5,17 +5,17 @@ import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
 import { ignoreBrokenPipe } from './cli-io.js';
-import { Repo, cloneRepo } from './git/repo.js';
+import { Repo, cloneRepo, commitQuietly, withCommit } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
-import { findProjectRoot, resolveStoreDir, seedStore } from './model/location.js';
-import { buildBundle, slug, stats } from './model/applications.js';
+import { findProjectRoot, isEmptyStore, resolveStore, seedStore } from './model/location.js';
+import { buildBundle, localDay, slug, stats } from './model/applications.js';
 import { buildMaster, resolveResume } from './model/resolve.js';
-import { Store } from './model/store.js';
+import { Store, aiSwitchedOff } from './model/store.js';
 import { currentIgnore } from './model/current.js';
 import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
-import type { WritingSample } from './model/types.js';
+import type { StoreConfig, WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
 
 // Every command here prints as it goes rather than buffering everything up
@@ -35,7 +35,7 @@ const projectRoot = findProjectRoot(path.dirname(fileURLToPath(import.meta.url))
  * which is the exact thing that arrangement exists to prevent. A flag that is
  * accepted and discarded is worse than one that is rejected.
  */
-const dataDir = resolveStoreDir(projectRoot, arg(process.argv.slice(2), 'data'));
+const { dir: dataDir, from: dataFrom } = resolveStore(projectRoot, arg(process.argv.slice(2), 'data'));
 /*
  * Say so when a save is made rather than opened.
  *
@@ -66,8 +66,10 @@ const WORKS_IN_A_STORE = new Set([
   'apply',
   'track',
   'save',
+  'pull',
   'voice',
   'serve',
+  'config',
 ]);
 
 /*
@@ -96,7 +98,13 @@ const USAGE = `rmm — resume mix-and-match
   rmm voice add <file…> [--dry-run] [--no-ai]
                                   Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
-  rmm save [-m "why"] [--push]    Commit everything in the store to git
+  rmm save [-m "why"] [--pull] [--push]
+                                  Commit everything in the store to git, then
+                                  bring in the remote's changes and send yours
+  rmm pull                        Bring in what was pushed from another machine
+  rmm config set ai.enabled <true|false>
+                                  Turn the AI on or off; on also answers a
+                                  pull or clone that switched it off here
   rmm clone <repo> <folder>       Bring a save down from where it is pushed,
                                   and open it
   rmm serve [--port 4600]         Start the editor GUI and extension API
@@ -136,7 +144,7 @@ const TAKES: Record<string, { value?: string[]; bare?: string[] }> = {
   build: { bare: ['all'] },
   feedback: { value: ['focus'] },
   apply: { value: ['company', 'role', 'url'] },
-  save: { value: ['message', 'm'], bare: ['push'] },
+  save: { value: ['message', 'm'], bare: ['push', 'pull'] },
   voice: { bare: ['dry-run', 'no-ai'] },
   serve: { value: ['port'] },
 };
@@ -335,6 +343,38 @@ function shortFlag(argv: string[], flag: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+/**
+ * Commit what a command has just written, and let a failed commit be a
+ * warning rather than a failed command.
+ *
+ * `apply` and `voice add` called `repo.commitAll` bare, so a commit that
+ * failed — git's `index.lock` held by a server on the same save, most often —
+ * failed the command after its work was done: `rmm apply` filed the
+ * application, wrote the bundle, and exited 1, and a script reading that
+ * would file it again. The same handling as the server's (`commitQuietly`):
+ * the write stands, and what is owed is a line saying the history did not
+ * get it, and how to put it there. A commit with nothing in it — the
+ * server's own commit took these files a moment before — is not a failure.
+ *
+ * `ensure` first, because `commitAll` returns nothing when the save is not a
+ * repository yet, so a CLI-only user with auto-commit on got no history at
+ * all and nothing said so.
+ */
+async function commitFromTerminal(repo: Repo, message: string, paths?: string[]): Promise<void> {
+  try {
+    await repo.ensure();
+  } catch (err) {
+    repo.lastCommitError = { message: err instanceof Error ? err.message : String(err), at: new Date().toISOString() };
+  }
+  if (!repo.lastCommitError) await commitQuietly(repo, message, paths);
+  if (repo.lastCommitError) {
+    console.warn(
+      `  ! Written, but not in the version history yet: ${repo.lastCommitError.message}. ` +
+        `\`rmm save --data ${repo.root}\` adds it.`,
+    );
+  }
+}
+
 function plural(n: number, word: string): string {
   return `${n} ${n === 1 ? word : `${word}s`}`;
 }
@@ -412,6 +452,8 @@ async function main(argv: string[]): Promise<number> {
 
   const store = new Store(dataDir);
   const repo = Repo.forStore(dataDir, () => currentIgnore(store));
+  // What it says to do next is said for a terminal. See `Repo.inTerminal`.
+  repo.inTerminal = true;
 
   switch (command) {
     case 'list': {
@@ -539,7 +581,25 @@ async function main(argv: string[]): Promise<number> {
       const prompt = feedbackPrompt(data, resolveResume(id, data), arg(rest, 'focus'));
       const result = await runAgent(data.config, prompt);
       if (!result.executed) {
-        console.log('AI is disabled (ai.enabled: false in data/config.yaml).');
+        /*
+         * Why, in the words that fit. "ai.enabled: false in config.yaml" was
+         * said whatever the reason, so somebody whose AI a pull had switched
+         * off went to config.yaml, found `enabled: true` there, and had
+         * nothing to go on. The switch-off says what changed, and how to
+         * answer it from here.
+         */
+        const switchedOff = aiSwitchedOff(store.root);
+        if (switchedOff) {
+          console.log(`AI is switched off on this machine. ${switchedOff}`);
+          console.log(
+            `Look at the command in ${path.join(dataDir, 'config.yaml')}, then turn it back on with ` +
+              '`rmm config set ai.enabled true` (or in Settings in `rmm serve`).',
+          );
+        } else if (process.env.RMM_AI === '0') {
+          console.log('AI is disabled (RMM_AI=0 is set in the environment).');
+        } else {
+          console.log(`AI is disabled (ai.enabled is not true in ${path.join(dataDir, 'config.yaml')}).`);
+        }
         console.log('Here is the prompt it would have run — paste it wherever you like:\n');
       }
       console.log(result.output);
@@ -556,11 +616,20 @@ async function main(argv: string[]): Promise<number> {
       }
       const result = await buildBundle(store, { resumeId: id, company, role, url: arg(rest, 'url') });
       if (store.loadConfig().git.autoCommit) {
-        // `commitAll` returns undefined when the store is not a repo yet, so a
-        // CLI-only user with auto-commit on got no history at all and nothing
-        // said so. `voice add` and `serve` already do this.
-        await repo.ensure();
-        await repo.commitAll(`Apply: ${company} — ${role}`);
+        /*
+         * Only what this command wrote: the tracker, the resumes it may have
+         * marked as kept (see `Store.saveApplications`), and the bundle when
+         * it is inside the save. A server running on the same save has edits
+         * of its own on disk, and `.` put them into this commit under
+         * "Apply: …", to be missing from the commit that was theirs.
+         */
+        const bundle = path.relative(store.root, result.dir);
+        const inside = bundle && !bundle.startsWith('..') && !path.isAbsolute(bundle);
+        await commitFromTerminal(repo, `Apply: ${company} — ${role}`, [
+          'applications.yaml',
+          'resumes',
+          ...(inside ? [bundle.split(path.sep).join('/')] : []),
+        ]);
       }
       console.log(`Bundle → ${path.relative(process.cwd(), result.dir)}`);
       for (const f of result.files) console.log(`  ${f}`);
@@ -595,7 +664,9 @@ async function main(argv: string[]): Promise<number> {
        * the state of what happened, it does not undo it. Hence the line
        * saying so, rather than leaving the number to speak for itself.
        */
-      if (!result.fits || result.missing) {
+      // The letter too: it is attached beside the resume, and a two-page one
+      // is as much "not cleanly" as a two-page resume.
+      if (!result.fits || result.letterFits === false || result.missing) {
         console.warn('The bundle is written and the application is filed — but not cleanly. See above.');
         return 1;
       }
@@ -608,7 +679,20 @@ async function main(argv: string[]): Promise<number> {
       console.log(`${s.total} applications — ${s.last7} in the last 7 days, ${s.last30} in the last 30`);
       console.log(`Response rate (OA or beyond): ${s.responseRate}%\n`);
       for (const a of [...apps].sort((x, y) => (y.appliedAt ?? '').localeCompare(x.appliedAt ?? ''))) {
-        const when = a.appliedAt?.slice(0, 10) ?? '          ';
+        /*
+         * The day on this machine's clock, as the ids, the GUI and every
+         * other date this program shows. `appliedAt` is UTC, and its first
+         * ten characters are the day in Greenwich: an application filed on
+         * the evening of the 11th in California printed as the 12th here,
+         * beside an id and a tracker row both reading the 11th. A bare date
+         * typed by hand has no time to move, and is printed as it is.
+         */
+        const at = a.appliedAt ? new Date(a.appliedAt) : undefined;
+        const when = !a.appliedAt
+          ? '          '
+          : /^\d{4}-\d{2}-\d{2}$/.test(a.appliedAt) || Number.isNaN(at!.getTime())
+            ? a.appliedAt.slice(0, 10)
+            : localDay(at);
         console.log(`  ${when}  ${a.status.padEnd(10)} ${a.company} — ${a.role}`);
       }
       return 0;
@@ -624,6 +708,7 @@ async function main(argv: string[]): Promise<number> {
       const result = await saveStore(repo, {
         message: arg(rest, 'message') ?? arg(rest, 'm') ?? shortFlag(rest, '-m'),
         push: rest.includes('--push'),
+        pull: rest.includes('--pull'),
       });
 
       if (result.initialised) console.log(`Initialised a git repository at ${dataDir}`);
@@ -637,6 +722,14 @@ async function main(argv: string[]): Promise<number> {
         console.log('Everything is already saved — nothing had changed.');
       }
 
+      if (result.pulled) {
+        if (!result.pulled.ok) {
+          console.error(`Pull failed: ${result.pulled.message}`);
+          if (rest.includes('--push')) console.error('Nothing was pushed, since the pull did not go through.');
+          return 1;
+        }
+        console.log(result.pulled.message);
+      }
       if (result.pushed) {
         console.log(result.pushed.ok ? result.pushed.output : `Push failed: ${result.pushed.output}`);
         if (!result.pushed.ok) return 1;
@@ -647,6 +740,90 @@ async function main(argv: string[]): Promise<number> {
       } else if (result.remote.ahead > 0) {
         console.log(`${plural(result.remote.ahead, 'commit')} not yet pushed to ${result.remote.url} — \`rmm save --push\` sends them.`);
       }
+      return 0;
+    }
+
+    /**
+     * Change a setting in config.yaml without opening the editor. One setting
+     * for now, `ai.enabled`, because it is the one a terminal-only machine
+     * cannot otherwise answer: a pull or a clone that changes the AI command
+     * switches the AI off here until somebody turns it on (see
+     * `aiCommandChange`), and Settings was the only way back.
+     *
+     * Through `Store.saveConfig` and committed as "Update settings", exactly
+     * as the editor's `PUT /config` does it — so turning it on clears the
+     * switch-off the same way, and turning it off while switched off leaves
+     * config.yaml's own value alone, as there.
+     */
+    case 'config': {
+      const [sub, key, value] = positionals('config', rest);
+      const usage = 'Usage: rmm config set ai.enabled <true|false>';
+      if (sub !== 'set' || key === undefined || value === undefined) {
+        console.error(usage);
+        return 1;
+      }
+      if (key !== 'ai.enabled') {
+        console.error(`${key} cannot be set from here; ai.enabled is the one setting this command changes. Settings in \`rmm serve\` has the rest.\n${usage}`);
+        return 1;
+      }
+      if (value !== 'true' && value !== 'false') {
+        console.error(`ai.enabled is true or false, not ${JSON.stringify(value)}.\n${usage}`);
+        return 1;
+      }
+      const enabled = value === 'true';
+      const wasSwitchedOff = aiSwitchedOff(store.root);
+      /*
+       * Off while a pull or a clone has it switched off is already the case,
+       * and config.yaml is left as it says it (see `Store.saveConfig`). Said
+       * here before anything is saved: saved anyway, the file was written
+       * back without its comments and committed, under a message saying it
+       * was unchanged.
+       */
+      if (!enabled && wasSwitchedOff) {
+        console.log('AI is already off on this machine, switched off by a pull or a clone; config.yaml is unchanged.');
+        return 0;
+      }
+      const saved = await withCommit(
+        repo,
+        store.loadConfig().git.autoCommit,
+        'Update settings',
+        () => store.saveConfig({ ai: { enabled } as StoreConfig['ai'] }),
+        // Only the one file this wrote, as `apply` does.
+        ['config.yaml'],
+      );
+      if (enabled) {
+        console.log(`AI on — it will run ${saved.ai.command} ${saved.ai.args.join(' ')}`.trimEnd());
+        if (wasSwitchedOff) console.log('The switch-off from the last pull or clone is cleared.');
+        if (!saved.ai.enabled && process.env.RMM_AI === '0') console.log('RMM_AI=0 in the environment still keeps it off.');
+      } else {
+        console.log('AI off — every action hands you the prompt.');
+      }
+      return 0;
+    }
+
+    /**
+     * Bring in what another machine pushed: `Repo.pull`, the same as the
+     * editor's Pull button. Exits non-zero for anything but a pull that went
+     * through, a conflict included, so a script syncing two machines stops
+     * there rather than pushing a save that is about to be merged by hand.
+     *
+     * With a server running on this same save, the two take turns: the
+     * pull's merge holds the save's lock (see `SaveLock`), so the server's
+     * writes wait for it rather than landing in the middle, and the server
+     * reads what came in on its next request.
+     */
+    case 'pull': {
+      const result = await repo.pull();
+      if (!result.ok) {
+        console.error(result.message);
+        if (result.conflict?.length) {
+          for (const file of result.conflict) console.error(`  conflict: ${file}`);
+        }
+        return 1;
+      }
+      console.log(result.message);
+      for (const file of result.files.slice(0, 20)) console.log(`  ${file}`);
+      if (result.files.length > 20) console.log(`  … and ${result.files.length - 20} more`);
       return 0;
     }
 
@@ -674,6 +851,7 @@ async function main(argv: string[]): Promise<number> {
       const stamp = Date.now().toString(36);
       const samples: WritingSample[] = [];
       let failed = 0;
+      let skipped = 0;
 
       for (const file of paths) {
         let found;
@@ -682,6 +860,13 @@ async function main(argv: string[]): Promise<number> {
         } catch (err) {
           console.error(`${file}: ${err instanceof Error ? err.message : String(err)}`);
           failed++;
+          continue;
+        }
+        // A file that keeps itself out (`voice: false` in its header) is said
+        // as skipped, not as a file with no writing in it.
+        if (found.skipped) {
+          console.log(`${file} — skipped: ${found.skipped}.`);
+          skipped++;
           continue;
         }
 
@@ -702,7 +887,7 @@ async function main(argv: string[]): Promise<number> {
       }
 
       if (samples.length === 0) {
-        console.log('Nothing was added.');
+        console.log(skipped > 0 ? `Nothing was added; ${plural(skipped, 'file')} skipped.` : 'Nothing was added.');
         return failed > 0 ? 1 : 0;
       }
       if (dryRun) {
@@ -712,10 +897,13 @@ async function main(argv: string[]): Promise<number> {
 
       for (const sample of samples) store.saveSample(sample);
       if (store.loadConfig().git.autoCommit) {
-        await repo.ensure();
-        await repo.commitAll(`Add ${plural(samples.length, 'writing sample')} from ${plural(paths.length, 'file')}`);
+        // Only the corpus, which is all this wrote. See `apply`.
+        await commitFromTerminal(repo, `Add ${plural(samples.length, 'writing sample')} from ${plural(paths.length, 'file')}`, ['corpus']);
       }
-      console.log(`\nAdded ${plural(samples.length, 'sample')}. Fix anything filed wrongly in Voice & AI, or with \`rmm serve\`.`);
+      console.log(
+        `\nAdded ${plural(samples.length, 'sample')}${skipped > 0 ? `; ${plural(skipped, 'file')} skipped` : ''}. ` +
+          'Fix anything filed wrongly in Voice & AI, or with `rmm serve`.',
+      );
       return failed > 0 ? 1 : 0;
     }
 
@@ -727,6 +915,21 @@ async function main(argv: string[]): Promise<number> {
      * laptop, before there is anything to open.
      */
     case 'clone': {
+      /*
+       * `--data` is every other command's way of naming a save, and this one
+       * accepted it and ignored it: `rmm clone <repo> here --data there`
+       * cloned into `here`, said so in one line, and `there` — the folder the
+       * person had asked for — was never made. The folder is the second
+       * argument; asked for twice, in two places, there is no saying which
+       * one was meant, so neither is guessed at.
+       */
+      if (rest.some((a) => a === '--data' || a.startsWith('--data='))) {
+        console.error(
+          '`rmm clone` does not take --data: the folder to clone into is its second argument. ' +
+            'Try `rmm clone <repository> <folder>`.',
+        );
+        return 1;
+      }
       const [url, into] = positionals('clone', rest);
       if (!url || !into) {
         console.error('Usage: rmm clone <repository> <folder>');
@@ -735,6 +938,13 @@ async function main(argv: string[]): Promise<number> {
       const store = await cloneProject(url, into, cloneRepo);
       rememberProject(store.root);
       console.log(`Cloned into ${store.root}, and opened it. Run \`rmm serve\` to work on it.`);
+      const switched = aiSwitchedOff(store.root);
+      if (switched) {
+        console.log(
+          `${switched} AI is switched off until you turn it on again: look at the command in ` +
+            `${path.join(store.root, 'config.yaml')}, then \`rmm config set ai.enabled true --data ${store.root}\`.`,
+        );
+      }
       return 0;
     }
 
@@ -790,12 +1000,55 @@ async function main(argv: string[]): Promise<number> {
  * `unknownFlag` is the same call `main` makes, on the same arguments. Running
  * it twice costs nothing; running it too late cost a folder.
  */
+/*
+ * Where a new save may be started: a folder somebody named, or the home
+ * default on a first run. Not the save remembered from the app — see
+ * `resolveStore` — which, gone missing, is a thing to say rather than refill.
+ */
+const SEEDS = new Set(['flag', 'env', 'home']);
+
+/** The commands that make the folder a repository and commit all of it. */
+const COMMITS_EVERYTHING = new Set(['serve', 'save', 'master']);
+
+const isSaveFolder = (dir: string) =>
+  fs.existsSync(path.join(dir, 'profile.yaml')) && fs.existsSync(path.join(dir, 'config.yaml'));
+
+/**
+ * Why this folder cannot be worked in, or null when it can.
+ *
+ * `rmm serve --data ~/Documents` — one folder too high — ran `git init` in
+ * Documents and committed every file in it, tax returns and all, as
+ * "Initialise resume store". A folder with things in it and no save among
+ * them is somebody's folder, not a save; an empty one is still a save to
+ * start.
+ */
+function notASave(command: string): string | null {
+  if (isSaveFolder(dataDir)) return null;
+  if (dataFrom === 'remembered') {
+    return fs.existsSync(dataDir)
+      ? `The save last opened, ${dataDir}, is not a save any more (it has no profile.yaml and config.yaml). ` +
+          'Open another in the app, or name one with --data.'
+      : `The save last opened, ${dataDir}, is not there any more. It may have been moved, deleted, or be on a ` +
+          'drive that is not connected. Open another in the app, or name one with --data.';
+  }
+  if (COMMITS_EVERYTHING.has(command) && !isEmptyStore(dataDir)) {
+    return `${dataDir} has files in it but is not a save (it has no profile.yaml and config.yaml), so it was left ` +
+      'alone. Point --data at a save, or at an empty or new folder to start one.';
+  }
+  return null;
+}
+
 const ARGV = commandFirst(process.argv.slice(2));
 {
   const command = ARGV[0] ?? '';
   const refused =
     ['help', '--help', '-h'].includes(command) || !COMMANDS.has(command) ? null : unknownFlag(command, ARGV.slice(1));
-  if (!refused && WORKS_IN_A_STORE.has(command) && seedStore(path.join(projectRoot, 'data'), dataDir)) {
+  const problem = refused || !WORKS_IN_A_STORE.has(command) ? null : notASave(command);
+  if (problem) {
+    console.error(problem);
+    process.exit(1);
+  }
+  if (!refused && WORKS_IN_A_STORE.has(command) && SEEDS.has(dataFrom) && seedStore(path.join(projectRoot, 'data'), dataDir)) {
     console.error(`Started a new save at ${dataDir}, from the bundled example — there was nothing there.`);
   }
 }

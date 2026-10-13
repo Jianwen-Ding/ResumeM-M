@@ -136,7 +136,7 @@ describe.skipIf(!available)('the precompiled-format fast path', { timeout: 120_0
        * comparison and it is the only thing standing between a preview that
        * contradicts itself and a user being told an impossible "fits".
        */
-      const pathological = resume(6, { marginIn: 4.6, autoFit: false });
+      const pathological = resume(6, { marginIn: 4.2, autoFit: false });
       const result = await compileResume(pathological, { mode: 'preview' });
       const trusted = await compileResume(pathological, { mode: 'final' });
 
@@ -328,7 +328,7 @@ describe.skipIf(!available)('the format cache', { timeout: 120_000 }, () => {
     await withACacheOfItsOwn(async (dir) => {
       await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
       const built = formatsIn(dir)[0] as string;
-      const stamp = fs.statSync(path.join(dir, built)).mtimeMs;
+      const stamp = fs.statSync(path.join(dir, built)).ino;
 
       resetFastPathCache(); // a fresh process knows nothing; the disk still does
       await hasFastPath();
@@ -336,8 +336,10 @@ describe.skipIf(!available)('the format cache', { timeout: 120_000 }, () => {
       const raw = await compileFastBody(HELLO, 'letter', DEFAULT_LAYOUT);
       expect(raw.pdf.subarray(0, 4).toString()).toBe('%PDF');
       // The count would be unchanged either way — a rebuild copies over the
-      // same path. The mtime is what tells them apart.
-      expect(fs.statSync(path.join(dir, built)).mtimeMs).toBe(stamp);
+      // same path. The inode is what tells them apart: a rebuild is renamed
+      // into place, a new file. Not the mtime, which every use now touches so
+      // the cache's sweep knows the format is wanted.
+      expect(fs.statSync(path.join(dir, built)).ino).toBe(stamp);
     });
   });
 });

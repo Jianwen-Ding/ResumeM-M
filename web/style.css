@@ -406,6 +406,9 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .save.saving { color: var(--faint); }
 .save.unsaved { color: var(--muted); }
 .save.failed { color: var(--bad); font-weight: 500; }
+/* The way out of a save that was refused for good: next to the words that say
+   so, because that is where anyone looking for one will look. */
+.save-stuck { display: inline-flex; gap: 4px; align-items: center; }
 
 /* Docs says "All changes saved in Drive" as quiet text, not as a badge. Same
    here: the state matters, the decoration does not. */
@@ -969,6 +972,8 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
   white-space: pre-wrap;
 }
 .settings .result.idle { background: #fafafb; border: 1px solid var(--line-soft); color: var(--muted); }
+/* What a push or pull said: a sentence, then git's own lines under it. */
+#project-settings .result { white-space: pre-wrap; }
 .settings .override { color: var(--warn); font-size: var(--t-xs); margin-top: 4px; }
 .settings .sandbox-note {
   font-size: var(--t-sm);
@@ -2071,6 +2076,9 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   #narrow-view { order: 2; }
   #btn-more { order: 3; }
   #save-state { order: 5; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; }
+  /* A row of its own, under the chip: beside it, the chip was squeezed to
+     "N…" and the one thing the buttons answer could not be read. */
+  #save-stuck { order: 9; flex-basis: 100%; }
   #live-state { order: 6; }
   #btn-focus { order: 7; }
   #btn-undo, #btn-redo { order: 8; }
@@ -2289,12 +2297,16 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   .embedded .sticky-toolbar::before { display: none; }
   .embedded .sticky-toolbar { gap: 4px; padding-top: 4px; padding-bottom: 4px; }
   .embedded #save-state { order: 1; flex: none; }
+  .embedded #save-stuck { order: 9; flex-basis: 100%; }
   .embedded #live-state { order: 2; font-size: 0; gap: 0; padding: 4px 6px; }
   .embedded #narrow-view { order: 3; }
   .embedded #btn-focus { order: 4; }
   .embedded #btn-undo, .embedded #btn-redo { order: 5; }
   .embedded #btn-more { order: 7; margin-left: auto; }
-  .embedded .segmented button { padding: 4px 8px; }
+  /* Edit/Preview a little tighter than elsewhere: at 8px a side, a 360px
+     panel set in Inter (and so, near enough, SF Pro) came 2px short, and
+     More wrapped onto a row of its own. */
+  .embedded .segmented button { padding: 4px 6px; }
   .embedded .sticky-toolbar button.tiny { padding: 4px 7px; }
   /* Said short: the whole sentence is its title, and "Not saved — …" keeps
      every word, because that one is asking for something. */
@@ -2310,7 +2322,11 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 /* A 320px panel keeps the same single row, a little closer together. */
 @media (max-width: 340px) {
   .embedded .sticky-toolbar { gap: 2px; }
-  .embedded .segmented button { padding: 4px 6px; }
-  .embedded .sticky-toolbar button.tiny { padding: 4px 5px; }
+  .embedded .segmented button { padding: 4px 4px; }
+  .embedded .sticky-toolbar button.tiny { padding: 4px 4px; }
   .embedded #btn-undo, .embedded #btn-redo, .embedded #btn-more { min-width: 28px; }
 }
+
+/* Pair JobHelper: the code is read off the screen and typed, so it is big. */
+.pair-code { font: 600 22px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.12em; margin: 8px 0 2px; }
+.pair-row { display: grid; gap: 2px; justify-items: start; }

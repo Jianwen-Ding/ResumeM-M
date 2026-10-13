@@ -72,6 +72,14 @@ function mentions(text: string, keyword: string): boolean {
 const printedTextByStore = new WeakMap<Store, Map<string, { stamp: string; text: string }>>();
 
 /**
+ * Forget one store's kept printed text, for a pull: its stamps are the same
+ * size-and-time stamps `Store.forgetReads` explains the gap in.
+ */
+export function forgetPrintedText(store: Store): void {
+  printedTextByStore.delete(store);
+}
+
+/**
  * `printedText`, kept from last time when nothing that would change it has
  * moved on disk.
  *

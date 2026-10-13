@@ -137,8 +137,41 @@ function unzipEntry(buf: Buffer, wanted: string): Buffer | null {
 function fromDocx(buf: Buffer): string {
   const xml = unzipEntry(buf, 'word/document.xml');
   if (!xml) throw new Error('That .docx has no readable document inside it');
-  const text = xml
-    .toString('utf8')
+  /*
+   * And the page header, where a resume made in Word keeps the name and the
+   * contact line more often than not. The first few by their usual names;
+   * one that is not there is simply not read.
+   */
+  const headers = ['word/header1.xml', 'word/header2.xml', 'word/header3.xml']
+    .map((name) => unzipEntry(buf, name)?.toString('utf8'))
+    .filter((x): x is string => Boolean(x));
+  const seen = new Set<string>();
+  const parts = [...headers.map(docxText), docxText(xml.toString('utf8'))].filter((t) => {
+    // A first-page header and the default one usually say the same thing.
+    if (!t || seen.has(t)) return false;
+    seen.add(t);
+    return true;
+  });
+  return tidy(parts.join('\n\n'));
+}
+
+/*
+ * One part of a .docx as the words a reader sees.
+ *
+ * Not what the file holds, which is more: a tracked deletion is still in it
+ * (`w:del`), a text box is in it twice (the drawing, and the `mc:Fallback`
+ * picture for old readers), and a hyperlink's field code (`w:instrText`) sits
+ * beside the link text. Each came through — "OLD EMPLOYER", "SIDEBAR" twice,
+ * `HYPERLINK "https://…"` — and the hyphens a non-breaking hyphen draws
+ * ("e-commerce", "co-op") and the line a carriage return breaks did not.
+ */
+function docxText(raw: string): string {
+  const text = raw
+    .replace(/<w:del\b[^>]*\/>|<w:del\b[^>]*>[\s\S]*?<\/w:del>/g, '')
+    .replace(/<mc:Fallback\b[^>]*>[\s\S]*?<\/mc:Fallback>/g, '')
+    .replace(/<w:instrText\b[^>]*>[\s\S]*?<\/w:instrText>/g, '')
+    .replace(/<w:noBreakHyphen\s*\/>/g, '-')
+    .replace(/<w:cr\s*\/>/g, '\n')
     .replace(/<w:p[ >][^>]*>|<w:p\/?>/g, '\n\n')
     .replace(/<\/w:p>/g, '\n\n')
     .replace(/<w:br\s*\/?>/g, '\n')

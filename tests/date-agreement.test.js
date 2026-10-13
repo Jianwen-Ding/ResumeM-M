@@ -33,6 +33,7 @@ const TEXTS = [
   '09/2022 -- 05/2026',
   '2022-09 -- 2026-05',
   'Sept 2022',
+  'Sept. 2022 -- May 2026',
   'Jan 2023 – Present',
   'Jan 2023 — Present',
   'Jan 2023 to Present',
@@ -84,6 +85,7 @@ const STYLES = [
   { month: 'abbr', range: ' – ', present: 'Current', expected: 'Anticipated' },
   { month: 'long', range: ' to ', present: 'Now', expected: 'Expected' },
   { month: 'numeric', range: '-', present: 'present', expected: 'Expected' },
+  { month: 'iso', range: ' -- ', present: 'Present', expected: 'Expected' },
 ];
 
 describe('the editor and the renderer agree about dates', () => {

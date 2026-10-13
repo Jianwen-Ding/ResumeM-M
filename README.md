@@ -325,6 +325,8 @@ rmm track                         The tracker
 rmm voice add <file…>             Read files into your writing corpus, sorted
                                   into letters, answers, resumes, and the rest
 rmm save [-m "why"] [--push]      Commit the whole store to git
+rmm config set ai.enabled true    Turn the AI on (also answers a pull or clone
+                                  that switched it off on this machine)
 rmm serve [--port 4600]           Editor GUI and the extension's API
 
 Any command also takes:
@@ -348,6 +350,23 @@ ai:
 While disabled, every AI endpoint returns the prompt it *would* have run, so you
 can paste it wherever you like and still not have to rewrite the instructions.
 
+Only `enabled: true` turns it on. `yes`, `on` and `1` are not booleans in
+YAML 1.2 and leave the AI off.
+
+`config.yaml` travels with a save, and `ai.command` is a program this app runs.
+So a pull or a clone that switches the AI on, or changes the command line it
+would run — the command, its arguments, or the `research`, `model` and
+`effort` settings that rewrite them — **switches the AI off on this machine**,
+says what changed, and leaves `config.yaml` as it arrived. The switch-off is
+kept in the save's `.git` folder, so it never travels to another machine, and
+saving other settings while it is in force does not write `enabled: false`
+into `config.yaml`. Look at the command, then turn the AI back on with the
+checkbox in Settings, or from a terminal:
+
+```sh
+rmm config set ai.enabled true
+```
+
 For Antigravity CLI (`agy`), choose **Antigravity (agy)** in Settings → Preset,
 enable AI, then click **Save and test**. Sign in through `agy` first. Its preset
 uses plan mode and terminal sandbox restrictions, with plain-text output:
@@ -364,6 +383,26 @@ ai:
 is treated as literal text, and text on stdin is not used as the prompt. Saved
 `agy` print arguments using `{prompt}` are repaired when the config is loaded.
 The desktop app includes `~/.local/bin` in its command search path.
+
+The CLI is not given the server's whole environment, only an allow-list:
+system basics (`PATH`, `HOME`, locale, temp folders, `XDG_*`, the Windows
+profile variables), proxy and certificate settings, and each CLI's own
+sign-in and config variables (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`,
+`CODEX_*`, `GEMINI_*`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_*`, `GOOGLE_GEMINI_*`,
+`GOOGLE_VERTEX_*` and the Google Cloud project, `ANTIGRAVITY_*`), and the
+desktop session bus the keyring is reached over. `AWS_*` is passed only when
+`CLAUDE_CODE_USE_BEDROCK` is set, in the environment or in the `env` block of
+`~/.claude/settings.json`; `GOOGLE_APPLICATION_CREDENTIALS` and
+`CLOUDSDK_CONFIG` only when `CLAUDE_CODE_USE_VERTEX` or
+`GOOGLE_GENAI_USE_VERTEXAI` is set, or the AI command is `gemini`. Everything
+else, such as `GITHUB_TOKEN`, `NPM_TOKEN`, a database URL or `NODE_OPTIONS`,
+stays with the server, because a job posting's text can steer what the model
+does. To pass more, name the variables in `RMM_AI_ENV_PASS`, comma-separated,
+e.g. `RMM_AI_ENV_PASS=MY_GATEWAY_KEY,NODE_OPTIONS`. That includes the key of a
+Codex provider set up in `~/.codex/config.toml` with its own `env_key`, such
+as `RMM_AI_ENV_PASS=OPENROUTER_API_KEY`: Codex reads it from the environment,
+and only `OPENAI_*` and `AZURE_OPENAI_*` are passed without being named. The
+full list is in `src/ai/env.ts`.
 
 Two things make this different from pasting into a chat window:
 

@@ -510,11 +510,15 @@ describe('an edit made just before leaving the page', () => {
   };
   const draftPuts = () => requests.filter((r) => r.method === 'PUT' && r.url.startsWith('/api/workspace/'));
 
+  /*
+   * A save sends only what was changed (see `saveDraftNow`), so what makes one
+   * large is a large letter, not a long posting beside it.
+   */
   it('saves a draft too large for the keepalive allowance', async () => {
-    drafts['streamly-intern'].jobDescription = 'Kafka. '.repeat(10_000);
+    const long = `Dear Streamly, ${'Kafka. '.repeat(10_000)}`;
     await openDraft();
-    typeLetter('Dear Streamly,');
-    await vi.waitFor(() => expect(drafts['streamly-intern'].coverLetter.body).toBe('Dear Streamly,'), { timeout: 3000 });
+    typeLetter(long);
+    await vi.waitFor(() => expect(drafts['streamly-intern'].coverLetter.body).toBe(long), { timeout: 3000 });
     expect(draftPuts().some((r) => !r.refused)).toBe(true);
     expect(document.querySelector('#draft-save-state').textContent).toBe('All changes saved');
   });
@@ -525,11 +529,9 @@ describe('an edit made just before leaving the page', () => {
    * one, and the draft can still go as a plain request.
    */
   it('leaves with the resume and a large draft both sent, the resume kept alive', async () => {
-    const draft = drafts['streamly-intern'];
-    const typed = { ...draft, coverLetter: { ...draft.coverLetter, body: 'Dear Streamly,', edited: true } };
-    draft.jobDescription = 'k'.repeat(64 * 1024 - 300 - JSON.stringify(typed).length);
+    const long = `Dear Streamly, ${'k'.repeat(64 * 1024 - 400)}`;
     await openDraft();
-    typeLetter('Dear Streamly,');
+    typeLetter(long);
     document.querySelector('button[data-tab="resumes"]').click();
     const id = document.querySelector('#editor .entry:has(.fold)').dataset.dragId;
     fold(id).click();
@@ -544,7 +546,7 @@ describe('an edit made just before leaving the page', () => {
     const sent = draftPuts().filter((r) => !r.refused);
     expect(sent.length).toBe(1);
     expect(sent[0].afterPageGone).toBe(false);
-    expect(sent[0].body.coverLetter.body).toBe('Dear Streamly,');
+    expect(sent[0].body.coverLetter.body).toBe(long);
     // The case it is meant to be: each fits alone, the two together do not.
     const size = (body) => new Blob([JSON.stringify(body)]).size;
     expect(size(sent[0].body)).toBeLessThanOrEqual(64 * 1024);
@@ -558,12 +560,12 @@ describe('an edit made just before leaving the page', () => {
    */
   it('sends again, plainly, a write refused for allowance not given back yet', async () => {
     allowanceLag = 5000;
-    drafts['streamly-intern'].jobDescription = 'k'.repeat(40_000);
+    const long = `Dear Streamly, ${'k'.repeat(40_000)}`;
     await openDraft();
-    typeLetter('Dear Streamly,');
-    await vi.waitFor(() => expect(drafts['streamly-intern'].coverLetter.body).toBe('Dear Streamly,'), { timeout: 3000 });
-    typeLetter('Dear Streamly, hello.');
-    await vi.waitFor(() => expect(drafts['streamly-intern'].coverLetter.body).toBe('Dear Streamly, hello.'), { timeout: 3000 });
+    typeLetter(long);
+    await vi.waitFor(() => expect(drafts['streamly-intern'].coverLetter.body).toBe(long), { timeout: 3000 });
+    typeLetter(`${long} hello.`);
+    await vi.waitFor(() => expect(drafts['streamly-intern'].coverLetter.body).toBe(`${long} hello.`), { timeout: 3000 });
     expect(draftPuts().some((r) => r.refused)).toBe(true);
     expect(document.querySelector('#draft-save-state').textContent).toBe('All changes saved');
   });
@@ -593,11 +595,8 @@ describe('an edit made just before leaving the page', () => {
   });
 
   it('sends a draft that does not fit beside the resume at once, when unloading', async () => {
-    const draft = drafts['streamly-intern'];
-    const typed = { ...draft, coverLetter: { ...draft.coverLetter, body: 'Dear Streamly,', edited: true } };
-    draft.jobDescription = 'k'.repeat(64 * 1024 - 300 - JSON.stringify(typed).length);
     await openDraft();
-    typeLetter('Dear Streamly,');
+    typeLetter(`Dear Streamly, ${'k'.repeat(64 * 1024 - 400)}`);
     document.querySelector('button[data-tab="resumes"]').click();
     const id = document.querySelector('#editor .entry:has(.fold)').dataset.dragId;
     fold(id).click();

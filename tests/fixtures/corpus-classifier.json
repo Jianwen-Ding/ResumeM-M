@@ -1,0 +1,1735 @@
+{
+ "check": "classifier",
+ "comment": "Built from /tmp/claude-0/hunt17-corpus/classifier.json in round 17. expect: the kind classifyPage gives, or {\"not\": kind}. Cases the corpus only probed are left out. \"round\" and \"source\" say where each case came from; \"comment\" records a decision. A value stored as {\"parts\": [...]} is joined with \"\" at runtime.",
+ "cases": [
+  {
+   "id": "classifier-001",
+   "input": {
+    "url": "http://bank.example:5097/application/personal-loan",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:56 (d80c7eb) — an application form that is not for a job > is not a job application: \"the personal loan t [test]"
+  },
+  {
+   "id": "classifier-002",
+   "input": {
+    "url": "http://bank2.example:5097/loans/personal",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:57 (d80c7eb) — an application form that is not for a job > is not a job application: \"the same loan at it [test]"
+  },
+  {
+   "id": "classifier-003",
+   "input": {
+    "url": "https://insure.example/quote/apply",
+    "html": "<!doctype html><html><head><title>Get a car insurance quote | Example Insurance</title></head><body>\n<h1>Get your quote</h1><p>Full-time or part-time drivers. Benefits: roadside assistance, compensation for courtesy cars.</p>\n<form><label>First name<input name=\"firstName\"></label><label>Last name<input name=\"lastName\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>Date of birth<input name=\"dob\"></label><label>Occupation<input name=\"occupation\"></label>\n<label>Upload your driving licence<input type=\"file\" name=\"licence\"></label>\n<p>Application form for new policies. Tell us about your car.</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:58 (d80c7eb) — an application form that is not for a job > is not a job application: \"an insurance quote\" [test]"
+  },
+  {
+   "id": "classifier-004",
+   "input": {
+    "url": "https://uni.example/admissions/apply",
+    "html": "<!doctype html><html><head><title>Undergraduate application | Example University</title></head><body>\n<h1>Apply for undergraduate admission</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study. Remote and on-site options.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>Upload transcript<input type=\"file\" name=\"transcript\"></label>\n<label>Personal statement — tell us about yourself<textarea name=\"statement\"></textarea></label>\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:59 (d80c7eb) — an application form that is not for a job > is not a job application: \"a university admiss [test]"
+  },
+  {
+   "id": "classifier-005",
+   "input": {
+    "url": "https://lettings.example/properties/12-elm/application",
+    "html": "<!doctype html><html><head><title>Rental application – 12 Elm Street | Example Lettings</title></head><body>\n<h1>Rental application</h1><p>Requirements: proof of income, references.</p>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>Current employer<input name=\"employer\"></label><label>Monthly income<input name=\"income\"></label>\n<label>Move-in date<input name=\"movein\"></label>\n<label>Upload proof of income<input type=\"file\" name=\"payslip\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:60 (d80c7eb) — an application form that is not for a job > is not a job application: \"a rental applicatio [test]"
+  },
+  {
+   "id": "classifier-006",
+   "input": {
+    "url": "https://bank.example/loans/apply?returnTo=/careers/",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:94 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-007",
+   "input": {
+    "url": "https://bank.example/loans/apply#jobs",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:95 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-008",
+   "input": {
+    "url": "https://jobs.example-cu.org/loans/apply",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:96 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-009",
+   "input": {
+    "url": "https://bank.example/job/loan-application",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:97 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-010",
+   "input": {
+    "url": "https://bank.example/loans/apply?partner=acme.icims.com",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:98 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-011",
+   "input": {
+    "url": "https://bank.example/loans/apply?utm_campaign=leverage&ref=jobs.lever.co/acme",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:99 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-012",
+   "input": {
+    "url": "https://bank.example/loans/apply?ref=acme.csod.com",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:100 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-013",
+   "input": {
+    "url": "https://bank.example/loans/apply?next=https://acme.homerun.co/x",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:101 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-014",
+   "input": {
+    "url": "https://uni.example/admissions/mba/apply",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>LinkedIn profile<input name=\"linkedin\"></label>\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:102 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r15 hunt15-rmm/jobs.ts — MBA admission with LinkedIn field [report]"
+  },
+  {
+   "id": "classifier-015",
+   "input": {
+    "url": "https://uni.example/admissions/mba/apply",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>Profile URL<input name=\"url\" placeholder=\"https://linkedin.com/in/you\"></label>\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:102 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r15 hunt15-rmm/jobs.ts — MBA admission with LinkedIn placeholder [report]"
+  },
+  {
+   "id": "classifier-016",
+   "input": {
+    "url": "https://accelerator.example/apply",
+    "html": "<!doctype html><html><head><title>Apply to the Spring batch | Example Accelerator</title></head><body>\n<h1>Founder application</h1><p>Requirements: a working prototype.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>LinkedIn URL<input name=\"linkedin_url\"></label><label>Company website<input name=\"site\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15, r16",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:104 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r15 hunt15-rmm/jobs.ts — accelerator with LinkedIn [report]; r16 hunt16-rmm/nonjob.test.ts — review F4 [report]"
+  },
+  {
+   "id": "classifier-017",
+   "input": {
+    "url": "https://uni.example/careers/events/fair-registration",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:105 (f94fe4c) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r15 hunt15-rmm/jobs.ts — career-fair registration at university /careers [report]"
+  },
+  {
+   "id": "classifier-018",
+   "input": {
+    "url": "https://accelerator.example/apply/s2027",
+    "html": "<!doctype html><html><head><title>Apply to the Spring batch | Example Accelerator</title></head><body>\n<h1>Founder application</h1><p>Requirements: a working prototype.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>LinkedIn URL<input name=\"linkedin_url\"></label><label>Company website<input name=\"site\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:107 (7f3b297) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r16 hunt16-rmm/nonjob.test.ts — review F4 [report]"
+  },
+  {
+   "id": "classifier-019",
+   "input": {
+    "url": "https://accelerator.example/apply/w27",
+    "html": "<!doctype html><html><head><title>Apply to the Spring batch | Example Accelerator</title></head><body>\n<h1>Founder application</h1><p>Requirements: a working prototype.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>LinkedIn URL<input name=\"linkedin_url\"></label><label>Company website<input name=\"site\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:108 (7f3b297) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r16 hunt16-rmm/nonjob.test.ts — review F4 [report]"
+  },
+  {
+   "id": "classifier-020",
+   "input": {
+    "url": "https://uni.example/apply/mba-2027",
+    "html": "<!doctype html><html><head><title>Apply to the Spring batch | Example Accelerator</title></head><body>\n<h1>Founder application</h1><p>Requirements: a working prototype.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>LinkedIn URL<input name=\"linkedin_url\"></label><label>Company website<input name=\"site\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:109 (7f3b297) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r16 hunt16-rmm/nonjob.test.ts — review F4 [report]"
+  },
+  {
+   "id": "classifier-021",
+   "input": {
+    "url": "https://uni.example/application/fall2027",
+    "html": "<!doctype html><html><head><title>Apply to the Spring batch | Example Accelerator</title></head><body>\n<h1>Founder application</h1><p>Requirements: a working prototype.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<label>LinkedIn URL<input name=\"linkedin_url\"></label><label>Company website<input name=\"site\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:110 (7f3b297) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]; r16 hunt16-rmm/nonjob.test.ts — review F4 [report]"
+  },
+  {
+   "id": "classifier-022",
+   "input": {
+    "url": "https://jobs.example-cu.org/careers/loans/apply",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:112 (7f3b297) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-023",
+   "input": {
+    "url": "https://uni.example/careers/events/register",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:113 (7f3b297) — a form that only looks like a job application by its address or a LinkedIn field > is not  [test]"
+  },
+  {
+   "id": "classifier-024",
+   "input": {
+    "url": "https://acme.wd5.myworkdayjobs.com/en-US/External/job/Boston/Platform-Engineer_R123/apply/applyManually",
+    "html": "<html><head><title>Apply</title></head><body><h1>My information</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:140 (d80c7eb) — an application form that is for a job > on \"Workday\", asking only who you are #0 [test]"
+  },
+  {
+   "id": "classifier-025",
+   "input": {
+    "url": "https://boards.greenhouse.io/acme/jobs/123#app",
+    "html": "<html><head><title>Apply</title></head><body><h1>My information</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:141 (d80c7eb) — an application form that is for a job > on \"Greenhouse\", asking only who you are #1 [test]"
+  },
+  {
+   "id": "classifier-026",
+   "input": {
+    "url": "https://jobs.lever.co/acme/abc-123/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>My information</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:142 (d80c7eb) — an application form that is for a job > on \"Lever\", asking only who you are #2 [test]"
+  },
+  {
+   "id": "classifier-027",
+   "input": {
+    "url": "https://careers-acme.icims.com/jobs/123/platform-engineer/candidate",
+    "html": "<html><head><title>Apply</title></head><body><h1>My information</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:143 (d80c7eb) — an application form that is for a job > on \"iCIMS\", asking only who you are #3 [test]"
+  },
+  {
+   "id": "classifier-028",
+   "input": {
+    "url": "https://jobs.ashbyhq.com/acme/abc-123/application",
+    "html": "<html><head><title>Apply</title></head><body><h1>My information</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:144 (d80c7eb) — an application form that is for a job > on \"Ashby\", asking only who you are #4 [test]"
+  },
+  {
+   "id": "classifier-029",
+   "input": {
+    "url": "https://jobs.smartrecruiters.com/Acme/123-platform-engineer/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>My information</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:145 (d80c7eb) — an application form that is for a job > on \"SmartRecruiters\", asking only who you are #5 [test]"
+  },
+  {
+   "id": "classifier-030",
+   "input": {
+    "url": "https://acme.example/careers/apply",
+    "html": "<html><head><title>Apply — Acme</title></head><body><h1>Submit application</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>Resume<input type=\"file\" name=\"resume\"></label></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:157 (d80c7eb) — an application form that is for a job > on an employer’s own site, by its résumé upload [test]"
+  },
+  {
+   "id": "classifier-031",
+   "input": {
+    "url": "https://acme.example/apply",
+    "html": "<html><head><title>Apply — Acme</title></head><body><h1>Submit application</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>Are you legally authorized to work in the United States?<select></select></label>\n<label>Will you now or in the future require sponsorship?<select></select></label></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:164 (d80c7eb) — an application form that is for a job > on an employer’s own site, by the questions only a [test]"
+  },
+  {
+   "id": "classifier-032",
+   "input": {
+    "url": "https://acme.example/apply",
+    "html": "<html><head><title>Apply — Acme</title></head><body><h1>Submit application</h1>\n<p>You are applying for the position of Platform Engineer.</p>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:164 (d80c7eb) — an application form that is for a job > on an employer’s own site, by the position it is f [test]"
+  },
+  {
+   "id": "classifier-033",
+   "input": {
+    "url": "https://careers.acme.com/apply/4821",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:180 (b5697f8) — an application form that is for a job > on \"an employer’s careers host, by its LinkedIn fi [test]"
+  },
+  {
+   "id": "classifier-034",
+   "input": {
+    "url": "https://acme.example/apply/48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:182 (f94fe4c) — an application form that is for a job > on \"an employer’s own /apply, by its LinkedIn fiel [test]"
+  },
+  {
+   "id": "classifier-035",
+   "input": {
+    "url": "https://careers.bank.example/jobs/loan-officer/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r15",
+   "source": "r15 ResumeM-M tests/not-a-job-application.test.ts:183 (f94fe4c) — an application form that is for a job > on \"a careers host whose role starts with \\\"loan\\\" [test]"
+  },
+  {
+   "id": "classifier-036",
+   "input": {
+    "url": "https://jobs.acme.com/careers/apply?step=1",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:184 (b5697f8) — an application form that is for a job > on \"an employer’s jobs host with /careers in the p [test]"
+  },
+  {
+   "id": "classifier-037",
+   "input": {
+    "url": "https://acme.pinpointhq.com/en/postings/abc/applications/new",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:185 (b5697f8) — an application form that is for a job > on \"Pinpoint\", asking only who you are #4 [test]"
+  },
+  {
+   "id": "classifier-038",
+   "input": {
+    "url": "https://acme.jobs.personio.de/job/12345/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:186 (b5697f8) — an application form that is for a job > on \"Personio\", asking only who you are #5 [test]"
+  },
+  {
+   "id": "classifier-039",
+   "input": {
+    "url": "https://www.comeet.com/jobs/acme/12.345/platform-engineer/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:187 (b5697f8) — an application form that is for a job > on \"Comeet\", asking only who you are #6 [test]"
+  },
+  {
+   "id": "classifier-040",
+   "input": {
+    "url": "https://acme.zohorecruit.com/jobs/Careers/123/Platform-Engineer/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:188 (b5697f8) — an application form that is for a job > on \"Zoho Recruit\", asking only who you are #7 [test]"
+  },
+  {
+   "id": "classifier-041",
+   "input": {
+    "url": "https://acme.applytojob.com/apply/abc123/Platform-Engineer",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:189 (b5697f8) — an application form that is for a job > on \"JazzHR\", asking only who you are #8 [test]"
+  },
+  {
+   "id": "classifier-042",
+   "input": {
+    "url": "https://acme.example/careers/mortgage-loan-officer/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:195 (7f3b297) — an application form that is for a job > on \"a mortgage loan officer\", asking only who you  [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-043",
+   "input": {
+    "url": "https://acme.example/careers/loan-servicing-specialist/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:196 (7f3b297) — an application form that is for a job > on \"a loan servicing specialist\", asking only who  [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-044",
+   "input": {
+    "url": "https://acme.example/jobs/insurance-sales-agent-12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:197 (7f3b297) — an application form that is for a job > on \"an insurance sales agent\", asking only who you [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-045",
+   "input": {
+    "url": "https://acme.example/careers/fair-lending-analyst",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:198 (7f3b297) — an application form that is for a job > on \"a fair lending analyst\", asking only who you a [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-046",
+   "input": {
+    "url": "https://acme.example/careers/lease-administrator/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:199 (7f3b297) — an application form that is for a job > on \"a lease administrator\", asking only who you ar [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-047",
+   "input": {
+    "url": "https://acme.example/careers/quotes-engineer",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:200 (7f3b297) — an application form that is for a job > on \"a quotes engineer\", asking only who you are #1 [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-048",
+   "input": {
+    "url": "https://careers.acme.com/job/4821/events-sales-manager",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:201 (7f3b297) — an application form that is for a job > on \"an events sales manager\", asking only who you  [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-049",
+   "input": {
+    "url": "https://careers.acme.com/apply/event-staff-4821",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:202 (7f3b297) — an application form that is for a job > on \"event staff\", asking only who you are #16 [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-050",
+   "input": {
+    "url": "https://acme.example/jobs/event.coordinator",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:203 (7f3b297) — an application form that is for a job > on \"an event coordinator after a dot\", asking only [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-051",
+   "input": {
+    "url": "https://acme.example/careers/insurance/claims-adjuster-4821",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:204 (7f3b297) — an application form that is for a job > on \"a claims adjuster in the insurance department\" [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-052",
+   "input": {
+    "url": "https://careers.acme.com/job/4821/insurance",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:205 (7f3b297) — an application form that is for a job > on \"a job numbered before its department\", asking  [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-053",
+   "input": {
+    "url": "https://acme.example/careers/events/apply/4821",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 ResumeM-M tests/not-a-job-application.test.ts:206 (7f3b297) — an application form that is for a job > on \"a numbered job under the events team\", asking  [test]; r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]",
+   "comment": "Round 17 decision: under /careers/events a number and nothing else on the page is not a job; \"events\" is not a department. Application only when the page names a role or shows another job signal (see classifier-r17 cases). Overrides the r16 test."
+  },
+  {
+   "id": "classifier-054",
+   "input": {
+    "url": "https://acme.example/bewerbung",
+    "html": "<html><head><title>Bewerbung</title></head><body>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>Lebenslauf<input type=\"file\" name=\"doc\"></label></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:217 (b5697f8) — an application form that is for a job > by a résumé asked for in another language [test]"
+  },
+  {
+   "id": "classifier-055",
+   "input": {
+    "url": "https://hr.acme.example/apply/123",
+    "html": "<html><head><title>Bewerbung</title></head><body>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>简历<input type=\"file\" name=\"doc\"></label></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 ResumeM-M tests/not-a-job-application.test.ts:218 (b5697f8) — an application form that is for a job > by a résumé asked for in another language [test]"
+  },
+  {
+   "id": "classifier-056",
+   "input": {
+    "url": "https://acme.example/apply",
+    "html": "<html><head><title>Apply — Acme</title>\n<script type=\"application/ld+json\">{\"@type\":\"JobPosting\",\"title\":\"Platform Engineer\"}</script></head><body>\n<h1>Submit application</h1><form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r13",
+   "source": "r13 ResumeM-M tests/not-a-job-application.test.ts:164 (d80c7eb) — an application form that is for a job > when the page declares a JobPosting [test]"
+  },
+  {
+   "id": "classifier-057",
+   "input": {
+    "url": "https://boards.greenhouse.io/streamly/jobs/1",
+    "html": "<html><head><title>SWE Intern at Streamly</title>\n<script type=\"application/ld+json\">\n{\"@context\":\"https://schema.org\",\"@type\":\"JobPosting\",\"title\":\"Software Engineer Intern, Data Platform\",\n\"hiringOrganization\":{\"@type\":\"Organization\",\"name\":\"Streamly\"},\n\"jobLocation\":{\"@type\":\"Place\",\"address\":{\"addressLocality\":\"Boston\",\"addressRegion\":\"MA\"}},\n\"description\":\"<p>Work on Kafka streaming infrastructure in Go and Python. Responsibilities include Kubernetes on AWS.</p>\"}\n</script></head><body>Apply now</body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (b07a459)",
+   "source": "pre-r8 (b07a459) ResumeM-M tests/jobs.test.ts:35 (b07a459) — what kind of page this is > knows a posting from its structured data [test]"
+  },
+  {
+   "id": "classifier-058",
+   "input": {
+    "url": "https://jobs.lever.co/streamly/abc/apply",
+    "html": "<html><head><title>Apply — Streamly</title></head><body>\n<h1>Submit application</h1>\n<form>\n  <label>First name<input name=\"first\"></label>\n  <label>Last name<input name=\"last\"></label>\n  <label>Phone number<input name=\"phone\"></label>\n  <label>Resume<input type=\"file\" name=\"resume\"></label>\n  <label>Cover letter<textarea name=\"cover\"></textarea></label>\n  <label>Why do you want to work here?<textarea></textarea></label>\n  <label>Will you now or in the future require sponsorship?<select></select></label>\n</form></body></html>"
+   },
+   "expect": "application",
+   "round": "pre-r8 (65390b0)",
+   "source": "pre-r8 (65390b0) ResumeM-M tests/jobs.test.ts:1013 (65390b0) — what kind of page this is > knows an application form, which describes almost nothing [test]; pre-r8 (65390b0) ResumeM-M tests/jobs.test.ts:1013 (65390b0) — what kind of page this is > still knows a real form, which asks for a name as they all do [test]"
+  },
+  {
+   "id": "classifier-059",
+   "input": {
+    "url": "https://streamly.com/careers",
+    "html": "<html><head><title>Careers at Streamly</title></head><body>\n<h1>Open positions</h1><p>12 results found. Filter by team, sort by date.</p>\n<ul><li><a href=\"/jobs/1\">Backend Engineer</a></li><li><a href=\"/jobs/2\">Designer</a></li></ul>\n</body></html>"
+   },
+   "expect": "listing",
+   "round": "pre-r8 (65390b0)",
+   "source": "pre-r8 (65390b0) ResumeM-M tests/jobs.test.ts:1019 (65390b0) — what kind of page this is > knows a page listing roles from a page describing one [test]"
+  },
+  {
+   "id": "classifier-060",
+   "input": {
+    "url": "https://news.ycombinator.com/item?id=1",
+    "html": "<html><head><title>Ask HN: Who is hiring? (September 2026)</title></head><body>\n<p>Streamly | Boston | Full-time | We are hiring a backend engineer. Kafka, Go.</p>\n</body></html>"
+   },
+   "expect": "discussion",
+   "round": "pre-r8 (65390b0)",
+   "source": "pre-r8 (65390b0) ResumeM-M tests/jobs.test.ts:1023 (65390b0) — what kind of page this is > knows a hiring thread on a forum [test]"
+  },
+  {
+   "id": "classifier-061",
+   "input": {
+    "url": "https://shop.example.com/starter",
+    "html": "<html><head><title>Sourdough starter</title></head><body>\n<h1>Sourdough starter</h1><p>Add to cart. Checkout. See our privacy policy and terms of service.</p>\n</body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (65390b0)",
+   "source": "pre-r8 (65390b0) ResumeM-M tests/jobs.test.ts:1027 (65390b0) — what kind of page this is > stays quiet on an ordinary page [test]"
+  },
+  {
+   "id": "classifier-062",
+   "input": {
+    "url": "https://claude.ai/code/session_01",
+    "html": "<html><head><title>Claude Code</title></head><body>\n<h1>Claude Code</h1>\n<p>Can you draft a cover letter for the Platform Engineer posting? I want to reuse\nthe answer about why do you want to work here. I have read the job description and\nthe requirements — years of experience, responsibilities, qualifications.</p>\n<p>Make the resume fit on one page and attach the resume when you submit application\nmaterials.</p>\n<form>\n  <label for=\"composer\">Reply</label>\n  <textarea id=\"composer\" name=\"prompt\"></textarea>\n  <input name=\"attachment\" type=\"file\">\n  <button type=\"submit\">Send</button>\n</form></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (aec0804)",
+   "source": "pre-r8 (aec0804) ResumeM-M tests/jobs.test.ts:1061 (aec0804) — what kind of page this is > refuses a page that discusses applications but asks nothing of [test]"
+  },
+  {
+   "id": "classifier-063",
+   "input": {
+    "url": "https://claude.ai/code/session_01",
+    "html": "<html><head><title>Claude Code</title></head><body>\n<h1>Claude Code</h1>\n<p>Can you draft a cover letter for the Platform Engineer posting? I want to reuse\nthe answer about why do you want to work here. I have read the job description and\nthe requirements — years of experience, responsibilities, qualifications.</p>\n<p>Make the resume fit on one page and attach the resume when you submit application\nmaterials.</p>\n<form>\n  <label for=\"you\">Full name</label><input id=\"you\" name=\"fullName\">\n  <input type=\"email\" name=\"email\">\n  <textarea id=\"composer\" name=\"prompt\"></textarea>\n  <input name=\"attachment\" type=\"file\">\n  <button type=\"submit\">Send</button>\n</form></body></html>"
+   },
+   "expect": "application",
+   "round": "pre-r8 (aec0804)",
+   "source": "pre-r8 (aec0804) ResumeM-M tests/jobs.test.ts:1061 (aec0804) — what kind of page this is > accepts the same page once it starts asking who you are [test]"
+  },
+  {
+   "id": "classifier-064",
+   "input": {
+    "url": "https://acme.example/careers/apply",
+    "html": "<html><head><title>Apply — Acme</title></head><body>\n<h1>Submit application</h1>\n<form><input type=\"email\" name=\"e\"><input type=\"file\" name=\"r\">\n<label>Cover letter<textarea></textarea></label>\n<label>Why do you want to work here?<textarea></textarea></label>\n<p>Upload your resume. Work authorization?</p></form></body></html>"
+   },
+   "expect": "application",
+   "round": "pre-r8 (aec0804)",
+   "source": "pre-r8 (aec0804) ResumeM-M tests/jobs.test.ts:1097 (aec0804) — what kind of page this is > takes an email field as asking who you are [test]"
+  },
+  {
+   "id": "classifier-065",
+   "input": {
+    "url": "https://streamly.com/careers/platform-engineer",
+    "html": "<html><head><title>Platform Engineer at Streamly</title></head><body>\n<h1>Platform Engineer</h1><p>Responsibilities, qualifications, years of experience,\nabout the role, what you'll do, benefits, compensation.</p></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (aec0804)",
+   "source": "pre-r8 (aec0804) ResumeM-M tests/jobs.test.ts:1108 (aec0804) — what kind of page this is > does not need an identity field from a page that names the rol [test]"
+  },
+  {
+   "id": "classifier-066",
+   "input": {
+    "url": "https://blog.example.com/bread",
+    "html": "<html><body><h1>Bread</h1><p>Sourdough notes from my kitchen.</p></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (65390b0)",
+   "source": "pre-r8 (65390b0) ResumeM-M tests/jobs.test.ts:1113 (65390b0) — what kind of page this is > stays quiet on a blog post that merely mentions work [test]"
+  },
+  {
+   "id": "classifier-067",
+   "input": {
+    "url": "https://jobs.ashbyhq.com/streamly/apply",
+    "html": "<html><head><title>Backend Engineer</title></head><body><p>Apply now</p></body></html>"
+   },
+   "expect": {
+    "not": "none"
+   },
+   "round": "pre-r8 (65390b0)",
+   "source": "pre-r8 (65390b0) ResumeM-M tests/jobs.test.ts:1119 (65390b0) — what kind of page this is > offers on a bare careers URL with little text, rather than mis [test]"
+  },
+  {
+   "id": "classifier-068",
+   "input": {
+    "url": "https://www.reddit.com/r/cscareerquestions/comments/1a2b3c/how_many_applications/",
+    "html": "<!doctype html><html><head><title>How many applications did it take you?</title></head><body><header><a href=\"/\">reddit</a>\n    <form action=\"/login\"><label for=\"lg\">Email or username</label>\n    <input id=\"lg\" name=\"username\" type=\"text\"><input name=\"password\" type=\"password\"></form>\n    <input type=\"search\" name=\"q\" placeholder=\"Search Reddit\"></header><div class=\"post\"><h1>How many applications did it take you?</h1><p>I have sent about 200. Most were full-time new grad roles. A few asked for a cover\n         letter, most wanted years of experience I do not have. The requirements are always\n         \"3+ years\" even for an internship. Benefits and compensation are never mentioned.</p></div><label for=\"c\">Add a comment</label><textarea id=\"c\" name=\"comment\"></textarea>\n    <input type=\"file\" id=\"img\" name=\"image\"><div class=\"comments\"><p>Posted by u/someone</p><p>312 comments</p></div></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1706 (c507b15) — a comment thread, which is written like a posting and is not one > stays quiet on a thread [test]"
+  },
+  {
+   "id": "classifier-069",
+   "input": {
+    "url": "https://www.reddit.com/r/cscareerquestions/comments/1a2b3d/software_engineer_offer/",
+    "html": "<!doctype html><html><head><title>Software Engineer</title></head><body><header><a href=\"/\">reddit</a>\n    <form action=\"/login\"><label for=\"lg\">Email or username</label>\n    <input id=\"lg\" name=\"username\" type=\"text\"><input name=\"password\" type=\"password\"></form>\n    <input type=\"search\" name=\"q\" placeholder=\"Search Reddit\"></header><div class=\"post\"><h1>Software Engineer</h1><p>Got an offer. Salary range seems low for the responsibilities. The job description said\n         minimum qualifications of 5 years. Should I negotiate? They are an equal opportunity\n         employer if that matters.</p></div><label for=\"c\">Add a comment</label><textarea id=\"c\" name=\"comment\"></textarea>\n    <input type=\"file\" id=\"img\" name=\"image\"><div class=\"comments\"><p>Posted by u/someone</p><p>312 comments</p></div></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1706 (c507b15) — a comment thread, which is written like a posting and is not one > stays quiet on a thread [test]"
+  },
+  {
+   "id": "classifier-070",
+   "input": {
+    "url": "https://www.reddit.com/r/resumes/comments/1a2b3e/resume_review_new_grad/",
+    "html": "<!doctype html><html><head><title>Resume review — new grad, 0 callbacks</title></head><body><header><a href=\"/\">reddit</a>\n    <form action=\"/login\"><label for=\"lg\">Email or username</label>\n    <input id=\"lg\" name=\"username\" type=\"text\"><input name=\"password\" type=\"password\"></form>\n    <input type=\"search\" name=\"q\" placeholder=\"Search Reddit\"></header><div class=\"post\"><h1>Resume review — new grad, 0 callbacks</h1><p>Here is my resume. I am applying to full-time new grad roles. Should I add a cover\n         letter? Most postings want years of experience. Any feedback on the requirements?</p></div><label for=\"c\">Add a comment</label><textarea id=\"c\" name=\"comment\"></textarea>\n    <input type=\"file\" id=\"img\" name=\"image\"><div class=\"comments\"><p>Posted by u/someone</p><p>312 comments</p></div></body></html>"
+   },
+   "expect": "none",
+   "round": "unknown",
+   "source": "unknown ResumeM-M tests/jobs.test.ts:null (null) — a comment thread, which is written like a posting and is not one > does not read a resume- [test]"
+  },
+  {
+   "id": "classifier-071",
+   "input": {
+    "url": "https://www.reddit.com/r/forhire/comments/1a2b3g/hiring_backend_engineer/",
+    "html": "<!doctype html><html><head><title>[Hiring] Backend Engineer — Remote</title></head><body><header><a href=\"/\">reddit</a>\n    <form action=\"/login\"><label for=\"lg\">Email or username</label>\n    <input id=\"lg\" name=\"username\" type=\"text\"><input name=\"password\" type=\"password\"></form>\n    <input type=\"search\" name=\"q\" placeholder=\"Search Reddit\"></header><div class=\"post\"><h1>[Hiring] Backend Engineer — Remote</h1><p>We are looking for a Backend Engineer. Responsibilities include building services in Go.\n         Minimum qualifications: 3 years of experience. Full-time, salary range $150k-$180k.\n         Apply now by emailing us. We are an equal opportunity employer.</p></div><label for=\"c\">Add a comment</label><textarea id=\"c\" name=\"comment\"></textarea>\n    <input type=\"file\" id=\"img\" name=\"image\"><div class=\"comments\"><p>Posted by u/someone</p><p>312 comments</p></div></body></html>"
+   },
+   "expect": "discussion",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1719 (c507b15) — a comment thread, which is written like a posting and is not one > still offers on a threa [test]"
+  },
+  {
+   "id": "classifier-072",
+   "input": {
+    "url": "https://forum.example.com/t/platform-engineer/2",
+    "html": "<!doctype html><html><head><title>Platform Engineer</title></head><body><header><a href=\"/\">reddit</a>\n    <form action=\"/login\"><label for=\"lg\">Email or username</label>\n    <input id=\"lg\" name=\"username\" type=\"text\"><input name=\"password\" type=\"password\"></form>\n    <input type=\"search\" name=\"q\" placeholder=\"Search Reddit\"></header><div class=\"post\"><h1>Platform Engineer</h1><p>Responsibilities, qualifications, years of experience, about the role,\n       what you'll do, benefits, compensation — what do these even mean?</p></div><label for=\"c\">Add a comment</label><textarea id=\"c\" name=\"comment\"></textarea>\n    <input type=\"file\" id=\"img\" name=\"image\"><div class=\"comments\"><p>Posted by u/someone</p><p>312 comments</p></div></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (06e77a6)",
+   "source": "pre-r8 (06e77a6) ResumeM-M tests/jobs.test.ts:1228 (06e77a6) — a comment thread, which is written like a posting and is not one > reads the Discourse and [test]"
+  },
+  {
+   "id": "classifier-073",
+   "input": {
+    "url": "https://stackexchange.com/questions/12/what-is-this",
+    "html": "<!doctype html><html><head><title>Platform Engineer</title></head><body><header><a href=\"/\">reddit</a>\n    <form action=\"/login\"><label for=\"lg\">Email or username</label>\n    <input id=\"lg\" name=\"username\" type=\"text\"><input name=\"password\" type=\"password\"></form>\n    <input type=\"search\" name=\"q\" placeholder=\"Search Reddit\"></header><div class=\"post\"><h1>Platform Engineer</h1><p>Responsibilities, qualifications, years of experience, about the role,\n       what you'll do, benefits, compensation — what do these even mean?</p></div><label for=\"c\">Add a comment</label><textarea id=\"c\" name=\"comment\"></textarea>\n    <input type=\"file\" id=\"img\" name=\"image\"><div class=\"comments\"><p>Posted by u/someone</p><p>312 comments</p></div></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (06e77a6)",
+   "source": "pre-r8 (06e77a6) ResumeM-M tests/jobs.test.ts:1229 (06e77a6) — a comment thread, which is written like a posting and is not one > reads the Discourse and [test]"
+  },
+  {
+   "id": "classifier-074",
+   "input": {
+    "url": "https://streamly.com/t/platform-engineer/2",
+    "html": "<html><head><title>Platform Engineer</title></head><body>\n      <h1>Platform Engineer</h1><p>Responsibilities, qualifications, years of experience,\n      about the role, what you'll do, benefits, compensation.</p></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (06e77a6)",
+   "source": "pre-r8 (06e77a6) ResumeM-M tests/jobs.test.ts:1241 (06e77a6) — a comment thread, which is written like a posting and is not one > leaves an ordinary site [test]"
+  },
+  {
+   "id": "classifier-075",
+   "input": {
+    "url": "https://streamly.com/questions/12",
+    "html": "<html><head><title>Platform Engineer</title></head><body>\n      <h1>Platform Engineer</h1><p>Responsibilities, qualifications, years of experience,\n      about the role, what you'll do, benefits, compensation.</p></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (06e77a6)",
+   "source": "pre-r8 (06e77a6) ResumeM-M tests/jobs.test.ts:1242 (06e77a6) — a comment thread, which is written like a posting and is not one > leaves an ordinary site [test]"
+  },
+  {
+   "id": "classifier-076",
+   "input": {
+    "url": "https://www.reddit.com/r/cscareerquestions/comments/1abc/a_thread/",
+    "html": "<!doctype html><html><head><title>Should I take this offer? : r/cscareerquestions</title></head><body><main><h1>Should I take this offer? : r/cscareerquestions</h1><p>Looking for advice. Got an offer, full-time, remote. Base salary is low and benefits ok. Requirements were 3 years of experience. Hiring is slow.</p></main></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1706 (c507b15) — a hiring thread says so in its title > is not a hiring thread for saying \"looking for\" or  [test]"
+  },
+  {
+   "id": "classifier-077",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Senior Software Engineer (Remote) - Acme Careers</title></head><body><main><h1>Senior Software Engineer (Remote)</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Senior Software Engineer [test]"
+  },
+  {
+   "id": "classifier-078",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Software Engineering Internship - Summer 2027 | Acme</title></head><body><main><h1>Software Engineering Internship - Summer 2027</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Software Engineering Int [test]"
+  },
+  {
+   "id": "classifier-079",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Backend Developer (m/w/d) | Acme GmbH</title></head><body><main><h1>Backend Developer (m/w/d)</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Backend Developer (m/w/d [test]"
+  },
+  {
+   "id": "classifier-080",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Account Executive, Mid-Market | Acme</title></head><body><main><h1>Account Executive</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Account Executive, Mid-M [test]"
+  },
+  {
+   "id": "classifier-081",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Product Owner | Acme</title></head><body><main><h1>Product Owner</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Product Owner | Acme\" as [test]"
+  },
+  {
+   "id": "classifier-082",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Developer Advocate | Acme</title></head><body><main><h1>Developer Advocate</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Developer Advocate | Acm [test]"
+  },
+  {
+   "id": "classifier-083",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Pharmacist | Acme Health</title></head><body><main><h1>Pharmacist</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Pharmacist | Acme Health [test]"
+  },
+  {
+   "id": "classifier-084",
+   "input": {
+    "url": "https://acme.com/careers/role-slug",
+    "html": "<!doctype html><html><head><title>Electrician | Acme</title></head><body><main><h1>Electrician</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1741 (c507b15) — a posting whose title is not just a role word at the end > reads \"Electrician | Acme\" as a [test]"
+  },
+  {
+   "id": "classifier-085",
+   "input": {
+    "url": "https://www.acme.com/jobs/12345",
+    "html": "<!doctype html><html><head><title>Shift Supervisor, Downtown | Acme Coffee</title></head><body><main><h1>Shift Lead Downtown Store</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "posting",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1745 (c507b15) — a posting whose title is not just a role word at the end > and a role no list knows, when  [test]"
+  },
+  {
+   "id": "classifier-086",
+   "input": {
+    "url": "https://lethain.com/staff-engineer/",
+    "html": "<!doctype html><html><head><title>Becoming a Staff Engineer | Irrational Exuberance</title></head><body><main><h1>Becoming a Staff Engineer</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1752 (c507b15) — a posting whose title is not just a role word at the end > while an article, a profile and [test]"
+  },
+  {
+   "id": "classifier-087",
+   "input": {
+    "url": "https://blog.acme.com/careers/staff-engineer",
+    "html": "<!doctype html><html><head><title>Staff Engineer | Eng Blog</title><meta property=\"og:type\" content=\"article\"></head><body><main><h1>Staff Engineer</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1755 (c507b15) — a posting whose title is not just a role word at the end > while an article, a profile and [test]"
+  },
+  {
+   "id": "classifier-088",
+   "input": {
+    "url": "https://en.wikipedia.org/wiki/Software_engineer",
+    "html": "<!doctype html><html><head><title>Software engineer - Wikipedia</title></head><body><main><h1>Software engineer</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1757 (c507b15) — a posting whose title is not just a role word at the end > while an article, a profile and [test]"
+  },
+  {
+   "id": "classifier-089",
+   "input": {
+    "url": "https://www.linkedin.com/in/jane-doe-123/",
+    "html": "<!doctype html><html><head><title>Jane Doe - Senior Software Engineer | LinkedIn</title></head><body><main><h1>Jane Doe</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1759 (c507b15) — a posting whose title is not just a role word at the end > while an article, a profile and [test]"
+  },
+  {
+   "id": "classifier-090",
+   "input": {
+    "url": "https://www.theverge.com/2022/11/14/23458233/twitter-fires-engineer",
+    "html": "<!doctype html><html><head><title>Twitter fires outspoken engineer - The Verge</title></head><body><main><h1>Twitter fires outspoken engineer</h1><h2>About the role</h2><p>We're looking for an experienced person to join our team.</p><h2>Responsibilities</h2><ul><li>Own the roadmap</li></ul><h2>Qualifications</h2><ul><li>3+ years of experience</li></ul><h2>Benefits</h2><p>Full-time. Hybrid. Base salary $120,000 - $150,000.</p><a class=\"btn\" href=\"/careers/apply?id=1\">Apply now</a></main></body></html>"
+   },
+   "expect": "none",
+   "round": "pre-r8 (c507b15)",
+   "source": "pre-r8 (c507b15) ResumeM-M tests/jobs.test.ts:1762 (c507b15) — a posting whose title is not just a role word at the end > while an article, a profile and [test]"
+  },
+  {
+   "id": "classifier-091",
+   "input": {
+    "url": "https://careers.acme.com/apply/4821",
+    "html": "<html><head><title>Apply | Acme Careers</title></head><body>\n<h1>Apply | Acme Careers</h1><form><label>First name</label><input name=\"first_name\"><label>Last name</label><input name=\"last_name\">\n   <label>Email</label><input type=\"email\" name=\"email\"><label>Phone number</label><input name=\"phone\">\n   <label>LinkedIn profile</label><input name=\"linkedin\"><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/classify.test.ts — employer own site, quick apply, no resume, no job words [report]"
+  },
+  {
+   "id": "classifier-092",
+   "input": {
+    "url": "https://jobs.acme.com/careers/apply?step=1",
+    "html": "<html><head><title>Your application - Acme</title></head><body>\n<h1>Your application - Acme</h1><form><h2>Personal information</h2><label>First name</label><input name=\"firstName\"><label>Last name</label><input name=\"lastName\">\n   <label>Email</label><input type=\"email\"><label>Phone number</label><input name=\"phone\"><p>Tell us about yourself</p><textarea name=\"about\"></textarea><button>Next</button></form><p>Application form</p></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/classify.test.ts — employer own site, step 1 personal info [report]"
+  },
+  {
+   "id": "classifier-093",
+   "input": {
+    "url": "https://acme.jobs.personio.de/job/12345/apply",
+    "html": "<html><head><title>Bewerbung | Acme GmbH</title></head><body>\n<h1>Bewerbung | Acme GmbH</h1><form><label>Vorname</label><input name=\"first_name\"><label>Nachname</label><input name=\"last_name\">\n   <label>E-Mail</label><input type=\"email\" name=\"email\"><label>Lebenslauf</label><input type=\"file\" name=\"documents\">\n   <label>Telefonnummer</label><input name=\"phone_number\"><button>Bewerbung absenden</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/classify.test.ts — Personio German form (English widget words) [report]"
+  },
+  {
+   "id": "classifier-094",
+   "input": {
+    "url": "https://acme.pinpointhq.com/en/postings/abc/applications/new",
+    "html": "<html><head><title>Application - Acme</title></head><body>\n<h1>Application - Acme</h1><form><label>First name</label><input name=\"first_name\"><label>Last name</label><input name=\"last_name\">\n   <label>Email</label><input type=\"email\"><label>Phone number</label><input name=\"phone\"><label>LinkedIn profile</label><input name=\"li\"><button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/classify.test.ts — Pinpoint form no resume word (attach CV says \"CV\") [report]"
+  },
+  {
+   "id": "classifier-095",
+   "input": {
+    "url": "https://acme.wd5.myworkdayjobs.com/en-US/External/job/Seattle/Engineer_R123/apply/applyManually",
+    "html": "<html><head><title>Careers</title></head><body>\n<h1>Careers</h1><h2>My Information</h2><form><label>First Name</label><input data-automation-id=\"legalNameSection_firstName\" name=\"x\"><label>Last Name</label><input name=\"legalNameSection_lastName\"><label>Email</label><input type=\"email\"><label>Phone Number</label><input name=\"phone-number\"><button>Save and Continue</button></form><p>Application form</p></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/classify.test.ts — Workday My Information on myworkdayjobs [report]"
+  },
+  {
+   "id": "classifier-096",
+   "input": {
+    "url": "https://recrutement.acme.fr/candidature/123",
+    "html": "<html><head><title>Candidature</title></head><body>\n<h1>Candidature</h1><form><label>Prénom</label><input name=\"first_name\"><label>Nom</label><input name=\"last_name\"><label>E-mail</label><input type=\"email\"><label>CV</label><input type=\"file\"></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/classify.test.ts — French employer form (CV upload) [list]"
+  },
+  {
+   "id": "classifier-097",
+   "input": {
+    "url": "https://hr.acme.cn/apply/123",
+    "html": "<html><head><title>职位申请</title></head><body>\n<h1>职位申请</h1><form><label>姓名</label><input name=\"full_name\"><label>邮箱</label><input type=\"email\"><label>简历</label><input type=\"file\"><button>提交申请</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r14",
+   "source": "r14 hunt14-rmm/classify.test.ts — Chinese form [report]"
+  },
+  {
+   "id": "classifier-098",
+   "input": {
+    "url": "https://bank.example/loans/apply?returnTo=/careers/",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan on bank /careers-adjacent query [report]"
+  },
+  {
+   "id": "classifier-099",
+   "input": {
+    "url": "https://bank.example/loans/apply#jobs",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan with #jobs hash [report]"
+  },
+  {
+   "id": "classifier-100",
+   "input": {
+    "url": "https://jobs.example-cu.org/loans/apply",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan under a jobs. host (credit union for workers) [report]"
+  },
+  {
+   "id": "classifier-101",
+   "input": {
+    "url": "https://bank.example/job/loan-application",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan on /job/ path segment [report]"
+  },
+  {
+   "id": "classifier-102",
+   "input": {
+    "url": "https://uni.example/admissions/mba/apply",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — MBA admission plain [report]"
+  },
+  {
+   "id": "classifier-103",
+   "input": {
+    "url": "https://bank.example/loans/apply?utm_campaign=leverage&ref=jobs.lever.co/acme",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan via lever in query [report]"
+  },
+  {
+   "id": "classifier-104",
+   "input": {
+    "url": "https://bank.example/loans/apply?partner=acme.icims.com",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan with icims host string in query [report]"
+  },
+  {
+   "id": "classifier-105",
+   "input": {
+    "url": "https://bank.example/loans/apply?ref=acme.csod.com",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan, ATS-free tracker name in query [report]"
+  },
+  {
+   "id": "classifier-106",
+   "input": {
+    "url": "https://bank.example/loans/apply?next=https://acme.homerun.co/x",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r15",
+   "source": "r15 hunt15-rmm/jobs.ts — loan, homerun in query [report]"
+  },
+  {
+   "id": "classifier-107",
+   "input": {
+    "url": "https://careers.acme.com/careers/events-coordinator",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-108",
+   "input": {
+    "url": "https://careers.acme.com/careers/events-coordinator",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-115",
+   "input": {
+    "url": "https://acme.example/jobs/insurance-agent-12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-116",
+   "input": {
+    "url": "https://acme.example/jobs/insurance-agent-12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-117",
+   "input": {
+    "url": "https://acme.example/jobs/insurance-sales-agent-12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-120",
+   "input": {
+    "url": "https://acme.example/careers/registration-specialist",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-121",
+   "input": {
+    "url": "https://acme.example/careers/registration-specialist",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-124",
+   "input": {
+    "url": "https://acme.example/careers/register",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: rejecting it is \"probably acceptable\" [report]"
+  },
+  {
+   "id": "classifier-125",
+   "input": {
+    "url": "https://acme.example/careers/register",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: rejecting it is \"probably acceptable\" [report]"
+  },
+  {
+   "id": "classifier-128",
+   "input": {
+    "url": "https://acme.example/events/careers/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]",
+   "comment": "Round 17: restored as at r10-r14. \"events\" before \"careers\" is a site section."
+  },
+  {
+   "id": "classifier-129",
+   "input": {
+    "url": "https://acme.example/events/careers/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]",
+   "comment": "Round 17: restored as at r10-r14. \"events\" before \"careers\" is a site section."
+  },
+  {
+   "id": "classifier-130",
+   "input": {
+    "url": "https://acme.example/careers/admissions-counselor/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-131",
+   "input": {
+    "url": "https://acme.example/careers/admissions-counselor/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-136",
+   "input": {
+    "url": "https://acme.example/careers/lease-administrator/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-137",
+   "input": {
+    "url": "https://acme.example/careers/mortgage-loan-officer/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-138",
+   "input": {
+    "url": "https://acme.example/careers/loan-servicing-specialist/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-139",
+   "input": {
+    "url": "https://acme.example/careers/insurance/claims-adjuster-4821",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-140",
+   "input": {
+    "url": "https://acme.example/careers/events/apply/4821",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]",
+   "comment": "Round 17 decision: as classifier-053; a LinkedIn field is no job signal on its own."
+  },
+  {
+   "id": "classifier-141",
+   "input": {
+    "url": "https://acme.example/jobs/event.coordinator",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-142",
+   "input": {
+    "url": "https://acme.example/jobs/Loan_Officer",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-143",
+   "input": {
+    "url": "https://acme.example/jobs/Loan_Officer",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-146",
+   "input": {
+    "url": "https://acme.example/careers/fair-lending-analyst",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-147",
+   "input": {
+    "url": "https://acme.example/careers/quotes-engineer",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-148",
+   "input": {
+    "url": "https://careers.acme.com/apply/event-staff-4821",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-149",
+   "input": {
+    "url": "https://careers.acme.com/job/4821/events-sales-manager",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-152",
+   "input": {
+    "url": "https://careers.acme.com/job/4821/insurance",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-153",
+   "input": {
+    "url": "https://careers.acme.com/job/4821/event-marketing-manager",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-154",
+   "input": {
+    "url": "https://careers.acme.com/job/4821/event-marketing-manager",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]"
+  },
+  {
+   "id": "classifier-157",
+   "input": {
+    "url": "https://acme.wd5.myworkdayjobs.com/en-US/External/job/Boston/Event-Manager_R123/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-158",
+   "input": {
+    "url": "https://acme.wd5.myworkdayjobs.com/en-US/External/job/Boston/Event-Manager_R123/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-159",
+   "input": {
+    "url": "https://acme.wd5.myworkdayjobs.com/en-US/Events/job/Boston/Engineer_R123/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-160",
+   "input": {
+    "url": "https://acme.wd5.myworkdayjobs.com/en-US/Events/job/Boston/Engineer_R123/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review: \"still fine\" [report]"
+  },
+  {
+   "id": "classifier-161",
+   "input": {
+    "url": "https://acme.example/careers/jobs/events",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=0) — review F3: a real job form now missed [report]",
+   "comment": "Round 17: restored as at r10-r14. \"events\" after \"jobs\" names which jobs."
+  },
+  {
+   "id": "classifier-162",
+   "input": {
+    "url": "https://acme.example/careers/jobs/events",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r16",
+   "source": "r16 hunt16-rmm/jobs.test.ts (li=1) — review F3: a real job form now missed [report]",
+   "comment": "Round 17: restored as at r10-r14. \"events\" after \"jobs\" names which jobs."
+  },
+  {
+   "id": "classifier-180",
+   "input": {
+    "url": "http://bank.example/application/personal-loan",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r13",
+   "source": "r13 hunt13-web/scripts/pages.mjs (loan) — server said isJobPosting:true [report]"
+  },
+  {
+   "id": "classifier-181",
+   "input": {
+    "url": "http://bank2.example/loans/personal",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r13",
+   "source": "r13 hunt13-web/scripts/pages.mjs (loan) — server said isJobPosting:true [report]"
+  },
+  {
+   "id": "classifier-182",
+   "input": {
+    "url": "https://acme.example/apply",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r14, r15",
+   "source": "r14 ResumeM-M b5697f8 tests/not-a-job-application.test.ts: \"an employer’s own /apply, by its LinkedIn field alone\" (removed in f94fe4c) [test]; r15 fix15 report: \"can't be kept alongside item 2's rule that LinkedIn only counts with another job signal\" — test changed to /apply/48213 [decision]",
+   "comment": "Round 17 decision: an employer's own /apply with only a LinkedIn field is none; LinkedIn counts only with another job signal."
+  },
+  {
+   "id": "classifier-r17-01",
+   "input": {
+    "url": "https://uni.example/careers/events/48213",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: a careers office's fair or admission form, numbered (university form)"
+  },
+  {
+   "id": "classifier-r17-02",
+   "input": {
+    "url": "https://uni.example/careers/events/48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=0)"
+  },
+  {
+   "id": "classifier-r17-03",
+   "input": {
+    "url": "https://uni.example/careers/events/48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=1)"
+  },
+  {
+   "id": "classifier-r17-04",
+   "input": {
+    "url": "https://uni.example/careers/fairs/12345",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: a careers office's fair or admission form, numbered (university form)"
+  },
+  {
+   "id": "classifier-r17-05",
+   "input": {
+    "url": "https://uni.example/careers/fairs/12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=0)"
+  },
+  {
+   "id": "classifier-r17-06",
+   "input": {
+    "url": "https://uni.example/careers/fairs/12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=1)"
+  },
+  {
+   "id": "classifier-r17-07",
+   "input": {
+    "url": "https://uni.example/careers/admissions/apply/12345",
+    "html": "<!doctype html><html><head><title>MBA application | Example University</title></head><body>\n<h1>Apply for the MBA programme</h1>\n<p>Requirements: transcripts and two references. Full-time and part-time study.</p>\n<form><label>First name<input name=\"first_name\"></label><label>Last name<input name=\"last_name\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n\n<label>Why do you want to study here?<textarea name=\"why\"></textarea></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: a careers office's fair or admission form, numbered (university form)"
+  },
+  {
+   "id": "classifier-r17-08",
+   "input": {
+    "url": "https://uni.example/careers/admissions/apply/12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=0)"
+  },
+  {
+   "id": "classifier-r17-09",
+   "input": {
+    "url": "https://uni.example/careers/admissions/apply/12345",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=1)"
+  },
+  {
+   "id": "classifier-r17-10",
+   "input": {
+    "url": "https://jobs.cu.example/loans/apply-online-48213",
+    "html": "<!doctype html><html><head><title>Personal loan application | Example Bank</title></head><body>\n<h1>Apply for a personal loan</h1><p>Requirements: you must be 18+. Benefits: low APR.</p>\n<form><label for=fn>First name</label><input id=fn name=first_name><label for=ln>Last name</label><input id=ln name=last_name>\n<label for=em>Email</label><input id=em type=email name=email><label for=ph>Phone</label><input id=ph name=phone>\n<label for=inc>Annual income</label><input id=inc name=income><label for=emp>Employer</label><input id=emp name=employer>\n<label for=ssn>Social Security number</label><input id=ssn name=ssn><p>SECRET-PAGE-MARKER-loan account 4111-1111</p>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: a credit union's loan form on a jobs. host, with a reference number"
+  },
+  {
+   "id": "classifier-r17-11",
+   "input": {
+    "url": "https://jobs.cu.example/loans/apply-online-48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=0)"
+  },
+  {
+   "id": "classifier-r17-12",
+   "input": {
+    "url": "https://jobs.cu.example/loans/apply-online-48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 1: the same as a quick form (li=1)"
+  },
+  {
+   "id": "classifier-r17-13",
+   "input": {
+    "url": "https://acme.example/careers/events/apply/4821",
+    "html": "<html><head><title>Event Coordinator - Acme</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r17",
+   "source": "r17 review 1 decision: under /careers/events, a number plus a role on the page is a job"
+  },
+  {
+   "id": "classifier-r17-14",
+   "input": {
+    "url": "https://acme.example/apply/events-for-developers-48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 2: a role after \"for\" names who it is for (li=0)"
+  },
+  {
+   "id": "classifier-r17-15",
+   "input": {
+    "url": "https://acme.example/apply/events-for-developers-48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 2: a role after \"for\" names who it is for (li=1)"
+  },
+  {
+   "id": "classifier-r17-16",
+   "input": {
+    "url": "https://acme.example/apply/fair-for-engineers-55555",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 2: a role after \"for\" names who it is for (li=0)"
+  },
+  {
+   "id": "classifier-r17-17",
+   "input": {
+    "url": "https://acme.example/apply/fair-for-engineers-55555",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 2: a role after \"for\" names who it is for (li=1)"
+  },
+  {
+   "id": "classifier-r17-18",
+   "input": {
+    "url": "https://acme.example/apply/insurance-for-developers-48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 2: a role after \"for\" names who it is for (li=0)"
+  },
+  {
+   "id": "classifier-r17-19",
+   "input": {
+    "url": "https://acme.example/apply/insurance-for-developers-48213",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 2: a role after \"for\" names who it is for (li=1)"
+  },
+  {
+   "id": "classifier-r17-20",
+   "input": {
+    "url": "https://acme.example/apply/mba-2027",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 3: a year beside a cohort word is the cohort (li=1)"
+  },
+  {
+   "id": "classifier-r17-21",
+   "input": {
+    "url": "https://acme.example/application/fall2027",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 3: a year beside a cohort word is the cohort (li=1)"
+  },
+  {
+   "id": "classifier-r17-22",
+   "input": {
+    "url": "https://acme.example/apply/2027",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r17",
+   "source": "r17 review 3 decision: a year with no cohort word counts as a job's number (li=1)"
+  },
+  {
+   "id": "classifier-r17-23",
+   "input": {
+    "url": "https://acme.example/apply/2027",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 3: and on its own, with no LinkedIn field, is not enough (li=0)"
+  },
+  {
+   "id": "classifier-r17-24",
+   "input": {
+    "url": "https://acme.example/apply/swe-intern-2027",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r17",
+   "source": "r17 review 3 decision: a year with no cohort word counts as a job's number (li=1)"
+  },
+  {
+   "id": "classifier-r17-25",
+   "input": {
+    "url": "https://acme.example/apply/swe-intern-2027",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 3: and on its own, with no LinkedIn field, is not enough (li=0)"
+  },
+  {
+   "id": "classifier-r17-26",
+   "input": {
+    "url": "https://acme.example/apply/r123",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r17",
+   "source": "r17 review 3: three digits after a letter or hyphen are a job's number (li=1)"
+  },
+  {
+   "id": "classifier-r17-27",
+   "input": {
+    "url": "https://acme.example/apply/job-123",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r17",
+   "source": "r17 review 3: three digits after a letter or hyphen are a job's number (li=1)"
+  },
+  {
+   "id": "classifier-r17-28",
+   "input": {
+    "url": "https://acme.example/apply/req-456",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "application",
+   "round": "r17",
+   "source": "r17 review 3: three digits after a letter or hyphen are a job's number (li=1)"
+  },
+  {
+   "id": "classifier-r17-29",
+   "input": {
+    "url": "https://accelerator.example/apply/s2027",
+    "html": "<html><head><title>Apply</title></head><body><h1>Your details</h1>\n<form><label>First name<input name=\"first\"></label><label>Last name<input name=\"last\"></label>\n<label>Email<input type=\"email\" name=\"email\"></label><label>Phone number<input name=\"phone\"></label><label>LinkedIn profile<input name=\"linkedin\"></label>\n<button>Submit application</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r17",
+   "source": "r17 review 3: an accelerator batch (li=1)"
+  }
+ ]
+}

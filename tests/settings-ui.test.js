@@ -57,8 +57,8 @@ describe('the settings panel', () => {
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/voice') result = { voice: '' };
       else if (url === '/api/ai/presets') result = { presets: AI_PRESETS, tasks: AI_TASKS };
-      else if (url.startsWith('/api/ai/models?')) {
-        const command = new URL(url, 'http://local').searchParams.get('command');
+      else if (url === '/api/ai/models' && options.method === 'POST') {
+        const command = body?.command;
         result = { models: liveModels[command] ?? [], from: 'cli' };
       }
       // A working AI, which is one that answers the question the test asks:
@@ -246,6 +246,36 @@ describe('the settings panel', () => {
     document.querySelector('button[data-tab="resumes"]').click();
     document.querySelector('button[data-tab="voice"]').click();
     await vi.waitFor(() => expect(commandBox().value).toBe('changed-elsewhere'));
+  });
+
+  /*
+   * Save sent `enabled: enabled.checked` with every change to the command,
+   * the timeout or the engine. While a pull has the AI switched off on this
+   * machine the box shows that switch-off, not config.yaml, so a save about
+   * the timeout wrote the machine-local "off" into the tracked file and
+   * committed it, and the next push switched the other machine off too. The
+   * box saves itself the moment it is flipped; nothing else sends it.
+   */
+  it('leaves the AI switch out of a save about the command', async () => {
+    config.ai = { ...config.ai, enabled: false };
+    config.overrides = { aiSwitchedOff: 'The AI command changed in what was pulled.' };
+    const configPuts = () =>
+      globalThis.fetch.mock.calls
+        .filter(([url, options]) => url === '/api/config' && options?.method === 'PUT')
+        .map(([, options]) => JSON.parse(options.body));
+
+    const command = commandBox();
+    command.value = 'claude';
+    command.dispatchEvent(new Event('input'));
+    document.querySelector('#settings button.primary').click();
+    await vi.waitFor(() => expect(configPuts().length).toBe(1));
+    expect(configPuts()[0].ai).not.toHaveProperty('enabled');
+
+    // And the switch itself still says what it is.
+    checkboxes()[0].checked = true;
+    checkboxes()[0].dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(configPuts().length).toBe(2));
+    expect(configPuts()[1]).toEqual({ ai: { enabled: true } });
   });
 
   it('puts the switch back where it was when the save is refused', async () => {

@@ -3,13 +3,35 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PLACEHOLDER_NAME } from './resolve.js';
-import { Store } from './store.js';
+import { Store, aiCommandChange, reportAiOffNotWritten, switchAiOff, writeAiOff } from './store.js';
+import { currentIgnore } from './current.js';
+import { Repo, refuseClonedLinks } from '../git/repo.js';
 
 export const projectsFile = () => process.env.RMM_PROJECTS_FILE || path.join(os.homedir(), '.resumem-m', 'projects.json');
 export interface ProjectPreferences { active?: string; recent: string[]; defaultFolder?: string | null }
+const warnedUnreadable = new Set<string>();
 export function readProjects(file = projectsFile()): ProjectPreferences {
   if (!fs.existsSync(file)) return { recent: [] };
-  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  /*
+   * A preferences file that cannot be read is no preferences, not a crash.
+   * Half-written by a full disk, or `null` by somebody's hand, it threw from
+   * here — and this is read at startup, by the CLI, and on every
+   * `/api/projects`, so the server would not start and the chooser that could
+   * have fixed it never appeared. The next save of a preference rewrites it.
+   */
+  let data: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    data = parsed as Record<string, unknown>;
+  } catch (error) {
+    // Once per file, not once per read: this is asked on every poll.
+    if (!warnedUnreadable.has(file)) {
+      warnedUnreadable.add(file);
+      console.warn(`[rmm] Ignoring unreadable save preferences at ${file}: ${(error as Error).message}`);
+    }
+    return { recent: [] };
+  }
   return { active: typeof data.active === 'string' ? data.active : undefined,
     ...(Object.hasOwn(data, 'defaultFolder') ? { defaultFolder: typeof data.defaultFolder === 'string' ? data.defaultFolder : null } : {}),
     recent: Array.isArray(data.recent) ? data.recent.filter((p: unknown) => typeof p === 'string') : [] };
@@ -121,6 +143,28 @@ export function prepareProject(current: Store | undefined, input: string, mode: 
 }
 
 /**
+ * A blank save, made a repository on the spot.
+ *
+ * Every other way a save arrives already is one — moved with its history,
+ * cloned, or initialised by the first `rmm save` — and Create Save left a
+ * folder that was not: auto-commit found no repository and quietly did
+ * nothing, so the history panel stayed empty through a day of edits. The
+ * first commit is the blank save itself, with the store's own ignores.
+ *
+ * A machine without git still gets its save; it just has no history yet,
+ * which is what the first explicit save will fix.
+ */
+export async function createProject(current: Store | undefined, input: string): Promise<Store> {
+  const store = prepareProject(current, input, 'create');
+  try {
+    await Repo.forStore(store.root, () => currentIgnore(store)).ensure('Create save');
+  } catch (error) {
+    console.warn(`[rmm] The new save has no version history yet: ${(error as Error).message}`);
+  }
+  return store;
+}
+
+/**
  * A save is its own git repository, which is exactly why this should exist.
  *
  * Keeping the store apart from the source is the whole design — it has its own
@@ -138,6 +182,7 @@ export async function cloneProject(
   url: string,
   into: string,
   clone: (url: string, dir: string) => Promise<void>,
+  current?: Store,
 ): Promise<Store> {
   const link = url.trim();
   if (!link) throw new Error('Paste the address of the repository holding the save');
@@ -157,6 +202,13 @@ export async function cloneProject(
   const expanded = into.startsWith('~/') ? path.join(os.homedir(), into.slice(2)) : into;
   if (!path.isAbsolute(expanded)) throw new Error('Use an absolute folder path (or ~/...)');
   const target = canonical(path.resolve(expanded));
+  /*
+   * Not inside the open save, nor around it — the refusal `prepareProject`
+   * makes. A clone into `<save>/backup` became a second repository inside the
+   * first, and the open save's next commit took it as an embedded repository.
+   */
+  const source = current ? canonical(current.root) : undefined;
+  if (source && (inside(source, target) || inside(target, source))) throw new Error('Choose a folder outside the current save');
   if (fs.existsSync(target) && (!fs.statSync(target).isDirectory() || fs.readdirSync(target).length)) {
     throw new Error('Choose an empty or new folder; existing files will not be overwritten');
   }
@@ -167,8 +219,31 @@ export async function cloneProject(
   const stage = fs.mkdtempSync(path.join(path.dirname(target), '.rmm-clone-'));
   try {
     await clone(link, stage);
+    // No symbolic links, before anything reads through one. See `Repo.vetIncoming`.
+    if (fs.existsSync(path.join(stage, '.git'))) await refuseClonedLinks(stage, link);
     if (!fs.existsSync(path.join(stage, 'profile.yaml')) || !fs.existsSync(path.join(stage, 'config.yaml'))) {
       throw new Error('That repository is not a resume save: it has no profile.yaml and config.yaml at its root.');
+    }
+    /*
+     * And an AI command that arrives switched on is not run until it has been
+     * looked at here, as after a pull that changes it (see `aiCommandChange`):
+     * it is a program somebody else's machine, or whoever can push to that
+     * repository, chose. Before the load below, which reads the config.
+     */
+    const change = aiCommandChange(undefined, fs.readFileSync(path.join(stage, 'config.yaml'), 'utf8'));
+    if (change) {
+      switchAiOff(stage, `The save was cloned with ${change}.`);
+      /*
+       * And in config.yaml, committed, for a version of the app that does not
+       * read the marker and opens this clone. See `writeAiOff`.
+       */
+      if (fs.existsSync(path.join(stage, '.git'))) {
+        await Repo.forStore(stage).commitAiOff('Switch the AI off: it arrived switched on in the clone');
+      } else {
+        writeAiOff(stage);
+      }
+      // Said with the switch-off, when the file could not be made to say it.
+      reportAiOffNotWritten(stage);
     }
     const store = new Store(stage);
     store.load(); // Validate before it becomes the open save.

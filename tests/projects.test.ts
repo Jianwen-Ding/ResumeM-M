@@ -3,10 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as agent from '../src/ai/agent.js';
-import { prepareProject, readProjects, rememberProject, setDefaultFolder } from '../src/model/projects.js';
+import { cloneProject, createProject, prepareProject, readProjects, rememberProject, setDefaultFolder } from '../src/model/projects.js';
 import { startServer } from '../src/server/index.js';
 import { makeTempStore } from './helpers.js';
-import { Repo } from '../src/git/repo.js';
+import { Repo, cloneRepo } from '../src/git/repo.js';
+import { execFileSync } from 'node:child_process';
+import net from 'node:net';
 
 const temporary: string[] = [];
 const fixtures: ReturnType<typeof makeTempStore>[] = [];
@@ -264,4 +266,126 @@ describe('project folders', () => {
     } finally { await server.close(); }
   });
 
+});
+
+/*
+ * A remote that accepts the connection and then says nothing: the shape of a
+ * slow or wedged git host, without the network.
+ */
+async function silentRemote() {
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer(socket => { sockets.add(socket); socket.on('error', () => undefined); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  return {
+    url: `http://127.0.0.1:${port}/save.git`,
+    connected: () => sockets.size > 0,
+    close: () => new Promise<void>(resolve => { sockets.forEach(s => s.destroy()); server.close(() => resolve()); }),
+  };
+}
+
+describe('cloning a save', () => {
+  /*
+   * The whole switch ran with `switching` up, so every API request was a 409
+   * for as long as the clone took — and with no timeout, a host that never
+   * answered took the editor down until the server was killed.
+   */
+  it('keeps the API answering while a clone is still on the wire', async () => {
+    const { t, dir, dest } = setup();
+    const remote = await silentRemote();
+    const server = await startServer({ port: 0, dataDir: t.dir, preferencesFile: path.join(dir, 'prefs.json') });
+    const base = `http://127.0.0.1:${server.port}`;
+    const post = (body: unknown) => fetch(`${base}/api/projects/switch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let clone: Promise<Response> | undefined;
+    try {
+      clone = post({ dir: dest, mode: 'clone', url: remote.url });
+      for (const until = Date.now() + 5000; !remote.connected() && Date.now() < until;) await new Promise(r => setTimeout(r, 25));
+      expect(remote.connected()).toBe(true);
+
+      const store = await fetch(`${base}/api/store`);
+      expect(store.status).toBe(200);
+      // But not a second switch on top of it.
+      expect((await post({ dir: path.join(dir, 'elsewhere'), mode: 'create' })).status).toBe(409);
+    } finally {
+      await remote.close();
+      const answered = await clone;
+      expect(answered?.status).toBe(400);
+      await server.close();
+    }
+    expect(fs.existsSync(dest)).toBe(false);
+    expect(t.store.load().profile.name).toBe('Test Person');
+  });
+
+  it('gives up on a clone that never finishes, and says so', { timeout: 15_000 }, async () => {
+    const { dir } = setup();
+    const remote = await silentRemote();
+    const into = path.join(dir, 'stage');
+    fs.mkdirSync(into);
+    try {
+      const began = Date.now();
+      await expect(cloneRepo(remote.url, into, 800)).rejects.toThrow(/took longer than/);
+      expect(Date.now() - began).toBeLessThan(5000);
+    } finally { await remote.close(); }
+  });
+
+  it('refuses a destination inside the open save, or around it', async () => {
+    const { t } = setup();
+    let cloned = false;
+    const clone = async () => { cloned = true; };
+    await expect(cloneProject('git@example.com:me/save.git', path.join(t.dir, 'backup'), clone, t.store))
+      .rejects.toThrow(/outside the current save/);
+    await expect(cloneProject('git@example.com:me/save.git', path.dirname(t.dir), clone, t.store))
+      .rejects.toThrow(/outside the current save/);
+    expect(cloned).toBe(false);
+    expect(fs.existsSync(path.join(t.dir, 'backup'))).toBe(false);
+  });
+});
+
+describe('creating a blank save', () => {
+  it('makes it a repository, with the blank save as its first commit', async () => {
+    const { t, dest } = setup();
+    const next = await createProject(t.store, dest);
+    const repo = Repo.forStore(next.root);
+    expect(await repo.isRepo()).toBe(true);
+    expect((await repo.log())[0]?.message).toBe('Create save');
+    expect(await repo.pending()).toEqual([]);
+    const tracked = execFileSync('git', ['ls-files'], { cwd: dest, encoding: 'utf8' }).split('\n');
+    expect(tracked).toContain('profile.yaml');
+    expect(tracked).toContain('.gitignore');
+    expect(fs.readFileSync(path.join(dest, '.gitignore'), 'utf8')).toContain('/out/current/');
+  });
+
+  it('through the app as well', async () => {
+    const { t, dir, dest } = setup();
+    const server = await startServer({ port: 0, dataDir: t.dir, preferencesFile: path.join(dir, 'prefs.json') });
+    try {
+      const change = await fetch(`http://127.0.0.1:${server.port}/api/projects/switch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: dest, mode: 'create' }) });
+      expect(change.status).toBe(200);
+      expect(await Repo.forStore(dest).isRepo()).toBe(true);
+    } finally { await server.close(); }
+  });
+});
+
+describe('a preferences file that cannot be read', () => {
+  it.each([['null', 'null'], ['half-written', '{"active": "/x", "rec'], ['a list', '[]']])('treats %s as no preferences', (_name, text) => {
+    const { dir } = setup();
+    const prefs = path.join(dir, 'prefs.json');
+    fs.writeFileSync(prefs, text);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(readProjects(prefs)).toEqual({ recent: [] });
+  });
+
+  it('and the server still starts, and a choice made then rewrites it', async () => {
+    const { t, dir } = setup();
+    const prefs = path.join(dir, 'prefs.json');
+    fs.writeFileSync(prefs, 'null');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const server = await startServer({ port: 0, dataDir: t.dir, preferencesFile: prefs });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      expect((await fetch(`${base}/api/projects`)).status).toBe(200);
+      rememberProject(t.dir, prefs);
+      expect(readProjects(prefs).active).toBe(t.dir);
+    } finally { await server.close(); }
+  });
 });

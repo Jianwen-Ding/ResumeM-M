@@ -132,6 +132,28 @@ describe('editing the date on an entry', () => {
     expect(lastSave().period).toEqual({ start: { year: 2024 }, end: { year: 2026 } });
   });
 
+  /*
+   * 2023.5 is between 1900 and 2100, and `Number` reads it, so it was saved
+   * and printed on the resume as "Jul. 2023.5". A year that is not a whole
+   * one is put back rather than sent — on the far end too, where reading it
+   * as an emptied box would have dropped the end date instead.
+   */
+  it('refuses a year with a fraction in it, at either end', async () => {
+    await open([JOB]);
+    const [from, to] = [...dates('Everclear').querySelectorAll('.date-end')];
+    const start = from.querySelector('.date-year');
+    start.value = '2023.5';
+    start.dispatchEvent(new window.Event('change'));
+    const end = to.querySelector('.date-year');
+    end.value = '2025.5';
+    end.dispatchEvent(new window.Event('change'));
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(saved).toEqual([]);
+    expect(start.value).toBe('2024');
+    expect(end.value).toBe('2024');
+  });
+
   it('sends a month when one is chosen', async () => {
     await open([JOB]);
     const from = [...dates('Everclear').querySelectorAll('.date-end')][0];

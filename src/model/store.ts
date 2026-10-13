@@ -3,12 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { withoutBom } from './bom.js';
+import { gitDirOf, holdSaveSync } from './save-lock.js';
 import { andList, newlyRepeated, type Option } from './duplicates.js';
 import { flattenResumes, needsFlattening } from './flatten.js';
 import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
 import { legacyTailoredResumeId, tailoredResumeId } from './applications.js';
 import { liftLayout } from './lift-layout.js';
-import { needsTiering, tierResumes } from './tiers.js';
+import { asLoaded, keptOnDisk, needsTiering, newlySent, sentResumes, tierResumes } from './tiers.js';
 import { adoptBulletOrder, adoptDateOrder, PLACEHOLDER_NAME } from './resolve.js';
 import {
   DEFAULT_CONFIG,
@@ -29,16 +30,17 @@ import {
 
 // It lives with the presets, which are what it repairs a config back towards,
 // and is re-exported here because this is where config is read.
-import { applyModelAndEffort, applyResearch, repairAiArgs } from '../ai/presets.js';
+import { AI_TASKS, aiIsOn, applyModelAndEffort, applyResearch, configForTask, repairAiArgs, type AiTask } from '../ai/presets.js';
 import { extractJob } from '../jobs/extract.js';
 import {
   normalizeAnswers,
   normalizeApplications,
   normalizeEntry,
   normalizeProfile,
+  normalizeSections,
   normalizeSkillGroups,
 } from './normalize.js';
-export { repairAiArgs };
+export { aiIsOn, repairAiArgs };
 
 /** What a value turned out to be, in words, for a message about a file. */
 function describeValue(v: unknown): string {
@@ -137,6 +139,105 @@ export function removeFile(full: string, what: string): void {
  */
 export { withoutBom } from './bom.js';
 
+/** `profile.autofill`'s scalars as their source text. See `Store.readProfile`. */
+function autofillAsWritten(profile: Profile, raw: string): Profile {
+  const block = profile?.autofill as Record<string, unknown> | undefined;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return profile;
+  let node: unknown;
+  try {
+    node = YAML.parseDocument(withoutBom(raw)).get('autofill', true);
+  } catch {
+    return profile;
+  }
+  if (!YAML.isMap(node)) return profile;
+  const autofill: Record<string, unknown> = { ...block };
+  for (const pair of node.items) {
+    const key = YAML.isScalar(pair.key) ? String(pair.key.value) : undefined;
+    const value = pair.value;
+    if (key === undefined || !(key in autofill) || !YAML.isScalar(value)) continue;
+    if (typeof value.value === 'string' || value.value === null) continue;
+    // A plain scalar's own characters; a quoted one was a string already.
+    if (typeof value.source === 'string') autofill[key] = value.source;
+  }
+  return { ...profile, autofill: autofill as Record<string, string> };
+}
+
+/**
+ * `data` as parsing its YAML back would give it — a fresh copy — or
+ * `undefined` where that is not certain.
+ *
+ * For `Store.rememberWritten`, which keeps this in place of parsing a file it
+ * has just written. Certain for plain data: strings, finite numbers, true and
+ * false, null, arrays and plain objects, where YAML's round trip is JSON's —
+ * a key set to `undefined` is left out and an `undefined` in a list comes
+ * back as null. Not attempted for anything else: a Date, a class, a -0, a
+ * NaN, a key named `__proto__`, or an object reached twice, which YAML writes
+ * as an anchor and reads back as one shared object. Those are left for the
+ * read to parse, which is always right and only slower.
+ *
+ * The top level is a list or a mapping, as every file this is used for is;
+ * anything else is left alone, since a read turns an empty one into the
+ * reader's own fallback.
+ */
+export function asReadBack(data: unknown): unknown {
+  const unsure = Symbol('unsure');
+  const seen = new Set<object>();
+  const copy = (value: unknown, inList: boolean): unknown => {
+    switch (typeof value) {
+      case 'string':
+      case 'boolean':
+        return value;
+      case 'number':
+        if (!Number.isFinite(value) || Object.is(value, -0)) throw unsure;
+        return value;
+      case 'undefined':
+        if (inList) return null;
+        throw unsure; // Only reached at the top level; a key is dropped below.
+      case 'object': {
+        if (value === null) return null;
+        if (seen.has(value)) throw unsure;
+        seen.add(value);
+        if (Array.isArray(value)) {
+          if (Object.getPrototypeOf(value) !== Array.prototype) throw unsure;
+          const out: unknown[] = [];
+          for (let i = 0; i < value.length; i++) {
+            if (!(i in value)) throw unsure;
+            out.push(copy(value[i], true));
+          }
+          return out;
+        }
+        const proto = Object.getPrototypeOf(value);
+        if (proto !== Object.prototype && proto !== null) throw unsure;
+        if (Object.getOwnPropertySymbols(value).length > 0) throw unsure;
+        const out: Record<string, unknown> = {};
+        for (const [key, item] of Object.entries(value)) {
+          if (key === '__proto__') throw unsure;
+          if (item === undefined) continue;
+          out[key] = copy(item, false);
+        }
+        return out;
+      }
+      default:
+        throw unsure;
+    }
+  };
+  if (data === null || typeof data !== 'object') return undefined;
+  /*
+   * Nor a mapping whose first key begins with a byte-order mark. YAML writes
+   * that key unquoted as the file's first characters, and the read takes
+   * them for the file's own mark and strips it (`withoutBom`), so the key
+   * comes back without it — and the cache would have held the one the file
+   * does not.
+   */
+  if (!Array.isArray(data) && Object.keys(data)[0]?.startsWith('\uFEFF')) return undefined;
+  try {
+    return copy(data, false);
+  } catch (err) {
+    if (err === unsure) return undefined;
+    throw err;
+  }
+}
+
 export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
   /*
    * A byte-order mark is how Notepad and a good many Windows tools start a
@@ -146,6 +247,24 @@ export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
    */
   raw = withoutBom(raw);
   if (!raw.trim()) return fallback;
+
+  /*
+   * A `git pull` that ended in a conflict leaves both sides in the file
+   * between `<<<<<<<` and `>>>>>>>` lines, and the save then would not open:
+   * "applications.yaml is not valid YAML — Implicit keys need to be on a
+   * single line at line 1, column 1", which is true and says nothing about a
+   * pull. The app has no Pull of its own, so whoever ran it is in a terminal
+   * and needs to hear that it is not finished. Checked before parsing,
+   * because a conflict can also happen to parse — into a value holding both
+   * sides and the markers as text, which is worse than not opening.
+   */
+  if (/^<{7} /m.test(raw) && /^>{7} /m.test(raw)) {
+    throw new Error(
+      `Unresolved git merge conflict in ${label}: it still has the <<<<<<< and >>>>>>> lines a git pull ` +
+        'leaves between the two sides. Edit the file to keep what you want and remove those lines, then ' +
+        'git add it and git commit (or run git merge --abort to undo the pull), and reload.',
+    );
+  }
 
   let parsed: unknown;
   try {
@@ -168,6 +287,397 @@ export function parseStoreYaml<T>(label: string, raw: string, fallback: T): T {
     );
   }
   return parsed as T;
+}
+
+/**
+ * The files of a save that are read as a list, by their path in the save. Every
+ * other YAML file the save reads is a set of keys and values. See
+ * `storeFileProblem`.
+ */
+const LIST_FILES = new Set([
+  'skills.yaml',
+  'applications.yaml',
+  'answers.yaml',
+  'education.yaml',
+  'experience.yaml',
+  'projects.yaml',
+  'custom.yaml',
+]);
+
+/**
+ * Why this file, as it would be in the save, would stop the save opening —
+ * or undefined when it would read, or is not a file the save parses.
+ *
+ * For a pull to ask before it changes anything (see `Repo.pull`). A merge
+ * git calls clean is a merge of lines, not of YAML: two machines that each
+ * added `phone:` to the profile, one near the top and one near the bottom,
+ * merge without a conflict into a profile.yaml with the key twice, which
+ * does not parse — and the pull said "Pulled 1 commit", after which every
+ * page of the app answered "profile.yaml is not valid YAML". So the files a
+ * pull would bring in are read here first, by the same parser and with the
+ * same expectations (`parseStoreYaml`) the save is opened with, and a pull
+ * that would leave one unreadable is refused instead, the way a conflict is.
+ *
+ * `rel` is the path in the save, with forward slashes, as git names it.
+ */
+export function storeFileProblem(rel: string, raw: string): string | undefined {
+  const parts = rel.split('/');
+  const name = parts[parts.length - 1] ?? '';
+  const folder = parts.length === 2 ? parts[0] : parts.length === 1 ? '' : undefined;
+  try {
+    if (folder === '' && (LIST_FILES.has(name) || name === 'profile.yaml' || name === 'config.yaml')) {
+      parseStoreYaml(rel, raw, LIST_FILES.has(name) ? [] : {});
+    } else if ((folder === 'resumes' && /\.ya?ml$/.test(name)) || (folder === 'drafts' && name.endsWith('.yaml'))) {
+      parseStoreYaml(rel, raw, {});
+    } else if ((folder === 'letters' || folder === 'corpus') && name.endsWith('.md')) {
+      // The header only, as the loaders read it; the body is prose.
+      const split = splitFrontMatter(withoutBom(raw));
+      if (split) parseStoreYaml(rel, split.header, {});
+    }
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * The file in this machine's `.git` folder that says the AI has been
+ * switched off here, and why. See `aiCommandChange`.
+ *
+ * In `.git` because it is about this machine: it says why, it holds the AI
+ * off here whatever config.yaml comes to say, and only turning the AI on
+ * here clears it. The switch-off itself is also written into config.yaml
+ * and committed, for the versions that do not read this file (see
+ * `writeAiOff`); nothing else that merely saves settings while switched off
+ * writes `false` there (see `saveConfig`). Undefined when the save is not a
+ * repository of its own, which nothing can pull into.
+ */
+export function aiSwitchOffFile(root: string): string | undefined {
+  const dotGit = path.join(root, '.git');
+  try {
+    if (fs.statSync(dotGit).isDirectory()) return path.join(dotGit, 'rmm-ai-switched-off');
+    const pointer = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotGit, 'utf8'))?.[1]?.trim();
+    return pointer ? path.join(path.resolve(root, pointer), 'rmm-ai-switched-off') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Why the AI was switched off on this machine by a pull or a clone, if it was. */
+export function aiSwitchedOff(root: string): string | undefined {
+  const file = aiSwitchOffFile(root);
+  if (!file) return undefined;
+  try {
+    return fs.readFileSync(file, 'utf8').trim() || 'The AI command came from another machine.';
+  } catch {
+    return undefined;
+  }
+}
+
+/** Switch the AI off on this machine (see `aiSwitchOffFile`). False when there is nowhere to say so. */
+export function switchAiOff(root: string, why: string): boolean {
+  const file = aiSwitchOffFile(root);
+  if (!file) return false;
+  fs.writeFileSync(file, `${why}\n`, 'utf8');
+  return true;
+}
+
+/**
+ * Write `ai.enabled: false` into config.yaml itself, for a pull or a clone
+ * that switches the AI off. True when the file changed.
+ *
+ * The marker in `.git` is this version's, and a version that predates it
+ * does not read it: the previous build opened on the same clone after a pull
+ * had switched the AI off found `enabled: true` in config.yaml, and ran the
+ * command that had just arrived. So the switch-off is also written where
+ * every version reads it, and committed on its own (see `Repo.commitAiOff`).
+ * That commit travels with the next push, and switches the AI off on the
+ * other machine too — deliberately: "off" is the answer that cannot run a
+ * command nobody has looked at, and turning it on again there is one click
+ * in Settings, which writes `true` as it always has.
+ *
+ * Edited in place rather than through `writeYaml`, so the comments and the
+ * order of the file survive and the commit is the one line. Nothing is
+ * written to a file that already says off, or that will not parse — the
+ * marker still holds the AI off on this machine either way.
+ */
+export function writeAiOff(root: string): boolean {
+  // Read, changed and written back under the save's lock, as the store's own writes are. See `SaveLock`.
+  return holdSaveSync(root, () => writeAiOffHeld(root));
+}
+
+function writeAiOffHeld(root: string): boolean {
+  const file = path.join(root, 'config.yaml');
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const text = withoutBom(raw);
+    const doc = YAML.parseDocument(text);
+    if (doc.errors.length > 0) return false;
+    if (saysAiOff(text)) return false;
+    /*
+     * The value's own characters replaced where there is one, so nothing
+     * else in the file is so much as re-spaced. Set through the document
+     * only where there is no such line to change.
+     */
+    const ai = doc.get('ai', true);
+    const node = doc.getIn(['ai', 'enabled'], true);
+    let next: string;
+    if (plainAiMap(ai) && YAML.isScalar(node) && !node.anchor && node.range) {
+      next = `${text.slice(0, node.range[0])}false${text.slice(node.range[1])}`;
+    } else if (plainAiMap(ai) && node === undefined) {
+      doc.setIn(['ai', 'enabled'], false);
+      next = doc.toString({ lineWidth: 0 });
+    } else {
+      /*
+       * Anything else — `ai: *shared`, `ai: &shared` that something else
+       * names, `enabled: *on`, `enabled: &on true`, a `<<` merge key, `ai:`
+       * with nothing under it — is the `ai` block written out again, from
+       * what it reads as, with `enabled: false`.
+       *
+       * Edited where it was, an alias is a node somewhere else: `setIn`
+       * through `ai: *a` refused, the switch-off wrote nothing, and a version
+       * that does not read the marker found the AI on and ran the command
+       * that had just arrived. And writing through an anchor switches off
+       * whatever else shares it, or changes nothing (a merge key's value is
+       * overridden by the map it is merged into). So the block is replaced
+       * outright, and every alias elsewhere to an anchor inside it is first
+       * written out as the value it stood for, so that nothing else in the
+       * file reads any differently.
+       */
+      const resolved = (doc.toJS() as Record<string, unknown> | null)?.ai;
+      const was = resolved && typeof resolved === 'object' && !Array.isArray(resolved) ? resolved : {};
+      const anchored = new Map<string, YAML.Node>();
+      if (YAML.isNode(ai)) {
+        YAML.visit(ai, (_key, n) => {
+          if (YAML.isNode(n) && n.anchor) anchored.set(n.anchor, n);
+        });
+      }
+      if (anchored.size > 0) {
+        YAML.visit(doc, (_key, n) => {
+          if (n === ai) return YAML.visit.SKIP;
+          if (YAML.isAlias(n) && anchored.has(n.source)) {
+            const copy = anchored.get(n.source)!.clone() as YAML.Node;
+            copy.anchor = undefined;
+            return copy;
+          }
+          return undefined;
+        });
+      }
+      doc.set('ai', doc.createNode({ ...was, enabled: false }, { aliasDuplicateObjects: false }));
+      next = doc.toString({ lineWidth: 0 });
+    }
+    // Only a file that reads as off, and reads the rest as it did, is written.
+    if (!saysAiOff(next) || !sameApartFromAi(text, next)) return false;
+    const temp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, next, 'utf8');
+    fs.renameSync(temp, file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * An `ai:` that is a map of its own, written out in the file: not an alias,
+ * not anchored for something else to name, and with no merge key in it. The
+ * one shape a single value can be changed in place in.
+ */
+function plainAiMap(ai: unknown): boolean {
+  if (!YAML.isMap(ai) || ai.anchor) return false;
+  return !ai.items.some((pair) => (YAML.isScalar(pair.key) ? pair.key.value : pair.key) === '<<' || YAML.isAlias(pair.value));
+}
+
+/**
+ * Whether config.yaml's text says `ai.enabled: false` in so many words. Not
+ * "is not on as this version reads it": `enabled: "true"` is off here and on
+ * to a version that read it by truthiness, and that version is who the line
+ * in the file is for.
+ */
+function saysAiOff(text: string): boolean {
+  try {
+    const parsed = parseStoreYaml<Partial<StoreConfig>>('config.yaml', text, {});
+    return Boolean(parsed.ai && typeof parsed.ai === 'object' && parsed.ai.enabled === false);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether two config.yaml texts read the same everywhere but under `ai`. */
+function sameApartFromAi(a: string, b: string): boolean {
+  const rest = (text: string) => {
+    const { ai: _ai, ...others } = (YAML.parse(text) ?? {}) as Record<string, unknown>;
+    return JSON.stringify(others);
+  };
+  return rest(a) === rest(b);
+}
+
+/**
+ * Whether config.yaml at `root` says `ai.enabled: false`, for a pull or a
+ * clone to check that `writeAiOff` left it saying so.
+ */
+export function aiOffInFile(root: string): boolean {
+  try {
+    return saysAiOff(fs.readFileSync(path.join(root, 'config.yaml'), 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What a pull or a clone that switched the AI off says when `writeAiOff`
+ * could not make config.yaml say so too. The marker still holds the AI off
+ * here; this is for the version that does not read it.
+ */
+export const AI_OFF_NOT_WRITTEN =
+  'config.yaml could not be changed to say `enabled: false`, so the AI is off on this machine only: a version of the app ' +
+  'from before this switch-off, opened on this save, would still find it on. Set `enabled: false` under `ai:` in config.yaml by hand.';
+
+/**
+ * After a switch-off has tried to write config.yaml: when the file still does
+ * not say off, the marker says so as well, and the sentence comes back for
+ * the caller's message. Undefined when the file says off.
+ */
+export function reportAiOffNotWritten(root: string): string | undefined {
+  if (aiOffInFile(root)) return undefined;
+  const why = aiSwitchedOff(root);
+  if (why && !why.includes(AI_OFF_NOT_WRITTEN)) switchAiOff(root, `${why} ${AI_OFF_NOT_WRITTEN}`);
+  return AI_OFF_NOT_WRITTEN;
+}
+
+/** What turning the AI on in Settings does to a switch-off. */
+export function clearAiSwitchOff(root: string): void {
+  const file = aiSwitchOffFile(root);
+  if (file) fs.rmSync(file, { force: true });
+}
+
+/**
+ * The command and arguments an `ai` block from config.yaml would actually
+ * run, after the same repairs and settings `loadConfig` applies: the known
+ * argument fixes, the research setting's deny list, and the model and effort
+ * flags. A value of the wrong type falls back to the default rather than
+ * throwing, because this also reads config.yaml files that arrived in a pull.
+ */
+export function effectiveAiCommand(ai: Partial<StoreConfig['ai']>): { command: string; args: string[] } {
+  const command = typeof ai.command === 'string' ? ai.command : DEFAULT_CONFIG.ai.command;
+  const given = Array.isArray(ai.args) ? ai.args.map(String) : DEFAULT_CONFIG.ai.args;
+  let args = repairAiArgs(command, given);
+  args = applyResearch(command, args, Boolean(ai.research));
+  args = applyModelAndEffort(command, args, {
+    model: typeof ai.model === 'string' ? ai.model : undefined,
+    effort: ai.effort,
+  });
+  return { command, args };
+}
+
+/**
+ * The arguments each kind of AI work actually runs with, from the same `ai`
+ * block: `effectiveAiCommand`'s, with `ai.models` putting its own model in
+ * for the work it names (see `configForTask`). A model that is not a string
+ * is left out, as `effectiveAiCommand` leaves out `ai.model`.
+ */
+function effectiveAiArgsByTask(ai: Partial<StoreConfig['ai']>): Record<AiTask, string[]> {
+  const { command, args } = effectiveAiCommand(ai);
+  const given = ai.models && typeof ai.models === 'object' ? (ai.models as Record<string, unknown>) : {};
+  const models = Object.fromEntries(
+    AI_TASKS.flatMap(({ key }) => (typeof given[key] === 'string' ? [[key, given[key]]] : [])),
+  ) as Partial<Record<AiTask, string>>;
+  const model = typeof ai.model === 'string' ? ai.model : undefined;
+  const effort = ai.effort;
+  return Object.fromEntries(
+    AI_TASKS.map(({ key }) => [key, configForTask({ ai: { command, args, model, models, effort } }, key).ai.args]),
+  ) as Record<AiTask, string[]>;
+}
+
+/**
+ * What a change to config.yaml would do to the command this machine runs
+ * for AI actions, in words; undefined when it does not change it.
+ *
+ * config.yaml is tracked, so it travels with a pull, and `ai.command` and
+ * `ai.args` are a program and its arguments that this app starts. Whoever
+ * can push to the remote — or a remote that is not who it was — could
+ * change them, and the next AI action on this machine ran whatever they
+ * said, with nothing on screen about it. So a pull that changes them, or
+ * that switches the AI on, switches it off here instead, until the person
+ * has looked at the command in Settings and turned it on themselves (see
+ * `aiSwitchOffFile`). A change that leaves the AI off needs nothing: the
+ * person sees the command when they turn it on.
+ *
+ * `before` undefined is a save that had no config.yaml here — a clone — so
+ * any AI that arrives switched on is new to this machine.
+ */
+export function aiCommandChange(
+  before: string | undefined,
+  after: string | undefined,
+  { offBySwitchOff = false }: { offBySwitchOff?: boolean } = {},
+): string | undefined {
+  const ai = (raw: string | undefined): Partial<StoreConfig['ai']> => {
+    if (raw === undefined) return {};
+    try {
+      const parsed = parseStoreYaml<Partial<StoreConfig>>('config.yaml', raw, {});
+      return parsed.ai && typeof parsed.ai === 'object' ? parsed.ai : {};
+    } catch {
+      return {};
+    }
+  };
+  const was = ai(before);
+  const now = ai(after);
+  const on = (c: Partial<StoreConfig['ai']>) => aiIsOn(c.enabled ?? DEFAULT_CONFIG.ai.enabled);
+  if (!on(now)) return undefined;
+  /*
+   * The command line as it would actually run, not as config.yaml spells it:
+   * `research`, `model` and `effort` rewrite the arguments on the way (see
+   * `effectiveAiCommand`), so `research: true` alone takes WebFetch and
+   * WebSearch off the deny list without `args` changing by a character.
+   */
+  const command = (c: Partial<StoreConfig['ai']>) => effectiveAiCommand(c).command;
+  const args = (c: Partial<StoreConfig['ai']>) => JSON.stringify(effectiveAiCommand(c).args);
+  /*
+   * And per kind of work. `ai.models` gives tailoring, writing, reviewing
+   * and drafting each a model of its own, and `configForTask` puts it into
+   * the arguments those actions run with. Compared only as the one command
+   * line, a pull that set `models.tailor` changed what every tailoring ran
+   * and switched nothing off. A kind of work is named only where it runs
+   * with arguments of its own, before or after: one that follows the shared
+   * arguments has already been said with them.
+   */
+  const ownArgs = (c: Partial<StoreConfig['ai']>) =>
+    Object.entries(effectiveAiArgsByTask(c))
+      .filter(([, taskArgs]) => JSON.stringify(taskArgs) !== args(c))
+      .map(([task, taskArgs]) => `${task} runs ${JSON.stringify(taskArgs)}`)
+      .join(', ');
+  const running = (c: Partial<StoreConfig['ai']>) =>
+    `${JSON.stringify(command(c))} ${args(c)}${ownArgs(c) ? ` (${ownArgs(c)})` : ''}`;
+  const said: string[] = [];
+  if (before === undefined) {
+    said.push(`the AI is switched on, running ${running(now)}`);
+  } else {
+    if (command(was) !== command(now)) said.push(`the command went from ${JSON.stringify(command(was))} to ${JSON.stringify(command(now))}`);
+    if (args(was) !== args(now)) said.push(`its arguments went from ${args(was)} to ${args(now)}`);
+    const [wasByTask, nowByTask] = [effectiveAiArgsByTask(was), effectiveAiArgsByTask(now)];
+    for (const { key } of AI_TASKS) {
+      const [from, to] = [JSON.stringify(wasByTask[key]), JSON.stringify(nowByTask[key])];
+      if (from === to || (from === args(was) && to === args(now))) continue;
+      said.push(`its arguments for ${key} went from ${from} to ${to}`);
+    }
+    /*
+     * Switched on with nothing else different is not a new program arriving
+     * — when the `false` it replaces is a switch-off's. Since a switch-off
+     * also writes `false` into config.yaml (see `writeAiOff`), counting that
+     * as a change made the two machines take turns: the other one turned it
+     * on again, this one pulled that, switched off and committed `false`, and
+     * so on for as long as both kept answering. Alongside a change to what
+     * runs, it is said with it.
+     *
+     * Only then (`offBySwitchOff`: the last commit to config.yaml before the
+     * merge is a switch-off's, made here or on the other machine). Exempted
+     * whatever the `false` was, a pull that changed nothing but `enabled`
+     * switched the AI on here — from the shipped `enabled: false` that
+     * nobody on this machine had ever turned on, running a command nobody
+     * here had looked at. That is the one thing the switch-off is for.
+     */
+    if (!on(was) && (said.length > 0 || !offBySwitchOff)) said.push(`it was switched on, running ${running(now)}`);
+  }
+  return said.length ? said.join('; ') : undefined;
 }
 
 /**
@@ -249,8 +759,16 @@ function fsyncDirectory(dir: string): void {
  * Trailing spaces after a fence are allowed for the same reason: they are
  * invisible, and a file that has one is not a file without a header.
  */
-function splitFrontMatter(raw: string): { header: string; body: string } | undefined {
-  const m = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(raw);
+/*
+ * And a byte-order mark in front of the first fence, which Notepad and Word
+ * write at the start of a UTF-8 file. With one there the file did not start
+ * with "---", so the header was read as prose: the letter lost its title, its
+ * company and its `applicationId`, and the first save wrote a second header
+ * above the first. A header with nothing in it ("---" straight after "---")
+ * is a header too, and was the same prose.
+ */
+export function splitFrontMatter(raw: string): { header: string; body: string } | undefined {
+  const m = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(withoutBom(raw));
   return m ? { header: m[1] ?? '', body: m[2] ?? '' } : undefined;
 }
 
@@ -403,6 +921,113 @@ function onDiskSpelling(full: string): string {
   return found === undefined ? full : path.join(dir, found);
 }
 
+/** The refusal for a symbolic link inside the save. See `Store.assertNoLink`. */
+function linkInSave(rel: string, full: string): Error {
+  let to = '';
+  try {
+    to = ` (to ${fs.readlinkSync(full)})`;
+  } catch {
+    // Gone since, or unreadable: the name is what matters.
+  }
+  return new Error(
+    `"${rel.split(path.sep).join('/')}" in the save is a symbolic link${to}, and the app does not follow links in a save: ` +
+      'one can lead anywhere on this computer. Nothing was read or written through it. Replace the link with the ' +
+      'file or folder itself (or remove it), and try again.',
+  );
+}
+
+/**
+ * Remove from `target` every key the patch set to `null`, following the patch
+ * into nested objects. The merge has already copied those nulls across; this
+ * turns each one into "no value", which is what a default is.
+ */
+function dropNulls(target: Record<string, unknown>, patch: unknown): void {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return;
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    if (value === null) {
+      delete target[key];
+    } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const inner = target[key];
+      if (inner && typeof inner === 'object' && !Array.isArray(inner)) dropNulls(inner as Record<string, unknown>, value);
+    }
+  }
+}
+
+/**
+ * "Has this file moved since I last looked", as one string, from its stat.
+ *
+ * Size and modification time were the whole of it, and on a file system
+ * whose clock ticks in whole seconds — HFS+, FAT and exFAT, many SMB shares,
+ * two seconds on FAT — a second process writing the same number of bytes
+ * within the same tick left both alone: the CLI changing "Acme1" to "Bcme1"
+ * on a row, measured, and the server went on handing back, and then writing
+ * back, the parse from before. The inode and the change time are added
+ * because neither can stay put through the writes that matter: every write
+ * this program makes renames a fresh file into place (`writeAtomic`), which
+ * is a new inode whatever the clock says, and an in-place write moves the
+ * change time on any file system that has one.
+ */
+export function statStamp(stat: fs.Stats): string {
+  return `${stat.size}:${stat.mtimeMs}:${stat.ino}:${stat.ctimeMs}`;
+}
+
+/**
+ * A whole-list write made onto a list that another process has changed since
+ * the writer read it: `base` is what the writer read, `mine` what it is
+ * writing, `theirs` what the file holds now. Undefined when the rows cannot
+ * be told apart by id — a row without one, or two with the same — and the
+ * caller writes `mine` as it always did.
+ *
+ * Row by row: a row `mine` changed, added or removed from `base` is taken
+ * from `mine`; any other row is taken from `theirs`, which keeps the other
+ * process's additions, edits and removals. The two touching the same row is
+ * the one case a side has to win, and the write being made now wins it, as
+ * it did before there was any merging. In `mine`'s order when the other
+ * process left the order alone, so a reorder made here survives; otherwise
+ * in `theirs`', with this write's new rows after.
+ */
+export function mergeById<T>(base: T[], mine: T[], theirs: T[], idOf: (row: T) => unknown): T[] | undefined {
+  const index = (rows: T[]): Map<string, T> | undefined => {
+    const byId = new Map<string, T>();
+    for (const row of rows) {
+      const id = row && typeof row === 'object' ? idOf(row) : undefined;
+      if (typeof id !== 'string' || byId.has(id)) return undefined;
+      byId.set(id, row);
+    }
+    return byId;
+  };
+  const b = index(base);
+  const m = index(mine);
+  const t = index(theirs);
+  if (!b || !m || !t) return undefined;
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+  const theirOrderMoved = !same([...b.keys()], [...t.keys()]);
+  const order = theirOrderMoved ? [...t.keys(), ...m.keys()] : [...m.keys(), ...t.keys()];
+  const out: T[] = [];
+  const done = new Set<string>();
+  for (const id of order) {
+    if (done.has(id)) continue;
+    done.add(id);
+    const ours = m.get(id);
+    const row = same(ours, b.get(id)) ? t.get(id) : ours;
+    if (row !== undefined) out.push(row);
+  }
+  return out;
+}
+
+/** `mergeById` for one object, key by key: the profile. */
+export function mergeFields<T extends object>(base: T, mine: T, theirs: T): T {
+  const b = base as Record<string, unknown>;
+  const m = mine as Record<string, unknown>;
+  const t = theirs as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(t), ...Object.keys(m)])) {
+    const value = JSON.stringify(m[key]) === JSON.stringify(b[key]) ? t[key] : m[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out as T;
+}
+
 /**
  * The store is a directory of YAML files under git. It is deliberately dumb:
  * read everything, hand out plain objects, write back whole files. A resume
@@ -442,7 +1067,39 @@ export class Store {
     if (full !== this.root && !full.startsWith(this.root + path.sep)) {
       throw new Error('That name is not allowed — it points outside the save folder.');
     }
-    return onDiskSpelling(full);
+    const found = onDiskSpelling(full);
+    this.assertNoLink(found);
+    return found;
+  }
+
+  /**
+   * And no link on the way there.
+   *
+   * The checks above are of the name, and a name can be perfectly good and
+   * still lead out of the save: a save is a git repository, git carries
+   * symbolic links, and a remote that put `voice.md -> ../../.ssh/id_ed25519`
+   * or `letters -> /somewhere/else` into it had this app reading and writing
+   * outside the save after a pull, every check here passed. A pull now
+   * refuses a tree with a link in it (see `Repo.pull`); this is for a link
+   * that got in some other way — an older version's pull, a hand-made one.
+   *
+   * Every part of the path below the save's own folder, with `lstat`, so the
+   * link itself is what is looked at and not what it points to. The save's
+   * folder may be reached through a link of its own (`/tmp` on a Mac is
+   * one), which is the person's choice of where the save is and not a thing
+   * inside it. A part that is not there yet ends the walk: nothing below a
+   * missing folder can be a link.
+   */
+  private assertNoLink(full: string): void {
+    const rel = path.relative(this.root, full);
+    if (!rel) return;
+    let at = this.root;
+    for (const part of rel.split(path.sep)) {
+      at = path.join(at, part);
+      const stat = fs.lstatSync(at, { throwIfNoEntry: false });
+      if (!stat) return;
+      if (stat.isSymbolicLink()) throw linkInSave(path.relative(this.root, at), at);
+    }
   }
 
   /**
@@ -483,24 +1140,88 @@ export class Store {
    * of parsing and removes the question rather than arguing it per caller.
    */
   /**
-   * Size and modification time together, as one string — "has this file
-   * moved since I last looked", answered without reading it.
+   * Size, modification time, inode and change time together, as one string —
+   * "has this file moved since I last looked", answered without reading it.
+   * See `statStamp`.
    *
-   * Together rather than either alone, for the reason `cached` below has
+   * Together rather than any one alone, for the reason `cached` below has
    * always kept them together: a hand edit, a git checkout, a restored
    * snapshot, a second process writing all move at least one, and
-   * `writeAtomic` renames a fresh file into place, which moves both.
+   * `writeAtomic` renames a fresh file into place, which moves them all.
    * `'missing'` for a file that is not there is its own stable answer — it
    * only ever collides with another file that is also not there, which is
    * not a collision that could hide a change.
    */
   private statKey(full: string): string {
     try {
-      const stat = fs.statSync(full);
-      return `${stat.size}:${stat.mtimeMs}`;
+      return statStamp(fs.statSync(full));
     } catch {
       return 'missing';
     }
+  }
+
+  /**
+   * Forget every parse this store is holding, so the next read of each file
+   * reads it again.
+   *
+   * For a pull (`Repo.pull`), which rewrites files underneath this process.
+   * The cache asks each file for its size and time on every read, and that
+   * is right for an edit — but it is all it asks, and `rememberWritten` keeps
+   * a parse keyed on the stat taken straight after this process wrote. A
+   * pulled file the same size as the one written here, landing within the
+   * same tick of the file system's clock — a second on some file systems, two
+   * on FAT, and a pull is over in well under one — was handed back as the
+   * parse of the old file: the row the other machine changed came back as
+   * it had been here, and the next whole-file write put it back that way on
+   * disk. A pull is rare and a re-parse is cheap; nothing is worth that.
+   */
+  forgetReads(): void {
+    this.parsed.clear();
+  }
+
+  /** `.git/HEAD` and `.git/ORIG_HEAD` as `forgetReadsIfGitMoved` last saw them. */
+  private gitMarks: string | undefined;
+
+  /**
+   * `forgetReads`, when a git outside this process has moved the save since
+   * the last time this was asked. True when it did.
+   *
+   * A pull in a terminal — `rmm pull` beside a running server, or `git pull`
+   * — rewrites files under this process the way the app's own pull does,
+   * and the app's own pull is the only one that told the cache. Most such
+   * rewrites move a file's inode and are caught by the stat key anyway
+   * (`statStamp`); this is for the ones that might not, and costs two stats.
+   * A pull, a merge and a reset write `ORIG_HEAD`; a checkout of another
+   * branch writes `HEAD`. This process's own commits write neither, so the
+   * cache survives them — forgetting on every commit would be forgetting on
+   * every save.
+   *
+   * Asked once per request by the server (see `createApi`).
+   */
+  forgetReadsIfGitMoved(): boolean {
+    const dir = gitDirOf(this.root);
+    if (!dir) return false;
+    const marks = ['HEAD', 'ORIG_HEAD'].map((name) => this.statKey(path.join(dir, name))).join('|');
+    if (marks === this.gitMarks) return false;
+    const first = this.gitMarks === undefined;
+    this.gitMarks = marks;
+    if (first) return false;
+    this.forgetReads();
+    return true;
+  }
+
+  /**
+   * What this process last read of a file, when somebody else has written
+   * the file since: the base a whole-file write is merged from. Undefined
+   * when the file is as it was read, or when nothing of it is remembered.
+   *
+   * Asked before anything reads the file again, because a read replaces what
+   * is remembered with what is there now.
+   */
+  private movedSinceRead(full: string): unknown {
+    const hit = this.parsed.get(full);
+    if (!hit || hit.key === this.statKey(full)) return undefined;
+    return structuredClone(hit.value);
   }
 
   private cached<T>(full: string, parse: (raw: string) => T, missing: T): T {
@@ -512,14 +1233,14 @@ export class Store {
     }
 
     /*
-     * Size and modification time together, rather than either alone. A hand
-     * edit, a git checkout, a restored snapshot, a second process writing:
-     * all of them move at least one, and `writeAtomic` renames a fresh file
-     * into place, which moves both. Nothing is keyed on this program having
-     * been the one to write the file, because most of the interesting edits
-     * are not.
+     * Size, modification time, inode and change time together, rather than
+     * any one alone (see `statStamp`). A hand edit, a git checkout, a
+     * restored snapshot, a second process writing: all of them move at least
+     * one, and `writeAtomic` renames a fresh file into place, which moves
+     * them all. Nothing is keyed on this program having been the one to write
+     * the file, because most of the interesting edits are not.
      */
-    const key = `${stat.size}:${stat.mtimeMs}`;
+    const key = statStamp(stat);
     const hit = this.parsed.get(full);
     if (hit?.key === key) return structuredClone(hit.value) as T;
 
@@ -587,8 +1308,7 @@ export class Store {
     const plain = path.join(this.root, 'resumes', `${id}.yaml`);
     let own: string;
     try {
-      const stat = fs.statSync(plain);
-      own = `${stat.size}:${stat.mtimeMs}`;
+      own = statStamp(fs.statSync(plain));
     } catch {
       own = Store.RESUME_SPELLINGS.map((ext) => this.statKey(this.file('resumes', `${id}.${ext}`))).join('|');
     }
@@ -601,6 +1321,25 @@ export class Store {
       full,
       (raw) => ({ raw, split: splitFrontMatter(raw) }),
       { raw: '', split: undefined },
+    );
+  }
+
+  /*
+   * The profile, with its autofill values as they were typed.
+   *
+   * Every one of them goes into a text box on a form, and YAML reads a bare
+   * `address_zip: 02115` as the number 2115, `phone_ext: 0042` as 42 and
+   * `gpa_scale: 4.0` as 4 — a ZIP code a form rejects, or worse, accepts.
+   * So the block's plain scalars are taken from the file's own text. Only the
+   * autofill block: everywhere else in the profile the parsed value is the
+   * one meant.
+   */
+  private readProfile(): Profile {
+    const fallback: Profile = { name: PLACEHOLDER_NAME };
+    return this.cached(
+      this.file('profile.yaml'),
+      (raw) => autofillAsWritten(parseStoreYaml('profile.yaml', raw, fallback), raw),
+      fallback,
     );
   }
 
@@ -635,6 +1374,15 @@ export class Store {
    *   folder a portal's upload dialog is pointed at.
    */
   private writeAtomic(f: string, text: string | Buffer): void {
+    /*
+     * Under the save's lock, so no other process's write lands in the middle
+     * of a read-modify-write this one is part of. Re-entrant: the methods
+     * below that read, change and write hold it already. See `SaveLock`.
+     */
+    holdSaveSync(this.root, () => this.writeAtomicHeld(f, text));
+  }
+
+  private writeAtomicHeld(f: string, text: string | Buffer): void {
     /*
      * A name is judged when it is created, and never afterwards.
      *
@@ -754,7 +1502,69 @@ export class Store {
     const f = this.file(...(Array.isArray(rel) ? rel : [rel]));
     // lineWidth 0 keeps long bullet text on one line so diffs stay per-bullet
     // instead of reflowing a whole paragraph every time a word changes.
-    this.writeAtomic(f, YAML.stringify(data, { lineWidth: 0 }));
+    const text = YAML.stringify(data, { lineWidth: 0 });
+    this.writeAtomic(f, text);
+    this.rememberWritten(f, text, rel === 'profile.yaml' ? undefined : data);
+  }
+
+  /*
+   * And the parse of what was just written, kept as if it had been read.
+   *
+   * The write moves the file's size and time, so the cache above rightly
+   * stops trusting what it held — and the next read, which is usually the
+   * next line, parsed the file back from scratch to learn what this method
+   * had in its hand a moment ago. On a tracker of a thousand applications
+   * that is most of a second, on every write: `syncCurrent` after a status
+   * change, the tracker list after a save.
+   *
+   * Only where what was written is exactly what a read would hand back:
+   *
+   * - Plain data, which YAML gives back as JSON would — see `asReadBack`.
+   *   Anything else is left for the read to parse, as before.
+   * - Not profile.yaml, whose reader takes the autofill block from the
+   *   file's own text rather than from the parse; see `readProfile`.
+   * - Keyed by the stat taken after the write, and only when that stat is
+   *   the size of what was written, so a second process that wrote the file
+   *   in between is read, not papered over.
+   *
+   * What is kept is a copy, like everything the cache hands out: the caller
+   * still has `data`, and changing it afterwards must not change what the
+   * next read finds.
+   */
+  private rememberWritten(full: string, text: string, data: unknown): void {
+    this.parsed.delete(full);
+    const value = asReadBack(data);
+    if (value === undefined) return;
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      return;
+    }
+    if (stat.size !== Buffer.byteLength(text)) return;
+    this.parsed.set(full, { key: statStamp(stat), value });
+  }
+
+  /*
+   * The profile, the skill groups and the answer bank on their own, each
+   * normalised exactly as `load` normalises it — `load` is built from these.
+   *
+   * For the writes that guard and version one of them (`PUT /profile`,
+   * `/skills`, `/answers`): the version they compare and hand back has to be
+   * the one `GET /store` reports, and getting it from `load` read every
+   * resume, letter and draft in the store twice per keystroke-save to look at
+   * one file.
+   */
+  loadProfile(): Profile {
+    return normalizeProfile(this.readProfile());
+  }
+
+  loadSkillGroups(): SkillGroup[] {
+    return normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
+  }
+
+  loadAnswers(): AnswerBankItem[] {
+    return normalizeAnswers(this.readYaml<AnswerBankItem[]>('answers.yaml', []));
   }
 
   /** Read every file in the store into one object. */
@@ -762,12 +1572,12 @@ export class Store {
     const config = this.loadConfig();
     const entries = this.loadEntries();
     return {
-      profile: normalizeProfile(this.readYaml<Profile>('profile.yaml', { name: PLACEHOLDER_NAME })),
+      profile: this.loadProfile(),
       // Normalised on the way in, so nothing downstream has to guard against a
       // hand-edited file that left a field without its alternates. See
       // normalize.ts — this is the only place it needs doing.
       entries,
-      skillGroups: normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', [])),
+      skillGroups: this.loadSkillGroups(),
       /*
        * A section that has never said how it wants to be ordered is asked the
        * one question that can be answered safely — would sorting it change
@@ -796,7 +1606,7 @@ export class Store {
       coverLetters: this.loadCoverLetters(),
       drafts: this.loadDrafts(),
       samples: this.loadSamples(),
-      answers: normalizeAnswers(this.readYaml<AnswerBankItem[]>('answers.yaml', [])),
+      answers: this.loadAnswers(),
       voice: this.loadVoice(),
       config,
     };
@@ -814,21 +1624,28 @@ export class Store {
       applications: { ...(raw.applications ?? {}) },
     };
 
-    config.ai.args = repairAiArgs(config.ai.command, config.ai.args);
-    // The deny list follows the research setting, so the two cannot disagree.
-    config.ai.args = applyResearch(config.ai.command, config.ai.args, Boolean(config.ai.research));
-    // And the model and effort flags follow their own settings, for the same
-    // reason: the saved arguments stay the preset's, and the choice is a
-    // setting rather than a hand edit that drifts.
-    config.ai.args = applyModelAndEffort(config.ai.command, config.ai.args, {
-      model: config.ai.model,
-      effort: config.ai.effort,
-    });
+    /*
+     * Repaired arguments; the deny list following the research setting, so
+     * the two cannot disagree; and the model and effort flags following their
+     * own settings, for the same reason: the saved arguments stay the
+     * preset's, and the choice is a setting rather than a hand edit that
+     * drifts. In one place (`effectiveAiCommand`) so that the switch-off
+     * compares exactly the command line this runs.
+     */
+    config.ai.args = effectiveAiCommand(config.ai).args;
+    /*
+     * Only a real `true` turns the AI on (see `aiIsOn`). Normalised here so
+     * that every reader of `config.ai.enabled` downstream, truthiness checks
+     * included, sees the same boolean the switch-off reasoned about.
+     */
+    config.ai.enabled = aiIsOn(config.ai.enabled);
 
     // Escape hatches for automated runs. A test suite driving a real server
     // should be able to leave no commits behind without editing config.yaml.
     if (process.env.RMM_AUTOCOMMIT === '0') config.git.autoCommit = false;
     if (process.env.RMM_AI === '0') config.ai.enabled = false;
+    // And this machine's own switch-off, from a pull that changed the command. See `aiCommandChange`.
+    if (config.ai.enabled && aiSwitchedOff(this.root) !== undefined) config.ai.enabled = false;
     if (process.env.RMM_LATEX_ENGINE) {
       config.latex.engine = process.env.RMM_LATEX_ENGINE as StoreConfig['latex']['engine'];
     }
@@ -838,8 +1655,52 @@ export class Store {
   /**
    * Write config.yaml. Only the fields the caller supplies are changed, so a
    * GUI that knows about the AI settings cannot clobber the LaTeX ones.
+   *
+   * A field sent as `null` is removed, at whatever depth it sits. Without
+   * that there was no way back to a default: "As it comes" effort and the
+   * auto-detected engine are the *absence* of a value, JSON drops an
+   * `undefined`, and a merge keeps whatever the file already said — so the
+   * page reported "Settings saved" over a setting that had not changed.
    */
   saveConfig(patch: Partial<StoreConfig>): StoreConfig {
+    /*
+     * The read, the change and the write as one step, with no other
+     * process's write in between: under the save's lock (see `SaveLock`).
+     * Every method here with a `…Held` half is held the same way.
+     */
+    return holdSaveSync(this.root, () => this.saveConfigHeld(patch));
+  }
+
+  private saveConfigHeld(patch: Partial<StoreConfig>): StoreConfig {
+    /*
+     * While a pull or a clone has the AI switched off here, "off" is this
+     * machine's answer and lives in `.git` (see `aiSwitchOffFile`), and
+     * `loadConfig` reports `enabled: false` whatever config.yaml says. A
+     * client that sends back what it was shown — the Settings page's Save
+     * did, with every change to the timeout — would write that false into
+     * the tracked file and commit it as "Update settings", a decision about
+     * the AI nobody made. The switch-off writes its own `false`, once and
+     * under its own name (see `writeAiOff`); and once somebody has turned
+     * the AI on again elsewhere and that has been pulled, a timeout changed
+     * here must not switch it off for everybody. So while switched off,
+     * anything short of turning the AI on leaves the file's own value alone. Turning it on (`true`) still
+     * goes through, and clears the switch-off below.
+     */
+    if (patch.ai && 'enabled' in patch.ai && patch.ai.enabled !== true && aiSwitchedOff(this.root) !== undefined) {
+      const { enabled: _keptAsTheFileSaysIt, ...rest } = patch.ai;
+      patch = { ...patch, ai: rest as StoreConfig['ai'] };
+      /*
+       * And nothing written at all when that was the whole of the patch.
+       * Written anyway, config.yaml came back out of `writeYaml` without its
+       * comments and in its own key order, a change of nobody's making that
+       * the caller then committed as "Update settings" — over a request that
+       * was told it changed nothing.
+       */
+      if (Object.keys(rest).length === 0) {
+        const { ai: _nothingLeft, ...others } = patch;
+        if (Object.values(others).every((v) => v === undefined)) return this.loadConfig();
+      }
+    }
     const current = this.readYaml<Partial<StoreConfig>>('config.yaml', {});
     const merged: Partial<StoreConfig> = {
       ...current,
@@ -870,7 +1731,11 @@ export class Store {
           }
         : {}),
     };
+    dropNulls(merged as Record<string, unknown>, patch);
     this.writeYaml('config.yaml', merged);
+    // Turning the AI on is the person answering a pull's switch-off: they have
+    // seen the command in Settings. See `aiCommandChange`.
+    if (patch.ai?.enabled === true) clearAiSwitchOff(this.root);
     return this.loadConfig();
   }
 
@@ -923,12 +1788,22 @@ export class Store {
           'Move that file aside and try again — nothing has been changed.',
       );
     }
+    let names: fs.Dirent[];
     try {
-      return fs.readdirSync(dir).filter(keep);
+      names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => keep(d.name));
     } catch (err) {
       const said = err instanceof Error ? err.message : String(err);
       throw new Error(`The save's "${rel}" folder could not be read (${dir}) — ${said}`);
     }
+    /*
+     * And none of what is listed a link, for the reason `assertNoLink` gives:
+     * the loaders read each name they are given straight from this folder,
+     * so a `letters/x.md` linking to a file outside the save was read and
+     * shown, and written back over, as a letter.
+     */
+    const link = names.find((d) => d.isSymbolicLink());
+    if (link) throw linkInSave(`${rel}/${link.name}`, path.join(dir, link.name));
+    return names.map((d) => d.name);
   }
 
   /** Resumes live one-per-file so a new variation is a new small file. */
@@ -955,7 +1830,33 @@ export class Store {
      * right way round: the sweep deletes things, and it should not begin
      * until the save has actually been migrated and the date recorded.
      */
-    return tierResumes(flattenResumes(this.loadResumesAsWritten())).tiered;
+    /*
+     * And a sent temporary resume, which is written as `extended` so that a
+     * version that would sweep it does not, read back as the temporary copy
+     * it is here. See `keptOnDisk`.
+     */
+    return tierResumes(flattenResumes(this.loadResumesAsWritten())).tiered.map(asLoaded);
+  }
+
+  /**
+   * Write the keep on every temporary resume the tracker says was sent.
+   *
+   * `saveResume` and `saveApplications` write it from now on; this is for
+   * the resumes already on disk — written before either did, by the version
+   * before this one, or by hand. Run on opening the save, before the sweep.
+   * Returns the ids it wrote, and none on any start after the first.
+   */
+  keepSentResumes(): string[] {
+    const sent = sentResumes(normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])));
+    const kept: string[] = [];
+    for (const spec of this.loadResumesAsWritten()) {
+      // As written: an untiered resume is the tiering migration's to settle,
+      // and that writes through `saveResume` too.
+      if (spec.tier !== 'temporary' || !sent.has(spec.id)) continue;
+      this.writeYaml(['resumes', `${spec.id}.yaml`], keptOnDisk(spec, sent));
+      kept.push(spec.id);
+    }
+    return kept;
   }
 
   /**
@@ -1093,7 +1994,9 @@ export class Store {
     }
     for (const draft of this.loadDrafts()) {
       if (draft.resumeId !== moved(draft.resumeId)) {
-        this.saveDraft({ ...draft, resumeId: moved(draft.resumeId) });
+        // Not touched: a rename nobody asked for is not an edit, and the
+        // date is what the drafts list sorts on and the sweep ages by.
+        this.saveDraft({ ...draft, resumeId: moved(draft.resumeId) }, { touch: false });
       }
     }
 
@@ -1151,7 +2054,17 @@ export class Store {
          * or copied and not yet filled in — arrived with `label: undefined`,
          * which is the label every picker in the app then showed for it.
          */
-        return { ...spec, id, label: String(spec.label ?? id) } satisfies ResumeSpec;
+        /*
+         * And sections in a shape that can be walked — see `normalizeSections`.
+         * One resume's hand edit is that resume's problem, not every screen's.
+         */
+        const sections = normalizeSections(spec.sections);
+        return {
+          ...spec,
+          id,
+          label: String(spec.label ?? id),
+          ...(sections ? { sections } : {}),
+        } satisfies ResumeSpec;
       })
       .filter((r, i, all) => Boolean(r.id) && all.findIndex((o) => o.id === r.id) === i);
   }
@@ -1161,7 +2074,18 @@ export class Store {
   }
 
   saveResume(spec: ResumeSpec): void {
-    this.writeYaml(['resumes', `${spec.id}.yaml`], spec);
+    holdSaveSync(this.root, () => this.saveResumeHeld(spec));
+  }
+
+  private saveResumeHeld(spec: ResumeSpec): void {
+    /*
+     * A temporary resume that went out is written as kept, whoever is
+     * writing it — the card filing its copy again, the editor saving it, a
+     * migration. See `keptOnDisk`: on disk as `temporary`, the previous
+     * version on the same clone sweeps it.
+     */
+    const sent = sentResumes(normalizeApplications(this.readYaml<Application[]>('applications.yaml', [])));
+    this.writeYaml(['resumes', `${spec.id}.yaml`], keptOnDisk(spec, sent));
   }
 
   /**
@@ -1188,13 +2112,20 @@ export class Store {
    * brought up to date first, and only then is one of them removed. It costs
    * one pass over a folder of small files, once, on the first delete after an
    * upgrade.
+   *
+   * Except that finding out there is nothing to fold is itself a read of every
+   * resume, and so is looking up the label — nothing for one deletion, and
+   * most of the sweep's time when it deleted ninety in a row. So a caller
+   * deleting many may fold once itself and say so with `migrated`, and hand
+   * over the `label` it already has. The label is only the name a failed
+   * unlink is reported under.
    */
-  deleteResume(id: string): void {
-    this.migrateResumes();
+  deleteResume(id: string, { migrated = false, label }: { migrated?: boolean; label?: string } = {}): void {
+    if (!migrated) this.migrateResumes();
 
-    const named = this.loadResumes().find((r) => r.id === id);
+    const named = label ?? this.loadResumes().find((r) => r.id === id)?.label ?? id;
     for (const ext of Store.RESUME_SPELLINGS) {
-      removeFile(this.file('resumes', `${id}.${ext}`), `"${named?.label ?? id}"`);
+      removeFile(this.file('resumes', `${id}.${ext}`), `"${named}"`);
     }
   }
 
@@ -1312,6 +2243,10 @@ export class Store {
    * match in, so the twin could not be cleared from the app either.
    */
   saveEntry(entry: Entry): void {
+    holdSaveSync(this.root, () => this.saveEntryHeld(entry));
+  }
+
+  private saveEntryHeld(entry: Entry): void {
     // Normalised on the way out as well as in, so a bad write from the API
     // never becomes a bad file: reads are already safe, but a file that says
     // something impossible is a trap for whoever opens it next.
@@ -1347,7 +2282,7 @@ export class Store {
     refuseRepeatsInEntry(before, clean);
 
     const list = this.readYaml<Entry[]>(rel, []);
-    const idx = list.findIndex((e) => e.id === clean.id);
+    const idx = list.findIndex((e) => holdsId(e, clean.id));
     if (idx >= 0) list[idx] = clean;
     else list.push(clean);
     this.writeYaml(rel, list);
@@ -1355,7 +2290,7 @@ export class Store {
     for (const other of Store.ENTRY_FILES) {
       if (other === rel) continue;
       const stale = this.readYaml<Entry[]>(other, []);
-      const next = stale.filter((e) => e.id !== clean.id);
+      const next = stale.filter((e) => !holdsId(e, clean.id));
       if (next.length !== stale.length) this.writeYaml(other, next);
     }
 
@@ -1374,11 +2309,15 @@ export class Store {
 
   /** Removes the id from every file, not merely the first one holding it. */
   deleteEntry(id: string): boolean {
+    return holdSaveSync(this.root, () => this.deleteEntryHeld(id));
+  }
+
+  private deleteEntryHeld(id: string): boolean {
     const was = this.loadEntries();
     let removed = false;
     for (const rel of Store.ENTRY_FILES) {
       const list = this.readYaml<Entry[]>(rel, []);
-      const next = list.filter((e) => e.id !== id);
+      const next = list.filter((e) => !holdsId(e, id));
       if (next.length !== list.length) {
         this.writeYaml(rel, next);
         removed = true;
@@ -1392,7 +2331,14 @@ export class Store {
   }
 
   saveSkillGroups(groups: SkillGroup[]): void {
+    holdSaveSync(this.root, () => this.saveSkillGroupsHeld(groups));
+  }
+
+  private saveSkillGroupsHeld(groups: SkillGroup[]): void {
+    const was = this.movedSinceRead(this.file('skills.yaml'));
     const before = normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
+    // Onto the file as it is now, when another process has written it since. See `saveApplications`.
+    if (was !== undefined) groups = mergeById(normalizeSkillGroups(was), groups, before, (g) => g.id) ?? groups;
     refuseRepeats(before, groups);
     this.writeYaml('skills.yaml', groups);
     // Dropping a skill from a group, or a whole group, reaches the resumes
@@ -1451,14 +2397,70 @@ export class Store {
   }
 
   saveProfile(profile: Profile): void {
-    this.writeYaml('profile.yaml', normalizeProfile(profile));
+    holdSaveSync(this.root, () => this.saveProfileHeld(profile));
+  }
+
+  private saveProfileHeld(profile: Profile): void {
+    // Onto the file as it is now, field by field, when another process has
+    // written it since. See `saveApplications`.
+    const was = this.movedSinceRead(this.file('profile.yaml'));
+    const mine = normalizeProfile(profile);
+    this.writeYaml(
+      'profile.yaml',
+      was === undefined ? mine : mergeFields(normalizeProfile(was as Profile), mine, this.loadProfile()),
+    );
   }
 
   saveApplications(apps: Application[]): void {
+    holdSaveSync(this.root, () => this.saveApplicationsHeld(apps));
+  }
+
+  private saveApplicationsHeld(apps: Application[]): void {
+    /*
+     * Onto the tracker as it is now, not as it was when the caller read it.
+     *
+     * Every caller reads the list, changes a row and hands the whole list
+     * back, and inside this server that is safe: nothing is awaited between
+     * the read and this write. But the `rmm` CLI is another process, and a
+     * row it filed between the server's read and this write was written
+     * over by the list from before it — `rmm apply` exited 0 and its row
+     * was gone. So when the file has moved since this process read it, the
+     * caller's change is worked out against what it read (the remembered
+     * parse) and made to what is there now, row by row: a row the caller
+     * changed, added or removed is the caller's; every other row is the
+     * file's. Under the lock, so nothing moves while that is done.
+     */
+    const was = this.movedSinceRead(this.file('applications.yaml'));
+    const before = normalizeApplications(this.readYaml<Application[]>('applications.yaml', []));
+    if (was !== undefined) {
+      apps = mergeById(normalizeApplications(was), normalizeApplications(apps), before, (a) => a.id) ?? apps;
+    }
     this.writeYaml('applications.yaml', apps);
+    /*
+     * And a temporary resume this write says went out is written as kept,
+     * in the same write and so the same commit: a row moved to `applied`,
+     * filed at `applied` to begin with, or remembering in `sentResumeIds`
+     * the resume it was sent with before it moved on. See `keptOnDisk` for
+     * why the file has to say it rather than the tracker alone.
+     *
+     * Only on the change, so a write that sends nothing new out does not
+     * also rewrite resumes: the ones already on disk are `keepSentResumes`'s,
+     * on opening the save.
+     */
+    const fresh = newlySent(before, normalizeApplications(apps));
+    if (fresh.length === 0) return;
+    const sent = new Set(fresh);
+    for (const spec of this.loadResumesAsWritten()) {
+      if (spec.tier !== 'temporary' || !sent.has(spec.id)) continue;
+      this.writeYaml(['resumes', `${spec.id}.yaml`], keptOnDisk(spec, sent));
+    }
   }
 
   upsertApplication(app: Application): Application[] {
+    return holdSaveSync(this.root, () => this.upsertApplicationHeld(app));
+  }
+
+  private upsertApplicationHeld(app: Application): Application[] {
     const apps = normalizeApplications(this.readYaml<Application[]>('applications.yaml', []));
     const idx = apps.findIndex((a) => a.id === app.id);
     if (idx >= 0) apps[idx] = app;
@@ -1468,6 +2470,16 @@ export class Store {
   }
 
   saveAnswers(answers: AnswerBankItem[]): void {
+    holdSaveSync(this.root, () => this.saveAnswersHeld(answers));
+  }
+
+  private saveAnswersHeld(answers: AnswerBankItem[]): void {
+    // Onto the file as it is now, when another process has written it since. See `saveApplications`.
+    const was = this.movedSinceRead(this.file('answers.yaml'));
+    if (was !== undefined) {
+      const now = normalizeAnswers(this.readYaml<AnswerBankItem[]>('answers.yaml', []));
+      answers = mergeById(normalizeAnswers(was), normalizeAnswers(answers), now, (a) => a.id) ?? answers;
+    }
     this.writeYaml('answers.yaml', answers);
   }
 
@@ -1528,7 +2540,11 @@ export class Store {
    * writing. `POST /voice/include` says "counted again" by taking the key
    * away, so it has to be able to write an absence and mean it.
    */
-  saveCoverLetter(letter: CoverLetter, { decidesVoice = false } = {}): void {
+  saveCoverLetter(letter: CoverLetter, opts: { decidesVoice?: boolean } = {}): void {
+    holdSaveSync(this.root, () => this.saveCoverLetterHeld(letter, opts));
+  }
+
+  private saveCoverLetterHeld(letter: CoverLetter, { decidesVoice = false }: { decidesVoice?: boolean }): void {
     const { body, id, ...meta } = letter;
     if (!decidesVoice && meta.voice === undefined) {
       const stored = this.loadCoverLetters().find((l) => l.id === id)?.voice;
@@ -1573,6 +2589,14 @@ export class Store {
     fs.mkdirSync(dir, { recursive: true });
     const front = YAML.stringify(meta, { lineWidth: 0 }).trimEnd();
     this.writeAtomic(this.file('corpus', `${id}.md`), `---\n${front}\n---\n${text}`);
+  }
+
+  /** Take a cover letter out; false when there was none by that id. */
+  deleteCoverLetter(id: string): boolean {
+    const f = this.file('letters', `${id}.md`);
+    if (!fs.existsSync(f)) return false;
+    removeFile(f, 'That cover letter');
+    return true;
   }
 
   deleteSample(id: string): boolean {
@@ -1838,10 +2862,27 @@ export class Store {
    */
   outPath(rel: string): string | undefined {
     const out = this.outDir();
-    if (!rel || rel.includes('\u0000')) return undefined;
+    // A hand-written `snapshotDir: 5` is not a folder either, and calling
+    // `.includes` on it threw out of the whole sync.
+    if (!rel || typeof rel !== 'string' || rel.includes('\u0000')) return undefined;
     const full = path.resolve(out, rel);
     return full.startsWith(out + path.sep) ? full : undefined;
   }
+}
+
+/**
+ * Whether an item read straight out of an entry file is the entry with this id.
+ *
+ * The file is compared raw, before `normalizeEntry` has run, so it has to
+ * read the id the way normalizing does. YAML makes `id: 2024` a number, and
+ * `e.id === '2024'` never matched it: a save appended a second copy that
+ * `loadEntries` then hid behind the first, so the edit was lost, and a delete
+ * removed whichever copy it found. A stray `-` is `null`, and reading `.id`
+ * off it threw — after the save had already written its own file.
+ */
+function holdsId(raw: unknown, id: string): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  return String((raw as Partial<Entry>).id ?? '') === id;
 }
 
 /**

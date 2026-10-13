@@ -21,6 +21,7 @@ import path from 'node:path';
 import { AI_PRESETS } from '../ai/presets.js';
 import type { SessionFile } from './main.js';
 import { redactDeep } from '../jobs/answers.js';
+import { sessionResume, tailorData, writingData, type TailorData, type WritingData } from './session-data.js';
 
 /**
  * The MCP entry point, in whichever form this install has.
@@ -182,6 +183,37 @@ function presetFor(command: string): string | undefined {
 }
 
 /**
+ * The session cut down to what its kind's tools read — see `session-data.ts`.
+ *
+ * Done here, on the way to disk, rather than trusted to each caller: a caller
+ * holding the whole store can pass it where a `Pick` is asked for and the
+ * compiler will not object, so this is the one place that decides what the
+ * file in the AI's working directory holds.
+ */
+export function minimalSession(session: Omit<SessionFile, 'out'>): Omit<SessionFile, 'out'> {
+  if (session.kind === 'author') {
+    return { kind: 'author', documents: session.documents ?? [], existing: session.existing };
+  }
+  const resume = session.resume ? sessionResume(session.resume) : undefined;
+  if (session.kind === 'write') {
+    return {
+      kind: 'write',
+      data: writingData((session.data ?? {}) as WritingData),
+      resume,
+      posting: session.posting,
+      draft: session.draft,
+      resumeText: session.resumeText,
+    };
+  }
+  return {
+    ...(session.kind ? { kind: session.kind } : {}),
+    data: tailorData((session.data ?? {}) as TailorData),
+    resume,
+    posting: session.posting,
+  };
+}
+
+/**
  * Write the session and the config into the sandbox, and say what to add.
  *
  * Returns `null` when the configured command is not one we know how to wire
@@ -211,7 +243,7 @@ export function wireUp(
    * sees — past `runAgent`'s redaction of the prompt and the protocol's of
    * every tool result. See `redactDeep`.
    */
-  fs.writeFileSync(sessionPath, JSON.stringify({ ...redactDeep(session), out }), 'utf8');
+  fs.writeFileSync(sessionPath, JSON.stringify({ ...redactDeep(minimalSession(session)), out }), 'utf8');
 
   /*
    * One server, named for what it is rather than for this application: the

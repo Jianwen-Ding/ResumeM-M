@@ -117,6 +117,21 @@ describe('finding something in what you have already written', () => {
     await type('#letter-find', '');
     await vi.waitFor(() => expect(cards('letters')).toHaveLength(2));
   });
+
+  /*
+   * Each keystroke asked for every letter and the whole store again, 150 to
+   * 340ms a key on a real save, to narrow lists already on the page.
+   */
+  it('narrows what it already has, without asking the server on each keystroke', async () => {
+    const asked = () =>
+      globalThis.fetch.mock.calls.filter(([url]) => url === '/api/letters' || url === '/api/store').length;
+    const before = asked();
+    for (const typed of ['h', 'he', 'hel', 'helios']) await type('#letter-find', typed);
+    for (const typed of ['s', 'sponsor']) await type('#answer-find', typed);
+    expect(cards('letters')).toHaveLength(1);
+    expect(cards('answers')).toHaveLength(1);
+    expect(asked()).toBe(before);
+  });
 });
 
 /*

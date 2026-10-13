@@ -55,6 +55,14 @@ export function deepEqual(a, b) {
  * The document routes, as `[pattern, docKey prefix, methods]`. Anything not
  * listed here — GETs, `/answers/save`, `/resumes/:id/base`, `/applications/*`,
  * the AI endpoints — is not a whole-document write and gets no undo entry.
+ *
+ * Cover letters are one: a letter is one file, `PUT /letters/:id` writes it
+ * and `DELETE /letters/:id` takes it away, and `GET /store` carries every one
+ * whole (`coverLetters`), which is what a step is read back from. Saving a
+ * letter in the editor was the one write of a document there was no taking
+ * back. Writing samples are not: `GET /store` lists them without their text
+ * (`chars` in its place), so a snapshot read from it is a sample with no
+ * words, and putting that back is refused.
  */
 const SINGLETONS = {
   '/profile': 'profile',
@@ -65,6 +73,7 @@ const COLLECTIONS = {
   entries: 'entry',
   resumes: 'resume',
   answers: 'answer',
+  letters: 'letter',
 };
 
 /** `'/entries/edu_neu?commit=0'` -> `'/entries/edu_neu'`. */
@@ -78,7 +87,8 @@ function bare(path) {
 
 /**
  * Which document a mutating request touches, as a stable string:
- * `'profile'`, `'skills'`, `'entry:<id>'`, `'resume:<id>'`, `'answer:<id>'`.
+ * `'profile'`, `'skills'`, `'entry:<id>'`, `'resume:<id>'`, `'answer:<id>'`,
+ * `'letter:<id>'`.
  * Returns `null` for requests that do not replace a whole document — reads,
  * unknown routes, and the action-shaped POSTs.
  *
@@ -100,6 +110,8 @@ export function docKeyFor(path, method) {
   if (parts.length !== 2) return null; // `/resumes/:id/base` and friends are partial writes
   const kind = COLLECTIONS[parts[0]];
   if (!kind || !parts[1]) return null;
+  // `/letters/id` is a question about a name, asked with a GET; never a letter.
+  if (kind === 'letter' && parts[1] === 'id') return null;
 
   let id = parts[1];
   try {
@@ -122,7 +134,7 @@ function parseKey(docKey) {
  * ------------------------------------------------------------------ */
 
 /** Where each document kind lives in `state.store`. */
-const COLLECTION_FIELD = { entry: 'entries', resume: 'resumes', answer: 'answers' };
+const COLLECTION_FIELD = { entry: 'entries', resume: 'resumes', answer: 'answers', letter: 'coverLetters' };
 
 /**
  * A deep-cloned snapshot of one document out of the editor's store copy, or
@@ -152,7 +164,30 @@ export function readDoc(store, docKey) {
  * Turning a snapshot back into an API call                            *
  * ------------------------------------------------------------------ */
 
-const COLLECTION_PATH = { entry: '/entries', resume: '/resumes', answer: '/answers' };
+const COLLECTION_PATH = { entry: '/entries', resume: '/resumes', answer: '/answers', letter: '/letters' };
+
+/*
+ * A letter's fields that the step's "before" may simply not have. `PUT
+ * /letters/:id` lays what it is sent over the stored letter, so one left out
+ * is kept rather than taken away: undoing "added the company" put back a
+ * letter with the company still on it. Sent as null, which the route reads
+ * as "clear this".
+ */
+const LETTER_OPTIONAL = ['company', 'role', 'tags', 'applicationId'];
+
+/**
+ * The body that puts `doc` back as `docKey`: the document itself, and for a
+ * letter each optional field it does not have said as null (see
+ * `LETTER_OPTIONAL`).
+ *
+ * @param {string} docKey
+ * @param {any} doc
+ * @returns {any}
+ */
+export function restoreBody(docKey, doc) {
+  if (parseKey(docKey).kind !== 'letter' || !doc || typeof doc !== 'object') return doc;
+  return { ...Object.fromEntries(LETTER_OPTIONAL.map((k) => [k, null])), ...doc };
+}
 
 /**
  * The single API call that puts `doc` back where `docKey` says it belongs.
@@ -179,7 +214,7 @@ export function restoreRequest(docKey, doc) {
   if (!base || !id) throw new Error(`"${docKey}" is not a document key`);
   const path = `${base}/${encodeURIComponent(id)}`;
   if (missing) return { path, options: { method: 'DELETE' } };
-  return { path: `${path}?commit=0`, options: { method: 'PUT', body: JSON.stringify(doc) } };
+  return { path: `${path}?commit=0`, options: { method: 'PUT', body: JSON.stringify(restoreBody(docKey, doc)) } };
 }
 
 /* ------------------------------------------------------------------ *

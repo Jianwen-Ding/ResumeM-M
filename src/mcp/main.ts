@@ -25,7 +25,8 @@ import { tailorTools } from './tools.js';
 import { WritingSession, type WritingState } from './writing.js';
 import { AuthoringSession, type AuthoringState, type SourceDocument } from './authoring.js';
 import { authoringTools, writingTools } from './writing-tools.js';
-import type { Draft, ResolvedResume, StoreData } from '../model/types.js';
+import type { Draft } from '../model/types.js';
+import type { SessionResume, TailorData, WritingData } from './session-data.js';
 
 /**
  * Three kinds of session, one server.
@@ -40,9 +41,17 @@ import type { Draft, ResolvedResume, StoreData } from '../model/types.js';
  */
 export interface SessionFile {
   kind?: 'tailor' | 'write' | 'author';
-  data: StoreData;
-  resume: ResolvedResume;
-  posting: TailorPosting;
+  /**
+   * Only what the kind's tools read — see `sessionData`. This file sits in the
+   * AI's working directory, where a coding CLI reads files without asking, so
+   * the whole store here was the whole store handed to the model: the phone
+   * number, the autofill block, the tracker, every draft for every employer.
+   * Absent for `author`, whose tools read none of it.
+   */
+  data?: TailorData | WritingData;
+  /** Absent for `author`. Its profile is the name and nothing else. */
+  resume?: SessionResume;
+  posting?: TailorPosting;
   /** For `write`: what the form is asking for. */
   draft?: Pick<Draft, 'coverLetter' | 'questions'>;
   /** For `write`: the resume as text, rendered by the caller. */
@@ -98,7 +107,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }));
 
   // An empty state written up front, so a run that is killed before it calls
-  // anything is still distinguishable from one that never started.
+  // anything is still distinguishable from one that never started. Which
+  // means the file existing says nothing about whether a tool was called:
+  // a reader asks what the state holds instead (`decidedAnything`, agent.ts).
   save();
 
   await serve(process.stdin, process.stdout, tools, { name: `resumem-m-${file.kind ?? 'tailor'}`, version: '1' });
@@ -118,11 +129,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
  * somewhere other than through a spawned process.
  */
 export function build(file: SessionFile): { session: { state: unknown }; tools: ToolDefinition[] } {
+  const resume: SessionResume = file.resume ?? { id: '', label: '', sections: [], profile: { name: '' } };
+  const posting: TailorPosting = file.posting ?? { description: '' };
   if (file.kind === 'write') {
+    const data = (file.data ?? {}) as Partial<WritingData>;
     const session = new WritingSession(
-      file.data,
-      file.resume,
-      file.posting,
+      { coverLetters: data.coverLetters ?? [], answers: data.answers ?? [] },
+      resume,
+      posting,
       file.draft ?? { coverLetter: { required: true, body: '' }, questions: [] },
       file.resumeText ?? '',
     );
@@ -135,7 +149,12 @@ export function build(file: SessionFile): { session: { state: unknown }; tools: 
     );
     return { session, tools: authoringTools(session) };
   }
-  const session = new TailorSession(file.data, file.resume, file.posting);
+  const data = (file.data ?? {}) as Partial<TailorData>;
+  const session = new TailorSession(
+    { entries: data.entries ?? [], skillGroups: data.skillGroups ?? [], resumes: data.resumes ?? [] },
+    resume,
+    posting,
+  );
   return { session, tools: tailorTools(session) };
 }
 

@@ -11,7 +11,7 @@ import { resolveResume } from '../src/model/resolve.js';
 import type { Application, Entry, ResumeSpec, StoreData } from '../src/model/types.js';
 
 describe('an application id identifies the application', () => {
-  const day = new Date('2026-09-16T12:00:00Z');
+  const day = new Date(2026, 8, 16, 12);
 
   it('is readable for the ordinary case', () => {
     expect(applicationId('Acme', 'Platform Engineer', day)).toBe('2026-09-16-acme-platform-engineer');
@@ -88,7 +88,7 @@ describe('an application id identifies the application', () => {
  * while the tracker still shows two rows, so nothing looks wrong.
  */
 describe('looking an application up finds that application', () => {
-  const day = new Date('2026-09-16T12:00:00Z');
+  const day = new Date(2026, 8, 16, 12);
   const app = (company: string, role: string, status: string): Application =>
     ({ id: applicationId(company, role, day), company, role, status, appliedAt: '2026-09-16' }) as Application;
 

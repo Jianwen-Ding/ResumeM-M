@@ -35,13 +35,20 @@ export const NARROW_QUERY = '(max-width: 640px)';
 
 /**
  * Which entry this is, stable across redraws. Entries and projects carry
- * their id; the profile and the skill groups do not, and are named by what
- * they are.
+ * their id; the profile does not, and is named by what it is.
+ *
+ * A skills group is named by its group's id, which the editor puts on it
+ * (`skillsBlock`). It was named by its title, and two groups may share one —
+ * a "Languages" of programming languages and a "Languages" of spoken ones —
+ * so opening either under Focus opened both, and the one asked for was not
+ * the only one on screen. The title is left only for a heading drawn without
+ * an id.
  */
 export function keyOf(entry) {
   if (!entry) return null;
   if (entry.dataset.dragId) return entry.dataset.dragId;
   if (entry.classList.contains('profile-entry')) return 'profile';
+  if (entry.dataset.groupId) return `group-id:${entry.dataset.groupId}`;
   const title = entry.querySelector('.entry-head .title')?.textContent;
   return title ? `group:${title}` : null;
 }

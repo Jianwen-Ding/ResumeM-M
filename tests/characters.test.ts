@@ -88,6 +88,24 @@ describe('characters the engine cannot set', () => {
     expect(unrenderableReason(fine)).toBeUndefined();
   });
 
+  /*
+   * The same name, decomposed: an `e` and a combining acute, as a Mac or a
+   * PDF often hands it over. The combining mark alone is not in T1, so this
+   * was refused — though composed, as `tex` sets it, it is a plain é.
+   */
+  it('accepts a decomposed accent, which it sets composed', () => {
+    const nfd = 'Jose\u0301 Garci\u0301a';
+    expect(unsupportedCharacters(nfd)).toEqual([]);
+    expect(unrenderableReason(nfd)).toBeUndefined();
+    expect(unrenderableReason(inlineTex(nfd), 'resume', [nfd])).toBeUndefined();
+  });
+
+  it('still refuses a combining mark that has nothing to compose with', () => {
+    // There is no precomposed q-acute, so this one really cannot be set.
+    const bad = unsupportedCharacters('q\u0301');
+    expect(bad.map((b) => b.codePoint)).toEqual(['U+0301']);
+  });
+
   it('names a character it cannot set, once, with where it is', () => {
     const bad = unsupportedCharacters('Hello 张 world 张 again');
     expect(bad).toHaveLength(1);

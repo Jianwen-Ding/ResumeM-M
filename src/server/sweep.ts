@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { removeWhatIsFiled, withCommit } from '../git/repo.js';
 import type { Repo } from '../git/repo.js';
 import { Store } from '../model/store.js';
@@ -14,9 +16,13 @@ import { workdayEmployer } from '../jobs/extract.js';
  *
  * What makes it acceptable at all is that nothing is actually lost: the store
  * is a git repository, the sweep commits, and a swept resume comes back out of
- * the history the same way a deleted entry does. The files that were *sent*
- * are in the application's snapshot folder and are not touched by any of this
- * — the sweep removes the recipe, never the document.
+ * the history the same way a deleted entry does.
+ *
+ * And it never takes the resume of an application that went out. This used
+ * to say "the files that were *sent* are in the application's snapshot
+ * folder … the sweep removes the recipe, never the document" — but that
+ * folder is under `out/`, which a save does not track, so the recipe was the
+ * only tracked record of what was sent. See `wentOut` in model/tiers.ts.
  *
  * That argument has a hole in it, and it is the reason for the first half of
  * `sweepTemporary`: committing the *deletion* recovers nothing if the resume
@@ -54,7 +60,35 @@ export function temporaryDays(store: Store): number {
  * cannot drift apart, which is the way a preview usually goes wrong.
  */
 export function wouldSweep(store: Store, now = Date.now()): DueToGo[] {
-  return dueToGo(store.load(), { days: temporaryDays(store), now });
+  return dueNow(store, temporaryDays(store), now);
+}
+
+/**
+ * `dueToGo`, less every resume whose file says `extended`.
+ *
+ * A sent temporary resume is written as `extended` with `keptBecauseSent`
+ * (`keptOnDisk` in model/tiers.ts) and read back by `asLoaded` as the
+ * temporary copy it is, and "the sweep still keeps it, for the reason it
+ * always did — it was sent" was true only while a row said so. Delete the
+ * application, or file it again from another resume without the row
+ * remembering this one, and nothing named it: `doneAt` counted it as a copy
+ * made and abandoned, from the day it was made, and the sweep took the one
+ * record of what was sent. What is on disk is the keep, and it is the
+ * promise made to every other version of the app that opens this save —
+ * `extended` is never swept — so this version keeps it too, whatever
+ * `asLoaded` shows. Read as written, because the loaded tier is the one
+ * thing that cannot tell the two apart.
+ */
+function dueNow(store: Store, days: number, now: number): DueToGo[] {
+  const due = dueToGo(store.load(), { days, now });
+  if (due.length === 0) return due;
+  const extended = new Set(
+    store
+      .loadResumesAsWritten()
+      .filter((spec) => spec.tier === 'extended')
+      .map((spec) => spec.id),
+  );
+  return due.filter((d) => !extended.has(d.id));
 }
 
 /** "Alpha", "Alpha, Beta" — and a count once a list would be a wall. */
@@ -77,8 +111,50 @@ export async function sweepTemporary(
   { now = Date.now() }: { now?: number } = {},
 ): Promise<SweepResult> {
   const days = temporaryDays(store);
-  const due = dueToGo(store.load(), { days, now });
+  const due = dueNow(store, days, now);
   if (due.length === 0) return { swept: [], held: [], days };
+
+  /*
+   * What each one was when it was found due, byte for byte.
+   *
+   * `due` is an answer from before the filing commit and the status check,
+   * and both of those wait on git — long enough for the editor to promote the
+   * resume to extended, or for somebody to save an edit to it. Deleting from
+   * the stale answer took the one they had just decided to keep, and an edit
+   * made after the check is in no commit at all. So the deletion asks again,
+   * in the synchronous callback where nothing can land between the question
+   * and the act: still due, and still the file that was found due. Anything
+   * else is held, like one the history does not have.
+   */
+  const read = (id: string) =>
+    Store.resumeFiles(id).map((rel) => {
+      try {
+        return fs.readFileSync(path.join(store.root, rel), 'utf8');
+      } catch {
+        return null;
+      }
+    });
+  const found = new Map(due.map((d) => [d.id, JSON.stringify(read(d.id))]));
+  const changed: DueToGo[] = [];
+
+  /*
+   * "Still due" is asked once, at the first deletion, and the answer kept for
+   * the rest.
+   *
+   * It was asked once per resume, and asking is a whole `store.load()` — every
+   * resume, the tracker, the letters, the drafts — so sweeping ninety resumes
+   * out of a save with a thousand applications loaded that save ninety times
+   * and took three times as long as the sweep it replaced. The re-check is
+   * there for what can land while git is busy, and nothing can land between
+   * one deletion and the next: `removeWhatIsFiled` calls this for every resume
+   * in one synchronous loop, so the answer taken at the first is still the
+   * answer at the last. Nor does a deletion change it for the others — whether
+   * a resume is due reads that resume, the tracker and the workspaces, never
+   * another resume. The per-file comparison stays per resume, because it is a
+   * read of two small files and it is the half that catches an edit.
+   */
+  let stillDue: Set<string> | undefined;
+  let migrated = false;
 
   const { removed, held } = await removeWhatIsFiled(
     repo,
@@ -90,9 +166,28 @@ export async function sweepTemporary(
       // could not be filed is still there and does not belong in the message.
       removing: (swept) => `Sweep ${naming(swept)} — temporary, and done with`,
     },
-    (d) => store.deleteResume(d.id),
+    (d) => {
+      stillDue ??= new Set(dueNow(store, days, now).map((x) => x.id));
+      if (stillDue.has(d.id) && JSON.stringify(read(d.id)) === found.get(d.id)) {
+        /*
+         * And the fold `deleteResume` does before every deletion, done here
+         * once, before the first. It reads every resume in the save to find
+         * out that there is nothing to fold, which is the answer every time
+         * after the first. A fold that did change something is the one thing
+         * that could move the answer above, so that answer is asked again.
+         */
+        if (!migrated) {
+          migrated = true;
+          const folded = store.migrateResumes();
+          if (folded.flattened.length + folded.tiered.length + folded.lifted.length > 0) stillDue = undefined;
+        }
+        // The label is only for the message if the file will not go, and
+        // `due` has it already; see `deleteResume`.
+        store.deleteResume(d.id, { migrated: true, label: d.label });
+      } else changed.push(d);
+    },
   );
-  return { swept: removed, held, days };
+  return { swept: removed.filter((d) => !changed.includes(d)), held: [...held, ...changed], days };
 }
 
 /** How long an application may sit at Applying in this save. */

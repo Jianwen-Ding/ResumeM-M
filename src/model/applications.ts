@@ -5,9 +5,15 @@ import YAML from 'yaml';
 import type { Store } from './store.js';
 import type { Application, ApplicationStatus, ResolvedResume } from './types.js';
 import { compileLetter, compileResume, type FitReport, type LetterCompileResult } from '../render/compile.js';
-import { syncCurrent } from './current.js';
+import { letterText } from '../render/letter.js';
+import { clipToBytes, fileNameKey, MAX_NAME_BYTES, syncCurrent } from './current.js';
+import { normalizeApplications } from './normalize.js';
 import { resolveResume, unsendableReason } from './resolve.js';
-import { cleanRole, employerKey, hostOf, jobNumberIn } from '../jobs/names.js';
+import { cleanRole, differentPlaces, differentRequisitions, employerKey, globalJobId, globalJobKind, hostOf, isJobBoardHost, jobNumberIn, requisitionInUrl, trailingJobId, withoutTitleNoise } from '../jobs/names.js';
+import { companyFromUrl, looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
+// A cycle (answers.ts reads `employerName` and `localDay` from here), safe
+// because neither side calls the other while its module is loading.
+import { sameQuestion } from '../jobs/answers.js';
 
 /**
  * One hyphenated part of a filename.
@@ -19,8 +25,12 @@ import { cleanRole, employerKey, hostOf, jobNumberIn } from '../jobs/names.js';
  * hyphen hanging off either end.
  */
 function namePart(s: string | undefined): string {
+  // With the marks that complete a letter: Devanagari's and Thai's vowel
+  // signs, and an accent typed as its own character, which split "प्रिया"
+  // into "प-र-य" and "Nguyễn" into "Nguye-n".
   return String(s ?? '')
-    .replace(/[^\p{L}\p{N}_\s-]/gu, ' ')
+    .normalize('NFC')
+    .replace(/[^\p{L}\p{M}\p{N}_\s-]/gu, ' ')
     .replace(/[\s-]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }
@@ -50,8 +60,22 @@ export function bundleFileName(
   kind: DocumentKind | undefined,
   { extension = '.pdf', disambiguator }: { extension?: string; disambiguator?: string } = {},
 ): string {
-  const parts = [namePart(name), namePart(role), namePart(kind), namePart(disambiguator)];
-  return parts.filter(Boolean).join('-') + extension;
+  /*
+   * No longer than a filesystem allows, and cut from the role.
+   *
+   * The role is the only part of unbounded length — it is whatever the
+   * posting called itself, req number, locations and all — and a name past
+   * 255 bytes is not a file anybody can write. The end of the name is what
+   * a portal and a person read it by, so the document type, the
+   * disambiguator and the extension are kept whole and the role gives way;
+   * the person's own name only if it alone is somehow too long.
+   */
+  const tail = [namePart(kind), namePart(disambiguator)].filter(Boolean).join('-');
+  const room = MAX_NAME_BYTES - Buffer.byteLength(extension, 'utf8') - (tail ? Buffer.byteLength(tail, 'utf8') + 1 : 0);
+  const person = clipToBytes(namePart(name), Math.max(0, room));
+  const left = room - Buffer.byteLength(person, 'utf8') - (person ? 1 : 0);
+  const title = clipToBytes(namePart(role), Math.max(0, left));
+  return [person, title, tail].filter(Boolean).join('-') + extension;
 }
 
 /** The three shapes the setting offers, and what each one puts in a name. */
@@ -95,7 +119,8 @@ export type CustomFileNames = Partial<Record<DocumentKind, string>>;
  * can see.
  */
 function typedName(said: string, extension: string): string | undefined {
-  const stem = namePart(said);
+  // And held to the same length as every other name. See `bundleFileName`.
+  const stem = clipToBytes(namePart(said), MAX_NAME_BYTES - Buffer.byteLength(extension, 'utf8'));
   return stem ? stem + extension : undefined;
 }
 
@@ -133,7 +158,9 @@ export function bundleFileNames(
     const settled = short.map((n, i) => byHand[i] ?? n);
     for (let i = 0; i < settled.length; i++) {
       if (!byHand[i]) continue;
-      const clash = settled.findIndex((n, j) => j !== i && n === settled[i]);
+      // As the filesystem compares them, which on a Mac or a PC ignores case:
+      // a resume typed as `jane-doe-cover-letter` is the letter's file there.
+      const clash = settled.findIndex((n, j) => j !== i && fileNameKey(n) === fileNameKey(settled[i]!));
       if (clash >= 0) {
         throw new Error(
           `"${documents[clash]!.kind}" is already called ${settled[i]}. Two files in one folder cannot ` +
@@ -175,8 +202,21 @@ export function fingerprint(...parts: string[]): string {
   return createHash('sha1').update(parts.join('\u0000')).digest('hex').slice(0, 8);
 }
 
+/**
+ * The calendar day it is where the person is, as YYYY-MM-DD.
+ *
+ * Not `toISOString().slice(0, 10)`, which is the day in Greenwich: anything
+ * started after eight in the evening on the US east coast was filed under
+ * tomorrow — `drafts/2026-10-10-moog-…` made on the evening of the 9th, and
+ * its commit dated the 9th beside it. An id is read as the day you did it.
+ */
+export function localDay(at = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+}
+
 export function applicationId(company: string, role: string, at = new Date()): string {
-  const date = at.toISOString().slice(0, 10);
+  const date = localDay(at);
   const readable = `${date}-${slug(company)}-${slug(role)}`.replace(/-+$/, '');
 
   return faithful(company, role) ? readable : `${readable}-${fingerprint(company, role)}`.replace(/^-+/, '');
@@ -332,7 +372,26 @@ function employerPart(company: string): string {
 }
 
 function rolePart(role: string, company: string): string {
-  return cleanRole(role, company) ?? role;
+  return sameWorkAnyWay(cleanRole(role, company) ?? role);
+}
+
+/*
+ * And with what one job's two pages write differently about it.
+ *
+ * LinkedIn adds how the job is worked to the title — "Software Engineer,
+ * Backend (Remote)", "… - Remote" — and the employer's own form says
+ * "Software Engineer, Backend"; one page writes "2027 Summer" and the other
+ * "Summer 2027". Each pair was two rows for one job: the workspace opened on
+ * LinkedIn sat at `applying` while the send from the form filed a second row
+ * at `applied`. Only for the key two rows are compared by — the role a row
+ * shows is the one it was given. Two postings with different job numbers are
+ * still two jobs: see the address veto in `sameJobAs`.
+ */
+const WORK_MODE_SUFFIX = /(?:\s*\(\s*(?:remote|hybrid|on-?site)\s*\)|\s+[-–—|]\s+(?:remote|hybrid|on-?site))$/i;
+const YEAR_THEN_SEASON = /\b((?:19|20)\d\d)\s+(summer|fall|autumn|winter|spring)\b/gi;
+
+function sameWorkAnyWay(role: string): string {
+  return role.replace(WORK_MODE_SUFFIX, '').replace(YEAR_THEN_SEASON, '$2 $1').trim() || role;
 }
 
 export function identity(company: string, role: string): string {
@@ -342,6 +401,359 @@ export function identity(company: string, role: string): string {
   if (faithful(employer, job)) return key;
   const tidy = (s: string) => s.normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
   return `${key}\u0000${fingerprint(tidy(employer), tidy(job))}`;
+}
+
+/**
+ * Whether two (employer, role) pairs are one job: one `identity`, and not two
+ * requisitions under one title. `identity` reads the role with its trailing
+ * requisition number cut (`cleanRole`), so "Software Engineer Intern
+ * (12345678)" and "(87654321)" at one employer have one key — and the second
+ * was found as the first's row, and read as already sent when the first was.
+ * A number on one side only still matches: that is what the cut is for.
+ * Compare two roles with this, not `identity(…) === identity(…)`.
+ */
+/*
+ * Nor two places under one title: "Software Engineer Intern in Austin, TX |
+ * Coinbase" and "… in Seattle, WA | Coinbase" read as one key, since the place
+ * comes off with the employer (`cleanRole`), and are two jobs. See
+ * `differentPlaces`.
+ */
+export function sameIdentity(company: string, role: string, otherCompany: string, otherRole: string): boolean {
+  return (
+    identity(company, role) === identity(otherCompany, otherRole) &&
+    !differentRequisitions(role, otherRole, company, otherCompany) &&
+    !differentPlaces(role, otherRole, company, otherCompany)
+  );
+}
+
+/*
+ * Whether two addresses are one posting, for matching a row by a name it was
+ * corrected from. When both carry a job number, that number on the same site
+ * (one job is often reached by several addresses there); otherwise the same
+ * address exactly, less any `#fragment` — the case this exists for is a send
+ * from the card still open on the page the row was staged from. A missing
+ * address on either side is not a match: "same host" alone would have let
+ * every Lever or Greenhouse posting with the same misread names in.
+ */
+/*
+ * "The same address" as the same posting, not the same string.
+ *
+ * Compared as written, one posting reached two ordinary ways was two
+ * addresses: the row's link and the send's differed by a trailing slash, a
+ * `www.`, the case of the host, a tracking parameter a board or a mailing
+ * list puts on every link (`utm_*`, Greenhouse's `gh_src`, `source`, `ref`),
+ * or by Greenhouse's two hosts — `boards.greenhouse.io` and
+ * `job-boards.greenhouse.io` serve the same board and the same job number.
+ * Each of those left a corrected row behind and made a second one. What is
+ * dropped is only what never names a different posting; every other
+ * parameter, and the path, still has to agree.
+ */
+/*
+ * But `ref` and `source` are not always tracking. An employer's own site can
+ * carry the job in them — `/careers/apply?ref=SE-2041`, `/job?source=4821` —
+ * and with both dropped, SE-2041 and SE-3377 were one address, so a send for
+ * the second posting was filed into the first's row. They are dropped only
+ * when their value has no digit in it: `ref=linkedin`, `source=newsletter`
+ * name where the link came from, and a job's id has a number in it.
+ */
+const TRACKING_PARAM = /^(?:utm_.*|gh_src)$/i;
+const TRACKING_UNLESS_NUMBERED = /^(?:source|ref)$/i;
+
+function postingHost(host: string): string {
+  return host.toLowerCase().replace(/^www\./, '').replace(/^job-boards\.((?:eu\.)?greenhouse\.io)$/, 'boards.$1');
+}
+
+function postingAddress(u: string): string {
+  try {
+    const parsed = new URL(u.trim());
+    parsed.hash = '';
+    parsed.hostname = postingHost(parsed.hostname);
+    for (const key of [...parsed.searchParams.keys()]) {
+      const values = parsed.searchParams.getAll(key);
+      if (TRACKING_PARAM.test(key) || (TRACKING_UNLESS_NUMBERED.test(key) && !values.some((v) => /\d/.test(v)))) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    if (parsed.pathname.length > 1) parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    return parsed.href;
+  } catch {
+    return u.trim();
+  }
+}
+
+export function sameAddress(url: string | undefined, other: string | undefined): boolean {
+  if (!url || !other) return false;
+  const number = jobNumberIn(url);
+  const otherNumber = jobNumberIn(other);
+  if (number && otherNumber) {
+    const host = postingHost(hostOf(url));
+    return number === otherNumber && host === postingHost(hostOf(other)) && host !== '' && sameTenant(url, other);
+  }
+  return postingAddress(url) === postingAddress(other);
+}
+
+/*
+ * One site, but not one employer's. Greenhouse and Lever serve every
+ * employer's board from one host and put the employer in the path —
+ * `boards.greenhouse.io/acme/jobs/4012345` — so "the same number on the same
+ * host" matched Globex's posting to Acme's row, with the number the same
+ * only by accident of the address's shape. Where the system names an
+ * employer in the address (`companyFromUrl`), the two have to name the same.
+ */
+/*
+ * But Greenhouse, SmartRecruiters and Lever number their jobs across every
+ * board, not per board: job 4012345 on Greenhouse is one job wherever it is
+ * linked from. An employer's board goes by more than one name — `acme` and
+ * `acmeinc`, `Acme` and `AcmeGroup` — and the same job under the two was two
+ * applications. On those hosts, with the same long id, a board named for the
+ * other with something added is the same employer's. Two unrelated names,
+ * `acme` and `globex`, are still two, as above.
+ */
+const GLOBAL_JOB_IDS = /(?:^|\.)(?:greenhouse\.io|smartrecruiters\.com|lever\.co)$/;
+
+/*
+ * Lever's job is a UUID, and only the whole UUID says which. "Seven digits
+ * or more" was the test for every host, which a UUID passes or fails by the
+ * luck of how many of its hex characters are digits, and says nothing about
+ * whether two are the one job.
+ */
+const LEVER_HOST = /(?:^|\.)lever\.co$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/*
+ * On Greenhouse, what is added to the shorter name has to be what a company
+ * adds to its own: `acme` and `acmeinc`, `acmecorp`, `acmegroup`, `acmehq`,
+ * `acmeglobal`, `acmecareers`, `acmeco`. Any addition was enough, so `acme`
+ * and `acmesolar` — two employers, one name the start of the other's — were
+ * one employer whenever their two job ids matched.
+ */
+const GREENHOUSE_HOST = /(?:^|\.)greenhouse\.io$/;
+const CORPORATE_SUFFIX = /^(?:inc|corp|group|hq|global|careers|co)$/;
+
+function sameTenant(url: string, other: string): boolean {
+  const one = companyFromUrl(url)?.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const two = companyFromUrl(other)?.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!one || !two || one === two) return true;
+  const number = jobNumberIn(url);
+  const [shorter, longer] = one.length < two.length ? [one, two] : [two, one];
+  const host = hostOf(url);
+  const otherHost = hostOf(other);
+  if (!GLOBAL_JOB_IDS.test(host) || !GLOBAL_JOB_IDS.test(otherHost)) return false;
+  if (!number || number !== jobNumberIn(other) || shorter.length < 3 || !longer.startsWith(shorter)) return false;
+  if (LEVER_HOST.test(host) || LEVER_HOST.test(otherHost)) return UUID.test(number);
+  if ((number.match(/\d/g) ?? []).length < 7) return false;
+  if (GREENHOUSE_HOST.test(host) || GREENHOUSE_HOST.test(otherHost)) {
+    return CORPORATE_SUFFIX.test(longer.slice(shorter.length));
+  }
+  return true;
+}
+
+/*
+ * Two different jobs, whatever their names say: the address veto.
+ *
+ * The names were the only thing compared, so "Software Engineer Intern" at
+ * Red Hat was one job however many Red Hat posted. Its Raleigh requisition,
+ * R-059038, was applied for; the workspace for its Boston one, R-111111, then
+ * opened as `submitted` holding Raleigh's letter, completing it replaced the
+ * letter, resume and files that had gone to Raleigh, and the send from
+ * Boston's form was swallowed as already made. A requisition on both titles
+ * told them apart (`differentRequisitions`); the address, which said so on
+ * every page, was never asked.
+ *
+ * Two are different when both addresses are on one site, for one employer
+ * there (`sameTenant`), and name two job numbers — or when each side names a
+ * requisition, in its title or its address, and none of them is the other's.
+ * A requisition both share is never vetoed: Workday names one job at more than
+ * one address, with the title's words in it, and the number is what is the
+ * same.
+ */
+function requisitionsOf(role: string, company: string, url?: string): string[] {
+  return [trailingJobId(role, company), requisitionInUrl(url)].filter((r): r is string => Boolean(r));
+}
+
+function shareOne(mine: string[], theirs: string[]): boolean {
+  return mine.some((r) => theirs.includes(r));
+}
+
+/*
+ * Not LinkedIn's `currentJobId`, though. It is the card selected on a search
+ * page, not the page's own job: the extension sends the search address
+ * beside whatever posting is open, and in one person's history 43 of 232
+ * such ids came with more than one title. Two of them were read as two jobs,
+ * so the row staged from a search page and the send from the next were never
+ * one, and a sent row was nothing to its own posting. They tell nothing
+ * apart; the names decide, weakly, and a sent row is asked about
+ * (`maybeSent`).
+ *
+ * Nor one number written two ways on one site: Adobe's posting is
+ * `/job/R171666/…` and `/job/ADOBUSR171666EXTERNALENUS/…`, Tesla's form
+ * `/apply/280604` and its posting `/internship-…-2027-280604`. Two numbers
+ * that share a run of five digits or more are one job's, spelt twice, and
+ * were vetoed as two.
+ */
+const CURRENT_JOB_ID = /[?&]currentjobid=/i;
+
+function differentPostings(url: string | undefined, other: string | undefined): boolean {
+  if (!url || !other) return false;
+  if (CURRENT_JOB_ID.test(url) || CURRENT_JOB_ID.test(other)) return false;
+  const number = jobNumberIn(url);
+  const otherNumber = jobNumberIn(other);
+  if (!number || !otherNumber || number === otherNumber) return false;
+  const runs = (n: string): string[] => n.match(/\d{5,}/g) ?? [];
+  if (runs(number).some((d) => runs(otherNumber).includes(d))) return false;
+  const host = postingHost(hostOf(url));
+  return host !== '' && host === postingHost(hostOf(other)) && sameTenant(url, other);
+}
+
+/*
+ * One job by its number, where one address names it in the path and the
+ * other as `pid`: Eightfold's posting `/careers/job/563602813674232` and the
+ * page after its form, `/careers/apply/success?pid=563602813674232`
+ * (Boston Scientific, Qualcomm, Applied Materials, Dolby). `pid` is left out
+ * of the job parameters (`jobNumberIn`) because it names anything; on one
+ * host and tenant, equal to the other's job number (or the other's `pid`:
+ * the form `/careers/apply?pid=N` and its `/success?pid=N`), it names this.
+ */
+function sameNumberByPid(url: string | undefined, other: string | undefined): boolean {
+  if (!url || !other) return false;
+  const pid = (u: string) => {
+    try {
+      return new URL(u).searchParams.get('pid')?.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const number = jobNumberIn(url);
+  const otherNumber = jobNumberIn(other);
+  const matched =
+    (number !== undefined && number === pid(other)) ||
+    (otherNumber !== undefined && otherNumber === pid(url)) ||
+    (pid(url) !== undefined && pid(url) === pid(other));
+  const host = postingHost(hostOf(url));
+  return matched && host !== '' && host === postingHost(hostOf(other)) && sameTenant(url, other);
+}
+
+/*
+ * One job by an id its ATS gives it everywhere (`globalJobId`): Greenhouse's
+ * job on the board and on the employer's careers page as `gh_jid`, Lever's
+ * and Ashby's UUID, SmartRecruiters' posting number. Compared on one site
+ * only, as `jobNumberIn`'s numbers are, the employer's page and the board
+ * were two sites, so a job sent from one was only a name-alike on the other:
+ * never "already sent", and staged as a second row.
+ */
+/*
+ * Between two of the ATS's own boards, the employer each names still has to
+ * be one (`sameTenant`): that is the rule two boards with one id have always
+ * had. The employer's own careers page names no board, and is not asked.
+ */
+const ATS_BOARD_HOST = /(?:^|\.)(?:greenhouse\.io|lever\.co|ashbyhq\.com|smartrecruiters\.com)$/;
+
+function sameGlobalJob(url: string | undefined, other: string | undefined): boolean {
+  const id = globalJobId(url);
+  if (!id || id !== globalJobId(other)) return false;
+  return !(ATS_BOARD_HOST.test(hostOf(url)) && ATS_BOARD_HOST.test(hostOf(other))) || sameTenant(url!, other!);
+}
+
+/* And two such ids from one ATS that are not the same: two jobs, wherever they are linked from. */
+function differentGlobalJobs(url: string | undefined, other: string | undefined): boolean {
+  const id = globalJobId(url);
+  const otherId = globalJobId(other);
+  return Boolean(id && otherId) && globalJobKind(id!) === globalJobKind(otherId!) && id !== otherId;
+}
+
+/* The same posting by its address or by its ATS's own id. */
+function samePage(url: string | undefined, other: string | undefined): boolean {
+  return sameAddress(url, other) || sameGlobalJob(url, other);
+}
+
+/*
+ * The other addresses a row has been found at (`aliases` that carry one): a
+ * LinkedIn posting staged into the row that the employer's form then filled,
+ * or the employer's address recorded by hand for a row sent from LinkedIn.
+ */
+function aliasAddresses(row: Matchable): string[] {
+  return (row.aliases ?? []).map((was) => was?.url).filter((u): u is string => typeof u === 'string' && u.trim() !== '');
+}
+
+/*
+ * One employer's own site, where neither address names a job number: the
+ * posting at `careers.helios.com/roles/platform-engineer` and its form at
+ * `/apply/platform-engineer`. Nothing in either address says which job, so
+ * nothing in them says another one, and the site is the employer's — the
+ * same title on it is that employer's same job, as surely as the names on
+ * one page. Not on a job board, whose one site is everybody's.
+ */
+function sameEmployersSite(url: string | undefined, other: string | undefined): boolean {
+  if (!url || !other || jobNumberIn(url) || jobNumberIn(other)) return false;
+  const host = postingHost(hostOf(url));
+  return host !== '' && host === postingHost(hostOf(other)) && !isJobBoardHost(host) && sameTenant(url, other);
+}
+
+/**
+ * How sure a match by name is.
+ *
+ * `strong`: something besides the names says it is this job — the same
+ * address (`sameAddress`), the same job number on the same site, a
+ * requisition both name, the employer's own site with no number on either
+ * address (`sameEmployersSite`) — or the job is asked about with no address, so the
+ * names are all there is to go on and they are what was meant: a row typed
+ * by hand ("Record an application" for a job the tracker has, to add a
+ * note), `rmm apply` filing one again.
+ *
+ * `weak`: a posting with an address, and a row only the names tie to it. A
+ * row with no address, or two addresses on two sites with no number in
+ * common: LinkedIn's page and the employer's form for one job, ordinarily —
+ * and just as ordinarily a second job with the same title at the same
+ * employer, which the posting's address would have told apart had the row
+ * had one. A weak match may suggest (which space to open, which letter to
+ * offer), and is never used to say a job has been sent, to refuse a stage, to
+ * swallow a send, or to file into a row that has gone out. See `forWriting`.
+ * Nor at all against a row untouched for half a year (`WEAK_MATCH_DAYS`).
+ *
+ * But against a sent row it asks: "you may have applied to this already"
+ * (`maybeSent`), and an automatic stage is held until somebody says it is
+ * another job — then filed as a new row, never into the sent one.
+ */
+export type MatchStrength = 'strong' | 'weak';
+
+/** A row a job was found as, and how surely. */
+export interface JobMatch<T> {
+  row: T;
+  strength: MatchStrength;
+}
+
+/*
+ * How long a weak match is worth anything. A row named the same with nothing
+ * else in common, untouched for half a year, is last year's application or
+ * another job; it is not the one being worked on now.
+ */
+const WEAK_MATCH_DAYS = 180;
+
+type Matchable = {
+  company: string;
+  role: string;
+  url?: string;
+  aliases?: { company: string; role: string; url?: string }[];
+  appliedAt?: string;
+  updatedAt?: string;
+  createdAt?: string;
+  history?: { at?: string }[];
+};
+
+/** The last time anything happened to a row or a space, as milliseconds; 0 when nothing says. */
+function lastActivity(row: Matchable): number {
+  const stamps = [row.appliedAt, row.updatedAt, row.createdAt, ...(row.history ?? []).map((h) => h?.at)];
+  let last = 0;
+  for (const at of stamps) {
+    const t = at ? Date.parse(at) : NaN;
+    if (Number.isFinite(t) && t > last) last = t;
+  }
+  return last;
+}
+
+function tooOldForAWeakMatch(row: Matchable, now = Date.now()): boolean {
+  const last = lastActivity(row);
+  return last > 0 && now - last > WEAK_MATCH_DAYS * 24 * 60 * 60 * 1000;
 }
 
 /*
@@ -366,20 +778,119 @@ export function identity(company: string, role: string): string {
  * second was found as the first's row, told it had already been sent, and
  * would have been filed into it. EA's two pages are both on jobs.ea.com.
  */
-function sameJobAs(company: string, role: string, url?: string): (row: { company: string; role: string; url?: string }) => boolean {
-  const key = identity(company, role);
+/*
+ * And under a name the row had before somebody corrected it.
+ *
+ * The tracker's Edit renames a row — "Summer 2027" to the employer it really
+ * is — and the page it came from goes on saying "Summer 2027": the card still
+ * open on it, and every later visit. Matched by its names alone, the send
+ * from that card found no row and filed a second one at `applied` beside the
+ * corrected row, which sat at `applying` until it was closed as left alone.
+ * Measured through the routes on a posting whose address carries no job
+ * number, where nothing else could tie the two together. The row keeps the
+ * names it was corrected from (`aliases`, written by `PATCH
+ * /applications/:id`), and they are the row's names too.
+ *
+ * But only at the row's own address. The names that get corrected are the
+ * extractor's misreads — a season, a board's name — and it misreads another
+ * employer's posting the same way: Globex's "Summer 2027" / "Software
+ * Engineer Intern" matched Acme's corrected row by its old names, so Globex's
+ * send was filed as Acme's, or its files replaced the ones Acme was sent. A
+ * name somebody has already said is wrong is no evidence on its own; the
+ * address is what says it is the same page. See `sameAddress`.
+ */
+function sameJobAs(company: string, role: string, url?: string): (row: Matchable) => MatchStrength | undefined {
   const number = jobNumberIn(url);
-  const site = hostOf(url);
+  /*
+   * The host as `postingHost` reads it, so Greenhouse's `job-boards.` and
+   * `boards.` — one board under two hosts, which `sameAddress` already
+   * treated as one — are one site here too. Compared as written, the same
+   * job sent from the other host was a second row.
+   */
+  const site = postingHost(hostOf(url));
   const job = slug(rolePart(role, company));
   const named = Boolean(job) && !/^unknown role\b/i.test(role.trim());
-  return (row) =>
-    identity(row.company, row.role) === key ||
-    (named &&
+  const mine = requisitionsOf(role, company, url);
+  const byName = sameNamesAs(company, role);
+  const aliasNamed = (was: { company: string; role: string }) =>
+    typeof was?.company === 'string' && typeof was?.role === 'string' && byName(was);
+  return (row) => {
+    /*
+     * At an address the row was also found at (`aliasAddresses`): this is
+     * the row's posting, as surely as at its own address.
+     */
+    if (url && (row.aliases ?? []).some((was) => was?.url && samePage(url, was.url) && (aliasNamed(was) || byName(row)))) {
+      return 'strong';
+    }
+    /*
+     * And by its ATS's own id, across hosts (`sameGlobalJob`), under the same
+     * role: the employer's careers page with `gh_jid` and the Greenhouse
+     * board are one posting.
+     */
+    if (named && sameGlobalJob(url, row.url) && slug(rolePart(row.role, row.company)) === job) return 'strong';
+    const elsewhere = aliasAddresses(row);
+    const theirs = [
+      ...requisitionsOf(row.role, row.company, row.url),
+      ...elsewhere.map((u) => requisitionInUrl(u)).filter((r): r is string => Boolean(r)),
+    ];
+    const shared = shareOne(mine, theirs);
+    const otherPosting = [row.url, ...elsewhere].some((u) => differentPostings(url, u) || differentGlobalJobs(url, u));
+    if (!shared && ((mine.length > 0 && theirs.length > 0) || otherPosting)) return undefined;
+    const byNumber =
+      named &&
       Boolean(number) &&
       jobNumberIn(row.url) === number &&
-      hostOf(row.url) === site &&
-      slug(rolePart(row.role, row.company)) === job);
+      postingHost(hostOf(row.url)) === site &&
+      sameTenant(url!, row.url!) &&
+      slug(rolePart(row.role, row.company)) === job;
+    if (byNumber) return 'strong';
+    if ((row.aliases ?? []).some(aliasNamed) && samePage(url, row.url)) return 'strong';
+    if (!byName(row)) return undefined;
+    if (shared || samePage(url, row.url) || sameEmployersSite(url, row.url) || sameNumberByPid(url, row.url) || !url) return 'strong';
+    return tooOldForAWeakMatch(row) ? undefined : 'weak';
+  };
 }
+
+/*
+ * The names alone: one employer and one role (`identity`), with no
+ * requisition or place in the titles saying otherwise. What `sameJobAs`
+ * starts from, before any address is asked.
+ */
+function sameNamesAs(company: string, role: string): (other: { company: string; role: string }) => boolean {
+  const key = identity(company, role);
+  return (other) =>
+    identity(other.company, other.role) === key &&
+    !differentRequisitions(role, other.role, company, other.company) &&
+    !differentPlaces(role, other.role, company, other.company);
+}
+
+/**
+ * A row's `aliases` with one more address it is the job at, unless it has
+ * that page already — as its own address (`row.url`, the one it is about to
+ * have) or an alias's. See `aliasAddresses`.
+ */
+export function aliasesWith(
+  row: Pick<Application, 'url' | 'aliases'>,
+  was: { company: string; role: string; url?: string },
+): Application['aliases'] {
+  const url = was.url?.trim();
+  if (!url || samePage(url, row.url) || aliasAddresses(row as Matchable).some((u) => samePage(url, u))) return row.aliases;
+  return [...(row.aliases ?? []), { company: was.company, role: was.role, url }];
+}
+
+/** Every row a job matches, with how surely. */
+function matchesOf<T extends Matchable>(rows: T[], company: string, role: string, url?: string): JobMatch<T>[] {
+  const strength = sameJobAs(company, role, url);
+  const out: JobMatch<T>[] = [];
+  for (const row of rows) {
+    const s = strength(row);
+    if (s) out.push({ row, strength: s });
+  }
+  return out;
+}
+
+const strongFirst = (a: { strength: MatchStrength }, b: { strength: MatchStrength }) =>
+  (a.strength === 'strong' ? 0 : 1) - (b.strength === 'strong' ? 0 : 1);
 
 /**
  * What each kind of lost reference is called in a sentence a person reads,
@@ -457,17 +968,62 @@ export function describeLost(lost: { kind: string }[]): string | undefined {
  * built were nowhere a file picker would find them.
  */
 export function findApplication(apps: Application[], company: string, role: string, url?: string): Application | undefined {
-  const same = apps.filter(sameJobAs(company, role, url));
+  return findApplicationMatch(apps, company, role, url)?.row;
+}
+
+/**
+ * `findApplication`, saying how sure it is (`MatchStrength`).
+ *
+ * A row something besides the names ties to this job is preferred to one only
+ * the names do, before the rule about which is being worked on: the row whose
+ * address is this posting's is this posting's even when another with the
+ * same title is still at `applying`.
+ */
+export function findApplicationMatch(
+  apps: Application[],
+  company: string,
+  role: string,
+  url?: string,
+): JobMatch<Application> | undefined {
+  const same = matchesOf(apps, company, role, url);
   if (same.length === 0) return undefined;
 
-  const byNewest = (a: Application, b: Application) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? '');
   // Closed only for being left alone is still this application; see
   // `closedAsStale`.
-  const unsent = same.filter((a) => a.status === 'interested' || a.status === 'applying' || closedAsStale(a));
-  if (unsent.length > 0) return unsent.sort(byNewest)[0];
-  // Undefined when every one of them is finished: this is a new attempt, and
-  // it needs a row and a folder of its own. See `freshApplicationId`.
-  return same.filter((a) => a.status !== 'closed').sort(byNewest)[0];
+  const unsent = (a: Application) => a.status === 'interested' || a.status === 'applying' || closedAsStale(a);
+  // Strong over weak; then, as always, one being worked on over one sent, and
+  // the newest. Undefined when every one of them is finished: this is a new
+  // attempt, and it needs a row and a folder of its own. See
+  // `freshApplicationId`.
+  return same
+    .filter(({ row }) => unsent(row) || row.status !== 'closed')
+    .sort(
+      (a, b) =>
+        strongFirst(a, b) ||
+        Number(unsent(b.row)) - Number(unsent(a.row)) ||
+        (b.row.appliedAt ?? '').localeCompare(a.row.appliedAt ?? ''),
+    )[0];
+}
+
+/**
+ * The row a job's files, letter, send or status may be written into: the
+ * one `findApplicationMatch` found, unless only its name matched and it has
+ * already gone out. Then it is another job's, as far as anything that writes
+ * is concerned — filing into it replaced what was sent to that job, a send
+ * into it was swallowed as already made, a stage was refused — and the caller
+ * files a new row. See `MatchStrength`.
+ */
+export function forWriting(match: JobMatch<Application> | undefined): Application | undefined {
+  if (!match) return undefined;
+  if (match.strength === 'weak' && (sentAlready(match.row) || (match.row.status === 'closed' && !closedAsStale(match.row)))) {
+    return undefined;
+  }
+  return match.row;
+}
+
+/** `findApplication` for anything that writes: see `forWriting`. */
+export function applicationToWrite(apps: Application[], company: string, role: string, url?: string): Application | undefined {
+  return forWriting(findApplicationMatch(apps, company, role, url));
 }
 
 /**
@@ -482,13 +1038,22 @@ export function findApplication(apps: Application[], company: string, role: stri
  *
  * Counted rather than stamped with a time, because the id is a folder name
  * somebody reads.
+ *
+ * And not the id of a folder already on disk, when the caller says where the
+ * folders are (`outDir`). Removing a row from the tracker leaves its folder
+ * of sent files where it is — the confirm says "the files on disk stay" — so
+ * the tracker alone no longer knows the id is spoken for. Measured: a row
+ * removed and the same job filed again later that day asked for the removed
+ * row's id, and the build's hand-over replaced the kept resume and deleted
+ * the kept cover letter beside it.
  */
-export function freshApplicationId(apps: Application[], company: string, role: string): string {
+export function freshApplicationId(apps: Application[], company: string, role: string, outDir?: string): string {
   const wanted = applicationId(company, role);
-  const taken = new Set(apps.map((a) => a.id));
-  if (!taken.has(wanted)) return wanted;
+  const ids = new Set(apps.map((a) => a.id));
+  const taken = (id: string) => ids.has(id) || (outDir !== undefined && fs.existsSync(path.join(outDir, 'applications', id)));
+  if (!taken(wanted)) return wanted;
   for (let n = 2; ; n++) {
-    if (!taken.has(`${wanted}-${n}`)) return `${wanted}-${n}`;
+    if (!taken(`${wanted}-${n}`)) return `${wanted}-${n}`;
   }
 }
 
@@ -515,10 +1080,54 @@ export function freshApplicationId(apps: Application[], company: string, role: s
  * September — and it closed. See what you sent", dated the day they started
  * and pointing at nothing sent.
  */
+/*
+ * And only a row something besides the name ties to this job (`MatchStrength`).
+ * "You applied to this on 20 September" about Red Hat's Boston requisition,
+ * because Raleigh's had the same title, is the claim this exists to make and
+ * was wrong: the card offered the other job's files, and somebody believing it
+ * does not apply.
+ */
 export function alreadySent(apps: Application[], company: string, role: string, url?: string): Application | undefined {
-  return apps
-    .filter(sameJobAs(company, role, url))
+  return matchesOf(apps, company, role, url)
+    .filter((m) => m.strength === 'strong')
+    .map((m) => m.row)
     .filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
+    .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
+}
+
+/**
+ * A sent row this job may be: "You may have applied to this already".
+ *
+ * `alreadySent` answers only for a row something besides the names ties to
+ * the job, and that left the ordinary case with no answer at all. A job sent
+ * from the employer's form and looked at again on LinkedIn has two addresses
+ * on two sites and nothing else in common but its names — 126 of 128 sent
+ * rows in a real tracker were nothing to the same job's LinkedIn posting, so
+ * the card never said it had gone out, and a stage there quietly filed a
+ * second row for it. Equally, the same names at another address are as often
+ * another job (Red Hat's Boston requisition after its Raleigh one), and
+ * saying "already sent" about it, or filing into it, is what round 22 put a
+ * stop to.
+ *
+ * So the names alone ask. A sent row with the same employer and role, that
+ * nothing surer answers for, is offered as a maybe: the card says when it
+ * went and where, an automatic stage is refused until somebody says it is
+ * another job (`AlreadySent` with `maybe`), and saying so files a new row —
+ * never into this one (`forWriting`). Not when the job surely has a row
+ * being worked on, which is the one it is — but a row only the names tie to
+ * it, being worked on, does not answer for the sent one: iCIMS's steps and a
+ * row closed for going quiet sit beside the sent row under its names, and
+ * found first they hid it. Nor against a row untouched for half a year
+ * (`WEAK_MATCH_DAYS`), as with every match by name. Two different job
+ * numbers or requisitions in the addresses still ask: one job is reposted
+ * under a new number often enough that the person should be the one to say.
+ */
+export function maybeSent(apps: Application[], company: string, role: string, url?: string): Application | undefined {
+  if (alreadySent(apps, company, role, url) || findApplicationMatch(apps, company, role, url)?.strength === 'strong') return undefined;
+  const byName = sameNamesAs(company, role);
+  return apps
+    .filter((a) => byName(a) && a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
+    .filter((a) => !tooOldForAWeakMatch(a))
     .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
 }
 
@@ -529,10 +1138,26 @@ export function findDraft<T extends { id: string; company: string; role: string;
   role: string,
   url?: string,
 ): T | undefined {
-  const same = drafts.filter(sameJobAs(company, role, url));
+  return findDraftMatch(drafts, company, role, url)?.row;
+}
+
+/** `findDraft`, saying how sure it is, strong over weak first. See `MatchStrength`. */
+export function findDraftMatch<T extends { id: string; company: string; role: string; status: string; updatedAt?: string; url?: string }>(
+  drafts: T[],
+  company: string,
+  role: string,
+  url?: string,
+): JobMatch<T> | undefined {
+  return pickDraft(matchesOf(drafts, company, role, url));
+}
+
+/** One being written over one sent, then strong over weak, then the newest. */
+function pickDraft<T extends { status: string; updatedAt?: string }>(same: JobMatch<T>[]): JobMatch<T> | undefined {
   if (same.length === 0) return undefined;
-  const open = same.filter((d) => d.status !== 'submitted');
-  return (open.length > 0 ? open : same).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
+  const open = same.filter((m) => m.row.status !== 'submitted');
+  return (open.length > 0 ? open : same).sort(
+    (a, b) => strongFirst(a, b) || (b.row.updatedAt ?? '').localeCompare(a.row.updatedAt ?? ''),
+  )[0];
 }
 
 /**
@@ -563,18 +1188,26 @@ export function draftForJob<T extends { id: string; company: string; role: strin
   role: string,
   url?: string,
 ): T | undefined {
-  const live = findApplication(apps, company, role, url);
+  const live = applicationToWrite(apps, company, role, url);
   const over = (d: T): boolean => {
     const row = apps.find((a) => a.id === d.id);
     if (row) return row.status === 'closed' && !closedAsStale(row);
     return d.status === 'submitted' && !live && Boolean(alreadySent(apps, company, role, url));
   };
-  return findDraft(
-    drafts.filter((d) => !over(d)),
-    company,
-    role,
-    url,
-  );
+  /*
+   * And not a space only the name ties to this job when it has gone out — it
+   * is `submitted`, or its row is past `applying`. That space is another
+   * job's sent application: opened for this one it showed that job's letter
+   * as this one's, opened as `submitted`, and its id took the new row's place
+   * over the sent one. See `forWriting`.
+   */
+  const sentElsewhere = (m: JobMatch<T>): boolean => {
+    if (m.strength === 'strong') return false;
+    if (m.row.status === 'submitted') return true;
+    const row = apps.find((a) => a.id === m.row.id);
+    return Boolean(row) && !forWriting({ row: row!, strength: 'weak' });
+  };
+  return pickDraft(matchesOf(drafts.filter((d) => !over(d)), company, role, url).filter((m) => !sentElsewhere(m)))?.row;
 }
 
 /**
@@ -587,7 +1220,7 @@ export function draftForJob<T extends { id: string; company: string; role: strin
  * Workspace while it was being written. This asks it of the live row only.
  */
 export function liveOneSent(apps: Application[], company: string, role: string, url?: string): boolean {
-  const live = findApplication(apps, company, role, url);
+  const live = applicationToWrite(apps, company, role, url);
   return Boolean(live) && live!.status !== 'interested' && live!.status !== 'applying' && !closedAsStale(live!);
 }
 
@@ -639,20 +1272,42 @@ export function sentAlready(app: Application | undefined): boolean {
  * away: without `status: 'applying'` (filing it again, `rmm apply`), or with
  * `evenIfSent`.
  */
+/*
+ * And a stage that only may be over one (`maybeSent`): the names are a sent
+ * row's, and nothing else says whether this is that job. Refused the same
+ * way, so the card can ask; asked again with `evenIfSent`, it files a new
+ * row and leaves the sent one as it was.
+ */
 export class AlreadySent extends Error {
-  constructor(readonly application: Application) {
+  constructor(
+    readonly application: Application,
+    readonly maybe = false,
+  ) {
     super(
-      `${application.company} — ${application.role} has already been sent, so its files were not rebuilt. ` +
-        'File it again if you mean to replace what went out.',
+      maybe
+        ? `You may have applied to this already: ${application.company} — ${application.role} was sent` +
+            `${application.appliedAt ? ` on ${localDay(new Date(application.appliedAt))}` : ''}` +
+            `${application.url ? ` (${application.url})` : ''}, and this may be the same job. ` +
+            'Nothing was staged. Say it is another job to file it as a new application.'
+        : `${application.company} — ${application.role} has already been sent, so its files were not rebuilt. ` +
+            'File it again if you mean to replace what went out.',
     );
   }
 }
 
 /** A stage over an application already sent, told apart before anything is written. See `AlreadySent`. */
-export function refusedAsSent(store: Store, req: Pick<BundleRequest, 'company' | 'role' | 'url' | 'status' | 'evenIfSent'>): Application | null {
+export function refusedAsSent(
+  store: Store,
+  req: Pick<BundleRequest, 'company' | 'role' | 'url' | 'status' | 'evenIfSent'>,
+): { application: Application; maybe: boolean } | null {
   if (req.status !== 'applying' || req.evenIfSent) return null;
-  const app = findApplication(store.load().applications, req.company, req.role, req.url);
-  return app && sentAlready(app) ? app : null;
+  const apps = store.load().applications;
+  // Only a row this job is surely: see `forWriting`.
+  const app = applicationToWrite(apps, req.company, req.role, req.url);
+  if (app && sentAlready(app)) return { application: app, maybe: false };
+  // Or a sent row it may be, which is asked about: see `maybeSent`.
+  const maybe = maybeSent(apps, req.company, req.role, req.url);
+  return maybe ? { application: maybe, maybe: true } : null;
 }
 
 export interface BundleResult {
@@ -661,7 +1316,25 @@ export interface BundleResult {
   files: string[];
   pages: number;
   fits: boolean;
+  /**
+   * Whether the cover letter stayed on one page, and how many it took —
+   * absent when the bundle has no letter.
+   *
+   * Only `fits` was returned, and that is the resume's. A letter that ran to
+   * a second page reached the caller as a line in `warnings` and nothing
+   * else, so `rmm apply` exited 0 on a bundle whose letter was the wrong
+   * shape to send — the one thing its exit code is there to say.
+   */
+  letterFits?: boolean;
+  letterPages?: number;
   warnings: string[];
+  /**
+   * Set when this build replaced files of an application that had already
+   * gone out — the sentence is also first in `warnings`. Apart so a route
+   * that does not pass every warning on (the Workspace's Complete leaves out
+   * the typography notes) can still pass this one.
+   */
+  replaced?: string;
   /**
    * What the resume asked for and the store no longer has, in a sentence.
    *
@@ -773,6 +1446,49 @@ async function inBuildLane<T>(id: string, run: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * The answers a build files, given what the request said and what the row
+ * already holds.
+ *
+ * Absent keeps the row's, like every other field a build was not told about.
+ *
+ * And a list is merged into the row's by question, never put in its place,
+ * whatever the status. The card's answer list is the step of the form it is
+ * looking at, not the form: a stage on step 2 sent step 2's answers and
+ * replaced step 1's, and filing the application from a step with no
+ * questions — or from a card that has not got them in hand (a reload, a
+ * step not yet drawn, another frame), which sends `[]` — cleared the lot.
+ * Measured on a real save: a Workday row's recorded "Please enter your
+ * name:" went to `answers: []` eight seconds after it was written, under a
+ * "Files rebuilt" line, by a stage nobody pressed.
+ *
+ * So an answer in the request beats the recorded one to the same question
+ * (`sameQuestion`, so "Discipline*" is "Discipline") and takes its place in
+ * the list; a recorded answer the request does not name is kept; a new one
+ * goes on the end. Clearing the answers on purpose is the tracker's own
+ * `PATCH /applications/:id`, which takes the list it is given.
+ */
+function answersToKeep(
+  req: Pick<BundleRequest, 'answers' | 'status'>,
+  recorded: BundleRequest['answers'],
+): BundleRequest['answers'] {
+  if (req.answers == null) return recorded;
+  if (!recorded?.length) return req.answers;
+  const incoming = req.answers;
+  const merged = recorded.map((r) => {
+    const over = incoming.filter((a) => sameQuestion(a.question, r.question)).pop();
+    return over ?? r;
+  });
+  for (const a of incoming) {
+    if (recorded.some((r) => sameQuestion(r.question, a.question))) continue;
+    // Twice in one request is once; the later one wins, as above.
+    const at = merged.findIndex((m) => sameQuestion(m.question, a.question));
+    if (at >= 0) merged[at] = a;
+    else merged.push(a);
+  }
+  return merged;
+}
+
+/**
  * Produce one folder holding everything an application needs, named the way
  * portals expect, plus a snapshot of the exact resume that was sent. The
  * snapshot is the point: six weeks later, when they ask about "the pipeline
@@ -780,9 +1496,9 @@ async function inBuildLane<T>(id: string, run: () => Promise<T>): Promise<T> {
  */
 export async function buildBundle(store: Store, req: BundleRequest): Promise<BundleResult> {
   const data0 = store.load();
-  const existing = findApplication(data0.applications, req.company, req.role, req.url);
+  const existing = applicationToWrite(data0.applications, req.company, req.role, req.url);
   return inBuildLane(
-    existing?.id ?? freshApplicationId(data0.applications, req.company, req.role),
+    existing?.id ?? freshApplicationId(data0.applications, req.company, req.role, store.outDir()),
     () => buildBundleNow(store, req),
   );
 }
@@ -827,7 +1543,17 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * already using, so rebuilding does not quietly rename the files somebody
    * has been dragging into a form.
    */
-  const already = findApplication(data.applications, req.company, req.role, req.url);
+  /*
+   * Never a sent row only the name ties to this job: its files are what went
+   * to another job, and this build would replace them. See `forWriting`.
+   */
+  const match = findApplicationMatch(data.applications, req.company, req.role, req.url);
+  const already = forWriting(match);
+  /*
+   * Found by the names alone (`MatchStrength`), which is how the posting on
+   * LinkedIn and the employer's form for it meet: see below, at `url`.
+   */
+  const weakly = already !== undefined && match?.strength === 'weak';
   const naming = req.naming ?? already?.naming;
   const [resumeName, letterName, answersName] = bundleFileNames(
     resolved.profile.name,
@@ -843,7 +1569,7 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    * application was opened lands in that application's folder rather than in
    * a second one beside it.
    */
-  const id = already?.id ?? freshApplicationId(data.applications, req.company, req.role);
+  const id = already?.id ?? freshApplicationId(data.applications, req.company, req.role, store.outDir());
   /*
    * Through the store, so an id that is a path cannot choose the folder. The
    * id here is often not one this code made — `findApplication` takes it from
@@ -918,13 +1644,26 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
    */
   const before = store.load().applications.find((a) => a.id === id);
   const letter = req.coverLetter === undefined ? before?.coverLetter : req.coverLetter?.trim() || undefined;
-  const answers = req.answers ?? before?.answers;
+  const answers = answersToKeep(req, before?.answers);
 
   try {
     const pdfPath = path.join(stage, resumeName);
+    /*
+     * With the engine the settings name, as `rmm build` and the preview use.
+     *
+     * Both compiles here went without it, so the engine was whatever
+     * auto-detection found first. Set pdflatex in Voice & AI and the preview
+     * and `rmm build` used pdflatex while the bundle — the file that actually
+     * gets attached — came from tectonic: a different font set, different
+     * line breaks, and sometimes a second page nobody had seen. Or, with
+     * tectonic installed and broken, `rmm apply` failed outright on a store
+     * whose every build had worked.
+     */
+    const engine = data.config.latex.engine;
     const compiled = await compileResume(resolved, {
       pdfPath,
       texPath: path.join(stage, 'source', 'resume.tex'),
+      engine,
     });
 
     const files = [resumeName];
@@ -936,20 +1675,26 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       // that gets uploaded, so it never takes the preview shortcut. The plain
       // text goes alongside it, because as many portals want a letter pasted
       // into a box as want one attached.
+      const content = {
+        profile: resolved.profile,
+        company: req.company,
+        role: req.role,
+        body: letter,
+      };
       letterOut = await compileLetter(
-        {
-          profile: resolved.profile,
-          company: req.company,
-          role: req.role,
-          body: letter,
-        },
+        content,
         resolved.layout,
-        { pdfPath: path.join(stage, letterName), texPath: path.join(stage, 'source', 'cover-letter.tex') },
+        { pdfPath: path.join(stage, letterName), texPath: path.join(stage, 'source', 'cover-letter.tex'), engine },
       );
       files.push(letterName);
 
       const textPath = path.join(stage, letterName.replace(/\.pdf$/, '.txt'));
-      fs.writeFileSync(textPath, letter, 'utf8');
+      /*
+       * The letter the PDF is, not the body as typed: that had no greeting
+       * and no name under it where the PDF adds them, and printed its
+       * markdown as asterisks. See `letterText`.
+       */
+      fs.writeFileSync(textPath, letterText(content), 'utf8');
       files.push(path.basename(textPath));
     }
 
@@ -1064,11 +1809,117 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
         ? settled.status
         : asked;
 
+    /*
+     * The row's own names, when it was found only by its job number.
+     *
+     * `sameJobAs` lets one job under two employers' names be one row — EA's
+     * job 216245 as "Electronic Arts" and as "Respawn Entertainment" — and
+     * that is a reason to *file* into the row, not to rename it. Writing the
+     * request's names over it is how a Texas Instruments row, found by the
+     * `currentJobId` in a LinkedIn search address the extension sent beside
+     * L3Harris's posting, became "L3Harris Technologies" — after which every
+     * later L3Harris stage matched it by name, and its address was replaced
+     * too. Renaming a row is `PATCH /applications/:id`, said on purpose.
+     * Matched by name (one employer, another spelling), the request's
+     * spelling still wins, as it always has.
+     */
+    /*
+     * Unless the row's own names are the junk this was keeping them from:
+     * an "Unknown company" row, or "Embed" with "Job Application for …" as
+     * its role, found by its number is the row the request's better names
+     * were read for.
+     */
+    /*
+     * And never back to a name somebody corrected the row from: the request
+     * found it by one of its `aliases`, because the page still says "Summer
+     * 2027", and the correction is the row's name whatever the page says.
+     */
+    const byOldName =
+      settled !== undefined &&
+      (settled.aliases ?? []).some((a) => sameIdentity(a.company, a.role, req.company, req.role)) &&
+      !sameIdentity(settled.company, settled.role, req.company, req.role);
+    const byNumberOnly =
+      byOldName ||
+      (settled !== undefined &&
+        !sameIdentity(settled.company, settled.role, req.company, req.role) &&
+        looksLikeCompanyName(settled.company) &&
+        looksLikeRoleTitle(settled.role) &&
+        withoutTitleNoise(settled.role) === settled.role);
+
+    /*
+     * And one history line for a run of rebuilds, not one per rebuild.
+     *
+     * Building stages the files, and the card stages on every save of the
+     * letter, every answer, every Recompile — so one application's history
+     * read "Files rebuilt" eight times in two minutes, and a real save carried
+     * over a thousand of them, each its own "Apply:" commit. A rebuild that
+     * moves nothing on adds nothing to say after a line that already says it:
+     * the status is unchanged and the last thing the history says is that the
+     * files were built at this status. Anything that happened in between — a
+     * send, "Not sent after all", a note — is a line of its own, and the next
+     * rebuild after it is recorded again.
+     */
+    const last = settled?.history?.at(-1);
+    const nothingNew =
+      settled !== undefined &&
+      settled.status === status &&
+      last?.status === status &&
+      (last.note === 'Files rebuilt' || last.note === 'Bundle created');
+    /*
+     * But the line's time still moves, because it is what `goneStale` reads
+     * as the last sign of work: frozen at the first rebuild, an application
+     * rebuilt every day for a fortnight was closed as left alone for one.
+     * Moved once an hour at most, so a run of rebuilds is still one write
+     * and not one commit each.
+     */
+    const lastAt = Date.parse(last?.at ?? '');
+    const touched =
+      nothingNew && !(Date.parse(now) - lastAt < 3_600_000)
+        ? [...settled!.history!.slice(0, -1), { ...last!, at: now }]
+        : settled?.history;
+
+    /*
+     * And said out loud when this replaces what was sent.
+     *
+     * A stage over a sent application is refused (`AlreadySent`), but filing
+     * it again is not, and should not be: the extension's "Prepare to submit"
+     * and the Workspace's Complete both build without `status`, and neither
+     * expects a refusal there. So `rmm apply newgrad` over an application at
+     * `interview` that went out with `intern` switched the row to `newgrad`,
+     * replaced the PDF and the letter in its folder, and recorded it as one
+     * more "Files rebuilt" — and the resume that was sent, if it was a
+     * temporary copy made for that posting, was then referenced by nothing
+     * and swept a week later. That is how a save ended up with rows at
+     * `applied` pointing at resumes that no longer existed.
+     *
+     * The build still happens. What changes is that the replaced resume is
+     * remembered on the row (`sentResumeIds`, which the sweep reads), the
+     * history says what was replaced, and the result carries a warning the
+     * CLI prints and the routes pass on. Only where there were sent files to
+     * replace: a row recorded by a send alone has no folder yet.
+     */
+    const wasSent = sentAlready(settled) && Boolean(settled?.snapshotDir);
+    const swappedResume = wasSent && settled!.resumeId !== undefined && settled!.resumeId !== req.resumeId;
+    const swappedLetter = wasSent && (settled!.coverLetter?.trim() ?? '') !== (letter?.trim() ?? '');
+    const label = (rid: string) => data.resumes.find((r) => r.id === rid)?.label ?? rid;
+    const what = [
+      ...(swappedResume ? [`the resume (${label(settled!.resumeId!)} → ${label(req.resumeId)})`] : []),
+      ...(swappedLetter ? ['the cover letter'] : []),
+    ].join(' and ');
+    const replaced = what
+      ? `${req.company} — ${req.role} had already been sent, and this build replaced ${what} in its folder: ` +
+        'the files there are no longer the ones that went out.' +
+        (swappedResume ? ` The resume that was sent, ${label(settled!.resumeId!)}, is kept.` : '')
+      : undefined;
+    const sentResumeIds = swappedResume
+      ? [...new Set([...(settled!.sentResumeIds ?? []), settled!.resumeId!])]
+      : settled?.sentResumeIds;
+
     const application: Application = {
       ...settled,
       id,
-      company: req.company,
-      role: req.role,
+      company: byNumberOnly ? settled!.company : req.company,
+      role: byNumberOnly ? settled!.role : req.role,
       /*
        * And what the build was not told stays as the tracker had it.
        *
@@ -1097,6 +1948,18 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
        * letter and the next fifteen did not.
        */
       url: req.url ?? settled?.url,
+      /*
+       * And the address it had kept, when only the names said this was its
+       * job. The row staged on LinkedIn moves to the employer's form when the
+       * form fills it — the status may go forward, that is the ordinary way
+       * through — but writing the form's address over LinkedIn's left the
+       * LinkedIn posting a stranger to its own row: visited again, it was a
+       * name-alike at best. Kept as an alias, it is this row's (see
+       * `aliasAddresses`).
+       */
+      ...(weakly && settled?.url && req.url && !samePage(settled.url, req.url)
+        ? { aliases: aliasesWith({ url: req.url, aliases: settled.aliases }, { company: settled.company, role: settled.role, url: settled.url }) }
+        : {}),
       appliedAt: settled?.appliedAt ?? now,
       status,
       resumeId: req.resumeId,
@@ -1109,12 +1972,14 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       naming: req.naming ?? settled?.naming,
       answers,
       coverLetter: letter,
-      history: [
-        ...(settled?.history ?? []),
-        { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' },
-      ],
+      ...(sentResumeIds ? { sentResumeIds } : {}),
+      history: replaced
+        ? [...(settled?.history ?? []), { at: now, status, note: `Files rebuilt after sending: replaced ${what} that went out` }]
+        : nothingNew
+          ? touched
+          : [...(settled?.history ?? []), { at: now, status, note: settled ? 'Files rebuilt' : 'Bundle created' }],
     };
-    store.upsertApplication(application);
+    const written = store.upsertApplication(application);
     /*
      * The files also land in the flat folder, ready for the upload dialog that
      * is probably already open — and this one keeps the plain name where two
@@ -1124,7 +1989,13 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
     // Not claiming the plain names: a build is often a tab rebuilding in
     // the background as its letter saves, and taking them then renamed the
     // file another tab had just copied the path to. See `uniqueNames`.
-    syncCurrent(store);
+    //
+    // Handed the list that was just written, read the way `load` reads it.
+    // Without it `syncCurrent` loads the whole store to get the tracker back,
+    // and the tracker it gets back is the file written one line up — parsed
+    // again from scratch, because the write moved it. With a thousand
+    // applications that second parse was most of a second on every build.
+    syncCurrent(store, normalizeApplications(written));
 
     return {
       application,
@@ -1132,6 +2003,8 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
       files,
       pages: compiled.pages,
       fits: compiled.fits,
+      letterFits: letterOut?.fits,
+      letterPages: letterOut?.pages,
       /*
        * The letter's too, which were computed and thrown away.
        *
@@ -1144,7 +2017,13 @@ async function buildBundleNow(store: Store, req: BundleRequest): Promise<BundleR
        * documents are fixed in different places and "a line runs past the
        * edge" sends whoever reads it to the resume otherwise.
        */
-      warnings: [...compiled.warnings, ...aboutTheResume(compiled), ...aboutTheLetter(letterOut)],
+      warnings: [
+        ...(replaced ? [replaced] : []),
+        ...compiled.warnings,
+        ...aboutTheResume(compiled),
+        ...aboutTheLetter(letterOut),
+      ],
+      replaced,
       missing: describeLost(resolved.lost ?? []),
     };
   } finally {
@@ -1197,9 +2076,9 @@ export function advance(store: Store, id: string, status: ApplicationStatus, not
 
   app.status = status;
   app.history = [...(app.history ?? []), { at: new Date().toISOString(), status, note }];
-  store.upsertApplication(app);
   // An application that has moved past sending takes its files out of the way.
-  syncCurrent(store);
+  // From the list just written, for the reason the build gives.
+  syncCurrent(store, normalizeApplications(store.upsertApplication(app)));
   return app;
 }
 
@@ -1294,7 +2173,8 @@ export function closeStale(store: Store, stale: GoneStale[], days: number): Appl
   if (closed.length === 0) return [];
   store.saveApplications(apps);
   // Out of the upload folder with them, which carries only what is in flight.
-  syncCurrent(store);
+  // From the list just written, for the reason the build gives.
+  syncCurrent(store, normalizeApplications(apps));
   return closed;
 }
 
@@ -1313,22 +2193,41 @@ export function stats(apps: Application[]): TrackerStats {
   for (const a of apps) byStatus[a.status] = (byStatus[a.status] ?? 0) + 1;
 
   /*
-   * A response is somebody coming back to you. `closed` is not counted: it
-   * covers a rejection, which is a reply, and being ghosted, which is the
-   * absence of one, and the tracker cannot tell them apart — counting it
-   * either way would state something the data does not know.
+   * A response is somebody coming back to you. `closed` on its own is not
+   * counted: it covers a rejection, which is a reply, and being ghosted,
+   * which is the absence of one, and the tracker cannot tell them apart —
+   * counting it either way would state something the data does not know.
+   *
+   * But an interview or an offer is counted when it was reached, not only
+   * while the row stands at it: an interview that ended in a rejection was
+   * still somebody coming back to you. Reading the current status alone, the
+   * rate fell when an interviewed row was closed — measured, 50% with one
+   * interview of two sent, then 0% the moment that interview's rejection was
+   * recorded — so the history counts too.
    */
-  const responded = apps.filter((a) => ['interview', 'offer'].includes(a.status)).length;
+  const RESPONSES = ['interview', 'offer'];
   // "Applying" has not been sent yet, so it cannot have drawn a response —
   // and nor has one closed only for sitting at Applying. See `closedAsStale`.
   const wentOut = apps.filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a));
   const sent = wentOut.length;
+  // Of the ones sent, so a row moved back to Applying after an interview
+  // cannot push the rate past 100%.
+  const responded = wentOut.filter(
+    (a) => RESPONSES.includes(a.status) || (a.history ?? []).some((h) => RESPONSES.includes(h.status)),
+  ).length;
 
   // Sent in the window, so over the same rows: every row started in it was
   // counted, and a stale close or a form still open read as sent lately.
+  // And by when it was sent, not when it was started: `appliedAt` is when the
+  // row was made, which for one opened at Applying is weeks before it went.
+  // The first `applied` in its history, as `sentBefore` in api.ts reads it.
+  const sentAt = (a: Application) => (a.history ?? []).find((h) => h.status === 'applied')?.at ?? a.appliedAt;
   const now = Date.now();
   const since = (days: number) =>
-    wentOut.filter((a) => a.appliedAt && now - Date.parse(a.appliedAt) < days * 86_400_000).length;
+    wentOut.filter((a) => {
+      const at = sentAt(a);
+      return at && now - Date.parse(at) < days * 86_400_000;
+    }).length;
 
   return {
     total: apps.length,

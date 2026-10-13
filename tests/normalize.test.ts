@@ -156,16 +156,35 @@ describe('making the rest of the store’s shape true', () => {
         id: 'exp_x',
         kind: 'experience',
         title: 'Helios',
-        bullets: [null, undefined, 'not an object', { id: 'b_one', variants: [{ id: 'v1', label: 'a', text: 'Shipped it' }] }],
+        bullets: [null, undefined, '', { id: 'b_one', variants: [{ id: 'v1', label: 'a', text: 'Shipped it' }] }],
       },
     ]);
     expect(entries[0]?.bullets?.map((b) => b.id)).toEqual(['b_one']);
+    // A line of text is not blank, though: it is a bullet written the short
+    // way, and it is kept as one. See hand-edits.test.ts.
+    const short = normalizeEntries([{ id: 'exp_x', kind: 'experience', bullets: ['Shipped it'] }]);
+    expect(short[0]?.bullets?.[0]?.variants.map((v) => v.text)).toEqual(['Shipped it']);
   });
 
   it('gives an answer with no phrasings an empty list rather than a crash', () => {
     const answers = normalizeAnswers([{ id: 'a1', question: 'Why us?' }]);
     expect(answers[0]?.variants).toEqual([]);
     expect(() => answers[0]!.variants.map((v) => v.text)).not.toThrow();
+  });
+
+  it('gives a second item under one id an id of its own, and leaves the first alone', () => {
+    const answers = normalizeAnswers([
+      { id: 'ans_discipline-d30f07e6', question: 'Discipline*' },
+      { id: 'ans_discipline-d30f07e6-2', question: 'Discipline' },
+      { id: 'ans_discipline-d30f07e6', question: 'Discipline*' },
+      { id: 'ans_discipline-d30f07e6', question: 'Discipline*' },
+    ]);
+    expect(answers.map((a) => a.id)).toEqual([
+      'ans_discipline-d30f07e6',
+      'ans_discipline-d30f07e6-2',
+      'ans_discipline-d30f07e6-3',
+      'ans_discipline-d30f07e6-4',
+    ]);
   });
 
   it('steps over an entry that is not an object', () => {

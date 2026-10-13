@@ -20,6 +20,7 @@
     "test:editor": "node tests/editor.mjs"
   },
   "dependencies": {
+    "content-disposition": "^0.5.4",
     "dompurify": "^3.4.15",
     "express": "^4.21.2",
     "marked": "^18.0.13",

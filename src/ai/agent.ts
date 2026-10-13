@@ -1,14 +1,12 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { redactIdentifiers } from '../jobs/answers.js';
 import { startRun, type RunHandle } from './activity.js';
-import { AI_PRESETS } from './presets.js';
+import { AI_PRESETS, aiIsOn } from './presets.js';
+import { envForAgent } from './env.js';
+import { runInGroup } from '../process-group.js';
 import type { StoreConfig } from '../model/types.js';
-
-const run = promisify(execFile);
 
 /**
  * How long a child gets to honour SIGTERM before it is killed outright.
@@ -123,7 +121,12 @@ export async function runAgent(
    * `redactIdentifiers`.
    */
   prompt = redactIdentifiers(prompt).text;
-  if (!config.ai.enabled) {
+  /*
+   * Only a real `true` runs anything (see `aiIsOn`). `loadConfig` already
+   * normalises the setting, but a config built some other way must not get
+   * a command run on the strength of `"on"` or `1`.
+   */
+  if (!aiIsOn(config.ai.enabled)) {
     return { output: prompt, executed: false };
   }
 
@@ -166,11 +169,19 @@ export async function runAgent(
    * a shell variable or a regex is enough: "cut cloud spend by $&" reached the
    * CLI as "cut cloud spend by {promptText}", and `` $` `` spliced the argument
    * template's own text into the middle of the prompt. Three of the four
-   * presets pass the prompt inline, so three of the four were affected.
+   * presets pass the prompt inline, so three of the four were affected. A
+   * replacement *function*'s return value is taken as it is, `$` and all.
    */
-  const put = (into: string, token: string, value: string) => into.split(token).join(value);
+  /*
+   * And in one pass. One token after another, `{sandbox}` was substituted
+   * into the argument *after* the prompt had been spliced in, so a prompt
+   * that said "{sandbox}" — a posting, a bullet, a letter quoting a config —
+   * reached the CLI with the scratch directory's path in its place. Each
+   * token is read off the template only; what replaces it is never read again.
+   */
+  const TOKENS: Record<string, string> = { '{prompt}': promptFile, '{promptText}': prompt, '{sandbox}': dir };
   const expanded = config.ai.args.map((a) =>
-    put(put(put(a, '{prompt}', promptFile), '{promptText}', prompt), '{sandbox}', dir),
+    a.replace(/\{prompt\}|\{promptText\}|\{sandbox\}/g, (token) => TOKENS[token]!),
   );
   /*
    * In front of the prompt, for the same reason the model and effort flags
@@ -181,7 +192,8 @@ export async function runAgent(
   const args = (() => {
     const added = wiring ? [...wiring.args, ...approval] : [];
     if (added.length === 0) return expanded;
-    const promptAt = expanded.findIndex((a) => a === prompt || a === promptFile || a.endsWith(prompt));
+    // `-` is the prompt too, read from stdin where it stands (Codex).
+    const promptAt = expanded.findIndex((a) => a === prompt || a === promptFile || a.endsWith(prompt) || a === '-');
     if (promptAt < 0) return [...expanded, ...added];
     return [...expanded.slice(0, promptAt), ...added, ...expanded.slice(promptAt)];
   })();
@@ -195,18 +207,29 @@ export async function runAgent(
    * a command is not a run to show.
    */
   let watching: RunHandle | null = null;
-  /** Cancels the forced kill; set once the child exists. See below. */
-  let stopForcing: (() => void) | null = null;
 
   try {
-    const pending = run(config.ai.command, args, {
+    /*
+     * In a process group of its own, and the timeout's signals go to the
+     * group: a CLI started through a wrapper script that does not `exec` it
+     * used to outlive its own 502 — the wrapper died, the CLI under it carried
+     * on. See `runInGroup`, which also sends the forced kill below.
+     */
+    const pending = runInGroup(config.ai.command, args, {
       timeout: config.ai.timeoutMs,
+      graceMs: STUBBORN_GRACE_MS,
       maxBuffer: 32 * 1024 * 1024,
       // The confinement: an empty directory with only the prompt in it, never
       // the server's own working directory.
       cwd: dir,
+      /*
+       * Not the server's environment: an allow-list of it. The whole of
+       * `process.env` used to go through, so every token in the shell that
+       * started the server reached a CLI that does what a job posting's text
+       * can talk its model into. See `envForAgent` for what is kept and why.
+       */
       env: {
-        ...process.env,
+        ...envForAgent(process.env, config.ai.command),
         // Some CLIs treat these as "the project"; point them at the sandbox so
         // a stray relative path cannot escape it.
         PWD: dir,
@@ -232,20 +255,11 @@ export async function runAgent(
      * still going for ever. A background job never finishes and the card
      * spins; a foreground request never answers at all.
      *
-     * So: a grace period after the polite signal, then one it cannot refuse.
-     * `killed` is set either way, so this arrives at the same "it ran out of
-     * time" sentence below rather than at a new kind of failure. `unref` so a
-     * pending timer cannot be the thing that keeps the process up.
+     * So: a grace period after the polite signal, then one it cannot refuse —
+     * `graceMs` above; `runInGroup` sends both, to the whole group. `killed`
+     * is set either way, so this arrives at the same "it ran out of time"
+     * sentence below rather than at a new kind of failure.
      */
-    const forceAfter = setTimeout(() => {
-      try {
-        pending.child.kill('SIGKILL');
-      } catch {
-        // Already gone, which is the outcome this wanted.
-      }
-    }, config.ai.timeoutMs + STUBBORN_GRACE_MS);
-    forceAfter.unref?.();
-    stopForcing = () => clearTimeout(forceAfter);
 
     /*
      * Close the child's stdin — always, and explicitly.
@@ -297,7 +311,15 @@ export async function runAgent(
      * Empty stdout on a clean exit is a failed run, and saying so is the honest
      * answer — the caller already knows how to show that.
      */
-    const decided = wiring ? tools?.read(wiring.out) : undefined;
+    /*
+     * Only a state with something in it. The tool server writes an empty one
+     * the moment it starts (see `mcp/main.ts`), so "there is a state" was true
+     * of every run that was wired, including the ones that never called a
+     * thing: a silent run was never explained, and `wiredButUnused` was never
+     * set. See `decidedAnything`.
+     */
+    const read = wiring ? tools?.read(wiring.out) : undefined;
+    const decided = decidedAnything(read) ? read : undefined;
 
     // The answer, not the session transcript it may be wrapped in. See
     // `unwrapAgentFraming` — this is before every reader of `output`, because
@@ -400,7 +422,11 @@ export async function runAgent(
        * tools at all.
        */
       const called = toolCallsIn(`${e.stdout ?? ''}\n${e.stderr ?? ''}`);
-      const toolless = wiring !== null && !fs.existsSync(wiring.out) && called === 0;
+      /*
+       * Whether the file exists says nothing: the server writes an empty state
+       * when it starts, before any call. What was decided is what counts.
+       */
+      const toolless = wiring !== null && !decidedAnything(tools?.read(wiring.out)) && called === 0;
       /*
        * When the CLI said why, say that instead of guessing.
        *
@@ -439,7 +465,6 @@ export async function runAgent(
     watching?.ended('failed', why);
     throw new AgentError(why, e.stdout);
   } finally {
-    stopForcing?.();
     // Whatever left the try another way still closes the record; `ended` keeps
     // the first outcome, so this only catches what nothing else named.
     watching?.ended('failed', 'The run ended without saying why.');
@@ -712,12 +737,42 @@ export class AgentError extends Error {
 }
 
 /**
+ * Did a tool session's state record anything at all?
+ *
+ * The three sessions keep different shapes — a tailoring plan, a letter and
+ * its answers, proposed entries — but each starts as nothing but empty
+ * strings, empty lists, empty maps and `false` (`emptyState`, `emptyWriting`,
+ * `emptyAuthoring`), and every tool that decides something leaves one of
+ * them non-empty. So anything that is not empty, at any depth, is a decision;
+ * a state that is all empties is a run that called nothing, however much the
+ * file it came from exists.
+ */
+export function decidedAnything(state: unknown): boolean {
+  if (state === null || state === undefined || state === false || state === '') return false;
+  if (Array.isArray(state)) return state.length > 0;
+  if (typeof state === 'object') return Object.values(state as Record<string, unknown>).some(decidedAnything);
+  return true;
+}
+
+/**
  * Pull a JSON object out of an agent's reply. Models wrap JSON in prose or
  * fences often enough that demanding clean output is not worth the failures.
+ *
+ * Every fenced block is a candidate, a ```json one first, then the reply as a
+ * whole. It used to be the first fence only, and only a ```json or bare one,
+ * so a ```latex block quoting a macro ahead of the answer hid the answer. And
+ * inside a candidate every `{` is a possible start: it used to give up at the
+ * first balanced `{…}` that was not JSON, so "Given the {posting} emphasis on
+ * C++, my plan: {"choices": …}" failed on "{posting}" and never reached the
+ * plan that followed it.
  */
 export function extractJson<T>(text: string): T {
-  const fenced = /```(?:json)?\s*\n([\s\S]*?)```/.exec(text);
-  const candidates = [fenced?.[1], text].filter((c): c is string => Boolean(c));
+  const fences = [...text.matchAll(/```([^\n`]*)\n([\s\S]*?)```/g)];
+  const candidates = [
+    ...fences.filter((f) => /^\s*json\s*$/i.test(f[1]!)).map((f) => f[2]),
+    ...fences.filter((f) => !/^\s*json\s*$/i.test(f[1]!)).map((f) => f[2]),
+    text,
+  ].filter((c): c is string => Boolean(c));
 
   for (const c of candidates) {
     try {
@@ -725,38 +780,47 @@ export function extractJson<T>(text: string): T {
     } catch {
       // Fall through to brace matching.
     }
-    const start = c.indexOf('{');
-    if (start < 0) continue;
-    // Walk braces so a nested object doesn't get truncated at the first '}'.
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let i = start; i < c.length; i++) {
-      const ch = c[i];
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (ch === '\\') {
-        escaped = true;
-        continue;
-      }
-      if (ch === '"') inString = !inString;
-      if (inString) continue;
-      if (ch === '{') depth++;
-      else if (ch === '}') {
-        depth--;
-        if (depth === 0) {
-          try {
-            return JSON.parse(c.slice(start, i + 1)) as T;
-          } catch {
-            break;
-          }
-        }
+    for (let start = c.indexOf('{'); start >= 0; start = c.indexOf('{', start + 1)) {
+      const found = balancedAt(c, start);
+      if (found === undefined) continue;
+      try {
+        return JSON.parse(found) as T;
+      } catch {
+        // Not this one: prose in braces, or a macro. Try the next `{`.
       }
     }
   }
   throw new AgentError(`Could not find JSON in the agent's reply. Raw output:\n${text.slice(0, 2000)}`);
+}
+
+/**
+ * The balanced `{…}` that starts at `start`, or undefined when it never
+ * closes. Braces inside strings do not count, so a nested object is not cut
+ * off at the first `}` and a `"}"` in a value does not end it.
+ */
+function balancedAt(c: string, start: number): string | undefined {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < c.length; i++) {
+    const ch = c[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') inString = !inString;
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return c.slice(start, i + 1);
+    }
+  }
+  return undefined;
 }
 
 /**

@@ -270,8 +270,9 @@ export interface ResumeSpec {
    * `base` — what you actually build from, and what the extension offers
    * first. `extended` — a permanent resume in the save that is not offered
    * first: kept, findable, never swept. `temporary` — made for one posting,
-   * worked on, sent, and then gone a week later, recoverable from the version
-   * history like anything else deleted.
+   * listed last, and gone a week after that posting closed without it being
+   * sent (one that was sent is kept: see `wentOut`), recoverable from the
+   * version history like anything else deleted.
    *
    * Absent means `extended`, which is the reading that cannot lose anybody's
    * work: a resume written by a version that had no tiers, or by hand, is
@@ -281,8 +282,8 @@ export interface ResumeSpec {
   /**
    * When this resume became temporary, for the sweep to count from.
    *
-   * Only ever a fallback: the week is normally measured from the application
-   * being sent, because a posting you are still writing for is not one to
+   * Only ever a fallback, or a floor: the week is normally measured from the
+   * application closing unsent, because a posting you are still writing for is not one to
    * take the resume away from. This covers the copy that was made and then
    * abandoned — no application, nothing to measure — and, more importantly,
    * the resumes an upgrade makes temporary. A save upgraded today must not
@@ -290,6 +291,18 @@ export interface ResumeSpec {
    * their clock starts when the migration ran.
    */
   temporaryFrom?: string;
+  /**
+   * A temporary resume that went out, written to disk as `extended`.
+   *
+   * This version keeps a sent temporary resume however long ago it was sent
+   * (see `wentOut`), and the version before it did not know that: it read
+   * `temporary` on a resume an `applied` row named, started the week, and
+   * deleted it, from the same clone. So the one thing every version honours —
+   * `extended`, never swept — is what the file says, and this flag is how
+   * this version still reads the resume as the temporary copy it is. See
+   * `keptOnDisk` and `asLoaded` in tiers.ts. The store writes and clears it.
+   */
+  keptBecauseSent?: boolean;
   /**
    * Pinned as a starting point.
    *
@@ -527,7 +540,36 @@ export interface Application {
   status: ApplicationStatus;
   /** Resume spec id used, and the snapshot folder holding the exact files. */
   resumeId?: string;
+  /**
+   * Resumes this application went out with before its current one.
+   *
+   * A sent application can be built again — `rmm apply`, the extension's
+   * "Prepare to submit", completing its space in the Workspace — and the
+   * build may name another resume. `resumeId` then points at the new one,
+   * and the resume that was actually sent was referenced by nothing: if it
+   * was a temporary copy made for this posting, the sweep took it a week
+   * later, and a save ended up with rows at `applied` whose resume no longer
+   * existed. Kept here so the sweep keeps them too (see `doneAt` in
+   * tiers.ts).
+   */
+  sentResumeIds?: string[];
   snapshotDir?: string;
+  /**
+   * What this row was called before it was corrected by hand.
+   *
+   * The tracker's Edit renames a row, and the page it came from does not
+   * know: the extension's card that is still open, or the next visit to the
+   * same posting, still says "Summer 2027". Without these a send under the
+   * old names found no row and filed a second one beside the corrected one.
+   * See `sameJobAs`.
+   *
+   * And the other addresses the row is the job at, with what that page
+   * called it: the LinkedIn posting a row was staged from before the
+   * employer's form filled it, or the employer's address recorded by hand
+   * for a row sent from LinkedIn. A visit to one of them is this row's
+   * posting (`aliasAddresses` in applications.ts), not only a name-alike.
+   */
+  aliases?: { company: string; role: string; url?: string }[];
   source?: string;
   notes?: string;
   /** Free-form per-application answers, useful when a company re-asks. */

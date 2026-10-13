@@ -1525,6 +1525,43 @@ describe('answers', () => {
     // And the identical text was not piled on as a second variant either.
     expect(matches[0]?.variants).toHaveLength(1);
   });
+
+  /*
+   * As the extension sent them, from three forms marking up one question
+   * three ways. Each was a row of its own, and a bank kept five rows for
+   * "Discipline" — three of them under one id.
+   */
+  it('keeps one item for a question however a form marks it up, under the words a person reads', async () => {
+    for (const [question, answer] of [
+      ['Discipline*', 'Computer Science'],
+      ['Discipline *', 'Computer Science'],
+      ['DisciplineDiscipline', 'Mathematics'],
+      ['Discipline', 'Computer Science'],
+    ]) {
+      await request(app).post('/api/answers/save').send({ question, answer, label: 'Chosen on a form' }).expect(200);
+    }
+    const answers = t.store.load().answers;
+    const rows = answers.filter((a) => sameQuestion(a.question, 'Discipline'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.question).toBe('Discipline');
+    expect(rows[0]?.variants.map((v) => v.text)).toEqual(['Computer Science', 'Mathematics']);
+    // The last save says which one to use now.
+    expect(rows[0]?.variants.find((v) => v.id === rows[0]?.default)?.text).toBe('Computer Science');
+    expect(new Set(answers.map((a) => a.id)).size).toBe(answers.length);
+  });
+
+  it('finds a row kept with its marker when the question comes back without one', async () => {
+    const bank = t.store.load().answers;
+    t.store.saveAnswers([
+      ...bank,
+      { id: 'ans_end-date-month-3776dfc5', question: 'End date month*', default: 'v_1', variants: [{ id: 'v_1', label: 'Chosen on a form', text: 'June' }] },
+    ]);
+    await request(app).post('/api/answers/save').send({ question: 'End date month', answer: 'May', label: 'Chosen on a form' }).expect(200);
+    const rows = t.store.load().answers.filter((a) => sameQuestion(a.question, 'End date month'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe('ans_end-date-month-3776dfc5');
+    expect(rows[0]?.variants.map((v) => v.text)).toEqual(['June', 'May']);
+  });
 });
 
 describe('cover letters', () => {
@@ -2113,7 +2150,7 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
       .post('/api/render')
       .send({
         strict: true,
-        spec: { id: 'tiny', label: 'Tiny', extends: 'base', layout: { marginIn: 4.6, autoFit: false } },
+        spec: { id: 'tiny', label: 'Tiny', extends: 'base', layout: { marginIn: 4.2, autoFit: false } },
       })
       .expect(422);
     expect(res.body.kind).toBe('overflow');
@@ -2138,7 +2175,9 @@ describe.skipIf(!latex)('rendering', { timeout: 180_000 }, () => {
     extends: 'base',
     // The margin the overflow test below proves spills this store's base
     // resume. A gentler one did not, and the assertions passed vacuously.
-    layout: { marginIn: 4.6 },
+    // Under the 4.25in a letter page can take at all (`checkLayoutNumbers`):
+    // 4.6 left a negative text width, which is now refused before TeX sees it.
+    layout: { marginIn: 4.2 },
   };
 
   it('reports the real spill when asked for the document as written', async () => {
@@ -2817,7 +2856,43 @@ describe('workspace', () => {
    * extension's quick submit, which opens no workspace at all, or opening one
    * and then deleting it, which is a button.
    */
+  /*
+   * Recorded with the posting's address, as the extension's quick submit
+   * records it. A row recorded with no address at all is only the names'
+   * match for a posting that has one (`MatchStrength`), and a sent row only
+   * the names tie to a posting is never filed into: see the next test.
+   */
   it('finds the row this job already has, even if it was opened another day', async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const created = await request(app)
+      .post('/api/applications')
+      .send({
+        id: `${yesterday.slice(0, 10)}-streamly-data-platform-intern`,
+        company: 'Streamly',
+        role: 'Data Platform Intern',
+        url: 'https://boards.greenhouse.io/streamly/jobs/1',
+        status: 'applied',
+        appliedAt: yesterday,
+      })
+      .expect(200);
+
+    await open().expect(200);
+
+    const { body } = await request(app).get('/api/applications').expect(200);
+    const mine = body.applications.filter((a: { company: string }) => a.company === 'Streamly');
+    expect(mine.map((a: { id: string }) => a.id)).toEqual([created.body.id]);
+    expect(mine[0].status).toBe('applied');
+  });
+
+  /*
+   * But a sent row with no address is only the same job by its name, and a
+   * second posting with the same title at the same employer is the ordinary
+   * case that name cannot tell apart: Red Hat's Raleigh and Boston interns.
+   * Opened as that row, the space showed the sent one's letter as this one's
+   * and completing it replaced the files that went out. The row is left as it
+   * was, and the space is a new application's.
+   */
+  it('but does not take a sent row that only shares the name for this posting', async () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const created = await request(app)
       .post('/api/applications')
@@ -2830,12 +2905,14 @@ describe('workspace', () => {
       })
       .expect(200);
 
-    await open().expect(200);
+    const opened = await open().expect(200);
 
+    expect(opened.body.draft.id).not.toBe(created.body.id);
+    expect(opened.body.draft.status).toBe('drafting');
     const { body } = await request(app).get('/api/applications').expect(200);
-    const mine = body.applications.filter((a: { company: string }) => a.company === 'Streamly');
-    expect(mine.map((a: { id: string }) => a.id)).toEqual([created.body.id]);
-    expect(mine[0].status).toBe('applied');
+    const was = body.applications.find((a: { id: string }) => a.id === created.body.id);
+    expect(was.status).toBe('applied');
+    expect(was.history).toHaveLength(1);
   });
 
   /*
@@ -2999,6 +3076,10 @@ describe('workspace', () => {
    * and it lets itself out a fortnight later so the Workspace stays a list of
    * live work instead of becoming a second, worse tracker.
    */
+  /*
+   * Retired through its own POST, and when a save is opened — never by
+   * listing the Workspace, which is a GET and writes nothing.
+   */
   it('keeps a sent workspace, and lets it go once it is a fortnight stale', async () => {
     // A repository, because a space is only ever closed once the history has
     // it — see the test below, and `removeWhatIsFiled`.
@@ -3020,17 +3101,17 @@ describe('workspace', () => {
     };
 
     leave('submitted', 3);
-    let list = await request(app).get('/api/workspace').expect(200);
+    let list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
 
     // Still being written, and old: that is somebody's unfinished application,
     // not litter.
     leave('drafting', 400);
-    list = await request(app).get('/api/workspace').expect(200);
+    list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
 
     leave('submitted', 15);
-    list = await request(app).get('/api/workspace').expect(200);
+    list = await request(app).post('/api/workspace/retire').expect(200);
     expect(list.body.drafts).toHaveLength(0);
   });
 
@@ -3061,7 +3142,7 @@ describe('workspace', () => {
     const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
 
-    await request(app).get('/api/workspace').expect(200);
+    await request(app).post('/api/workspace/retire').expect(200);
 
     expect(fs.existsSync(file)).toBe(false);
     const holds = await Promise.all(
@@ -3087,7 +3168,7 @@ describe('workspace', () => {
     const stale = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/updatedAt:.*/, `updatedAt: "${stale}"`), 'utf8');
 
-    const list = await request(app).get('/api/workspace').expect(200);
+    const list = await request(app).post('/api/workspace/retire').expect(200);
 
     expect(list.body.drafts.map((d: { id: string }) => d.id)).toContain(id);
     expect(fs.existsSync(file)).toBe(true);
@@ -4538,5 +4619,98 @@ describe('GET /attachments with two applications in flight', () => {
     // Pressed in the other tab, it goes there.
     await request(app).get('/api/attachments?application=a2&claim=1').expect(200);
     expect(fs.readFileSync(folder, 'utf8')).toBe('%PDF a2\n');
+  });
+});
+
+/*
+ * A form of several steps, handed over one step at a time. What the
+ * extension posts is the questions on the page in front of it, and the route
+ * took that as the whole list: answers written in the workspace for step 1
+ * were deleted when step 2 was handed over.
+ */
+describe('a workspace handed a later step of the form', () => {
+  const JOB = { company: 'Beta Labs', role: 'Platform Engineer', url: 'https://acme.wd1.myworkdayjobs.com/en-US/careers/job/Boston/Platform-Engineer_R123/apply' };
+  const open = (questions: { question: string; required?: boolean }[]) =>
+    request(app).post('/api/workspace').send({ ...JOB, coverLetterRequired: false, questions }).expect(200);
+
+  it('keeps the answers written for the steps before it', async () => {
+    const first = (await open([{ question: 'Why Beta?', required: true }, { question: 'Earliest start date?' }, { question: 'Anything else?' }])).body.draft;
+    first.questions[0] = { ...first.questions[0], answer: 'I love platforms.', edited: true, source: 'human' };
+    first.questions[1] = { ...first.questions[1], answer: 'June 2027', edited: true, source: 'human' };
+    await request(app).put(`/api/workspace/${first.id}`).send({ questions: first.questions }).expect(200);
+
+    const second = (await open([{ question: 'Are you willing to relocate?', required: true }])).body.draft;
+    const asked = second.questions.map((q: { question: string; answer: string }) => [q.question, q.answer]);
+    expect(asked).toEqual([
+      ['Why Beta?', 'I love platforms.'],
+      ['Earliest start date?', 'June 2027'],
+      ['Are you willing to relocate?', ''],
+    ]);
+    // An empty one nobody wrote in goes, as it did; and no two share an id.
+    const ids = second.questions.map((q: { id: string }) => q.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('knows a question again however the form marks it up', async () => {
+    const first = (await open([{ question: 'Discipline' }])).body.draft;
+    first.questions[0] = { ...first.questions[0], answer: 'Computer Science', edited: true, source: 'human' };
+    await request(app).put(`/api/workspace/${first.id}`).send({ questions: first.questions }).expect(200);
+
+    const again = (await open([{ question: 'Discipline*', required: true }])).body.draft;
+    expect(again.questions).toHaveLength(1);
+    expect(again.questions[0]).toMatchObject({ answer: 'Computer Science', edited: true, required: true });
+  });
+
+  it('still lets the editor take a question out', async () => {
+    const first = (await open([{ question: 'Why Beta?' }, { question: 'Earliest start date?' }])).body.draft;
+    first.questions[0] = { ...first.questions[0], answer: 'I love platforms.', edited: true };
+    first.questions[1] = { ...first.questions[1], answer: 'June 2027', edited: true };
+    await request(app).put(`/api/workspace/${first.id}`).send({ questions: [first.questions[0]] }).expect(200);
+    expect(t.store.getDraft(first.id)!.questions.map((q) => q.question)).toEqual(['Why Beta?']);
+  });
+});
+
+/*
+ * The extension's "save to store" PUTs the letter it holds under the
+ * server's `letterId` for the job and the day — the id completing that job's
+ * application files its letter under — with nothing about the application.
+ * It replaced the filed letter and took its `applicationId` with it.
+ */
+describe('a letter saved again over one filed with its application', () => {
+  const filed = {
+    id: '2026-10-11-intel-software-engineer',
+    title: 'Software Engineer — Intel',
+    company: 'Intel',
+    role: 'Software Engineer',
+    createdAt: '2026-10-11T09:00:00.000Z',
+    body: 'Dear Intel, as sent.',
+    applicationId: '2026-10-11-intel-software-engineer',
+    tags: ['sent'],
+  };
+
+  it('keeps its link to the application, and takes the new text', async () => {
+    t.store.saveCoverLetter(filed);
+    const res = await request(app)
+      .put(`/api/letters/${filed.id}`)
+      .send({ id: filed.id, title: filed.title, company: 'Intel', role: 'Software Engineer', createdAt: new Date().toISOString(), body: 'Dear Intel, revised.' })
+      .expect(200);
+    const stored = t.store.loadCoverLetters().find((l) => l.id === filed.id)!;
+    expect(stored).toMatchObject({ applicationId: filed.applicationId, tags: ['sent'], body: 'Dear Intel, revised.', createdAt: filed.createdAt });
+    expect(res.body.applicationId).toBe(filed.applicationId);
+  });
+
+  it('is unlinked only when that is said', async () => {
+    t.store.saveCoverLetter(filed);
+    await request(app).put(`/api/letters/${filed.id}`).send({ body: filed.body, applicationId: null }).expect(200);
+    expect(t.store.loadCoverLetters().find((l) => l.id === filed.id)!.applicationId).toBeUndefined();
+  });
+
+  it('says what id the server gives a letter for a job today', async () => {
+    const { letterId } = await import('../src/jobs/answers.js');
+    const role = 'Software Engineer, Distributed Systems and Platform Infrastructure';
+    const res = await request(app).get('/api/letters/id').query({ company: 'Intel Corporation', role }).expect(200);
+    expect(res.body.id).toBe(letterId('Intel Corporation', role));
+    // Cut after the ends are trimmed, so a cut on a gap keeps its "-".
+    expect(res.body.id).toMatch(/^\d{4}-\d{2}-\d{2}-intel-corporation-software-engineer-distributed-$/);
   });
 });

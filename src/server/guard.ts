@@ -1,4 +1,4 @@
-import type { RequestHandler } from 'express';
+import type { Request, RequestHandler } from 'express';
 
 /**
  * This server is on loopback with no password, so "who is asking" is decided
@@ -40,12 +40,140 @@ export interface GuardOptions {
   host?: string;
   /** Extra names to answer to, e.g. `RMM_ALLOWED_HOSTS=rmm.local`. */
   allowHosts?: string[];
+  /**
+   * Whether a request from a browser extension carries a pairing token this
+   * server gave out, to that extension. Left out, no extension is paired.
+   * See `src/server/pairing.ts`.
+   */
+  paired?: (token: string | undefined, origin: string | undefined) => boolean;
+  /**
+   * Whether a path is one of the editor's own files — the page, its scripts,
+   * its styles — which hold nothing of the save. Served to a caller that says
+   * nothing about itself on a non-loopback name, because there the editor's
+   * own navigation to `/` says nothing either.
+   */
+  editorFile?: (path: string) => boolean;
 }
 
-const EXTENSION = /^chrome-extension:\/\/[a-p]+$/;
+const EXTENSION = /^chrome-extension:\/\/[a-p]{32}$/;
 const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-export function localOnly({ host, allowHosts = [] }: GuardOptions = {}): RequestHandler {
+/** The header a paired extension sends its token in. */
+export const PAIR_HEADER = 'X-RMM-Pair';
+
+const isLoopback = (header: string | undefined) => Boolean(header) && LOOPBACK.includes(hostName(header!));
+
+/**
+ * Whether `value`, an `Origin` or a `Referer`, is the address this request was
+ * sent to: same scheme-relative host and port as its `Host`.
+ */
+export function ownAddress(value: string, hostHeader: string | undefined): boolean {
+  if (!hostHeader) return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    return url.host === new URL(`${url.protocol}//${hostHeader}`).host;
+  } catch {
+    return false; // `null`, or something that is not a URL at all
+  }
+}
+
+/**
+ * A browser asking from somewhere that is not the editor, and not a person
+ * following a link: an extension, or a page's subresource. The origin when it
+ * says one, `''` when it does not, and `null` for everything else.
+ *
+ * Chrome leaves `Origin` off a GET an extension makes to a host it holds
+ * permission for — measured, from JobHelper's own service worker, with and
+ * without `no-cors`, and the reply was readable both times. So "no Origin"
+ * is not "not a browser". What every browser request to loopback does carry
+ * is `Sec-Fetch-Site`, which no page and no extension can set: `same-origin`
+ * from the editor, and `none` or `cross-site` from an extension. The CLI,
+ * scripts and tests send no `Sec-Fetch-Site` at all, and are local processes
+ * that can read the save off the disk anyway, so they are left alone.
+ *
+ * On loopback only. Chrome sends the `Sec-Fetch-*` headers to trustworthy
+ * origins alone, which for plain http means 127.0.0.1, localhost and ::1; at
+ * `http://rmm.test:4600` (`RMM_ALLOWED_HOSTS`) or a LAN name it sends none of
+ * them, from the editor or from an extension. So there, a request with none
+ * looked like the CLI, and an unpaired extension read the whole store, the
+ * full `/health`, and the live pairing code — and paired itself with it.
+ * The CLI and the macOS app only ever talk to 127.0.0.1, so on any other
+ * name the missing header proves nothing, and what the editor does send is
+ * a `Referer` of its own page on every fetch (and an `Origin` on every write
+ * and module script) — measured in Chromium at `http://rmm.test`. An
+ * extension's service worker cannot send either: its own `referrer` is
+ * ignored for another origin, and both headers are the browser's to write.
+ */
+export function foreignCaller(req: Request): string | null {
+  const origin = req.headers.origin;
+  if (typeof origin === 'string' && origin.startsWith('chrome-extension:')) return origin;
+  // A web page's own origin: a write is refused below, and a read is
+  // withheld by CORS, as before.
+  if (origin) return null;
+  const site = req.headers['sec-fetch-site'];
+  const mode = req.headers['sec-fetch-mode'];
+  if (typeof site === 'string') return site !== 'same-origin' && mode !== 'navigate' ? '' : null;
+  if (isLoopback(req.headers.host)) return null;
+  const referer = req.headers.referer;
+  return typeof referer === 'string' && ownAddress(referer, req.headers.host) ? null : '';
+}
+
+/**
+ * Whether the request positively comes from the editor: a browser saying it
+ * is same-origin, an `Origin` or `Referer` of this very address, or — on a
+ * loopback name only — no browser headers at all, which is the CLI or a script.
+ *
+ * Not "nothing says otherwise": that is what let a navigation, and every
+ * request on a non-loopback name, reach the routes that show the pairing code.
+ */
+export function fromEditor(req: Request): boolean {
+  const { origin, referer, host } = req.headers;
+  const site = req.headers['sec-fetch-site'];
+  if (typeof site === 'string') return site === 'same-origin' && (typeof origin !== 'string' || ownAddress(origin, host));
+  if (typeof origin === 'string') return ownAddress(origin, host);
+  if (typeof referer === 'string') return ownAddress(referer, host);
+  return isLoopback(host);
+}
+
+/**
+ * What an unpaired extension may still reach: whether the server is there,
+ * how to pair, and the bug-report inbox (which only takes a report in, and is
+ * how somebody says pairing does not work).
+ */
+export function openToUnpaired(method: string, path: string): boolean {
+  // As Express routes it: without regard to case, or to a trailing slash.
+  const p = path.toLowerCase().replace(/\/+$/, '') || '/';
+  if (p === '/health') return method === 'GET' || method === 'HEAD';
+  if (method !== 'POST') return false;
+  return p === '/api/extension/pair' || p === '/api/bug-reports';
+}
+
+export const NOT_PAIRED =
+  'This browser extension is not paired with ResumeM-M. In ResumeM-M, open Save & Files → Pair JobHelper, ' +
+  'make a code, and enter it in the extension.';
+
+/**
+ * What an extension hears when it sends no pairing header at all.
+ *
+ * Every JobHelper that knows about pairing sends `X-RMM-Pair` on every
+ * request, empty until it is paired. One that sends none was built before
+ * pairing existed, and has nowhere to enter a code: told to "make a code, and
+ * enter it in the extension", its owner made one and found no box to type it
+ * in. Its sends went untracked in the meantime, and nothing said why.
+ *
+ * But "none" is also what a JobHelper with a pairing box sends on the one
+ * request it makes without the header — and what a store reached by some
+ * other route sees — so "update it" sent somebody whose popup had a box for
+ * the code off to reinstall an extension that was not out of date. Both
+ * answers are given, by what the popup shows.
+ */
+export const OLDER_EXTENSION =
+  'This JobHelper did not send a pairing code. If its popup has a pairing box, make a code in ResumeM-M ' +
+  '(Save & Files → Pair JobHelper) and enter it there; if it has none, it is older than ResumeM-M: update it ' +
+  '(reload the unpacked extension from the new version).';
+
+export function localOnly({ host, allowHosts = [], paired = () => false, editorFile = () => false }: GuardOptions = {}): RequestHandler {
   const allowed = new Set([
     ...LOOPBACK,
     // Binding to every interface is a choice to be reachable by whatever name
@@ -66,13 +194,80 @@ export function localOnly({ host, allowHosts = [] }: GuardOptions = {}): Request
       return;
     }
 
+    /*
+     * An extension, only once it is paired.
+     *
+     * Every `chrome-extension://` origin was let through, and echoed in CORS,
+     * so any extension installed in the browser could read the whole store
+     * and write to it. Now the token has to be there and has to be the one
+     * this machine gave that extension. The refusal is readable — it says
+     * nothing about the save — so the extension can say what to do.
+     */
+    const foreign = foreignCaller(req);
+    let pairedNow = false;
+    if (foreign !== null && req.method !== 'OPTIONS') {
+      const token = req.headers[PAIR_HEADER.toLowerCase()];
+      pairedNow = EXTENSION.test(foreign) || foreign === ''
+        ? paired(typeof token === 'string' ? token : undefined, foreign || undefined)
+        : false;
+      res.locals.extension = { origin: foreign || null, paired: pairedNow };
+      /*
+       * Everything else is refused, not a list of what holds the save: Express
+       * matches `/API/store` to `/api`, and a list is one spelling away from
+       * a hole. Nothing an extension legitimately asks for is left out by
+       * this — the editor it frames is a navigation, and asks for its own
+       * files from its own origin.
+       */
+      /*
+       * On a name Chrome sends no `Sec-Fetch-*` to, typing the address is a
+       * navigation with no header at all — the same as an extension's fetch.
+       * So the editor's own files go to either, and nothing else does.
+       */
+      const anonymous = foreign === '' && !isLoopback(header);
+      const shell = anonymous && (req.method === 'GET' || req.method === 'HEAD') && editorFile(req.path);
+      if (!pairedNow && !shell && !openToUnpaired(req.method, req.path)) {
+        if (EXTENSION.test(foreign)) res.setHeader('Access-Control-Allow-Origin', foreign);
+        res.setHeader('Vary', 'Origin');
+        /*
+         * No header at all, rather than an empty one, from an extension: an
+         * extension older than pairing. See `OLDER_EXTENSION`. From its
+         * origin, or with none on loopback, which is how Chrome sends an
+         * extension's GET (see `foreignCaller`); not on another name, where
+         * "none" is as likely a typed address.
+         */
+        const older = !(PAIR_HEADER.toLowerCase() in req.headers) && (EXTENSION.test(foreign) || (foreign === '' && !anonymous));
+        res.status(403).json({
+          kind: 'not-paired',
+          error: token
+            ? `${NOT_PAIRED} The pairing this extension has was removed, or was made with another ResumeM-M.`
+            : older
+              ? OLDER_EXTENSION
+              : anonymous
+                ? `${NOT_PAIRED} If this is not an extension: open the editor at http://${header}/ and go from there.`
+                : NOT_PAIRED,
+        });
+        return;
+      }
+    }
+
     const origin = req.headers.origin;
     if (origin && WRITES.has(req.method)) {
-      let ok = EXTENSION.test(origin);
+      let ok = EXTENSION.test(origin) && (pairedNow || openToUnpaired(req.method, req.path));
       if (!ok) {
         try {
           const url = new URL(origin);
-          ok = (url.protocol === 'http:' || url.protocol === 'https:') && allowed.has(url.hostname.toLowerCase());
+          /*
+           * And on this server's own port. Any other port on loopback is
+           * another program — a dev server, a notebook, a page some tool
+           * serves — and a form on it posting here was let through for having
+           * the right name, which is the whole of the attack this check is
+           * for. The editor is served from here, so its origin is the
+           * address the request itself was sent to.
+           */
+          const own = header ? new URL(`http://${header}`) : undefined;
+          const ownPort = own ? Number(own.port || 80) : req.socket.localPort;
+          const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+          ok = (url.protocol === 'http:' || url.protocol === 'https:') && allowed.has(url.hostname.toLowerCase()) && port === ownPort;
         } catch {
           ok = false; // `null`, or something that is not a URL at all
         }

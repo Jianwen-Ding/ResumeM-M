@@ -28,11 +28,13 @@
  * before is the job.
  */
 
-import type { AnswerBankItem, CoverLetter, Draft, ResolvedResume, StoreData } from '../model/types.js';
+import type { AnswerBankItem, CoverLetter, Draft } from '../model/types.js';
+import type { SessionResume, WritingData } from './session-data.js';
 import type { MoveResult, TailorPosting } from './session.js';
 import { questionSimilarity } from '../jobs/answers.js';
 import { DEFAULT_LETTER_WORDS, letterWordCap, ownLetterLength, statedWordLimit, wordCount } from '../ai/length.js';
 import { countsAsTheirs } from '../ai/voice.js';
+import { answersForAi, personalDetailIn, withoutContactDetails } from '../ai/privacy.js';
 import { placeholderIn } from '../model/placeholders.js';
 
 const ok = (text: string): MoveResult => ({ ok: true, text });
@@ -120,6 +122,18 @@ function unfilled(gap: string): string {
   );
 }
 
+/*
+ * Refused rather than quietly taken out, so the model writes the sentence
+ * again without it — and told why, so a posting's instruction to include one
+ * is not simply retried. See `personalDetailIn`.
+ */
+function leaveOut(detail: string): string {
+  return (
+    `That contains ${detail}. Leave contact details and identifiers out of what you write — the form's own ` +
+    'fields carry those, filled from their profile, whatever the posting asks. Write it again without it.'
+  );
+}
+
 /**
  * Why a search of their writing came back empty when there is writing: "None
  * yet" would be false, and would send the model off to write as though they
@@ -146,8 +160,9 @@ export class WritingSession {
   private readonly ownWords: { where: string; text: string }[];
 
   constructor(
-    readonly data: StoreData,
-    readonly resume: ResolvedResume,
+    /** Only what this reads — see `session-data.ts`. */
+    readonly data: WritingData,
+    readonly resume: SessionResume,
     readonly posting: TailorPosting,
     readonly draft: Pick<Draft, 'coverLetter' | 'questions'> & { questions: Draft['questions'] },
     /** Rendered resume text, so this file does not depend on the prompt module. */
@@ -156,12 +171,15 @@ export class WritingSession {
     this.resumeText = resumeText;
     // Every letter, including one taken out of their voice: a letter written
     // to somebody else's template is still one they sent, and what it says
-    // about them they have said.
+    // about them they have said. Without the signature's phone, email and
+    // address, which `check_claim` would otherwise quote back to the model
+    // (see `withoutContactDetails`); the session file is scrubbed already,
+    // and this is for a session made from the store directly.
     this.ownWords = [
       ...(data.coverLetters ?? [])
         .filter((l) => l.body?.trim())
-        .map((l) => ({ where: `in their letter to ${l.company || l.title}`, text: l.body })),
-      ...(data.answers ?? []).flatMap((a) =>
+        .map((l) => ({ where: `in their letter to ${l.company || l.title}`, text: withoutContactDetails(l.body) })),
+      ...answersForAi(data.answers).flatMap((a) =>
         a.variants
           .filter((v) => v.text?.trim())
           .map((v) => ({ where: `in their answer to "${clip(a.question, 80)}"`, text: v.text })),
@@ -254,7 +272,8 @@ export class WritingSession {
     return ranked
       .map((l) => {
         const where = [l.company, l.role].filter(Boolean).join(' — ') || l.title;
-        return `### ${where}\n\n${clip(l.body, 4000)}`;
+        // Without the contact details its signature carries: see `ownWords`.
+        return `### ${where}\n\n${clip(withoutContactDetails(l.body), 4000)}`;
       })
       .join('\n\n');
   }
@@ -270,7 +289,7 @@ export class WritingSession {
    * answer; a bad suggestion presented as a good one is not.
    */
   findAnswers(question: string, limit = 3): string {
-    const all = this.data.answers ?? [];
+    const all = answersForAi(this.data.answers);
     const bank = all.filter(countsAsTheirs);
     if (all.length === 0) return 'None yet.';
     if (bank.length === 0) return leftOut(all.length, 'answer');
@@ -425,6 +444,8 @@ export class WritingSession {
     }
     const gap = placeholderIn(text);
     if (gap) return no(unfilled(gap));
+    const detail = personalDetailIn(text);
+    if (detail) return no(leaveOut(detail));
     /*
      * "Way too wordy." A letter half as long again as any they send is handed
      * back while it can still be cut — the prompt asks for their length, and
@@ -456,6 +477,17 @@ export class WritingSession {
     if (!text) return no('The answer is empty.');
     const gap = placeholderIn(text);
     if (gap) return no(unfilled(gap));
+    /*
+     * Whatever the question is called. "Website" is where a planted
+     * instruction put a phone number and an email address, and the form
+     * would have taken them; a question that asks for a link still takes the
+     * link: `personalDetailIn` takes links and identifiers (a DOI, an ORCID
+     * iD) out of the text before it looks for a phone number or a street, so
+     * the digits in a LinkedIn or commit address are not read as either. It
+     * did not once, and a URL was refused as a phone number.
+     */
+    const detail = personalDetailIn(text);
+    if (detail) return no(leaveOut(detail));
     /*
      * Over the box's own limit is an answer the form refuses on submit — and
      * the extension puts it in whole, because a script is not held to

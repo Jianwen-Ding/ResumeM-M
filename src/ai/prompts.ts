@@ -1,6 +1,7 @@
 import { buildVoiceContext, countsAsTheirs, renderVoiceContext } from './voice.js';
 import { DEFAULT_LETTER_WORDS, ownLetterLength, statedWordLimit, wordCount } from './length.js';
 import { questionSimilarity, relevantLetters } from '../jobs/answers.js';
+import { answersForAi, withoutContactDetails } from './privacy.js';
 import { looksLikeCompanyName } from '../jobs/extract.js';
 import { employerName } from '../model/applications.js';
 import { effortInstruction } from './presets.js';
@@ -224,7 +225,7 @@ function theRestOfTheStore(data: StoreData, resume: ResolvedResume): string {
     }
   }
 
-  const answers = data.answers.slice(0, 8);
+  const answers = answersForAi(data.answers).slice(0, 8);
   if (answers.length > 0) {
     lines.push('', '### Questions they have answered');
     for (const a of answers) {
@@ -280,7 +281,7 @@ function priorWorkIndex(data: StoreData, { question, job }: PriorWork): string {
   const letters = (data.coverLetters ?? [])
     .filter(countsAsTheirs)
     .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
-  const answers = (data.answers ?? []).filter(countsAsTheirs);
+  const answers = answersForAi(data.answers).filter(countsAsTheirs);
   if (letters.length === 0 && answers.length === 0) return '';
 
   const lines = ['## What they have written before', ''];
@@ -341,7 +342,7 @@ function priorWork(data: StoreData, { question, job, letters, skip }: PriorWork)
     (l) => countsAsTheirs(l) && (!skip?.letterId || l.id !== skip.letterId),
   );
 
-  const ranked = (data.answers ?? []).filter((a) => countsAsTheirs(a) && !skip?.answerIds.has(a.id));
+  const ranked = answersForAi(data.answers).filter((a) => countsAsTheirs(a) && !skip?.answerIds.has(a.id));
   if (question) {
     ranked.sort((a, b) => questionSimilarity(question, b.question) - questionSimilarity(question, a.question));
   }
@@ -360,7 +361,8 @@ function priorWork(data: StoreData, { question, job, letters, skip }: PriorWork)
         const letter = chosenLetters[i];
         if (!letter?.body?.trim()) continue;
         const where = [letter.company, letter.role].filter(Boolean).join(' — ') || letter.title;
-        const text = clip(letter.body, PRIOR_BUDGET - spent);
+        // Without its signature's phone, email and address: see `withoutContactDetails`.
+        const text = clip(withoutContactDetails(letter.body), PRIOR_BUDGET - spent);
         letterParts.push(`### ${where}\n\n${text}`);
         spent += text.length;
         continue;
@@ -440,7 +442,8 @@ export function startingPoint(
   // One taken out of their voice is not a place to start: this is where the
   // shape and the length of what they write are taken from.
   const usable = letter && countsAsTheirs(letter) ? letter : undefined;
-  const body = usable?.body?.trim() ?? '';
+  // Without its signature's contact details, as every letter shown to a model is.
+  const body = withoutContactDetails(usable?.body ?? '').trim();
   // A line or two is a note, not a letter to start from.
   const letterShown = Boolean(usable) && wordCount(body) >= 40;
   if (usable && letterShown) {
@@ -459,7 +462,7 @@ export function startingPoint(
   for (const question of questions) {
     // The same "about the question at all" line `find_my_answers` draws: the
     // best of a bad lot is not a place to start.
-    const closest = (data.answers ?? [])
+    const closest = answersForAi(data.answers)
       .filter(countsAsTheirs)
       .map((a) => ({ a, score: questionSimilarity(question, a.question) }))
       .filter(({ a, score }) => score > 0 && a.variants.some((v) => v.text?.trim()))

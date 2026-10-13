@@ -66,8 +66,8 @@ export type Season = 'spring' | 'summer' | 'fall' | 'winter';
 
 /** How this store writes a date, read back out of the store itself. */
 export interface DateStyle {
-  /** `Sep.` | `Sep` | `September` | `09` */
-  month: 'abbrDot' | 'abbr' | 'long' | 'numeric';
+  /** `Sep.` | `Sep` | `September` | `09/2024` | `2024-09` */
+  month: 'abbrDot' | 'abbr' | 'long' | 'numeric' | 'iso';
   /** What sits between the two ends, spaces included. */
   range: string;
   /** The word for an end that has not happened. */
@@ -158,8 +158,11 @@ function monthFromWord(
   if (abbr >= 0) return { month: abbr + 1, how: word.endsWith('.') ? 'abbrDot' : 'abbr' };
 
   // "Sept" is written often enough to be worth knowing, and it is nobody's
-  // three-letter abbreviation.
-  if (clean === 'sept') return { month: 9, how: 'abbr' };
+  // three-letter abbreviation. Its full stop is a vote like any other: "Sept."
+  // was counted as undotted, so a store written "Sept. 2022 -- May 2026"
+  // inferred `abbr` and every date touched afterwards lost its dot. It is
+  // written back as the store's own "Sep.", the way "Sept" comes back "Sep".
+  if (clean === 'sept') return { month: 9, how: word.endsWith('.') ? 'abbrDot' : 'abbr' };
   return null;
 }
 
@@ -179,7 +182,7 @@ function parsePoint(raw: string): { point: DatePoint; how?: DateStyle['month']; 
   if (iso) {
     const month = Number(iso[2]);
     if (month < 1 || month > 12) return null;
-    return { point: { year: Number(iso[1]), month }, how: 'numeric' };
+    return { point: { year: Number(iso[1]), month }, how: 'iso' };
   }
 
   // 07/2024 and 7/2024.
@@ -301,7 +304,7 @@ export function styleOf(raw: string): Partial<DateStyle> {
    */
   for (const month of text.matchAll(/([A-Za-z]{3,9}\.?)\s+\d{4}|\d{4}[-/]\d{1,2}|\d{1,2}[-/]\d{4}/g)) {
     if (!month[1]) {
-      found.month = 'numeric';
+      found.month = /^\d{4}/.test(month[0]) ? 'iso' : 'numeric';
       break;
     }
     const how = monthFromWord(month[1]);
@@ -378,6 +381,7 @@ function formatPoint(point: DatePoint, style: DateStyle): string {
   const season = point.season;
   if (season) return `${season[0]?.toUpperCase()}${season.slice(1)} ${point.year}`;
   if (point.month === undefined) return String(point.year);
+  if (style.month === 'iso') return `${point.year}-${String(point.month).padStart(2, '0')}`;
   if (style.month === 'numeric') return `${String(point.month).padStart(2, '0')}/${point.year}`;
   return `${formatMonth(point.month, style.month)} ${point.year}`;
 }

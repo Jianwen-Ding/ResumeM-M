@@ -637,3 +637,103 @@ describe('the awkward bytes', () => {
     await expect(extractText('', Buffer.from([0, 1, 2, 3]))).rejects.toThrow(/that file/);
   });
 });
+
+describe('a .docx read as a reader sees it', () => {
+  const W = (inner: string) => `<w:document><w:body>${inner}</w:body></w:document>`;
+  const p = (inner: string) => `<w:p>${inner}</w:p>`;
+  const r = (t: string) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+
+  it('leaves out a tracked deletion, a text box read twice, and a field code', async () => {
+    const box = p(r('SIDEBAR: Python, Go'));
+    const xml = W(
+      p(r('Deleted: ') + '<w:del w:id="1"><w:r><w:delText>OLD EMPLOYER</w:delText></w:r></w:del>' + r('end')) +
+        p(
+          '<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:txbxContent>' + box + '</w:txbxContent></mc:Choice>' +
+            '<mc:Fallback><w:pict><w:txbxContent>' + box + '</w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent></w:r>',
+        ) +
+        p('<w:r><w:instrText xml:space="preserve"> HYPERLINK "https://github.com/jdoe" </w:instrText></w:r>' + r('github.com/jdoe')),
+    );
+    const out = await extractText('resume.docx', makeZip('word/document.xml', Buffer.from(xml)));
+    expect(out.text).toBe('Deleted: end\n\nSIDEBAR: Python, Go\n\ngithub.com/jdoe');
+  });
+
+  it('draws a non-breaking hyphen as a hyphen and a carriage return as a new line', async () => {
+    const xml = W(
+      p(r('an e') + '<w:r><w:noBreakHyphen/></w:r>' + r('commerce co') + '<w:r><w:noBreakHyphen/></w:r>' + r('op')) +
+        p(r('Line one') + '<w:r><w:cr/></w:r>' + r('Line two')),
+    );
+    const out = await extractText('resume.docx', makeZip('word/document.xml', Buffer.from(xml)));
+    expect(out.text).toBe('an e-commerce co-op\n\nLine one\nLine two');
+  });
+
+  it('reads the page header, where the name and contact line often are', async () => {
+    const zip = makeZipOf([
+      ['word/document.xml', Buffer.from(W(p(r('Experience'))))],
+      ['word/header1.xml', Buffer.from(`<w:hdr>${p(r('Jane Doe | jane@example.com'))}</w:hdr>`)],
+    ]);
+    const out = await extractText('resume.docx', zip);
+    expect(out.text).toBe('Jane Doe | jane@example.com\n\nExperience');
+  });
+});
+
+/** A zip of several files, built from single-file ones. */
+function makeZipOf(files: [string, Buffer][]): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const [name, contents] of files) {
+    const one = makeZip(name, contents);
+    const nameLen = one.readUInt16LE(26);
+    const dataLen = one.readUInt32LE(18);
+    const localLen = 30 + nameLen + dataLen;
+    const central = Buffer.from(one.subarray(localLen, localLen + 46 + nameLen));
+    central.writeUInt32LE(offset, 42);
+    locals.push(one.subarray(0, localLen));
+    centrals.push(central);
+    offset += localLen;
+  }
+  const dir = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x0605_4b50, 0);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(dir.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, dir, eocd]);
+}
+
+describe('sorting a file, without losing what is short or what only sounds like an ending', () => {
+  const notes =
+    'Why us?\n\nYour mission.\n\nAre you authorized to work in the US?\n\nYes, I am a citizen.\n\n' +
+    'What is your notice period?\n\nTwo weeks from offer acceptance, negotiable.';
+
+  it('keeps a short question with its short answer', () => {
+    const made = sortByRules('notes.md', segment(notes));
+    expect(made.map((p) => p.text)).toContain('Why us?\n\nYour mission.');
+    expect(made.map((p) => p.text)).toContain('Are you authorized to work in the US?\n\nYes, I am a citizen.');
+  });
+
+  it('gives the rules what a model grouped too small to keep', () => {
+    const blocks = segment(notes);
+    const reply = JSON.stringify({ items: [{ blocks: [0], kind: 'answer' }, { blocks: [1], kind: 'answer' }, { blocks: [2], kind: 'answer' }] });
+    const made = readIngestPlan(reply, 'notes.md', blocks);
+    expect(made.map((p) => p.blocks)).toEqual([[0, 1], [2, 3], [4, 5]]);
+  });
+
+  it('does not end a letter at a sentence that starts with "Thanks"', () => {
+    const letter =
+      'Dear Acme team,\n\nI am applying for the platform role and have five years of Go.\n\n' +
+      'Thanks to my time at Beta, I learned Kafka.\n\nAt Beta I also led the migration to Kubernetes across 40 services.\n\n' +
+      'Sincerely,\n\nJane Doe';
+    const made = sortByRules('letter.txt', segment(letter));
+    expect(made).toHaveLength(1);
+    expect(made[0]!.kind).toBe('letter');
+    expect(made[0]!.text).toContain('Kubernetes');
+    expect(made[0]!.text.endsWith('Jane Doe')).toBe(true);
+  });
+
+  it('while a sign-off with the name on its line still ends one', () => {
+    const two = 'Dear Acme,\n\nI would like to apply for the role you posted.\n\nBest regards, Jane Doe\n\nDear Beta,\n\nI would like to apply for the role you posted too.';
+    expect(sortByRules('letters.txt', segment(two)).map((p) => p.kind)).toEqual(['letter', 'letter']);
+  });
+});

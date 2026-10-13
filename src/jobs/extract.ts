@@ -19,7 +19,9 @@ import {
   jobNumberIn,
   joinTitle,
   knownEmployer,
+  namesAJob,
   namesEmployer,
+  requisitionOf,
   ROLE_NOUN,
   siteSegment,
   splitTitle,
@@ -38,6 +40,13 @@ export interface ExtractedJob {
   source: 'json-ld' | 'meta' | 'heuristic';
   /** Technology and domain keywords, used to score variants without an AI call. */
   keywords: string[];
+  /**
+   * The requisition number the title carried and `title` has had cut — "12345678"
+   * of "Software Engineer Intern (12345678)". Kept so whatever files an
+   * application can tell two requisitions under one title apart: see
+   * `withRequisition`.
+   */
+  requisition?: string;
 }
 
 /** Terms worth matching against variant tags. Kept small and concrete. */
@@ -1151,10 +1160,50 @@ export function companyFromUrl(url: string | undefined): string | undefined {
     [/([\w-]+)\.jobylon\.com/i, 1],
     // ADP Workforce Now's candidate site: `myjobs.adp.com/<client>/cx/...`.
     [/myjobs\.adp\.com\/([^/?#]+)/i, 1],
+    // Cornerstone's careers site, under the client's tenant: `macomtech.csod.com/ux/ats/...`.
+    [/([\w-]+)\.csod\.com/i, 1],
   ];
+  /*
+   * Greenhouse's embedded form is at `/embed/job_app?for=<board>&token=…`, and
+   * the path's first segment — read as the board everywhere else — is "embed".
+   * Nuro's, Zipline's and Pinterest's forms were all filed under an employer
+   * called "Embed". The board is the `for` parameter.
+   */
+  if (/^https?:\/\/(?:job-)?boards(?:\.eu)?\.greenhouse\.io\/embed\//i.test(url)) {
+    let board: string | null = null;
+    try {
+      board = new URL(url).searchParams.get('for');
+    } catch {
+      board = null;
+    }
+    const named = board?.trim() ? (knownEmployer(board) ?? titleCased(board)) : undefined;
+    return named && !isRegion(named) && !isSeasonPhrase(named) && !isFieldOfWork(named) ? named : undefined;
+  }
+  /*
+   * Read off the host and the path only, and only where the system's own host
+   * is the page's host.
+   *
+   * Matched anywhere in the address, a tracker named in a query string —
+   * `?ref=acme.csod.com`, `?next=https://acme.homerun.co/x`, a bank's
+   * `?partner=acme.icims.com` — made a loan form an employer's careers page,
+   * and so a job application. So each pattern is tried against the host and
+   * path together, with no query or fragment, and has to start at the start
+   * of the host or of one of its labels and run to the end of the host: the
+   * same address in the path of somebody else's site is not that system.
+   */
+  let host = '';
+  let target = '';
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`);
+    host = parsed.hostname.toLowerCase();
+    target = host + parsed.pathname;
+  } catch {
+    return undefined;
+  }
   for (const [re, group] of patterns) {
-    const m = re.exec(url);
-    const raw = m?.[group];
+    const m = re.exec(target);
+    const onTheHost = m && m.index < host.length && (m.index === 0 || target[m.index - 1] === '.') && m.index + m[0].length >= host.length;
+    const raw = onTheHost ? m?.[group] : undefined;
     if (raw) {
       /*
        * iCIMS names a tenant for the careers site as often as for the
@@ -1162,8 +1211,8 @@ export function companyFromUrl(url: string | undefined): string | undefined {
        * front are the site's. Atlassian's Americas portal, taken as it came,
        * filed a job under "Careers Americas".
        */
-      const word = /\.icims\.com/i.test(url)
-        ? raw.replace(/^(?:careers?|jobs?|uscareers|external|internal|campus)-(?=[\w-]{2,})/i, '')
+      const word = /\.icims\.com$/i.test(host)
+        ? raw.replace(/^(?:(?:careers?|jobs?)(?:-?(?:us|usa|na|global|intl|international))?|uscareers|external|internal|campus)-(?=[\w-]{2,})/i, '')
         : raw;
       /*
        * Spelled the way the employer spells itself where that is known, and
@@ -1265,7 +1314,7 @@ export function extractKeywords(text: string): string[] {
  * which is honest, where a tidied "Greenhouse" would be a lie.
  */
 const NOT_THE_EMPLOYER =
-  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|myjobs\.adp|workforcenow\.adp|indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
+  /\b(greenhouse|lever|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|applytojob|successfactors|brassring|myworkdayjobs|workday|oraclecloud|csod|cornerstone|dayforcehcm|ultipro|paylocity|paycom|eightfold|phenompeople|avature|zohorecruit|personio|pinpointhq|comeet|bullhorn|myjobs\.adp|workforcenow\.adp|recruiting\.adp|ns2cloud|indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
 
 /**
  * The employer's name when nothing on the page gave one.
@@ -1335,9 +1384,16 @@ export function employerOrUnknown(...urls: (string | undefined)[]): string {
 const ORG_SUFFIX =
   /\b(inc|llc|l\.l\.c|ltd|limited|corp|corporation|company|co|holdings|group|partners|labs?|technologies|technology|systems|software|solutions|industries|ventures|capital|bank|university|college|institute|hospital|foundation|gmbh|plc|ag|nv|bv|sa|sas|srl|pty|oy|ab)\b\.?$/i;
 
-/** Names that are a page's furniture rather than anyone's employer. */
+/**
+ * Names that are a page's furniture rather than anyone's employer.
+ *
+ * And the screens around an application, which title themselves as plainly as
+ * any employer does: LinkedIn's messaging overlay ("Messaging"), ADP's
+ * candidate site ("Self Service"), iCIMS's chat widget ("Job Chat") and its
+ * profile step ("Candidate Profile") were each filed as the employer.
+ */
 const NOT_A_NAME =
-  /^(unknown( (company|employer|organi[sz]ation))?|n\.?\/?a|none|null|undefined|careers?|jobs?|job (description|posting|details?|opening)|apply|apply now|application|hiring|we ?('?re| are) hiring|now hiring|open (positions?|roles?)|home|homepage|company|employer|untitled|test|example|welcome|search|results?|opportunit(y|ies)|vacanc(y|ies)|the team|team)$/i;
+  /^(unknown( (company|employer|organi[sz]ation))?|n\.?\/?a|none|null|undefined|careers?|jobs?|job (description|posting|details?|opening)|apply|apply now|application|hiring|we ?('?re| are) hiring|now hiring|open (positions?|roles?)|home|homepage|company|employer|untitled|test|example|welcome|search|results?|opportunit(y|ies)|vacanc(y|ies)|the team|team|messag(e|es|ing)|inbox|chat|job chat|live chat|notifications?|feed|my network|(candidate |my |your )?profile|(candidate |employee |my )?dashboard|(candidate |employee )?self[- ]?service|my (jobs|applications|account)|candidate (portal|home|login))$/i;
 
 /**
  * What the employer is called when nothing that can be trusted names it.
@@ -1365,6 +1421,8 @@ export function looksLikeCompanyName(name?: string): boolean {
   // Without the trailing punctuation: "We are hiring!" is the same non-answer
   // as "We are hiring", and a page that shouts it is if anything more certain.
   if (NOT_A_NAME.test(n.replace(/[!?.]+$/, ''))) return false;
+  // The sign-in step in front of a form, and a legal form with no name before it.
+  if (/^(?:sign[ -]?(?:in|on|up)|log[ -]?(?:in|on)|inc|llc|l\.l\.c|ltd|limited|corp|corporation|co|plc|gmbh|ag|s\.?a)\.?$/i.test(n)) return false;
   // A sentence, a URL fragment, or a list is not a name.
   if (/[.!?]\s|[|<>{}]|\S@\S|^https?:/i.test(n)) return false;
   if (n.split(' ').length > 6) return false;
@@ -1377,7 +1435,8 @@ export function looksLikeCompanyName(name?: string): boolean {
    * letter is worse than not naming anyone at all.
    */
   if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(n)) return false;
-  if (ROLE_NOUN.test(n) && !ORG_SUFFIX.test(n)) return false;
+  // A firm named for its work is a name: "Thermagia Engineering". See `isFirmNamedForItsWork`.
+  if (namesAJob(n) && !ORG_SUFFIX.test(n)) return false;
   /*
    * When, where, and what kind of work — never who. Each of these was filed
    * as the employer, because it sat where a title puts the company:
@@ -1416,10 +1475,14 @@ const NOT_A_ROLE =
    * that starts with applying, and says nothing after it but where or how,
    * is the page talking about itself.
    *
+   * And the screens round an application — LinkedIn's "Messaging", ADP's
+   * "Self Service", iCIMS's "Job Chat" and "Candidate Profile" — which are
+   * refused as employers by `NOT_A_NAME` and are no more a job.
+   *
    * And the sign-in step in front of an application. iCIMS titles it "Login
    * | Careers Markon", and the card said the job was "Login".
    */
-  /^(log[ -]?in|log[ -]?on|sign[ -]?(in|on|up)|create (an |your )?account|register|registration|my account|job search|search jobs|apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|application (submitted|received|sent|complete|completed)|thank you( for (applying|your application))?|thanks|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome)$/i;
+  /^(log[ -]?in|log[ -]?on|sign[ -]?(in|on|up)|create (an |your )?account|register|registration|my account|job search|search jobs|apply|apply now|apply here|apply (for|to)\b[\w\s]{0,30}|application( form)?|job application|submit (your )?application|start (your )?application|application (submitted|received|sent|complete|completed)|thank you( for (applying|your application))?|thanks|careers?|jobs?|job (details?|description|posting|board)|candidate (portal|home|login|profile)|requisition|vacanc(y|ies)|openings?|current openings|join us|work (with|for) us|home|welcome|messag(e|es|ing)|inbox|(job |live )?chat|notifications?|feed|my network|(my |your )?profile|(candidate |my )?dashboard|(candidate |employee )?self[- ]?service)$/i;
 
 /**
  * The role, read out of the address, when the page itself never says it.
@@ -1586,6 +1649,14 @@ const A_POST =
  * themselves, which is a moment's work. Accepting a non-role puts a line in
  * the one list that is supposed to be the record of what they have done.
  */
+/*
+ * What a page or a posting says about itself or about the work's terms, and
+ * which was filed as the role: an error page, an empty tab, the About page,
+ * a working arrangement, and the tracker's own screen.
+ */
+const NOT_A_JOB_TITLE =
+  /^(?:(?:page|job|posting) not found|404(?: not found)?|not found|untitled(?: page| document)?|about(?: us)?|contact(?: us)?|remote|hybrid|on-?site|in[- ]office|full[- ]?time|part[- ]?time|contract|temporary|permanent|my applications|applications)$/i;
+
 export function looksLikeRoleTitle(role?: string): boolean {
   const r = (role ?? '').trim().replace(/\s+/g, ' ');
   if (r.length < 2 || r.length > 120) return false;
@@ -1593,7 +1664,11 @@ export function looksLikeRoleTitle(role?: string): boolean {
   if (/^https?:|^www\.|\?[a-z0-9_]+=|&[a-z0-9_]+=/i.test(r)) return false;
   // A bare hostname, for the same reason `looksLikeCompanyName` refuses one.
   if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(r)) return false;
+  // A repository, "owner/name" and its description: GitHub's title for a README.
+  // With its description: "Intern/Co-op" and "Developer/Engineer" are jobs.
+  if (/^[\w.-]+\/[\w.-]+:\s/.test(r)) return false;
   if (NOT_A_ROLE.test(r.replace(/[!?.]+$/, ''))) return false;
+  if (NOT_A_JOB_TITLE.test(r.replace(/[!?.]+$/, ''))) return false;
   if (A_LIST_OF_JOBS.test(r)) return false;
   /*
    * A word, somewhere in it. `R-129384` and `4021_A` are requisition numbers
@@ -1710,6 +1785,31 @@ interface TitleReading {
  * And each is still held to `acceptEmployer`, so "Summer 2027" and "US" are
  * refused even where they stand.
  */
+/*
+ * The employer the address names, written out in full by the title.
+ *
+ * Lever's titles are "{employer} - {job}", and the address has the employer
+ * as a slug: `jobs.lever.co/demiurgestudios` titled "Demiurge Studios - 2027
+ * Associate Software Engineer", `jobs.lever.co/palantir` titled "Palantir
+ * Technologies - Forward Deployed Software Engineer". Neither is the slug's
+ * name exactly, so the employer stayed on the front of the role — and
+ * "Demiurgestudios" went on the letter.
+ */
+const squashed = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+function spellsOut(segment: string, employers: string[]): string | undefined {
+  for (const employer of employers) {
+    const e = employer.trim();
+    if (!e) continue;
+    if (/\s/.test(segment) && squashed(segment) === squashed(e)) return segment;
+    const rest = segment.slice(e.length).trim();
+    if (segment.toLowerCase().startsWith(`${e.toLowerCase()} `) && rest && ORG_SUFFIX.test(rest)) return segment;
+  }
+  return undefined;
+}
+
+/** A company's legal form, as the last word of its name: "Inc.", "B.V", "GmbH". */
+const LEGAL_ENTITY = /\b(?:inc|llc|l\.l\.c|ltd|limited|corp|corporation|holdings|gmbh|plc|ag|s\.?a|n\.?v|b\.?v)\.?$/i;
+
 function readTitle(
   raw: string | undefined,
   ctx: { employers: string[]; unnamed: boolean; onBoard: boolean },
@@ -1718,7 +1818,7 @@ function readTitle(
   const said = raw ? withoutTitleNoise(raw) : '';
   if (!said) return out;
   let segments = splitTitle(said);
-  const aName = (s: string) => Boolean(acceptEmployer(s, { onBoard: ctx.onBoard, pageDerived: true })) && !ROLE_NOUN.test(s);
+  const aName = (s: string) => Boolean(acceptEmployer(s, { onBoard: ctx.onBoard, pageDerived: true })) && !namesAJob(s);
   const pageWord = (s: string) => NOT_A_ROLE.test(s.replace(/[!?.]+$/, ''));
   const careersOf = (name?: string) => (name ? acceptEmployer(name, { onBoard: ctx.onBoard, pageDerived: true }) : undefined);
   let fromBoard = false;
@@ -1754,6 +1854,20 @@ function readTitle(
       suffixGone = true;
       continue;
     }
+    /*
+     * A legal entity after a strong separator, when the employer is already
+     * known and this is another name for it — the group it belongs to.
+     * Epsilon's iCIMS titles its posting "Software Engineering Internship -
+     * Summer 2027 in Irving, Texas | Publicis Groupe Holdings B.V", and the
+     * whole of that was filed as the role, so the same job reached from its
+     * form, which says only the job, was a second row. Not taken as the
+     * employer: the address already said who, and said it better.
+     */
+    if (segments.length > 1 && last.strong && !ctx.unnamed && LEGAL_ENTITY.test(s) && aName(s)) {
+      segments.pop();
+      suffixGone = true;
+      continue;
+    }
     break;
   }
 
@@ -1780,6 +1894,7 @@ function readTitle(
       rest.length > 0 &&
       aName(s) &&
       (namesEmployer(s, ctx.employers, { exact: true }) ||
+        Boolean(spellsOut(s, ctx.employers)) ||
         (rest[0]!.strong && ctx.unnamed && rest.some((r) => ROLE_NOUN.test(r.text))))
     ) {
       out.company ??= s;
@@ -1932,7 +2047,9 @@ function withoutEqualOpportunityStatement(text: string): string {
  * writes needs one. A mailbox the company keeps for applicants — careers@,
  * jobs@, recruiting@ — is how to apply, and is left.
  */
-const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
+// From the start of the run only: with `\b` it was tried again from inside a
+// long run of address characters with no @ in it, once per character.
+const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
 const COMPANY_MAILBOX =
   /^(?:careers?|jobs?|recruit\w*|talent\w*|hr|hiring|apply|applications?|people|accommodations?|accessibility|staffing|employment|resumes?|cv|info|hello|contact|privacy)$/i;
 const PHONE =
@@ -2034,10 +2151,19 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
     worthy(declared) ??
     (fromTitle && ROLE_NOUN.test(fromTitle) ? fromTitle : undefined) ??
     worthy(headingRole(html)) ??
-    (fromTitle && !addressShaped(fromTitle) && !(soleName && !namedElsewhere) ? fromTitle : undefined) ??
-    worthy(roleFromUrl(url));
+    /*
+     * The address before a title that names no job, when the address does
+     * name one. Iridium's self-identification step is titled with its
+     * tagline, "Truly Global Communications", which was filed as the role of
+     * a third row for an application already sent — while its address read
+     * `/jobs/5136/iridium-software-engineering-internship-–-summer-2027/form`.
+     * `roleFromUrl` only answers with a role noun in it, so "Product
+     * Marketing, Early Career" at an address that names nothing still stands.
+     */
+    worthy(roleFromUrl(url)) ??
+    (fromTitle && !addressShaped(fromTitle) && !(soleName && !namedElsewhere) ? fromTitle : undefined);
 
-  const company =
+  const named =
     fromData ??
     fromAddress ??
     titled.hiring ??
@@ -2046,11 +2172,41 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
     titled.company ??
     titled.careersOf ??
     (soleName && soleName !== rawTitle ? soleName : undefined);
+  /*
+   * The title's spelling of the address's employer: "Demiurge Studios", not
+   * "Demiurgestudios"; "Headlands Technologies LLC" — Greenhouse's "… at
+   * Headlands Technologies LLC" — not "Headlandstechnologiesllc", which an
+   * answer written for that application then named.
+   */
+  const spelt =
+    named && !fromData && named === fromAddress
+      ? [titled.company, titled.at, titled.hiring, fromSite].find(
+          (n) =>
+            n &&
+            (squashed(n) === squashed(named) ||
+              // "Freedom Consulting Group" for `freedomconsulting`: the slug and an organisation's word.
+              (squashed(n).startsWith(squashed(named)) &&
+                /^(?:inc|llc|ltd|corp|corporation|company|co|group|holdings|technologies|technology|labs?|systems|solutions)+$/.test(
+                  squashed(n).slice(squashed(named).length),
+                ))),
+        )
+      : undefined;
+  const company = spelt ?? named;
 
   // Page titles routinely carry the company along; the company has its own
   // field, and repeating it in the role reads badly everywhere it is shown.
   const unAt = rawTitle?.replace(/\s+at\s+[A-Z][\w&.\- ]{1,40}\s*$/, '').trim() || rawTitle;
   const title = cleanRole(unAt, company, ...employers);
+  /*
+   * And the requisition number it cut, read off whichever of the title's
+   * sources still has one: the cut above, and `readTitle` before it, may have
+   * taken it already.
+   */
+  const requisition = title
+    ? [unAt, ld?.title, og, pageTitle]
+        .map((t) => requisitionOf(t, company, ...employers, titled.company, titled.careersOf))
+        .find(Boolean)
+    : undefined;
 
   // A structured description is authoritative even when it is short — it is the
   // posting itself, where the page text is the posting plus navigation, cookie
@@ -2096,6 +2252,7 @@ export function extractJob(html: string, url?: string, said?: string): Extracted
   return {
     title,
     company,
+    ...(requisition ? { requisition } : {}),
     location: ld?.location,
     description: description.slice(0, 40_000),
     source: ld ? 'json-ld' : metaContent(html, ['og:title']) ? 'meta' : 'heuristic',
@@ -2122,9 +2279,87 @@ export interface PageVerdict {
   why: string[];
 }
 
-const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|successfactors|brassring|myjobs\.adp|workforcenow\.adp)\b/i;
+/*
+ * Pinpoint, Personio, Comeet, Zoho Recruit and JazzHR's applytojob hosts were
+ * missing, and once the form had to show a job somewhere (see `forAJob`) the
+ * tracker's address was the only evidence their quick-apply pages carried.
+ */
+/*
+ * Words in an address's path that say the form is for something other than a
+ * job — see `careersAddress` in `classifyPage` — unless a role's name follows,
+ * as in `/jobs/loan-officer`.
+ *
+ * Anywhere later in the same segment, not only as the next word, and after a
+ * "." as well as a "-" or "_". Only the next word was looked at, so real job
+ * forms were read as something else and lost their careers address:
+ * `/careers/mortgage-loan-officer`, `/careers/loan-servicing-specialist`,
+ * `/jobs/insurance-sales-agent-12345`, `/careers/fair-lending-analyst`,
+ * `/job/4821/events-sales-manager`, `/jobs/event.coordinator`. And the role
+ * nouns stopped short: an engineer, an administrator, an adjuster, a
+ * producer, an executive, a developer or event staff were not roles to it.
+ */
+const ROLE_AFTER_A_PURPOSE =
+  /(?:officers?|advis[eo]rs?|analysts?|specialists?|agents?|underwriters?|processors?|managers?|coordinators?|consultants?|representatives?|associates?|assistants?|planners?|brokers?|clerks?|leads?|directors?|counsel(?:l?ors?)?|recruiters?|engineers?|administrators?|adjusters?|staff|producers?|executives?|developers?|designers?|supervisors?|technicians?|operators?|attendants?|marketers?|writers?|scientists?|investigators?|examiners?|auditors?|inspectors?|accountants?|interns?)/
+    .source;
+const NOT_A_JOB_WORD =
+  /(?:loans?|mortgages?|admissions?|registrations?|register|enrol(?:l)?(?:ment)?s?|events?|fairs?|insurance|rentals?|lettings?|tenanc(?:y|ies)|leases?|quotes?)/
+    .source;
+/*
+ * But not anywhere later in the segment: a role noun four words on was enough,
+ * and so was one after "for", which names who an event is for rather than the
+ * job: `/apply/events-for-developers-48213`, `/apply/fair-for-engineers-55555`
+ * and `/apply/insurance-for-developers-48213` were all read as roles, and
+ * their forms as job applications. At most two words between the purpose word
+ * and the role, and neither of them "for" or "and" — "and" joins a second
+ * thing, `/events-and-staff`, not a longer name for the first.
+ */
+const BETWEEN_PURPOSE_AND_ROLE = /(?:[_.-](?!(?:for|and)(?![a-z0-9]))[a-z0-9]+){0,2}/.source;
+const NOT_A_JOB_PATH = new RegExp(
+  `(?:^|[/_.-])${NOT_A_JOB_WORD}(?![a-z])(?!${BETWEEN_PURPOSE_AND_ROLE}[_.-]${ROLE_AFTER_A_PURPOSE}(?![a-z]))`,
+);
+/*
+ * The same word as the whole of a segment: a department or a team on an
+ * employer's careers site, `/careers/insurance/claims-adjuster-4821`, rather
+ * than what the form is for. See `careersAddress`.
+ *
+ * Only a line of business, which is what an employer's departments are
+ * named for: insurance, loans, mortgages, leases, rentals. Every purpose
+ * word was one, so `/careers/events/48213`, `/careers/fairs/12345` and
+ * `/careers/admissions/apply/12345` — a university careers office's fair and
+ * admission forms — had their "events", "fairs" and "admissions" read as the
+ * team the job was in, the number beside them as the job's, and were job
+ * applications. An event, a fair, a registration, an admission or an
+ * enrolment is what a form is for, never who it is hiring for.
+ */
+const BUSINESS_LINE_SEGMENT = /^(?:loans?|mortgages?|insurance|leases?|rentals?)$/;
+/*
+ * And the same word straight after a `/jobs` segment names which jobs: `/careers/jobs/events`
+ * is the events team's openings, as `/jobs/engineering` is engineering's.
+ * After `/careers` it is the careers office's own events, `/careers/events`.
+ */
+const NOT_A_JOB_SEGMENT = new RegExp(`^${NOT_A_JOB_WORD}$`);
+
+function decodeURIComponentSafe(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|applytojob|successfactors|brassring|pinpointhq|personio|comeet|zohorecruit|myjobs\.adp|workforcenow\.adp|recruiting\.adp)\b/i;
 const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y|ies)|apply|application|hiring|req|requisition)(\/|$|[?#])/i;
 const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
+/** What a hiring thread calls itself: "[Hiring]", "Who is hiring?", "We're hiring". */
+const HIRING_MARKER =
+  /\[\s*hiring\s*\]|\(\s*hiring\s*\)|\bwho\s*(?:is|['’]s)\s+hiring\b|\bwe\s*(?:are|['’]re)\s+hiring\b|\bnow\s+hiring\b|^\s*hiring\s*[:\-–—]/i;
+
+/** A person's page on a network, which has their job title for a title. */
+const PROFILE_PAGE = /\blinkedin\.com\/(?:in|pub)\//i;
+
+/** An encyclopedia or a dictionary, whose entry for a job is titled with it. */
+const REFERENCE_SITE = /(?:^|\.)(?:wikipedia|wiktionary|wikihow|britannica|merriam-webster|dictionary)\.(?:org|com)$/i;
+
 const FORUM = /\b(news\.ycombinator|reddit|lobste\.rs|discourse|forum|stackexchange|quora|levels\.fyi|blind)\b/i;
 
 /**
@@ -2196,6 +2431,23 @@ const LISTING_WORDS = [
   'results found', 'jobs found', 'sort by', 'view all openings', 'browse jobs',
 ];
 
+/**
+ * Words only an employer's form says: the questions about the job itself
+ * rather than about you. See `forAJob` in `classifyPage`.
+ *
+ * Not "job title" or "employer", which a loan, a lease and an insurance quote
+ * all ask about the job you already have; and not "visa", which is half of
+ * what an embassy's form is about. Sponsorship is asked of a candidate in
+ * words a visa form does not use.
+ */
+const JOB_FORM_WORDS = [
+  'cover letter', 'work authorization', 'authorized to work', 'authorised to work', 'legally authorized',
+  'require sponsorship', 'requires sponsorship', 'visa sponsorship', 'sponsorship for employment',
+  'voluntary self-identification', 'equal opportunity employer', 'employment history', 'work history',
+  'requisition', 'job id', 'this position', 'the position', 'position you', 'position applied',
+  'this role', 'the role', 'why do you want to work', 'desired salary', 'salary expectations',
+];
+
 /** Pages that look busy but are not about a job at all. */
 const AGAINST = [
   'add to cart', 'checkout', 'privacy policy', 'terms of service', 'cookie preferences',
@@ -2221,7 +2473,13 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   };
 
   if (/"@type"\s*:\s*"?JobPosting/i.test(html)) add(6, 'structured JobPosting data');
-  if (ATS.test(link)) add(4, 'applicant tracking system');
+  /*
+   * By the host, as the boards below are. Read anywhere in the address, a
+   * tracker's name in a query string — `?partner=acme.icims.com`, a
+   * `?ref=jobs.lever.co/acme` — counted a bank's loan form as on a tracker.
+   */
+  const onATracker = ATS.test(hostOf(url));
+  if (onATracker) add(4, 'applicant tracking system');
   /*
    * By the host. The whole address said "LinkedIn" for any posting a board
    * sent you to: ADP tags its links `?rb=LINKEDIN`, and Lever and Greenhouse
@@ -2287,11 +2545,19 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   const uploadsResume =
     !thread &&
     /<input[^>]+type=["']?file/i.test(html) &&
-    /\bcv\b|résum|resum/i.test(text) &&
+    // And in the languages a form most often asks for one in.
+    /\bcv\b|résum|resum|lebenslauf|currículum|简历/i.test(text) &&
     asksWhoYouAre;
   if (uploadsResume) add(3, 'asks for a resume file');
 
-  const forumHiring = FORUM.test(link) && /\b(hiring|who is hiring|looking for|we are hiring)\b/i.test(text);
+  /*
+   * The thread has to say it is hiring where a thread says what it is: in
+   * its title or its heading. "Looking for" and "hiring" anywhere in the body
+   * made every r/cscareerquestions thread asking for advice a hiring thread —
+   * "Looking for advice", "I was looking for a job for months".
+   */
+  const headline = `${/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? ''} ${/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html)?.[1] ?? ''}`;
+  const forumHiring = FORUM.test(link) && HIRING_MARKER.test(stripTags(headline));
   if (forumHiring) add(3, 'a hiring thread');
 
   const against = countIn(text, AGAINST);
@@ -2340,11 +2606,28 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * through.
    */
   const aRole = (said: string) => {
-    const named = stripTags(said).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
-    return (
-      named.split(/\s+/).length <= 8 &&
-      (ENDS_WITH_ROLE.test(named) || LEADS_WITH_ROLE.test(named)) &&
-      !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my)\b/i.test(named)
+    const first = stripTags(said).split(/\s+[–—|]\s+|\s+\bat\b\s+|,/)[0]?.trim() ?? '';
+    /*
+     * And the same with a hyphen as the separator, and without what a title
+     * puts in brackets after the role: "Senior Software Engineer (Remote) -
+     * Acme Careers", "Backend Developer (m/w/d)", "Software Engineering
+     * Internship - Summer 2027". Each named no role, because the role word
+     * was not the end of anything. Both readings are tried, so a title that
+     * puts the employer first with a hyphen still names its role as before.
+     */
+    const bare = (n: string) => n.replace(/(?:\s*\([^()]*\))+$/, '').trim();
+    const hyphened = bare(first.split(/\s+-\s+/)[0]!);
+    /*
+     * The hyphen reading only where the role is written as a title is, with a
+     * capital: "Twitter fires outspoken engineer - The Verge" is a headline.
+     */
+    const titled = (ROLE_WORDS.exec(hyphened.split(/\s+/).slice(-2).join(' '))?.[0] ?? '').match(/^[A-Z]/);
+    const named = [bare(first), ...(titled ? [hyphened] : [])];
+    return named.some(
+      (n) =>
+        n.split(/\s+/).length <= 8 &&
+        (ENDS_WITH_ROLE.test(n) || LEADS_WITH_ROLE.test(n)) &&
+        !/^(how|why|what|when|where|the|a|an|is|are|should|we|our|i|my|becoming|being|life|inside)\b/i.test(n),
     );
   };
   /*
@@ -2355,7 +2638,42 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * and the application started, nameless, on the form three steps later.
    * Its `og:title` is the role: "Software Engineering Intern".
    */
-  const namesARole = !thread && (aRole(heading) || aRole(metaContent(html, ['og:title']) ?? ''));
+  /*
+   * Never a page that says it is something else: an article (`og:type`), a
+   * person's profile, an encyclopedia's entry. Each has a job title for a
+   * title — "Becoming a Staff Engineer", "Jane Doe - Senior Software
+   * Engineer | LinkedIn", "Software engineer - Wikipedia" — and none is a
+   * job anybody can apply for.
+   */
+  const notAPosting =
+    /^article$/i.test(metaContent(html, ['og:type'])?.trim() ?? '') ||
+    PROFILE_PAGE.test(link) ||
+    REFERENCE_SITE.test(hostOf(url));
+  /*
+   * Or the address names one job and the page reads like a posting: a job's
+   * number in the URL and three or more of a posting's words. Roles no list
+   * of role words reaches — "Barista", "Pharmacist", "Product Owner" — are
+   * still one job when the address says which. Only an address that is a
+   * job's, by its path or its host: a news story's number is not one.
+   *
+   * Nor one whose path says the number is something else's. A careers
+   * office's fair, `/careers/events/48213` or `/careers/fairs/12345`, has an
+   * event's number under a careers path and describes itself in a posting's
+   * words — requirements, full-time, part-time — and named a role by that
+   * alone, which made its registration form a job application. Read here
+   * from `readCareersAddress`, further down, where the address's other
+   * evidence is weighed.
+   */
+  const careersAddress = readCareersAddress();
+  const numberedPosting =
+    Boolean(jobNumberIn(url)) &&
+    !careersAddress.otherPurpose &&
+    (JOB_PATH.test(link) || onATracker || BOARD.test(hostOf(url))) &&
+    described >= 3;
+  const namesARole =
+    !thread &&
+    !notAPosting &&
+    (aRole(heading) || aRole(metaContent(html, ['og:title']) ?? '') || numberedPosting);
 
   const hasFields = /<(input|textarea|select)\b/i.test(html);
   /*
@@ -2376,11 +2694,163 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * was satisfied by any page with a textarea that discussed applications
    * three times, which is a chat window, a pull request, and a support thread.
    */
-  const actionable =
+  /*
+   * And the job has to be on the form somewhere.
+   *
+   * Reported from life: a bank's personal-loan application came back as a job
+   * application with a score of 8, and when the user pressed Submit the
+   * tracker gained an "applied" row for "Bank / Personal loan application"
+   * and the answer bank gained their annual income. Every test above passed
+   * on it honestly. It asked who you are; it said "first name", "last name"
+   * and "submit application", which is three of a form's words; it lived
+   * under /application/; and "requirements" and "benefits" in its blurb read
+   * as a posting's. So does an insurance quote, a university's admission
+   * form and a letting agent's rental application — each is an application
+   * form, and the word "application" is all the rule was looking at.
+   *
+   * What none of them has is a job. A job application gives itself away in
+   * at least one of a handful of ways: it wants a résumé, it is on a
+   * tracker's or a board's address, it declares a JobPosting, its title names
+   * the role, or it asks the questions only an employer asks — a cover
+   * letter, whether you may work here, the position or requisition you are
+   * applying for, where you have worked before. A form with none of these is
+   * collecting you for something else, and asking for a name, an email and
+   * an income is exactly what that something else does.
+   */
+  /*
+   * Three more, because the list above missed real job forms that it used to
+   * catch: an employer's own quick-apply page — careers.acme.com/apply/4821,
+   * jobs.acme.com/careers/apply?step=1 — asks who you are and for your
+   * LinkedIn and says nothing else, and the trackers whose names `ATS` did not
+   * know carried no evidence but their address.
+   *
+   * - an address any of `companyFromUrl`'s systems would read an employer
+   *   from, which is a tracker's address by construction;
+   * - a careers address: a `/careers` or `/jobs` segment in the path, or a
+   *   `careers.` or `jobs.` host. Not `/apply` or `/application` alone,
+   *   which is where the bank's loan form lives;
+   * - a LinkedIn profile field, which a loan, a lease, an insurer and a
+   *   university have no use for.
+   *
+   * Each of those was then found reading too much as a job:
+   *
+   * - the careers address was tested on the whole address, so a loan form
+   *   at `/loans/apply?returnTo=/careers/` or `#jobs` had one. It is the path
+   *   and the host now, nothing after them;
+   * - and a careers-looking host or path is not enough when the path says
+   *   what else it is for: a credit union's `jobs.example-cu.org/loans/apply`,
+   *   `/job/loan-application`, a university's
+   *   `/careers/events/fair-registration`. A loan, a mortgage, an admission,
+   *   a registration, an event or fair, insurance or a rental in the path
+   *   takes the careers address away — unless the word is the start of a
+   *   role's name, `/jobs/loan-officer`, `/careers/admissions-counselor`;
+   * - a LinkedIn field asked for by an MBA admission or an accelerator's
+   *   founder form as readily as by an employer, so on its own it says
+   *   nothing. It counts with a job's number in the address beside it.
+   */
+  function readCareersAddress() {
+    let parsed: URL;
+    try {
+      parsed = new URL(url ?? '');
+    } catch {
+      return { careers: false, otherPurpose: false, numbered: false };
+    }
+    const where = decodeURIComponentSafe(parsed.pathname).toLowerCase();
+    const careersHost = /^(?:careers?|jobs?)\./.test(hostOf(url));
+    const careers = /\/(?:careers?|jobs?)(?:\/|$)/.test(where) || careersHost;
+    /*
+     * A job's number: four digits or more, or three after a letter or a
+     * hyphen — `r123`, `job-123`, `req-456`, which is how a small employer's
+     * own site numbers its few openings. A bare "123" is still a page's
+     * number, not a job's.
+     *
+     * "Any digit" was the test once, so an accelerator's `/apply/s2027`,
+     * `/apply/w27`, an MBA's `/apply/mba-2027` and `/application/fall2027`
+     * were all a job's number, and their founder and admission forms, which
+     * ask for a LinkedIn profile too, were job applications. Then every year
+     * was refused, which cost `/apply/2027` and `/apply/swe-intern-2027`, the
+     * forms for the class of 2027's roles. A year is the cohort's only when a
+     * cohort's word is in the segment with it: an MBA, a term, "cohort", or
+     * an accelerator's batch, S27, W27 or S2027.
+     */
+    const COHORT = /(?:^|[^a-z])(?:mba|fall|spring|summer|winter|autumn|cohort|batch|[sw](?:19|20)?\d\d)(?![a-z])/;
+    const numberIn = (segment: string) =>
+      [...segment.matchAll(/\d+/g)].some(({ 0: run, index }) => {
+        const prefixed = index! > 0 && /[a-z-]/.test(segment[index! - 1]!);
+        if (run.length < (prefixed ? 3 : 4)) return false;
+        return !(/^(?:19|20)\d\d$/.test(run) && COHORT.test(segment));
+      });
+    const segments = where.split('/').filter(Boolean);
+    const afterApply = segments.filter((_, k) => k > 0 && /^(?:apply|application|jobs?|careers?)$/.test(segments[k - 1]!));
+    const numbered = Boolean(jobNumberIn(url)) || afterApply.some(numberIn);
+    /*
+     * What the form is for is said after the careers segment, not before it.
+     * `acme.example/events/careers/apply` is the careers section of a site
+     * that also runs events, and `/careers/jobs/events` is the events team's
+     * openings (see `NOT_A_JOB_SEGMENT`); both were read as an event's form
+     * once "events" anywhere in the path took the careers address away, and
+     * both are quick-apply job forms, as rounds 10 to 14 had them. Neither
+     * reading reaches a purpose word written after `/careers` itself:
+     * `/careers/events/register` is still a fair's form.
+     */
+    const firstCareers = segments.findIndex((seg) => /^(?:careers?|jobs?)$/.test(seg));
+    const purposeSegments = segments
+      .slice(Math.max(firstCareers, 0))
+      .filter((seg, k, all) => !(k > 0 && /^jobs?$/.test(all[k - 1]!) && NOT_A_JOB_SEGMENT.test(seg)));
+    const purpose = `/${purposeSegments.join('/')}`;
+    /*
+     * And not when a careers address says which job it is: a business line
+     * as a segment of its own under a careers path, beside a number, is the
+     * department the job is in — `/careers/insurance/claims-adjuster-4821`,
+     * `careers.acme.com/job/4821/insurance`. A loan's or a fair's form under
+     * a careers address — `jobs.example-cu.org/careers/loans/apply`,
+     * `/careers/events/fair-registration` — has no number and is still not a
+     * job.
+     *
+     * Under a careers *path* only. A careers host on its own is no evidence
+     * that the first segment is a department: a credit union's
+     * `jobs.cu.example/loans/apply-online-48213` is its loan form with a
+     * reference number, and was a job application.
+     *
+     * `jobNumberIn(url)` on its own used to say which job too, whatever the
+     * path said the form was for, so a careers office's
+     * `/careers/events/48213` and `/careers/fairs/12345` were job forms by
+     * their event's number. The number has to be beside nothing that says
+     * otherwise. That leaves `/careers/events/apply/4821` with no job on it
+     * unless the page says so: a role in its title, a résumé, an employer's
+     * questions — any of `forAJob`'s other evidence — still make it a job
+     * form, and a page with none of them is as likely the careers office's
+     * event as a job in its events team.
+     */
+    const withoutDepartments =
+      firstCareers < 0
+        ? purposeSegments
+        : purposeSegments.filter((seg, k) => !(k > 0 && BUSINESS_LINE_SEGMENT.test(seg)));
+    const sayWhichJob =
+      careers && segments.some(numberIn) && !NOT_A_JOB_PATH.test(`/${withoutDepartments.join('/')}`);
+    const otherPurpose = NOT_A_JOB_PATH.test(purpose) && !sayWhichJob;
+    return { careers: careers && !otherPurpose, otherPurpose, numbered };
+  }
+  const asksForLinkedIn =
+    /<(?:input|textarea)\b[^>]*\b(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*linked[\s_-]*in/i.test(html) ||
+    /<label\b[^>]*>[^<]*linked\s*in\b/i.test(html);
+  const forAJob =
     /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    onATracker ||
+    BOARD.test(hostOf(url)) ||
+    Boolean(companyFromUrl(url)) ||
+    careersAddress.careers ||
+    (asksForLinkedIn && careersAddress.numbered && !careersAddress.otherPurpose) ||
     uploadsResume ||
     namesARole ||
-    (formish >= 3 && hasFields && asksWhoYouAre);
+    countIn(text, JOB_FORM_WORDS) > 0;
+  const fillsInAJobForm = formish >= 3 && hasFields && asksWhoYouAre && forAJob;
+
+  const actionable =
+    /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    (uploadsResume && !notAPosting) ||
+    namesARole ||
+    (fillsInAJobForm && !notAPosting);
   if (namesARole) why.push('names a role');
   else if (actionable) why.push('somewhere to apply');
   else if (thread) why.push('a comment thread, whatever it is about');
@@ -2389,7 +2859,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   // wins over a description, because the form is what you are about to fill
   // in — and a page that is both is still, at this moment, the form.
   let kind: PageKind = 'none';
-  if ((formish >= 3 && hasFields && asksWhoYouAre) || uploadsResume) kind = 'application';
+  if (fillsInAJobForm || uploadsResume) kind = 'application';
   else if (described >= 3 || /"@type"\s*:\s*"?JobPosting/i.test(html)) kind = 'posting';
   else if (listish >= 2) kind = 'listing';
   else if (forumHiring) kind = 'discussion';
@@ -2535,7 +3005,7 @@ export const JOB_SHAPED = 3;
  * gets in through the button, the form, the structured data or the host.
  */
 const ROLE_WORDS =
-  /\b(engineer|developer|programmer|scientist|analyst|designer|manager|director|architect|administrator|consultant|specialist|technician|researcher|intern|internship|associate|coordinator|accountant|nurse|physician|teacher|professor|writer|editor|marketer|recruiter|counsel|attorney|paralegal|therapist|chef|driver|technologist|strategist|producer|operator|advisor|apprentice|fellow|lead|head of|officer|assistant|representative|agent)\b/i;
+  /\b(engineer|developer|programmer|scientist|analyst|designer|manager|director|architect|administrator|consultant|specialist|technician|researcher|intern|internship|associate|coordinator|accountant|nurse|physician|teacher|professor|writer|editor|marketer|recruiter|counsel|attorney|paralegal|therapist|chef|driver|technologist|strategist|producer|operator|advisor|apprentice|fellow|lead|head of|officer|assistant|representative|agent|executive|owner|advocate|pharmacist|electrician|plumber|mechanic|welder|carpenter|barista|cashier|clerk|bartender|cook|dentist|hygienist|veterinarian|pilot|librarian|instructor|tutor|trainer|planner|buyer|auditor|controller|underwriter|actuary|economist|statistician|psychologist|pharmacy technician|caregiver|receptionist|sre|sdr|bdr)\b/i;
 /**
  * The role word has to end the title, give or take a level — "Platform
  * Engineer", "Software Engineer II". "Software Engineer salaries" is a page
@@ -2624,9 +3094,45 @@ function fitTrail(parts: { head: string; text: string }[]): string[] {
   );
 }
 
+/*
+ * The pages of a trail that are not some other job.
+ *
+ * A board that is one page — LinkedIn's search results, where choosing a job
+ * changes `currentJobId` and nothing else — puts every job looked at into one
+ * trail, and the merge takes the role and the employer from the first page
+ * that knows each. So the job somebody had moved on to was filed under the one
+ * they had looked at first, and then under the next page's employer as well:
+ * "Technology Undergraduate Summer Internship | Wellington Management" was a
+ * row three times, under "Unknown company", "Radiance Technologies" and
+ * "Amazon", each at a different job's address.
+ *
+ * The page you are on is the application. An earlier page on the same site
+ * whose address names a different job's number (`jobNumberIn`) is a different
+ * application, and is left out. On another host a different number says
+ * nothing — the posting on a board and the form on the employer's tracker
+ * number one job two ways.
+ */
+function thisJobsPages(pages: PageSource[]): PageSource[] {
+  const current = pages[pages.length - 1];
+  const host = hostOf(current?.url);
+  const number = jobNumberIn(current?.url)?.toLowerCase();
+  if (!host || !number) return pages;
+  return pages.filter((p) => {
+    if (p === current || hostOf(p.url) !== host) return true;
+    const theirs = jobNumberIn(p.url)?.toLowerCase();
+    /*
+     * Two plain numbers only — LinkedIn's `currentJobId`, a board's id. A
+     * slug or a uuid can be one job's posting and its form on one host:
+     * SmartRecruiters' posting `744000012345678-software-engineer` and its
+     * one-click form `/publication/<uuid>`.
+     */
+    if (!theirs || !/^\d+$/.test(theirs) || !/^\d+$/.test(number)) return true;
+    return theirs === number;
+  });
+}
+
 export function mergeJobPages(pages: PageSource[]): MergedJob {
-  const read = pages
-    .filter((p) => p?.html?.trim())
+  const read = thisJobsPages(pages.filter((p) => p?.html?.trim()))
     .map((p) => ({
       page: p,
       verdict: classifyPage(p.html, p.url),
@@ -2676,12 +3182,23 @@ export function mergeJobPages(pages: PageSource[]): MergedJob {
 
   // Fields come from whichever page actually knew them, not from the last one —
   // and a title one page wrote with another page's employer on the end loses it.
-  const company = read.map((r) => r.job.company).find(Boolean);
-  const title = cleanRole(read.map((r) => r.job.title).find(Boolean), company);
+  // And the spelling another page gives the same name, where the first read
+  // it off an address: the posting says "Headlandstechnologiesllc" and its
+  // form "Headlands Technologies LLC".
+  const first = read.map((r) => r.job.company).find(Boolean);
+  const spaced = first && !/\s/.test(first)
+    ? read.map((r) => r.job.company).find((c) => c && /\s/.test(c) && squashed(c) === squashed(first))
+    : undefined;
+  const company = spaced ?? first;
+  const titled = read.find((r) => r.job.title);
+  const title = cleanRole(titled?.job.title, company);
+  // The number of the page the title came from, or of any that has one.
+  const requisition = titled?.job.requisition ?? read.map((r) => r.job.requisition).find(Boolean);
 
   return {
     title,
     company,
+    ...(requisition ? { requisition } : {}),
     location: read.map((r) => r.job.location).find(Boolean),
     description,
     source: best.job.source,

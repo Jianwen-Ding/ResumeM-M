@@ -28,6 +28,48 @@ describe('escaping', () => {
   });
 });
 
+/*
+ * T1 fonts join `<<`, `>>` and `,,` into « » and „, so a line about C++
+ * streams printed a guillemet. An empty group between the pair stops the
+ * ligature; a single `<` or `,` is left exactly as it was.
+ */
+describe('characters the fonts would join', () => {
+  it('keeps << and >> as two characters each', () => {
+    expect(tex('std::cout << x >> y')).toBe('std::cout <{}< x >{}> y');
+  });
+
+  it('breaks every pair in a longer run, and a doubled comma too', () => {
+    expect(tex('a <<< b')).toBe('a <{}<{}< b');
+    expect(tex('x,,y')).toBe('x,{},y');
+  });
+
+  it('leaves single ones, and the ligatures people mean, alone', () => {
+    expect(tex('a < b, c > d -- e --- f')).toBe('a < b, c > d -- e --- f');
+  });
+
+  it('does the same inside markup and code', () => {
+    expect(inlineTex('**a << b** and `x >> 1`')).toBe('\\textbf{a <{}< b} and \\texttt{x >{}> 1}');
+  });
+});
+
+/*
+ * "José" pasted from a Mac or a PDF can be an `e` and a combining U+0301.
+ * Composed, it is a character the fonts have; left decomposed, it was refused.
+ */
+describe('decomposed accents', () => {
+  const nfd = 'Jose\u0301 Garci\u0301a';
+
+  it('are composed in what reaches the .tex', () => {
+    expect(tex(nfd)).toBe('Jos\u00e9 Garc\u00eda');
+    expect(inlineTex(`**${nfd}**`)).toBe('\\textbf{Jos\u00e9 Garc\u00eda}');
+    expect(tex(nfd)).not.toContain('\u0301');
+  });
+
+  it('are composed in a link target too', () => {
+    expect(texHref('https://example.com/jose\u0301')).toBe('https://example.com/jos\u00e9');
+  });
+});
+
 describe('inline markup', () => {
   it('turns **bold** into \\textbf', () => {
     expect(inlineTex('cut latency by **80%**')).toBe('cut latency by \\textbf{80\\%}');
@@ -140,6 +182,65 @@ describe('inline markup', () => {
   it('renders a markdown link as \\href', () => {
     expect(inlineTex('[my site](https://example.com)')).toContain('\\href{https://example.com}');
   });
+
+  /*
+   * The PDF goes to an employer, and the text can come from a posting or an
+   * AI draft: a `javascript:` (or `data:`, `file:`) target was a live link
+   * annotation in it. Only the web, mail, phone and bare addresses link.
+   */
+  it('keeps a link to anything but the web, mail or a phone as its words', () => {
+    for (const url of ['javascript:alert(1)', 'JavaScript:x', ' data:text/html,x', 'file:///etc/passwd', 'vbscript:x']) {
+      const out = inlineTex(`[click](${url})`);
+      expect(out, url).not.toContain('\\href');
+      expect(out, url).toContain('click');
+    }
+    for (const url of ['https://example.com', 'http://a.b', 'mailto:a@example.com', 'tel:+15550100']) {
+      expect(inlineTex(`[ok](${url})`), url).toContain(`\\href{${url}}`);
+    }
+  });
+
+  /*
+   * A target with no scheme was let through as it was written, and hyperref
+   * makes one a link to a file: `evil.pdf` and `//host/share/x.pdf` were
+   * GoToR actions in the PDF sent out, which a viewer opens from the
+   * reader's disk or a network share. A web address is linked as one, the
+   * way the profile's links are; anything else keeps its words.
+   */
+  it('links a bare web address as https, and keeps a path or a file as its words', () => {
+    for (const [url, href] of [
+      ['example.com/x', 'https://example.com/x'],
+      ['www.x.y', 'https://www.x.y'],
+      ['example.com', 'https://example.com'],
+      ['example.com:8080/a?b=c', 'https://example.com:8080/a?b=c'],
+      ['example.com/cv.pdf', 'https://example.com/cv.pdf'],
+      // Real domains on what are also file extensions, and any name a path follows.
+      ['bun.sh', 'https://bun.sh'],
+      ['jane.sh/projects', 'https://jane.sh/projects'],
+      ['jane.zip/x', 'https://jane.zip/x'],
+      ['cool.mov/x', 'https://cool.mov/x'],
+      ['jane.md', 'https://jane.md'],
+    ]) {
+      expect(inlineTex(`[ok](${url})`), url).toContain(`\\href{${href}}`);
+    }
+    for (const url of [
+      'evil.pdf',
+      'launch.pdf',
+      'calc.exe',
+      '//attacker.example/share/x.pdf',
+      '../../secret.pdf#page=1',
+      '../x.pdf',
+      '/etc/passwd',
+      'cv',
+      'run:calc.exe',
+      '\u0001javascript:alert(1)',
+      '\u200bjavascript:alert(1)',
+      '10.0.0.1/x',
+    ]) {
+      const out = inlineTex(`[words](${url})`);
+      expect(out, url).not.toContain('\\href');
+      expect(out, url).toContain('words');
+    }
+  });
 });
 
 /*
@@ -169,6 +270,17 @@ describe('a link target', () => {
     expect(texHref('https://x.example/a{b}c\\d')).toBe('https://x.example/a\\%7Bb\\%7Dc\\%5Cd');
   });
 
+  /*
+   * And `^`, which TeX also reads before hyperref sees anything: `^^5c` is a
+   * backslash to the tokenizer, so a link ending "/^^5cinput^^20x" ran
+   * `\input` while the target was being scanned and the build died with "TeX
+   * capacity exceeded". A link is text from a posting or the AI as often as
+   * from the person, so that was a file-read primitive as well as a dead build.
+   */
+  it('percent-encodes a caret, so `^^` cannot spell a control sequence', () => {
+    expect(texHref('https://x.example/^^5cinput^^20x')).toBe('https://x.example/\\%5E\\%5E5cinput\\%5E\\%5E20x');
+  });
+
   it('does not double-encode a URL that already carries an escape', () => {
     // `\%20` is how hyperref is told to put one literal `%` in the target.
     expect(texHref('https://x.example/a%20b')).toBe('https://x.example/a\\%20b');
@@ -176,6 +288,29 @@ describe('a link target', () => {
 
   it('handles an address someone mistyped, rather than refusing to build', () => {
     expect(texHref('a{b@c.example')).toBe('a\\%7Bb@c.example');
+  });
+});
+
+/*
+ * A save is YAML advertised as editable by hand, and a layout number from
+ * there went straight into the .tex: -5pt came back as "Font T1/lmr/m/n/-5
+ * not found", a margin of "abc" as "Missing number, treated as zero".
+ */
+describe('a layout number the engine cannot take', () => {
+  const withLayout = (over: Record<string, unknown>) =>
+    resume({ layout: { ...DEFAULT_LAYOUT, ...over } as ResolvedResume['layout'] });
+
+  it('is named, rather than handed to TeX', () => {
+    expect(() => renderLatex(withLayout({ fontSizePt: -5 }))).toThrow(/font size \(fontSizePt\).*-5/);
+    expect(() => renderLatex(withLayout({ fontSizePt: 1e5 }))).toThrow(/fontSizePt/);
+    expect(() => renderLatex(withLayout({ marginIn: 'abc' }))).toThrow(/margin \(marginIn\).*"abc"/);
+    expect(() => renderLatex(withLayout({ spacing: Number.NaN }))).toThrow(/spacing/);
+  });
+
+  it('while every number the settings allow still renders', () => {
+    for (const over of [{ fontSizePt: 8 }, { fontSizePt: 14 }, { marginIn: 0.3 }, { marginIn: 1.5 }, { spacing: 0.8 }, { spacing: 1.5 }]) {
+      expect(() => renderLatex(withLayout(over))).not.toThrow();
+    }
   });
 });
 

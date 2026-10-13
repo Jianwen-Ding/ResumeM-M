@@ -25,7 +25,19 @@ const ESCAPES: Record<string, string> = {
  * the rule that handles literal braces.
  */
 export function tex(input: string): string {
-  return String(input ?? '').replace(/[\\&%$#_{}~^]/g, (ch) => ESCAPES[ch] ?? ch);
+  return (
+    String(input ?? '')
+      .normalize('NFC')
+      .replace(/[\\&%$#_{}~^]/g, (ch) => ESCAPES[ch] ?? ch)
+      /*
+       * T1 fonts carry ligatures for `<<`, `>>` and `,,`: they set as « » and
+       * a low „, so `std::cout << x` printed with a guillemet in it. An empty
+       * group between the pair stops the font from joining them, and costs
+       * nothing where there was no pair. `--`, `---` and the TeX quotes are
+       * left as they are: those ligatures are ones people type on purpose.
+       */
+      .replace(/([<>,])(?=\1)/g, '$1{}')
+  );
 }
 
 /*
@@ -88,7 +100,14 @@ export interface UnsupportedCharacter {
  */
 export function unsupportedCharacters(text: string): UnsupportedCharacter[] {
   const found = new Map<string, UnsupportedCharacter>();
-  const chars = [...String(text ?? '')];
+  /*
+   * Composed first, as `tex` composes what it sets. "José" pasted from a Mac
+   * or a PDF can arrive decomposed — an `e` and a combining U+0301 — and the
+   * combining accent on its own is nothing T1 has, so a name the engine sets
+   * perfectly well once composed was refused. One that does not compose
+   * (a `q` with an acute) is still reported, since that one cannot be set.
+   */
+  const chars = [...String(text ?? '').normalize('NFC')];
   chars.forEach((ch, i) => {
     const code = ch.codePointAt(0) ?? 0;
     if (renderable(code)) return;
@@ -126,7 +145,7 @@ export function unrenderableReason(
   const first = bad[0]!;
   const near =
     own
-      .filter((field): field is string => typeof field === 'string' && field.includes(first.char))
+      .filter((field): field is string => typeof field === 'string' && field.normalize('NFC').includes(first.char))
       .map((field) => unsupportedCharacters(field).find((c) => c.char === first.char)?.context)
       .find(Boolean) ?? first.context;
 
@@ -255,7 +274,9 @@ const MAX_NESTING = 4;
  * cannot be broken that way by a callback.
  */
 export function inlineTex(input: string): string {
-  return markup(String(input ?? ''), MAX_NESTING);
+  // Composed before it is cut up by the markup, so an accent is never parted
+  // from its letter at a marker. `tex` composes again, which is a no-op then.
+  return markup(String(input ?? '').normalize('NFC'), MAX_NESTING);
 }
 
 /**
@@ -294,10 +315,17 @@ export function lineTex(input: string): string {
  *
  * None of the three is legal in a URI anyway, so they are percent-encoded:
  * the link still points where it pointed, and TeX only ever sees `\%`.
+ *
+ * And `^`, for the same reason and a worse one: the tokenizer reads `^^5c` as
+ * a backslash before hyperref sees the target, so "/^^5cinput^^20x" ran
+ * `\input` — from a link a posting or the AI may have written — and the build
+ * died with "TeX capacity exceeded". `%5E` is the same address.
  */
 export function texHref(url: string): string {
+  // Composed, like every other piece of text that reaches the .tex: see `tex`.
   return url
-    .replace(/[\\{}]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+    .normalize('NFC')
+    .replace(/[\\{}^]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
     /*
      * `&` too: hyperref reads `\&` as a plain ampersand in the target, and a
      * bare one is an alignment tab wherever the link was already read as a
@@ -305,6 +333,65 @@ export function texHref(url: string): string {
      * table — so one query string in a linked title produced no PDF at all.
      */
     .replace(/([%#&])/g, '\\$1');
+}
+
+/**
+ * What a markdown link's target becomes in the PDF, or undefined when it may
+ * not become a link at all.
+ *
+ * The PDF is what goes to an employer, and a letter or a bullet can carry
+ * text that came from somewhere else — a posting, an AI draft. Any scheme
+ * written there became a live link annotation: `[here](javascript:…)` was
+ * a `javascript:` URI in the document sent out. Only the schemes a reader's
+ * PDF viewer should open are linked — the web, mail and phone — as the
+ * editor's own links already are.
+ *
+ * And not a target with no scheme at all, as it is written. hyperref makes
+ * one of those a link to a file — `[cv](evil.pdf)` and
+ * `[x](//attacker.example/share/x.pdf)` were GoToR actions, which a viewer
+ * opens from the reader's disk or a network share, and `[run](calc.exe)` a
+ * Launch. One that looks like a web address — `example.com/x`,
+ * `www.example.org` — is what somebody meant by it, and is linked as
+ * `https://` and the address, the way the profile's links are (see
+ * `header`). Anything else — a relative path, a file, `//host/share`, a
+ * stray character in front of a scheme — keeps only its words.
+ */
+function linkTarget(url: string): string | undefined {
+  const target = url.trim();
+  // First, because `example.com:8080/x` reads as a scheme called `example.com`.
+  if (webAddress(target)) return `https://${target}`;
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(target)?.[1]?.toLowerCase();
+  return scheme !== undefined && ['http', 'https', 'mailto', 'tel'].includes(scheme) ? target : undefined;
+}
+
+/*
+ * A host name of two labels or more, then optionally a port and a path,
+ * query or fragment — and a last label that starts with a letter (not an IP
+ * address, which is somebody's machine more often than a site) and is not a
+ * file's extension, so `cv.pdf`, `calc.exe` and `notes.txt` are files and
+ * `example.com` is a site.
+ */
+/*
+ * But only a name with nothing after it is a file's. `bun.sh`, `jane.zip/x`
+ * and `cool.mov/x` are sites — `.sh`, `.zip`, `.mov` and `.md` are real
+ * top-level domains people have their pages on — and a name followed by a
+ * port, a path, a query or a fragment is a host whatever its last label
+ * says: a file is not served from `cv.pdf/…`. Every one of them was read as a
+ * file and printed unlinked. And those four are not in the list at all,
+ * since `bun.sh` alone is as plainly a site as `example.com`; the rest are
+ * extensions far more often than places anybody lives on the web.
+ */
+const WEB_ADDRESS = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z](?:[a-z0-9-]*[a-z0-9])?)((?::\d{1,5})?(?:[/?#][^\s]*)?)$/i;
+const FILE_EXTENSIONS = new Set([
+  'pdf', 'exe', 'bat', 'cmd', 'msi', 'scr', 'vbs', 'js', 'jar', 'dmg', 'pkg', 'ps1', 'lnk',
+  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'rtf', 'txt', 'tex', 'csv', 'json', 'xml', 'yaml', 'yml',
+  'html', 'htm', 'rar', 'gz', 'tar', '7z', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'mp3', 'mp4',
+]);
+
+function webAddress(target: string): boolean {
+  const m = WEB_ADDRESS.exec(target);
+  if (!m) return false;
+  return m[2] !== '' || !FILE_EXTENSIONS.has(m[1]!.toLowerCase());
 }
 
 function markup(s: string, depth: number): string {
@@ -320,8 +407,13 @@ function markup(s: string, depth: number): string {
     const [whole, label, url, strongem, bold, starItalic, underItalic, code] = m;
     const italic = starItalic ?? underItalic;
 
-    if (label !== undefined) {
-      out += `\\href{${texHref(url!)}}{\\underline{${markup(label, depth - 1)}}}`;
+    const target = label !== undefined ? linkTarget(url!) : undefined;
+    if (label !== undefined && target === undefined) {
+      // A link to anything but a web page or an address: kept as its words.
+      // See `linkTarget`.
+      out += markup(label, depth - 1);
+    } else if (label !== undefined) {
+      out += `\\href{${texHref(target!)}}{\\underline{${markup(label, depth - 1)}}}`;
     } else if (strongem !== undefined) {
       out += `\\textbf{\\textit{${markup(strongem, depth - 1)}}}`;
     } else if (bold !== undefined) {
@@ -585,7 +677,33 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 }
 
 /** The numbers for one particular layout, run inside the document. */
+/*
+ * The numbers as the engine will take them, or a sentence saying which is
+ * not. The settings route holds its own limits, but a save is YAML that is
+ * advertised as editable by hand, and what reached TeX from there — a font of
+ * -5pt, a margin of "abc" — came back as "Font T1/lmr/m/n/-5 not found" or
+ * "Missing number, treated as zero", retried by the fit loop eight times and
+ * naming nothing the person could find. The bounds are only what can be set
+ * at all; the settings keep the sensible ones.
+ */
+function checkLayoutNumbers(layout: LayoutOptions): void {
+  const paper = layout.paper === 'a4' ? { w: 8.27, h: 11.69 } : { w: 8.5, h: 11 };
+  const wrong = (what: string, value: unknown, range: string) =>
+    new Error(`The layout's ${what} has to be a number ${range}, not ${JSON.stringify(value)}. Fix it in the save's settings.`);
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  if (!ok(layout.fontSizePt) || layout.fontSizePt < 4 || layout.fontSizePt > 40) {
+    throw wrong('font size (fontSizePt)', layout.fontSizePt, 'from 4 to 40');
+  }
+  if (!ok(layout.marginIn) || layout.marginIn < 0 || layout.marginIn * 2 >= Math.min(paper.w, paper.h)) {
+    throw wrong('margin (marginIn)', layout.marginIn, `from 0 to under ${Math.min(paper.w, paper.h) / 2}`);
+  }
+  if (!ok(layout.spacing) || layout.spacing <= 0 || layout.spacing > 10) {
+    throw wrong('spacing', layout.spacing, 'above 0 and up to 10');
+  }
+}
+
 export function runtimeSetup(layout: LayoutOptions): string {
+  checkLayoutNumbers(layout);
   const sp = layout.spacing;
   // Jake's template hard-codes 0.5in margins by fiddling \oddsidemargin etc.
   // The offsets below reproduce that arithmetic for an arbitrary margin.
