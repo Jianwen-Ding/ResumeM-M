@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runAgent } from './ai/agent.js';
 import { feedbackPrompt } from './ai/prompts.js';
 import { ignoreBrokenPipe } from './cli-io.js';
-import { Repo, cloneRepo, withCommit } from './git/repo.js';
+import { Repo, cloneRepo, commitQuietly, withCommit } from './git/repo.js';
 import { saveStore } from './git/save.js';
 import { ingestFile } from './ingest/index.js';
 import { findProjectRoot, isEmptyStore, resolveStore, seedStore } from './model/location.js';
@@ -343,6 +343,38 @@ function shortFlag(argv: string[], flag: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+/**
+ * Commit what a command has just written, and let a failed commit be a
+ * warning rather than a failed command.
+ *
+ * `apply` and `voice add` called `repo.commitAll` bare, so a commit that
+ * failed — git's `index.lock` held by a server on the same save, most often —
+ * failed the command after its work was done: `rmm apply` filed the
+ * application, wrote the bundle, and exited 1, and a script reading that
+ * would file it again. The same handling as the server's (`commitQuietly`):
+ * the write stands, and what is owed is a line saying the history did not
+ * get it, and how to put it there. A commit with nothing in it — the
+ * server's own commit took these files a moment before — is not a failure.
+ *
+ * `ensure` first, because `commitAll` returns nothing when the save is not a
+ * repository yet, so a CLI-only user with auto-commit on got no history at
+ * all and nothing said so.
+ */
+async function commitFromTerminal(repo: Repo, message: string, paths?: string[]): Promise<void> {
+  try {
+    await repo.ensure();
+  } catch (err) {
+    repo.lastCommitError = { message: err instanceof Error ? err.message : String(err), at: new Date().toISOString() };
+  }
+  if (!repo.lastCommitError) await commitQuietly(repo, message, paths);
+  if (repo.lastCommitError) {
+    console.warn(
+      `  ! Written, but not in the version history yet: ${repo.lastCommitError.message}. ` +
+        `\`rmm save --data ${repo.root}\` adds it.`,
+    );
+  }
+}
+
 function plural(n: number, word: string): string {
   return `${n} ${n === 1 ? word : `${word}s`}`;
 }
@@ -420,6 +452,8 @@ async function main(argv: string[]): Promise<number> {
 
   const store = new Store(dataDir);
   const repo = Repo.forStore(dataDir, () => currentIgnore(store));
+  // What it says to do next is said for a terminal. See `Repo.inTerminal`.
+  repo.inTerminal = true;
 
   switch (command) {
     case 'list': {
@@ -582,11 +616,20 @@ async function main(argv: string[]): Promise<number> {
       }
       const result = await buildBundle(store, { resumeId: id, company, role, url: arg(rest, 'url') });
       if (store.loadConfig().git.autoCommit) {
-        // `commitAll` returns undefined when the store is not a repo yet, so a
-        // CLI-only user with auto-commit on got no history at all and nothing
-        // said so. `voice add` and `serve` already do this.
-        await repo.ensure();
-        await repo.commitAll(`Apply: ${company} — ${role}`);
+        /*
+         * Only what this command wrote: the tracker, the resumes it may have
+         * marked as kept (see `Store.saveApplications`), and the bundle when
+         * it is inside the save. A server running on the same save has edits
+         * of its own on disk, and `.` put them into this commit under
+         * "Apply: …", to be missing from the commit that was theirs.
+         */
+        const bundle = path.relative(store.root, result.dir);
+        const inside = bundle && !bundle.startsWith('..') && !path.isAbsolute(bundle);
+        await commitFromTerminal(repo, `Apply: ${company} — ${role}`, [
+          'applications.yaml',
+          'resumes',
+          ...(inside ? [bundle.split(path.sep).join('/')] : []),
+        ]);
       }
       console.log(`Bundle → ${path.relative(process.cwd(), result.dir)}`);
       for (const f of result.files) console.log(`  ${f}`);
@@ -740,8 +783,13 @@ async function main(argv: string[]): Promise<number> {
         console.log('AI is already off on this machine, switched off by a pull or a clone; config.yaml is unchanged.');
         return 0;
       }
-      const saved = await withCommit(repo, store.loadConfig().git.autoCommit, 'Update settings', () =>
-        store.saveConfig({ ai: { enabled } as StoreConfig['ai'] }),
+      const saved = await withCommit(
+        repo,
+        store.loadConfig().git.autoCommit,
+        'Update settings',
+        () => store.saveConfig({ ai: { enabled } as StoreConfig['ai'] }),
+        // Only the one file this wrote, as `apply` does.
+        ['config.yaml'],
       );
       if (enabled) {
         console.log(`AI on — it will run ${saved.ai.command} ${saved.ai.args.join(' ')}`.trimEnd());
@@ -759,9 +807,10 @@ async function main(argv: string[]): Promise<number> {
      * through, a conflict included, so a script syncing two machines stops
      * there rather than pushing a save that is about to be merged by hand.
      *
-     * With a server running on this same save, its Pull button is the better
-     * way: from here the pull is a git outside that server, which it guards
-     * against but cannot hold its own writes off for.
+     * With a server running on this same save, the two take turns: the
+     * pull's merge holds the save's lock (see `SaveLock`), so the server's
+     * writes wait for it rather than landing in the middle, and the server
+     * reads what came in on its next request.
      */
     case 'pull': {
       const result = await repo.pull();
@@ -848,8 +897,8 @@ async function main(argv: string[]): Promise<number> {
 
       for (const sample of samples) store.saveSample(sample);
       if (store.loadConfig().git.autoCommit) {
-        await repo.ensure();
-        await repo.commitAll(`Add ${plural(samples.length, 'writing sample')} from ${plural(paths.length, 'file')}`);
+        // Only the corpus, which is all this wrote. See `apply`.
+        await commitFromTerminal(repo, `Add ${plural(samples.length, 'writing sample')} from ${plural(paths.length, 'file')}`, ['corpus']);
       }
       console.log(
         `\nAdded ${plural(samples.length, 'sample')}${skipped > 0 ? `; ${plural(skipped, 'file')} skipped` : ''}. ` +
@@ -890,7 +939,12 @@ async function main(argv: string[]): Promise<number> {
       rememberProject(store.root);
       console.log(`Cloned into ${store.root}, and opened it. Run \`rmm serve\` to work on it.`);
       const switched = aiSwitchedOff(store.root);
-      if (switched) console.log(`${switched} AI is switched off until you turn it on again in Settings.`);
+      if (switched) {
+        console.log(
+          `${switched} AI is switched off until you turn it on again: look at the command in ` +
+            `${path.join(store.root, 'config.yaml')}, then \`rmm config set ai.enabled true --data ${store.root}\`.`,
+        );
+      }
       return 0;
     }
 

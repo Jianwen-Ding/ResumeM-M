@@ -12,6 +12,7 @@ import {
   switchAiOff,
   writeAiOff,
 } from '../model/store.js';
+import { holdSave } from '../model/save-lock.js';
 
 const run = promisify(execFile);
 
@@ -107,6 +108,13 @@ export class Repo {
    * save rather than a log of everything that has ever gone wrong.
    */
   lastCommitError?: { message: string; at: string };
+
+  /**
+   * Set by the `rmm` CLI, so what a pull says to do next is something to
+   * run in the terminal it was typed in, rather than a panel of an editor
+   * that is not open. The server leaves it off and keeps the editor's words.
+   */
+  inTerminal = false;
 
   constructor(
     root: string,
@@ -703,6 +711,25 @@ export class Repo {
     if (busy && (busy.kind === 'rebase' || (auto && busy.kind === 'merge'))) {
       throw new GitBusyError(busy.what, this.root, true);
     }
+    /*
+     * The rest under the save's lock (see `SaveLock`), which every other
+     * ResumeM-M process on this save takes for its writes and its commits.
+     *
+     * The commit queue above keeps this server's commits apart, and nothing
+     * kept them apart from the CLI's: `rmm apply` and the server committing
+     * at once collided on git's own `index.lock` ("Command failed: git add"),
+     * or one's commit took the other's staged files and the other's then had
+     * nothing left to commit and failed for it — `rmm apply` exited 1 on six
+     * runs in twelve, its application filed. Held from the add to the commit,
+     * so no write of the other process's lands between the two either.
+     * Waited for after the outside-git check, which can take seconds, so the
+     * other process is not kept waiting through that as well.
+     */
+    return holdSave(this.root, () => this.commitHeld(message, paths, auto));
+  }
+
+  /** The part of `commitNow` made under the save's lock. */
+  private async commitHeld(message: string, paths: string[] | undefined, auto: boolean): Promise<string | undefined> {
     const { wrote: wroteIgnores, untrack } = this.ensureIgnores();
     /*
      * And out of the index, where a store written before the folder was
@@ -836,6 +863,16 @@ export class Repo {
         ['-c', 'user.name=ResumeM-M', '-c', 'user.email=resumem-m@localhost', 'commit', '-q', '-m', message],
         scoped?.env,
       );
+    } catch (err) {
+      /*
+       * "Nothing to commit" is this save already being in the history: what
+       * was staged went into a commit made a moment ago — a git of somebody
+       * else's, since every ResumeM-M process takes the save's lock first.
+       * The same answer as finding nothing staged above, not a failure.
+       */
+      const said = `${(err as { stdout?: string }).stdout ?? ''}${(err as { stderr?: string }).stderr ?? ''}${(err as Error).message}`;
+      if (/nothing to commit|nothing added to commit|no changes added to commit/i.test(said)) return undefined;
+      throw err;
     } finally {
       if (scoped) fs.rmSync(scoped.file, { force: true });
     }
@@ -1412,8 +1449,10 @@ export class Repo {
     const url = await this.getRemote();
     if (!url) {
       return refused(
-        'No remote is configured for the save, so there is nowhere to pull from. Add one under Backup Remote ' +
-          '(Save & Files) — the same address the other machine pushes to.',
+        'No remote is configured for the save, so there is nowhere to pull from. ' +
+          (this.inTerminal
+            ? `Add one with \`git -C ${this.root} remote add origin <address>\` — the same address the other machine pushes to.`
+            : 'Add one under Backup Remote (Save & Files) — the same address the other machine pushes to.'),
       );
     }
     const shown = redactUrl(url);
@@ -1494,7 +1533,23 @@ export class Repo {
               'start in the middle of it. Nothing was pulled. Pull again in a moment.',
           );
         }
-        return await this.queued(() => this.mergeFrom(tracking, theirs, shown));
+        /*
+         * And under the save's lock, from the commit of what is on disk to
+         * the merge's end, so another ResumeM-M process on this save — the
+         * server, when this is `rmm pull` — cannot write between the two.
+         * `rmm pull` beside a running server saving a tracker row in a loop
+         * was refused nine times in ten without it: the server wrote the
+         * tracker after the pull had committed it, and the merge then would
+         * not touch a file with an uncommitted change in it. The other process's writes wait for the
+         * merge (see `SaveLock`), and its next request reads what it brought
+         * in (`Store.forgetReadsIfGitMoved`).
+         */
+        return await this.queued(() =>
+          holdSave(this.root, () => this.mergeFrom(tracking, theirs, shown)).catch((err: unknown) => {
+            if (err instanceof Error && err.name === 'SaveBusyError') return refused(`Not pulled: ${err.message}`);
+            throw err;
+          }),
+        );
       } finally {
         this.ownFetch('FETCH_HEAD', 'ORIG_HEAD'); // The merge's own; see `justPulled`.
         Repo.holding.delete(this.root);
@@ -1551,7 +1606,10 @@ export class Repo {
     if (left.length > 0) {
       return refused(
         `Not pulled: ${left.map((c) => c.path).slice(0, 5).join(', ')}${left.length > 5 ? '…' : ''} could not be saved ` +
-          'to the history first, and a pull needs everything saved. Save History under Save & Files says why.',
+          'to the history first, and a pull needs everything saved. ' +
+          (this.inTerminal
+            ? `\`rmm save --data ${this.root}\` saves them and says why if it cannot; \`git -C ${this.root} status\` shows them.`
+            : 'Save History under Save & Files says why.'),
       );
     }
 
@@ -1836,7 +1894,10 @@ export class Repo {
     });
     if (!change) return undefined;
     switchAiOff(this.root, `The AI command changed in what was pulled: ${change}.`);
-    return `The AI command changed in what was pulled: ${change}. AI is switched off until you turn it on again in Settings.`;
+    return (
+      `The AI command changed in what was pulled: ${change}. AI is switched off until you turn it on again ` +
+      (this.inTerminal ? `with \`rmm config set ai.enabled true --data ${this.root}\`.` : 'in Settings.')
+    );
   }
 
   /**

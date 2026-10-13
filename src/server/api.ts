@@ -872,6 +872,17 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
   const api = express.Router();
   api.use(express.json({ limit: '32mb' }));
   /*
+   * What this process remembers of the files, forgotten when a git outside
+   * it has moved the save — `rmm pull` or `git pull` in a terminal, a reset,
+   * a checkout. The app's own pull forgets them itself (see
+   * `/config/store/pull`); these it cannot see happen, so every request asks,
+   * at the cost of two stats. See `Store.forgetReadsIfGitMoved`.
+   */
+  api.use((_req, _res, next) => {
+    if (store.forgetReadsIfGitMoved()) forgetPrintedText(store);
+    next();
+  });
+  /*
    * Every write a request checks in for (`assertNoOutsideGit`) is counted
    * until the request is answered, so a Pull pressed meanwhile waits for it
    * rather than merging under it. See `Repo.holdForRequest`. A read checks

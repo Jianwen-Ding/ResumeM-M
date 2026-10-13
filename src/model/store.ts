@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { withoutBom } from './bom.js';
+import { gitDirOf, holdSaveSync } from './save-lock.js';
 import { andList, newlyRepeated, type Option } from './duplicates.js';
 import { flattenResumes, needsFlattening } from './flatten.js';
 import { entryLosesIds, findMovedWordings, forgetMissing, indexStore, skillsLoseIds } from './forget.js';
@@ -401,6 +402,11 @@ export function switchAiOff(root: string, why: string): boolean {
  * marker still holds the AI off on this machine either way.
  */
 export function writeAiOff(root: string): boolean {
+  // Read, changed and written back under the save's lock, as the store's own writes are. See `SaveLock`.
+  return holdSaveSync(root, () => writeAiOffHeld(root));
+}
+
+function writeAiOffHeld(root: string): boolean {
   const file = path.join(root, 'config.yaml');
   try {
     const raw = fs.readFileSync(file, 'utf8');
@@ -948,6 +954,81 @@ function dropNulls(target: Record<string, unknown>, patch: unknown): void {
 }
 
 /**
+ * "Has this file moved since I last looked", as one string, from its stat.
+ *
+ * Size and modification time were the whole of it, and on a file system
+ * whose clock ticks in whole seconds — HFS+, FAT and exFAT, many SMB shares,
+ * two seconds on FAT — a second process writing the same number of bytes
+ * within the same tick left both alone: the CLI changing "Acme1" to "Bcme1"
+ * on a row, measured, and the server went on handing back, and then writing
+ * back, the parse from before. The inode and the change time are added
+ * because neither can stay put through the writes that matter: every write
+ * this program makes renames a fresh file into place (`writeAtomic`), which
+ * is a new inode whatever the clock says, and an in-place write moves the
+ * change time on any file system that has one.
+ */
+export function statStamp(stat: fs.Stats): string {
+  return `${stat.size}:${stat.mtimeMs}:${stat.ino}:${stat.ctimeMs}`;
+}
+
+/**
+ * A whole-list write made onto a list that another process has changed since
+ * the writer read it: `base` is what the writer read, `mine` what it is
+ * writing, `theirs` what the file holds now. Undefined when the rows cannot
+ * be told apart by id — a row without one, or two with the same — and the
+ * caller writes `mine` as it always did.
+ *
+ * Row by row: a row `mine` changed, added or removed from `base` is taken
+ * from `mine`; any other row is taken from `theirs`, which keeps the other
+ * process's additions, edits and removals. The two touching the same row is
+ * the one case a side has to win, and the write being made now wins it, as
+ * it did before there was any merging. In `mine`'s order when the other
+ * process left the order alone, so a reorder made here survives; otherwise
+ * in `theirs`', with this write's new rows after.
+ */
+export function mergeById<T>(base: T[], mine: T[], theirs: T[], idOf: (row: T) => unknown): T[] | undefined {
+  const index = (rows: T[]): Map<string, T> | undefined => {
+    const byId = new Map<string, T>();
+    for (const row of rows) {
+      const id = row && typeof row === 'object' ? idOf(row) : undefined;
+      if (typeof id !== 'string' || byId.has(id)) return undefined;
+      byId.set(id, row);
+    }
+    return byId;
+  };
+  const b = index(base);
+  const m = index(mine);
+  const t = index(theirs);
+  if (!b || !m || !t) return undefined;
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+  const theirOrderMoved = !same([...b.keys()], [...t.keys()]);
+  const order = theirOrderMoved ? [...t.keys(), ...m.keys()] : [...m.keys(), ...t.keys()];
+  const out: T[] = [];
+  const done = new Set<string>();
+  for (const id of order) {
+    if (done.has(id)) continue;
+    done.add(id);
+    const ours = m.get(id);
+    const row = same(ours, b.get(id)) ? t.get(id) : ours;
+    if (row !== undefined) out.push(row);
+  }
+  return out;
+}
+
+/** `mergeById` for one object, key by key: the profile. */
+export function mergeFields<T extends object>(base: T, mine: T, theirs: T): T {
+  const b = base as Record<string, unknown>;
+  const m = mine as Record<string, unknown>;
+  const t = theirs as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(t), ...Object.keys(m)])) {
+    const value = JSON.stringify(m[key]) === JSON.stringify(b[key]) ? t[key] : m[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out as T;
+}
+
+/**
  * The store is a directory of YAML files under git. It is deliberately dumb:
  * read everything, hand out plain objects, write back whole files. A resume
  * store is a few hundred kilobytes; there is no reason for an index or a
@@ -1059,21 +1140,21 @@ export class Store {
    * of parsing and removes the question rather than arguing it per caller.
    */
   /**
-   * Size and modification time together, as one string — "has this file
-   * moved since I last looked", answered without reading it.
+   * Size, modification time, inode and change time together, as one string —
+   * "has this file moved since I last looked", answered without reading it.
+   * See `statStamp`.
    *
-   * Together rather than either alone, for the reason `cached` below has
+   * Together rather than any one alone, for the reason `cached` below has
    * always kept them together: a hand edit, a git checkout, a restored
    * snapshot, a second process writing all move at least one, and
-   * `writeAtomic` renames a fresh file into place, which moves both.
+   * `writeAtomic` renames a fresh file into place, which moves them all.
    * `'missing'` for a file that is not there is its own stable answer — it
    * only ever collides with another file that is also not there, which is
    * not a collision that could hide a change.
    */
   private statKey(full: string): string {
     try {
-      const stat = fs.statSync(full);
-      return `${stat.size}:${stat.mtimeMs}`;
+      return statStamp(fs.statSync(full));
     } catch {
       return 'missing';
     }
@@ -1098,6 +1179,51 @@ export class Store {
     this.parsed.clear();
   }
 
+  /** `.git/HEAD` and `.git/ORIG_HEAD` as `forgetReadsIfGitMoved` last saw them. */
+  private gitMarks: string | undefined;
+
+  /**
+   * `forgetReads`, when a git outside this process has moved the save since
+   * the last time this was asked. True when it did.
+   *
+   * A pull in a terminal — `rmm pull` beside a running server, or `git pull`
+   * — rewrites files under this process the way the app's own pull does,
+   * and the app's own pull is the only one that told the cache. Most such
+   * rewrites move a file's inode and are caught by the stat key anyway
+   * (`statStamp`); this is for the ones that might not, and costs two stats.
+   * A pull, a merge and a reset write `ORIG_HEAD`; a checkout of another
+   * branch writes `HEAD`. This process's own commits write neither, so the
+   * cache survives them — forgetting on every commit would be forgetting on
+   * every save.
+   *
+   * Asked once per request by the server (see `createApi`).
+   */
+  forgetReadsIfGitMoved(): boolean {
+    const dir = gitDirOf(this.root);
+    if (!dir) return false;
+    const marks = ['HEAD', 'ORIG_HEAD'].map((name) => this.statKey(path.join(dir, name))).join('|');
+    if (marks === this.gitMarks) return false;
+    const first = this.gitMarks === undefined;
+    this.gitMarks = marks;
+    if (first) return false;
+    this.forgetReads();
+    return true;
+  }
+
+  /**
+   * What this process last read of a file, when somebody else has written
+   * the file since: the base a whole-file write is merged from. Undefined
+   * when the file is as it was read, or when nothing of it is remembered.
+   *
+   * Asked before anything reads the file again, because a read replaces what
+   * is remembered with what is there now.
+   */
+  private movedSinceRead(full: string): unknown {
+    const hit = this.parsed.get(full);
+    if (!hit || hit.key === this.statKey(full)) return undefined;
+    return structuredClone(hit.value);
+  }
+
   private cached<T>(full: string, parse: (raw: string) => T, missing: T): T {
     let stat;
     try {
@@ -1107,14 +1233,14 @@ export class Store {
     }
 
     /*
-     * Size and modification time together, rather than either alone. A hand
-     * edit, a git checkout, a restored snapshot, a second process writing:
-     * all of them move at least one, and `writeAtomic` renames a fresh file
-     * into place, which moves both. Nothing is keyed on this program having
-     * been the one to write the file, because most of the interesting edits
-     * are not.
+     * Size, modification time, inode and change time together, rather than
+     * any one alone (see `statStamp`). A hand edit, a git checkout, a
+     * restored snapshot, a second process writing: all of them move at least
+     * one, and `writeAtomic` renames a fresh file into place, which moves
+     * them all. Nothing is keyed on this program having been the one to write
+     * the file, because most of the interesting edits are not.
      */
-    const key = `${stat.size}:${stat.mtimeMs}`;
+    const key = statStamp(stat);
     const hit = this.parsed.get(full);
     if (hit?.key === key) return structuredClone(hit.value) as T;
 
@@ -1182,8 +1308,7 @@ export class Store {
     const plain = path.join(this.root, 'resumes', `${id}.yaml`);
     let own: string;
     try {
-      const stat = fs.statSync(plain);
-      own = `${stat.size}:${stat.mtimeMs}`;
+      own = statStamp(fs.statSync(plain));
     } catch {
       own = Store.RESUME_SPELLINGS.map((ext) => this.statKey(this.file('resumes', `${id}.${ext}`))).join('|');
     }
@@ -1249,6 +1374,15 @@ export class Store {
    *   folder a portal's upload dialog is pointed at.
    */
   private writeAtomic(f: string, text: string | Buffer): void {
+    /*
+     * Under the save's lock, so no other process's write lands in the middle
+     * of a read-modify-write this one is part of. Re-entrant: the methods
+     * below that read, change and write hold it already. See `SaveLock`.
+     */
+    holdSaveSync(this.root, () => this.writeAtomicHeld(f, text));
+  }
+
+  private writeAtomicHeld(f: string, text: string | Buffer): void {
     /*
      * A name is judged when it is created, and never afterwards.
      *
@@ -1408,7 +1542,7 @@ export class Store {
       return;
     }
     if (stat.size !== Buffer.byteLength(text)) return;
-    this.parsed.set(full, { key: `${stat.size}:${stat.mtimeMs}`, value });
+    this.parsed.set(full, { key: statStamp(stat), value });
   }
 
   /*
@@ -1529,6 +1663,15 @@ export class Store {
    * page reported "Settings saved" over a setting that had not changed.
    */
   saveConfig(patch: Partial<StoreConfig>): StoreConfig {
+    /*
+     * The read, the change and the write as one step, with no other
+     * process's write in between: under the save's lock (see `SaveLock`).
+     * Every method here with a `…Held` half is held the same way.
+     */
+    return holdSaveSync(this.root, () => this.saveConfigHeld(patch));
+  }
+
+  private saveConfigHeld(patch: Partial<StoreConfig>): StoreConfig {
     /*
      * While a pull or a clone has the AI switched off here, "off" is this
      * machine's answer and lives in `.git` (see `aiSwitchOffFile`), and
@@ -1931,6 +2074,10 @@ export class Store {
   }
 
   saveResume(spec: ResumeSpec): void {
+    holdSaveSync(this.root, () => this.saveResumeHeld(spec));
+  }
+
+  private saveResumeHeld(spec: ResumeSpec): void {
     /*
      * A temporary resume that went out is written as kept, whoever is
      * writing it — the card filing its copy again, the editor saving it, a
@@ -2096,6 +2243,10 @@ export class Store {
    * match in, so the twin could not be cleared from the app either.
    */
   saveEntry(entry: Entry): void {
+    holdSaveSync(this.root, () => this.saveEntryHeld(entry));
+  }
+
+  private saveEntryHeld(entry: Entry): void {
     // Normalised on the way out as well as in, so a bad write from the API
     // never becomes a bad file: reads are already safe, but a file that says
     // something impossible is a trap for whoever opens it next.
@@ -2158,6 +2309,10 @@ export class Store {
 
   /** Removes the id from every file, not merely the first one holding it. */
   deleteEntry(id: string): boolean {
+    return holdSaveSync(this.root, () => this.deleteEntryHeld(id));
+  }
+
+  private deleteEntryHeld(id: string): boolean {
     const was = this.loadEntries();
     let removed = false;
     for (const rel of Store.ENTRY_FILES) {
@@ -2176,7 +2331,14 @@ export class Store {
   }
 
   saveSkillGroups(groups: SkillGroup[]): void {
+    holdSaveSync(this.root, () => this.saveSkillGroupsHeld(groups));
+  }
+
+  private saveSkillGroupsHeld(groups: SkillGroup[]): void {
+    const was = this.movedSinceRead(this.file('skills.yaml'));
     const before = normalizeSkillGroups(this.readYaml<SkillGroup[]>('skills.yaml', []));
+    // Onto the file as it is now, when another process has written it since. See `saveApplications`.
+    if (was !== undefined) groups = mergeById(normalizeSkillGroups(was), groups, before, (g) => g.id) ?? groups;
     refuseRepeats(before, groups);
     this.writeYaml('skills.yaml', groups);
     // Dropping a skill from a group, or a whole group, reaches the resumes
@@ -2235,11 +2397,44 @@ export class Store {
   }
 
   saveProfile(profile: Profile): void {
-    this.writeYaml('profile.yaml', normalizeProfile(profile));
+    holdSaveSync(this.root, () => this.saveProfileHeld(profile));
+  }
+
+  private saveProfileHeld(profile: Profile): void {
+    // Onto the file as it is now, field by field, when another process has
+    // written it since. See `saveApplications`.
+    const was = this.movedSinceRead(this.file('profile.yaml'));
+    const mine = normalizeProfile(profile);
+    this.writeYaml(
+      'profile.yaml',
+      was === undefined ? mine : mergeFields(normalizeProfile(was as Profile), mine, this.loadProfile()),
+    );
   }
 
   saveApplications(apps: Application[]): void {
+    holdSaveSync(this.root, () => this.saveApplicationsHeld(apps));
+  }
+
+  private saveApplicationsHeld(apps: Application[]): void {
+    /*
+     * Onto the tracker as it is now, not as it was when the caller read it.
+     *
+     * Every caller reads the list, changes a row and hands the whole list
+     * back, and inside this server that is safe: nothing is awaited between
+     * the read and this write. But the `rmm` CLI is another process, and a
+     * row it filed between the server's read and this write was written
+     * over by the list from before it — `rmm apply` exited 0 and its row
+     * was gone. So when the file has moved since this process read it, the
+     * caller's change is worked out against what it read (the remembered
+     * parse) and made to what is there now, row by row: a row the caller
+     * changed, added or removed is the caller's; every other row is the
+     * file's. Under the lock, so nothing moves while that is done.
+     */
+    const was = this.movedSinceRead(this.file('applications.yaml'));
     const before = normalizeApplications(this.readYaml<Application[]>('applications.yaml', []));
+    if (was !== undefined) {
+      apps = mergeById(normalizeApplications(was), normalizeApplications(apps), before, (a) => a.id) ?? apps;
+    }
     this.writeYaml('applications.yaml', apps);
     /*
      * And a temporary resume this write says went out is written as kept,
@@ -2262,6 +2457,10 @@ export class Store {
   }
 
   upsertApplication(app: Application): Application[] {
+    return holdSaveSync(this.root, () => this.upsertApplicationHeld(app));
+  }
+
+  private upsertApplicationHeld(app: Application): Application[] {
     const apps = normalizeApplications(this.readYaml<Application[]>('applications.yaml', []));
     const idx = apps.findIndex((a) => a.id === app.id);
     if (idx >= 0) apps[idx] = app;
@@ -2271,6 +2470,16 @@ export class Store {
   }
 
   saveAnswers(answers: AnswerBankItem[]): void {
+    holdSaveSync(this.root, () => this.saveAnswersHeld(answers));
+  }
+
+  private saveAnswersHeld(answers: AnswerBankItem[]): void {
+    // Onto the file as it is now, when another process has written it since. See `saveApplications`.
+    const was = this.movedSinceRead(this.file('answers.yaml'));
+    if (was !== undefined) {
+      const now = normalizeAnswers(this.readYaml<AnswerBankItem[]>('answers.yaml', []));
+      answers = mergeById(normalizeAnswers(was), normalizeAnswers(answers), now, (a) => a.id) ?? answers;
+    }
     this.writeYaml('answers.yaml', answers);
   }
 
@@ -2331,7 +2540,11 @@ export class Store {
    * writing. `POST /voice/include` says "counted again" by taking the key
    * away, so it has to be able to write an absence and mean it.
    */
-  saveCoverLetter(letter: CoverLetter, { decidesVoice = false } = {}): void {
+  saveCoverLetter(letter: CoverLetter, opts: { decidesVoice?: boolean } = {}): void {
+    holdSaveSync(this.root, () => this.saveCoverLetterHeld(letter, opts));
+  }
+
+  private saveCoverLetterHeld(letter: CoverLetter, { decidesVoice = false }: { decidesVoice?: boolean }): void {
     const { body, id, ...meta } = letter;
     if (!decidesVoice && meta.voice === undefined) {
       const stored = this.loadCoverLetters().find((l) => l.id === id)?.voice;
