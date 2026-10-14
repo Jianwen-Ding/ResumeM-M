@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   fileSentAnswer,
+  isOptionPhrase,
   isSensitiveAnswer,
   isSensitiveQuestion,
   letterId,
@@ -1897,6 +1898,23 @@ describe('a row whose question is one of the answers', () => {
     const bank = [one('real', 'Yes', 'No')];
     expect(matchAnswer('Yes', bank).item).toBeUndefined();
     expect(matchAnswer('No, I was NEVER a government employee.', [one('g', 'No, I was NEVER a government employee.', 'Yes')]).item).toBeUndefined();
+  });
+
+  /*
+   * "No." for number and "Y.O.E." open real labels with an answer's letters.
+   * They were taken for options: never matched, and refused when saved.
+   */
+  it('leaves a label that opens with "No." for number, or Y.O.E., alone', () => {
+    for (const q of ['No. of years of experience', 'No. of direct reports', 'No: of years in current role', 'No.of reports', 'Y.O.E. in Python']) {
+      expect(isOptionPhrase(q), q).toBe(false);
+    }
+    const bank = [one('n', 'No. of years of experience', '5')];
+    expect(matchAnswer('No. of years of experience', bank).confident).toBe(true);
+    expect(matchAnswer('No. of years of experience *', bank).item?.id).toBe('n');
+    // While an option that opens the same way, or a tick box's own words, still is one.
+    for (const q of ['No, I opt-out Required', 'No, I was NEVER a government employee.', 'No, of course not', 'Yes - I agree to the terms', 'No', 'Y']) {
+      expect(isOptionPhrase(q), q).toBe(true);
+    }
   });
 
   it('leaves real questions that open with an answer word alone', () => {

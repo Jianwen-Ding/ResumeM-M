@@ -1154,3 +1154,116 @@ describe('the version a whole-object write hands back', () => {
     expect(answers.headers.etag).toBe(`"${now.answersVersion}"`);
   });
 });
+
+describe('rebuilt previews, while one machine is still on a version that commits them', () => {
+  const REBUILT = () => ['/out/current/', '/out/.previews/'];
+  const as = (cwd: string, ...args: string[]) => git(['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], cwd);
+  let base: string;
+  let oldA: string;
+  let newB: string;
+  let repoNewB: Repo;
+  let repoNewA: Repo;
+
+  /** A save from before previews were ignored, on a bare remote, cloned to two machines. */
+  beforeEach(() => {
+    base = tempDir('rmm-pull-previews-');
+    git(['init', '-q', '-b', 'main', '--bare', 'remote.git'], base);
+    oldA = path.join(base, 'A');
+    fs.mkdirSync(path.join(oldA, 'out', '.previews'), { recursive: true });
+    git(['init', '-q', '-b', 'main'], oldA);
+    fs.writeFileSync(path.join(oldA, 'profile.yaml'), 'name: x\n');
+    for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(oldA, 'out', '.previews', `p${i}.pdf`), `pdf${i}`);
+    as(oldA, 'add', '-A');
+    as(oldA, 'commit', '-q', '-m', 'old save');
+    git(['remote', 'add', 'origin', path.join(base, 'remote.git')], oldA);
+    git(['push', '-q', '-u', 'origin', 'main'], oldA);
+    git(['clone', '-q', path.join(base, 'remote.git'), 'B'], base);
+    newB = path.join(base, 'B');
+    repoNewB = new Repo(newB, ['.'], REBUILT);
+    repoNewA = new Repo(oldA, ['.'], REBUILT);
+  });
+
+  it('pulls the other machine’s untracking over a preview rebuilt and committed here by the old version', async () => {
+    // A updates first: its first save stops following the previews, and is pushed.
+    fs.writeFileSync(path.join(oldA, 'profile.yaml'), 'name: y\n');
+    await repoNewA.commitAll('Edit profile');
+    git(['push', '-q'], oldA);
+    // B, still on the old version, rebuilt a preview and committed it.
+    fs.writeFileSync(path.join(newB, 'out', '.previews', 'p0.pdf'), 'pdf0-new');
+    as(newB, 'add', '-A');
+    as(newB, 'commit', '-q', '-m', 'B edit with previews');
+
+    // Then B updates, and its first act is a pull.
+    const result = await repoNewB.pull();
+
+    expect(result.conflict).toBeUndefined();
+    expect(result.ok).toBe(true);
+    expect(fs.readFileSync(path.join(newB, 'profile.yaml'), 'utf8')).toBe('name: y\n');
+    expect(git(['ls-files', 'out'], newB)).toBe('');
+    // The previews stay on disk, ignored, and nothing is left half-done.
+    expect(fs.readFileSync(path.join(newB, 'out', '.previews', 'p0.pdf'), 'utf8')).toBe('pdf0-new');
+    expect(git(['status', '--porcelain'], newB)).toBe('');
+    expect(fs.existsSync(path.join(newB, '.git', 'MERGE_HEAD'))).toBe(false);
+  });
+
+  for (const mergeTree of [true, false]) {
+    it(`settles a preview the old version rebuilt on the other machine, which this one no longer follows${mergeTree ? '' : ' (older git)'}`, async () => {
+      // B updates first, and no longer follows the previews.
+      fs.writeFileSync(path.join(newB, 'profile.yaml'), 'name: b\n');
+      await repoNewB.commitAll('Edit profile on B');
+      expect(git(['ls-files', 'out'], newB)).toBe('');
+      // A, still on the old version, rebuilds a preview, adds one, and pushes.
+      fs.writeFileSync(path.join(oldA, 'out', '.previews', 'p0.pdf'), 'pdf0-from-A');
+      fs.writeFileSync(path.join(oldA, 'out', '.previews', 'p9.pdf'), 'pdf9-from-A');
+      fs.writeFileSync(path.join(oldA, 'letter.md'), 'Dear team\n');
+      as(oldA, 'add', '-A');
+      as(oldA, 'commit', '-q', '-m', 'A edit with previews');
+      git(['push', '-q'], oldA);
+
+      const was = Repo.mergeTreeWorks;
+      if (!mergeTree) Repo.mergeTreeWorks = false;
+      let result;
+      try {
+        result = await repoNewB.pull();
+      } finally {
+        Repo.mergeTreeWorks = was;
+      }
+
+      expect(result.conflict).toBeUndefined();
+      expect(result.ok).toBe(true);
+      expect(fs.readFileSync(path.join(newB, 'letter.md'), 'utf8')).toBe('Dear team\n');
+      expect(fs.readFileSync(path.join(newB, 'profile.yaml'), 'utf8')).toBe('name: b\n');
+      // Not followed again by way of the merge.
+      expect(git(['ls-files', 'out'], newB)).toBe('');
+      expect(git(['status', '--porcelain'], newB)).toBe('');
+      expect(fs.existsSync(path.join(newB, '.git', 'MERGE_HEAD'))).toBe(false);
+      expect(git(['log', '-1', '--format=%s'], newB).trim()).toBe("Merge remote-tracking branch 'origin/main'");
+    });
+  }
+
+  it('still refuses a conflict in real work beside one in previews, and changes nothing', async () => {
+    fs.writeFileSync(path.join(newB, 'profile.yaml'), 'name: b\n');
+    await repoNewB.commitAll('Edit profile on B');
+    fs.writeFileSync(path.join(oldA, 'out', '.previews', 'p0.pdf'), 'pdf0-from-A');
+    fs.writeFileSync(path.join(oldA, 'profile.yaml'), 'name: a\n');
+    as(oldA, 'add', '-A');
+    as(oldA, 'commit', '-q', '-m', 'A edit with previews');
+    git(['push', '-q'], oldA);
+    const before = head(newB);
+
+    for (const mergeTree of [true, false]) {
+      const was = Repo.mergeTreeWorks;
+      if (!mergeTree) Repo.mergeTreeWorks = false;
+      try {
+        const result = await repoNewB.pull();
+        expect(result.ok).toBe(false);
+        expect(result.conflict).toContain('profile.yaml');
+      } finally {
+        Repo.mergeTreeWorks = was;
+      }
+      expect(head(newB)).toBe(before);
+      expect(fs.readFileSync(path.join(newB, 'profile.yaml'), 'utf8')).toBe('name: b\n');
+      expect(fs.existsSync(path.join(newB, '.git', 'MERGE_HEAD'))).toBe(false);
+    }
+  });
+});

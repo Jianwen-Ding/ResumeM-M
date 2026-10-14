@@ -1681,6 +1681,22 @@ export class Repo {
      * touch a file with an uncommitted change in it, and one set to stash
      * around it is the stash-and-reset that lost writes before.
      */
+    /*
+     * And the rebuilt folders out of the index before that, in their own
+     * commit, as the first save of this version does (see `commitHeld`). A
+     * save last committed by an older version still follows them, and a
+     * pull is often the first thing a machine does after updating: the other
+     * machine's history has already stopped following them, and a preview
+     * this one had rebuilt and committed then met that deletion as a
+     * conflict — a PDF nobody can edit the markers out of — and the pull was
+     * refused. Taken out here first, both sides have deleted them, and git
+     * puts that together on its own.
+     */
+    try {
+      await this.untrackRebuiltNow();
+    } catch {
+      // Left for the merge below to settle, or refuse; never a reason not to try.
+    }
     let pending: PendingChange[];
     try {
       pending = await this.pending();
@@ -1754,7 +1770,18 @@ export class Repo {
     let merged: string | undefined;
     if (!fastForward) {
       const clash = await this.wouldConflict(tracking);
-      if (clash && clash.conflicts.length > 0) return conflicted(clash.conflicts, 'Nothing was merged');
+      /*
+       * Except a conflict over nothing but rebuilt files (see
+       * `rebuiltFolders`), which the merge settles below by not following
+       * them at all. The other machine is still on a version that commits
+       * them, has rebuilt one, and this one has stopped following it — or the
+       * other way round. Nobody is going to edit markers out of a PDF, and
+       * whatever either side had is rebuilt from the save anyway. Anything
+       * else in the list is real work, and refuses the pull as ever.
+       */
+      if (clash && clash.conflicts.length > 0 && !this.onlyRebuilt(clash.conflicts)) {
+        return conflicted(clash.conflicts, 'Nothing was merged');
+      }
       merged = clash?.tree;
     }
     /*
@@ -1800,30 +1827,38 @@ export class Repo {
         env,
       );
     } catch (err) {
-      // Not switched off for a pull that did not happen.
-      if (switchedOff && !hadSwitchOff) clearAiSwitchOff(this.root);
       const conflicts = await this.conflictedPaths();
       const merging = await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(() => true, () => false);
-      let undone = true;
-      if (merging) {
-        await this.git(['merge', '--abort'], env).catch(() => undefined);
-        undone = (await this.git(['rev-parse', 'HEAD'])).trim() === before && !fs.existsSync(path.join(this.gitDir() ?? this.root, 'MERGE_HEAD'));
+      /*
+       * A merge stopped only over rebuilt files is settled by not following
+       * them (see `settleRebuiltConflicts`), and goes on as one that went
+       * through; anything else is undone, as before.
+       */
+      const settled = merging && (await this.settleRebuiltConflicts(conflicts, env));
+      if (!settled) {
+        // Not switched off for a pull that did not happen.
+        if (switchedOff && !hadSwitchOff) clearAiSwitchOff(this.root);
+        let undone = true;
+        if (merging) {
+          await this.git(['merge', '--abort'], env).catch(() => undefined);
+          undone = (await this.git(['rev-parse', 'HEAD'])).trim() === before && !fs.existsSync(path.join(this.gitDir() ?? this.root, 'MERGE_HEAD'));
+        }
+        if (!undone) {
+          return {
+            ok: false,
+            pulled: 0,
+            files: [],
+            conflict: conflicts.length ? conflicts : undefined,
+            message:
+              `The pull's merge stopped part-way and could not be undone. In a terminal, in ${this.root}, run ` +
+              'git merge --abort to put the save back as it was, or settle the conflicts and git commit. ' +
+              'The app will not save edits until that is done.',
+          };
+        }
+        if (conflicts.length > 0) return conflicted(conflicts, 'The merge was undone');
+        const said = redactUrls(((err as { stderr?: string }).stderr || (err as Error).message || 'git merge failed').trim());
+        return refused(`The changes from ${shown} could not be merged in, and the save was left as it was.\n\n${said}`);
       }
-      if (!undone) {
-        return {
-          ok: false,
-          pulled: 0,
-          files: [],
-          conflict: conflicts.length ? conflicts : undefined,
-          message:
-            `The pull's merge stopped part-way and could not be undone. In a terminal, in ${this.root}, run ` +
-            'git merge --abort to put the save back as it was, or settle the conflicts and git commit. ' +
-            'The app will not save edits until that is done.',
-        };
-      }
-      if (conflicts.length > 0) return conflicted(conflicts, 'The merge was undone');
-      const said = redactUrls(((err as { stderr?: string }).stderr || (err as Error).message || 'git merge failed').trim());
-      return refused(`The changes from ${shown} could not be merged in, and the save was left as it was.\n\n${said}`);
     }
 
     const after = (await this.git(['rev-parse', 'HEAD'])).trim();
@@ -2028,6 +2063,67 @@ export class Repo {
     const paths = new Set<string>();
     for (const line of listed.split('\0').filter(Boolean)) paths.add(line.slice(line.indexOf('\t') + 1));
     return [...paths].sort();
+  }
+
+  /** The rebuilt folders (see `rebuilt`), as paths from the save's root: `out/.previews`. */
+  private rebuiltFolders(): string[] {
+    return this.rebuilt()
+      .map((p) => p.replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean);
+  }
+
+  /** Whether every one of `files` is inside a rebuilt folder — nothing anybody wrote. */
+  private onlyRebuilt(files: string[]): boolean {
+    const folders = this.rebuiltFolders();
+    return files.length > 0 && files.every((f) => folders.some((d) => f.startsWith(`${d}/`)));
+  }
+
+  /**
+   * Take the rebuilt folders out of the index now, in a commit of their own
+   * (`commitUntracked`), when the save still follows anything in them. For
+   * `mergeFrom`, which runs under the commit queue and the save's lock
+   * already. Nothing at all when nothing in them is followed, which is every
+   * time but the first.
+   */
+  private async untrackRebuiltNow(): Promise<void> {
+    const folders = this.rebuiltFolders();
+    if (folders.length === 0) return;
+    const followed = (await this.git(['ls-files', '-z', '--', ...folders]).catch(() => '')).split('\0').filter(Boolean);
+    if (followed.length === 0) return;
+    // The ignore lines first, or the next add puts them straight back.
+    this.ensureIgnores();
+    for (const folder of folders) {
+      await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]);
+    }
+    await this.commitUntracked(folders);
+  }
+
+  /**
+   * Conclude a merge that stopped over nothing but rebuilt files, by taking
+   * those folders out of the index — what this version does with them
+   * anyway — and committing the merge. True when it did; false, having
+   * changed nothing the caller's `merge --abort` cannot undo, otherwise.
+   *
+   * Only rebuilt files, which the app makes again from the save whenever
+   * anything changes: a conflict in anything else is somebody's work, and is
+   * never settled here. The files stay on disk, ignored.
+   */
+  private async settleRebuiltConflicts(conflicts: string[], env: NodeJS.ProcessEnv): Promise<boolean> {
+    if (!this.onlyRebuilt(conflicts)) return false;
+    try {
+      for (const folder of this.rebuiltFolders()) {
+        await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]);
+      }
+      if ((await this.conflictedPaths()).length > 0) return false;
+      if (this.ensureIgnores().wrote) await this.git(['add', '--', '.gitignore']);
+      await this.git(
+        ['-c', 'user.name=ResumeM-M', '-c', 'user.email=resumem-m@localhost', 'commit', '-q', '--no-edit'],
+        env,
+      );
+      return !(await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(() => true, () => false));
+    } catch {
+      return false;
+    }
   }
 
   /**

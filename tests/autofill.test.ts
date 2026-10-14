@@ -235,6 +235,22 @@ describe('reading a grade out of the line it is printed on', () => {
     expect(readGpa('GPA: 3.95')).toBe('3.95');
   });
 
+  /*
+   * "GPA: 3,8", as much of Europe writes it, went to a form as 3. A decimal
+   * comma is read as one; a comma followed by a space is still the end of the
+   * grade, and a number that runs on is not cut short into a grade.
+   */
+  it('reads a decimal comma as a decimal point, and never truncates', () => {
+    expect(readGpa('GPA: 3,8')).toBe('3.8');
+    expect(readGpa('GPA 3,85/4,00')).toBe('3.85');
+    expect(readGpa('University of Bologna, 3,7 GPA')).toBe('3.7');
+    expect(readGpa('GPA 3,8, Dean’s list')).toBe('3.8');
+    expect(readGpa('GPA 3.8, Dean’s list')).toBe('3.8');
+    expect(readGpa('GPA: 3.8/4.0, 2023')).toBe('3.8');
+    expect(readGpa('GPA: 3,800')).toBeUndefined();
+    expect(splitDegree('Bachelor of Science in Physics, GPA 3,8/4,0')).toEqual({ degree: 'Bachelor of Science', major: 'Physics' });
+  });
+
   it('refuses a score that cannot be one', () => {
     // Above its own scale, so one of the two was misread.
     expect(readGpa('GPA 5.0/4.0')).toBeUndefined();

@@ -476,6 +476,15 @@ const HONOURS_ANYWHERE = /\s*\((?:with\s+)?(?:first[- ]class\s+)?hon(?:ou?r)?s\.
 const DEGREE_WORD =
   /\b(bachelor'?s?|master'?s?|doctor(ate)?|associate'?s?|b\.?s\.?c?|b\.?a\.?|b\.?eng|m\.?s\.?c?|m\.?a\.?|m\.?eng|m\.?b\.?a|ph\.?d|j\.?d|m\.?d|diploma|certificate)\b/i;
 
+/*
+ * A grade as a resume writes it. With a decimal comma too, as much of Europe
+ * writes it: "GPA: 3,8" was read as 3, a grade the person never had. A comma
+ * with a digit straight after it is a decimal one ("GPA 3.8, Dean's list"
+ * has a space); and a number that runs on past what is read — "3,800" — is
+ * not read at all, rather than cut short.
+ */
+const GPA_NUMBER = String.raw`\d{1,3}(?:\.\d+|,\d{1,2})?(?![.,]?\d)`;
+
 /**
  * A grade point average, as a form wants it: the number alone.
  *
@@ -483,14 +492,20 @@ const DEGREE_WORD =
  * it; the box asks for one number and validates it. Only a plausible one — a
  * "GPA" followed by something that is not a grade is a sentence, not a score.
  */
-const GPA_CLAUSE = /[,;]?\s*\bGPA[:\s]+\d{1,3}(?:\.\d+)?%?(?:\s*\/\s*\d{1,3}(?:\.\d+)?)?/i;
+const GPA_CLAUSE = new RegExp(String.raw`[,;]?\s*\bGPA[:\s]+${GPA_NUMBER}%?(?:\s*\/\s*${GPA_NUMBER})?`, 'i');
 
 /*
  * Every grade a line gives, with the word in front of it: "Major GPA: 3.9,
  * Cumulative GPA: 3.6" is two.
  */
-const GPA_SAID = /\b(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA[:\s]+(\d{1,3}(?:\.\d+)?)(%?)(?:\s*\/\s*(\d{1,3}(?:\.\d+)?))?/gi;
-const GPA_AFTER = /\b(\d{1,3}\.\d{1,3})(%?)(?:\s*\/\s*(\d{1,3}(?:\.\d+)?))?\s+(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA\b/gi;
+const GPA_SAID = new RegExp(
+  String.raw`\b(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA[:\s]+(${GPA_NUMBER})(%?)(?:\s*\/\s*(${GPA_NUMBER}))?`,
+  'gi',
+);
+const GPA_AFTER = new RegExp(
+  String.raw`\b(\d{1,3}(?:\.\d{1,3}|,\d{1,2})(?![.,]?\d))(%?)(?:\s*\/\s*(${GPA_NUMBER}))?\s+(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA\b`,
+  'gi',
+);
 
 /*
  * The highest a four- or five-point grade goes: 4.0, 4.3, 4.33, 5.0. A form's
@@ -517,9 +532,11 @@ export function readGpa(line: string): string | undefined {
    */
   const said = String(line ?? '');
   const found: { score: string; kind: string }[] = [];
-  const take = (score: string, percent: string, scale: string | undefined, kind: string | undefined) => {
+  const take = (said: string, percent: string, scale: string | undefined, kind: string | undefined) => {
+    // As a form's number box wants it: "3,8" is 3.8.
+    const score = said.replace(',', '.');
     const n = Number(score);
-    const out = scale === undefined ? undefined : Number(scale);
+    const out = scale === undefined ? undefined : Number(scale.replace(',', '.'));
     if (percent || !Number.isFinite(n) || n <= 0 || n > TOP_OF_SCALE) return;
     // A score above its own scale is a misreading, not a grade; a scale past five points is another kind of grade.
     if (out !== undefined && (!Number.isFinite(out) || n > out || out > TOP_OF_SCALE)) return;

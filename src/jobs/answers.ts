@@ -585,8 +585,15 @@ function sameFurnitureWhenThin(asked: string, stored: string): boolean {
  * asked about it would be answered with the opposite option. So such a row
  * is never offered, and never banked, and an option is never looked up as a
  * question.
+ *
+ * But not the abbreviations that open a real label with the same letters: "No."
+ * for number ("No. of years of experience", "No: of direct reports", "No. 2
+ * choice") and "Y.O.E." for years of experience. Those were refused as
+ * options, unmatched and unsaveable; an option's "No" is followed by a
+ * comma, a dash or nothing, never by "of".
  */
-const OPTION_PHRASE = /^(?:yes|no|y|n|true|false)(?:\s*[,.;:!–—-](?:\s*.*)?|\s+(?:and|but|i|i'm|i am|we)\b.*)?$/i;
+const OPTION_PHRASE =
+  /^(?!no\s*[.:]+\s*(?:of\b|\d)|y\s*\.?\s*o\s*\.?\s*e\b)(?:yes|no|y|n|true|false)(?:\s*[,.;:!–—-](?:\s*.*)?|\s+(?:and|but|i|i'm|i am|we)\b.*)?$/i;
 
 export function isOptionPhrase(question: string): boolean {
   const q = tidyQuestion(question).replace(/\s+(?:required|optional)$/i, '').trim();

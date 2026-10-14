@@ -1534,6 +1534,9 @@ describe('answers', () => {
     // And a question whose answer only opens like a prompt is kept.
     await request(app).post('/api/answers/save').send({ question: 'Anything else we should know?', answer: 'Please see my portfolio.' }).expect(200);
     expect(t.store.load().answers).toHaveLength(3);
+    // Nor is a label that opens with "No." for number taken for an option.
+    await request(app).post('/api/answers/save').send({ question: 'No. of years of experience', answer: '5' }).expect(200);
+    expect(t.store.load().answers).toHaveLength(4);
   });
 
   it('does not duplicate an item when the same question is saved again without its id', async () => {
