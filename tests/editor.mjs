@@ -3234,6 +3234,225 @@ async function main() {
         `${panel.last} ends at ${panel.lastBottom}, the button starts at ${panel.chipTop}`,
       );
 
+      /*
+       * Round 29: the keyboard on a line edited in place, the header's status
+       * line, what sticks at the top, and the tracker's widths.
+       */
+      const lines = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.waitForTimeout(200);
+        const where = () => p.evaluate(() => {
+          const a = document.activeElement;
+          return a && a.classList.contains('editable') ? `${a.classList.contains('editing') ? 'editing' : 'line'}:${a.textContent.trim()}` : a === document.body ? 'BODY' : a?.localName;
+        });
+        const line = p.locator('.profile-field .meta-value.editable').first();
+        await line.scrollIntoViewIfNeeded().catch(() => {});
+        const at0 = await line.textContent();
+        const a11y = await line.evaluate((n) => ({
+          role: n.getAttribute('role'),
+          readonly: n.getAttribute('aria-readonly'),
+          described: document.getElementById(n.getAttribute('aria-describedby') ?? '')?.textContent ?? '',
+          title: n.title,
+          hint: document.querySelector('.editor-interaction-hint')?.textContent ?? '',
+        }));
+        await line.focus();
+        await p.keyboard.press('F2');
+        await p.keyboard.press('Escape');
+        const afterEscape = await where();
+        await p.keyboard.press('Enter');
+        await p.keyboard.press('Enter');
+        const afterEnter = await where();
+        // An edit kept with Enter: the line is drawn again, and the focus is on the new one.
+        await p.keyboard.press('Enter');
+        await p.keyboard.type(' 29');
+        await p.keyboard.press('Enter');
+        await p.waitForFunction(() => document.activeElement === document.body || !document.activeElement?.isConnected || document.activeElement?.textContent.includes(' 29'), null, { timeout: 5_000 }).catch(() => {});
+        await p.waitForTimeout(1500);
+        const afterSave = await where();
+        // And back as it was, from the keyboard.
+        if (afterSave.startsWith('line:')) {
+          await p.keyboard.press('Enter');
+          for (let i = 0; i < 3; i++) await p.keyboard.press('Backspace');
+          await p.keyboard.press('Enter');
+          await p.waitForTimeout(1500);
+        }
+        // A click with no pointer (a screen reader's Enter in browse mode) starts editing.
+        const clicked = await line.evaluate((n) => {
+          n.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 }));
+          return n.classList.contains('editing');
+        });
+        await p.keyboard.press('Escape');
+        // Ctrl+Shift+E mid-edit: the half-typed words are not saved, and the edit is there when the dialog closes.
+        await line.focus();
+        await p.keyboard.press('Enter');
+        await p.keyboard.type(' half');
+        await p.keyboard.press('Control+Shift+E');
+        await p.locator('#error-log-dialog:not(.hidden)').waitFor({ timeout: 5_000 }).catch(() => {});
+        await p.waitForTimeout(500);
+        const profile = await p.evaluate(async () => JSON.stringify((await (await fetch('/api/store')).json().catch(() => ({}))).profile ?? null));
+        await p.keyboard.press('Escape');
+        await p.waitForTimeout(300);
+        const afterLog = await where();
+        await p.keyboard.press('Escape');
+        const restored = await where();
+        return { at0: at0.trim(), a11y, afterEscape, afterEnter, afterSave, clicked, savedHalf: profile.includes(' half'), afterLog, restored };
+      });
+      check('Escape on a line being edited leaves the focus on the line', lines.afterEscape === `line:${lines.at0}`, lines.afterEscape);
+      check('and so does Enter with nothing changed', lines.afterEnter === `line:${lines.at0}`, lines.afterEnter);
+      check('and Enter after an edit puts the focus on the line drawn again', lines.afterSave === `line:${lines.at0} 29`, lines.afterSave);
+      check(
+        'a line says it can be edited, and how, to a screen reader',
+        lines.a11y.role === 'textbox' && lines.a11y.readonly === 'true' && /Enter or F2/.test(lines.a11y.described) && /F2/.test(lines.a11y.title) && /F2/.test(lines.a11y.hint),
+        JSON.stringify(lines.a11y),
+      );
+      check('a click with no pointer behind it starts editing', lines.clicked);
+      check('Ctrl+Shift+E mid-edit does not save the half-typed words', !lines.savedHalf);
+      check('and the edit is still open, focused, when the dialog closes', lines.afterLog === `editing:${lines.at0} half`, lines.afterLog);
+      check('and Escape then puts it back', lines.restored === `line:${lines.at0}`, lines.restored);
+
+      /* An ordinary status at 800: "Log an error" stays on its row, and the toolbar under the header. */
+      const ordinary = await at(800, 900, async (p) => {
+        await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          s.className = 'status';
+          s.textContent = s.title = 'AI feedback requested — you can keep editing. Watch the results indicator.';
+        });
+        await p.waitForTimeout(200);
+        return p.evaluate(() => {
+          const header = document.querySelector('header').getBoundingClientRect();
+          const first = document.querySelector('header h1').getBoundingClientRect();
+          const chip = document.querySelector('#error-log-chip').getBoundingClientRect();
+          return {
+            chipRow: chip.top < first.bottom,
+            height: Math.round(header.height),
+            measured: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-h')),
+          };
+        });
+      });
+      check('a long status at 800px leaves "Log an error" on its row, and --header-h right', ordinary.chipRow && Math.abs(ordinary.height - ordinary.measured) <= 1, JSON.stringify(ordinary));
+
+      /* A short error has room in the header at 1600: it is not floated over the page. */
+      const short = await at(1600, 700, async (p) => {
+        await sayError(p, 'Failed to fetch');
+        return p.evaluate(() => document.querySelector('#status').classList.contains('toast'));
+      });
+      check('a short error stays in the header where there is room for it', !short);
+
+      /*
+       * Where the tabs only just fit on the one row (1230–1310px with the AI
+       * chip showing) the status line was 4–84px: "S…". The tabs take a row
+       * of their own instead, wherever that is today.
+       */
+      const roomy = await at(1200, 700, async (p) => {
+        const narrow = [];
+        for (let width = 1200; width <= 1500; width += 10) {
+          await p.setViewportSize({ width, height: 700 });
+          await p.waitForTimeout(80);
+          await p.evaluate(() => {
+            const s = document.querySelector('#status');
+            s.className = 'status';
+            s.textContent = 'Application corrected';
+          });
+          await p.waitForTimeout(40);
+          const got = await p.evaluate(() => {
+            const s = document.querySelector('#status');
+            return { w: Math.round(s.getBoundingClientRect().width), cut: s.scrollWidth > s.clientWidth + 1 };
+          });
+          if (got.cut || got.w < 100) narrow.push(`${width}:${got.w}`);
+        }
+        return narrow;
+      });
+      check('the status line has room for its words at every width from 1200 to 1500', roomy.length === 0, roomy.join(' '));
+
+      /* Shift+Tab up the resume: nothing focused under the sticky header and toolbar. */
+      const backtab = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.evaluate(() => [...document.querySelectorAll('#editor button')].at(-1)?.focus());
+        let covered = 0;
+        let stops = 0;
+        for (let i = 0; i < 120; i++) {
+          await p.keyboard.press('Shift+Tab');
+          const f = await p.evaluate(() => {
+            const e = document.activeElement;
+            if (!e || !e.closest('#editor')) return null;
+            const r = e.getBoundingClientRect();
+            const top = document.elementFromPoint(r.left + Math.min(r.width / 2, 10), r.top + r.height / 2);
+            return { covered: !(top && (top === e || e.contains(top))) };
+          });
+          if (!f) break;
+          stops++;
+          if (f.covered) covered++;
+        }
+        return { covered, stops };
+      });
+      check('Shift+Tab up the resume never leaves the focus under the header', backtab.stops > 20 && backtab.covered === 0, JSON.stringify(backtab));
+
+      /* The side panel's "Log an error" over the page has a background of its own. */
+      const embeddedChip = await at(360, 800, (p) =>
+        p.evaluate(async () => {
+          document.documentElement.classList.add('embedded');
+          await new Promise((r) => setTimeout(r, 100));
+          return getComputedStyle(document.querySelector('#error-log-chip')).backgroundColor;
+        }),
+      );
+      check('in the side panel "Log an error" is not see-through', !/^(rgba\(0, 0, 0, 0\)|transparent)$/.test(embeddedChip), embeddedChip);
+
+      /* The order picker's ring is the accent, as every other box's. */
+      const orderRing = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        const box = p.locator('.order-by').first();
+        await box.waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.keyboard.press('Tab');
+        await box.focus().catch(() => {});
+        await p.waitForTimeout(400);
+        return box.evaluate((b) => {
+          const probe = document.createElement('i');
+          probe.style.color = 'var(--accent)';
+          document.body.append(probe);
+          const accent = getComputedStyle(probe).color;
+          probe.remove();
+          return { border: getComputedStyle(b).borderTopColor, accent, fv: b.matches(':focus-visible') };
+        }).catch(() => null);
+      });
+      check('the order picker focused from the keyboard has the accent border', !!orderRing && orderRing.fv && orderRing.border === orderRing.accent, JSON.stringify(orderRing));
+
+      /* "Actual size": its words say what it does; not also aria-pressed. */
+      const zoomPill = await at(390, 760, (p) =>
+        p.evaluate(() => {
+          const z = document.querySelector('#preview-zoom');
+          z.click();
+          const out = { text: z.textContent, pressed: z.getAttribute('aria-pressed') };
+          z.click();
+          return out;
+        }),
+      );
+      check('the zoom pill says what it does once, not also as pressed', zoomPill.text === 'Fit width' && zoomPill.pressed === null, JSON.stringify(zoomPill));
+
+      /* The tracker: the stage reads whole, and the table does not scroll sideways at 1151–1200 or 1401. */
+      const stages = [];
+      for (const width of [1151, 1180, 1401]) {
+        stages.push(await at(width, 900, async (p) => {
+          await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+          await p.locator('#apps-wrap td.app-status select').first().waitFor({ timeout: 10_000 }).catch(() => {});
+          return p.evaluate((width) => {
+            const wrap = document.querySelector('#apps-wrap');
+            const cut = [...wrap.querySelectorAll('td.app-status select')].filter((s) => {
+              const free = s.cloneNode(true);
+              free.style.cssText = 'width:auto;max-width:none;position:absolute;visibility:hidden';
+              // Beside it, so it has the cell's font.
+              s.after(free);
+              const need = free.getBoundingClientRect().width;
+              free.remove();
+              return need > s.getBoundingClientRect().width + 0.5;
+            }).length;
+            return { width, cut, over: wrap.scrollWidth - wrap.clientWidth, rows: wrap.querySelectorAll('td.app-status select').length };
+          }, width);
+        }));
+      }
+      check('the tracker shows each stage whole and never scrolls sideways', stages.every((s) => s.rows > 0 && s.cut === 0 && s.over <= 0), JSON.stringify(stages));
+
       /* At 320px the save's name said "Save: …" even when it was "data". */
       const chip = await at(320, 600, (p) =>
         p.evaluate(() => {

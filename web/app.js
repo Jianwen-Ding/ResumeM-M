@@ -2648,7 +2648,7 @@ function attachSourceTools(block, key, actions, anchor, kind = 'bullet') {
       event.stopPropagation();
     }
   });
-  for (const line of block.querySelectorAll('.editable')) line.title = `Double-click to edit and show ${kind} actions. Shared wording updates every resume using it.`;
+  for (const line of block.querySelectorAll('.editable')) line.title = `Double-click to edit and show ${kind} actions, or press Enter or F2 to edit. Shared wording updates every resume using it.`;
   return block;
 }
 
@@ -2816,7 +2816,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     // looks like this one — a list bullet's preview, say — must not invite a
     // double-click that does nothing.
     className: `${className} editable`,
-    title: title ?? 'Double-click to edit. This wording is shared by every resume using it.',
+    title: title ?? 'Double-click, or press Enter or F2, to edit. This wording is shared by every resume using it.',
   });
   // Plain words: `display` has already taken the markers off, and reading
   // what is left as markup again would find some in a code span's text.
@@ -2824,6 +2824,10 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
 
   let editing = false;
   let retryTimer = null;
+  // Ctrl+Shift+E pressed mid-edit: the blur that follows is the error log's
+  // dialog taking the focus, not the person leaving the line.
+  let holding = false;
+  let heldRange = null;
   const stop = (commit) => {
     // Enter, Escape or a click away replaces a retry still waiting.
     clearTimeout(retryTimer);
@@ -2831,12 +2835,25 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     inlineRetrying.delete(node);
     if (!editing) return;
     editing = false;
-    node.contentEditable = 'false';
+    heldRange = null;
+    /*
+     * The focus stays on the line. Leaving edit mode before giving the tab
+     * stop back left the line, for a moment, something that cannot have the
+     * focus — and Chrome sent it to <body>: after Escape or Enter the next
+     * Tab started again from the top of the page.
+     */
+    const focused = document.activeElement === node;
     node.tabIndex = 0;
+    node.contentEditable = 'false';
+    node.setAttribute('aria-readonly', 'true');
     node.classList.remove('editing');
+    if (focused && document.activeElement !== node) node.focus({ preventScroll: true });
     const next = node.textContent.trim();
     if (commit && next && next !== raw) {
+      // Saving draws the line again; the focus goes to the new one.
+      const place = focused ? linePlace(node) : null;
       const save = Promise.resolve().then(() => onCommit(next));
+      if (place) save.then(() => refocusLine(node, place), () => {});
       inlineSaves.add(save);
       /*
        * And the chip says it is going. It went on saying "All changes saved"
@@ -2882,6 +2899,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
           editing = true;
           node.contentEditable = 'plaintext-only';
           node.removeAttribute('tabindex');
+          node.setAttribute('aria-readonly', 'false');
           node.classList.add('editing');
           node.textContent = next;
           if (!offline) {
@@ -2939,6 +2957,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     node.contentEditable = 'plaintext-only';
     // Being edited, it is focusable as any text is; the tab stop is for the line at rest.
     node.removeAttribute('tabindex');
+    node.setAttribute('aria-readonly', 'false');
     node.classList.add('editing');
     // The sentence as written, markup and all: what is saved is what is shown
     // here, so there is nothing to lose in translation.
@@ -2959,10 +2978,22 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
   };
   node.ondblclick = () => start();
   /*
+   * A click with no pointer behind it (`detail` 0) is a screen reader's
+   * browse mode pressing Enter on the line, or another assistive tool
+   * activating it: it starts editing, as Enter would with the focus there.
+   */
+  node.onclick = (e) => {
+    if (e.detail === 0 && !editing) start(true);
+  };
+  /*
    * And from the keyboard: a line only a double-click could edit was out of
-   * reach without a mouse. Tab to it, then Enter or F2.
+   * reach without a mouse. Tab to it, then Enter or F2. Said to a screen
+   * reader too: a text box, read-only until then, described by how.
    */
   node.tabIndex = 0;
+  node.setAttribute('role', 'textbox');
+  node.setAttribute('aria-readonly', 'true');
+  node.setAttribute('aria-describedby', 'editable-line-hint');
   node.setAttribute('aria-keyshortcuts', 'Enter F2');
   node.onkeydown = (e) => {
     if (!editing && (e.key === 'Enter' || e.key === 'F2')) {
@@ -2970,16 +3001,77 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
       start(true);
       return;
     }
+    if (editing && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'E' || e.key === 'e' || e.code === 'KeyE')) {
+      /*
+       * The error log opens over the line (errorlog.js listens on the
+       * document) and takes the focus: the blur committed the half-typed
+       * sentence to the shared store. The edit is held open instead, and the
+       * dialog gives the focus back to it when it closes.
+       */
+      holding = true;
+      setTimeout(() => {
+        holding = false;
+      });
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
       stop(true);
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      // Only the edit: not also the actions around it, which took the focus to their button.
+      if (editing) e.stopPropagation();
       stop(false);
     }
   };
-  node.onblur = () => stop(true);
+  node.onblur = () => {
+    if (holding && editing) {
+      holding = false;
+      const sel = window.getSelection();
+      heldRange = sel && sel.rangeCount && node.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+      return;
+    }
+    stop(true);
+  };
+  node.onfocus = () => {
+    // Back from the dialog: the caret where it was left.
+    if (!editing || !heldRange) return;
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(heldRange);
+    heldRange = null;
+  };
   return node;
+}
+
+/*
+ * Where a line is, in terms that survive drawing it again: the block of
+ * actions it belongs to, if any, and its place among the editable lines
+ * there (or in the page). Saving a line redraws the editor, and the focus,
+ * which was on the old line, fell to <body>.
+ */
+function linePlace(node) {
+  const block = node.closest('[data-tools-key]');
+  const scope = block ?? document;
+  return {
+    key: block?.dataset.toolsKey ?? null,
+    index: [...scope.querySelectorAll('.editable')].indexOf(node),
+    global: [...document.querySelectorAll('.editable')].indexOf(node),
+  };
+}
+
+function refocusLine(node, place) {
+  // Not if the line is still there, or the person has gone elsewhere since.
+  if (node.isConnected) return;
+  const at = document.activeElement;
+  if (at && at !== document.body) return;
+  let line = null;
+  if (place.key) {
+    const block = [...document.querySelectorAll('[data-tools-key]')].find((b) => b.dataset.toolsKey === place.key);
+    line = block?.querySelectorAll('.editable')[place.index] ?? null;
+  }
+  line ??= document.querySelectorAll('.editable')[place.global] ?? null;
+  if (line && line.getClientRects().length) line.focus({ preventScroll: true });
 }
 
 /** Review the complete entry through the same background feedback panel. */
@@ -4159,7 +4251,7 @@ function profileBlock() {
         value
           ? editableLine(String(value), {
               className: 'meta-value',
-              title: `Double-click to edit. ${label} appears in the header of every resume.`,
+              title: `Double-click, or press Enter or F2, to edit. ${label} appears in the header of every resume.`,
               onCommit: (text) => saveProfileField(key, text),
             })
           : el('button', {
@@ -4191,7 +4283,7 @@ function profileBlock() {
         el('span', { className: 'meta-label', textContent: key }),
         editableLine(String(value), {
           className: 'meta-value',
-          title: 'Double-click to edit. Used to fill forms, never printed on a resume.',
+          title: 'Double-click, or press Enter or F2, to edit. Used to fill forms, never printed on a resume.',
           onCommit: (text) => saveAutofillField(key, text),
         }),
         el('button', {
@@ -4231,7 +4323,7 @@ function nameHead(profile) {
     return [
       editableLine(String(field ?? '') || 'Your Name', {
         className: 'title',
-        title: 'Double-click to edit. This is the name at the top of every resume.',
+        title: 'Double-click, or press Enter or F2, to edit. This is the name at the top of every resume.',
         onCommit: (text) => saveProfileField('name', text),
       }),
       el('button', {
@@ -4259,7 +4351,7 @@ function nameHead(profile) {
   return [
     editableLine(String(chosen?.text ?? ''), {
       className: 'title',
-      title: 'Double-click to edit this form of your name.',
+      title: 'Double-click, or press Enter or F2, to edit this form of your name.',
       onCommit: (text) => saveNameText(current, text),
     }),
     alternateStepper(key, field, current),

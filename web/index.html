@@ -85,7 +85,9 @@
         <div id="way-back" class="way-back" hidden></div>
         <div id="rescue" class="way-back rescue" role="status" hidden></div>
         <p id="resume-view-note" class="hint"></p>
-        <p class="hint editor-interaction-hint">Double-click a heading field or bullet to edit and show actions, or use its … button.</p>
+        <p class="hint editor-interaction-hint">Double-click a heading field or bullet to edit and show actions, or use its … button. From the keyboard, Tab to it and press Enter or F2 to edit.</p>
+        <!-- What every line that can be edited in place is described by, to a screen reader (aria-describedby). -->
+        <span id="editable-line-hint" hidden>Press Enter or F2 to edit. Enter keeps the change, Escape puts it back.</span>
         <div id="fit" class="fit idle">Not compiled yet.</div>
         <div id="warnings" class="warnings"></div>
         <div id="editor"></div>
@@ -95,7 +97,7 @@
              page in rather than blinking. See preview.js. -->
         <div id="preview-pane" class="preview-frame">
           <div id="preview-empty" class="preview-empty">Compiling your resume…</div>
-          <button id="preview-zoom" type="button" class="tiny narrow-only preview-zoom" aria-pressed="false" title="Show the page at its real size, and scroll it">Actual size</button>
+          <button id="preview-zoom" type="button" class="tiny narrow-only preview-zoom" title="Show the page at its real size, and scroll it">Actual size</button>
         </div>
         <section id="feedback-panel" class="feedback-panel" aria-label="AI Feedback" hidden>
           <div class="toolbar">

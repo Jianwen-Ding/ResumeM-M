@@ -88,8 +88,13 @@ export function fitStatus(status) {
   status.classList.remove('toast');
   if (status.classList.contains('err') && status.textContent && !isFloating(status)) {
     const cut = status.scrollHeight > status.clientHeight + 1 || status.scrollWidth > status.clientWidth + 1;
-    let toast = cut || status.clientWidth < STATUS_MIN;
     const header = status.closest('header');
+    /*
+     * The room the row leaves it, not the width it happens to have: a short
+     * error ("Failed to fetch") is narrower than STATUS_MIN however much room
+     * there is, and floated over the page at 1600px for no reason.
+     */
+    let toast = cut || (header ? statusRoom(header, status) : status.clientWidth) < STATUS_MIN;
     // The side panel's header floats in a corner (fixed): growing there moves
     // nothing under it, and the error stays in it, above "Log an error".
     if (!toast && header && getComputedStyle(header).position !== 'fixed') {
@@ -103,6 +108,20 @@ export function fitStatus(status) {
   }
   fitDismiss(status);
   fitFloating(status.closest('header'));
+  noteHeight(status.closest('header'));
+}
+
+/*
+ * `--header-h`, measured again: a change of words in the status line can
+ * change the header's height (where the tabs have a row of their own and the
+ * rest wraps), and the sticky toolbar slid under it. Only a property on the
+ * root changes here, which nothing observes, so this cannot loop.
+ */
+function noteHeight(header) {
+  const root = document.documentElement;
+  if (!header || root.classList.contains('embedded')) return;
+  const height = `${header.offsetHeight}px`;
+  if (root.style.getPropertyValue('--header-h') !== height) root.style.setProperty('--header-h', height);
 }
 
 /**
@@ -214,6 +233,15 @@ export function fitHeader(header = document.querySelector('header')) {
   header.classList.remove('tabs-row');
   header.classList.add('log-mark-only');
   if (tabs && tabs.scrollWidth > tabs.clientWidth + 1) header.classList.add('tabs-row');
+  /*
+   * And where they fit only by leaving the status line next to nothing: at
+   * 1230–1310px it was 4–84px wide, and "Status updated" read "S…". A row of
+   * their own makes the header some 25px taller there, and says what happened.
+   */
+  const row = header.querySelector('h1') ?? chip;
+  if (!header.classList.contains('tabs-row') && status && !isFloating(status) && row && statusRoom(header, row) < STATUS_ROOM) {
+    header.classList.add('tabs-row');
+  }
 
   // Then the button's words, if the status line keeps its room beside them.
   if (chip) {
@@ -231,6 +259,26 @@ export function fitHeader(header = document.querySelector('header')) {
 
   fitStatus(status);
   root.style.setProperty('--header-h', `${header.offsetHeight}px`);
+}
+
+/*
+ * `--toolbar-h`: the sticky toolbar's height, as `--header-h` is the header's,
+ * so the page can keep what it scrolls into view clear of both
+ * (`scroll-padding-top`, see style.css). Shift+Tab up a long resume put the
+ * focus under them — a third of the stops at 1280px. The tab not showing has
+ * a toolbar of no height; whichever has one is the one on screen.
+ */
+function watchToolbars() {
+  const root = document.documentElement;
+  const bars = [...document.querySelectorAll('.sticky-toolbar')];
+  if (!bars.length || typeof ResizeObserver === 'undefined') return;
+  const measure = () => {
+    const height = Math.max(0, ...bars.map((bar) => bar.offsetHeight));
+    root.style.setProperty('--toolbar-h', `${height}px`);
+  };
+  const observer = new ResizeObserver(measure);
+  for (const bar of bars) observer.observe(bar);
+  measure();
 }
 
 /**
@@ -251,6 +299,7 @@ export function setupHeader(header = document.querySelector('header')) {
     });
   };
   fitHeader(header);
+  watchToolbars();
   window.addEventListener('resize', refit);
   const status = header.querySelector('#status');
   /*

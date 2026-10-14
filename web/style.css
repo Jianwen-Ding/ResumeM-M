@@ -113,6 +113,24 @@ header.tabs-row #tabs {
   flex-wrap: wrap;
   overflow: visible;
 }
+/* The status line takes only what the row has left, and is cut short with
+   its title holding the rest: as wide as its words, a long one pushed "Log an
+   error" onto a row of its own at 641–870px, and the header grew under it.
+   It fills the gap before the AI chips, so they stay at the right as they
+   were rather than wherever its words happen to end. */
+header.tabs-row #status { flex: 1 1 0; max-width: none; order: 1; }
+header.tabs-row .jobs-chip, header.tabs-row #error-log-chip, header.tabs-row #status-dismiss { order: 2; }
+
+/*
+ * What is scrolled into view — by Tab and Shift+Tab, by a find, by a link —
+ * clears what sticks at the top: the header (`--header-h`) and the toolbar
+ * under it (`--toolbar-h`), both measured by header.js. Shift+Tab up a long
+ * resume left a third of the stops under them at 1280px.
+ */
+html { scroll-padding-top: calc(var(--header-h, 56px) + var(--toolbar-h, 0px) + 8px); }
+/* The header floats in a corner in the side panel (and scrolls away on a
+   phone, below): only the toolbar sticks. */
+html.embedded { scroll-padding-top: calc(var(--toolbar-h, 0px) + 8px); }
 
 h1 {
   font-size: var(--t-lg);
@@ -1199,7 +1217,9 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 /* ---- Application detail ---- */
 
 .apps-split { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .9fr); gap: 16px; align-items: start; }
-@media (max-width: 1150px) { .apps-split { grid-template-columns: 1fr; } }
+/* One column up to 1200px, not 1150: beside the record at 1151–1193px the
+   table was a few pixels wider than its half, and scrolled sideways. */
+@media (max-width: 1200px) { .apps-split { grid-template-columns: 1fr; } }
 
 /*
  * The table stays inside its half of the split.
@@ -1235,8 +1255,11 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
  * need, and "Enclosed" — shown again beside the table, in the record — goes
  * where the table shares the page with it and the room is short.
  */
-#apps-wrap td.app-status select { width: 9em; max-width: 100%; }
-@media (min-width: 1151px) and (max-width: 1400px) {
+/* As wide as its longest stage: at 9em "Interviewing" read "Interviewi". */
+#apps-wrap td.app-status select { width: auto; max-width: 100%; }
+/* To 1520px, not 1400: "Enclosed" coming back at 1401 squeezed Company and
+   Role so far that the table grew by a fifth in one pixel. */
+@media (min-width: 1201px) and (max-width: 1520px) {
   #apps-wrap th:nth-child(6), #apps-wrap td:nth-child(6) { display: none; }
 }
 
@@ -1277,10 +1300,11 @@ tbody tr { cursor: pointer; }
      a row of their own) with room to spare. */
   position: sticky;
   top: calc(var(--header-h, 56px) + 16px);
-  scroll-margin-top: calc(var(--header-h, 56px) + 16px);
+  /* Past the header, which the page's scroll-padding already clears. */
+  scroll-margin-top: 16px;
 }
 /* Stacked under the list, it is where it falls (the editor scrolls to it). */
-@media (max-width: 1150px) {
+@media (max-width: 1200px) {
   .app-detail { position: static; }
 }
 .app-detail h3 { margin: 0 0 2px; font-size: var(--t-lg); letter-spacing: -.01em; }
@@ -1904,7 +1928,10 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   background: var(--panel);
   color: var(--muted);
 }
-.order-by:hover, .order-by:focus-visible { color: var(--ink); border-color: var(--faint); }
+.order-by:hover { color: var(--ink); border-color: var(--faint); }
+/* The accent, as every other box has it: --faint here, under the select's own
+   accent inset, drew a two-tone ring. */
+.order-by:focus-visible { color: var(--ink); border-color: var(--accent); }
 
 /* ------------------------------------------------------------------ *
  * Dates, edited as dates                                              *
@@ -2139,6 +2166,8 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 .narrow-only { display: none; }
 
 @media (max-width: 640px) {
+  /* What is scrolled into view clears only the toolbar: the header is not there. */
+  html { scroll-padding-top: calc(var(--toolbar-h, 0px) + 8px); }
   /* The header: two short rows that scroll away, rather than one wide row
      that sticks and pushes the page sideways. The tabs scroll within
      themselves. */
@@ -2417,6 +2446,8 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 .embedded header > * { pointer-events: auto; }
 .embedded h1, .embedded nav, .embedded #project-chip, .embedded #ai-peek-chip, .embedded #resume-select { display: none; }
 .embedded header .jobs-chip { margin-left: 0; box-shadow: var(--shadow-md); }
+/* Over the page, not see-through: its words sat on top of whatever was under them. */
+.embedded .error-log-chip { background: var(--panel); box-shadow: var(--shadow-md); }
 .embedded .status {
   /* In the floating header already, under the AI chip; not floated again. */
   position: static;
@@ -2531,7 +2562,7 @@ header.log-mark-only .error-log-chip-label {
 .error-log-note:empty { display: none; }
 .error-log-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 /* "Open the error log" scrolls here: the heading clears the sticky header. */
-#error-log { scroll-margin-top: calc(var(--header-h, 56px) + 16px); }
+#error-log { scroll-margin-top: 16px; }
 @media (max-width: 640px) {
   /* The header scrolls away here, so nothing to clear. */
   #error-log { scroll-margin-top: 8px; }
