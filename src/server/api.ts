@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type Router } from 'express';
+import { logServerEvent } from '../errorlog/buffer.js';
 import contentDisposition from 'content-disposition';
 import { extractText } from '../ingest/text.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -2248,6 +2249,8 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     '/config/store/push',
     handler(async (_req, res) => {
       const result = await repo.push();
+      // For the error log: see `src/errorlog/buffer.ts`.
+      if (!result.ok) logServerEvent('push', `Push failed: ${result.output}`);
       res.json({ ...result, remote: await repo.remoteStatus() });
     }),
   );
@@ -2264,6 +2267,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     '/config/store/pull',
     handler(async (_req, res) => {
       const result = await repo.pull();
+      if (!result.ok) logServerEvent('pull', `Pull failed: ${result.message}`);
       /*
        * Everything this process remembers about the files, forgotten, even
        * when nothing came in — a merge that was undone has rewritten the

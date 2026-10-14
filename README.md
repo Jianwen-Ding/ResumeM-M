@@ -328,6 +328,10 @@ rmm save [-m "why"] [--push]      Commit the whole store to git
 rmm config set ai.enabled true    Turn the AI on (also answers a pull or clone
                                   that switched it off on this machine)
 rmm serve [--port 4600]           Editor GUI and the extension's API
+rmm log "what went wrong" [--minutes N] [--screenshot <file>]…
+                                  Write an entry in the error log
+rmm log status | remote <url> | push | pull
+                                  Look after the error log's own repository
 
 Any command also takes:
   --data <folder>                 Work on the save in this folder rather than
@@ -623,6 +627,70 @@ Two details make it a document history:
 The raw commit log, with patches, is still one click away for anyone who wants
 it.
 
+### The error log
+
+When something goes wrong, log it there and then — it takes a few seconds, and
+the entry carries what you could not have seen: the request that failed, the
+commit or push that did not happen, the compile that gave up, in the minutes
+before you noticed.
+
+**Where it lives.** In a git repository of its own, apart from every save and
+from this source tree: `~/.resumem-m/error-log`, made the first time anything
+is logged (with a README saying what it is). `RMM_ERROR_LOG_DIR` puts it
+somewhere else, as does `{"dir": "…"}` in `~/.resumem-m/error-log.json`.
+Errors are worth logging with no save open — opening one is among the things
+that go wrong — so nothing about the error log is kept in a save.
+
+**Logging.**
+
+- **Editor:** the **Log an error** button at the right of the header, or
+  **Ctrl+Shift+E** (**Cmd+Shift+E** on a Mac), from any tab. Type what went
+  wrong, paste a screenshot with Ctrl+V (or drop one, or choose a file), pick
+  how far back the automatic logs go — 2, 10 or 30 minutes — and **Save to error
+  log** (Ctrl+Enter).
+- **JobHelper:** **Log an error** in the popup, or **Alt+Shift+E** on any page.
+  The same form, with **Capture this tab** for a screenshot of the page in
+  front of you. When ResumeM-M cannot be reached the entry is kept in the
+  browser and sent the next time it answers; the popup says how many are
+  waiting.
+- **Terminal:** `rmm log "the build hung" --minutes 10 --screenshot shot.png`.
+  With a server running for the same error log (on `PORT`, 4600, or
+  `--server <url>`), the entry includes the server's logs from that window;
+  otherwise it says there were none to include.
+
+**An entry** is a folder, `entries/<date>/<time>-<words>/`, and one commit,
+"Log: <your first line>":
+
+- `entry.md` — your description; when (local time and UTC); where it was
+  logged from (editor, JobHelper, CLI, or a bug report — the bug-report inbox
+  copies every report here too); the server, app and extension versions; the
+  page it was logged over, from JobHelper; which save was open (its folder,
+  never its contents); the resume or application open, by id.
+- `logs.jsonl` — one JSON line per event, oldest first, from every part:
+  the server's console warnings and errors, every request that failed or took
+  over three seconds (method, route, status, the server's own message, how
+  long), failed commits, pushes and pulls, LaTeX failures and warnings, AI runs
+  that failed or timed out; the editor's own errors, its failed requests and
+  every red status line; JobHelper's failed calls, its errors on the page, the
+  card's red strips, and which actions ran (analyze, stage, fill, send…) and
+  how they ended.
+- `screenshot-N.png` / `.jpg` / `.webp` — what you pasted or captured, checked
+  to be the image it says it is; 8 MB together at most.
+
+**What is not recorded.** Every log line has email addresses, phone numbers,
+street addresses, tokens (in a remote's address, an `Authorization` or
+`X-RMM-Pair` header, a `?token=`/`key`/`secret`/`code` query, or any of the
+usual token shapes) taken out before it is written. Resume text, letters,
+answers, form field values and AI prompts or replies are never put in a log
+line at all. Screenshots are only ever what you paste or capture yourself.
+Each part keeps at most fifteen minutes or 2,000 events, in memory.
+
+**Pushing it.** Like a save: create an empty *private* repository, then set it
+under **Save & Files → Error Log → Remote** (or `rmm log remote <url>`), and
+**Push** / **Pull** there (`rmm log push`, `rmm log pull`). A token in the
+address is masked wherever it is shown. Entries say whether they have been
+pushed, and **Error Log** lists the newest of them.
+
 ---
 
 ## Local API
@@ -642,6 +710,9 @@ local tool. Do not expose it; CORS is open so the extension can reach it from a
 | `GET /api/autofill` | Profile fields and the answer bank |
 | `POST /api/applications/bundle` | Compile, name, file, snapshot, track |
 | `POST /api/ai/feedback` \| `/tailor` \| `/cover-letter` \| `/answer` | AI paths |
+| `POST /api/error-log` | Write an error-log entry (description, screenshots as data URLs, the caller's events) |
+| `GET /api/error-log` \| `/status` \| `/recent?minutes=N` | Its entries, its repository and remote, the server's scrubbed buffer |
+| `PUT /api/error-log/remote` · `POST /api/error-log/push` \| `/pull` | Its remote, and syncing it |
 
 ---
 

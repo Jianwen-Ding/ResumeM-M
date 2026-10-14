@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runInGroup } from '../process-group.js';
+import { logServerEvent } from '../errorlog/buffer.js';
 import { DEFAULT_LAYOUT, type LayoutOptions, type ResolvedResume } from '../model/types.js';
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
 import { renderLatex, unrenderableReason, type OwnField } from './latex.js';
@@ -420,7 +421,10 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
     const fileLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
     const combined = `${e.stdout ?? ''}\n${e.stderr ?? ''}\n${fileLog}`;
     fs.rmSync(dir, { recursive: true, force: true });
-    throw new LatexError(`${engine} failed: ${firstTexError(combined) ?? e.message ?? 'unknown error'}`, tail(combined));
+    const failed = new LatexError(`${engine} failed: ${firstTexError(combined) ?? e.message ?? 'unknown error'}`, tail(combined));
+    // For the error log: the first line only, which is TeX's complaint and not the document. See `noted`.
+    logServerEvent('compile', failed.message.split('\n')[0]!.slice(0, 300), 'error', { engine });
+    throw failed;
   }
 
   const pdfFile = path.join(dir, 'resume.pdf');
@@ -432,7 +436,9 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
     const logFile = path.join(dir, 'resume.log');
     const fileLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : log;
     fs.rmSync(dir, { recursive: true, force: true });
-    throw new LatexError(`${engine} produced no PDF: ${firstTexError(fileLog) ?? 'no pages of output'}`, tail(fileLog));
+    const failed = new LatexError(`${engine} produced no PDF: ${firstTexError(fileLog) ?? 'no pages of output'}`, tail(fileLog));
+    logServerEvent('compile', failed.message.split('\n')[0]!.slice(0, 300), 'error', { engine });
+    throw failed;
   }
 
   const auxFile = path.join(dir, 'resume.aux');
@@ -464,6 +470,26 @@ function assertRenderable(
 ): void {
   const reason = unrenderableReason(tex, what, own);
   if (reason) throw new LatexError(reason, reason);
+}
+
+/**
+ * LaTeX's own warnings — the fonts it could not find, a line run off the
+ * page — noted for the error log as well as returned, and only when they
+ * change: the preview compiles on every pause in the typing, and the same
+ * warning a hundred times would push everything else out of the buffer.
+ * These are this program's sentences, never the document's text; a
+ * resume's own warnings (which can name its entries) are not noted.
+ */
+let lastNoted = '';
+let lastNotedAt = 0;
+function noted(warnings: string[]): string[] {
+  const key = warnings.join('\n');
+  if (key && (key !== lastNoted || Date.now() - lastNotedAt > 5 * 60_000)) {
+    lastNoted = key;
+    lastNotedAt = Date.now();
+    for (const warning of warnings) logServerEvent('latex', warning, 'warn');
+  }
+  return warnings;
 }
 
 function firstTexError(log: string): string | undefined {
@@ -1077,7 +1103,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     texPath: opts.texPath,
     tex: best.tex,
     engine,
-    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log), ...tooWideWarnings(best.raw.log, best.layout)],
+    warnings: [...(resume.warnings ?? []), ...noted(fontWarnings(best.raw.log)), ...noted(tooWideWarnings(best.raw.log, best.layout))],
     log: tail(best.raw.log, 30),
     fastPath: best.fast,
   };
@@ -1413,7 +1439,7 @@ export async function compileLetter(
     texPath: opts.texPath,
     tex,
     engine,
-    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log, used), ...placeholderWarnings(letter)],
+    warnings: [...noted(fontWarnings(raw.log)), ...noted(tooWideWarnings(raw.log, used)), ...placeholderWarnings(letter)],
     pages: m.pages,
     fits,
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

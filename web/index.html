@@ -32,6 +32,9 @@
   <button id="ai-peek-chip" class="jobs-chip peek" title="The last few AI runs — what they were given, and what they said">What the AI is doing</button>
   <span id="jobs-chip" class="jobs-chip hidden" title="Work the AI is doing, or has finished"></span>
   <span id="status" class="status" role="status" aria-live="polite"></span>
+  <!-- Always there, beside the status line, so logging an error is one press
+       (or Ctrl+Shift+E) from anywhere, with or without a save. See errorlog.js. -->
+  <button id="error-log-chip" class="error-log-chip" type="button" title="Log an error — what went wrong, a screenshot, and the logs from the minutes before (Ctrl+Shift+E)"><span class="error-log-chip-mark" aria-hidden="true">!</span><span class="error-log-chip-label">Log an error</span></button>
 </header>
 
 <div id="project-banner" role="status"><strong id="project-status">No Save Open</strong><span id="project-banner-path">Open or create a save to access resumes, applications, and files.</span></div>
@@ -140,6 +143,13 @@
         <select id="save-default"><option value="">Ask Me on Startup</option></select>
         <button id="save-default-current" hidden>Use This Save by Default</button>
         <p id="save-default-status" class="hint">Choose which save opens when ResumeM-M starts.</p>
+        <!-- Not in any save, so shown whether or not one is open. See errorlog.js. -->
+        <section id="error-log" aria-labelledby="error-log-heading">
+          <hr>
+          <h3 id="error-log-heading">Error Log</h3>
+          <p class="hint">What went wrong, when you log it: your words, screenshots, and what the editor, the server and JobHelper noticed in the minutes before. Kept in its own git repository, which you can push like a save.</p>
+          <div id="error-log-panel" class="settings"></div>
+        </section>
         <div data-project-required hidden>
         <hr>
         <!-- Files you attach again and again and never generate. Kept beside

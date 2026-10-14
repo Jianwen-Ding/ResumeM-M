@@ -1,9 +1,15 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { decodeScreenshot } from '../errorlog/screenshots.js';
 
 /** Independent of resume saves: diagnostics must work with no save open. */
-export function bugReportsApi(root: string, build: string) {
+export function bugReportsApi(
+  root: string,
+  build: string,
+  /** Told of each report once it is in the inbox, with its screenshots as sent; see the error log in index.ts. */
+  saved?: (report: { text: string; version: string; extensionBuild: string }, screenshots: string[]) => void,
+) {
   const api = express.Router();
   api.get('/', (_req, res) => {
     const reports = fs.existsSync(root) ? fs.readdirSync(root)
@@ -30,13 +36,11 @@ export function bugReportsApi(root: string, build: string) {
     for (const image of report.screenshots) {
       const match = typeof image === 'string' && /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image);
       if (!match) { res.status(400).json({ error: 'Screenshots must be PNG, JPEG or WebP images.' }); return; }
-      const bytes = Buffer.from(match[2]!, 'base64');
-      total += bytes.length;
-      const valid = match[1] === 'png' ? bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
-        : match[1] === 'jpeg' ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
-        : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
-      if (!valid || total > 4 * 1024 * 1024) { res.status(400).json({ error: 'Use valid screenshots totaling at most 4 MB.' }); return; }
-      images.push({ extension: match[1] === 'jpeg' ? 'jpg' : match[1]!, bytes });
+      // The bytes decide, by the same check the error log makes. See `decodeScreenshot`.
+      const decoded = decodeScreenshot(image);
+      total += decoded?.bytes.length ?? 0;
+      if (!decoded || total > 4 * 1024 * 1024) { res.status(400).json({ error: 'Use valid screenshots totaling at most 4 MB.' }); return; }
+      images.push(decoded);
     }
     const destination = path.join(root, report.id);
     let temporary: string | undefined;
@@ -59,6 +63,7 @@ export function bugReportsApi(root: string, build: string) {
       fs.renameSync(temporary, destination);
       temporary = undefined;
       res.status(201).json({ id: report.id, directory: destination });
+      saved?.({ text: kept.text, version: kept.version, extensionBuild: kept.extensionBuild }, report.screenshots);
     } catch (error) { next(error); }
     finally { if (temporary) fs.rmSync(temporary, { recursive: true, force: true }); }
   });

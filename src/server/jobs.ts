@@ -1,3 +1,4 @@
+import { logServerEvent } from '../errorlog/buffer.js';
 /**
  * Work that takes long enough that you should not have to sit and watch it.
  *
@@ -53,7 +54,15 @@ export class Jobs {
 
     void work().then(
       (result) => this.finish(job.id, { status: 'done', result }),
-      (err: unknown) => this.finish(job.id, { status: 'failed', error: err instanceof Error ? err.message : String(err) }),
+      (err: unknown) => {
+        const error = err instanceof Error ? err.message : String(err);
+        /*
+         * For the error log: which run, and the first of what it said — never
+         * the prompt it was given or anything it wrote. See `src/errorlog/buffer.ts`.
+         */
+        logServerEvent('ai', `AI run "${kind}" failed: ${error.split('\n')[0]!.slice(0, 300)}`, 'error', { kind });
+        this.finish(job.id, { status: 'failed', error });
+      },
     );
 
     return job;

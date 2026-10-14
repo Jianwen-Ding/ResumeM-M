@@ -19,6 +19,7 @@ import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 import { markupFragment, plainMarkup } from './markup.js';
 import { setupCompact } from './compact.js';
 import { setupEmbed } from './embed.js';
+import { captureEditorErrors, recordEditorEvent, recordFailedRequest, setupErrorLog } from './errorlog.js';
 let activeProject;
 /** The narrow layout's switches, and the side panel's line to this page. See compact.js, embed.js. */
 let compact = null;
@@ -378,6 +379,8 @@ let statusTimer;
  * the bottom instead, where it can wrap without moving the toolbar.
  */
 function setStatus(text, isError = false) {
+  // Every red line the person was shown, for the error log. See errorlog.js.
+  if (isError && text) recordEditorEvent({ kind: 'status', message: text });
   const s = $('#status');
   s.textContent = text;
   s.title = text;
@@ -565,11 +568,16 @@ async function api(path, options = {}) {
   let res;
   try {
     res = options.keepalive ? await fetchKeptAlive(url, init) : await fetch(url, init);
+  } catch (err) {
+    // For the error log: the route and that it never arrived. See errorlog.js.
+    recordFailedRequest(method, url, null, err?.message);
+    throw err;
   } finally {
     if (order) unsettledOrders.delete(Number(order));
     if (writes) writesOut--;
   }
   const body = await res.json().catch(() => ({}));
+  if (!res.ok) recordFailedRequest(method, url, res.status, body.error ?? res.statusText);
   // With the reply, which for a refused save says what is there now.
   if (!res.ok) throw Object.assign(new Error(body.error ?? `${res.status} ${res.statusText}`), { status: res.status, body });
   // Which write of a resume a save made, where the server says. See `autoSave`.
@@ -13827,6 +13835,23 @@ async function boot() {
    * than not being there.
    */
   renderDraftingChip();
+
+  /*
+   * The error log, before anything that needs a save: an error is worth
+   * logging whichever save is open, and most of all when none will open.
+   * See errorlog.js.
+   */
+  captureEditorErrors();
+  setupErrorLog({
+    el,
+    setChildren,
+    setStatus,
+    showTab,
+    context: () => ({
+      resumeId: state.masterView ? null : (state.resumeId ?? null),
+      applicationId: openApplicationId ?? openDraftId ?? null,
+    }),
+  });
 
   $('#feedback-close').onclick = () => { $('#feedback-panel').hidden = true; };
   $('#feedback-select').onchange = event => {

@@ -2362,3 +2362,59 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 13px; overflow-wrap: anywhere;
 }
 .pair-row { display: grid; gap: 2px; justify-items: start; }
+
+/* ---- Error log: the header button, its dialog, and the section under Save & Files (errorlog.js) ---- */
+
+/* Quiet, like the AI peek beside it: always there, never the news. */
+.error-log-chip {
+  font-size: var(--t-sm);
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  flex: none;
+}
+.error-log-chip:hover { color: var(--bad); border-color: var(--bad); }
+.error-log-chip { display: inline-flex; align-items: center; gap: 6px; }
+.error-log-chip-mark {
+  display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%;
+  border: 1.5px solid currentColor; font-size: 10px; font-weight: 700; line-height: 1;
+}
+/* Below the width where the tabs, the chips and the status line all fit with
+   its words, just the mark: the status line is the one that would give up its
+   room (it shrinks first), and it is the one saying what happened. The words
+   stay the button's name, and its title says them. */
+@media (max-width: 1499px) {
+  .error-log-chip { padding: 5px 7px; }
+  .error-log-chip-label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+  }
+}
+.error-log-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.error-log-body { width: min(560px, 94vw); }
+.error-log-body textarea { min-height: 64px; font-family: inherit; font-size: 14px; }
+.error-log-body .lbl { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+.error-log-paste { padding: 14px; }
+.error-log-thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.error-log-thumbs:empty { display: none; }
+.error-log-thumb { margin: 0; display: grid; gap: 4px; justify-items: start; }
+.error-log-thumb img { max-width: 140px; max-height: 96px; border: 1px solid var(--line); border-radius: 6px; object-fit: contain; background: #fafafb; }
+.error-log-window { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 13px; }
+.error-log-note:empty { display: none; }
+.error-log-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+#error-log .mono-path { margin: 6px 0; }
+.error-log-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 6px; }
+/* The section sits in the Save & Files side column, which is narrow: buttons
+   wrap, and each entry is its time and source over its description. */
+#error-log-panel .row { flex-wrap: wrap; }
+#error-log-panel input[type=text] { width: 100%; }
+.error-log-list li { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; font-size: 12px; align-items: baseline; padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
+.error-log-list li:last-child { border-bottom: 0; }
+.error-log-what, .error-log-list li .hint { grid-column: 1 / -1; }
+.error-log-when { color: var(--muted); white-space: nowrap; }
+.error-log-source { color: var(--muted); font-weight: 500; }
+.error-log-what { overflow-wrap: anywhere; }

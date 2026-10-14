@@ -17,6 +17,8 @@ import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { StoreConfig, WritingSample } from './model/types.js';
 import { startServer } from './server/index.js';
+import { ErrorLog, appVersion } from './errorlog/log.js';
+import { windowMinutes, type LogEvent } from './errorlog/buffer.js';
 
 // Every command here prints as it goes rather than buffering everything up
 // front, so every command can meet a reader that stops early. See cli-io.ts.
@@ -108,6 +110,13 @@ const USAGE = `rmm — resume mix-and-match
   rmm clone <repo> <folder>       Bring a save down from where it is pushed,
                                   and open it
   rmm serve [--port 4600]         Start the editor GUI and extension API
+  rmm log "what went wrong" [--minutes 10] [--screenshot <file>]…
+                                  Write an entry in the error log, with the
+                                  running server's logs from the minutes before
+  rmm log status                  Where the error log is, its remote, its
+                                  newest entries
+  rmm log remote <url>            Set (or with --remove, take away) its remote
+  rmm log push | rmm log pull     Send its entries there, or bring them in
 
 Any command also takes:
   --data <folder>    Work on the save in this folder instead of the one that is
@@ -119,6 +128,8 @@ Environment:
                      its own git repository, separate from this source tree.
   RMM_AUTOCOMMIT=0   Do not commit store changes.
   RMM_AI=0           Keep the AI off whatever config.yaml says.
+  RMM_ERROR_LOG_DIR  Where the error log lives. Defaults to
+                     ~/.resumem-m/error-log, a git repository of its own.
 `;
 
 function arg(argv: string[], name: string): string | undefined {
@@ -147,13 +158,14 @@ const TAKES: Record<string, { value?: string[]; bare?: string[] }> = {
   save: { value: ['message', 'm'], bare: ['push', 'pull'] },
   voice: { bare: ['dry-run', 'no-ai'] },
   serve: { value: ['port'] },
+  log: { value: ['minutes', 'screenshot', 'server'], bare: ['remove'] },
 };
 
 /** The flags whose value is free text, and so may legitimately begin with a dash. */
 const FREE_TEXT = new Set(['m', 'message', 'focus']);
 
 /** Every command there is, for telling an unknown one from a known one given a stray flag. */
-const COMMANDS = new Set([...WORKS_IN_A_STORE, 'clone', 'help', '--help', '-h']);
+const COMMANDS = new Set([...WORKS_IN_A_STORE, 'clone', 'log', 'help', '--help', '-h']);
 
 /**
  * `--data` before the command, moved after it.
@@ -968,6 +980,9 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'log':
+      return logCommand(rest);
+
     case 'serve': {
       await repo.ensure();
       const port = arg(rest, 'port');
@@ -1003,6 +1018,178 @@ async function main(argv: string[]): Promise<number> {
       console.log(USAGE);
       return 1;
   }
+}
+
+/** Every value a flag that may be given more than once was given: `--screenshot a.png --screenshot b.png`. */
+function allArgs(argv: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === '--') break;
+    if (token.startsWith(`--${name}=`)) out.push(token.slice(name.length + 3));
+    else if (token === `--${name}` && argv[i + 1] !== undefined) out.push(argv[++i]!);
+  }
+  return out;
+}
+
+/** A screenshot file as the data URL an entry takes, by what its bytes are, not its name. */
+function screenshotFile(file: string): string {
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    throw new Error(
+      `--screenshot ${file}: ${code === 'ENOENT' ? 'there is nothing at that path' : code === 'EISDIR' ? 'that is a folder, not an image' : clean(err)}.`,
+    );
+  }
+  const kind = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    ? 'png'
+    : bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
+      ? 'jpeg'
+      : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP'
+        ? 'webp'
+        : null;
+  if (!kind) throw new Error(`--screenshot ${file}: not a PNG, JPEG or WebP image.`);
+  return `data:image/${kind};base64,${bytes.toString('base64')}`;
+}
+
+/**
+ * The running server's buffer, when a server is running for this same error
+ * log; nothing otherwise.
+ *
+ * The CLI keeps no buffer of its own — each command is over in a moment, and
+ * what went wrong in it was printed in front of the person typing. What it
+ * cannot see is the server's last few minutes, which is usually what the
+ * entry is about. Asked at `--server`, or `RMM_SERVER`, or the port the
+ * server starts on (`PORT`, else 4600), for two seconds; a server that
+ * writes to another error log is not this one's to quote.
+ */
+async function serverBuffer(
+  rest: string[],
+  dir: string,
+  minutes: number,
+): Promise<{ url: string; events: LogEvent[]; build?: string } | { url: string; why: string }> {
+  const url = (arg(rest, 'server') ?? process.env.RMM_SERVER ?? `http://127.0.0.1:${process.env.PORT || 4600}`).replace(/\/+$/, '');
+  const same = (a: string, b: string) => {
+    const real = (p: string) => {
+      try {
+        return fs.realpathSync(p);
+      } catch {
+        return path.resolve(p);
+      }
+    };
+    return real(a) === real(b);
+  };
+  try {
+    const res = await fetch(`${url}/api/error-log/recent?minutes=${minutes}`, { signal: AbortSignal.timeout(2_000) });
+    if (!res.ok) return { url, why: `the server at ${url} did not give its logs (${res.status})` };
+    const body = (await res.json()) as { dir?: string; events?: LogEvent[] };
+    if (typeof body.dir !== 'string' || !same(body.dir, dir)) {
+      return { url, why: `the server at ${url} keeps its error log in ${body.dir ?? 'another folder'}, not this one` };
+    }
+    const health = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2_000) })
+      .then((r) => r.json() as Promise<{ build?: string }>)
+      .catch(() => ({}) as { build?: string });
+    return { url, events: Array.isArray(body.events) ? body.events : [], ...(health.build ? { build: health.build } : {}) };
+  } catch {
+    return { url, why: `no server is running at ${url}` };
+  }
+}
+
+/**
+ * `rmm log`: write an error-log entry, or look after the error log's
+ * repository — its status, its remote, push and pull — the way `rmm save`
+ * and `rmm pull` look after a save's. Works with no save at all.
+ */
+async function logCommand(rest: string[]): Promise<number> {
+  const log = new ErrorLog();
+  // What a pull says to do next is said for a terminal. See `Repo.inTerminal`.
+  log.repo.inTerminal = true;
+  const words = positionals('log', rest);
+  const [first, ...more] = words;
+  const sub =
+    first === 'remote' ? more.length <= 1 : first !== undefined && ['push', 'pull', 'status'].includes(first) && more.length === 0;
+
+  if (sub && first === 'status') {
+    const status = await log.status();
+    console.log(`Error log: ${status.dir}${status.isRepo ? '' : ' (not made yet — it is, the first time something is logged)'}`);
+    console.log(`  ${status.entries} ${status.entries === 1 ? 'entry' : 'entries'}`);
+    if (status.remote) {
+      const r = status.remote;
+      console.log(
+        `  remote: ${r.url}` +
+          (r.tracked ? ` — ${r.ahead} commit${r.ahead === 1 ? '' : 's'} not pushed, ${r.behind} to pull as of the last push or pull` : ' — never pushed'),
+      );
+    } else console.log('  remote: none — `rmm log remote <url>` adds one');
+    if (status.lastPush) console.log(`  last pushed: ${new Date(status.lastPush).toLocaleString()}`);
+    for (const entry of await log.list(5)) {
+      console.log(
+        `  ${new Date(entry.at).toLocaleString()}  ${entry.source.padEnd(10)} ${entry.description}` +
+          `${entry.screenshots ? ` [${plural(entry.screenshots, 'screenshot')}]` : ''}${entry.pushed ? '' : ' (not pushed)'}`,
+      );
+    }
+    return 0;
+  }
+  if (sub && first === 'remote') {
+    const remove = rest.includes('--remove');
+    const url = more[0];
+    if (url === undefined && !remove) {
+      const status = await log.status();
+      console.log(status.remote?.url ?? 'The error log has no remote. `rmm log remote <url>` adds one.');
+      return 0;
+    }
+    const status = await log.setRemote(remove ? '' : url ?? '');
+    console.log(status.remote?.url ? `The error log pushes to ${status.remote.url}.` : 'Remote removed. The error log is local only.');
+    return 0;
+  }
+  if (sub && first === 'push') {
+    const result = await log.push();
+    (result.ok ? console.log : console.error)(result.output);
+    return result.ok ? 0 : 1;
+  }
+  if (sub && first === 'pull') {
+    const result = await log.pull();
+    (result.ok ? console.log : console.error)(result.message);
+    for (const file of result.conflict ?? []) console.error(`  conflict: ${file}`);
+    return result.ok ? 0 : 1;
+  }
+
+  const description = words.join(' ').trim();
+  if (!description) {
+    console.error('Usage: rmm log "what went wrong" [--minutes 10] [--screenshot <file>]…  (or: rmm log status | remote <url> | push | pull)');
+    return 1;
+  }
+  const asked = arg(rest, 'minutes');
+  if (asked !== undefined && !/^\d+$/.test(asked.trim())) {
+    console.error(`--minutes takes a number of minutes, and "${asked}" is not one. Try --minutes 10.`);
+    return 1;
+  }
+  const minutes = windowMinutes(asked);
+  const screenshots = allArgs(rest, 'screenshot').map(screenshotFile);
+  const server = await serverBuffer(rest, log.root, minutes);
+  const result = await log.add({
+    description,
+    source: 'CLI',
+    minutes,
+    logs: 'events' in server ? [{ events: server.events }] : [],
+    screenshots,
+    versions: { appVersion: appVersion(), ...('build' in server ? { serverBuild: server.build } : {}) },
+    save: isSaveFolder(dataDir) ? dataDir : null,
+  });
+  const where = path.join(log.root, result.entry.id);
+  if (!result.committed) {
+    console.warn(`Written to ${where}, but not committed: ${result.commitError ?? 'git had nothing to commit'}.`);
+  } else {
+    console.log(`Logged to ${where} (not pushed yet — \`rmm log push\` sends it).`);
+  }
+  console.log(
+    'events' in server
+      ? `  ${plural(result.entry.events, 'event')} from the last ${minutes} minute${minutes === 1 ? '' : 's'}, from the server at ${server.url}.`
+      : `  No automatic logs: ${server.why}.`,
+  );
+  if (screenshots.length) console.log(`  ${plural(screenshots.length, 'screenshot')}.`);
+  return result.committed ? 0 : 1;
 }
 
 /*

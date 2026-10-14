@@ -17,6 +17,9 @@ import { PAIR_HEADER, fromEditor, localOnly, scriptPolicy } from './guard.js';
 import { EXTENSION_ORIGIN, Pairings, pairingsFile } from './pairing.js';
 import { createHash } from 'node:crypto';
 import { bugReportsApi } from './bug-reports.js';
+import { captureConsole, errorLogApi, requestLog } from './error-log.js';
+import { ErrorLog, appVersion, errorLogDir } from '../errorlog/log.js';
+import { serverLog } from '../errorlog/buffer.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = findProjectRoot(here);
@@ -29,6 +32,8 @@ export interface ServerOptions {
   /** Which browser extensions are paired. Beside the preferences file unless said. */
   pairingsFile?: string;
   bugReportsDir?: string;
+  /** Where the error log is; `errorLogDir()` (RMM_ERROR_LOG_DIR, then ~/.resumem-m) when left out. */
+  errorLogDir?: string;
   /** Desktop launches offer dataDir as a suggestion until a project is selected. */
   requireProjectSelection?: boolean;
   host?: string;
@@ -225,6 +230,14 @@ export async function startServer(opts: ServerOptions = {}) {
   }
 
   const app = express();
+  /*
+   * What goes wrong, kept for the error log from the first request on: the
+   * console, and every request that failed or was slow — the ones the guard
+   * below refuses as well. See `src/server/error-log.ts`.
+   */
+  captureConsole();
+  app.use(requestLog());
+  const errorLog = new ErrorLog(opts.errorLogDir ?? errorLogDir());
   let requests = 0;
   let switching = false;
   // A clone in progress: the API keeps answering, but no other switch may start.
@@ -401,9 +414,29 @@ export async function startServer(opts: ServerOptions = {}) {
       projectOpen: Boolean(active), ai: { enabled: ai?.enabled ?? false, command: ai?.command ?? '', configured: Boolean(ai?.command?.trim()) } });
   });
 
+  // Before the server's own body limit, which is not the error log's; see `errorLogApi`.
+  app.use('/api/error-log', errorLogApi({ log: () => errorLog, build: buildStamp, save: () => active?.store.root ?? null }));
   app.use('/api', express.json({ limit: '32mb' }));
   app.use('/api/bug-reports', bugReportsApi(
     opts.bugReportsDir ?? process.env.RMM_BUG_REPORTS_DIR ?? path.join(projectRoot, 'bug-reports'), buildStamp,
+    /*
+     * And a copy in the error log, so everything that went wrong is in one
+     * repository: the report's notes and screenshots, and what the server
+     * saw in the ten minutes before it. After the report is safely in the
+     * inbox, and never a reason for it not to be.
+     */
+    (report, screenshots) => {
+      errorLog
+        .add({
+          description: report.text,
+          source: 'bug report',
+          screenshots,
+          logs: [{ events: serverLog.since(10) }],
+          versions: { serverBuild: buildStamp, appVersion: appVersion(), extensionBuild: report.extensionBuild, extensionVersion: report.version },
+          save: active?.store.root ?? null,
+        })
+        .catch((err: unknown) => console.warn(`[rmm] The bug report was saved, but not copied to the error log: ${(err as Error).message}`));
+    },
   ));
   /*
    * Pairing a browser extension.
