@@ -528,6 +528,50 @@ describe('undo in the builder', () => {
   });
 
   /*
+   * And it is taken away only as the step left it. The DELETE went out
+   * whatever had happened to the copy since — edited in another tab, sent
+   * with an application — and all of that went with it.
+   */
+  const copyThenUndo = async (meanwhile) => {
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'intern';
+    selector.dispatchEvent(new Event('change'));
+    await vi.advanceTimersByTimeAsync(2000);
+    document.querySelector('#btn-save-as').click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-content [name="label"]').value = 'A copy that moved on';
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(selector.value).toBe('intern-variant'));
+    meanwhile();
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+  };
+  const deletesOf = (id) => requests.filter((r) => r.method === 'DELETE' && r.url.includes(`/resumes/${id}`));
+
+  it('does not take away a copy changed elsewhere since it was made', async () => {
+    await copyThenUndo(() => {
+      data.resumes = data.resumes.map((r) => (r.id === 'intern-variant' ? { ...r, notes: 'Written in another tab.' } : r));
+    });
+    expect(deletesOf('intern-variant')).toEqual([]);
+    expect(spec('intern-variant')?.notes).toBe('Written in another tab.');
+    expect(document.querySelector('#status').textContent).toMatch(/Nothing was undone.*changed since it was made/);
+    expect(undoBtn().disabled, 'the step is still there').toBe(false);
+  });
+
+  it('does not take away a copy an application went out with since', async () => {
+    await copyThenUndo(() => {
+      data.applications = [
+        ...(data.applications ?? []),
+        { id: 'acme-1', company: 'Acme', role: 'Engineer', status: 'applied', resumeId: 'intern-variant', history: [] },
+      ];
+    });
+    expect(deletesOf('intern-variant')).toEqual([]);
+    expect(spec('intern-variant')).toBeDefined();
+    expect(document.querySelector('#status').textContent).toMatch(/filed with an application/);
+  });
+
+  /*
    * Deleting a skill group is the same two writes, and the half-way state is
    * worse than an orphan: one press put the *reference* back without the
    * group, so `resolveResume` warned "Skills group … does not exist" on every

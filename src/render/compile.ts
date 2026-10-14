@@ -876,6 +876,19 @@ export class OverflowError extends Error {
 }
 
 /**
+ * The height a fitted resume is said to use, held to the room it has.
+ *
+ * The measurement runs a few points past the text block at the boundary (the
+ * depth of the last line, \raggedbottom) on a resume LaTeX set on its pages,
+ * so `rmm check` said "✓ 1 page" over "used 725.5pt of 720pt available". The
+ * page count is the verdict, as `overflowPt` already says: a resume that
+ * fits used at most what there was.
+ */
+export function reportedUsedPt(usedPt: number, availablePt: number, fits: boolean): number {
+  return round(fits ? Math.min(usedPt, availablePt) : usedPt, 1);
+}
+
+/**
  * Does a run's own page count agree with its own measured height?
  *
  * The two halves of one answer. On rare pathological layouts a raw
@@ -1065,7 +1078,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   const report: FitReport = {
     fits,
     pages: best.m.pages,
-    usedPt: round(best.m.usedPt, 1),
+    usedPt: reportedUsedPt(best.m.usedPt, availablePt, fits),
     availablePt: round(availablePt, 1),
     overflowPt: round(overflowPt, 1),
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

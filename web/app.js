@@ -957,6 +957,37 @@ async function putBack(docKey, back, from) {
     }
   }
   const id = String(docKey).startsWith('resume:') ? String(docKey).slice('resume:'.length) : null;
+  /*
+   * And a resume the step made — undoing "Save as variation" — the same way:
+   * taken away only as the step left it, and not once an application names
+   * it. The DELETE went out whatever had happened since: the copy edited in
+   * another tab, or sent with an application, and all of it went with it.
+   */
+  if (id && options.method === 'DELETE') {
+    const store = await api('/store');
+    const now = readDoc(store, docKey);
+    if (now) {
+      const name = now.label || id;
+      const named = (store.applications ?? []).some(
+        (a) => a.resumeId === id || (a.sentResumeIds ?? []).includes(id),
+      );
+      const content = (r) => ({
+        label: r?.label,
+        notes: r?.notes,
+        sections: r?.sections,
+        choices: r?.choices ?? {},
+        lists: r?.lists ?? {},
+        layout: r?.layout ?? {},
+      });
+      if (named || !same(content(now), content(from))) {
+        throw new Error(
+          named
+            ? `Nothing was undone: “${name}” has been filed with an application since it was made, so it was not taken away.`
+            : `Nothing was undone: “${name}” was changed since it was made, so it was not taken away.`,
+        );
+      }
+    }
+  }
   if (!id && options.method === 'PUT' && from !== null && from !== undefined) {
     const store = await api('/store');
     const now = readDoc(store, docKey);
@@ -7336,8 +7367,27 @@ async function deleteVariation() {
     ({ drafts }) => (drafts ?? []).filter((d) => d.resumeId === mine.id),
     () => [],
   );
+  /*
+   * And the applications it went out with. The server refuses to delete
+   * those without `force` (the tracker's row would show no resume), so they
+   * are named here, and saying yes is saying so.
+   */
+  const sentWith = await api('/applications').then(
+    ({ applications }) =>
+      (applications ?? []).filter(
+        (a) =>
+          !['interested', 'applying'].includes(a.status) &&
+          (a.resumeId === mine.id || (a.sentResumeIds ?? []).includes(mine.id)),
+      ),
+    () => [],
+  );
   const ok = await confirmModal(`Delete “${mine.label ?? mine.id}”?`, [
     'It is removed from the save. The entries and wordings it selected are the store’s and stay.',
+    sentWith.length > 0
+      ? `It went out with ${sentWith.length === 1 ? 'the application' : `${sentWith.length} applications`} to ${sentWith
+          .map((a) => `${a.company} (${a.role})`)
+          .join(', ')}; ${sentWith.length === 1 ? 'that row' : 'those rows'} will no longer show the resume that was sent.`
+      : null,
     using.length > 0
       ? `${using.length === 1 ? 'The application' : `${using.length} applications`} in the Workspace for ${using
           .map((d) => d.company)
@@ -7403,7 +7453,19 @@ async function deleteVariation() {
   scheduleRender();
 
   try {
-    await api(`/resumes/${encodeURIComponent(mine.id)}`, { method: 'DELETE' });
+    const remove = (force) => api(`/resumes/${encodeURIComponent(mine.id)}${force ? '?force=1' : ''}`, { method: 'DELETE' });
+    try {
+      await remove(sentWith.length > 0);
+    } catch (err) {
+      // Sent with an application this page did not know of: named, and asked again.
+      if (err.status !== 409 || err.body?.kind !== 'in-use') throw err;
+      const rows = (err.body.applications ?? []).map((a) => `${a.company} (${a.role})`).join(', ');
+      if (!(await confirmModal(`Delete “${mine.label ?? mine.id}” anyway?`, `It went out with the application to ${rows}. That row will no longer show the resume that was sent.`))) {
+        setStatus(`“${mine.label ?? mine.id}” was kept`);
+        return;
+      }
+      await remove(true);
+    }
     setStatus(`Deleted “${mine.label ?? mine.id}”`);
   } catch (err) {
     /*
@@ -9635,10 +9697,23 @@ async function tailorDraft(draft, notes, useAi) {
   // is gone before anyone reads it, which is the right amount of noise.
   const stopChip = startDrafting(doing, () => openDraft(draft.id));
   try {
-    const res = await api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
-      method: 'POST',
-      body: JSON.stringify({ useAi, baseResumeId: draft.resumeId }),
-    });
+    const tailor = (overwrite) =>
+      api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
+        method: 'POST',
+        body: JSON.stringify({ useAi, baseResumeId: draft.resumeId, ...(overwrite ? { overwrite: true } : {}) }),
+      });
+    let res;
+    try {
+      res = await tailor(false);
+    } catch (err) {
+      // The copy was edited by hand since it was tailored: asked, not replaced.
+      if (err.status !== 409 || err.body?.kind !== 'edited') throw err;
+      if (!confirm('The tailored copy has edits made since it was tailored — tailoring again replaces them. Continue?')) {
+        setChildren(notes, el('div', { className: 'hint', textContent: 'Not tailored again: the edits to the copy are kept.' }));
+        return;
+      }
+      res = await tailor(true);
+    }
 
     const changed = (res.diff ?? []).filter((c) => c.kind !== 'none');
     const said = [

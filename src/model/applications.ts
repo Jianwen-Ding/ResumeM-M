@@ -692,6 +692,20 @@ function samePage(url: string | undefined, other: string | undefined): boolean {
   return sameAddress(url, other) || sameGlobalJob(url, other);
 }
 
+/**
+ * Whether two addresses are two different postings, as `sameJobAs` vetoes a
+ * match by name: two job numbers on one site and tenant, or two of one ATS's
+ * own job ids. An address missing on either side says nothing.
+ */
+export function differentPosting(url: string | undefined, other: string | undefined): boolean {
+  return differentPostings(url, other) || differentGlobalJobs(url, other);
+}
+
+/** Whether two addresses are one posting, by address or by its ATS's own id. */
+export function samePosting(url: string | undefined, other: string | undefined): boolean {
+  return samePage(url, other);
+}
+
 /*
  * The other addresses a row has been found at (`aliases` that carry one): a
  * LinkedIn posting staged into the row that the employer's form then filled,

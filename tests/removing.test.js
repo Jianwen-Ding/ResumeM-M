@@ -35,6 +35,10 @@ afterEach(() => {
 let saved;
 let deleted;
 let putAnswers;
+/** The tracker's rows, for the page to ask about; and whether the server refuses a resume in use. */
+let trackerRows = [];
+let refuseInUse = false;
+let deleteUrls;
 /** How many resumes other than the open one chose the wording under test. */
 let chooserCount = 0;
 
@@ -78,6 +82,7 @@ async function open({ answers, chooser, resumes } = {}) {
 
   saved = [];
   deleted = [];
+  deleteUrls = [];
   putAnswers = null;
 
   vi.stubGlobal('confirm', () => true);
@@ -86,6 +91,7 @@ async function open({ answers, chooser, resumes } = {}) {
     if (url === '/api/store') result = data;
     else if (url === '/api/ai/jobs') result = { jobs: [] };
     else if (url === '/api/letters') result = [];
+    else if (url === '/api/applications') result = { applications: trackerRows };
     else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
     else if (url === '/api/config') result = { ai: { enabled: false }, latex: {}, git: {}, output: {}, overrides: {} };
     else if (String(url).startsWith('/api/entries/') && options.method === 'PUT') {
@@ -96,7 +102,12 @@ async function open({ answers, chooser, resumes } = {}) {
       data.entries = data.entries.map((e) => (e.id === body.id ? body : e));
       result = body;
     } else if (String(url).startsWith('/api/resumes/') && options.method === 'DELETE') {
-      deleted.push(decodeURIComponent(String(url).split('/').pop()));
+      deleteUrls.push(String(url));
+      if (refuseInUse && !/[?&]force=1/.test(String(url))) {
+        const body = { kind: 'in-use', error: 'This resume went out with an application', applications: [{ id: 'globex-1', company: 'Globex', role: 'Data Intern', status: 'applied' }] };
+        return { ok: false, status: 409, statusText: 'Conflict', json: async () => body };
+      }
+      deleted.push(decodeURIComponent(String(url).split('?')[0].split('/').pop()));
       data.resumes = data.resumes.filter((r) => r.id !== deleted.at(-1));
       result = { ok: true };
     } else if (url === '/api/answers' && options.method === 'PUT') {
@@ -425,6 +436,46 @@ describe('deleting a variation', () => {
    * A store with no resume in it has nothing to open, and "delete" should not
    * be a way to reach a state the rest of the app cannot handle.
    */
+  /*
+   * One an application went out with: the server refuses it without
+   * `force`, since the tracker's row would show no resume. The confirmation
+   * names the applications, and saying yes sends the force.
+   */
+  it('names the applications it went out with, and sends the force once confirmed', async () => {
+    await open();
+    const openOne = document.querySelector('#resume-select').value;
+    trackerRows = [{ id: 'acme-1', company: 'Acme', role: 'Backend Intern', status: 'applied', resumeId: openOne }];
+    refuseInUse = true;
+    try {
+      document.querySelector('#btn-delete-resume').click();
+      await vi.waitFor(() => expect(document.querySelector('#modal:not(.hidden)')).not.toBeNull());
+      expect(modalNote()).toMatch(/went out with the application to Acme \(Backend Intern\)/);
+      document.querySelector('#modal-ok').click();
+      await vi.waitFor(() => expect(deleted).toEqual([openOne]));
+      expect(deleteUrls.every((u) => /force=1/.test(u))).toBe(true);
+    } finally {
+      trackerRows = [];
+      refuseInUse = false;
+    }
+  });
+
+  it('asks again, naming them, when the server knows of one the page did not', async () => {
+    await open();
+    const openOne = document.querySelector('#resume-select').value;
+    refuseInUse = true;
+    try {
+      document.querySelector('#btn-delete-resume').click();
+      await confirmIt();
+      await vi.waitFor(() => expect(modalNote()).toMatch(/Globex \(Data Intern\)/));
+      expect(deleted).toEqual([]);
+      document.querySelector('#modal-ok').click();
+      await vi.waitFor(() => expect(deleted).toEqual([openOne]));
+      expect(deleteUrls.at(-1)).toMatch(/force=1/);
+    } finally {
+      refuseInUse = false;
+    }
+  });
+
   it('is not offered on the last resume standing', async () => {
     await open({ resumes: (all) => all.slice(0, 1) });
     expect(document.querySelector('#btn-delete-resume').hidden).toBe(true);

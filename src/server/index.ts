@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -180,9 +181,61 @@ export async function openSave(store: Store, repo: Repo): Promise<void> {
   }
 }
 
+/**
+ * Whether `port` can be listened on, asked by listening and letting go.
+ *
+ * Asked before anything else, so a server that cannot start does nothing:
+ * `rmm serve` on a port another server held opened the save, ran the
+ * upgrade's migrations and committed them, and only then failed to listen.
+ */
+export function portFree(port: number, host = '127.0.0.1'): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE' || err.code === 'EACCES') resolve(false);
+      else reject(err);
+    });
+    probe.listen(port, host, () => probe.close(() => resolve(true)));
+  });
+}
+
+/** What `rmm serve` says when its port is taken. */
+export function portInUseMessage(port: number): string {
+  return `Port ${port} is already in use — is ResumeM-M already running? Use --port to pick another.`;
+}
+
+/** Errors from reading a request's body, as JSON for the API, and never a stack trace. */
+export function apiBodyErrors(err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction): void {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  const { status, type } = (err ?? {}) as { status?: number; statusCode?: number; type?: string };
+  const code = status ?? (err as { statusCode?: number })?.statusCode;
+  const said: Record<string, string> = {
+    'entity.too.large': 'That request is too large for ResumeM-M to accept (the limit is 32 MB).',
+    'entity.parse.failed': 'The request body is not valid JSON.',
+    'encoding.unsupported': 'The request body is in an encoding ResumeM-M does not read.',
+    'charset.unsupported': 'The request body is in a character set ResumeM-M does not read.',
+    'request.aborted': 'The request was cut off before its body arrived.',
+  };
+  const message =
+    (type && said[type]) ||
+    (code === 413 ? said['entity.too.large'] : undefined) ||
+    (code && code < 500 && err instanceof Error ? err.message : 'The server could not answer that request.');
+  res.status(code && code >= 400 && code < 600 ? code : 500).json({ error: message });
+}
+
 export async function startServer(opts: ServerOptions = {}) {
   const port = opts.port ?? Number(process.env.PORT ?? 4600);
   const host = opts.host ?? '127.0.0.1';
+  /*
+   * The port before the save: see `portFree`. Port 0 is any free one, and
+   * always is.
+   */
+  if (port !== 0 && !(await portFree(port, host))) {
+    throw Object.assign(new Error(portInUseMessage(port)), { code: 'EADDRINUSE', port });
+  }
   const preferencesFile = opts.preferencesFile ?? projectsFile();
   const preferences = readProjects(preferencesFile);
   const fallback = opts.dataDir ?? resolveStoreDir(projectRoot);
@@ -417,6 +470,8 @@ export async function startServer(opts: ServerOptions = {}) {
   // Before the server's own body limit, which is not the error log's; see `errorLogApi`.
   app.use('/api/error-log', errorLogApi({ log: () => errorLog, build: buildStamp, save: () => active?.store.root ?? null }));
   app.use('/api', express.json({ limit: '32mb' }));
+  // A body it cannot read answered as the API answers, not as Express's HTML page with a stack trace in it.
+  app.use('/api', apiBodyErrors);
   app.use('/api/bug-reports', bugReportsApi(
     opts.bugReportsDir ?? process.env.RMM_BUG_REPORTS_DIR ?? path.join(projectRoot, 'bug-reports'), buildStamp,
     /*
@@ -629,6 +684,8 @@ export async function startServer(opts: ServerOptions = {}) {
         `This usually means the server is running from a build that did not carry web/ with it.`,
     );
   }
+  // And anything else under /api that reached Express's own error page.
+  app.use('/api', apiBodyErrors);
   app.use(express.static(webRoot));
 
   return new Promise<{ close: () => Promise<void>; port: number }>((resolve, reject) => {

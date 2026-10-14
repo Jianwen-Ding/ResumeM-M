@@ -70,7 +70,7 @@ describe('a phone number after a machine word in a log line', () => {
   // 555-01xx: numbers set aside for fiction.
   const PHONE = '6175550134';
   it('is taken out after line, code, status, count and row, and after "phone" a few words before', () => {
-    for (const line of [`line ${PHONE}`, `code ${PHONE}`, `status: ${PHONE}`, `count ${PHONE}`, `row ${PHONE}`, `Phone (ID ${PHONE})`, `Phone line ${PHONE}`, `mobile, job ${PHONE}`]) {
+    for (const line of [`line ${PHONE}`, `code ${PHONE}`, `status: ${PHONE}`, `count ${PHONE}`, `row ${PHONE}`, `Phone (ID ${PHONE})`, `Phone line ${PHONE}`, `phone, job ${PHONE}`]) {
       expect(scrubText(line), line).not.toContain(PHONE);
     }
   });

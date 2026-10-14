@@ -16,7 +16,7 @@ import { currentIgnore } from './model/current.js';
 import { cloneProject, rememberProject } from './model/projects.js';
 import { compileResume, OverflowError } from './render/compile.js';
 import type { StoreConfig, WritingSample } from './model/types.js';
-import { startServer } from './server/index.js';
+import { portFree, portInUseMessage, startServer } from './server/index.js';
 import { ErrorLog, appVersion } from './errorlog/log.js';
 import { windowMinutes, type LogEvent } from './errorlog/buffer.js';
 
@@ -984,7 +984,6 @@ async function main(argv: string[]): Promise<number> {
       return logCommand(rest);
 
     case 'serve': {
-      await repo.ensure();
       const port = arg(rest, 'port');
       /*
        * `rmm serve --port abc` reached Node's own listen() validation and
@@ -1000,7 +999,24 @@ async function main(argv: string[]): Promise<number> {
         console.error(`--port ${port} is above the highest port there is (65535).`);
         return 1;
       }
-      await startServer({ port: port ? Number(port) : undefined, dataDir });
+      /*
+       * The port before anything is written: on a port another server held,
+       * the save was opened, upgraded and committed, and then the listen
+       * failed with Node's raw EADDRINUSE. See `portFree`.
+       */
+      const wanted = port ? Number(port) : Number(process.env.PORT ?? 4600);
+      if (wanted !== 0 && !(await portFree(wanted))) {
+        console.error(portInUseMessage(wanted));
+        return 1;
+      }
+      await repo.ensure();
+      try {
+        await startServer({ port: port ? Number(port) : undefined, dataDir });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw err;
+        console.error(portInUseMessage(wanted));
+        return 1;
+      }
       return new Promise<number>(() => {
         /* run until interrupted */
       });
@@ -1115,12 +1131,21 @@ async function logCommand(rest: string[]): Promise<number> {
    * real remote gone, and the entry never written. Anything else is the
    * description, and is logged as one.
    */
+  /*
+   * `host:path`, scp's way of writing one. A host with no dot that is not
+   * localhost is a word as often as a host — "unreachable:503", "HTTP:502",
+   * "timeout:30s" were all set as the remote — so its path has to look like
+   * one: a "/" in it, or ending ".git".
+   */
+  const scpStyle = (host: string, where: string) =>
+    host.includes('.') || host.toLowerCase() === 'localhost' || where.includes('/') || /\.git$/i.test(where);
   const remoteAddress = (word: string) =>
     /^[a-z][a-z0-9+.-]*:\/\//i.test(word) || // https://…, ssh://…, file://…
-    /^[^\s@/:]+@[^\s@/:]+:\S/.test(word) || // git@github.com:me/log.git
+    // git@github.com:me/log.git, me@myserver:/srv/log.git
+    ((m) => Boolean(m && scpStyle(m[1]!, m[2]!)))(/^[^\s@/:]+@([^\s@/:]+):(\S+)$/.exec(word)) ||
     // github.com:me/log.git, and a host with no dot: myserver:repos/log.git,
     // localhost:/srv/log.git. Not C:log — one letter is a Windows drive.
-    /^(?![A-Za-z]:)[\w.-]+:\S+$/.test(word) ||
+    ((m) => Boolean(m && scpStyle(m[1]!, m[2]!)))(/^(?![A-Za-z]:)([\w.-]+):(\S+)$/.exec(word)) ||
     /^(?:[/.~]|[A-Za-z]:[\\/])/.test(word) || // a folder: /srv/log.git, ./log, ~/log, C:\log
     fs.existsSync(word);
   const sub =

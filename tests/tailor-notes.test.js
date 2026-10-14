@@ -28,6 +28,9 @@ describe('what the Workspace says a tailoring run did', () => {
   let tailorReply;
   let holdTailor;
   let holdGenerate;
+  /** While set, the server refuses a tailoring without `overwrite`: the copy was edited since. */
+  let editedSince;
+  let tailorBodies;
   const draftId = 'streamly-intern';
 
   beforeEach(async () => {
@@ -61,6 +64,8 @@ describe('what the Workspace says a tailoring run did', () => {
     };
     holdTailor = null;
     holdGenerate = null;
+    editedSince = false;
+    tailorBodies = [];
 
     // One real change, and however many refusals the test asks for.
     tailorReply = {
@@ -79,6 +84,12 @@ describe('what the Workspace says a tailoring run did', () => {
       else if (url === '/api/render') result = { pages: 1, fits: true, adjustments: [], pdfUrl: '/pdf/x.pdf' };
       else if (url === '/api/workspace') result = { drafts: [draft, other] };
       else if (url.endsWith('/tailor')) {
+        const body = JSON.parse(options.body ?? '{}');
+        tailorBodies.push(body);
+        if (editedSince && !body.overwrite) {
+          const refusal = { kind: 'edited', resumeId: 'job-streamly', error: 'It has edits made since it was tailored.' };
+          return { ok: false, status: 409, statusText: 'Conflict', json: async () => refusal };
+        }
         if (holdTailor) await new Promise((r) => { holdTailor.release = r; holdTailor.started = true; });
         result = tailorReply;
       } else if (url.endsWith('/generate')) {
@@ -128,6 +139,34 @@ describe('what the Workspace says a tailoring run did', () => {
     expect(said).toMatch(/1 change from the resume it started from, chosen by the AI/);
     // Including the changes themselves, which are the reason to read it.
     expect(said).toMatch(/Built a Kafka pipeline/);
+  });
+
+  /*
+   * Tailoring again rebuilt the copy from its base and wrote it over the one
+   * there, and a wording chosen by hand on the copy since went without a
+   * word. The server refuses that now unless told to; the panel asks.
+   */
+  it('asks before tailoring again over a copy edited since, and replaces it only when told to', async () => {
+    editedSince = true;
+    const asked = [];
+    vi.stubGlobal('confirm', (q) => {
+      asked.push(q);
+      return true;
+    });
+    const said = await tailorAndRead();
+    expect(asked).toEqual(['The tailored copy has edits made since it was tailored — tailoring again replaces them. Continue?']);
+    expect(tailorBodies.map((b) => Boolean(b.overwrite))).toEqual([false, true]);
+    expect(said).toMatch(/Made "Data Platform Intern — Streamly"/);
+  });
+
+  it('keeps the edits when the answer is no', async () => {
+    editedSince = true;
+    vi.stubGlobal('confirm', () => false);
+    [...document.querySelectorAll('#draft-editor button')]
+      .find((b) => /Tailor one for this posting/.test(b.textContent))
+      .click();
+    await vi.waitFor(() => expect(document.querySelector('#draft-editor').textContent).toMatch(/edits to the copy are kept/));
+    expect(tailorBodies).toHaveLength(1);
   });
 
   /*

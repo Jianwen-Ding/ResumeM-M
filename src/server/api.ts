@@ -53,9 +53,9 @@ import {
 import { fitResumes, forgetPrintedText, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, OPENED_UNASKED_NOTE, advance, localDay, alreadySent, maybeSent, sendOf, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, OPENED_UNASKED_NOTE, advance, localDay, alreadySent, maybeSent, sendOf, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, differentPosting, samePosting, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
-import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
+import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, editedSinceTailored, standingBase, tailoredFingerprint } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { FRAME_ANCESTORS } from './guard.js';
@@ -498,27 +498,101 @@ function checkNumber(what: string, value: unknown, [min, max]: [number, number],
   }
 }
 
+/*
+ * A resume's own layout is held only to what can be typeset at all — the
+ * bounds the renderer itself refuses outside (`checkLayoutNumbers` in
+ * render/latex.ts) — and not to the Page settings' sensible ones: a resume
+ * with 2.6in margins is a choice, and a font of 0pt or a margin of "wide" is
+ * not one.
+ */
+const RESUME_LAYOUT_LIMITS: Record<string, [number, number]> = {
+  fontSizePt: [4, 40],
+  marginIn: [0, 4.1],
+  spacing: [0.05, 10],
+};
+const RESUME_BOUND_LIMITS: Record<string, [number, number]> = {
+  minFontSizePt: [4, 40],
+  maxFontSizePt: [4, 40],
+  minMarginIn: [0, 4.1],
+  maxMarginIn: [0, 4.1],
+  minSpacing: [0.05, 10],
+  maxSpacing: [0.05, 10],
+};
+
+/**
+ * A layout's numbers, held to `limits` and `bounds`.
+ * `stored` is what is already written there: a value that has not changed is
+ * not the caller's to answer for, so a resume written by hand outside these
+ * limits can still be saved with its other edits.
+ */
+function checkLayout(
+  layout: unknown,
+  stored?: unknown,
+  limits: Record<string, [number, number]> = LAYOUT_LIMITS,
+  boundLimits: Record<string, [number, number]> = BOUND_LIMITS,
+): void {
+  if (layout === undefined || layout === null) return;
+  if (typeof layout !== 'object' || Array.isArray(layout)) throw new Error('The layout has to be a set of settings');
+  const l = layout as Record<string, unknown>;
+  const was = (stored && typeof stored === 'object' ? stored : {}) as Record<string, unknown>;
+  const fresh = (value: unknown, before: unknown) => value !== before;
+  for (const [key, range] of Object.entries(limits)) {
+    if (fresh(l[key], was[key])) checkNumber(`The ${key} setting`, l[key], range);
+  }
+  if (fresh(l.maxPages, was.maxPages)) checkNumber('The maxPages setting', l.maxPages, [1, 10], true);
+  if (l.paper !== undefined && l.paper !== null && l.paper !== 'letter' && l.paper !== 'a4') {
+    throw new Error(`Paper must be "letter" or "a4", not ${JSON.stringify(l.paper)}`);
+  }
+  if (l.autoFit !== undefined && l.autoFit !== null && typeof l.autoFit !== 'boolean') {
+    throw new Error('autoFit must be true or false');
+  }
+  for (const bounds of ['fitBounds', 'growBounds']) {
+    const b = l[bounds];
+    if (b === undefined || b === null) continue;
+    if (typeof b !== 'object' || Array.isArray(b)) throw new Error(`The ${bounds} setting has to be a set of settings`);
+    const bWas = (was[bounds] && typeof was[bounds] === 'object' ? was[bounds] : {}) as Record<string, unknown>;
+    for (const [key, range] of Object.entries(boundLimits)) {
+      const value = (b as Record<string, unknown>)[key];
+      if (fresh(value, bWas[key])) checkNumber(`The ${bounds}.${key} setting`, value, range);
+    }
+  }
+}
+
+/**
+ * What a whole-resume write has to be before it replaces the file: an object
+ * with its sections as a list, a name that is text, and a layout inside the
+ * limits. Anything at all was written — `{}` left a file holding only its id,
+ * and an object for a name was listed as "[object Object]".
+ */
+export function checkResumeWrite(body: unknown, stored?: ResumeSpec): void {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error('A resume has to be sent as an object with its sections');
+  }
+  const spec = body as Record<string, unknown>;
+  // An older client's shape, folded on the way in: its sections come from what it extends.
+  if (!Array.isArray(spec.sections) && !(typeof spec.extends === 'string' && spec.sections === undefined)) {
+    throw new Error('A resume needs its sections, as a list');
+  }
+  if (spec.label !== undefined && spec.label !== null && typeof spec.label !== 'string') {
+    throw new Error('A resume’s name has to be text');
+  }
+  if (spec.notes !== undefined && spec.notes !== null && typeof spec.notes !== 'string') {
+    throw new Error('A resume’s notes have to be text');
+  }
+  checkLayout(spec.layout, stored?.layout, RESUME_LAYOUT_LIMITS, RESUME_BOUND_LIMITS);
+}
+
+/** A resume whose name is text: a number is written as one, and anything else gives way to the id. */
+function textLabel(spec: ResumeSpec): ResumeSpec {
+  const label = (spec as { label?: unknown }).label;
+  if (label === undefined || typeof label === 'string') return spec;
+  return { ...spec, label: typeof label === 'number' && Number.isFinite(label) ? String(label) : spec.id };
+}
+
 export function checkConfigPatch(patch: unknown): void {
   if (!patch || typeof patch !== 'object') return;
   const { layout, resumes, applications } = patch as Record<string, unknown>;
-  if (layout && typeof layout === 'object') {
-    const l = layout as Record<string, unknown>;
-    for (const [key, range] of Object.entries(LAYOUT_LIMITS)) checkNumber(`The ${key} setting`, l[key], range);
-    checkNumber('The maxPages setting', l.maxPages, [1, 10], true);
-    if (l.paper !== undefined && l.paper !== null && l.paper !== 'letter' && l.paper !== 'a4') {
-      throw new Error(`Paper must be "letter" or "a4", not ${JSON.stringify(l.paper)}`);
-    }
-    if (l.autoFit !== undefined && l.autoFit !== null && typeof l.autoFit !== 'boolean') {
-      throw new Error('autoFit must be true or false');
-    }
-    for (const bounds of ['fitBounds', 'growBounds']) {
-      const b = l[bounds];
-      if (!b || typeof b !== 'object') continue;
-      for (const [key, range] of Object.entries(BOUND_LIMITS)) {
-        checkNumber(`The ${bounds}.${key} setting`, (b as Record<string, unknown>)[key], range);
-      }
-    }
-  }
+  if (layout && typeof layout === 'object') checkLayout(layout);
   if (resumes && typeof resumes === 'object') {
     checkNumber('Days to keep a temporary resume', (resumes as Record<string, unknown>).temporaryDays, [0, 3650], true);
   }
@@ -808,21 +882,62 @@ function employersOf(store: Store, data: { applications: { company: string }[] }
  * legal form or a spelling the tracker already forgives does not make a
  * second resume either.
  */
-function copyIdForPosting(resumes: ResumeSpec[], company: string, role: string): string {
+function copyIdForPosting(
+  resumes: ResumeSpec[],
+  company: string,
+  role: string,
+  posting: PostingOwner = {},
+): string {
   const job = identity(company, role);
+  const anothers = anotherPostingsCopy(posting);
   /*
    * Only a copy under the id this code would have minted for what it was made
    * for: one somebody named themselves is theirs, and is a base to start
    * from rather than a file to write over.
    */
-  const made = resumes.find((r) => {
+  const madeForThisJob = (r: ResumeSpec) => {
     const { company: was, role: as } = r.generatedFor ?? {};
     if (r.tier !== 'temporary' || !was) return false;
     if (!sameIdentity(was, as ?? 'Unknown role', company, role)) return false;
     const minted = tailoredResumeId(was, as ?? 'Unknown role');
     return r.id === minted || r.id.startsWith(`${minted}-`) || mintedForJob(r.id, job);
-  });
-  return made?.id ?? copyIdFor(resumes, tailoredResumeId(company, role));
+  };
+  /*
+   * The copy this space already sends comes first; then one made for this
+   * job that is not another posting's. One company and one role is not one
+   * posting: Acme's two "Software Engineer Intern" requisitions at
+   * `/jobs/1111111` and `/jobs/2222222` shared one copy, and tailoring the
+   * second wrote over the first's choices under both spaces.
+   */
+  const ours = (r: ResumeSpec) => madeForThisJob(r) && !anothers(r);
+  const own = posting.resumeId ? resumes.find((r) => r.id === posting.resumeId && ours(r)) : undefined;
+  const made = own ?? resumes.find(ours);
+  return made?.id ?? copyIdFor(resumes, tailoredResumeId(company, role), anothers);
+}
+
+/** What says which posting a copy is being made for: its address, and the space it is made from. */
+interface PostingOwner {
+  url?: string;
+  /** The space being tailored, and the resume it sends now. */
+  draftId?: string;
+  resumeId?: string;
+  /** Every space, to tell a copy another space sends. */
+  drafts?: { id: string; url?: string; resumeId?: string }[];
+}
+
+/**
+ * Whether a temporary copy belongs to another posting than `posting`: made
+ * for an address that is a different job (`differentPosting`, the veto
+ * `sameJobAs` uses), or sent by another space that is not at this address.
+ */
+function anotherPostingsCopy(posting: PostingOwner): (r: ResumeSpec) => boolean {
+  return (r) => {
+    if (differentPosting(posting.url, r.generatedFor?.url)) return true;
+    if (!posting.draftId || !posting.drafts) return false;
+    return posting.drafts.some(
+      (d) => d.id !== posting.draftId && d.resumeId === r.id && !(posting.url && samePosting(posting.url, d.url)),
+    );
+  };
 }
 
 /**
@@ -1045,8 +1160,11 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
    * earlier holds it; a temporary copy takes the next free id instead of
    * writing over it. See `copyIdFor`.
    */
-  const keptSafe = (spec: ResumeSpec): ResumeSpec =>
-    spec.tier === 'temporary' ? { ...spec, id: copyIdFor(store.load().resumes, spec.id) } : spec;
+  const keptSafe = (sent: ResumeSpec): ResumeSpec => {
+    // A name is text: anything else was listed as "[object Object]". See `checkResumeWrite`.
+    const spec = textLabel(sent);
+    return spec.tier === 'temporary' ? { ...spec, id: copyIdFor(store.load().resumes, spec.id) } : spec;
+  };
 
   /**
    * Which write of a resume the save holds: a short string that changes every
@@ -1308,32 +1426,39 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        */
       if (movedOn(res, id, (req.body as { basedOn?: unknown }).basedOn)) return;
 
-      spec.tier = tier;
-      // The flag the tier replaced. Leaving it would let the two disagree.
-      delete spec.base;
-      /*
-       * The clock starts now, and only for a resume that was not already on
-       * it. Re-marking something temporary must not give it another week, or
-       * a stray click would keep it forever; and promoting it out has to
-       * forget the date, or demoting it later would sweep it immediately.
-       */
-      if (tier === 'temporary') spec.temporaryFrom ??= new Date().toISOString();
-      else delete spec.temporaryFrom;
-      /*
-       * A tier chosen here is somebody's choice, and no longer the store's
-       * reading of a sent copy (see `keptOnDisk` in tiers.ts). Marked Kept,
-       * it is kept and listed as kept. Marked temporary, it is temporary —
-       * and if it was sent, the store writes the keep again on saving it.
-       */
-      delete spec.keptBecauseSent;
+      const mark = (spec: ResumeSpec) => {
+        spec.tier = tier;
+        // The flag the tier replaced. Leaving it would let the two disagree.
+        delete spec.base;
+        /*
+         * The clock starts now, and only for a resume that was not already on
+         * it. Re-marking something temporary must not give it another week, or
+         * a stray click would keep it forever; and promoting it out has to
+         * forget the date, or demoting it later would sweep it immediately.
+         */
+        if (tier === 'temporary') spec.temporaryFrom ??= new Date().toISOString();
+        else delete spec.temporaryFrom;
+        /*
+         * A tier chosen here is somebody's choice, and no longer the store's
+         * reading of a sent copy (see `keptOnDisk` in tiers.ts). Marked Kept,
+         * it is kept and listed as kept. Marked temporary, it is temporary —
+         * and if it was sent, the store writes the keep again on saving it.
+         */
+        delete spec.keptBecauseSent;
+      };
 
       const said = { base: 'a base', extended: 'kept', temporary: 'temporary' }[tier];
       // Tagged as written, before the commit's awaits let another write in.
-      await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => {
-        store.saveResume(spec);
+      // Onto the resume as it is under the lock: see `/answers/save`.
+      const marked = await withCommit(repo, autoCommit(), `Mark "${spec.label}" ${said}`, () => {
+        const fresh = store.loadResumes().find((r) => r.id === id);
+        if (!fresh) throw new Error(`No resume "${id}"`);
+        mark(fresh);
+        store.saveResume(fresh);
         tagVersion(res, id);
+        return fresh;
       });
-      res.json(spec);
+      res.json(marked);
     }),
   );
 
@@ -1354,15 +1479,18 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const spec = store.loadResumes().find((r) => r.id === id);
       if (!spec) throw new Error(`No resume "${id}"`);
 
-      spec.tier = tier;
-      delete spec.base;
-      delete spec.temporaryFrom;
-      delete spec.keptBecauseSent;
-
-      await withCommit(repo, autoCommit(), `${tier === 'base' ? 'Mark' : 'Unmark'} "${spec.label}" as a base`, () =>
-        store.saveResume(spec),
-      );
-      res.json(spec);
+      // Onto the resume as it is under the lock: see `/answers/save`.
+      const marked = await withCommit(repo, autoCommit(), `${tier === 'base' ? 'Mark' : 'Unmark'} "${spec.label}" as a base`, () => {
+        const fresh = store.loadResumes().find((r) => r.id === id);
+        if (!fresh) throw new Error(`No resume "${id}"`);
+        fresh.tier = tier;
+        delete fresh.base;
+        delete fresh.temporaryFrom;
+        delete fresh.keptBecauseSent;
+        store.saveResume(fresh);
+        return fresh;
+      });
+      res.json(marked);
     }),
   );
 
@@ -1589,7 +1717,13 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     '/resumes/:id/rename',
     handler(async (req, res) => {
       const id = String(req.params.id);
-      const label = String((req.body as { label?: unknown })?.label ?? '').replace(/\s+/g, ' ').trim();
+      const given = (req.body as { label?: unknown })?.label;
+      // Text, or nothing: an object was written as "[object Object]".
+      if (given !== undefined && given !== null && typeof given !== 'string' && typeof given !== 'number') {
+        res.status(400).json({ error: 'A resume’s name has to be text.' });
+        return;
+      }
+      const label = String(given ?? '').replace(/\s+/g, ' ').trim();
       const resumes = store.loadResumes();
       const mine = resumes.find((r) => r.id === id);
       if (!mine) {
@@ -1616,10 +1750,14 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         res.json(mine);
         return;
       }
-      const renamed = { ...mine, label };
-      await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => {
-        store.saveResume(renamed);
+      // Onto the resume as it is under the lock: see `/answers/save`.
+      const renamed = await withCommit(repo, autoCommit(), `Rename resume "${id}" to "${label}"`, () => {
+        const fresh = store.loadResumes().find((r) => r.id === id);
+        if (!fresh) throw new Error(`There is no resume "${id}" in this save.`);
+        const next = { ...fresh, label };
+        store.saveResume(next);
         tagVersion(res, id);
+        return next;
       });
       res.json(renamed);
     }),
@@ -1628,6 +1766,12 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
   api.put(
     '/resumes/:id',
     handler(async (req, res) => {
+      try {
+        checkResumeWrite(req.body, store.loadResumes().find((r) => r.id === String(req.params.id)));
+      } catch (err) {
+        res.status(400).json({ error: (err as Error).message });
+        return;
+      }
       const spec = { ...(req.body as ResumeSpec), id: String(req.params.id) };
 
       /*
@@ -1751,7 +1895,33 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     '/resumes/:id',
     handler(async (req, res) => {
       const id = String(req.params.id);
-      await withCommit(repo, autoCommit(), `Delete resume "${id}"`, () => store.deleteResume(id));
+      /*
+       * Not a resume an application went out with, unless asked twice
+       * (`?force=1`): the tracker's row named it and showed nothing once it
+       * was gone, and what was sent could no longer be opened. Asked on the
+       * save as it is under the lock, so the answer is the one the delete
+       * acts on.
+       */
+      const force = req.query.force === '1' || req.query.force === 'true';
+      const inUse = await withCommit(repo, autoCommit(), `Delete resume "${id}"`, () => {
+        const sentWith = force
+          ? []
+          : store
+              .load()
+              .applications.filter((a) => wentOut(a) && (a.resumeId === id || (a.sentResumeIds ?? []).includes(id)));
+        if (sentWith.length) return sentWith;
+        store.deleteResume(id);
+        return [];
+      });
+      if (inUse.length) {
+        const named = inUse.map((a) => `${a.role} at ${a.company}`);
+        res.status(409).json({
+          kind: 'in-use',
+          error: `This resume went out with ${named.length === 1 ? 'an application' : `${named.length} applications`}: ${named.join('; ')}.`,
+          applications: inUse.map((a) => ({ id: a.id, company: a.company, role: a.role, status: a.status })),
+        });
+        return;
+      }
       res.json({ ok: true });
     }),
   );
@@ -1942,32 +2112,34 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     '/entries/:entryId/bullets/:bulletId/variants',
     handler(async (req, res) => {
       const { entryId, bulletId } = req.params as { entryId: string; bulletId: string };
-      const data = store.load();
-      const entry = data.entries.find((e) => e.id === entryId);
-      if (!entry) throw new Error(`No entry "${entryId}"`);
-      const bullet = (entry.bullets ?? []).find((b) => b.id === bulletId);
-      if (!bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
-
       const body = req.body as Partial<Variant> & { makeDefault?: boolean };
       if (!body.text?.trim()) throw new Error('A variant needs text');
+      const text = body.text.trim();
+      const id = body.id?.trim() || `v_${slug(body.label ?? text.slice(0, 20)) || Date.now()}`;
 
-      const id = body.id?.trim() || `v_${slug(body.label ?? body.text.slice(0, 20)) || Date.now()}`;
-      if (bullet.variants.some((v) => v.id === id)) throw new Error(`Variant "${id}" already exists`);
+      // Read, changed and written under the save's lock: see `/answers/save`.
+      const variant = await withCommit(repo, autoCommit(), `Add variant "${id}" to bullet "${bulletId}"`, () => {
+        const data = store.load();
+        const entry = data.entries.find((e) => e.id === entryId);
+        if (!entry) throw new Error(`No entry "${entryId}"`);
+        const bullet = (entry.bullets ?? []).find((b) => b.id === bulletId);
+        if (!bullet) throw new Error(`No bullet "${bulletId}" on entry "${entryId}"`);
 
-      const variant: Variant = {
-        id,
-        label: body.label ?? 'New phrasing',
-        text: body.text.trim(),
-        tags: body.tags,
-        note: body.note,
-        suggested: body.suggested,
-      };
-      bullet.variants.push(variant);
-      if (body.makeDefault) bullet.default = id;
+        if (bullet.variants.some((v) => v.id === id)) throw new Error(`Variant "${id}" already exists`);
 
-      await withCommit(repo, autoCommit(), `Add variant "${id}" to bullet "${bulletId}"`, () =>
-        store.saveEntry(entry),
-      );
+        const variant: Variant = {
+          id,
+          label: body.label ?? 'New phrasing',
+          text,
+          tags: body.tags,
+          note: body.note,
+          suggested: body.suggested,
+        };
+        bullet.variants.push(variant);
+        if (body.makeDefault) bullet.default = id;
+        store.saveEntry(entry);
+        return variant;
+      });
       res.json(variant);
     }),
   );
@@ -1988,37 +2160,49 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const { variantId } = req.body as { variantId?: string };
       if (!variantId) throw new Error('Name the alternate to pin');
 
-      const data = store.load();
+      /*
+       * Found and checked on the save as it is, under its lock: read before
+       * `withCommit` waited on another process's save, the entry written
+       * back was the one from before that save. See `/answers/save`. The
+       * label for the commit message is from a first look.
+       */
+      const pin = (data: StoreData) => {
+        // The name on the page lives on the profile rather than on an entry, and
+        // pins the same way everything else does.
+        if (key === PROFILE_NAME_KEY) {
+          const field = data.profile.name;
+          if (typeof field === 'string') throw new Error('Your name has no alternates to pin');
+          const chosen = field.variants.find((v) => v.id === variantId);
+          if (!chosen) throw new Error('No such alternate');
+          return {
+            label: chosen.label ?? variantId,
+            write: () => store.saveProfile({ ...data.profile, name: { ...field, default: variantId } }),
+          };
+        }
 
-      // The name on the page lives on the profile rather than on an entry, and
-      // pins the same way everything else does.
-      if (key === PROFILE_NAME_KEY) {
-        const field = data.profile.name;
-        if (typeof field === 'string') throw new Error('Your name has no alternates to pin');
-        if (!field.variants.some((v) => v.id === variantId)) throw new Error('No such alternate');
-        const label = field.variants.find((v) => v.id === variantId)?.label ?? variantId;
-        await withCommit(repo, autoCommit(), `Pin "${label}" as the default`, () =>
-          store.saveProfile({ ...data.profile, name: { ...field, default: variantId } }),
-        );
-        res.json({ key, variantId });
-        return;
-      }
+        const dot = key.indexOf('.');
+        const entry = dot > 0
+          ? data.entries.find((e) => e.id === key.slice(0, dot))
+          : data.entries.find((e) => (e.bullets ?? []).some((b) => b.id === key));
+        if (!entry) throw new Error('That line is not in the store any more');
 
-      const dot = key.indexOf('.');
-      const entry = dot > 0
-        ? data.entries.find((e) => e.id === key.slice(0, dot))
-        : data.entries.find((e) => (e.bullets ?? []).some((b) => b.id === key));
-      if (!entry) throw new Error('That line is not in the store any more');
+        const target = dot > 0
+          ? entry[key.slice(dot + 1) as 'title' | 'dates' | 'subtitle' | 'location']
+          : (entry.bullets ?? []).find((b) => b.id === key);
+        if (!target || typeof target === 'string') throw new Error('That line has no alternates to pin');
+        const chosen = target.variants.find((v) => v.id === variantId);
+        if (!chosen) throw new Error('No such alternate');
+        return {
+          label: chosen.label ?? variantId,
+          write: () => {
+            target.default = variantId;
+            store.saveEntry(entry);
+          },
+        };
+      };
 
-      const target = dot > 0
-        ? entry[key.slice(dot + 1) as 'title' | 'dates' | 'subtitle' | 'location']
-        : (entry.bullets ?? []).find((b) => b.id === key);
-      if (!target || typeof target === 'string') throw new Error('That line has no alternates to pin');
-      if (!target.variants.some((v) => v.id === variantId)) throw new Error('No such alternate');
-
-      target.default = variantId;
-      const label = target.variants.find((v) => v.id === variantId)?.label ?? variantId;
-      await withCommit(repo, autoCommit(), `Pin "${label}" as the default`, () => store.saveEntry(entry));
+      const { label } = pin(store.load());
+      await withCommit(repo, autoCommit(), `Pin "${label}" as the default`, () => pin(store.load()).write());
       res.json({ key, variantId });
     }),
   );
@@ -2462,34 +2646,41 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       if (kind === 'letter') {
         const letter = store.loadCoverLetters().find((l) => l.id === id);
         if (!letter) throw new Error(`No cover letter "${id}"`);
-        const next = { ...letter, voice: keep };
-        if (wanted) delete next.voice;
         await withCommit(
           repo,
           autoCommit(),
           `${wanted ? 'Count' : 'Stop counting'} "${letter.title}" as your writing`,
-          // Deciding, not writing: `next` means it by leaving `voice` out.
-          () => store.saveCoverLetter(next, { decidesVoice: true }),
+          () => {
+            // The letter as it is under the lock, not as read above: see `/answers/save`.
+            const fresh = store.loadCoverLetters().find((l) => l.id === id);
+            if (!fresh) throw new Error(`No cover letter "${id}"`);
+            const next = { ...fresh, voice: keep };
+            if (wanted) delete next.voice;
+            // Deciding, not writing: `next` means it by leaving `voice` out.
+            store.saveCoverLetter(next, { decidesVoice: true });
+          },
         );
         res.json({ kind, id, inVoice: wanted });
         return;
       }
 
       if (kind === 'answer') {
-        const answers = store.load().answers;
-        const item = answers.find((a) => a.id === id);
-        if (!item) throw new Error(`No answer "${id}"`);
-        const next = answers.map((a) => {
-          if (a.id !== id) return a;
-          const copy = { ...a, voice: keep };
-          if (wanted) delete copy.voice;
-          return copy;
-        });
+        // Read and written in one step under the save's lock: see `/answers/save`.
         await withCommit(
           repo,
           autoCommit(),
           `${wanted ? 'Count' : 'Stop counting'} an answer as your writing`,
-          () => store.saveAnswers(next),
+          () => {
+            const answers = store.load().answers;
+            if (!answers.some((a) => a.id === id)) throw new Error(`No answer "${id}"`);
+            const next = answers.map((a) => {
+              if (a.id !== id) return a;
+              const copy = { ...a, voice: keep };
+              if (wanted) delete copy.voice;
+              return copy;
+            });
+            store.saveAnswers(next);
+          },
         );
         res.json({ kind, id, inVoice: wanted });
         return;
@@ -3279,24 +3470,27 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          * keeps the date it was first written and any key somebody added to
          * its header.
          */
-        const letters = store.loadCoverLetters();
-        const id = unclaimedLetterId(letters, letterId(job.company, job.jobTitle));
-        const before = letters.find((l) => l.id === id);
-        saved = {
-          ...(before ?? {}),
-          id,
-          // Named for the employer the address belongs to when the page never
-          // said who is hiring, and never for the address — see `employerOrUnknown`.
-          title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerOrUnknown(job.url)}`,
-          company: job.company,
-          role: job.jobTitle,
-          createdAt: before?.createdAt || new Date().toISOString(),
-          body,
-        };
-        const letter = saved;
-        await withCommit(repo, autoCommit(), `Add cover letter "${letter.id}"`, () =>
-          store.saveCoverLetter(letter),
-        );
+        // Its id chosen on the letters as they are under the save's lock: see `/answers/save`.
+        const named = letterId(job.company, job.jobTitle);
+        const first = unclaimedLetterId(store.loadCoverLetters(), named);
+        saved = await withCommit(repo, autoCommit(), `Add cover letter "${first}"`, () => {
+          const letters = store.loadCoverLetters();
+          const id = unclaimedLetterId(letters, named);
+          const before = letters.find((l) => l.id === id);
+          const letter: CoverLetter = {
+            ...(before ?? {}),
+            id,
+            // Named for the employer the address belongs to when the page never
+            // said who is hiring, and never for the address — see `employerOrUnknown`.
+            title: `${job.jobTitle ?? 'Role'} — ${job.company ?? employerOrUnknown(job.url)}`,
+            company: job.company,
+            role: job.jobTitle,
+            createdAt: before?.createdAt || new Date().toISOString(),
+            body,
+          };
+          store.saveCoverLetter(letter);
+          return letter;
+        });
       }
 
       res.json({
@@ -3578,65 +3772,73 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         throw new Error('That is the dropdown’s prompt rather than an answer, so it was not saved.');
       }
 
-      const answers = store.load().answers;
       /*
-       * Kept as a person reads it: without the required marker a form puts
-       * on it, and once, not twice. See `tidyQuestion`.
+       * Read, changed and written under the save's lock, in one step. Read
+       * before `withCommit`, which waits for another process's save to
+       * finish, the bank written here was the one from before that save, and
+       * the answer it had just added was gone.
        */
-      const asked = tidyQuestion(question) || question.trim();
-      /*
-       * Found by id when the caller has one, and otherwise by the question
-       * itself — not only by id. Without this, saving a question the bank
-       * already holds, from a caller that never learned its id, added a
-       * second item with the same question rather than a variant of the
-       * first: two competing answers to "Why do you want to work here?",
-       * with `matchAnswer` seeing only whichever came first and the second
-       * unreachable by anything but a fresh save. `sameQuestion` allows for
-       * the whitespace and case a retyped question differs by; a real
-       * change in wording is a new question and gets a new item, same as
-       * always.
-       */
-      const existing = itemId
-        ? answers.find((a) => a.id === itemId)
-        : answers.find((a) => sameQuestion(a.question, question));
-
-      if (existing) {
+      const saved = await withCommit(repo, autoCommit(), 'Update answer bank', () => {
+        const answers = store.load().answers;
         /*
-         * The same wording saved twice is not a second variant — it is the
-         * same click landing twice, from a retry or a double submit — so it
-         * is not piled on as one. It is made the default, since saving it
-         * again is the caller saying this is the one to use now.
+         * Kept as a person reads it: without the required marker a form puts
+         * on it, and once, not twice. See `tidyQuestion`.
          */
-        const already = existing.variants.find((v) => v.text.trim() === answer.trim());
-        if (already) {
-          existing.default = already.id;
-          // Saved by hand: no longer an AI draft nobody has read.
-          delete already.suggested;
-        } else {
-          // A new phrasing of a question already in the bank, not a new question.
-          /*
-           * Named after its label, as a person reads it. A label with nothing
-           * a slug keeps ("—", "！", an emoji) made the id a bare "v_": the
-           * fallback was put after the "v_" was added, where it could never
-           * be reached. And a clash is settled by counting up rather than by
-           * the clock, which can give the same number twice.
-           */
-          const stem = slug(label ?? localDay());
-          const unique = newVariantId(existing.variants, stem ? `v_${stem}` : `v_${Date.now().toString(36)}`);
-          existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
-          existing.default = unique;
-        }
-      } else {
-        answers.push({
-          id: answerId(asked, answers),
-          question: asked,
-          default: 'v_1',
-          variants: [{ id: 'v_1', label: label ?? 'Saved', text: answer.trim() }],
-        });
-      }
+        const asked = tidyQuestion(question) || question.trim();
+        /*
+         * Found by id when the caller has one, and otherwise by the question
+         * itself — not only by id. Without this, saving a question the bank
+         * already holds, from a caller that never learned its id, added a
+         * second item with the same question rather than a variant of the
+         * first: two competing answers to "Why do you want to work here?",
+         * with `matchAnswer` seeing only whichever came first and the second
+         * unreachable by anything but a fresh save. `sameQuestion` allows for
+         * the whitespace and case a retyped question differs by; a real
+         * change in wording is a new question and gets a new item, same as
+         * always.
+         */
+        const existing = itemId
+          ? answers.find((a) => a.id === itemId)
+          : answers.find((a) => sameQuestion(a.question, question));
 
-      await withCommit(repo, autoCommit(), 'Update answer bank', () => store.saveAnswers(answers));
-      res.json({ ok: true, answers });
+        if (existing) {
+          /*
+           * The same wording saved twice is not a second variant — it is the
+           * same click landing twice, from a retry or a double submit — so it
+           * is not piled on as one. It is made the default, since saving it
+           * again is the caller saying this is the one to use now.
+           */
+          const already = existing.variants.find((v) => v.text.trim() === answer.trim());
+          if (already) {
+            existing.default = already.id;
+            // Saved by hand: no longer an AI draft nobody has read.
+            delete already.suggested;
+          } else {
+            // A new phrasing of a question already in the bank, not a new question.
+            /*
+             * Named after its label, as a person reads it. A label with nothing
+             * a slug keeps ("—", "！", an emoji) made the id a bare "v_": the
+             * fallback was put after the "v_" was added, where it could never
+             * be reached. And a clash is settled by counting up rather than by
+             * the clock, which can give the same number twice.
+             */
+            const stem = slug(label ?? localDay());
+            const unique = newVariantId(existing.variants, stem ? `v_${stem}` : `v_${Date.now().toString(36)}`);
+            existing.variants.push({ id: unique, label: label ?? 'Saved', text: answer.trim() });
+            existing.default = unique;
+          }
+        } else {
+          answers.push({
+            id: answerId(asked, answers),
+            question: asked,
+            default: 'v_1',
+            variants: [{ id: 'v_1', label: label ?? 'Saved', text: answer.trim() }],
+          });
+        }
+        store.saveAnswers(answers);
+        return answers;
+      });
+      res.json({ ok: true, answers: saved });
     }),
   );
 
@@ -3777,7 +3979,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
        * names one, as `unnamedRole` reads them. See `sameJobAs`.
        */
       const jobAddress = addresses.find((u) => jobNumberIn(u)) ?? url;
-      const specId = copyIdForPosting(data.resumes, employer, role);
+      const specId = copyIdForPosting(data.resumes, employer, role, { url: jobAddress });
 
       /*
        * A default never starts this posting from another posting's copy.
@@ -4659,45 +4861,46 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
     '/applications/:id',
     handler(async (req, res) => {
       const id = String(req.params.id);
-      const apps = store.load().applications;
-      /*
-       * The one row, not every row by that name. A filter by id took both
-       * copies of a row a hand-merged tracker held twice; loading now gives
-       * repeats their own id (see `normalizeApplications`), and this removes
-       * one row however the list came to hold it.
-       */
-      const at = apps.findIndex((a) => a.id === id);
-      if (at < 0) throw new Error(`No application "${id}"`);
-      const next = [...apps.slice(0, at), ...apps.slice(at + 1)];
-      /*
-       * The snapshot folder under out/ is left alone: a record of what was sent
-       * is worth keeping even when the tracker row was a mistake.
-       *
-       * And so is the resume it was sent with. The confirm says "the files on
-       * disk stay", but a temporary resume is kept only for as long as a sent
-       * row names it (see `wentOut` in tiers.ts): with the row gone it read as
-       * abandoned from the day it was made, and the next sweep deleted the
-       * one record of what went out that the save's history holds — `out/` is
-       * not tracked. So a sent row's temporary resumes are marked kept on the
-       * way out, as marking one kept in the editor does. Only temporary ones:
-       * a base or a kept resume is never swept, and is left exactly as it is.
-       */
-      const gone = apps[at]!;
-      const sentWith = wentOut(gone) ? [...new Set([gone.resumeId, ...(gone.sentResumeIds ?? [])])] : [];
-      const toKeep = store
-        .loadResumes()
-        .filter((r) => sentWith.includes(r.id) && tierOf(r) === 'temporary');
-      /*
-       * Its letter stays, unlinked. The letter is a letter you wrote and is
-       * kept as one, but it still said `applicationId:` the row that is
-       * gone: the letters view offered "application" beside it and opened
-       * nothing, and anything that looks a letter up by its application —
-       * completing one, `GET /letters/id` — would take it for the letter of
-       * a row that only shares the id. Cleared in the same commit as the
-       * row, so the history has no state with one and not the other.
-       */
-      const linkedLetters = store.loadCoverLetters().filter((l) => l.applicationId === id);
+      // Read and written under the save's lock, in one step: see `/answers/save`.
       await withCommit(repo, autoCommit(), `Remove application "${id}"`, () => {
+        const apps = store.load().applications;
+        /*
+         * The one row, not every row by that name. A filter by id took both
+         * copies of a row a hand-merged tracker held twice; loading now gives
+         * repeats their own id (see `normalizeApplications`), and this removes
+         * one row however the list came to hold it.
+         */
+        const at = apps.findIndex((a) => a.id === id);
+        if (at < 0) throw new Error(`No application "${id}"`);
+        const next = [...apps.slice(0, at), ...apps.slice(at + 1)];
+        /*
+         * The snapshot folder under out/ is left alone: a record of what was sent
+         * is worth keeping even when the tracker row was a mistake.
+         *
+         * And so is the resume it was sent with. The confirm says "the files on
+         * disk stay", but a temporary resume is kept only for as long as a sent
+         * row names it (see `wentOut` in tiers.ts): with the row gone it read as
+         * abandoned from the day it was made, and the next sweep deleted the
+         * one record of what went out that the save's history holds — `out/` is
+         * not tracked. So a sent row's temporary resumes are marked kept on the
+         * way out, as marking one kept in the editor does. Only temporary ones:
+         * a base or a kept resume is never swept, and is left exactly as it is.
+         */
+        const gone = apps[at]!;
+        const sentWith = wentOut(gone) ? [...new Set([gone.resumeId, ...(gone.sentResumeIds ?? [])])] : [];
+        const toKeep = store
+          .loadResumes()
+          .filter((r) => sentWith.includes(r.id) && tierOf(r) === 'temporary');
+        /*
+         * Its letter stays, unlinked. The letter is a letter you wrote and is
+         * kept as one, but it still said `applicationId:` the row that is
+         * gone: the letters view offered "application" beside it and opened
+         * nothing, and anything that looks a letter up by its application —
+         * completing one, `GET /letters/id` — would take it for the letter of
+         * a row that only shares the id. Cleared in the same commit as the
+         * row, so the history has no state with one and not the other.
+         */
+        const linkedLetters = store.loadCoverLetters().filter((l) => l.applicationId === id);
         store.saveApplications(next);
         for (const letter of linkedLetters) {
           const { applicationId: _gone, ...unlinked } = letter;
@@ -4753,33 +4956,43 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         throw new Error('Say what the company or the role should be');
       }
       if (company === '' || role === '') throw new Error('A company and a role cannot be left empty');
-      const apps = store.load().applications;
-      const app = apps.find((a) => a.id === id);
-      if (!app) throw new Error(`No application "${id}"`);
-      const next: Application = {
-        ...app,
-        ...(company !== undefined ? { company } : {}),
-        ...(role !== undefined ? { role } : {}),
-        ...(answers !== undefined ? { answers } : {}),
-      };
       /*
-       * And the names it had, kept as another name for it.
-       *
-       * The page the row came from still says them: the card still open on
-       * it, and the next visit. A send under the old names found no row — on
-       * an address with no job number nothing else ties the two together — and
-       * filed a second one at `applied` beside this one. See `sameJobAs`.
+       * Worked out on the tracker as it is under the save's lock, not as read
+       * before `withCommit` waited for another process: see `/answers/save`.
+       * Once outside as well, to refuse early and to name the commit.
        */
-      if (!sameIdentity(app.company, app.role, next.company, next.role)) {
-        const was = { company: app.company, role: app.role };
-        const known = (app.aliases ?? []).some((a) => sameIdentity(a.company, a.role, was.company, was.role));
-        if (!known) next.aliases = [...(app.aliases ?? []), was];
-      }
+      const revise = (apps: Application[]) => {
+        const app = apps.find((a) => a.id === id);
+        if (!app) throw new Error(`No application "${id}"`);
+        const next: Application = {
+          ...app,
+          ...(company !== undefined ? { company } : {}),
+          ...(role !== undefined ? { role } : {}),
+          ...(answers !== undefined ? { answers } : {}),
+        };
+        /*
+         * And the names it had, kept as another name for it.
+         *
+         * The page the row came from still says them: the card still open on
+         * it, and the next visit. A send under the old names found no row — on
+         * an address with no job number nothing else ties the two together — and
+         * filed a second one at `applied` beside this one. See `sameJobAs`.
+         */
+        if (!sameIdentity(app.company, app.role, next.company, next.role)) {
+          const was = { company: app.company, role: app.role };
+          const known = (app.aliases ?? []).some((a) => sameIdentity(a.company, a.role, was.company, was.role));
+          if (!known) next.aliases = [...(app.aliases ?? []), was];
+        }
+        return { app, next };
+      };
+      const { next: named } = revise(store.load().applications);
       const what =
         company === undefined && role === undefined
           ? `Set the answers on application "${id}"`
-          : `Rename application "${id}" to ${next.role} at ${next.company}`;
-      await withCommit(repo, autoCommit(), what, () => {
+          : `Rename application "${id}" to ${named.role} at ${named.company}`;
+      const next = await withCommit(repo, autoCommit(), what, () => {
+        const apps = store.load().applications;
+        const { app, next } = revise(apps);
         const drafts = store.loadDrafts();
         /*
          * With the row's address, as every route that files, sends or moves a
@@ -4793,6 +5006,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         const space = drafts.find((d) => d.id === id) ?? draftForJob(othersLeftOut(drafts, apps, id), apps, app.company, app.role, app.url);
         store.saveApplications(apps.map((a) => (a.id === id ? next : a)));
         if (space) store.saveDraft({ ...space, company: next.company, role: next.role });
+        return next;
       });
       res.json(next);
     }),
@@ -5743,15 +5957,16 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       }
 
       const patch = req.body as Partial<Draft>;
-      const merged: Draft = {
-        ...existing,
+      const mergedOnto = (base: Draft): Draft => ({
+        ...base,
         ...patch,
         id,
-        coverLetter: { ...existing.coverLetter, ...(patch.coverLetter ?? {}) },
-        questions: patch.questions ?? existing.questions,
-      };
-      const saved = await withCommit(repo, autoCommit(), `Update workspace for ${merged.company}`, () =>
-        store.saveDraft(merged),
+        coverLetter: { ...base.coverLetter, ...(patch.coverLetter ?? {}) },
+        questions: patch.questions ?? base.questions,
+      });
+      // Onto the space as it is under the save's lock: see `/answers/save`.
+      const saved = await withCommit(repo, autoCommit(), `Update workspace for ${mergedOnto(existing).company}`, () =>
+        store.saveDraft(mergedOnto(store.getDraft(id) ?? existing)),
       );
       res.json(saved);
     }),
@@ -5861,10 +6076,27 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const draft = store.getDraft(String(req.params.id));
       if (!draft) throw new Error(`No draft "${String(req.params.id)}"`);
 
-      const { useAi, baseResumeId } = req.body as { useAi?: boolean; baseResumeId?: string };
+      const { useAi, baseResumeId, overwrite } = (req.body ?? {}) as { useAi?: boolean; baseResumeId?: string; overwrite?: boolean };
       // When the base is read, which is what the copy is dated by. See `deriveSpec`.
       const readAt = new Date().toISOString();
       const data = store.load();
+      /*
+       * Tailoring again rebuilds the copy from its base and writes it over
+       * the one there. An edit made to the copy since it was tailored went
+       * with it, without a word; now it is refused unless the request says
+       * `overwrite`, and the workspace asks first. Checked here, before the
+       * fetch and the AI, and again at the write.
+       */
+      const editedCopy = (id: string) => {
+        const held = store.loadResumes().find((r) => r.id === id);
+        return held && editedSinceTailored(held) ? held : undefined;
+      };
+      const refuseEdited = (held: ResumeSpec) =>
+        res.status(409).json({
+          kind: 'edited',
+          resumeId: held.id,
+          error: `“${held.label ?? held.id}” has edits made since it was tailored. Tailoring again replaces them.`,
+        });
 
       // The posting text: fetched from the link when there is one, falling
       // back to whatever the draft already carries.
@@ -5893,7 +6125,19 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
         job = extractJob(draft.jobDescription, draft.url, `${draft.role} at ${draft.company}`);
       }
       job = withYourTerms(job, data);
-      const specId = copyIdForPosting(data.resumes, draft.company, draft.role);
+      const specId = copyIdForPosting(data.resumes, draft.company, draft.role, {
+        url: draft.url,
+        draftId: draft.id,
+        resumeId: draft.resumeId,
+        drafts: store.loadDrafts(),
+      });
+      if (overwrite !== true) {
+        const held = editedCopy(specId);
+        if (held) {
+          refuseEdited(held);
+          return;
+        }
+      }
 
       /*
        * Tailoring twice must not make a resume that inherits from itself. The
@@ -5952,7 +6196,26 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       const inclusion = plan ? applyInclusion(base, data, plan) : undefined;
       if (inclusion) spec.sections = withNarrowedSkills(inclusion, spec.sections);
 
-      await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => store.saveResume(spec));
+      const refused = await withCommit(repo, autoCommit(), `Tailor a resume for ${draft.company}`, () => {
+        const held = overwrite === true ? undefined : editedCopy(spec.id);
+        if (held) return held;
+        /*
+         * A name or notes given to the copy by hand stay: they are not what
+         * tailoring makes. The name is the copy's own when it is not the one
+         * the last tailoring gave it.
+         */
+        const was = store.loadResumes().find((r) => r.id === spec.id && r.tier === 'temporary');
+        const madeName = was?.generatedFor ? `${was.generatedFor.role ?? 'Unknown role'} — ${was.generatedFor.company ?? ''}` : undefined;
+        if (was?.label && was.label !== madeName) spec.label = was.label;
+        if (was?.notes) spec.notes = was.notes;
+        spec.generatedFor = { ...spec.generatedFor, tailored: tailoredFingerprint(spec) };
+        store.saveResume(spec);
+        return undefined;
+      });
+      if (refused) {
+        refuseEdited(refused);
+        return;
+      }
 
       // The draft now sends this one, and keeps the posting text for the
       // letter and the answers to draw on. Those two fields, and nothing else:

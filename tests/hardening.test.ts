@@ -116,7 +116,7 @@ describe('an id is a name, never a path', () => {
   });
 
   it('still allows the ordinary ids people actually use', async () => {
-    await request(app).put('/api/resumes/acme-platform-engineer-2').send({ label: 'Fine' }).expect(200);
+    await request(app).put('/api/resumes/acme-platform-engineer-2').send({ label: 'Fine', sections: [] }).expect(200);
     expect(t.store.getResume('acme-platform-engineer-2')?.label).toBe('Fine');
   });
 });

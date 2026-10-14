@@ -103,10 +103,17 @@ const JOINED_PHONE = /(?<![A-Za-z0-9])(?:\+?1[-._])?\d{3}[-._]\d{3}[-._]\d{4}(?!
  *   Not after "line", "code", "status", "count" or "row": those are words a
  *   person writes about a phone too ("phone line 6175550134"), and a line
  *   number or a status is never ten digits. Nor with "phone", "tel",
- *   "mobile", "cell", "call", "SMS" or "WhatsApp" a few words before —
- *   "Phone (ID 6175550134)" is a phone number whatever word is next to it.
+ *   "cell" or "WhatsApp" right before the name — "Phone (ID 6175550134)"
+ *   is a phone number whatever word is next to it. Further back, the name
+ *   next to the number wins: "tel: link handler pid 1234567890" is a pid.
+ *
+ * Not "call", which is a word about software far more often than about a
+ * phone ("API call failed for job …", "call stack: commit …"); and "mobile"
+ * and "SMS" only where a number or a word for one follows them ("Mobile:
+ * 6175550134", "SMS number") and not in "Mobile build 2024061512".
  */
-const PHONE_SAID = String.raw`\b(?:phones?|tel|telephone|mobile|cell(?:phone)?|call|sms|whatsapp)\b\W*(?:\w+\W+){0,3}`;
+const PHONE_WORD = String.raw`\b(?:phones?|tel|telephone|cell(?:phone)?|whatsapp|(?:mobile|sms)(?=\W*(?:phones?\b|numbers?\b|no\b|nr\b|line\b|#|\+?\d)))\b`;
+const PHONE_SAID = String.raw`${PHONE_WORD}\W*(?:\w+\W+){0,3}`;
 /*
  * One unbroken run of a phone's digits with "phone" or its like a few words
  * before: the contact rule lets "Phone (ID 6175550134)" through as an ID, and
@@ -120,7 +127,7 @@ const NOT_PHONE: RegExp[] = [
   new RegExp(`(?<![\\w.-])(?:${DAY}(?:[T ]${CLOCK})?|${DAY_FIRST}(?:,?\\s+${CLOCK})?)(?![\\w])`, 'g'),
   /(?<![\w.+-]|\d[\s().-]{1,3})1\d{12}(?![\w]|[\s().-]{1,3}\d)/g,
   new RegExp(
-    String.raw`(?<!${PHONE_SAID})(?<=\b(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|overflow|exit|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)`,
+    String.raw`(?<=\b(?<!${PHONE_WORD}\W{0,3})(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|overflow|exit|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)`,
     'gi',
   ),
   /(?<![\w.+-]|\d[\s().-]{1,3})\d+(?=\s?(?:ms|sec|bytes|KB|MB|GB|KiB|MiB|GiB|pt|px)\b)/g,
