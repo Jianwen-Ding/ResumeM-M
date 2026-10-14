@@ -35,13 +35,21 @@ describe('a server that stops and comes back', () => {
     const data = fixture.store.load();
     fixture.cleanup();
 
-    const net = { down, puts: [], renders: 0 };
+    const net = { down, failRender: false, puts: [], renders: 0 };
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url, init = {}) => {
         const method = init.method ?? 'GET';
         const writes = String(url).startsWith('/api/render') || method !== 'GET';
         if (net.down && writes) throw new TypeError('Failed to fetch');
+        if (net.failRender && String(url).startsWith('/api/render')) {
+          return {
+            ok: false,
+            status: 422,
+            statusText: 'Unprocessable Entity',
+            json: async () => ({ error: 'LaTeX failed: Undefined control sequence.' }),
+          };
+        }
         let result = {};
         if (url === '/api/store') result = data;
         else if (url === '/api/ai/jobs') result = { jobs: [] };
@@ -99,6 +107,26 @@ describe('a server that stops and comes back', () => {
     await vi.waitFor(() => expect(net.renders).toBeGreaterThan(before), { timeout: 8000 });
     await vi.waitFor(() => expect(text('#live-state')).toBe('Live'));
     expect(text('#fit')).toMatch(/fits on one page/i);
+  }, 20_000);
+
+  /*
+   * A compile the server answered with an error is over, and the pane went on
+   * saying "Compiling your resume…" under it for as long as nothing else was
+   * touched.
+   */
+  it('says the compile failed in the pane, and puts it back when one works', async () => {
+    const net = await boot();
+    await vi.waitFor(() => expect(text('#live-state')).toBe('Live'), { timeout: 4000 });
+
+    net.failRender = true;
+    untick('Acme Co.');
+    await vi.waitFor(() => expect(text('#fit')).toMatch(/undefined control sequence/i), { timeout: 4000 });
+    expect(text('#preview-empty')).toBe('Couldn’t compile — see the message on the left.');
+
+    net.failRender = false;
+    untick('Thing');
+    await vi.waitFor(() => expect(text('#fit')).toMatch(/fits on one page/i), { timeout: 4000 });
+    expect(text('#preview-empty')).toBe('Compiling your resume…');
   }, 20_000);
 
   it('says so in the pane when there was never a page to show', async () => {

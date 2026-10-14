@@ -78,6 +78,7 @@ const HONORIFIC = /^(?:dr|mr|mrs|ms|mx|miss|prof|professor)\.?\s+/i;
  *   "Martin Luther King Jr."  -> Martin / King
  *   "Cher"                    -> nothing; one word is not two boxes
  *   "J. R. R. Tolkien"        -> J. / Tolkien
+ *   "José Antonio Núñez García" -> nothing; which words are the surname is not plain
  */
 export function splitName(full: string): { first: string; last: string } | undefined {
   const said = tidy(full).replace(HONORIFIC, '');
@@ -109,6 +110,23 @@ export function splitName(full: string): { first: string; last: string } | undef
   // Walk back over particles, but never all the way: a surname is at least
   // one real word and the given name has to keep one too.
   while (at > 1 && PARTICLES.has(words[at - 1]!.toLowerCase())) at -= 1;
+
+  /*
+   * Nor where the surname may be two words and nothing says which. "José
+   * Antonio Núñez García" is José Antonio, Núñez García — a Spanish name
+   * carries both surnames — and was split as José / García, dropping half the
+   * surname from the Last name box of an application. Read plainly only when
+   * the words between the first and the surname are initials ("J. R. R.
+   * Tolkien"), or nothing after the first name carries an accent — the mark
+   * of a Spanish or Portuguese name, where the last two words are very often
+   * both the surname ("Martin Luther King Jr." is still Martin / King).
+   * Otherwise nothing, so the whole name still fills a Full name box, and
+   * first and last names set in the profile (`autofill.first_name`,
+   * `autofill.last_name`) fill theirs, as they always have.
+   */
+  const middle = words.slice(1, at).filter((w) => !/^\p{L}\.?$/u.test(w));
+  const accented = words.slice(1).some((w) => /[^\x00-\x7F]/.test(w));
+  if (middle.length > 0 && accented) return undefined;
 
   const first = words[0]!;
   const last = words.slice(at).join(' ');
@@ -192,12 +210,37 @@ const STATE_NAMES = new Set(
  * the ways people write their own that are not the ISO name.
  */
 const COUNTRY_CODES = new Set<string>(['UK', 'USA']);
+/*
+ * And a country as its own people write it. The runtime's region names are
+ * English, so "München, Deutschland", "Madrid, España", "Amsterdam,
+ * Nederland" and "Москва, Россия" — which is how somebody whose resume is
+ * in their own language writes where they live — split into no boxes at all
+ * while "Munich, Germany" did. The endonyms of the countries whose forms
+ * this meets, with the spellings their neighbours use for the shared ones.
+ */
+const ENDONYMS = [
+  'Deutschland', 'Österreich', 'Schweiz', 'Suisse', 'Svizzera', 'España', 'Brasil', 'Nederland', 'Italia', 'Polska',
+  'Россия', 'Российская Федерация', '日本', '中国', '中华人民共和国', '한국', '대한민국', 'France', 'Belgique', 'België',
+  'Sverige', 'Norge', 'Danmark', 'Suomi', 'Portugal', 'México', 'Argentina', 'Chile', 'Colombia', 'Perú',
+  'Türkiye', 'Ελλάδα', 'Česko', 'Česká republika', 'Magyarország', 'România', 'Україна', 'Éire', 'Ísland',
+  'Hrvatska', 'Slovensko', 'Slovenija', 'Lietuva', 'Latvija', 'Eesti', 'Luxembourg', 'Lëtzebuerg', 'ישראל',
+  'مصر', 'المغرب', 'भारत', 'ประเทศไทย', 'Việt Nam', 'Indonesia', 'Pilipinas', 'Malaysia', 'Singapura',
+  'Estados Unidos', 'Vereinigte Staaten', 'États-Unis', 'Reino Unido', 'Royaume-Uni', 'Großbritannien', 'Canadá', 'Kanada',
+  'Australien', 'Австралия', 'Niederlande', 'Países Bajos', 'Pays-Bas', 'Frankreich', 'Francia', 'Alemania', 'Allemagne',
+  'Alemanha', 'Germania', 'Italien', 'Italie', 'Spanien', 'Espagne', 'Espanha', 'Schweden', 'Suède', 'Suecia', 'Noruega',
+  'Norwegen', 'Norvège', 'Dänemark', 'Danemark', 'Dinamarca', 'Finnland', 'Finlande', 'Finlandia', 'Polen', 'Pologne', 'Polonia',
+  'Griechenland', 'Grèce', 'Grecia', 'Russland', 'Russie', 'Rusia', 'Rússia', 'Japan', 'Japon', 'Japón', 'Japão', 'China', 'Chine',
+  'Türkei', 'Turquie', 'Turquía', 'Belgien', 'Bélgica', 'Portugal', 'Mexiko', 'Mexique', 'Argentinien', 'Argentine', 'Chili',
+  'Kolumbien', 'Colombie', 'Brasilien', 'Brésil', 'Südkorea', 'Corée du Sud', 'Corea del Sur', 'Coreia do Sul', 'Irland',
+  'Irlande', 'Irlanda', 'Schottland', 'Écosse', 'Escocia', 'Inglaterra', 'Angleterre', 'Tschechien', 'Tchéquie', 'Chequia',
+];
 const COUNTRY_NAMES = new Set<string>(
   [
     'USA', 'U.S.A.', 'U.S.', 'UK', 'U.K.', 'United States of America', 'America', 'England', 'Scotland',
     'Wales', 'Northern Ireland', 'Great Britain', 'Britain', 'Czech Republic', 'Republic of Korea',
     'Korea', 'Holland', 'The Netherlands', 'UAE', 'Russia', 'Vietnam', 'Türkiye', 'Turkey',
-  ].map((n) => n.toLowerCase()),
+    ...ENDONYMS,
+  ].map((n) => n.normalize('NFC').toLowerCase()),
 );
 try {
   const regions = new Intl.DisplayNames(['en'], { type: 'region' });
@@ -218,7 +261,15 @@ const plain = (s: string) => s.replace(/\./g, '').trim();
 const isStateCode = (s: string) => POSTAL_CODE.test(plain(s)) && STATE_CODES.has(plain(s).toUpperCase());
 const isStateName = (s: string) => STATE_NAMES.has(s.toLowerCase());
 const isCountry = (s: string) =>
-  COUNTRY_NAMES.has(s.toLowerCase()) || COUNTRY_CODES.has(plain(s).toUpperCase()) && /^[A-Za-z.]{2,6}$/.test(s);
+  COUNTRY_NAMES.has(s.normalize('NFC').toLowerCase()) || COUNTRY_CODES.has(plain(s).toUpperCase()) && /^[A-Za-z.]{2,6}$/.test(s);
+
+/*
+ * A Japanese address is written largest first and with no commas: 東京都渋谷区
+ * is the prefecture 東京都 and then the ward 渋谷区. The prefecture ends in
+ * one of four characters, and what follows it is the city or ward a form's
+ * City box takes.
+ */
+const JP_PREFECTURE = /^(.{1,4}[都道府県])(.+)$/u;
 
 /** Where somebody works that is not a place: never a city. */
 const NOT_A_CITY = /^(?:remote|hybrid|anywhere|on-?site|in[- ]office|wfh|work from home|various|multiple locations?)$/i;
@@ -241,9 +292,14 @@ export function splitLocation(
   location: string,
 ): { city?: string; state?: string; country?: string } | undefined {
   const said = tidy(location);
-  if (!said || !said.includes(',')) return undefined;
+  if (!said) return undefined;
+  if (!said.includes(',')) {
+    const jp = JP_PREFECTURE.exec(said);
+    return jp && /\p{Script=Han}/u.test(jp[2]!) ? { city: jp[2]!, state: jp[1]! } : undefined;
+  }
 
-  const parts = said.split(',').map(tidy).filter(Boolean);
+  // The full-width comma a Japanese or Chinese location is written with.
+  const parts = said.split(/[,、，]/).map(tidy).filter(Boolean);
   const town = (city: string) => (NOT_A_CITY.test(city) ? {} : { city });
   /*
    * A state's code before a country's, because the two overlap — "CA",
@@ -420,6 +476,17 @@ const HONOURS_ANYWHERE = /\s*\((?:with\s+)?(?:first[- ]class\s+)?hon(?:ou?r)?s\.
 const DEGREE_WORD =
   /\b(bachelor'?s?|master'?s?|doctor(ate)?|associate'?s?|b\.?s\.?c?|b\.?a\.?|b\.?eng|m\.?s\.?c?|m\.?a\.?|m\.?eng|m\.?b\.?a|ph\.?d|j\.?d|m\.?d|diploma|certificate)\b/i;
 
+/*
+ * A grade as a resume writes it. With a decimal comma too, as much of Europe
+ * writes it: "GPA: 3,8" was read as 3, a grade the person never had. A comma
+ * with a digit straight after it is a decimal one ("GPA 3.8, Dean's list"
+ * has a space); and a number that runs on past what is read — "3,800" — is
+ * not read at all, rather than cut short. But a comma before a number with a
+ * decimal point of its own — "GPA 3.9,4.0 scale" — is between two numbers,
+ * the grade and its scale, and the grade is read.
+ */
+const GPA_NUMBER = String.raw`\d{1,3}(?:\.\d+|,\d{1,2})?(?!\.?\d|,\d(?!\.\d))`;
+
 /**
  * A grade point average, as a form wants it: the number alone.
  *
@@ -427,7 +494,26 @@ const DEGREE_WORD =
  * it; the box asks for one number and validates it. Only a plausible one — a
  * "GPA" followed by something that is not a grade is a sentence, not a score.
  */
-const GPA_CLAUSE = /[,;]?\s*\bGPA[:\s]+\d(?:\.\d+)?(?:\s*\/\s*\d(?:\.\d+)?)?/i;
+const GPA_CLAUSE = new RegExp(String.raw`[,;]?\s*\bGPA[:\s]+${GPA_NUMBER}%?(?:\s*\/\s*${GPA_NUMBER})?`, 'i');
+
+/*
+ * Every grade a line gives, with the word in front of it: "Major GPA: 3.9,
+ * Cumulative GPA: 3.6" is two.
+ */
+const GPA_SAID = new RegExp(
+  String.raw`\b(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA[:\s]+(${GPA_NUMBER})(%?)(?:\s*\/\s*(${GPA_NUMBER}))?`,
+  'gi',
+);
+const GPA_AFTER = new RegExp(
+  String.raw`\b(\d{1,3}(?:\.\d{1,3}|,\d{1,2})(?![.,]?\d))(%?)(?:\s*\/\s*(${GPA_NUMBER}))?\s+(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA\b`,
+  'gi',
+);
+
+/*
+ * The highest a four- or five-point grade goes: 4.0, 4.3, 4.33, 5.0. A form's
+ * GPA box asks on that scale and checks the number against it.
+ */
+const TOP_OF_SCALE = 5;
 
 export function readGpa(line: string): string | undefined {
   /*
@@ -435,17 +521,34 @@ export function readGpa(line: string): string | undefined {
    * other, and the second is how a school line carries it — "University of
    * Virginia, 3.97 GPA" — which was read as no grade at all.
    */
+  /*
+   * And all of the number, on a four- or five-point scale only. The grade
+   * was read one digit long, so "GPA: 85/100" went to a form as 8, "GPA
+   * 92%" as 9 and "GPA 10/10" as 1 — each a grade the person never had,
+   * typed into a box an employer screens on. A grade out of 100, out of 10
+   * or as a percentage is not converted (nobody's conversion is the
+   * school's), so it is not given at all.
+   *
+   * And the overall grade before the major one: "Major GPA: 3.9, Cumulative
+   * GPA: 3.6" gave the 3.9, and a box marked GPA asks for the cumulative.
+   */
   const said = String(line ?? '');
-  const hit =
-    /\bGPA[:\s]+(\d(?:\.\d+)?)(?:\s*\/\s*(\d(?:\.\d+)?))?/i.exec(said) ??
-    /\b(\d\.\d{1,2})(?:\s*\/\s*(\d(?:\.\d+)?))?\s+(?:cumulative\s+|overall\s+)?GPA\b/i.exec(said);
-  if (!hit) return undefined;
-  const score = Number(hit[1]);
-  const scale = hit[2] === undefined ? undefined : Number(hit[2]);
-  // A score above its own scale is a misreading, not a grade.
-  if (!Number.isFinite(score) || score <= 0) return undefined;
-  if (scale !== undefined && (!Number.isFinite(scale) || score > scale)) return undefined;
-  return hit[1];
+  const found: { score: string; kind: string }[] = [];
+  const take = (said: string, percent: string, scale: string | undefined, kind: string | undefined) => {
+    // As a form's number box wants it: "3,8" is 3.8.
+    const score = said.replace(',', '.');
+    const n = Number(score);
+    const out = scale === undefined ? undefined : Number(scale.replace(',', '.'));
+    if (percent || !Number.isFinite(n) || n <= 0 || n > TOP_OF_SCALE) return;
+    // A score above its own scale is a misreading, not a grade; a scale past five points is another kind of grade.
+    if (out !== undefined && (!Number.isFinite(out) || n > out || out > TOP_OF_SCALE)) return;
+    found.push({ score, kind: (kind ?? '').toLowerCase() });
+  };
+  for (const m of said.matchAll(GPA_SAID)) take(m[2]!, m[3]!, m[4], m[1]);
+  if (found.length === 0) for (const m of said.matchAll(GPA_AFTER)) take(m[1]!, m[2]!, m[3], m[4]);
+  const overall = found.find((g) => g.kind === 'cumulative' || g.kind === 'overall');
+  const plain = found.find((g) => g.kind === '');
+  return (overall ?? plain ?? found[0])?.score;
 }
 
 /**
@@ -653,9 +756,16 @@ export function derivedAutofill(
      * different decision, and a box marked "GPA" is asking. The school line
      * first, where "University of Virginia, 3.97 GPA" carries it.
      */
+    /*
+     * The wording being sent before the others, which are only a fallback:
+     * with "GPA 3.4/4.0" and "GPA 3.8/4.0" as two wordings and the second
+     * chosen, the form was told 3.4 — the first in the list — while the
+     * resume attached to it said 3.8.
+     */
     const anywhere = [
       named,
-      ...(isVariantField(school.subtitle) ? school.subtitle.variants.map((v) => String(v.text)) : [line]),
+      line,
+      ...(isVariantField(school.subtitle) ? school.subtitle.variants.map((v) => String(v.text)).filter((t) => t !== line) : []),
     ];
     for (const said of anywhere) {
       const gpa = readGpa(said);

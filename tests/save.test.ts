@@ -309,6 +309,11 @@ describe('Repo.pending', () => {
  *
  * It was briefly not true — previews were ignored to keep the history small —
  * and small was not what was wanted.
+ *
+ * Except for what is rebuilt rather than written: the upload folder and the
+ * editor's `out/.previews`, which a store's own `Repo` is told to ignore (see
+ * `currentIgnore` and tests/preview-history.test.ts). A `Repo` told nothing,
+ * as here, keeps everything.
  */
 describe('what goes into the history', () => {
   const tracked = () =>

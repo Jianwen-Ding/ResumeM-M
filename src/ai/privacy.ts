@@ -135,16 +135,27 @@ const NAMED_AS_OTHER =
 const NAMED_AS_PHONE =
   /\b(?:call|phone|mobile|cell|tel|text|whats\s?app|ring|dial|reach)\b(?:\s+(?:me|us))?(?:\s+(?:on|at))?\s*(?:(?:#|nos?\.?|numbers?)\s*)?[:.#]?\s*$/i;
 
+/*
+ * A trunk 0 and a slash: "0176/12345678", "030/1234567", which is how a
+ * German signature writes the area code against the number. A "/" is where
+ * `DIGIT_RUN` ends a run — between two numbers it is a date, a path or two
+ * phones side by side — so each half stood alone and neither was a phone.
+ * Only with a 0 and two to four digits in front of the slash and five or
+ * more after it: "01/2024" and "12/03/2024" have neither.
+ */
+const TRUNK_SLASH_PHONE = /(?<![\w+/.-])0\d{2,4}\/\d{5,}(?![\w/]|[.-]\w)/;
+
 function phoneIn(text: string): boolean {
   for (const found of text.matchAll(DIGIT_RUN)) if (isPhoneRun(text, found)) return true;
-  return false;
+  return TRUNK_SLASH_PHONE.test(text);
 }
 
 /** The runs of digits in `text` that `phoneIn` reads as phone numbers. */
 function phoneRunsIn(text: string): { at: number; length: number }[] {
-  return [...text.matchAll(DIGIT_RUN)]
-    .filter((found) => isPhoneRun(text, found))
-    .map((found) => ({ at: found.index!, length: found[0].length }));
+  return [
+    ...[...text.matchAll(DIGIT_RUN)].filter((found) => isPhoneRun(text, found)),
+    ...text.matchAll(new RegExp(TRUNK_SLASH_PHONE.source, 'g')),
+  ].map((found) => ({ at: found.index!, length: found[0].length }));
 }
 
 /** Whether some stretch of this one run of digits is a phone number. */
@@ -180,6 +191,23 @@ function isPhoneRun(text: string, found: RegExpMatchArray): boolean {
    * unbroken run it has no phone's layout to go by either.
    */
   if (groups.length === 1 && !groups[0]!.startsWith('+') && text[found.index! - 1] === '#') return false;
+  /*
+   * A date and the hour after it: "2024-10-14 12:00", "14.10.2026 12:00".
+   * The run stops at the ":" and is the date's eight digits and the hour's
+   * two, so the whole of it was a phone and came out "[phone number]:00".
+   * Only exactly that: a year, month and day joined by "-" (or a day, month
+   * and year by "."), a space, an hour of 0 to 23, and a ":" straight after
+   * the run. No phone is written that way.
+   */
+  if (groups.length === 4 && seps[2] === ' ' && text[found.index! + run.length] === ':' && /^\d{1,2}$/.test(groups[3]!) && Number(groups[3]) <= 23) {
+    const [a, b, c] = groups as [string, string, string];
+    const month = (x: string) => /^\d{1,2}$/.test(x) && Number(x) >= 1 && Number(x) <= 12;
+    const day = (x: string) => /^\d{1,2}$/.test(x) && Number(x) >= 1 && Number(x) <= 31;
+    const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
+    const ymd = seps[0] === '-' && seps[1] === '-' && year(a) && month(b) && day(c);
+    const dmy = seps[0] === '.' && seps[1] === '.' && day(a) && month(b) && year(c);
+    if (ymd || dmy) return false;
+  }
   const breakable = (sep: string) => !/[.-]/.test(sep);
   for (let i = 0; i < groups.length; i++) {
     if (i > 0 && !breakable(seps[i - 1]!)) continue;
@@ -188,8 +216,20 @@ function isPhoneRun(text: string, found: RegExpMatchArray): boolean {
       const g = groups.slice(i, j + 1);
       const between = seps.slice(i, j);
       const digits = g.join('').replace(/\D/g, '').length;
-      if (digits < 10 || digits > 15) continue;
       const bare = g.map((x) => x.replace('+', ''));
+      /*
+       * Nine digits in threes and twos, "612 34 56 78": how Spain writes a
+       * mobile or a landline, which has no trunk 0 and is one digit short of
+       * the ten the rule below asks for. Only that shape, spaced, and only
+       * starting as a Spanish number does (6 to 9): "128 25 51 20" is still
+       * a list of figures.
+       */
+      const spanish =
+        bare.length === 4 &&
+        bare.map((x) => x.length).join('') === '3222' &&
+        /^[6-9]/.test(bare[0]!) &&
+        between.every((sep) => sep === ' ');
+      if ((digits < 10 && !spanish) || digits > 15) continue;
       const plus = g[0]!.startsWith('+');
       /*
        * "00" is how a "+" is dialled, and is written in its place: "0049
@@ -257,7 +297,14 @@ function isPhoneRun(text: string, found: RegExpMatchArray): boolean {
        */
       if (named && !plus && bare.length === 1) continue;
       if (bare.length === 2 && !plus && !between.some((sep) => /[-()]/.test(sep))) {
-        if (digits > 11 || bare[0]!.length < 3 || bare[0]!.length > 5) continue;
+        /*
+         * Twelve with a trunk 0 in front: a German mobile is "0176 12345678",
+         * four and eight, and was one digit over the eleven a two-group phone
+         * was allowed. Nothing else written as two groups starts with a 0 and
+         * runs to twelve digits.
+         */
+        const trunk = bare[0]!.startsWith('0');
+        if (digits > (trunk ? 12 : 11) || bare[0]!.length < 3 || bare[0]!.length > 5) continue;
         /*
          * Named as IDs, orders or tickets, the numbers are those, trunk 0
          * or not. Round 16 kept a number starting with a trunk 0 a phone
@@ -291,11 +338,19 @@ function isPhoneRun(text: string, found: RegExpMatchArray): boolean {
       const long = bare.findIndex((x) => x.length >= 5);
       const marked =
         between.some((sep) => sep.includes('-')) || bare.some((x, k) => k !== long && year(x));
+      /*
+       * A bracketed group in front is an area code, and the number after it
+       * is a phone however it is written: Brazil's "(11) 91234-5678" is two
+       * digits in brackets, then five, a dash and four, and the dash beside
+       * the five-digit group read it as a requisition.
+       */
+      const areaCoded = (between[0] ?? '').includes(')');
       if (
         bare.length > 1 &&
         long >= 0 &&
         !plus &&
         marked &&
+        !areaCoded &&
         !bare[0]!.startsWith('0') &&
         bare.filter((_, k) => k !== long).join('').length > 3
       ) {
@@ -319,8 +374,30 @@ function isPhoneRun(text: string, found: RegExpMatchArray): boolean {
  * "Hwy". A famous address is still somebody's place of work, and the AI has
  * no need to write it; "10 Downing Street" is refused for the same reason.
  */
-const STREET =
-  /\b\d{1,6}[A-Z]?\s+(?:[A-Z0-9][A-Za-z0-9.'-]*\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Court|Ct|Place|Pl|Terrace|Circle|Cir|Parkway|Pkwy|Highway|Hwy|Loop)\b/;
+/*
+ * And as the rest of Europe writes one, each in the shape its language uses
+ * and each case-sensitive for the same reason as the English one:
+ *
+ * - the street word on the end of the name and the number after it —
+ *   German "Hauptstraße 12", "Berliner Str. 4", "Karl-Marx-Allee 1", Dutch
+ *   "Keizersgracht 123", "Kalverstraat 5", "Dorpsplein 1";
+ * - the street word first, then the name, then the number — Spanish "Calle
+ *   Mayor 5", "Avenida de la Constitución 12", Portuguese "Rua Augusta,
+ *   1500", "Av. Paulista 1000", Russian "ул. Ленина, д. 10", "пр. Мира 5";
+ * - the number first and the street word after it in lower case, as French
+ *   writes it — "12 rue de la Paix", "5 avenue des Champs-Élysées". The word
+ *   has to be followed by a name with a capital, so "finished in 12 place"
+ *   and "a 2 avenue strategy" are still prose.
+ *
+ * A signature in any of these went to the AI whole, and `personalDetailIn`
+ * let the AI write one into a form.
+ */
+const STREET_EN = String.raw`\b\d{1,6}[A-Z]?\s+(?:[A-Z0-9][A-Za-z0-9.'-]*\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Court|Ct|Place|Pl|Terrace|Circle|Cir|Parkway|Pkwy|Highway|Hwy|Loop)\b`;
+const STREET_DE_NL = String.raw`(?<![\p{L}\p{N}])(?:\p{Lu}[\p{L}.'-]*\s+){0,3}\p{Lu}?[\p{L}'-]*(?:[Ss]tra(?:ß|ss)e|[Ss]tr\.|[Pp]latz|[Ww]eg|[Aa]llee|[Gg]asse|[Rr]ing|[Uu]fer|[Dd]amm|straat|gracht|laan|plein|singel|kade)\s+\d{1,4}\s?[a-zA-Z]?(?![\p{L}\p{N}])`;
+const STREET_ES_PT = String.raw`\b(?:Calle|C\/|Avenida|Avda\.?|Av\.|Plaza|Paseo|Camino|Carrer|Rua|Travessa|Alameda|Praça|Largo)\s+(?:(?:de|del|dels?|la|las|los|el|da|das|do|dos|e|y)\s+)*\p{Lu}[\p{L}'-]*(?:\s+(?:(?:de|del|la|las|los|el|da|das|do|dos|e|y)\s+)*\p{Lu}[\p{L}'-]*){0,3},?\s+(?:n[ºo°.]?\s*)?\d{1,5}(?![\p{L}\p{N}])`;
+const STREET_RU = String.raw`(?<![\p{L}\p{N}])(?:ул\.|улица|пр\.|пр-т|проспект|пер\.|переулок|пл\.|площадь|наб\.|набережная|бул\.|бульвар|ш\.|шоссе)\s*\p{Lu}[\p{L}-]*(?:\s+\p{L}[\p{L}-]*){0,2},?\s+(?:д\.\s*)?\d{1,4}(?![\p{L}\p{N}])`;
+const STREET_FR = String.raw`\b\d{1,4}(?:\s?(?:bis|ter))?,?\s+(?:rue|avenue|boulevard|bd|place|all[ée]e|chemin|impasse|quai|cours|route)\s+(?:(?:de|du|des|la|le|les|d'|l'|d’|l’)\s*)*\p{Lu}[\p{L}'’-]*`;
+const STREET = new RegExp([STREET_EN, STREET_DE_NL, STREET_ES_PT, STREET_RU, STREET_FR].join('|'), 'u');
 
 /**
  * The contact detail or identifier in something an AI wrote, named so it can
@@ -406,7 +483,7 @@ const SCRUBBED = {
 export function withoutContactDetails(text: string): string {
   const blank = (t: string, re: RegExp) => t.replace(re, (m) => ' '.repeat(m.length));
   const email = new RegExp(CONTACT_ANSWER[0]!.source, 'g');
-  const street = new RegExp(STREET.source, 'g');
+  const street = new RegExp(STREET.source, `${STREET.flags}g`);
   const noGit = (t: string) => blank(t, GIT_REMOTE);
   const prose = (t: string) => URL_LIKE.reduce(blank, noGit(t));
 

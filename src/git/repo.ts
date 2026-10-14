@@ -12,7 +12,7 @@ import {
   switchAiOff,
   writeAiOff,
 } from '../model/store.js';
-import { holdSave } from '../model/save-lock.js';
+import { holdSave, holdSaveForCommit } from '../model/save-lock.js';
 
 const run = promisify(execFile);
 
@@ -647,9 +647,13 @@ export class Repo {
    * most are the ones that already exist. Appending, never rewriting: this
    * file belongs to whoever opened the store.
    *
-   * Returns whether it wrote, and the rebuilt folders it has just started
-   * ignoring — which may already be in the history, and `.gitignore` says
-   * nothing about a file git already tracks.
+   * Returns whether it wrote, and the rebuilt folders to take out of the
+   * index — which may already be in the history, and `.gitignore` says nothing
+   * about a file git already tracks. All of them, the first time this process
+   * asks, rather than only those it has just written: a `.gitignore` that
+   * came from somewhere else (a clone, another process, a write whose untrack
+   * never happened) carries the line over files git still follows. Taking out
+   * nothing is a no-op, so this is safe to ask once per process.
    */
   private ensureIgnores(): { wrote: boolean; untrack: string[] } {
     const rebuilt = this.rebuilt();
@@ -662,7 +666,8 @@ export class Repo {
       const had = fs.existsSync(at) ? fs.readFileSync(at, 'utf8') : '';
       const lines = had.split('\n').map((l) => l.trim());
       const missing = wanted.filter((p) => !lines.includes(p));
-      if (missing.length === 0) return { wrote: false, untrack: [] };
+      const untrack = rebuilt.map((p) => p.replace(/^\/+|\/+$/g, '')).filter(Boolean);
+      if (missing.length === 0) return { wrote: false, untrack };
 
       const temporary = missing.filter((p) => Repo.IGNORED.includes(p));
       const derived = missing.filter((p) => !Repo.IGNORED.includes(p));
@@ -672,7 +677,7 @@ export class Repo {
       ].join('\n');
       const body = had && !had.endsWith('\n') ? `${had}\n${blocks}\n` : `${had}${blocks}\n`;
       fs.writeFileSync(at, body, 'utf8');
-      return { wrote: true, untrack: derived.map((p) => p.replace(/^\/+|\/+$/g, '')) };
+      return { wrote: true, untrack };
     } catch {
       // A store whose .gitignore cannot be written still commits; it just
       // keeps the race this was for. Not a reason to refuse the save.
@@ -723,7 +728,14 @@ export class Repo {
      * runs in twelve, its application filed. Held from the add to the commit,
      * so no write of the other process's lands between the two either.
      * Waited for after the outside-git check, which can take seconds, so the
-     * other process is not kept waiting through that as well.
+     * other process is not kept waiting through that as well. Inside
+     * `withCommit` the lock is this process's already, taken around the
+     * write that this commits (see there), and this hold only counts.
+     *
+     * Held from the add to the commit, the other process's uncommitted files
+     * may still go into this commit: a `.`-scoped add takes whatever is on
+     * disk, under this commit's message. That is the documented shape of two
+     * processes sharing one history — see `SaveLock` — and not a lost write.
      */
     return holdSave(this.root, () => this.commitHeld(message, paths, auto));
   }
@@ -735,11 +747,75 @@ export class Repo {
      * And out of the index, where a store written before the folder was
      * ignored has it already: an ignored file git tracks is still walked by
      * the add below, which is the race all over again. The files stay on
-     * disk; the next commit records only that they are no longer followed.
+     * disk; the history records only that they are no longer followed.
      */
     for (const folder of untrack) {
       await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]).catch(() => undefined);
     }
+    // A failure here leaves the untracking staged, for the save's own commit
+    // to take as it always did; not a reason to lose the save.
+    const cleaned = await this.commitUntracked(untrack).catch(() => undefined);
+    return (await this.commitStaged(message, paths, auto, wroteIgnores && !cleaned, untrack)) ?? cleaned;
+  }
+
+  /**
+   * The folders just taken out of the index, committed on their own.
+   *
+   * They rode along with whatever save came next, so an edit to one bullet
+   * was recorded as that edit plus the deletion of eighty previews, under the
+   * edit's message — the change Save History showed for it was the PDFs. A
+   * commit of its own says what happened, once, and leaves the save after it
+   * to be about the save. Undefined when there was nothing to take out, which
+   * is every time after the first.
+   *
+   * Not during a merge, whose commit has to take everything that was
+   * resolved: there the untracking goes in with it, as before.
+   */
+  private async commitUntracked(untrack: string[]): Promise<string | undefined> {
+    if (untrack.length === 0) return undefined;
+    const gone = (await this.git(['diff', '--cached', '--name-only', '-z', '--diff-filter=D', '--', ...untrack]).catch(() => ''))
+      .split('\0')
+      .filter(Boolean);
+    if (gone.length === 0) return undefined;
+    const merging = await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(
+      () => true,
+      () => false,
+    );
+    if (merging) return undefined;
+    // The ignore lines that keep them out go in the same commit, or the next
+    // add would put the files straight back.
+    const ignore = fs.existsSync(path.join(this.root, '.gitignore')) ? ['.gitignore'] : [];
+    if (ignore.length) await this.git(['add', '--', ...ignore]).catch(() => undefined);
+    const files = [...ignore, ...gone];
+    const scoped = await this.indexOf(files);
+    try {
+      await this.git(
+        [
+          '-c',
+          'user.name=ResumeM-M',
+          '-c',
+          'user.email=resumem-m@localhost',
+          'commit',
+          '-q',
+          '-m',
+          `Stop keeping a history of rebuilt files (${untrack.map((f) => `${f}/`).join(', ')})`,
+        ],
+        scoped.env,
+      );
+    } finally {
+      fs.rmSync(scoped.file, { force: true });
+    }
+    return (await this.git(['rev-parse', 'HEAD'])).trim();
+  }
+
+  /** The rest of `commitHeld`: this save's own commit. */
+  private async commitStaged(
+    message: string,
+    paths: string[] | undefined,
+    auto: boolean,
+    wroteIgnores: boolean,
+    untrack: string[],
+  ): Promise<string | undefined> {
     /*
      * Only paths there is something at — on disk, or in the index as a file
      * that has since been removed.
@@ -1025,6 +1101,18 @@ export class Repo {
     return changes.sort((a, b) => a.path.localeCompare(b.path));
   }
 
+  /**
+   * How many commits the history holds — 0 for a repository with none yet,
+   * or no repository at all. `log(1).length` was asked for this and could
+   * only ever answer 0 or 1: "1 commit so far" on a save with eighty.
+   */
+  async count(): Promise<number> {
+    if (!(await this.isRepo())) return 0;
+    const out = await this.git(['rev-list', '--count', 'HEAD']).catch(() => '0');
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : 0;
+  }
+
   async log(limit = 30): Promise<{ hash: string; date: string; message: string }[]> {
     if (!(await this.isRepo())) return [];
     // A repo with no commits yet makes `git log` fail rather than print
@@ -1168,6 +1256,7 @@ export class Repo {
       await this.git(['remote', 'remove', 'origin']).catch(() => undefined);
       return;
     }
+    checkRemoteUrl(url);
     const existing = await this.getRemote();
     /*
      * The address as it is shown has its token masked (see `redactUrl`), and
@@ -1592,6 +1681,22 @@ export class Repo {
      * touch a file with an uncommitted change in it, and one set to stash
      * around it is the stash-and-reset that lost writes before.
      */
+    /*
+     * And the rebuilt folders out of the index before that, in their own
+     * commit, as the first save of this version does (see `commitHeld`). A
+     * save last committed by an older version still follows them, and a
+     * pull is often the first thing a machine does after updating: the other
+     * machine's history has already stopped following them, and a preview
+     * this one had rebuilt and committed then met that deletion as a
+     * conflict — a PDF nobody can edit the markers out of — and the pull was
+     * refused. Taken out here first, both sides have deleted them, and git
+     * puts that together on its own.
+     */
+    try {
+      await this.untrackRebuiltNow();
+    } catch {
+      // Left for the merge below to settle, or refuse; never a reason not to try.
+    }
     let pending: PendingChange[];
     try {
       pending = await this.pending();
@@ -1665,7 +1770,18 @@ export class Repo {
     let merged: string | undefined;
     if (!fastForward) {
       const clash = await this.wouldConflict(tracking);
-      if (clash && clash.conflicts.length > 0) return conflicted(clash.conflicts, 'Nothing was merged');
+      /*
+       * Except a conflict over nothing but rebuilt files (see
+       * `rebuiltFolders`), which the merge settles below by not following
+       * them at all. The other machine is still on a version that commits
+       * them, has rebuilt one, and this one has stopped following it — or the
+       * other way round. Nobody is going to edit markers out of a PDF, and
+       * whatever either side had is rebuilt from the save anyway. Anything
+       * else in the list is real work, and refuses the pull as ever.
+       */
+      if (clash && clash.conflicts.length > 0 && !this.onlyRebuilt(clash.conflicts)) {
+        return conflicted(clash.conflicts, 'Nothing was merged');
+      }
       merged = clash?.tree;
     }
     /*
@@ -1711,30 +1827,38 @@ export class Repo {
         env,
       );
     } catch (err) {
-      // Not switched off for a pull that did not happen.
-      if (switchedOff && !hadSwitchOff) clearAiSwitchOff(this.root);
       const conflicts = await this.conflictedPaths();
       const merging = await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(() => true, () => false);
-      let undone = true;
-      if (merging) {
-        await this.git(['merge', '--abort'], env).catch(() => undefined);
-        undone = (await this.git(['rev-parse', 'HEAD'])).trim() === before && !fs.existsSync(path.join(this.gitDir() ?? this.root, 'MERGE_HEAD'));
+      /*
+       * A merge stopped only over rebuilt files is settled by not following
+       * them (see `settleRebuiltConflicts`), and goes on as one that went
+       * through; anything else is undone, as before.
+       */
+      const settled = merging && (await this.settleRebuiltConflicts(conflicts, env));
+      if (!settled) {
+        // Not switched off for a pull that did not happen.
+        if (switchedOff && !hadSwitchOff) clearAiSwitchOff(this.root);
+        let undone = true;
+        if (merging) {
+          await this.git(['merge', '--abort'], env).catch(() => undefined);
+          undone = (await this.git(['rev-parse', 'HEAD'])).trim() === before && !fs.existsSync(path.join(this.gitDir() ?? this.root, 'MERGE_HEAD'));
+        }
+        if (!undone) {
+          return {
+            ok: false,
+            pulled: 0,
+            files: [],
+            conflict: conflicts.length ? conflicts : undefined,
+            message:
+              `The pull's merge stopped part-way and could not be undone. In a terminal, in ${this.root}, run ` +
+              'git merge --abort to put the save back as it was, or settle the conflicts and git commit. ' +
+              'The app will not save edits until that is done.',
+          };
+        }
+        if (conflicts.length > 0) return conflicted(conflicts, 'The merge was undone');
+        const said = redactUrls(((err as { stderr?: string }).stderr || (err as Error).message || 'git merge failed').trim());
+        return refused(`The changes from ${shown} could not be merged in, and the save was left as it was.\n\n${said}`);
       }
-      if (!undone) {
-        return {
-          ok: false,
-          pulled: 0,
-          files: [],
-          conflict: conflicts.length ? conflicts : undefined,
-          message:
-            `The pull's merge stopped part-way and could not be undone. In a terminal, in ${this.root}, run ` +
-            'git merge --abort to put the save back as it was, or settle the conflicts and git commit. ' +
-            'The app will not save edits until that is done.',
-        };
-      }
-      if (conflicts.length > 0) return conflicted(conflicts, 'The merge was undone');
-      const said = redactUrls(((err as { stderr?: string }).stderr || (err as Error).message || 'git merge failed').trim());
-      return refused(`The changes from ${shown} could not be merged in, and the save was left as it was.\n\n${said}`);
     }
 
     const after = (await this.git(['rev-parse', 'HEAD'])).trim();
@@ -1941,6 +2065,67 @@ export class Repo {
     return [...paths].sort();
   }
 
+  /** The rebuilt folders (see `rebuilt`), as paths from the save's root: `out/.previews`. */
+  private rebuiltFolders(): string[] {
+    return this.rebuilt()
+      .map((p) => p.replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean);
+  }
+
+  /** Whether every one of `files` is inside a rebuilt folder — nothing anybody wrote. */
+  private onlyRebuilt(files: string[]): boolean {
+    const folders = this.rebuiltFolders();
+    return files.length > 0 && files.every((f) => folders.some((d) => f.startsWith(`${d}/`)));
+  }
+
+  /**
+   * Take the rebuilt folders out of the index now, in a commit of their own
+   * (`commitUntracked`), when the save still follows anything in them. For
+   * `mergeFrom`, which runs under the commit queue and the save's lock
+   * already. Nothing at all when nothing in them is followed, which is every
+   * time but the first.
+   */
+  private async untrackRebuiltNow(): Promise<void> {
+    const folders = this.rebuiltFolders();
+    if (folders.length === 0) return;
+    const followed = (await this.git(['ls-files', '-z', '--', ...folders]).catch(() => '')).split('\0').filter(Boolean);
+    if (followed.length === 0) return;
+    // The ignore lines first, or the next add puts them straight back.
+    this.ensureIgnores();
+    for (const folder of folders) {
+      await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]);
+    }
+    await this.commitUntracked(folders);
+  }
+
+  /**
+   * Conclude a merge that stopped over nothing but rebuilt files, by taking
+   * those folders out of the index — what this version does with them
+   * anyway — and committing the merge. True when it did; false, having
+   * changed nothing the caller's `merge --abort` cannot undo, otherwise.
+   *
+   * Only rebuilt files, which the app makes again from the save whenever
+   * anything changes: a conflict in anything else is somebody's work, and is
+   * never settled here. The files stay on disk, ignored.
+   */
+  private async settleRebuiltConflicts(conflicts: string[], env: NodeJS.ProcessEnv): Promise<boolean> {
+    if (!this.onlyRebuilt(conflicts)) return false;
+    try {
+      for (const folder of this.rebuiltFolders()) {
+        await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]);
+      }
+      if ((await this.conflictedPaths()).length > 0) return false;
+      if (this.ensureIgnores().wrote) await this.git(['add', '--', '.gitignore']);
+      await this.git(
+        ['-c', 'user.name=ResumeM-M', '-c', 'user.email=resumem-m@localhost', 'commit', '-q', '--no-edit'],
+        env,
+      );
+      return !(await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(() => true, () => false));
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * What one commit changed: the files it touched and the patch itself. This
    * is what makes the store's history browsable — "what did the resume I sent
@@ -2129,20 +2314,48 @@ export async function withCommit<T>(
    */
   repo.assertNoOutsideGit();
   /*
-   * And counted as under way until `fn` is done, for a pull starting now to
-   * wait for — when no request is holding it already. See `holdWrite`.
-   * Released before the commit, which the pull does not need to wait for:
-   * it is queued, and the pull's merge is queued behind it.
+   * Under the save's lock from the write to the end of the commit, taken
+   * asynchronously (see `SaveLock`). The store's own writes take it
+   * synchronously, and in the server that is the event loop standing still
+   * while the other process finishes: with `rmm apply` committing through a
+   * hook that slept seven seconds, every GET on the server waited five, and
+   * the PATCH that was waiting then failed with "remove …/rmm-write.lock".
+   * Taken here first, the write inside finds the lock held by this process
+   * and goes straight through, and when the other process has it this
+   * request alone waits — for longer (`COMMIT_WAIT_MS`), since nothing else
+   * is kept waiting with it — while the server goes on answering.
+   *
+   * When the lock is free, `fn` runs before the first await, so the
+   * handler's check-then-write is still one step. When another process
+   * holds it, this request waits across ticks, and a check the handler made
+   * before calling this (a resume's version, say) is as old as the wait by
+   * the time `fn` runs; the one thing another request of this server can
+   * have done meanwhile is a write of its own, which is what the versions
+   * the editor and the extension send are there to catch on their next save.
+   *
+   * The commit is inside the hold too, as it was in `commitNow` (which is
+   * re-entrant here), so no write of the other process's lands between the
+   * `add` and the `commit`. The commit queue keeps this server's commits in
+   * order; the lock is only about the other process. See `SaveLock` for
+   * what the other process's files may do under this commit's message.
    */
-  const release = repo.holdWriteOutsideRequest();
-  let result: T;
-  try {
-    result = await fn();
-  } finally {
-    release();
-  }
-  if (enabled) await commitQuietly(repo, message, paths);
-  return result;
+  return holdSaveForCommit(repo.root, async () => {
+    /*
+     * And counted as under way until `fn` is done, for a pull starting now to
+     * wait for — when no request is holding it already. See `holdWrite`.
+     * Released before the commit, which the pull does not need to wait for:
+     * it is queued, and the pull's merge is queued behind it.
+     */
+    const release = repo.holdWriteOutsideRequest();
+    let result: T;
+    try {
+      result = await fn();
+    } finally {
+      release();
+    }
+    if (enabled) await commitQuietly(repo, message, paths);
+    return result;
+  });
 }
 
 /**
@@ -2273,9 +2486,47 @@ export function redactUrls(text: string): string {
   return text.replace(USERINFO_IN_TEXT, maskUserinfo);
 }
 
+/**
+ * The ways a remote may be reached. `ext::` runs a command of the address's
+ * choosing, and other `<helper>::` forms hand the address to a program; a
+ * remote is somewhere to push, so they are refused here whatever the user's
+ * git config allows. Local paths and `file://` stay, for a backup on a disk.
+ */
+const ALLOWED_PROTOCOLS = 'file:git:http:https:ssh';
+
+/**
+ * Refuse a remote address git would treat as something other than a place:
+ * a `<helper>::` address (`ext::sh -c …` runs a command on push), an address
+ * starting with `-` (read as an option), or a scheme outside the ones above.
+ * `user@host:path`, `host:path` and local paths are plain places and pass.
+ */
+export class RemoteUrlError extends Error {
+  override name = 'RemoteUrlError';
+}
+
+export function checkRemoteUrl(url: string): void {
+  const u = url.trim();
+  const refuse = (why: string): never => {
+    throw new RemoteUrlError(`That remote address is not allowed: ${why}. Use an https://, ssh://, git@host:path, or local path address.`);
+  };
+  if (/[\x00-\x1f\x7f]/.test(u)) refuse('it has a line break or control character in it');
+  if (u.startsWith('-')) refuse('it starts with "-"');
+  if (/^[A-Za-z][A-Za-z0-9+.-]*::/.test(u)) refuse('git would hand it to a helper program');
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(u)?.[1]?.toLowerCase();
+  if (scheme && !ALLOWED_PROTOCOLS.split(':').includes(scheme) && scheme !== 'git+ssh' && scheme !== 'ssh+git') {
+    refuse(`git cannot push to ${scheme}:// here`);
+  }
+}
+
 /** Git with nobody to answer it: a missing credential is refused, not asked for. */
 function noPrompt(): NodeJS.ProcessEnv {
-  return { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo' };
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: 'echo',
+    SSH_ASKPASS: 'echo',
+    GIT_ALLOW_PROTOCOL: ALLOWED_PROTOCOLS,
+  };
 }
 
 /**

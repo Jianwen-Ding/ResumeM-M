@@ -243,6 +243,34 @@ describe('a server with pairing', () => {
     }
   });
 
+  /*
+   * JobHelper's "Get a code" links to `#save/pair?make=1`, and the editor
+   * presses "Make a code" itself on arriving there. The fragment never
+   * reaches the server, so the link is only a way into the editor page: the
+   * code is still made by the editor's own request, and anything else that
+   * asks — a page elsewhere, a tab opened on the route, another program's port
+   * on loopback, an extension — is refused as before.
+   */
+  it('makes a code for the editor alone, whatever opens the link that asks for one', async () => {
+    // Opening the link is a navigation to the editor page, and makes nothing.
+    await request(base).get('/').set('Sec-Fetch-Site', 'cross-site').set('Sec-Fetch-Mode', 'navigate').expect(200);
+    const seen = async () => ((await (await fetch(`${base}/api/extension/pairings`, { headers: { 'Sec-Fetch-Site': 'same-origin' } })).json()) as { code: unknown }).code;
+    expect(await seen()).toBeNull();
+    // A page elsewhere posting to the route, by fetch or by a form.
+    for (const [site, mode] of [['cross-site', 'cors'], ['cross-site', 'navigate'], ['same-site', 'no-cors'], ['none', 'navigate']] as const) {
+      await request(base).post('/api/extension/pairings/code').set('Sec-Fetch-Site', site).set('Sec-Fetch-Mode', mode).expect(403);
+    }
+    // Another program's port on loopback is not this editor.
+    await request(base).post('/api/extension/pairings/code').set('Origin', 'http://127.0.0.1:1').set('Sec-Fetch-Site', 'same-site').expect(403);
+    // Nor is an extension, paired or not.
+    expect((await asExtension('/api/extension/pairings/code', { method: 'POST' })).status).toBe(403);
+    expect(await seen()).toBeNull();
+    // The editor's own request, which is what the link sets off, still does.
+    const made = await fetch(`${base}/api/extension/pairings/code`, { method: 'POST', headers: { Origin: base, 'Sec-Fetch-Site': 'same-origin' } });
+    expect(made.status).toBe(200);
+    expect(await seen()).toMatchObject({ code: expect.stringMatching(/^[A-Z2-9]{8}$/) });
+  });
+
   it('pairs only from an extension origin', async () => {
     const code = await makeCode();
     const reply = await fetch(`${base}/api/extension/pair`, {

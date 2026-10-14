@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { byTier } from './tiers.js';
 import { tierOf, type ResumeSpec } from './types.js';
 
@@ -150,14 +151,75 @@ export function standingBase(
  * sweep. So an id held by anything but a temporary copy is skipped, and the
  * new copy takes the next one that is free.
  */
-export function copyIdFor(resumes: ResumeSpec[], id: string): string {
+export function copyIdFor(resumes: ResumeSpec[], id: string, anothers?: (held: ResumeSpec) => boolean): string {
+  /*
+   * And, where the caller can tell, never over a temporary copy that belongs
+   * to another posting (`anothers`): two postings with one company and one
+   * role derive one id, and the second's tailoring wrote over the first's.
+   */
   const free = (candidate: string) => {
     const held = resumes.find((r) => r.id === candidate);
-    return !held || held.tier === 'temporary';
+    return !held || (held.tier === 'temporary' && !anothers?.(held));
   };
   if (free(id)) return id;
   for (let n = 2; ; n++) {
     const next = `${id}-${n}`;
     if (free(next)) return next;
   }
+}
+
+/**
+ * What a tailored copy says, as one string: its sections, wordings, lists and
+ * layout — what Tailor writes and what an edit to the copy changes — and not
+ * its name, its notes, or which entries are folded in the editor.
+ *
+ * Recorded as `generatedFor.tailored` when the workspace tailors a copy.
+ * Tailoring again rebuilt the copy from its base and wrote it over whatever
+ * was there, so a wording chosen by hand on the copy since went without a
+ * word; compared with this, the edit is noticed and asked about first.
+ */
+export function tailoredFingerprint(spec: ResumeSpec): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.keys(value as Record<string, unknown>)
+          .filter((k) => (value as Record<string, unknown>)[k] !== undefined)
+          .sort()
+          .map((k) => [k, canonical((value as Record<string, unknown>)[k])]),
+      );
+    }
+    return value;
+  };
+  const { sections, choices, lists, layout } = spec;
+  const text = JSON.stringify(canonical({ sections, choices: choices ?? {}, lists: lists ?? {}, layout: layout ?? {} }));
+  return createHash('sha256').update(text).digest('hex').slice(0, 16);
+}
+
+/**
+ * `spec` with `generatedFor.tailored` recorded, for any path that writes a
+ * tailored copy's content — the extension's analysis, filing a copy from
+ * JobHelper's card, starting a variation — and not only the workspace's
+ * Tailor. Those wrote the copy with no fingerprint, and a copy without one
+ * reads as never edited, so tailoring again wrote over a hand edit made to a
+ * copy JobHelper had filed without a word.
+ *
+ * `held` is the copy as the save has it now. When what is written is what is
+ * already there — the card filing again the copy it read back — the
+ * fingerprint already recorded stays: recording a fresh one would make an
+ * edit made since the last tailoring read as the tailoring itself. A spec
+ * with no `generatedFor` is not a tailored copy and is left as it is.
+ */
+export function withTailoredFingerprint(spec: ResumeSpec, held?: ResumeSpec): ResumeSpec {
+  if (!spec.generatedFor) return spec;
+  const now = tailoredFingerprint(spec);
+  const kept = held?.generatedFor?.tailored;
+  const tailored = typeof kept === 'string' && tailoredFingerprint(held!) === now ? kept : now;
+  return { ...spec, generatedFor: { ...spec.generatedFor, tailored } };
+}
+
+/** Whether a tailored copy was changed since Tailor last wrote it. Unknown (never recorded) is not. */
+export function editedSinceTailored(spec: ResumeSpec): boolean {
+  const recorded = spec.generatedFor?.tailored;
+  return typeof recorded === 'string' && recorded !== tailoredFingerprint(spec);
 }

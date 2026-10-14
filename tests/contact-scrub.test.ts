@@ -232,3 +232,20 @@ describe('what reaches the AI', () => {
     }
   });
 });
+
+/*
+ * Round 27: a date and the hour after it are ten digits up to the ":", and
+ * were read as a phone — "2024-10-14 12:00" came out "[phone number]:00".
+ */
+describe('a date and time', () => {
+  it('is not a phone number, written year first or day first', () => {
+    for (const text of ['2024-10-14 12:00', 'Interview on 2026-10-14 08:15:30', 'Termin am 14.10.2026 12:00']) {
+      expect(withoutContactDetails(text), text).toBe(text);
+      expect(personalDetailIn(text), text).toBeNull();
+    }
+    // A phone beside one is still a phone.
+    expect(withoutContactDetails('Call 617-555-0134 on 2024-10-14 12:00')).toBe('Call [phone number] on 2024-10-14 12:00');
+    // And a month that is no month is not a date.
+    expect(withoutContactDetails('2024-55-14 12:00')).toBe('[phone number]:00');
+  });
+});

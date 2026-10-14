@@ -293,7 +293,8 @@ describe('the zoom on the preview', () => {
     const button = document.querySelector('#preview-zoom');
     button.click();
     expect(zoom).toHaveBeenLastCalledWith(1);
-    expect(button.getAttribute('aria-pressed')).toBe('true');
+    // One way of saying it: the words, which swap. Not also aria-pressed.
+    expect(button.hasAttribute('aria-pressed')).toBe(false);
     expect(button.textContent).toBe('Fit width');
     button.click();
     expect(zoom).toHaveBeenLastCalledWith('fit');

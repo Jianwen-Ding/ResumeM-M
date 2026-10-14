@@ -19,6 +19,8 @@ import { bulletsAreHandOrdered, orderedBullets } from './sections.js';
 import { markupFragment, plainMarkup } from './markup.js';
 import { setupCompact } from './compact.js';
 import { setupEmbed } from './embed.js';
+import { captureEditorErrors, recordEditorEvent, recordFailedRequest, setupErrorLog } from './errorlog.js';
+import { fitStatus, measureToolbars, setupHeader } from './header.js';
 let activeProject;
 /** The narrow layout's switches, and the side panel's line to this page. See compact.js, embed.js. */
 let compact = null;
@@ -372,16 +374,21 @@ function clearEdits() {
 let statusTimer;
 /**
  * A word in the header. One line there, cut short with an ellipsis when it is
- * long, so a long name in "Renamed to …" or a long error does not squeeze the
- * tabs; the whole sentence is its title, and all of it is still the text a
- * screen reader is given (the element is a live region). Narrow, it floats at
- * the bottom instead, where it can wrap without moving the toolbar.
+ * long, so a long name in "Renamed to …" does not squeeze the tabs; the whole
+ * sentence is its title, and all of it is still the text a screen reader is
+ * given (the element is a live region). An error is not cut: it wraps onto a
+ * second line, and one longer than that floats whole in the corner, as every
+ * status does on a phone, where it can wrap without moving the toolbar.
  */
 function setStatus(text, isError = false) {
+  // Every red line the person was shown, for the error log. See errorlog.js.
+  if (isError && text) recordEditorEvent({ kind: 'status', message: text });
   const s = $('#status');
   s.textContent = text;
   s.title = text;
   s.className = isError ? 'status err' : 'status';
+  // An error wraps in the header, or floats whole if it is longer. See header.js.
+  fitStatus(s);
   clearTimeout(statusTimer);
   if (text && !isError) {
     statusTimer = setTimeout(() => {
@@ -565,11 +572,20 @@ async function api(path, options = {}) {
   let res;
   try {
     res = options.keepalive ? await fetchKeptAlive(url, init) : await fetch(url, init);
+  } catch (err) {
+    // For the error log: the route and that it never arrived. See errorlog.js.
+    recordFailedRequest(method, url, null, err?.message);
+    // A request that never arrived (not one cancelled on purpose).
+    if (unreachable(err)) serverReached(false);
+    throw err;
   } finally {
     if (order) unsettledOrders.delete(Number(order));
     if (writes) writesOut--;
   }
+  // Answered, even if with a refusal: the server is there.
+  serverReached(true);
   const body = await res.json().catch(() => ({}));
+  if (!res.ok) recordFailedRequest(method, url, res.status, body.error ?? res.statusText);
   // With the reply, which for a refused save says what is there now.
   if (!res.ok) throw Object.assign(new Error(body.error ?? `${res.status} ${res.statusText}`), { status: res.status, body });
   // Which write of a resume a save made, where the server says. See `autoSave`.
@@ -783,7 +799,7 @@ async function stepOnce(direction) {
     for (const change of changes) {
       const back = direction === 'undo' ? change.before : change.after;
       const from = direction === 'undo' ? change.after : change.before;
-      await putBack(change.docKey, back, from);
+      await putBack(change.docKey, back, from, direction);
     }
     /*
      * The selections on screen are dropped, not kept.
@@ -855,6 +871,20 @@ async function stepOnce(direction) {
       : entry.label;
     setStatus(`${direction === 'undo' ? 'Undid' : 'Redid'} ${label}`);
   } catch (err) {
+    if (err.dropStep) {
+      /*
+       * A step that can never be taken now — a copy sent with an application
+       * since, or changed since — went back on top of the stack, and every
+       * step under it was out of reach for good: each press said the same
+       * refusal. It comes off, and the status says so.
+       */
+      history.forget(direction);
+      setStatus(
+        `${err.message} That step is off the ${direction} list now, so the ones ${direction === 'undo' ? 'before' : 'after'} it can be ${direction === 'undo' ? 'undone' : 'redone'}.`,
+        true,
+      );
+      return;
+    }
     // Put it back on the stack it came off: a failed undo has not happened.
     if (direction === 'undo') history.redo();
     else history.undo();
@@ -884,7 +914,7 @@ async function stepOnce(direction) {
  * back too. So the step is rebased onto what the server has now, read just
  * before, the same way: only what the step changed is taken back.
  */
-async function putBack(docKey, back, from) {
+async function putBack(docKey, back, from, direction = 'undo') {
   let { path, options } = restoreRequest(docKey, back);
   /*
    * A letter's body is put back even when it went out with an application
@@ -941,6 +971,60 @@ async function putBack(docKey, back, from) {
     }
   }
   const id = String(docKey).startsWith('resume:') ? String(docKey).slice('resume:'.length) : null;
+  /*
+   * And a resume the step made — undoing "Save as variation" — the same way:
+   * taken away only as the step left it, and not once an application names
+   * it. The DELETE went out whatever had happened since: the copy edited in
+   * another tab, or sent with an application, and all of it went with it.
+   *
+   * Named as the server names it (`DELETE /resumes/:id`): by an application
+   * that went out. A row still at Interested or Applying was refused here
+   * and deleted by the server without a word.
+   *
+   * Redoing a delete is a delete already confirmed — "Delete … anyway?",
+   * named with the applications it went out with — so it is not refused for
+   * them and goes with `?force=1`, which the server asks for and the first
+   * delete sent. Refused, the step could not be redone at all. Still only as
+   * the step left it: changed since, it stays.
+   */
+  if (id && options.method === 'DELETE') {
+    const redone = direction === 'redo';
+    const store = await api('/store');
+    const now = readDoc(store, docKey);
+    if (now) {
+      const name = now.label || id;
+      const named =
+        !redone &&
+        (store.applications ?? []).some(
+          (a) => appWentOut(a) && (a.resumeId === id || (a.sentResumeIds ?? []).includes(id)),
+        );
+      const content = (r) => ({
+        label: r?.label,
+        notes: r?.notes,
+        sections: r?.sections,
+        choices: r?.choices ?? {},
+        lists: r?.lists ?? {},
+        layout: r?.layout ?? {},
+      });
+      if (named || !same(content(now), content(from))) {
+        throw Object.assign(new Error(
+          named
+            ? `Nothing was undone: “${name}” has been filed with an application since it was made, so it was not taken away.`
+            : redone
+              ? `Nothing was redone: “${name}” was changed since it was put back, so it was not deleted again.`
+              : `Nothing was undone: “${name}” was changed since it was made, so it was not taken away.`,
+          ),
+          /*
+           * Sent is for good: not a step that will come right by waiting, so
+           * it leaves the stack (see `stepOnce`). Changed since is not — put
+           * the change back and the step can be taken — so it stays.
+           */
+          { dropStep: named },
+        );
+      }
+    }
+    if (redone) path = `${path}${path.includes('?') ? '&' : '?'}force=1`;
+  }
   if (!id && options.method === 'PUT' && from !== null && from !== undefined) {
     const store = await api('/store');
     const now = readDoc(store, docKey);
@@ -976,7 +1060,11 @@ async function putBack(docKey, back, from) {
 function sentLetterNow(store, letter) {
   if (!letter?.applicationId) return false;
   const app = (store?.applications ?? []).find((a) => a.id === letter.applicationId);
-  if (!app) return false;
+  return Boolean(app) && appWentOut(app);
+}
+
+/** The server's `wentOut` (src/model/tiers.ts): whether a tracker row's application went out. */
+function appWentOut(app) {
   const sent = ['applied', 'interview', 'offer'];
   if (sent.includes(app.status)) return true;
   if (app.status !== 'closed') return false;
@@ -2095,6 +2183,8 @@ function setSaveState(mode, detail) {
     mode = 'failed';
     detail = 'can’t reach the server. Retrying…';
   }
+  // Nor about one still on its way; the last of those to land says so.
+  if (mode === 'saved' && inlineSaves.size > 0) mode = 'saving';
   chip.className = `save ${mode}`;
   chip.textContent =
     mode === 'saving'
@@ -2599,7 +2689,7 @@ function attachSourceTools(block, key, actions, anchor, kind = 'bullet') {
       event.stopPropagation();
     }
   });
-  for (const line of block.querySelectorAll('.editable')) line.title = `Double-click to edit and show ${kind} actions. Shared wording updates every resume using it.`;
+  for (const line of block.querySelectorAll('.editable')) line.title = `Double-click to edit and show ${kind} actions, or press Enter or F2 to edit. Shared wording updates every resume using it.`;
   return block;
 }
 
@@ -2767,7 +2857,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     // looks like this one — a list bullet's preview, say — must not invite a
     // double-click that does nothing.
     className: `${className} editable`,
-    title: title ?? 'Double-click to edit. This wording is shared by every resume using it.',
+    title: title ?? 'Double-click, or press Enter or F2, to edit. This wording is shared by every resume using it.',
   });
   // Plain words: `display` has already taken the markers off, and reading
   // what is left as markup again would find some in a code span's text.
@@ -2775,6 +2865,10 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
 
   let editing = false;
   let retryTimer = null;
+  // Ctrl+Shift+E pressed mid-edit: the blur that follows is the error log's
+  // dialog taking the focus, not the person leaving the line.
+  let holding = false;
+  let heldRange = null;
   const stop = (commit) => {
     // Enter, Escape or a click away replaces a retry still waiting.
     clearTimeout(retryTimer);
@@ -2782,12 +2876,34 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     inlineRetrying.delete(node);
     if (!editing) return;
     editing = false;
+    heldRange = null;
+    /*
+     * The focus stays on the line. Leaving edit mode before giving the tab
+     * stop back left the line, for a moment, something that cannot have the
+     * focus — and Chrome sent it to <body>: after Escape or Enter the next
+     * Tab started again from the top of the page.
+     */
+    const focused = document.activeElement === node;
+    node.tabIndex = 0;
     node.contentEditable = 'false';
+    node.setAttribute('aria-readonly', 'true');
     node.classList.remove('editing');
+    if (focused && document.activeElement !== node) node.focus({ preventScroll: true });
     const next = node.textContent.trim();
     if (commit && next && next !== raw) {
+      // Saving draws the line again; the focus goes to the new one.
+      const place = focused ? linePlace(node) : null;
       const save = Promise.resolve().then(() => onCommit(next));
+      if (place) save.then(() => refocusLine(node, place), () => {});
       inlineSaves.add(save);
+      /*
+       * And the chip says it is going. It went on saying "All changes saved"
+       * for the whole round trip, which is the one moment that is not true:
+       * close the tab on it and the wording is gone. Not over a failure the
+       * chip is already showing, which stays until something clears it.
+       */
+      const chip = $('#save-state');
+      if (chip && !chip.classList.contains('failed') && !chip.classList.contains('unsaved')) setSaveState('saving');
       save
         .then(() => {
           // Landed, and no other line is still waiting: the chip can say so again.
@@ -2818,9 +2934,13 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
               : `${err.message} The wording is still in the line — press Enter to try again.`,
             true,
           );
+          // Not "Saving…" for ever, and not "All changes saved" either.
+          if (!offline) setSaveState('failed', 'an edited line was not accepted');
           if (!node.isConnected) return;
           editing = true;
           node.contentEditable = 'plaintext-only';
+          node.removeAttribute('tabindex');
+          node.setAttribute('aria-readonly', 'false');
           node.classList.add('editing');
           node.textContent = next;
           if (!offline) {
@@ -2851,7 +2971,20 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
           };
           retryTimer = setTimeout(retry, UNREACHABLE_RETRY_MS);
         })
-        .finally(() => inlineSaves.delete(save));
+        .finally(() => {
+          inlineSaves.delete(save);
+          // The last one in: "Saving…" was this, and it is done. Not while the
+          // resume itself has a save of its own still to say.
+          if (
+            inlineSaves.size === 0 &&
+            $('#save-state')?.classList.contains('saving') &&
+            !state.dirty &&
+            !autoSaveTimer &&
+            !autoSaving
+          ) {
+            setSaveState('saved');
+          }
+        });
     } else {
       // Put the markup back: the raw text is what gets edited, the rendered
       // form is what gets shown.
@@ -2859,30 +2992,127 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     }
   };
 
-  node.ondblclick = () => {
+  const start = (fromKeyboard = false) => {
     if (editing) return;
     editing = true;
     node.contentEditable = 'plaintext-only';
+    // Being edited, it is focusable as any text is; the tab stop is for the line at rest.
+    node.removeAttribute('tabindex');
+    node.setAttribute('aria-readonly', 'false');
     node.classList.add('editing');
     // The sentence as written, markup and all: what is saved is what is shown
     // here, so there is nothing to lose in translation.
     node.textContent = raw;
     node.focus();
-    // Put the caret where the pointer was, rather than at the start.
     const sel = window.getSelection();
-    if (sel && sel.rangeCount === 0) node.textContent = node.textContent;
+    if (fromKeyboard && sel) {
+      // From the keyboard there is no pointer: the caret goes at the end.
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } else if (sel && sel.rangeCount === 0) {
+      // Put the caret where the pointer was, rather than at the start.
+      node.textContent = node.textContent;
+    }
   };
+  node.ondblclick = () => start();
+  /*
+   * A click with no pointer behind it (`detail` 0) is a screen reader's
+   * browse mode pressing Enter on the line, or another assistive tool
+   * activating it: it starts editing, as Enter would with the focus there.
+   */
+  node.onclick = (e) => {
+    if (e.detail === 0 && !editing) start(true);
+  };
+  /*
+   * And from the keyboard: a line only a double-click could edit was out of
+   * reach without a mouse. Tab to it, then Enter or F2. Said to a screen
+   * reader too: a text box, read-only until then, described by how.
+   */
+  node.tabIndex = 0;
+  node.setAttribute('role', 'textbox');
+  node.setAttribute('aria-readonly', 'true');
+  node.setAttribute('aria-describedby', 'editable-line-hint');
+  node.setAttribute('aria-keyshortcuts', 'Enter F2');
   node.onkeydown = (e) => {
+    if (!editing && (e.key === 'Enter' || e.key === 'F2')) {
+      e.preventDefault();
+      start(true);
+      return;
+    }
+    if (editing && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'E' || e.key === 'e' || e.code === 'KeyE')) {
+      /*
+       * The error log opens over the line (errorlog.js listens on the
+       * document) and takes the focus: the blur committed the half-typed
+       * sentence to the shared store. The edit is held open instead, and the
+       * dialog gives the focus back to it when it closes.
+       */
+      holding = true;
+      setTimeout(() => {
+        holding = false;
+      });
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
       stop(true);
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      // Only the edit: not also the actions around it, which took the focus to their button.
+      if (editing) e.stopPropagation();
       stop(false);
     }
   };
-  node.onblur = () => stop(true);
+  node.onblur = () => {
+    if (holding && editing) {
+      holding = false;
+      const sel = window.getSelection();
+      heldRange = sel && sel.rangeCount && node.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+      return;
+    }
+    stop(true);
+  };
+  node.onfocus = () => {
+    // Back from the dialog: the caret where it was left.
+    if (!editing || !heldRange) return;
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(heldRange);
+    heldRange = null;
+  };
   return node;
+}
+
+/*
+ * Where a line is, in terms that survive drawing it again: the block of
+ * actions it belongs to, if any, and its place among the editable lines
+ * there (or in the page). Saving a line redraws the editor, and the focus,
+ * which was on the old line, fell to <body>.
+ */
+function linePlace(node) {
+  const block = node.closest('[data-tools-key]');
+  const scope = block ?? document;
+  return {
+    key: block?.dataset.toolsKey ?? null,
+    index: [...scope.querySelectorAll('.editable')].indexOf(node),
+    global: [...document.querySelectorAll('.editable')].indexOf(node),
+  };
+}
+
+function refocusLine(node, place) {
+  // Not if the line is still there, or the person has gone elsewhere since.
+  if (node.isConnected) return;
+  const at = document.activeElement;
+  if (at && at !== document.body) return;
+  let line = null;
+  if (place.key) {
+    const block = [...document.querySelectorAll('[data-tools-key]')].find((b) => b.dataset.toolsKey === place.key);
+    line = block?.querySelectorAll('.editable')[place.index] ?? null;
+  }
+  line ??= document.querySelectorAll('.editable')[place.global] ?? null;
+  if (line && line.getClientRects().length) line.focus({ preventScroll: true });
 }
 
 /** Review the complete entry through the same background feedback panel. */
@@ -4057,11 +4287,12 @@ function profileBlock() {
     const value = profile[key];
     grid.append(
       el('div', { className: 'profile-field' }, [
-        el('span', { className: 'meta-label', textContent: label }),
+        // "Address /" and "location" break as words, not "/" on a line of its own (390px).
+        el('span', { className: 'meta-label', textContent: label.replace(' / ', ' /\u00a0') }),
         value
           ? editableLine(String(value), {
               className: 'meta-value',
-              title: `Double-click to edit. ${label} appears in the header of every resume.`,
+              title: `Double-click, or press Enter or F2, to edit. ${label} appears in the header of every resume.`,
               onCommit: (text) => saveProfileField(key, text),
             })
           : el('button', {
@@ -4093,7 +4324,7 @@ function profileBlock() {
         el('span', { className: 'meta-label', textContent: key }),
         editableLine(String(value), {
           className: 'meta-value',
-          title: 'Double-click to edit. Used to fill forms, never printed on a resume.',
+          title: 'Double-click, or press Enter or F2, to edit. Used to fill forms, never printed on a resume.',
           onCommit: (text) => saveAutofillField(key, text),
         }),
         el('button', {
@@ -4133,7 +4364,7 @@ function nameHead(profile) {
     return [
       editableLine(String(field ?? '') || 'Your Name', {
         className: 'title',
-        title: 'Double-click to edit. This is the name at the top of every resume.',
+        title: 'Double-click, or press Enter or F2, to edit. This is the name at the top of every resume.',
         onCommit: (text) => saveProfileField('name', text),
       }),
       el('button', {
@@ -4161,7 +4392,7 @@ function nameHead(profile) {
   return [
     editableLine(String(chosen?.text ?? ''), {
       className: 'title',
-      title: 'Double-click to edit this form of your name.',
+      title: 'Double-click, or press Enter or F2, to edit this form of your name.',
       onCommit: (text) => saveNameText(current, text),
     }),
     alternateStepper(key, field, current),
@@ -6412,6 +6643,7 @@ let renderToken = 0;
 function scheduleRender({ delay = LIVE_DELAY_MS } = {}) {
   clearTimeout(renderTimer);
   setLive('working');
+  forgetFit();
   renderTimer = setTimeout(() => {
     renderTimer = null;
     renderPreview();
@@ -6867,19 +7099,56 @@ function clearPdf(frame) {
   frame.classList.remove('loaded');
 }
 
-/** The "is what I see current?" indicator that replaced the Preview button. */
+/**
+ * The "is what I see current?" indicator that replaced the Preview button.
+ *
+ * Two things decide it: how the last compile went (`liveMode`), and whether
+ * the server answered the last request of any kind (`serverDown`). It used to
+ * hear only from the compile, so a save that could not reach a stopped server
+ * left it green, saying "Live", over an edit that had gone nowhere — the
+ * preview is only asked again after a save, and the save had failed. Any
+ * request that never arrives now turns it to "Can’t reach server", and the
+ * next one answered turns it back. See `api`.
+ */
+let liveMode = 'ok';
+let serverDown = false;
+
+const LIVE_WORDS = {
+  working: 'Updating…',
+  bad: 'Compile failed',
+  offline: 'Can’t reach server',
+  ok: 'Live',
+};
+
 function setLive(mode) {
+  if (mode === 'offline') serverDown = true;
+  else liveMode = mode;
+  paintLive();
+}
+
+/** Whether a request reached the server; from `api`, for every request. */
+function serverReached(reached) {
+  if (serverDown === !reached) return;
+  serverDown = !reached;
+  paintLive();
+}
+
+function paintLive() {
   const chip = $('#live-state');
   if (!chip) return;
+  const mode = serverDown ? 'offline' : liveMode;
   chip.className = `live ${mode}`;
-  chip.textContent =
-    mode === 'working'
-      ? 'Updating…'
-      : mode === 'bad'
-        ? 'Compile failed'
-        : mode === 'offline'
-          ? 'Can’t reach server'
-          : 'Live';
+  chip.textContent = LIVE_WORDS[mode];
+  /*
+   * Its words in its title as well: on a phone the words are hidden and the
+   * dot is all there is (see style.css), so the title says what the colour
+   * means, for a pointer, a long press and a screen reader's description.
+   */
+  chip.title = `${LIVE_WORDS[mode]} — ${
+    mode === 'offline'
+      ? 'the server isn’t answering, so changes aren’t being saved or compiled. It is asked again every few seconds.'
+      : 'the preview recompiles itself whenever you change something. Click to force one.'
+  }`;
 }
 
 /**
@@ -6898,7 +7167,7 @@ function fitSummary(fit, result, { master, fitting = false } = {}) {
     master
       ? `Master Document · ${plural(result.pages, 'page')} · All source phrasings; may exceed two pages`
       : result.fits
-        ? `Fits on one page${
+        ? `Fits on ${onPages(result)}${
             result.overflowLines < 0 ? ` — room for about ${plural(Math.abs(result.overflowLines), 'more line')}` : ''
           }`
         : `${plural(result.pages, 'page')} — about ${plural(result.overflowLines, 'line')} too long. Pick a shorter phrasing or drop a bullet.`,
@@ -6926,6 +7195,40 @@ function fitSummary(fit, result, { master, fitting = false } = {}) {
       ]),
     );
   }
+}
+
+/**
+ * "one page", or the count the PDF really has — with how many were allowed,
+ * when that is more than the one this tool is named for.
+ *
+ * "Fits on one page" was said of every resume that fitted, a two-page resume
+ * allowed two pages included. The server says how many it allowed beside the
+ * count; an older one does not, and the layout in force here says the same.
+ */
+function onPages(result) {
+  const allowed = result.maxPages ?? pageLayout().maxPages ?? 1;
+  const pages = result.pages === 1 ? 'one page' : plural(result.pages, 'page');
+  return allowed > 1 ? `${pages} (${allowed} allowed)` : pages;
+}
+
+/**
+ * The fit chip back to not knowing, from the moment a compile is asked for.
+ *
+ * Only `renderPreview` wrote the chip, and only once an answer came, so
+ * between asking and answering it kept saying whatever it said last. On a
+ * switch of resume that was the previous resume's verdict: "Fits on one page"
+ * stood over a two-page resume for the second or six its compile took, and
+ * whoever looked then — a person, or a test polling the chip — was told the
+ * wrong document fitted. A change to the Page settings was the same, the old
+ * page's verdict over the new page. `renderPreview` already turns an idle
+ * chip into "Compiling…"; this makes it idle whenever a compile is scheduled,
+ * so the chip never carries a verdict about anything but what it is over.
+ */
+function forgetFit() {
+  const fit = $('#fit');
+  if (!fit) return;
+  fit.className = 'fit idle';
+  fit.textContent = 'Compiling…';
 }
 
 /**
@@ -6993,6 +7296,9 @@ async function renderPreview() {
     if (!unreachable(err)) {
       setLive('bad');
       fit.textContent = err.message;
+      // Not "Compiling your resume…" for ever over a compile that has ended.
+      // The next one that works puts the usual words back, above.
+      $('#preview-empty').textContent = 'Couldn’t compile — see the message on the left.';
       return;
     }
     /*
@@ -7129,10 +7435,27 @@ async function dropOrphan(lost) {
   markDirty(`Removed "${id}" from this resume`);
 }
 
+/**
+ * The page settings in force for the resume on screen: its own over the
+ * save's, as `layoutFor` resolves them on the server.
+ *
+ * The save-wide half is not in `GET /store`, which keeps config down to git
+ * and the AI switch, so it is read from `/config` alongside the store and
+ * kept here; the Page settings panel puts what it saves in the same place.
+ * Read off the resume alone, a save whose config.yaml said `autoFit: false`
+ * looked like one with it on: the preview asked for a fitted compile the
+ * server would only answer as written, and said "Squeezing it onto one
+ * page…" over a resume nothing was going to squeeze.
+ */
+let saveLayout = {};
+
+function pageLayout() {
+  return { ...saveLayout, ...(resumeById(state.resumeId)?.layout ?? {}) };
+}
+
 /** Whether this resume is allowed to shrink itself to fit. */
 function autoFitOn() {
-  const spec = resumeById(state.resumeId);
-  return spec?.layout?.autoFit ?? true;
+  return pageLayout().autoFit ?? true;
 }
 
 /**
@@ -7177,21 +7500,55 @@ async function deleteVariation() {
     ({ drafts }) => (drafts ?? []).filter((d) => d.resumeId === mine.id),
     () => [],
   );
-  const ok = await confirmModal(`Delete “${mine.label ?? mine.id}”?`, [
-    'It is removed from the save. The entries and wordings it selected are the store’s and stay.',
-    using.length > 0
-      ? `${using.length === 1 ? 'The application' : `${using.length} applications`} in the Workspace for ${using
-          .map((d) => d.company)
-          .join(', ')} ${using.length === 1 ? 'uses' : 'use'} it, and will need another resume chosen.`
-      : null,
-    // Said because the list shows where each copy came from, so the name is
-    // about to stop resolving there. Nothing about the copies themselves
-    // changes — they hold their own sections and always did.
-    copies.length > 0
-      ? `${plural(copies.length, 'resume')} copied from it ${copies.length === 1 ? 'is' : 'are'} untouched.`
-      : null,
-    'The version history keeps it, the way it keeps a deleted entry.',
-  ].filter(Boolean).join(' '));
+  /*
+   * And the applications it went out with. The server refuses to delete
+   * those without `force` (the tracker's row would show no resume), so they
+   * are named here, and saying yes is saying so.
+   */
+  /*
+   * Counted as the server counts them (`wentOut`, through `appWentOut`): a row
+   * closed before anything went out is not one, and was named here as one.
+   * The server's refusal is still the last word — see the 409 below.
+   */
+  const sentWith = await api('/applications').then(
+    ({ applications }) =>
+      (applications ?? []).filter(
+        (a) => appWentOut(a) && (a.resumeId === mine.id || (a.sentResumeIds ?? []).includes(mine.id)),
+      ),
+    () => [],
+  );
+  /*
+   * Said in parts, each application on a line of its own: one paragraph, the
+   * names run together with commas, was the whole answer to "what does this
+   * take with it".
+   */
+  const listOf = (items) => el('ul', { className: 'confirm-list' }, items.map((text) => el('li', { textContent: text })));
+  const ok = await showModal(
+    `Delete “${mine.label ?? mine.id}”?`,
+    el('div', {}, [
+      el('p', { textContent: 'It is removed from the save. The entries and wordings it selected are the store’s and stay.' }),
+      sentWith.length > 0
+        ? el('p', {
+            textContent: `It went out with ${sentWith.length === 1 ? 'this application' : `these ${sentWith.length} applications`}, and ${sentWith.length === 1 ? 'its row' : 'their rows'} will no longer show the resume that was sent:`,
+          })
+        : null,
+      sentWith.length > 0 ? listOf(sentWith.map((a) => `${a.company} — ${a.role}`)) : null,
+      using.length > 0
+        ? el('p', {
+            textContent: `${using.length === 1 ? 'This application' : `These ${using.length} applications`} in the Workspace ${using.length === 1 ? 'uses' : 'use'} it, and will need another resume chosen:`,
+          })
+        : null,
+      using.length > 0 ? listOf(using.map((d) => `${d.company} — ${d.role}`)) : null,
+      // Said because the list shows where each copy came from, so the name is
+      // about to stop resolving there. Nothing about the copies themselves
+      // changes — they hold their own sections and always did.
+      copies.length > 0
+        ? el('p', { textContent: `${plural(copies.length, 'resume')} copied from it ${copies.length === 1 ? 'is' : 'are'} untouched.` })
+        : null,
+      el('p', { textContent: 'The version history keeps it, the way it keeps a deleted entry.' }),
+    ].filter(Boolean)),
+    { okLabel: 'Delete', showCancel: true },
+  );
   if (!ok) return;
 
   /*
@@ -7244,7 +7601,19 @@ async function deleteVariation() {
   scheduleRender();
 
   try {
-    await api(`/resumes/${encodeURIComponent(mine.id)}`, { method: 'DELETE' });
+    const remove = (force) => api(`/resumes/${encodeURIComponent(mine.id)}${force ? '?force=1' : ''}`, { method: 'DELETE' });
+    try {
+      await remove(sentWith.length > 0);
+    } catch (err) {
+      // Sent with an application this page did not know of: named, and asked again.
+      if (err.status !== 409 || err.body?.kind !== 'in-use') throw err;
+      const rows = (err.body.applications ?? []).map((a) => `${a.company} (${a.role})`).join(', ');
+      if (!(await confirmModal(`Delete “${mine.label ?? mine.id}” anyway?`, `It went out with the application to ${rows}. That row will no longer show the resume that was sent.`))) {
+        setStatus(`“${mine.label ?? mine.id}” was kept`);
+        return;
+      }
+      await remove(true);
+    }
     setStatus(`Deleted “${mine.label ?? mine.id}”`);
   } catch (err) {
     /*
@@ -7282,8 +7651,19 @@ async function saveAsVariation() {
    * nothing said so. It is refused now (see `?create=1`), and the refusal
    * reopens the form holding what was typed rather than throwing it away.
    */
+  /*
+   * Offered as a name and a file nobody has: "base-variant" taken by the
+   * last copy, pressing OK on what was offered was refused, every time after
+   * the first. The next free pair instead — "… variation 2", "-variant-2".
+   */
   let label = `${parentLabel} variation`;
   let filename = `${state.resumeId}-variant`;
+  const held = state.store.resumes ?? [];
+  const taken = (id, name) => held.some((r) => r.id === id || sameName(r.label ?? r.id, name));
+  for (let n = 2; taken(filename, label) && n < 100; n++) {
+    label = `${parentLabel} variation ${n}`;
+    filename = `${state.resumeId}-variant-${n}`;
+  }
   let problem = '';
   for (;;) {
     const answer = await form('Save as variation', [
@@ -7451,7 +7831,8 @@ async function createVariation(chosenId, chosenLabel) {
    */
   await flushAutoSave().catch(() => undefined);
 
-  describeNext(`Saved ${spec.id}`);
+  // Named as the list names it, not by its file: "Undo save “Kafka-heavy” as a variation".
+  describeNext(`save “${spec.label || spec.id}” as a variation`);
   /*
    * `?create=1` is this write's condition: written only where there is no
    * resume by that file or that name, checked with nothing awaited before the
@@ -7865,6 +8246,13 @@ function drawApplications({ applications, stats, current }) {
     ),
   );
 
+  /*
+   * A cell with a run of characters too long for any column — a url a page
+   * called itself — may break inside it (`long-token`, style.css). Words do
+   * not: "Distinguished" broke as "Distingui/shed" when every cell could.
+   */
+  const unbroken = (text) => (/\S{24,}/.test(String(text ?? '')) ? 'long-token' : '');
+
   const wrap = $('#apps-wrap');
   if (applications.length === 0) {
     wrap.replaceChildren(
@@ -7952,9 +8340,9 @@ function drawApplications({ applications, stats, current }) {
       // date, and wrapping the narrowest column steals two lines of height
       // from every row to save nothing.
       el('td', { className: 'when', textContent: localDate(a.appliedAt) }),
-      el('td', { textContent: a.company }),
-      el('td', { textContent: a.role }),
-      el('td', {}, [sel]),
+      el('td', { className: unbroken(a.company), textContent: a.company }),
+      el('td', { className: unbroken(a.role), textContent: a.role }),
+      el('td', { className: 'app-status' }, [sel]),
       // Blank, not a dash: an em-dash in a date column reads as a date that
       // failed to load rather than as one that has not happened.
       el('td', { className: 'when', textContent: sentOn(a) }),
@@ -8065,7 +8453,14 @@ function drawApplications({ applications, stats, current }) {
 
     // Clicking the row opens the full record; the status dropdown and the
     // remove button stop the event so they still work on their own.
-    row.onclick = () => openApplication(a.id);
+    row.onclick = () => {
+      revealApplicationDetail();
+      // And again once it is filled: the placeholder is short, and at the foot
+      // of the page there was not yet room to bring it all the way up.
+      openApplication(a.id).then(() => {
+        if (openApplicationId === a.id) revealApplicationDetail();
+      }, () => undefined);
+    };
     sel.onclick = (ev) => ev.stopPropagation();
     return row;
   };
@@ -8155,6 +8550,34 @@ function drawApplications({ applications, stats, current }) {
       el('tbody', {}, rows),
     ]),
   );
+}
+
+/**
+ * Bring the detail pane to a row just opened, where it is not already beside it.
+ *
+ * Below the width where the list and the pane stack, the pane is under the
+ * whole list: a row clicked forty rows down filled it a long scroll away, and
+ * the click looked like it had done nothing. Beside the list the pane is
+ * sticky and already in view (see `.app-detail` in the stylesheet). Only on a
+ * click, not on the re-opens a reload does, which must not move the page.
+ */
+function revealApplicationDetail() {
+  if (!applicationsStacked()) return;
+  $('#app-detail')?.scrollIntoView?.({ block: 'start' });
+}
+
+/*
+ * Whether the list and the pane are stacked, asked of the layout itself rather
+ * than of a width written here a second time: the stylesheet moved its
+ * breakpoint from 1150px to 1200px (`.apps-split`) and this still said 1150,
+ * so a row clicked at 1151–1200px filled a pane a long scroll away. Where
+ * nothing is laid out (a test's document), the stylesheet's width.
+ */
+function applicationsStacked() {
+  const split = $('.apps-split');
+  const columns = split ? getComputedStyle(split).gridTemplateColumns : '';
+  if (columns && columns !== 'none') return columns.trim().split(/\s+/).length === 1;
+  return Boolean(window.matchMedia?.('(max-width: 1200px)').matches);
 }
 
 /** Everything that was actually submitted for one application. */
@@ -9296,6 +9719,9 @@ function renderDraft(draft) {
     renderDraft(draft);
   };
 
+  // What tailoring decided not to do, said under its buttons. See `tailorDraft`.
+  const tailorSaid = el('div', { className: 'hint tailor-said', role: 'status' });
+
   setChildren(
     panel,
     el('div', { className: 'draft-head' }, [
@@ -9325,12 +9751,12 @@ function renderDraft(draft) {
           title: draft.url
             ? 'Read the posting and pick the phrasings that suit it'
             : 'Works from the posting text; add a link to this draft to read it automatically',
-          onclick: () => tailorDraft(draft, notes, false),
+          onclick: () => tailorDraft(draft, notes, false, tailorSaid),
         }),
         aiButton({
           label: 'Let the AI choose',
           title: 'The AI reads the posting and decides which phrasings and bullets to use',
-          onclick: () => tailorDraft(draft, notes, true),
+          onclick: () => tailorDraft(draft, notes, true, tailorSaid),
         }),
         /*
          * The third thing you want, and the one that was missing: neither
@@ -9344,6 +9770,7 @@ function renderDraft(draft) {
           onclick: () => startVariation(draft, notes),
         }),
       ]),
+      tailorSaid,
       hasResume(draft)
         ? el('div', { className: 'toolbar' }, [
             el('button', {
@@ -9440,18 +9867,45 @@ async function startVariation(draft, notes) {
   }
 }
 
-async function tailorDraft(draft, notes, useAi) {
+async function tailorDraft(draft, notes, useAi, near = notes) {
   const doing = useAi ? 'Reading the posting' : 'Matching against the posting';
+  if (near !== notes) near.replaceChildren();
   setChildren(notes, el('div', { textContent: `${doing}…` }));
   // In the toolbar too, so leaving this panel does not lose the only sign it
   // is running. `useAi` runs for minutes; the match is instant and the chip
   // is gone before anyone reads it, which is the right amount of noise.
   const stopChip = startDrafting(doing, () => openDraft(draft.id));
   try {
-    const res = await api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
-      method: 'POST',
-      body: JSON.stringify({ useAi, baseResumeId: draft.resumeId }),
-    });
+    const tailor = (overwrite) =>
+      api(`/workspace/${encodeURIComponent(draft.id)}/tailor`, {
+        method: 'POST',
+        body: JSON.stringify({ useAi, baseResumeId: draft.resumeId, ...(overwrite ? { overwrite: true } : {}) }),
+      });
+    let res;
+    try {
+      res = await tailor(false);
+    } catch (err) {
+      // The copy was edited by hand since it was tailored: asked, not replaced.
+      if (err.status !== 409 || err.body?.kind !== 'edited') throw err;
+      /*
+       * Asked in the editor's own dialog, as every other question here is, with
+       * the button saying what it does. And the answer said under the button
+       * that was pressed: written to the notes at the foot of the panel, "Not
+       * tailored again" was a long scroll from where anybody was looking.
+       */
+      const name = resumeById(err.body.resumeId)?.label ?? err.body.resumeId ?? 'The tailored copy';
+      const replace = await showModal(
+        'Replace your edits?',
+        el('p', { textContent: `“${name}” has edits made since it was tailored. Tailoring again rebuilds it from its base resume, and those edits go.` }),
+        { okLabel: 'Replace my edits', showCancel: true, cancelLabel: 'Keep my edits' },
+      );
+      if (!replace) {
+        notes.replaceChildren();
+        setChildren(near, el('div', { textContent: 'Not tailored again: the edits to the copy are kept.' }));
+        return;
+      }
+      res = await tailor(true);
+    }
 
     const changed = (res.diff ?? []).filter((c) => c.kind !== 'none');
     const said = [
@@ -10639,42 +11093,124 @@ async function loadDocuments() {
  * to undo, and the save-switch header would only get in the way.
  */
 let pairingTimer = null;
+/*
+ * A code made here, and whether JobHelper has used it yet.
+ *
+ * Somebody sent here by JobHelper's "Get a code" reads the code, types it
+ * back on the job page, and is left with this tab open and nothing in it
+ * saying whether that worked. So once a code is made, the list of pairings
+ * is watched — it already is, every few seconds while a code shows, so the
+ * list fills in as the extension pairs — and the code's panel says "Waiting
+ * for JobHelper…" until a pairing newer than the code turns up, and then
+ * which extension it was, so the tab can be closed knowing.
+ *
+ * `before` is when the code was made: a pairing from after that is this
+ * one. Kept until the code runs out, is replaced, or is used.
+ */
+let pairingWatch = null;
+
+const pairingAsk = async (path, method = 'GET') => {
+  const res = await fetch(`/api/extension/pairings${path}`, { method, headers: { 'Content-Type': 'application/json' } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+  return body;
+};
+
+/**
+ * A paired origin, as a person reads it: "JobHelper" and the start of its id
+ * for an extension's origin, which is otherwise thirty-two letters nobody
+ * recognises; anything else as it is. The whole origin is the title.
+ */
+const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/([a-p]{32})\/?$/;
+function originLabel(origin, className) {
+  const id = EXTENSION_ORIGIN_RE.exec(String(origin))?.[1];
+  return el('span', { className, title: String(origin) }, id
+    ? ['JobHelper ', el('small', { className: 'faint ext-id', textContent: `${id.slice(0, 6)}…` })]
+    : [String(origin)]);
+}
+
+/** Make a fresh code, and watch for it to be used. See `pairingWatch`. */
+async function makePairingCode() {
+  const made = await pairingAsk('/code', 'POST');
+  pairingWatch = { since: Date.now(), code: made.code, done: null };
+  return made;
+}
+
 async function loadPairing() {
   const box = $('#pairing');
   if (!box) return;
-  const ask = async (path, method = 'GET') => {
-    const res = await fetch(`/api/extension/pairings${path}`, { method, headers: { 'Content-Type': 'application/json' } });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
-    return body;
-  };
+  const ask = pairingAsk;
   const note = el('p', { className: 'hint', id: 'pair-status' });
   const draw = (state) => {
     clearTimeout(pairingTimer);
     pairingTimer = null;
     const children = [];
+    /*
+     * Paired since the code was made: the code has gone, and a row in the
+     * list is newer than it. Said where the code was, in the same place the
+     * eye already is.
+     */
+    if (pairingWatch && !pairingWatch.done && (!state.code || state.code.code !== pairingWatch.code)) {
+      const fresh = state.paired.filter((p) => Date.parse(p.pairedAt) >= pairingWatch.since - 1000);
+      if (fresh.length > 0) pairingWatch.done = fresh[fresh.length - 1].origin;
+      else pairingWatch = null;
+    }
     if (state.code) {
       const left = Math.max(0, Math.ceil((Date.parse(state.code.expiresAt) - Date.now()) / 60000));
+      const shown = `${state.code.code.slice(0, 4)}-${state.code.code.slice(4)}`;
+      const copy = el('button', {
+        id: 'pair-copy',
+        className: 'tiny',
+        textContent: 'Copy',
+        title: 'Copy the code, to paste into JobHelper',
+        onclick: () => {
+          const done = () => { copy.textContent = 'Copied'; };
+          // The clipboard is there on loopback, which is a secure context;
+          // anywhere it is not, the code is selected for Ctrl+C instead.
+          const select = () => {
+            const range = document.createRange();
+            range.selectNodeContents($('#pair-code'));
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+          };
+          if (navigator.clipboard?.writeText) navigator.clipboard.writeText(shown).then(done, select);
+          else select();
+        },
+      });
       children.push(
-        el('div', { className: 'pair-code', id: 'pair-code', textContent: `${state.code.code.slice(0, 4)}-${state.code.code.slice(4)}` }),
-        el('p', { className: 'hint', textContent: `Type this into JobHelper’s popup. It works once, for the next ${left} ${left === 1 ? 'minute' : 'minutes'}.` }),
+        el('div', { className: 'pair-code-row' }, [
+          el('div', { className: 'pair-code', id: 'pair-code', textContent: shown }),
+          copy,
+        ]),
+        el('p', { className: 'hint', textContent: `Type this into JobHelper — the card on the job page, or its toolbar popup. It works once, for the next ${left} ${left === 1 ? 'minute' : 'minutes'}.` }),
       );
+      if (pairingWatch && pairingWatch.code === state.code.code) {
+        children.push(el('p', { className: 'hint pair-waiting', id: 'pair-waiting', 'aria-live': 'polite', textContent: 'Waiting for JobHelper…' }));
+      }
       // Looked at again until it is used or runs out, so the list below
       // gains the extension the moment it pairs.
-      pairingTimer = setTimeout(() => refresh().catch(() => {}), 3000);
+      pairingTimer = setTimeout(() => refresh().catch(() => {}), 2000);
+    }
+    if (pairingWatch?.done) {
+      children.push(el('p', {
+        className: 'pair-done',
+        id: 'pair-done',
+        'aria-live': 'polite',
+      }, ['Paired with ', originLabel(pairingWatch.done), '. JobHelper can reach the save now; this tab can be closed.']));
     }
     children.push(el('div', { className: 'toolbar' }, [
       el('button', {
         id: 'pair-make',
         textContent: state.code ? 'Make a new code' : 'Make a code',
-        onclick: () => ask('/code', 'POST').then(refresh).catch((e) => { note.textContent = e.message; }),
+        onclick: () => makePairingCode().then(refresh).catch((e) => { note.textContent = e.message; }),
       }),
     ]));
     if (state.paired.length > 0) {
       children.push(el('div', { className: 'lbl', textContent: 'Paired extensions' }));
       children.push(el('div', { className: 'card-list', id: 'pair-list' }, state.paired.map((p) =>
         el('div', { className: 'card pair-row' }, [
-          el('div', { className: 'mono-path', textContent: p.origin }),
+          originLabel(p.origin, 'pair-origin'),
           el('div', { className: 'hint', textContent: `Paired ${new Date(p.pairedAt).toLocaleString()}` }),
           el('button', {
             className: 'tiny',
@@ -10695,6 +11231,42 @@ async function loadPairing() {
   await refresh();
 }
 
+/*
+ * Arriving from JobHelper's "Get a code": `#save/pair?make=1`.
+ *
+ * JobHelper's card asks for a code where the person is standing, and the
+ * code is here. Rather than send them to find a section and press a button,
+ * the link does both: the Save & Files tab, scrolled to Pair JobHelper, with
+ * a code already made and shown large, so all that is left is reading it.
+ *
+ * Made by this page, with this page's own request — the same one the button
+ * sends — so nothing about who may make a code changes: the route still
+ * answers the editor alone (see `editorOnly` and `fromEditor` on the server),
+ * and a link only gets as far as opening the editor. A page elsewhere that
+ * links here makes a code nobody but the person looking at this tab sees,
+ * which is what pressing the button does.
+ *
+ * Once per arrival. The address is put back to `#pair` before anything is
+ * asked, with `replaceState`, which fires no `hashchange` — so a reload, or
+ * Back and Forward through this tab, shows the code that is there instead of
+ * making another and voiding the one already typed half-way.
+ */
+async function arriveToPair({ make }) {
+  window.history.replaceState(null, '', '#pair');
+  showTab('save');
+  if (!$('#pairing')) setupPairing();
+  if (make) {
+    try {
+      await makePairingCode();
+    } catch (e) {
+      const status = $('#pair-status');
+      if (status) status.textContent = e.message;
+    }
+  }
+  await loadPairing().catch((e) => { $('#pairing').textContent = e.message; });
+  ($('#pair-code') ?? $('#pair-jobhelper'))?.scrollIntoView?.({ block: 'center' });
+}
+
 function setupPairing() {
   const after = $('#save-default-status');
   if (!after || $('#pairing')) return;
@@ -10704,7 +11276,7 @@ function setupPairing() {
     el('p', {
       className: 'hint',
       textContent: 'The JobHelper browser extension can read and change this save only once it is paired with ' +
-        'ResumeM-M on this computer. Make a code here, then enter it in JobHelper’s popup. An extension ' +
+        'ResumeM-M on this computer. Make a code here, then enter it in JobHelper — on the card, or in its popup. An extension ' +
         'that is not paired is refused.',
     }),
     el('div', { id: 'pairing' }),
@@ -11019,6 +11591,7 @@ function pageDefaults(config) {
     try {
       const saved = await api('/config', { method: 'PUT', body: JSON.stringify({ layout: patch }) });
       if (state.store?.config) state.store.config.layout = saved.layout;
+      saveLayout = saved.layout ?? {};
       Object.assign(inForce, patch);
       setStatus('Page settings saved');
       // Every resume is set on this, including the one on screen.
@@ -13142,7 +13715,11 @@ function renderBaseButton() {
 }
 
 async function loadStore() {
-  adoptStore(await api('/store'));
+  // The save-wide page settings with it; see `pageLayout`. Not fatal: an
+  // older server has no layout to give, and the store is worth having without it.
+  const [fresh, config] = await Promise.all([api('/store'), api('/config').catch(() => null)]);
+  if (config?.layout) saveLayout = config.layout;
+  adoptStore(fresh);
 }
 
 /**
@@ -13477,6 +14054,13 @@ async function applyHash() {
     return true;
   }
 
+  // JobHelper's "Get a code". See `arriveToPair`.
+  const pairLink = /^#save\/pair(?:\?(.*))?$/.exec(location.hash);
+  if (pairLink) {
+    await arriveToPair({ make: new URLSearchParams(pairLink[1] ?? '').get('make') === '1' });
+    return true;
+  }
+
   // A bare `#voice` or `#applications` opens that tab. The extension links
   // here when it needs to send someone to a setting, and a link that lands on
   // the wrong tab is worse than no link.
@@ -13569,6 +14153,8 @@ function setupTabs() {
     btn.onclick = () => {
       for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b === btn);
       for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === `tab-${btn.dataset.tab}`);
+      // The new tab's toolbar, before anything scrolls to a place in it. See `measureToolbars`.
+      measureToolbars();
       if (btn.dataset.tab === 'resumes') scheduleRender();
       if (btn.dataset.tab === 'save') {
         assetUI.load().catch((e) => setStatus(e.message, true));
@@ -13608,6 +14194,25 @@ async function boot() {
    * than not being there.
    */
   renderDraftingChip();
+  // Every tab in sight at every width. See header.js.
+  setupHeader();
+
+  /*
+   * The error log, before anything that needs a save: an error is worth
+   * logging whichever save is open, and most of all when none will open.
+   * See errorlog.js.
+   */
+  captureEditorErrors();
+  setupErrorLog({
+    el,
+    setChildren,
+    setStatus,
+    showTab,
+    context: () => ({
+      resumeId: state.masterView ? null : (state.resumeId ?? null),
+      applicationId: openApplicationId ?? openDraftId ?? null,
+    }),
+  });
 
   $('#feedback-close').onclick = () => { $('#feedback-panel').hidden = true; };
   $('#feedback-select').onchange = event => {
@@ -13628,7 +14233,12 @@ async function boot() {
   setupPairing();
   const project = await assetUI.init();
   loadDocuments().catch(() => {});
-  if (!project.current) { showTab('save'); return; }
+  if (!project.current) {
+    showTab('save');
+    // Pairing needs no save, so JobHelper's "Get a code" works without one.
+    if (/^#save\/pair\b/.test(location.hash)) await applyHash().catch(() => false);
+    return;
+  }
   setupHistoryTab();
   /*
    * The tabs stay off until the store is here.

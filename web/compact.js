@@ -121,8 +121,14 @@ export function setupCompact({ doc = document, win = window, onPreviewShown = ()
     body.classList.toggle('fit-open', state.fitOpen);
     fit?.setAttribute('aria-expanded', String(state.fitOpen));
     if (zoomButton) {
-      zoomButton.setAttribute('aria-pressed', String(state.zoomed));
+      /*
+       * The words say what pressing it does, and that is all: it was also
+       * aria-pressed, so a screen reader said "Fit width, pressed" — two
+       * answers to one question, which contradict each other.
+       */
+      zoomButton.removeAttribute('aria-pressed');
       zoomButton.textContent = state.zoomed ? 'Fit width' : 'Actual size';
+      zoomButton.title = state.zoomed ? 'Fit the page to the pane’s width again' : 'Show the page at its real size, and scroll it';
     }
     toolbar?.classList.toggle('more-open', state.more);
     markActive();

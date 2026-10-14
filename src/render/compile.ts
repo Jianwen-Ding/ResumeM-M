@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runInGroup } from '../process-group.js';
+import { logServerEvent } from '../errorlog/buffer.js';
 import { DEFAULT_LAYOUT, type LayoutOptions, type ResolvedResume } from '../model/types.js';
 import { compileFast, compileFastBody, hasFastPath } from './fastCompile.js';
-import { renderLatex, unrenderableReason } from './latex.js';
+import { renderLatex, unrenderableReason, type OwnField } from './latex.js';
 import { letterLayout, renderLetterFastBody, renderLetterLatex, type LetterContent } from './letter.js';
 import { namePlaceholders, placeholdersIn } from '../model/placeholders.js';
 
@@ -420,7 +421,10 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
     const fileLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
     const combined = `${e.stdout ?? ''}\n${e.stderr ?? ''}\n${fileLog}`;
     fs.rmSync(dir, { recursive: true, force: true });
-    throw new LatexError(`${engine} failed: ${firstTexError(combined) ?? e.message ?? 'unknown error'}`, tail(combined));
+    const failed = new LatexError(`${engine} failed: ${firstTexError(combined) ?? e.message ?? 'unknown error'}`, tail(combined));
+    // For the error log: the first line only, which is TeX's complaint and not the document. See `noted`.
+    logServerEvent('compile', failed.message.split('\n')[0]!.slice(0, 300), 'error', { engine });
+    throw failed;
   }
 
   const pdfFile = path.join(dir, 'resume.pdf');
@@ -432,7 +436,9 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
     const logFile = path.join(dir, 'resume.log');
     const fileLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : log;
     fs.rmSync(dir, { recursive: true, force: true });
-    throw new LatexError(`${engine} produced no PDF: ${firstTexError(fileLog) ?? 'no pages of output'}`, tail(fileLog));
+    const failed = new LatexError(`${engine} produced no PDF: ${firstTexError(fileLog) ?? 'no pages of output'}`, tail(fileLog));
+    logServerEvent('compile', failed.message.split('\n')[0]!.slice(0, 300), 'error', { engine });
+    throw failed;
   }
 
   const auxFile = path.join(dir, 'resume.aux');
@@ -460,10 +466,30 @@ async function compileOnce(tex: string, engine: Engine): Promise<RawCompile> {
 function assertRenderable(
   tex: string,
   what: 'resume' | 'cover letter' = 'resume',
-  own: readonly (string | undefined)[] = [],
+  own: readonly OwnField[] = [],
 ): void {
   const reason = unrenderableReason(tex, what, own);
   if (reason) throw new LatexError(reason, reason);
+}
+
+/**
+ * LaTeX's own warnings — the fonts it could not find, a line run off the
+ * page — noted for the error log as well as returned, and only when they
+ * change: the preview compiles on every pause in the typing, and the same
+ * warning a hundred times would push everything else out of the buffer.
+ * These are this program's sentences, never the document's text; a
+ * resume's own warnings (which can name its entries) are not noted.
+ */
+let lastNoted = '';
+let lastNotedAt = 0;
+function noted(warnings: string[]): string[] {
+  const key = warnings.join('\n');
+  if (key && (key !== lastNoted || Date.now() - lastNotedAt > 5 * 60_000)) {
+    lastNoted = key;
+    lastNotedAt = Date.now();
+    for (const warning of warnings) logServerEvent('latex', warning, 'warn');
+  }
+  return warnings;
 }
 
 function firstTexError(log: string): string | undefined {
@@ -663,11 +689,13 @@ interface Tried {
  * And a grown page has to be no wider than the one as written, as well as no
  * taller. Larger type and wider margins both take room from every line, and
  * a line TeX has nowhere to break — a link, a path — is set past the
- * right-hand edge, where it is not in the PDF at all. A resume with a design
- * doc's link in it that set cleanly as written was grown until the link ran
- * 30pt off the paper. Growing is a nicety; losing text is the one thing this
- * must not do, so a layout that runs further past the edge than the one as
- * written counts as not fitting. When that is what stops it, the margins give
+ * right-hand edge of the text, and past the edge of the paper it is not in
+ * the PDF at all. A resume with a design doc's link in it that set cleanly as
+ * written was grown until the link ran 30pt off the paper. Growing is a
+ * nicety; losing text is the one thing this must not do, so a layout that
+ * runs further off the paper than the one as written counts as not fitting.
+ * Into the margin, where the glyphs are still on the sheet, it may go — see
+ * `noFurtherOffPaper`. When the paper is what stops it, the margins give
  * their width back and the type goes on growing into it.
  */
 async function fitSearch<A extends Tried>(
@@ -714,11 +742,11 @@ async function fitSearch<A extends Tried>(
   if (fitsAt(first)) {
     if (!canGrow(base) || fill(first) >= NEARLY_FULL) return first;
     // On its page, and losing nothing off the side of it the page as written kept.
-    const edges = pastEdge(first.raw.log).sort((x, y) => y - x);
+    const edges = offPaper(first.raw.log, first.layout);
     // Nor wrapping a heading row onto more lines than the page as written
     // did: larger type would otherwise buy itself two- and three-line titles.
     const wrapped = wrappedRows(first.raw.log);
-    const wide = (a: Tried) => !noFurtherPastEdge(a.raw.log, edges) || wrappedRows(a.raw.log) > wrapped;
+    const wide = (a: Tried) => !noFurtherOffPaper(a.raw.log, a.layout, edges) || wrappedRows(a.raw.log) > wrapped;
     const tall = (a: Tried) => a.m.pages > pages;
     const roomy = (a: Tried) => !tall(a) && !wide(a);
     /*
@@ -848,6 +876,19 @@ export class OverflowError extends Error {
 }
 
 /**
+ * The height a fitted resume is said to use, held to the room it has.
+ *
+ * The measurement runs a few points past the text block at the boundary (the
+ * depth of the last line, \raggedbottom) on a resume LaTeX set on its pages,
+ * so `rmm check` said "✓ 1 page" over "used 725.5pt of 720pt available". The
+ * page count is the verdict, as `overflowPt` already says: a resume that
+ * fits used at most what there was.
+ */
+export function reportedUsedPt(usedPt: number, availablePt: number, fits: boolean): number {
+  return round(fits ? Math.min(usedPt, availablePt) : usedPt, 1);
+}
+
+/**
  * Does a run's own page count agree with its own measured height?
  *
  * The two halves of one answer. On rare pathological layouts a raw
@@ -932,13 +973,14 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
       ...section.skillGroups.flatMap((group) => [group.name, ...group.items]),
       section.heading,
     ]),
-    p.name,
-    p.phone,
-    p.email,
-    p.location,
-    p.linkedin,
-    p.github,
-    p.website,
+    // Named, so the message can say which field and, for the name, what to do.
+    { field: 'profile.name', text: p.name },
+    { field: 'profile.phone', text: p.phone },
+    { field: 'profile.email', text: p.email },
+    { field: 'profile.location', text: p.location },
+    { field: 'profile.linkedin', text: p.linkedin },
+    { field: 'profile.github', text: p.github },
+    { field: 'profile.website', text: p.website },
   ]);
 
   // The fast path is only ever a preview convenience. If it is unavailable, or
@@ -1036,7 +1078,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
   const report: FitReport = {
     fits,
     pages: best.m.pages,
-    usedPt: round(best.m.usedPt, 1),
+    usedPt: reportedUsedPt(best.m.usedPt, availablePt, fits),
     availablePt: round(availablePt, 1),
     overflowPt: round(overflowPt, 1),
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),
@@ -1074,7 +1116,7 @@ export async function compileResume(resume: ResolvedResume, opts: CompileOptions
     texPath: opts.texPath,
     tex: best.tex,
     engine,
-    warnings: [...(resume.warnings ?? []), ...fontWarnings(best.raw.log), ...tooWideWarnings(best.raw.log)],
+    warnings: [...(resume.warnings ?? []), ...noted(fontWarnings(best.raw.log)), ...noted(tooWideWarnings(best.raw.log, best.layout))],
     log: tail(best.raw.log, 30),
     fastPath: best.fast,
   };
@@ -1128,29 +1170,63 @@ function fontWarnings(log: string): string[] {
  * a resume they could still send. But it has to be said, because losing text
  * silently is the one thing a document tool must not do.
  *
+ * Said of the right lines. TeX measures an overfull box against the text
+ * block, not the paper: "18pt too wide" inside 0.45in margins is a line that
+ * ends 18pt into a 32pt margin, every glyph of it on the sheet and in the
+ * PDF — `pdftotext` finds the whole link. This told that line's author that
+ * "whatever is past the edge is not in the PDF at all", and they went looking
+ * for text that was all there. The paper's edge is `marginIn` past the text
+ * block's, so a line is lost from where it runs past *that*, less a few
+ * points of bleed: a glyph set against the very edge of the sheet is cut by
+ * the printer, and a reader crops to the page box. Short of it, the line is
+ * only into the margin, which is said more mildly.
+ *
  * Above `\hfuzz` and then some. TeX reports an overfull box at 0.1pt, which is
- * a hairline nobody can see and nothing is lost to; a couple of points in is
- * where a glyph starts going missing.
+ * a hairline nobody can see; a couple of points is where a line is noticeably
+ * past where the others end.
  */
 const TOO_WIDE = /^Overfull \\hbox \(([\d.]+)pt too wide\)/gm;
 const NOTICEABLE_PT = 2;
 
+/** How near the paper's edge a glyph may be set and still be counted as on it. */
+const BLEED_PT = 4;
+
+/** How far each noticeably too-wide line runs past the text block, in points. */
 function pastEdge(log: string): number[] {
   return [...log.matchAll(TOO_WIDE)].map((m) => Number(m[1])).filter((pt) => pt >= NOTICEABLE_PT);
 }
 
 /**
- * Whether no line runs further past the edge than the page as written had one
+ * How far each of those lines runs past the edge of the paper itself —
+ * negative while it is still in the margin — widest first.
+ */
+function offPaper(log: string, layout: LayoutOptions): number[] {
+  const margin = layout.marginIn * PT_PER_IN;
+  return pastEdge(log)
+    .map((pt) => pt - margin)
+    .sort((x, y) => y - x);
+}
+
+/** Off the paper, or near enough its edge to be cut: text that is gone. */
+const lost = (offPaperPt: number) => offPaperPt > -BLEED_PT;
+
+/**
+ * Whether no line runs further off the paper than the page as written had one
  * run: no more such lines, and the widest no wider than the widest was, the
- * next no wider than the next, and so on (`before` sorted widest first).
+ * next no wider than the next, and so on (`before` from `offPaper`, so widest
+ * first).
  *
  * Measured, not a yes-or-no. A link already off the side as written is the
  * author's to shorten, and must not stop the page growing so long as growing
- * does not push it further — nor excuse a second line going over.
+ * does not push it further — nor excuse a second line going over. Into the
+ * margin is not over: a line that larger type sets a few points past the
+ * text block, still on the paper, loses nothing, and growing may put it
+ * there. It is the paper's edge that growth may not push a line across.
  */
-function noFurtherPastEdge(log: string, before: readonly number[]): boolean {
-  const now = pastEdge(log).sort((x, y) => y - x);
-  return now.length <= before.length && now.every((pt, i) => pt <= before[i]! + EDGE_SLACK_PT);
+function noFurtherOffPaper(log: string, layout: LayoutOptions, before: readonly number[]): boolean {
+  const now = offPaper(log, layout).filter(lost);
+  const was = before.filter(lost);
+  return now.length <= was.length && now.every((pt, i) => pt <= was[i]! + EDGE_SLACK_PT);
 }
 
 /** Noise in the width TeX reports for the same line at another size. */
@@ -1161,16 +1237,30 @@ function wrappedRows(log: string): number {
   return [...log.matchAll(/RMM-ROW-LINES: (\d+)/g)].reduce((sum, m) => sum + Number(m[1]) - 1, 0);
 }
 
-function tooWideWarnings(log: string): string[] {
-  const worst = pastEdge(log).sort((a, b) => b - a);
-  if (worst.length === 0) return [];
+function tooWideWarnings(log: string, layout: LayoutOptions): string[] {
+  const over = offPaper(log, layout);
+  const gone = over.filter(lost);
+  const inMargin = over.filter((pt) => !lost(pt));
+  const usually =
+    'This is usually one long unbroken thing: a link, a file path, a token. ' +
+    'Shorten it, or put it behind a few words of link text.';
+  const runs = (n: number) => (n > 1 ? `${n} lines run` : 'A line runs');
 
-  const many = worst.length > 1 ? `${worst.length} lines run` : 'A line runs';
-  return [
-    `${many} past the right-hand edge of the page — the widest by ${Math.round(worst[0]!)}pt — and ` +
-      'whatever is past the edge is not in the PDF at all. This is usually one long unbroken ' +
-      'thing: a link, a file path, a token. Shorten it, or put it behind a few words of link text.',
-  ];
+  const warnings: string[] = [];
+  if (gone.length > 0) {
+    warnings.push(
+      `${runs(gone.length)} past the right-hand edge of the page — the widest by ${Math.max(1, Math.round(gone[0]!))}pt — and ` +
+        `whatever is past the edge is not in the PDF at all. ${usually}`,
+    );
+  }
+  if (inMargin.length > 0) {
+    const margin = layout.marginIn * PT_PER_IN;
+    warnings.push(
+      `${runs(inMargin.length)} into the right-hand margin — the widest by ${Math.round(inMargin[0]! + margin)}pt — ` +
+        `still on the paper, so nothing is lost, but set past where the other lines end. ${usually}`,
+    );
+  }
+  return warnings;
 }
 
 /** The last page's natural height and the total shrink of its glue, as `\\AtEndDocument` reported them. */
@@ -1299,13 +1389,13 @@ export async function compileLetter(
     letter.greeting,
     letter.signOff,
     letter.date,
-    p.name,
-    p.phone,
-    p.email,
-    p.location,
-    p.linkedin,
-    p.github,
-    p.website,
+    { field: 'profile.name', text: p.name },
+    { field: 'profile.phone', text: p.phone },
+    { field: 'profile.email', text: p.email },
+    { field: 'profile.location', text: p.location },
+    { field: 'profile.linkedin', text: p.linkedin },
+    { field: 'profile.github', text: p.github },
+    { field: 'profile.website', text: p.website },
   ]);
 
   type Attempt = { layout: LayoutOptions; raw: RawCompile; m: Measurement; tex: string; fast: boolean };
@@ -1362,7 +1452,7 @@ export async function compileLetter(
     texPath: opts.texPath,
     tex,
     engine,
-    warnings: [...fontWarnings(raw.log), ...tooWideWarnings(raw.log), ...placeholderWarnings(letter)],
+    warnings: [...noted(fontWarnings(raw.log)), ...noted(tooWideWarnings(raw.log, used)), ...placeholderWarnings(letter)],
     pages: m.pages,
     fits,
     overflowLines: Math.ceil(Math.abs(overflowPt) / baselinePt) * Math.sign(overflowPt),

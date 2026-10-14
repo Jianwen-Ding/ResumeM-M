@@ -158,6 +158,37 @@ describe.runIf(latex && hasPdfToText)('what the reader actually sees', () => {
   }, 120_000);
 
   /*
+   * And only when it did. TeX measures an overfull line against the text
+   * block, not the paper, and the warning took its number as the loss: a
+   * link 18pt too wide inside a 32pt margin — every glyph of it on the sheet
+   * and in the PDF — was reported as text that "is not in the PDF at all".
+   * Eight characters more and it is; the two have to be told apart, and the
+   * PDF itself is what tells them.
+   */
+  it('and says only that a line is into the margin while every glyph of it is still on the paper', async () => {
+    const link = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz/edit';
+    const asWritten = (bullet: string) => ({ ...resume([bullet]), layout: { ...DEFAULT_LAYOUT, autoFit: false } });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-margin-'));
+    try {
+      const inMargin = path.join(dir, 'margin.pdf');
+      const kept = await compileResume(asWritten(`Design doc: ${link}`), { pdfPath: inMargin });
+      expect((await run('pdftotext', [inMargin, '-'])).stdout).toContain('UvWxYz/edit');
+      expect(kept.warnings.filter((w) => /into the right-hand margin/.test(w))).toHaveLength(1);
+      expect(kept.warnings.filter((w) => /past the right-hand edge/.test(w))).toEqual([]);
+      // Still the same advice: it is the same kind of line.
+      expect(kept.warnings.join(' ')).toMatch(/link|path|token/);
+
+      const offPaper = path.join(dir, 'paper.pdf');
+      const cut = await compileResume(asWritten(`Design doc: ${link}${'X'.repeat(8)}`), { pdfPath: offPaper });
+      expect((await run('pdftotext', [offPaper, '-'])).stdout).not.toContain('XXXXXXXX');
+      expect(cut.warnings.filter((w) => /past the right-hand edge/.test(w))).toHaveLength(1);
+      expect(cut.warnings.filter((w) => /into the right-hand margin/.test(w))).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  /*
    * A save whose profile.yaml has lost its `name:` key.
    *
    * The heading ends with a `\\`, and with nothing in front of it TeX says

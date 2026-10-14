@@ -646,17 +646,59 @@ export function siteSegment(s: string): { board?: boolean; careersOf?: string } 
  * employers book their hiring to. The same list the extension compares
  * employers by, so the two sides agree on what one employer is.
  */
+/*
+ * With its dots, and in the forms companies take outside the Anglo list:
+ * "Société Générale S.A.", "Telefónica, S.L.", "Acme S.r.l.", "Acme S.p.A.",
+ * "Acme SARL", "Acme Ltda.", "Acme e.V.", "Acme GmbH & Co. KG", "Acme A/S",
+ * "Acme ApS", "Acme Oyj". Each was a different employer from the same name
+ * without it, so a posting's JSON-LD and the form it hands you to — which
+ * writes the name plain — were two rows for one job. "GmbH & Co. KG" is one
+ * form, taken off in one piece: "Co." on its own in front of a "KG" is not a
+ * company called Co.
+ *
+ * The same pattern, byte for byte, as JobHelper's `LEGAL_FORM` in
+ * src/shared/trail.js, so the two sides agree on what one employer is.
+ */
 const LEGAL_FORM =
-  /[\s,]+(?:personnel[\s,]+)?(?:inc|incorporated|llc|l\.l\.c|ltd|limited|corp|corporation|co|plc|gmbh|ag|sa|nv|bv|pty|oy|ab|lp|llp)\.?$/i;
+  /[\s,]+(?:personnel[\s,]+)?(?:inc|incorporated|llc|l\.l\.c|ltd|limited|corp|corporation|co|plc|gmbh(?:\s*&\s*co\.?\s*kg(?:aa)?)?|ag|s\.?a|n\.?v|b\.?v|pty|oy|oyj|ab|lp|llp|s\.?l|s\.?r\.?l|s\.?p\.?a|s\.?a\.?s|sarl|ltda|e\.?v|kg|a\/s|aps)\.?$/i;
+/*
+ * And the Japanese forms, which go in front as often as behind: 株式会社リクルート
+ * and リクルート株式会社 are one company, as are (株)リクルート and ㈱リクルート.
+ * Also JobHelper's, byte for byte.
+ */
+const JP_LEGAL_FORM =
+  /^(?:株式会社|有限会社|合同会社|合資会社|\(株\)|（株）|㈱|\(有\)|（有）|㈲)\s*|\s*(?:株式会社|有限会社|合同会社|合資会社|\(株\)|（株）|㈱|\(有\)|（有）|㈲)$/u;
 
 /** "Acme, Inc." is Acme; a name that is nothing but a legal form is left as it was. */
 export function withoutLegalForm(company: string | undefined): string {
   let n = String(company ?? '').trim().replace(/\s+/g, ' ');
   for (;;) {
-    const next = n.replace(LEGAL_FORM, '').trim();
+    const next = n.replace(LEGAL_FORM, '').replace(JP_LEGAL_FORM, '').trim();
     if (next === n || !next) return n;
     n = next;
   }
+}
+
+/*
+ * The gender tag a German or French posting puts after its title — "(m/w/d)",
+ * "(w/m/d)", "(m/f/d)", "(d/m/w)", "(H/F)", "F/H", "(all genders)", "(gn)" —
+ * which says who may apply and nothing about the job. The employer's own form
+ * writes the title without it, so "Werkstudent Softwareentwicklung (m/w/d)"
+ * and "Werkstudent Softwareentwicklung" were two rows for one job. Anywhere
+ * in the title: "Softwareentwickler (m/w/d) - Remote" carries it before the
+ * work mode. Written bare only in the few shapes a posting uses, so "A/B" and
+ * "C/C++" are left alone; and only two to four single letters.
+ */
+const GENDER_TAG =
+  /\s*(?:\(\s*(?:[mwfdhx](?:\s*\/\s*[mwfdhx]){1,3}|all\s+genders|gn)\s*\)|(?<![\p{L}\p{N}])(?:[mwf]\/[mwf](?:\/[dx])?|[hf]\/[hf]|d\/m\/w)(?![\p{L}\p{N}]))/giu;
+
+/** The title without its gender tag, and with the spacing that leaves tidied. */
+export function withoutGenderTag(role: string): string {
+  return role
+    .replace(GENDER_TAG, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,;:)\]])/g, '$1')
+    .trim();
 }
 
 /*
@@ -880,7 +922,8 @@ function peelTitle(role: string, employers: (string | undefined)[]): { out: stri
    * Processing Engineer Intern (41213)" is the job L3Harris's posting calls
    * "Image Processing Engineer Intern". See `isJobIdSegment`.
    */
-  const out = joinTitle(segments).replace(TRAILING_JOB_ID, '').trim();
+  // And the gender tag, wherever in the title it sits: see `withoutGenderTag`.
+  const out = withoutGenderTag(joinTitle(segments)).replace(TRAILING_JOB_ID, '').trim();
   return { out, peeled };
 }
 

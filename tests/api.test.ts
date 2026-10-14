@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { createApi, createPdfRouter, createCurrentRouter, questionsToWrite } from '../src/server/api.js';
 import { sameQuestion } from '../src/jobs/answers.js';
@@ -1507,6 +1508,35 @@ describe('answers', () => {
       .expect(400);
     expect(res.body.error).toMatch(/personal identifying information/);
     expect(t.store.load().answers).toHaveLength(2);
+  });
+
+  /*
+   * As a form handed them over: a radio group's first option read as its
+   * question, a tick box's words as both, and a dropdown's prompt as the
+   * answer chosen. Each was banked, and offered back on the next form.
+   */
+  it('refuses an option kept as the question, and a prompt kept as the answer', async () => {
+    for (const [question, answer, why] of [
+      ['Yes Required', 'No', /options rather than the question/],
+      ['No, I don’t have an agreement Required', 'Yes, I have an agreement', /options rather than the question/],
+      ['Yes, and I would require relocation assistance Required', 'Yes, but I am planning to relocate on my own', /options rather than the question/],
+      ['Yes, I live in the U.S.', 'Yes, I live in the U.S.', /options rather than the question/],
+      ['CA - Irvine', 'CA - Irvine', /options rather than the question/],
+      ['Willingness to Travel', '— Please Specify —', /prompt rather than an answer/],
+      ['Candidate Source', '- Select -', /prompt rather than an answer/],
+      ['Candidate Source', '[Select]', /prompt rather than an answer/],
+      ['Candidate Source', '< Select >', /prompt rather than an answer/],
+    ] as const) {
+      const res = await request(app).post('/api/answers/save').send({ question, answer, label: 'Chosen on a form' }).expect(400);
+      expect(res.body.error, question).toMatch(why);
+    }
+    expect(t.store.load().answers).toHaveLength(2);
+    // And a question whose answer only opens like a prompt is kept.
+    await request(app).post('/api/answers/save').send({ question: 'Anything else we should know?', answer: 'Please see my portfolio.' }).expect(200);
+    expect(t.store.load().answers).toHaveLength(3);
+    // Nor is a label that opens with "No." for number taken for an option.
+    await request(app).post('/api/answers/save').send({ question: 'No. of years of experience', answer: '5' }).expect(200);
+    expect(t.store.load().answers).toHaveLength(4);
   });
 
   it('does not duplicate an item when the same question is saved again without its id', async () => {
@@ -4492,6 +4522,24 @@ describe('the store panel when git will not answer', () => {
     await request(app).post('/api/store/save').send({}).expect(200);
     const res = await request(app).get('/api/config/store').expect(200);
     expect(res.body.pendingError).toBeUndefined();
+  });
+});
+
+/*
+ * "Its own git repository, 1 commit so far." on a save with eighty: the count
+ * was `log(1).length`, which can only ever be 0 or 1.
+ */
+describe('the store panel’s count of commits', () => {
+  it('is the whole history, and 0 before there is one', async () => {
+    expect((await request(app).get('/api/config/store').expect(200)).body.commits).toBe(0);
+    await repo.ensure();
+    for (let n = 0; n < 4; n++) {
+      fs.writeFileSync(path.join(t.dir, 'voice.md'), `# Voice\n\nTake ${n}.\n`);
+      await repo.commitAll(`Take ${n}`);
+    }
+    const { body } = await request(app).get('/api/config/store').expect(200);
+    expect(body.commits).toBe(5);
+    expect(body.commits).toBe(Number(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: t.dir, encoding: 'utf8' })));
   });
 });
 

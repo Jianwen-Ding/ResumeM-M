@@ -26,6 +26,8 @@ describe('editing a line in place', () => {
   let requests;
   /** Set by the one test that needs the store to refuse a write. */
   let refuseEntryWrites;
+  /** A promise an entry write waits on, for the test that needs one held. */
+  let entryGate;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -36,10 +38,12 @@ describe('editing a line in place', () => {
     fixture.cleanup();
     requests = [];
     refuseEntryWrites = false;
+    entryGate = null;
 
     vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
       const body = options.body ? JSON.parse(options.body) : null;
       requests.push({ url, method: options.method ?? 'GET', body });
+      if (entryGate && url.startsWith('/api/entries/') && options.method === 'PUT') await entryGate;
       let result = {};
       if (refuseEntryWrites && url.startsWith('/api/entries/') && options.method === 'PUT') {
         return { ok: false, status: 409, statusText: 'Conflict', json: async () => ({ error: 'The save moved under you.' }) };
@@ -176,6 +180,48 @@ describe('editing a line in place', () => {
     line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await vi.advanceTimersByTimeAsync(200);
     expect(storedText('v_base')).toBe('Built a pipeline handling **2M events/day** at p95');
+  });
+
+  /*
+   * The chip said "All changes saved" for the whole round trip of an inline
+   * edit — the one moment it is not true: close the tab then and the wording
+   * is gone.
+   */
+  it('says "Saving…" while the line is on its way, and "saved" once it lands', async () => {
+    await openMaster();
+    let land;
+    entryGate = new Promise((go) => {
+      land = go;
+    });
+    const chip = document.querySelector('#save-state');
+
+    const line = rowFor('Built a pipeline handling').querySelector('.editable');
+    line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    line.textContent = `${line.textContent} at p95`;
+    line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(chip.textContent).toBe('Saving…');
+    expect(chip.classList.contains('saving')).toBe(true);
+
+    land();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(storedText('v_base')).toBe('Built a pipeline handling **2M events/day** at p95');
+    expect(chip.textContent).toBe('All changes saved');
+  });
+
+  it('and a refused one does not leave it saying either', async () => {
+    await openMaster();
+    refuseEntryWrites = true;
+    const chip = document.querySelector('#save-state');
+
+    const line = rowFor('Built a pipeline handling').querySelector('.editable');
+    line.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    line.textContent = `${line.textContent} at p95`;
+    line.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(chip.textContent).toMatch(/^Not saved/);
   });
 
   it('leaves the store alone when the text comes back unchanged', async () => {

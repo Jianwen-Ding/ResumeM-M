@@ -528,6 +528,125 @@ describe('undo in the builder', () => {
   });
 
   /*
+   * And it is taken away only as the step left it. The DELETE went out
+   * whatever had happened to the copy since — edited in another tab, sent
+   * with an application — and all of that went with it.
+   */
+  const copyThenUndo = async (meanwhile) => {
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'intern';
+    selector.dispatchEvent(new Event('change'));
+    await vi.advanceTimersByTimeAsync(2000);
+    document.querySelector('#btn-save-as').click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-content [name="label"]').value = 'A copy that moved on';
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(selector.value).toBe('intern-variant'));
+    meanwhile();
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+  };
+  const deletesOf = (id) => requests.filter((r) => r.method === 'DELETE' && r.url.includes(`/resumes/${id}`));
+
+  it('does not take away a copy changed elsewhere since it was made', async () => {
+    await copyThenUndo(() => {
+      data.resumes = data.resumes.map((r) => (r.id === 'intern-variant' ? { ...r, notes: 'Written in another tab.' } : r));
+    });
+    expect(deletesOf('intern-variant')).toEqual([]);
+    expect(spec('intern-variant')?.notes).toBe('Written in another tab.');
+    expect(document.querySelector('#status').textContent).toMatch(/Nothing was undone.*changed since it was made/);
+    expect(undoBtn().disabled, 'the step is still there').toBe(false);
+  });
+
+  it('does not take away a copy an application went out with since', async () => {
+    await copyThenUndo(() => {
+      data.applications = [
+        ...(data.applications ?? []),
+        { id: 'acme-1', company: 'Acme', role: 'Engineer', status: 'applied', resumeId: 'intern-variant', history: [] },
+      ];
+    });
+    expect(deletesOf('intern-variant')).toEqual([]);
+    expect(spec('intern-variant')).toBeDefined();
+    expect(document.querySelector('#status').textContent).toMatch(/filed with an application/);
+    // And it is off the stack: it can never be taken back now, and on top it hid every step under it.
+    expect(document.querySelector('#status').textContent).toMatch(/off the undo list/);
+    expect(undoBtn().title).not.toMatch(/as a variation/);
+  });
+
+  it('names the step by the copy’s name, and offers a name and file nobody has', async () => {
+    const selector = document.querySelector('#resume-select');
+    const saveAsOffered = async () => {
+      selector.value = 'intern';
+      selector.dispatchEvent(new Event('change'));
+      await vi.advanceTimersByTimeAsync(2000);
+      document.querySelector('#btn-save-as').click();
+      await vi.advanceTimersByTimeAsync(50);
+    };
+    // The first copy takes what is offered…
+    await saveAsOffered();
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(spec('intern-variant')).toBeDefined());
+    // …and the second is offered the next free one, not the same refused again.
+    await saveAsOffered();
+    await vi.advanceTimersByTimeAsync(50);
+    const offered = {
+      label: document.querySelector('#modal-content [name="label"]').value,
+      id: document.querySelector('#modal-content [name="id"]').value,
+    };
+    expect(offered.id).toBe('intern-variant-2');
+    expect(offered.label).toMatch(/variation 2$/);
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(spec('intern-variant-2')).toBeDefined());
+    expect(undoBtn().title).toMatch(new RegExp(`${offered.label}.*as a variation`));
+    expect(undoBtn().title).not.toMatch(/intern-variant-2/);
+  });
+
+  // As the server counts them (`wentOut`): a row at Interested has sent nothing, and the server lets the copy go.
+  it('takes away a copy only an application not yet sent names', async () => {
+    await copyThenUndo(() => {
+      data.applications = [
+        ...(data.applications ?? []),
+        { id: 'acme-2', company: 'Acme', role: 'Engineer', status: 'interested', resumeId: 'intern-variant', history: [] },
+      ];
+    });
+    expect(deletesOf('intern-variant')).toHaveLength(1);
+    expect(spec('intern-variant')).toBeUndefined();
+  });
+
+  /*
+   * Redoing a delete is a delete already confirmed. It was refused for the
+   * application the resume went out with, and when it was not, it went
+   * without the `force` the server asks for that.
+   */
+  it('redoes the delete of a resume an application went out with, with force', async () => {
+    const selector = document.querySelector('#resume-select');
+    selector.value = 'intern';
+    selector.dispatchEvent(new Event('change'));
+    await vi.advanceTimersByTimeAsync(2000);
+    data.applications = [
+      ...(data.applications ?? []),
+      { id: 'acme-3', company: 'Acme', role: 'Engineer', status: 'applied', resumeId: 'intern', history: [] },
+    ];
+    document.querySelector('#btn-delete-resume').click();
+    await vi.advanceTimersByTimeAsync(50);
+    document.querySelector('#modal-ok').click();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(spec('intern')).toBeUndefined());
+
+    undoBtn().click();
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(spec('intern')).toBeDefined());
+
+    document.querySelector('#btn-redo').click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(spec('intern'), document.querySelector('#status').textContent).toBeUndefined();
+    expect(deletesOf('intern').at(-1)?.url).toMatch(/[?&]force=1\b/);
+  });
+
+  /*
    * Deleting a skill group is the same two writes, and the half-way state is
    * worse than an orphan: one press put the *reference* back without the
    * group, so `resolveResume` warned "Skills group … does not exist" on every

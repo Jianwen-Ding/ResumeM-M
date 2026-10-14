@@ -9,7 +9,7 @@ import { letterText } from '../render/letter.js';
 import { clipToBytes, fileNameKey, MAX_NAME_BYTES, syncCurrent } from './current.js';
 import { normalizeApplications } from './normalize.js';
 import { resolveResume, unsendableReason } from './resolve.js';
-import { cleanRole, differentPlaces, differentRequisitions, employerKey, globalJobId, globalJobKind, hostOf, isJobBoardHost, jobNumberIn, requisitionInUrl, trailingJobId, withoutTitleNoise } from '../jobs/names.js';
+import { cleanRole, differentPlaces, differentRequisitions, employerKey, globalJobId, globalJobKind, hostOf, isJobBoardHost, jobNumberIn, requisitionInUrl, trailingJobId, withoutGenderTag, withoutTitleNoise } from '../jobs/names.js';
 import { companyFromUrl, looksLikeCompanyName, looksLikeRoleTitle } from '../jobs/extract.js';
 // A cycle (answers.ts reads `employerName` and `localDay` from here), safe
 // because neither side calls the other while its module is loading.
@@ -181,8 +181,25 @@ export function bundleFileNames(
   return short.map((n, i) => ((counts.get(n) ?? 0) > 1 ? full[i]! : n));
 }
 
+/*
+ * Accents come off before the letters are kept, so "Société Générale" is
+ * `societe-generale` rather than `soci-t-g-n-rale` — and, which matters more,
+ * the same name composed (one é) and decomposed (an e and a combining accent,
+ * as a Mac or a PDF hands it over) slug alike. They did not: the NFC row's id
+ * was `soci-t-g-n-rale` and the NFD one's `socie-te-ge-ne-rale`, and since
+ * `identity` is built on this slug the two were two jobs, each unable to
+ * find the other's row. NFKD also folds the compatibility forms (a ligature,
+ * a full-width letter) to their plain letters.
+ *
+ * Only new ids for names with non-ASCII letters change shape: an ASCII name
+ * slugs exactly as it did, and the finders compare keys computed from the
+ * names on the row rather than from its stored id, so a row minted under the
+ * old spelling still matches whatever its id says.
+ */
 export function slug(s: string): string {
   return s
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
@@ -387,11 +404,20 @@ function rolePart(role: string, company: string): string {
  * shows is the one it was given. Two postings with different job numbers are
  * still two jobs: see the address veto in `sameJobAs`.
  */
-const WORK_MODE_SUFFIX = /(?:\s*\(\s*(?:remote|hybrid|on-?site)\s*\)|\s+[-–—|]\s+(?:remote|hybrid|on-?site))$/i;
+/*
+ * And a gender tag — "(m/w/d)", "(H/F)", "(all genders)" — which a German or
+ * French posting adds and the employer's form leaves off (`withoutGenderTag`
+ * in names.ts, where the suffix shapes are listed). Taken off wherever it is,
+ * and the work mode as often as it is on the end, so "(m/w/d) (Remote)" and
+ * "(Remote) (m/w/d)" read the same.
+ */
+const WORK_MODE_SUFFIX = /(?:\s*\(\s*(?:remote|hybrid|on-?site|in[- ]office)\s*\)|\s+[-–—|]\s+(?:remote|hybrid|on-?site|in[- ]office))$/i;
 const YEAR_THEN_SEASON = /\b((?:19|20)\d\d)\s+(summer|fall|autumn|winter|spring)\b/gi;
 
 function sameWorkAnyWay(role: string): string {
-  return role.replace(WORK_MODE_SUFFIX, '').replace(YEAR_THEN_SEASON, '$2 $1').trim() || role;
+  let out = withoutGenderTag(role);
+  for (let next = out.replace(WORK_MODE_SUFFIX, ''); next !== out; next = out.replace(WORK_MODE_SUFFIX, '')) out = next;
+  return out.replace(YEAR_THEN_SEASON, '$2 $1').trim() || role;
 }
 
 export function identity(company: string, role: string): string {
@@ -664,6 +690,20 @@ function differentGlobalJobs(url: string | undefined, other: string | undefined)
 /* The same posting by its address or by its ATS's own id. */
 function samePage(url: string | undefined, other: string | undefined): boolean {
   return sameAddress(url, other) || sameGlobalJob(url, other);
+}
+
+/**
+ * Whether two addresses are two different postings, as `sameJobAs` vetoes a
+ * match by name: two job numbers on one site and tenant, or two of one ATS's
+ * own job ids. An address missing on either side says nothing.
+ */
+export function differentPosting(url: string | undefined, other: string | undefined): boolean {
+  return differentPostings(url, other) || differentGlobalJobs(url, other);
+}
+
+/** Whether two addresses are one posting, by address or by its ATS's own id. */
+export function samePosting(url: string | undefined, other: string | undefined): boolean {
+  return samePage(url, other);
 }
 
 /*
@@ -1121,15 +1161,102 @@ export function alreadySent(apps: Application[], company: string, role: string, 
  * (`WEAK_MATCH_DAYS`), as with every match by name. Two different job
  * numbers or requisitions in the addresses still ask: one job is reposted
  * under a new number often enough that the person should be the one to say.
+ *
+ * Only a row that really went out (`sendOf`). Every status past `applying`
+ * was taken for a send, and `closed` is not one: a row recorded at
+ * `applying` and closed by hand — "Decided not to apply" — was offered as
+ * "You may have applied to this already … was sent on <date>", with the day
+ * it was recorded for the day it went. The history says whether anything
+ * went, and when.
+ *
+ * And not once the person has answered. "It's another job" files a new row
+ * at `applying` beside the sent one, and the next page of that application
+ * — its form, its confirmation — asked the same question again, because the
+ * new row is a match by name only (another address) and the sent row was
+ * still there under the same names. A live row by these names that began
+ * after the send is the application the person said is different, and it
+ * answers for the question; one that began before the send does not (iCIMS's
+ * steps sit beside the sent row under its names, and hid it).
+ */
+/*
+ * Nor a row the app filed by itself that nobody has touched (`openedUnasked`).
+ * The first visit to the posting opened a workspace and filed it at
+ * `interested`; on the next visit that row was this posting's by its address,
+ * a strong match, and it answered the question nobody had answered — the
+ * warning never came back and the automatic stage went through, rebuilding
+ * files for what may be a job already applied for.
  */
 export function maybeSent(apps: Application[], company: string, role: string, url?: string): Application | undefined {
-  if (alreadySent(apps, company, role, url) || findApplicationMatch(apps, company, role, url)?.strength === 'strong') return undefined;
+  const asked = apps.filter((a) => !openedUnasked(a));
+  if (alreadySent(apps, company, role, url) || findApplicationMatch(asked, company, role, url)?.strength === 'strong') return undefined;
   const byName = sameNamesAs(company, role);
-  return apps
-    .filter((a) => byName(a) && a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a))
-    .filter((a) => !tooOldForAWeakMatch(a))
-    .sort((a, b) => (b.appliedAt ?? '').localeCompare(a.appliedAt ?? ''))[0];
+  const named = apps.filter((a) => byName(a) && !tooOldForAWeakMatch(a));
+  const sent = named
+    .filter((a) => a.status !== 'interested' && a.status !== 'applying' && !closedAsStale(a) && sendOf(a) !== undefined)
+    .sort((a, b) => (sentAt(b) ?? '').localeCompare(sentAt(a) ?? ''))[0];
+  if (!sent) return undefined;
+  const went = Date.parse(sentAt(sent) ?? '');
+  const answered = named.some((a) => a.status === 'applying' && Number.isFinite(went) && beganAt(a) > went);
+  return answered ? undefined : sent;
 }
+
+/** What the tracker says about a row it filed itself on opening a workspace, with nobody asking. */
+export const OPENED_UNASKED_NOTE = 'Workspace opened, nothing sent yet';
+
+/**
+ * A row the app filed by itself — the workspace opened automatically, at
+ * `interested` — that the person has done nothing with since: no stage, no
+ * status, no "It's a different job". It holds a place; it is not an answer to
+ * anything, and in particular not to whether this posting is a job already
+ * sent (`maybeSent`).
+ */
+export function openedUnasked(app: Application): boolean {
+  const history = app.history ?? [];
+  return (
+    app.status === 'interested' &&
+    history.length > 0 &&
+    history.every((h) => h.status === 'interested' && h.note === OPENED_UNASKED_NOTE)
+  );
+}
+
+/** When a row went out, as `sendOf` reads it. */
+function sentAt(app: Application): string | undefined {
+  return sendOf(app)?.at;
+}
+
+/** When a row was begun: its first history line, or the date it carries; 0 when nothing says. */
+function beganAt(app: Application): number {
+  const stamps = [app.history?.[0]?.at, app.appliedAt];
+  let first = Number.POSITIVE_INFINITY;
+  for (const at of stamps) {
+    const t = at ? Date.parse(at) : NaN;
+    if (Number.isFinite(t) && t < first) first = t;
+  }
+  return Number.isFinite(first) ? first : 0;
+}
+
+/**
+ * Whether an application really went out, and when.
+ *
+ * The history is what says so: the first line at `applied`, `interview` or
+ * `offer` is the send, and its date is the day it went. `appliedAt` is not —
+ * it is stamped when the row is made, which for anything begun from the
+ * extension or recorded while still applying is days before the send, or
+ * never followed by one. A row at a sent status with no such line is one
+ * from before the history was kept, or one filed straight as sent, and its
+ * `appliedAt` is the best date there is; a `closed` row with no history at
+ * all is kept as sent for the same reason `wentOut` keeps it. A `closed` row
+ * whose history never passed `applying` never went.
+ */
+export function sendOf(app: Application): { at?: string } | undefined {
+  const went = (app.history ?? []).find((h) => SENT_STATUSES.has(h.status));
+  if (went) return { at: went.at };
+  if (SENT_STATUSES.has(app.status)) return { at: app.appliedAt };
+  if (app.status === 'closed' && !(app.history ?? []).length) return { at: app.appliedAt };
+  return undefined;
+}
+
+const SENT_STATUSES: ReadonlySet<ApplicationStatus> = new Set(['applied', 'interview', 'offer']);
 
 /** The same question about a workspace, whose id is made the same way. */
 export function findDraft<T extends { id: string; company: string; role: string; status: string; updatedAt?: string; url?: string }>(
@@ -1286,7 +1413,8 @@ export class AlreadySent extends Error {
     super(
       maybe
         ? `You may have applied to this already: ${application.company} — ${application.role} was sent` +
-            `${application.appliedAt ? ` on ${localDay(new Date(application.appliedAt))}` : ''}` +
+            // The day it went, which the history knows (`sendOf`); `appliedAt` is the day the row was made.
+            `${sendOf(application)?.at ? ` on ${localDay(new Date(sendOf(application)!.at!))}` : ''}` +
             `${application.url ? ` (${application.url})` : ''}, and this may be the same job. ` +
             'Nothing was staged. Say it is another job to file it as a new application.'
         : `${application.company} — ${application.role} has already been sent, so its files were not rebuilt. ` +
@@ -1302,8 +1430,14 @@ export function refusedAsSent(
 ): { application: Application; maybe: boolean } | null {
   if (req.status !== 'applying' || req.evenIfSent) return null;
   const apps = store.load().applications;
-  // Only a row this job is surely: see `forWriting`.
-  const app = applicationToWrite(apps, req.company, req.role, req.url);
+  // Only a row this job is surely: see `forWriting`. Never one the app filed
+  // by itself and nobody has touched, which says nothing (`openedUnasked`).
+  const app = applicationToWrite(
+    apps.filter((a) => !openedUnasked(a)),
+    req.company,
+    req.role,
+    req.url,
+  );
   if (app && sentAlready(app)) return { application: app, maybe: false };
   // Or a sent row it may be, which is asked about: see `maybeSent`.
   const maybe = maybeSent(apps, req.company, req.role, req.url);

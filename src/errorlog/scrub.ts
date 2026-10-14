@@ -1,0 +1,264 @@
+import { withoutContactDetails } from '../ai/privacy.js';
+import { redactUrls } from '../git/repo.js';
+import type { LogEvent } from './buffer.js';
+
+/**
+ * What never goes into the error log, however it got into a log line.
+ *
+ * The error log is a git repository meant to be pushed — to a private
+ * repository, but pushed — and the lines in it are written by code that was
+ * not thinking about that: a git error quoting the remote it could not reach,
+ * a request log naming the address it was asked for, a console warning
+ * repeating whatever the exception said. So every line is cleaned on its way
+ * into an entry, whoever wrote it:
+ *
+ * - **Contact details**, by the same rule the AI's prompts use
+ *   (`withoutContactDetails`): an email, a phone number, a street address.
+ * - **Tokens in addresses**, by the same rule the remote and push code use
+ *   (`redactUrls`): `https://alice:ghp_…@github.com/…` keeps the user and
+ *   loses the token.
+ * - **Credentials named as such**: an `Authorization` header and what follows
+ *   it, the pairing header (`X-RMM-Pair`), a `Bearer …`, and a `token=`,
+ *   `secret: …` or `password=` written out in a message.
+ * - **Query strings that carry one**: `?token=`, `&key=`, `?code=`, `secret`,
+ *   `signature` and the like — a sign-in callback, a signed link.
+ * - **The shapes tokens come in**, for one pasted somewhere with no name in
+ *   front of it: GitHub's, OpenAI's and Anthropic's, Slack's, AWS key ids,
+ *   Stripe's, Google API keys, npm's, JSON web tokens, and private keys.
+ *
+ * What is not here is the bigger rule: answer text, letter bodies, resume
+ * text, form field values and prompts are never put in a log line in the
+ * first place. A scrub catches a secret that slipped into a message; it
+ * cannot be what keeps a cover letter out.
+ */
+const MASK = '[redacted]';
+
+const HEADER = /\b(authorization|proxy-authorization|x-rmm-pair|cookie|set-cookie)(["']?\s*[:=]\s*["']?)(?:(bearer|basic|token|digest)\s+)?[^\s"',;]+/gi;
+const BEARER = /\b(bearer)\s+[A-Za-z0-9._~+/-]+=*/gi;
+/*
+ * The value stops at an "@": in "https://x-access-token:ghs_…@github.com/o/r.git"
+ * the name is followed by the token and then the host, and the host and the
+ * repository went with the token. A value already masked — `redactUrls`'s
+ * "•••" — is left as it is, for the same reason.
+ */
+const NAMED = /\b((?:access[_-]?|refresh[_-]?|id[_-]?|api[_-]?|auth[_-]?|session[_-]?)?(?:token|secret|password|passwd|api[_-]?key|apikey|client[_-]?secret))(["']?\s*[:=]\s*["']?)(?!\[redacted\]|•••)[^\s"',;&@]+/gi;
+const QUERY = /([?&#;][\w.-]*(?:token|key|secret|code|password|passwd|auth|sig|signature|session|pair)[\w.-]*=)[^&#\s"'<>]*/gi;
+const SHAPES: RegExp[] = [
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/g,
+  /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+  // Stripe's secret and restricted keys.
+  /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
+  // Google API keys.
+  /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g,
+  // npm access tokens.
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  // A private key, to its END line — or to the end of the line, when a log cut it off before that.
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
+];
+
+/** The longest a single line may be once it is in the log. */
+export const MAX_LINE = 2000;
+
+/** `text` with every secret this knows the shape of masked. Contact details are left. */
+export function withoutSecrets(text: string): string {
+  let out = redactUrls(String(text ?? ''));
+  out = out.replace(HEADER, (_all, name: string, sep: string, scheme?: string) => `${name}${sep}${scheme ? `${scheme} ` : ''}${MASK}`);
+  out = out.replace(BEARER, (_all, word: string) => `${word} ${MASK}`);
+  out = out.replace(QUERY, (_all, name: string) => `${name}${MASK}`);
+  out = out.replace(NAMED, (_all, name: string, sep: string) => `${name}${sep}${MASK}`);
+  for (const shape of SHAPES) out = out.replace(shape, MASK);
+  return out;
+}
+
+/*
+ * A phone number written into an address or an id: "617-555-0134" between a
+ * "-" and a "/", "jane_617.555.0134". The contact-details rule reads prose,
+ * and in a path it leaves digit runs alone on purpose ("/api/v2/1234567890"
+ * is an id), so a number joined to its neighbours went into the log whole.
+ * Only one written as a phone is — three, three and four digits with a
+ * separator between each, a country code allowed — so a LinkedIn job number
+ * (ten digits, no separators) stays readable.
+ */
+const JOINED_PHONE = /(?<![A-Za-z0-9])(?:\+?1[-._])?\d{3}[-._]\d{3}[-._]\d{4}(?![A-Za-z0-9])/g;
+
+/*
+ * What a log line has in it that is not a phone number, however many digits
+ * it has: the contact rule reads prose, where ten digits are a phone, and a
+ * log line is about machines.
+ *
+ * - **A date and time**, ISO ("2024-10-14 12:00", "2026-10-14T08:15:30Z") or
+ *   day first ("14.10.2026 12:00"): the date's eight digits and the hour
+ *   were ten, and came out "[phone number]:00".
+ * - **A time in milliseconds**, thirteen digits from 2001 to 2033
+ *   ("timestamp 1728907200000").
+ * - **A number named as a machine's**: "job 4012345678", "pid 4123456789",
+ *   "commit 0123456789", "overflow 1234567890 pt". Only one unbroken run of
+ *   digits: written as a phone is written — "(617) 555-0134", "+1 617 555
+ *   0134", "617-555-0134" — it is still taken out, whatever is in front.
+ *   Not after "line", "code", "status", "count" or "row": those are words a
+ *   person writes about a phone too ("phone line 6175550134"), and a line
+ *   number or a status is never ten digits. Nor with "phone", "tel",
+ *   "cell" or "WhatsApp" right before the name — "Phone (ID 6175550134)"
+ *   is a phone number whatever word is next to it. Further back, the name
+ *   next to the number wins: "tel: link handler pid 1234567890" is a pid.
+ *
+ * Not "call", which is a word about software far more often than about a
+ * phone ("API call failed for job …", "call stack: commit …"); and "mobile"
+ * and "SMS" only where a number or a word for one follows them ("Mobile:
+ * 6175550134", "SMS number") and not in "Mobile build 2024061512".
+ */
+const PHONE_WORD = String.raw`\b(?:phones?|tel|telephone|cell(?:phone)?|whatsapp|(?:mobile|sms)(?=\W*(?:phones?\b|numbers?\b|no\b|nr\b|line\b|#|\+?\d)))\b`;
+/*
+ * A word for the number itself, between the phone word and the name: "Phone
+ * number ID 6175550134", "Phone no. id: …", "whatsapp user id …", "cell
+ * number id=…" are phone numbers as "Phone ID …" is, and the name of an id
+ * alone ("ID") let them through as a machine's.
+ */
+const PHONE_NUMBER_WORD = String.raw`(?:\W{0,3}(?:numbers?|no|nr|num|user)\b)?`;
+const PHONE_SAID = String.raw`${PHONE_WORD}\W*(?:\w+\W+){0,3}`;
+/*
+ * One unbroken run of a phone's digits with "phone" or its like a few words
+ * before: the contact rule lets "Phone (ID 6175550134)" through as an ID, and
+ * here it is a phone number whatever word is next to it.
+ */
+const PHONE_NAMED = new RegExp(String.raw`(?<=${PHONE_SAID})(?<![\w.+-])\+?1?\d{10}(?![\w]|[.-]\w)`, 'gi');
+const DAY = '(?:19|20)\\d\\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])';
+const DAY_FIRST = '(?:0?[1-9]|[12]\\d|3[01])\\.(?:0?[1-9]|1[0-2])\\.(?:19|20)\\d\\d';
+const CLOCK = '(?:[01]?\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:[.,]\\d{1,9})?)?(?:\\s?(?:Z|[+-](?:[01]\\d|2[0-3]):?[0-5]\\d))?';
+const NOT_PHONE: RegExp[] = [
+  new RegExp(`(?<![\\w.-])(?:${DAY}(?:[T ]${CLOCK})?|${DAY_FIRST}(?:,?\\s+${CLOCK})?)(?![\\w])`, 'g'),
+  /(?<![\w.+-]|\d[\s().-]{1,3})1\d{12}(?![\w]|[\s().-]{1,3}\d)/g,
+  new RegExp(
+    String.raw`(?<=\b(?<!${PHONE_WORD}${PHONE_NUMBER_WORD}\W{0,3})(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|overflow|exit|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)`,
+    'gi',
+  ),
+  /(?<![\w.+-]|\d[\s().-]{1,3})\d+(?=\s?(?:ms|sec|bytes|KB|MB|GB|KiB|MiB|GiB|pt|px)\b)/g,
+];
+
+/** The contact-details rule, and a phone number joined into a path (`JOINED_PHONE`), with `NOT_PHONE` kept. */
+function withoutContact(text: string): string {
+  // Each kept stretch set aside as one character no rule reads as part of a number, and put back after.
+  const kept: string[] = [];
+  let out = text;
+  // A line with such characters of its own is read as it is: they would be taken for the ones set aside.
+  for (const shape of /[\ue000-\uf8ff]/.test(text) ? [] : NOT_PHONE) {
+    out = out.replace(shape, (all) => {
+      kept.push(all);
+      return String.fromCharCode(0xe000 + kept.length - 1);
+    });
+    if (kept.length > 6000) return withoutContactDetails(text).replace(JOINED_PHONE, '[phone number]');
+  }
+  out = withoutContactDetails(out).replace(JOINED_PHONE, '[phone number]').replace(PHONE_NAMED, '[phone number]');
+  return kept.length ? out.replace(/[\ue000-\uf8ff]/g, (c) => kept[c.charCodeAt(0) - 0xe000] ?? c) : out;
+}
+
+/**
+ * `text` with its percent-escapes undone, as far as they undo: a request
+ * line names `jane.doe%40example.com`, which no rule reads as an email. Up to
+ * three times, for an address escaped twice; a run that is not valid UTF-8 is
+ * left as it was.
+ */
+function decoded(text: string): string {
+  let out = text;
+  for (let i = 0; i < 3; i++) {
+    const next = out.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run;
+      }
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** A line fit for the error log: no secrets, no contact details, not too long. */
+/*
+ * Read decoded as well. When the decoded line has something to take out, it
+ * is the decoded line, scrubbed, that is kept — the escaped one would keep
+ * the email the rules cannot see in it. Otherwise the line stays as it was
+ * written, escapes and all.
+ */
+export function scrubText(text: string, max = MAX_LINE): string {
+  const raw = String(text ?? '');
+  let clean = withoutContact(withoutSecrets(raw));
+  const plain = decoded(raw);
+  if (plain !== raw) {
+    const scrubbedPlain = withoutContact(withoutSecrets(plain));
+    if (scrubbedPlain !== plain) clean = scrubbedPlain;
+  }
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+/** An address fit for the error log: its query string's secrets gone, and no token in front of the host. */
+export function scrubUrl(url: string): string {
+  return scrubText(url, 500);
+}
+
+const LEVELS = new Set(['error', 'warn', 'info']);
+
+/**
+ * One event, from anywhere, made safe to keep: its text scrubbed, its detail
+ * cut to small plain values, its time a real time. Undefined for something
+ * that is not an event at all.
+ */
+export function scrubEvent(raw: unknown, source?: string): LogEvent | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const e = raw as Record<string, unknown>;
+  const at = typeof e.at === 'string' || typeof e.at === 'number' ? new Date(e.at) : undefined;
+  if (!at || !Number.isFinite(at.getTime())) return undefined;
+  const message = typeof e.message === 'string' ? e.message : '';
+  if (!message.trim()) return undefined;
+  const detail: Record<string, string | number | boolean | null> = {};
+  if (e.detail && typeof e.detail === 'object') {
+    for (const [key, value] of Object.entries(e.detail as Record<string, unknown>).slice(0, 12)) {
+      if (!/^[A-Za-z][\w-]{0,31}$/.test(key)) continue;
+      if (typeof value === 'string') detail[key] = scrubText(value, 300);
+      else if (typeof value === 'number' && Number.isFinite(value)) detail[key] = value;
+      else if (typeof value === 'boolean' || value === null) detail[key] = value;
+    }
+  }
+  const kind = typeof e.kind === 'string' && /^[\w -]{1,32}$/.test(e.kind) ? e.kind : 'event';
+  const from = source ?? (typeof e.source === 'string' && /^[\w -]{1,32}$/.test(e.source) ? e.source : 'unknown');
+  return {
+    at: at.toISOString(),
+    source: from,
+    kind,
+    level: LEVELS.has(e.level as string) ? (e.level as LogEvent['level']) : 'info',
+    message: scrubText(message),
+    ...(Object.keys(detail).length ? { detail } : {}),
+  };
+}
+
+/**
+ * Events from several places, each scrubbed, kept to the window that ends at
+ * `until`, and put in the order they happened. Ties keep the order they came
+ * in, so two events in one millisecond from one place stay as they were.
+ */
+export function mergeEvents(
+  lists: { events: unknown[]; source?: string }[],
+  { until, minutes, max = 5000 }: { until: Date; minutes: number; max?: number },
+): LogEvent[] {
+  const from = until.getTime() - minutes * 60 * 1000;
+  const to = until.getTime() + 5_000; // A client clock a moment ahead is still this window.
+  const all: { event: LogEvent; n: number }[] = [];
+  let n = 0;
+  for (const { events, source } of lists) {
+    for (const raw of Array.isArray(events) ? events : []) {
+      const event = scrubEvent(raw, source);
+      if (!event) continue;
+      const t = Date.parse(event.at);
+      if (t < from || t > to) continue;
+      all.push({ event, n: n++ });
+    }
+  }
+  all.sort((a, b) => a.event.at.localeCompare(b.event.at) || a.n - b.n);
+  return all.slice(-max).map((x) => x.event);
+}

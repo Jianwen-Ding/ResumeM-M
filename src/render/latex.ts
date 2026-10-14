@@ -25,10 +25,48 @@ const ESCAPES: Record<string, string> = {
  * the rule that handles literal braces.
  */
 export function tex(input: string): string {
+  return extractable(plainTex(input));
+}
+
+/**
+ * `tex` for a section heading, which titlesec and hyperref carry into places
+ * the `\BeginAccSupp` of `extractable` cannot go — "Missing \endcsname" and
+ * no PDF. A heading with a Latvian letter in it extracts as T1 sets it.
+ */
+export function headingTex(input: string): string {
+  return plainTex(input);
+}
+
+/*
+ * Characters that are not there: the zero-width spaces, joiners and
+ * direction marks (U+200B–200F, U+2060–2064) and the byte order mark
+ * (U+FEFF) that come in with text pasted from a browser or a PDF. Each is
+ * invisible on the page the person copied from and invisible in the editor,
+ * and each stopped the whole resume with a message naming a character
+ * nobody could see. They mean nothing to a typesetter, so they are dropped.
+ * The soft hyphen (U+00AD) stays: T1 sets it, and it says where a word may
+ * break.
+ */
+const INVISIBLE = /[\u200b-\u200f\u2060-\u2064\ufeff]/g;
+
+function plainTex(input: string): string {
   return (
     String(input ?? '')
       .normalize('NFC')
+      .replace(INVISIBLE, '')
       .replace(/[\\&%$#_{}~^]/g, (ch) => ESCAPES[ch] ?? ch)
+      /*
+       * The typographic spaces French and German typing put in: the narrow
+       * no-break space before "%" and ":" that a French keyboard layout
+       * writes (U+202F), the thin space (U+2009), and the figure and
+       * punctuation spaces (U+2007, U+2008) between digits. T1 has no glyph
+       * for any of them and the resume was refused for a space. They set as
+       * what they mean: a thin space, and a non-breaking one. After the
+       * escaping, because `\,` has a backslash in it and `~` is itself
+       * escaped above.
+       */
+      .replace(/[\u202f\u2009]/g, '\\,')
+      .replace(/[\u2007\u2008]/g, '~')
       /*
        * T1 fonts carry ligatures for `<<`, `>>` and `,,`: they set as « » and
        * a low „, so `std::cout << x` printed with a guillemet in it. An empty
@@ -38,6 +76,37 @@ export function tex(input: string): string {
        */
       .replace(/([<>,])(?=\1)/g, '$1{}')
   );
+}
+
+/*
+ * Letters T1 sets by stacking an accent on a base glyph, which the PDF's text
+ * layer then reads back as the two pieces: the Latvian and Lithuanian letters
+ * with a comma, a macron or an ogonek — ņ ķ ļ ŗ ģ ī ų į — came out of
+ * pdftotext as "n,", "k,", "ı̄" and "u˛", and Đ as Ð. A name is the one thing
+ * an applicant tracking system reads off the PDF and compares, and Jānis
+ * Bērziņš's extracted as "Jānis Bērzin, š".
+ *
+ * accsupp's `ActualText` tells the reader what a span of glyphs *says*,
+ * whatever glyphs it is drawn with, and poppler and the ATS parsers honour
+ * it. Over the whole word rather than the one letter: the accent glyph sits
+ * back under its base, and a reader asked about the letter alone still put a
+ * space after it ("Bērziņ š"). A word is a run of letters.
+ */
+const EXTRACTS_WRONG = new Set([
+  0x0110, // Đ, read as Ð
+  0x0122, 0x0123, 0x0136, 0x0137, 0x013b, 0x013c, 0x0145, 0x0146, 0x0156, 0x0157, // comma below
+  0x0129, 0x012b, 0x012d, 0x0135, 0x01d0, // a dotless i or j with its accent
+  0x012e, 0x012f, 0x0172, 0x0173, // ogonek
+]);
+const WORD = /\p{L}+/gu;
+
+function extractable(set: string): string {
+  if (!/[\u0110\u0122-\u0173\u01d0]/.test(set)) return set;
+  return set.replace(WORD, (word) => {
+    if (![...word].some((ch) => EXTRACTS_WRONG.has(ch.codePointAt(0) ?? 0))) return word;
+    const hex = [...word].map((ch) => ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')).join('');
+    return `\\BeginAccSupp{method=hex,unicode,ActualText=${hex}}${word}\\EndAccSupp{}`;
+  });
 }
 
 /*
@@ -71,10 +140,18 @@ const PUNCTUATION = new Set([
   0x2010, 0x2011, 0x2012, 0x2013, 0x2014, // hyphens and dashes
   0x2018, 0x2019, 0x201a, 0x201c, 0x201d, 0x201e, // curly quotes
   0x2020, 0x2021, 0x2022, 0x2026, 0x2030, // dagger, bullet, ellipsis, permille
-  0x2039, 0x203a, 0x2044, 0x20ac, 0x2122, 0x2192, // guillemets, euro, arrow
+  0x2039, 0x203a, 0x2044, 0x20ac, 0x2122, 0x2190, 0x2192, // guillemets, euro, arrows
+  0x2116, // № — "Order № 12", as Russian and Polish write it
   // Ligatures as single code points. Nobody types these, but copying your own
   // last resume out of its PDF pastes "ﬁrst" rather than "first".
   0xfb00, 0xfb01, 0xfb02, 0xfb03, 0xfb04,
+  /*
+   * The letters with a caron that pinyin writes the third tone with — Ǎ ǎ Ǐ
+   * ǐ Ǒ ǒ Ǔ ǔ (U+01CD–01D4) — which T1 composes from the letter and the
+   * accent as it does Dvořák's ř. Measured by the same probe as the rest,
+   * and refused for being past Latin Extended-A.
+   */
+  0x01cd, 0x01ce, 0x01cf, 0x01d0, 0x01d1, 0x01d2, 0x01d3, 0x01d4,
 ]);
 
 function renderable(code: number): boolean {
@@ -135,27 +212,123 @@ export function unsupportedCharacters(text: string): UnsupportedCharacter[] {
  * half of it markup the person never typed and cannot find. Quoted from the
  * field that holds the character instead, it is their own sentence.
  */
+/** A field the person wrote, named when the caller knows which it is. */
+export type OwnField = string | { field: string; text: string | undefined } | undefined;
+
+/*
+ * What an invisible character is called, so the message can say "an invisible
+ * zero-width space (U+200B)" rather than print a character nobody can see
+ * between two parentheses. The ones `tex` drops never reach this; these are
+ * the rest of the format and separator characters pasted text carries.
+ */
+const INVISIBLE_NAMES: Record<number, string> = {
+  0x00ad: 'soft hyphen',
+  0x034f: 'combining grapheme joiner',
+  0x061c: 'Arabic letter mark',
+  0x180e: 'Mongolian vowel separator',
+  0x200b: 'zero-width space',
+  0x200c: 'zero-width non-joiner',
+  0x200d: 'zero-width joiner',
+  0x200e: 'left-to-right mark',
+  0x200f: 'right-to-left mark',
+  0x2028: 'line separator',
+  0x2029: 'paragraph separator',
+  0x202a: 'left-to-right embedding',
+  0x202b: 'right-to-left embedding',
+  0x202c: 'pop directional formatting',
+  0x202d: 'left-to-right override',
+  0x202e: 'right-to-left override',
+  0x2060: 'word joiner',
+  0x2061: 'function application',
+  0x2062: 'invisible times',
+  0x2063: 'invisible separator',
+  0x2064: 'invisible plus',
+  0x2066: 'left-to-right isolate',
+  0x2067: 'right-to-left isolate',
+  0x2068: 'first strong isolate',
+  0x2069: 'pop directional isolate',
+  0xfeff: 'byte order mark',
+};
+
+/** How one unsupported character is named in the message. */
+function describeCharacter(c: UnsupportedCharacter): string {
+  const code = c.char.codePointAt(0) ?? 0;
+  const invisible = INVISIBLE_NAMES[code] ?? (/\p{Cf}/u.test(c.char) ? 'formatting character' : undefined);
+  if (invisible) return `an invisible ${invisible} (${c.codePoint})`;
+  if (/\p{Zs}/u.test(c.char)) return `a typographic space (${c.codePoint})`;
+  return `${c.char} (${c.codePoint})`;
+}
+
+const isLetter = (c: UnsupportedCharacter) => /\p{L}/u.test(c.char);
+const isEmoji = (c: UnsupportedCharacter) => /\p{Extended_Pictographic}/u.test(c.char);
+const isInvisible = (c: UnsupportedCharacter) => /^an invisible/.test(describeCharacter(c));
+
+/*
+ * The sentence about what the engine can set, said about what was found: the
+ * list of scripts only when a letter from one of them is the trouble. Over a
+ * zero-width space it read "text in Chinese, Japanese, Korean … cannot go in
+ * the PDF", about a resume with no such text in it, and sent its reader
+ * looking for Chinese.
+ */
+function whatItCannotSet(bad: UnsupportedCharacter[]): string {
+  const parts: string[] = [];
+  if (bad.some(isLetter)) {
+    parts.push(
+      'It sets Latin scripts only, so text in Chinese, Japanese, Korean, Cyrillic, Greek, Arabic or Hebrew cannot go in the PDF.',
+    );
+  }
+  if (bad.some(isEmoji)) parts.push(`${parts.length ? 'Nor can' : 'It sets Latin letters and ordinary punctuation only, so'} emoji${parts.length ? '' : ' cannot go in the PDF'}.`);
+  if (bad.some(isInvisible)) {
+    parts.push('An invisible character comes in with pasted text and can simply be deleted where it is quoted below.');
+  }
+  if (parts.length === 0) parts.push('It sets Latin letters and ordinary punctuation only.');
+  return parts.join(' ');
+}
+
+/*
+ * And the way out when the trouble is the name.
+ *
+ * A name written in Chinese or Cyrillic is nothing the person did wrong, and
+ * the message named the character and stopped — with no PDF, and nothing
+ * saying what to do. Where the only unrenderable characters are in
+ * `profile.name`, the message ends with the one thing that works: a Latin
+ * spelling, or an alternate name pinned for printing, with the original kept
+ * for the forms the extension fills in. (`resolveProfile` prints a renderable
+ * alternate on its own when the store has one; this is the message for when
+ * it does not.)
+ */
+const NAME_WAY_OUT =
+  'Give your name a Latin spelling in profile.yaml — or add an alternate name and pin it — and keep the original for forms.';
+
 export function unrenderableReason(
   text: string,
   what: 'resume' | 'cover letter' = 'resume',
-  own: readonly (string | undefined)[] = [],
+  own: readonly OwnField[] = [],
 ): string | undefined {
   const bad = unsupportedCharacters(text);
   if (bad.length === 0) return undefined;
   const first = bad[0]!;
+  const fields = own
+    .map((f) => (typeof f === 'string' ? { field: undefined, text: f } : f))
+    .filter((f): f is { field: string | undefined; text: string } => typeof f?.text === 'string');
+  const holding = (c: UnsupportedCharacter) => fields.filter((f) => f.text.normalize('NFC').includes(c.char));
   const near =
-    own
-      .filter((field): field is string => typeof field === 'string' && field.normalize('NFC').includes(first.char))
-      .map((field) => unsupportedCharacters(field).find((c) => c.char === first.char)?.context)
+    holding(first)
+      .map((f) => unsupportedCharacters(f.text).find((c) => c.char === first.char)?.context)
       .find(Boolean) ?? first.context;
+  const where = holding(first).find((f) => f.field)?.field;
+  const onlyInName = bad.every((c) => {
+    const held = holding(c);
+    return held.length > 0 && held.every((f) => f.field === 'profile.name');
+  });
 
-  const shown = bad.slice(0, 6).map((b) => `${b.char} (${b.codePoint})`).join(', ');
+  const shown = bad.slice(0, 6).map(describeCharacter).join(', ');
   const more = bad.length > 6 ? `, and ${bad.length - 6} more` : '';
   return (
     `This ${what} contains ${bad.length} character${bad.length === 1 ? '' : 's'} the LaTeX ` +
-    `engine cannot typeset: ${shown}${more}. It sets Latin scripts only, so text in ` +
-    `Chinese, Japanese, Korean, Cyrillic, Greek, Arabic or Hebrew — and emoji — cannot go ` +
-    `in the PDF. First occurrence near: "${near}".`
+    `engine cannot typeset: ${shown}${more}. ${whatItCannotSet(bad)} ` +
+    `First occurrence ${where ? `in ${where}, ` : ''}near: "${near}".` +
+    (onlyInName ? ` ${NAME_WAY_OUT}` : '')
   );
 }
 
@@ -544,6 +717,9 @@ export function stablePreamble(paper: LayoutOptions['paper'] = 'letter'): string
 \\usepackage{verbatim}
 \\usepackage{enumitem}
 \\usepackage[hidelinks]{hyperref}
+% \`ActualText\` for the words whose letters the PDF's text layer otherwise reads
+% back in pieces; see \`extractable\` in latex.ts.
+\\usepackage{accsupp}
 \\usepackage{fancyhdr}
 \\usepackage[english]{babel}
 \\usepackage{tabularx}
@@ -762,7 +938,7 @@ function section(s: ResolvedSection): string {
     const lines = groups
       .map((g) => `     \\textbf{${lineTex(g.name)}}{: ${lineTex(g.items.join(', '))}}`)
       .join(' \\\\\n');
-    return `\\section{${tex(s.heading)}}
+    return `\\section{${headingTex(s.heading)}}
  \\begin{itemize}[leftmargin=0.15in, label={}]
     \\small{\\item{
 ${lines}
@@ -808,7 +984,7 @@ ${lines}
     })
     .join('\n');
 
-  return `\\section{${tex(s.heading)}}
+  return `\\section{${headingTex(s.heading)}}
   \\resumeSubHeadingListStart
 ${body}
   \\resumeSubHeadingListEnd`;

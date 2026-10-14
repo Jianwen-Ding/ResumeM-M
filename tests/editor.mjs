@@ -526,6 +526,18 @@ async function main() {
       if (anyDates > 0) {
         check('with a month to pick', (await dated.locator('select.date-month').count()) > 0);
         check('and a year to type', (await dated.locator('input.date-year').count()) > 0);
+        /*
+         * Every year whole in its box. The general rule for number fields
+         * once outweighed `.date-year`'s own smaller padding, and each year
+         * read "202" with its last digit scrolled out of sight.
+         */
+        const cutYears = await page.evaluate(() =>
+          [...document.querySelectorAll('#editor input.date-year')]
+            .filter((y) => y.offsetParent && y.scrollWidth > y.clientWidth)
+            .map((y) => `${y.value || y.placeholder} (${y.scrollWidth} in ${y.clientWidth})`)
+            .slice(0, 3),
+        );
+        check('and every year shows all four digits', cutYears.length === 0, cutYears.join(' | '));
 
         /*
          * The one that keeps regressing: a text input whose value looks like
@@ -1491,6 +1503,17 @@ async function main() {
         await page.locator('#resume-select option').first().waitFor({ state: 'attached', timeout: 30_000 });
         await page.locator('#resume-select').selectOption(squeezed);
 
+        /*
+         * The chip goes idle the moment the switch schedules its compile,
+         * and only then answers. Waited for in that order: polled for a
+         * settled answer alone, this read the previous resume's "Fits on one
+         * page" — settled, and about the wrong document — in the moments
+         * before the switch had asked for anything.
+         */
+        await page.waitForFunction(() => document.querySelector('#fit')?.classList.contains('idle'), null, {
+          timeout: 30_000,
+          polling: 50,
+        });
         await page.waitForFunction(
           () => {
             const chip = document.querySelector('#fit');
@@ -1728,6 +1751,82 @@ async function main() {
         }
       } finally {
         await fetch(`${server.url}/api/workspace/${encodeURIComponent(draft.id)}`, { method: 'DELETE' }).catch(() => undefined);
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+      }
+    }
+
+    /*
+     * Undo and redo of a resume taken away, against what the server counts:
+     * an application that went out. Redoing a delete already confirmed was
+     * refused for the application it went out with, and sent no `force`;
+     * undoing "Save as variation" was refused for a row at Interested, which
+     * the server would have let go.
+     */
+    console.log('\nTaking a resume away again, by undo and by redo');
+    {
+      const listed = async () => (await (await fetch(`${server.url}/api/resumes`)).json()).map((r) => r.id);
+      const json = { 'Content-Type': 'application/json' };
+      const record = async (company, status, resumeId) =>
+        (
+          await (
+            await fetch(`${server.url}/api/applications`, {
+              method: 'POST',
+              headers: json,
+              body: JSON.stringify({ company, role: 'Redo Probe Engineer', status, resumeId }),
+            })
+          ).json()
+        );
+      const rows = [];
+      const probe = 'redo-sent-probe';
+      try {
+        await fetch(`${server.url}/api/resumes/${probe}?commit=0`, {
+          method: 'PUT',
+          headers: json,
+          body: JSON.stringify({ label: 'Redo sent probe', tier: 'extended', sections: [] }),
+        });
+        rows.push(await record('Redo Sent Co', 'applied', probe));
+        await reloaded();
+        await page.locator('#tabs button[data-tab="resumes"]').click();
+        await page.selectOption('#resume-select', probe);
+        await pickerSays('Redo sent probe');
+        await page.locator('#btn-delete-resume').click();
+        await dialogUp();
+        await page.locator('#modal-ok').click();
+        const gone = () => pollFor(async () => !(await listed()).includes(probe));
+        const back = () => pollFor(async () => (await listed()).includes(probe));
+        check('a resume an application went out with is deleted, once confirmed', await gone());
+        await page.locator('#btn-undo').click();
+        check('undo puts it back', await back());
+        await settled(/\/api\//);
+        await page.locator('#btn-redo').click();
+        const redone = await gone();
+        const said = await page.locator('#status').innerText().catch(() => '');
+        check('and redo deletes it again, as confirmed, without asking twice', redone, said);
+
+        // A row at Interested is not one it went out with: the server lets the copy go, and so does undo.
+        await page.selectOption('#resume-select', (await listed())[0]);
+        await settled(/\/api\//);
+        await page.locator('#btn-save-as').click();
+        await dialogUp();
+        await page.locator('#f_label').fill('Undo interested probe');
+        await page.locator('#f_id').fill('undo-interested-probe');
+        await page.locator('#modal-ok').click();
+        await pickerSays('Undo interested probe');
+        rows.push(await record('Undo Interested Co', 'interested', 'undo-interested-probe'));
+        await settled(/\/api\//);
+        await page.locator('#btn-undo').click();
+        const undone = await pollFor(async () => !(await listed()).includes('undo-interested-probe'));
+        const note = await page.locator('#status').innerText().catch(() => '');
+        check('undoing "Save as variation" takes it away when only an unsent application names it', undone, note);
+      } finally {
+        for (const row of rows) {
+          const id = row?.id ?? row?.application?.id;
+          if (id) await fetch(`${server.url}/api/applications/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => undefined);
+        }
+        for (const id of [probe, 'undo-interested-probe']) {
+          await fetch(`${server.url}/api/resumes/${id}?force=1`, { method: 'DELETE' }).catch(() => undefined);
+        }
+        await reloaded();
         await page.locator('#tabs button[data-tab="resumes"]').click();
       }
     }
@@ -2838,6 +2937,767 @@ async function main() {
       split.scrollWidth <= split.clientWidth + 1,
       `${Math.round(split.scrollWidth)} wide inside ${Math.round(split.clientWidth)}`,
     );
+
+    /*
+     * The header and what floats over the page, at the widths where each
+     * went wrong. Each on a page of its own, so nothing above is disturbed.
+     */
+    {
+      const LONG_ERR = "Could not save Experience: EACCES: permission denied, open '/home/jane/Resumes/experience.yaml' — try again.";
+      const at = async (width, height, run) => {
+        const p = await browser.newPage({ viewport: { width, height } });
+        p.on('pageerror', (e) => errors.push(e.message));
+        try {
+          await p.goto(server.url, { waitUntil: 'domcontentloaded' });
+          await p.waitForFunction(() => !document.querySelector('#tabs button[data-tab="resumes"]').disabled, null, { timeout: 15_000 }).catch(() => {});
+          await p.evaluate(() => document.fonts.ready);
+          return await run(p);
+        } finally {
+          await p.close();
+        }
+      };
+      // What `setStatus` does with an error: the words, then `fitStatus`.
+      const sayError = (p, text) =>
+        p.evaluate(async (text) => {
+          const { fitStatus } = await import('/header.js');
+          const s = document.querySelector('#status');
+          s.textContent = text;
+          s.title = text;
+          s.className = 'status err';
+          fitStatus(s);
+        }, text);
+
+      /*
+       * An error in the status line wrapped the header onto another line at
+       * 800px, and `--header-h` was not measured again: the sticky toolbar
+       * slid under the header. The header keeps its height; the error floats.
+       */
+      for (const width of [1024, 800]) {
+        const got = await at(width, 900, async (p) => {
+          await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+          await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+          await p.waitForTimeout(100);
+          const header = () => p.evaluate(() => document.querySelector('header').getBoundingClientRect().height);
+          const before = await header();
+          await sayError(p, LONG_ERR);
+          return p.evaluate((before) => {
+            const h = document.querySelector('header').getBoundingClientRect().height;
+            const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-h'));
+            return { before, h, v };
+          }, before);
+        });
+        check(
+          `an error in the status line does not move the header at ${width}px`,
+          Math.abs(got.h - got.before) < 0.5 && Math.abs(got.h - got.v) < 1,
+          `header ${got.before} → ${got.h}, --header-h ${got.v}`,
+        );
+      }
+
+      /*
+       * The error floating in the corner could not be put away, and at 390px
+       * sat over "+ Add skill group" at the foot of the page for good.
+       */
+      const toast = await at(390, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await sayError(p, LONG_ERR);
+        await p.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+        await p.waitForTimeout(100);
+        const covered = await p.evaluate(() => {
+          const st = document.querySelector('#status').getBoundingClientRect();
+          return [...document.querySelectorAll('.tab.active button')]
+            .filter((b) => b.offsetParent && b.id !== 'status-dismiss')
+            .filter((b) => {
+              const r = b.getBoundingClientRect();
+              const x = r.left + r.width / 2;
+              const y = r.top + r.height / 2;
+              return x >= st.left && x <= st.right && y >= st.top && y <= st.bottom;
+            })
+            .map((b) => b.textContent.trim().slice(0, 30));
+        });
+        const dismiss = p.locator('#status-dismiss');
+        const shown = await dismiss.isVisible().catch(() => false);
+        const label = shown ? (await dismiss.getAttribute('aria-label')) ?? '' : '';
+        if (shown) await dismiss.click({ timeout: 3_000 }).catch(() => {});
+        const after = await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          return { text: s.textContent, visible: getComputedStyle(s).display !== 'none' && s.getBoundingClientRect().height > 0 };
+        });
+        return { covered, shown, label, after };
+      });
+      check('a floating error leaves the controls at the foot of the page clear of it', toast.covered.length === 0, toast.covered.join(' | '));
+      check('and has a labelled button to put it away', toast.shown && /dismiss|close/i.test(toast.label), toast.label || 'none');
+      check('and pressing it puts the error away', toast.shown && toast.after.text === '' && !toast.after.visible, JSON.stringify(toast.after));
+
+      /*
+       * And the focus went to <body> with it: the × hides itself as it is
+       * pressed. It goes back to where the person was before the error, or,
+       * when that is gone, to "Log an error".
+       */
+      const refocus = await at(390, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        const field = p.locator('#editor input:visible, #editor textarea:visible').first();
+        await field.focus().catch(() => {});
+        const before = await p.evaluate(() => document.activeElement?.outerHTML.slice(0, 80) ?? '');
+        await p.evaluate(() => document.activeElement?.setAttribute('data-refocus', '1'));
+        await sayError(p, LONG_ERR);
+        await p.locator('#status-dismiss').click({ timeout: 3_000 }).catch(() => {});
+        const back = await p.evaluate(() => document.activeElement?.getAttribute('data-refocus') === '1');
+        // A button that is gone by the time the error is put away, pressed by keyboard.
+        await p.evaluate(() => {
+          const b = document.createElement('button');
+          b.id = 'refocus-gone';
+          b.textContent = 'gone';
+          document.querySelector('#editor').prepend(b);
+          b.focus();
+        });
+        await sayError(p, LONG_ERR);
+        await p.evaluate(() => document.getElementById('refocus-gone').remove());
+        await p.locator('#status-dismiss').focus().catch(() => {});
+        await p.keyboard.press('Enter');
+        const chip = await p.evaluate(() => document.activeElement?.id ?? '');
+        return { before, back, chip };
+      });
+      check('and putting it away sends the focus back to where it was', refocus.back, refocus.before);
+      check('or, when that is gone, to "Log an error"', refocus.chip === 'error-log-chip', refocus.chip || 'body');
+
+      /*
+       * The error log's announcement puts a longer link in the status line
+       * after `setStatus` has fitted it, and nothing fitted it again: at 1024
+       * the error stayed in the header and wrapped it past `--header-h`, and
+       * at 1280 the × and the room kept at the foot stayed where the shorter
+       * words had them.
+       */
+      const announced = await at(1024, 800, async (p) => {
+        await sayError(p, 'That folder is not a resume save. Choose Create Save for a new folder.');
+        await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          const a = document.createElement('a');
+          a.href = '#save';
+          a.className = 'error-log-link';
+          a.textContent = `${s.textContent} · Open the error log`;
+          s.replaceChildren(a);
+        });
+        await p.evaluate(() => new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go))));
+        return p.evaluate(() => {
+          const s = document.querySelector('#status');
+          const box = s.getBoundingClientRect();
+          const dismiss = document.querySelector('#status-dismiss');
+          return {
+            h: document.querySelector('header').getBoundingClientRect().height,
+            v: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-h')),
+            toast: s.classList.contains('toast'),
+            dismissShown: getComputedStyle(dismiss).display !== 'none',
+            room: parseFloat(document.documentElement.style.getPropertyValue('--status-toast-h')) || 0,
+            need: Math.ceil(innerHeight - box.top),
+          };
+        });
+      });
+      check(
+        'an error made longer after it was shown is fitted again: the header keeps its height',
+        Math.abs(announced.h - announced.v) < 1,
+        `header ${announced.h}, --header-h ${announced.v}`,
+      );
+      check(
+        'and floating, it has its × and the room at the foot it needs',
+        !announced.toast || (announced.dismissShown && announced.room >= announced.need),
+        JSON.stringify(announced),
+      );
+
+      /*
+       * "Log an error" kept its words where the "!" alone had already gone
+       * onto a row of its own (both AI chips showing): the words had that row
+       * to themselves, and the header grew by a row at 800px.
+       */
+      const crowded = await at(800, 700, async (p) => {
+        await p.evaluate(() => {
+          const d = document.getElementById('drafting-chip');
+          d.classList.remove('hidden');
+          d.textContent = '✦ Drafting a cover letter…';
+          const j = document.getElementById('jobs-chip');
+          j.classList.remove('hidden');
+          j.classList.add('ready');
+          j.textContent = '2 AI jobs running';
+        });
+        await p.waitForTimeout(300);
+        return p.evaluate(() => {
+          const header = document.querySelector('header');
+          const label = document.querySelector('#error-log-chip .error-log-chip-label');
+          const first = header.querySelector('h1').getBoundingClientRect();
+          const chip = document.querySelector('#error-log-chip').getBoundingClientRect();
+          return { words: label.getBoundingClientRect().width > 2, offFirstRow: chip.top >= first.bottom - 1 };
+        });
+      });
+      check('"Log an error" off the first row shows only its "!"', !(crowded.words && crowded.offFirstRow), JSON.stringify(crowded));
+
+      // The side panel's "Actual size" over the page: a background of its own, not the words alone over the PDF.
+      const pill = await at(520, 760, (p) =>
+        p.evaluate(() => {
+          const z = document.querySelector('#preview-zoom');
+          return z ? getComputedStyle(z).backgroundColor : 'missing';
+        }),
+      );
+      check('"Actual size" has a background over the page', !/^(rgba\(0, 0, 0, 0\)|transparent|missing)$/.test(pill), pill);
+
+      /*
+       * The profile fields, the dates and Ctrl+Shift+E, on the Resumes tab.
+       */
+      const resumes = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.waitForTimeout(200);
+        // Undefined colours: the year and month boxes and the order picker were see-through.
+        const backgrounds = await p.evaluate(() =>
+          ['.date-year', '.date-month', '.order-by']
+            .map((sel) => document.querySelector(sel))
+            .filter(Boolean)
+            .map((node) => getComputedStyle(node).backgroundColor),
+        );
+        // A profile field, reached and edited from the keyboard.
+        const field = p.locator('.profile-field .meta-value.editable').first();
+        await field.focus().catch(() => {});
+        const focused = await p.evaluate(() => document.activeElement?.classList.contains('meta-value') ?? false);
+        if (focused) await p.keyboard.press('F2');
+        const editing = await p.evaluate(() => document.activeElement?.classList.contains('editing') ?? false);
+        if (editing) await p.keyboard.press('Escape');
+        // "/ location" kept together, however narrow the label is made.
+        const slash = await p.evaluate(() => {
+          const label = [...document.querySelectorAll('.profile-field .meta-label')].find((l) => /address/i.test(l.textContent));
+          if (!label) return 'missing';
+          label.style.display = 'inline-block';
+          label.style.width = '9ch';
+          const text = label.firstChild;
+          const at = text.textContent.indexOf('/');
+          const top = (from, to) => {
+            const r = document.createRange();
+            r.setStart(text, from);
+            r.setEnd(text, to);
+            return Math.round(r.getClientRects()[0]?.top ?? -1);
+          };
+          const out = { slash: top(at, at + 1), next: top(at + 2, at + 3) };
+          label.style.display = label.style.width = '';
+          return out;
+        });
+        // Ctrl+Shift+E from a field, and Cancel: the focus goes back to that field.
+        const name = p.locator('#editor input:visible, #editor textarea:visible').first();
+        await name.focus().catch(() => {});
+        await p.evaluate(() => document.activeElement?.setAttribute('data-before-log', '1'));
+        await p.keyboard.press('Control+Shift+E');
+        await p.locator('#error-log-dialog:not(.hidden)').waitFor({ timeout: 5_000 }).catch(() => {});
+        await p.locator('#error-log-dialog button', { hasText: 'Cancel' }).click({ timeout: 3_000 }).catch(() => {});
+        const back = await p.evaluate(() => document.activeElement?.getAttribute('data-before-log') === '1');
+        return { backgrounds, focused, editing, slash, back };
+      });
+      check(
+        'the year, month and order boxes have a background',
+        resumes.backgrounds.length > 0 && resumes.backgrounds.every((b) => b !== 'rgba(0, 0, 0, 0)'),
+        resumes.backgrounds.join(', '),
+      );
+      check('a profile field can be reached from the keyboard', resumes.focused);
+      check('and F2 edits it', resumes.editing);
+      check('"/ location" is not split at the "/"', resumes.slash !== 'missing' && resumes.slash.slash === resumes.slash.next, JSON.stringify(resumes.slash));
+      check('closing "Log an error" puts the focus back where it was', resumes.back);
+
+      /*
+       * The tracker at 1280, beside the detail panel: every cell could break
+       * anywhere, and Role went to 74px with "Distinguished" broken in two.
+       */
+      await fetch(`${server.url}/api/applications`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          company: 'Globex Interplanetary Logistics',
+          role: 'Senior Staff Principal Distinguished Machine Learning Infrastructure Platform Engineer',
+          url: 'https://example.invalid/long-role',
+        }),
+      });
+      const tracker = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+        await p.locator('#apps-wrap tbody tr', { hasText: 'Distinguished' }).first().waitFor({ timeout: 15_000 }).catch(() => {});
+        return p.evaluate(() => {
+          const wrap = document.querySelector('#apps-wrap');
+          const row = [...wrap.querySelectorAll('tbody tr')].find((r) => r.textContent.includes('Distinguished'));
+          if (!row) return { missing: true };
+          const broken = [];
+          for (const cell of [row.children[1], row.children[2]]) {
+            const text = cell.firstChild;
+            if (!text) continue;
+            for (const m of text.textContent.matchAll(/\S+/g)) {
+              const r = document.createRange();
+              r.setStart(text, m.index);
+              r.setEnd(text, m.index + m[0].length);
+              const tops = new Set([...r.getClientRects()].map((b) => Math.round(b.top)));
+              if (tops.size > 1) broken.push(m[0]);
+            }
+          }
+          return { broken, over: wrap.scrollWidth - wrap.clientWidth, page: document.documentElement.scrollWidth - innerWidth };
+        });
+      });
+      check(
+        'the tracker breaks no word in the middle at 1280, and runs past nothing',
+        !tracker.missing && tracker.broken.length === 0 && tracker.over <= 1 && tracker.page <= 0,
+        JSON.stringify(tracker),
+      );
+
+      /*
+       * "File names" on Save & Files: a select as wide as its longest option,
+       * past the edge of its column.
+       */
+      const names = await at(1440, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="save"]').click());
+        await p.waitForTimeout(200);
+        return p.evaluate(() => {
+          const s = document.querySelector('#output-file-names');
+          const col = s?.closest('.project-panel');
+          if (!s || !col || !s.offsetParent) return null;
+          const cs = getComputedStyle(col);
+          return { right: s.getBoundingClientRect().right, edge: col.getBoundingClientRect().right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth) };
+        });
+      });
+      check('the file names picker stays inside its column', !!names && names.right <= names.edge + 1, JSON.stringify(names));
+
+      /*
+       * Two AI chips at once sat apart across the header, each pushing itself
+       * right: only the first showing does.
+       */
+      const chips = await at(1440, 600, async (p) => {
+        await p.evaluate(() => {
+          const j = document.querySelector('#jobs-chip');
+          j.textContent = 'Tailoring 2 resumes';
+          j.className = 'jobs-chip working';
+          const d = document.querySelector('#drafting-chip');
+          d.textContent = 'Drafting: a cover letter';
+          d.className = 'jobs-chip working';
+        });
+        await p.waitForTimeout(100);
+        return p.evaluate(() => {
+          const shown = [...document.querySelectorAll('header > .jobs-chip')].filter((c) => c.offsetParent);
+          const gaps = [];
+          for (let i = 1; i < shown.length; i++) {
+            if (Math.abs(shown[i].getBoundingClientRect().top - shown[i - 1].getBoundingClientRect().top) > 2) continue;
+            gaps.push(Math.round(shown[i].getBoundingClientRect().left - shown[i - 1].getBoundingClientRect().right));
+          }
+          return gaps;
+        });
+      });
+      check('the AI chips sit together in the header', chips.length > 0 && chips.every((g) => g <= 24), `gaps ${chips.join(', ')}px`);
+
+      /*
+       * In JobHelper's side panel, "Log an error" floats in the bottom corner
+       * over the page, and the last controls could not be scrolled out from
+       * under it. The panel's class is set as embed.js sets it when framed by
+       * the extension; it is CSS and header.js that decide the rest.
+       */
+      const panel = await at(360, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.evaluate(() => document.documentElement.classList.add('embedded'));
+        await p.waitForTimeout(150);
+        return p.evaluate(async () => {
+          scrollTo(0, document.documentElement.scrollHeight);
+          await new Promise((r) => setTimeout(r, 100));
+          const chip = document.querySelector('#error-log-chip').getBoundingClientRect();
+          const last = [...document.querySelectorAll('.tab.active button, .tab.active input, .tab.active select, .tab.active textarea')]
+            .filter((b) => b.offsetParent)
+            .reduce((a, b) => (b.getBoundingClientRect().bottom > (a?.getBoundingClientRect().bottom ?? -1) ? b : a), null);
+          return { chipTop: Math.round(chip.top), last: last?.textContent.trim().slice(0, 30), lastBottom: Math.round(last?.getBoundingClientRect().bottom ?? 0) };
+        });
+      });
+      check(
+        'in the side panel the last control scrolls clear of "Log an error"',
+        panel.lastBottom > 0 && panel.lastBottom <= panel.chipTop,
+        `${panel.last} ends at ${panel.lastBottom}, the button starts at ${panel.chipTop}`,
+      );
+
+      /*
+       * Round 29: the keyboard on a line edited in place, the header's status
+       * line, what sticks at the top, and the tracker's widths.
+       */
+      const lines = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.waitForTimeout(200);
+        const where = () => p.evaluate(() => {
+          const a = document.activeElement;
+          return a && a.classList.contains('editable') ? `${a.classList.contains('editing') ? 'editing' : 'line'}:${a.textContent.trim()}` : a === document.body ? 'BODY' : a?.localName;
+        });
+        const line = p.locator('.profile-field .meta-value.editable').first();
+        await line.scrollIntoViewIfNeeded().catch(() => {});
+        const at0 = await line.textContent();
+        const a11y = await line.evaluate((n) => ({
+          role: n.getAttribute('role'),
+          readonly: n.getAttribute('aria-readonly'),
+          described: document.getElementById(n.getAttribute('aria-describedby') ?? '')?.textContent ?? '',
+          title: n.title,
+          hint: document.querySelector('.editor-interaction-hint')?.textContent ?? '',
+        }));
+        await line.focus();
+        await p.keyboard.press('F2');
+        await p.keyboard.press('Escape');
+        const afterEscape = await where();
+        await p.keyboard.press('Enter');
+        await p.keyboard.press('Enter');
+        const afterEnter = await where();
+        // An edit kept with Enter: the line is drawn again, and the focus is on the new one.
+        await p.keyboard.press('Enter');
+        await p.keyboard.type(' 29');
+        await p.keyboard.press('Enter');
+        await p.waitForFunction(() => document.activeElement === document.body || !document.activeElement?.isConnected || document.activeElement?.textContent.includes(' 29'), null, { timeout: 5_000 }).catch(() => {});
+        await p.waitForTimeout(1500);
+        const afterSave = await where();
+        // And back as it was, from the keyboard.
+        if (afterSave.startsWith('line:')) {
+          await p.keyboard.press('Enter');
+          for (let i = 0; i < 3; i++) await p.keyboard.press('Backspace');
+          await p.keyboard.press('Enter');
+          await p.waitForTimeout(1500);
+        }
+        // A click with no pointer (a screen reader's Enter in browse mode) starts editing.
+        const clicked = await line.evaluate((n) => {
+          n.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 0 }));
+          return n.classList.contains('editing');
+        });
+        await p.keyboard.press('Escape');
+        // Ctrl+Shift+E mid-edit: the half-typed words are not saved, and the edit is there when the dialog closes.
+        await line.focus();
+        await p.keyboard.press('Enter');
+        await p.keyboard.type(' half');
+        await p.keyboard.press('Control+Shift+E');
+        await p.locator('#error-log-dialog:not(.hidden)').waitFor({ timeout: 5_000 }).catch(() => {});
+        await p.waitForTimeout(500);
+        const profile = await p.evaluate(async () => JSON.stringify((await (await fetch('/api/store')).json().catch(() => ({}))).profile ?? null));
+        await p.keyboard.press('Escape');
+        await p.waitForTimeout(300);
+        const afterLog = await where();
+        await p.keyboard.press('Escape');
+        const restored = await where();
+        return { at0: at0.trim(), a11y, afterEscape, afterEnter, afterSave, clicked, savedHalf: profile.includes(' half'), afterLog, restored };
+      });
+      check('Escape on a line being edited leaves the focus on the line', lines.afterEscape === `line:${lines.at0}`, lines.afterEscape);
+      check('and so does Enter with nothing changed', lines.afterEnter === `line:${lines.at0}`, lines.afterEnter);
+      check('and Enter after an edit puts the focus on the line drawn again', lines.afterSave === `line:${lines.at0} 29`, lines.afterSave);
+      check(
+        'a line says it can be edited, and how, to a screen reader',
+        lines.a11y.role === 'textbox' && lines.a11y.readonly === 'true' && /Enter or F2/.test(lines.a11y.described) && /F2/.test(lines.a11y.title) && /F2/.test(lines.a11y.hint),
+        JSON.stringify(lines.a11y),
+      );
+      check('a click with no pointer behind it starts editing', lines.clicked);
+      check('Ctrl+Shift+E mid-edit does not save the half-typed words', !lines.savedHalf);
+      check('and the edit is still open, focused, when the dialog closes', lines.afterLog === `editing:${lines.at0} half`, lines.afterLog);
+      check('and Escape then puts it back', lines.restored === `line:${lines.at0}`, lines.restored);
+
+      /* An ordinary status at 800: "Log an error" stays on its row, and the toolbar under the header. */
+      const ordinary = await at(800, 900, async (p) => {
+        await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          s.className = 'status';
+          s.textContent = s.title = 'AI feedback requested — you can keep editing. Watch the results indicator.';
+        });
+        await p.waitForTimeout(200);
+        return p.evaluate(() => {
+          const header = document.querySelector('header').getBoundingClientRect();
+          const first = document.querySelector('header h1').getBoundingClientRect();
+          const chip = document.querySelector('#error-log-chip').getBoundingClientRect();
+          return {
+            chipRow: chip.top < first.bottom,
+            height: Math.round(header.height),
+            measured: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-h')),
+          };
+        });
+      });
+      check('a long status at 800px leaves "Log an error" on its row, and --header-h right', ordinary.chipRow && Math.abs(ordinary.height - ordinary.measured) <= 1, JSON.stringify(ordinary));
+
+      /* A short error has room in the header at 1600: it is not floated over the page. */
+      const short = await at(1600, 700, async (p) => {
+        await sayError(p, 'Failed to fetch');
+        return p.evaluate(() => document.querySelector('#status').classList.contains('toast'));
+      });
+      check('a short error stays in the header where there is room for it', !short);
+
+      /*
+       * Where the tabs only just fit on the one row (1230–1310px with the AI
+       * chip showing) the status line was 4–84px: "S…". The tabs take a row
+       * of their own instead, wherever that is today.
+       */
+      const roomy = await at(1200, 700, async (p) => {
+        const narrow = [];
+        for (let width = 1200; width <= 1500; width += 10) {
+          await p.setViewportSize({ width, height: 700 });
+          await p.waitForTimeout(80);
+          await p.evaluate(() => {
+            const s = document.querySelector('#status');
+            s.className = 'status';
+            s.textContent = 'Application corrected';
+          });
+          await p.waitForTimeout(40);
+          const got = await p.evaluate(() => {
+            const s = document.querySelector('#status');
+            return { w: Math.round(s.getBoundingClientRect().width), cut: s.scrollWidth > s.clientWidth + 1 };
+          });
+          if (got.cut || got.w < 100) narrow.push(`${width}:${got.w}`);
+        }
+        return narrow;
+      });
+      check('the status line has room for its words at every width from 1200 to 1500', roomy.length === 0, roomy.join(' '));
+
+      /* Shift+Tab up the resume: nothing focused under the sticky header and toolbar. */
+      const backtab = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.evaluate(() => [...document.querySelectorAll('#editor button')].at(-1)?.focus());
+        let covered = 0;
+        let stops = 0;
+        for (let i = 0; i < 120; i++) {
+          await p.keyboard.press('Shift+Tab');
+          const f = await p.evaluate(() => {
+            const e = document.activeElement;
+            if (!e || !e.closest('#editor')) return null;
+            const r = e.getBoundingClientRect();
+            const top = document.elementFromPoint(r.left + Math.min(r.width / 2, 10), r.top + r.height / 2);
+            return { covered: !(top && (top === e || e.contains(top))) };
+          });
+          if (!f) break;
+          stops++;
+          if (f.covered) covered++;
+        }
+        return { covered, stops };
+      });
+      check('Shift+Tab up the resume never leaves the focus under the header', backtab.stops > 20 && backtab.covered === 0, JSON.stringify(backtab));
+
+      /* The side panel's "Log an error" over the page has a background of its own. */
+      const embeddedChip = await at(360, 800, (p) =>
+        p.evaluate(async () => {
+          document.documentElement.classList.add('embedded');
+          await new Promise((r) => setTimeout(r, 100));
+          return getComputedStyle(document.querySelector('#error-log-chip')).backgroundColor;
+        }),
+      );
+      check('in the side panel "Log an error" is not see-through', !/^(rgba\(0, 0, 0, 0\)|transparent)$/.test(embeddedChip), embeddedChip);
+
+      /* The order picker's ring is the accent, as every other box's. */
+      const orderRing = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        const box = p.locator('.order-by').first();
+        await box.waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.keyboard.press('Tab');
+        await box.focus().catch(() => {});
+        await p.waitForTimeout(400);
+        return box.evaluate((b) => {
+          const probe = document.createElement('i');
+          probe.style.color = 'var(--accent)';
+          document.body.append(probe);
+          const accent = getComputedStyle(probe).color;
+          probe.remove();
+          return { border: getComputedStyle(b).borderTopColor, accent, fv: b.matches(':focus-visible') };
+        }).catch(() => null);
+      });
+      check('the order picker focused from the keyboard has the accent border', !!orderRing && orderRing.fv && orderRing.border === orderRing.accent, JSON.stringify(orderRing));
+
+      /* "Actual size": its words say what it does; not also aria-pressed. */
+      const zoomPill = await at(390, 760, (p) =>
+        p.evaluate(() => {
+          const z = document.querySelector('#preview-zoom');
+          z.click();
+          const out = { text: z.textContent, pressed: z.getAttribute('aria-pressed') };
+          z.click();
+          return out;
+        }),
+      );
+      check('the zoom pill says what it does once, not also as pressed', zoomPill.text === 'Fit width' && zoomPill.pressed === null, JSON.stringify(zoomPill));
+
+      /* The tracker: the stage reads whole, and the table does not scroll sideways at 1151–1200 or 1401. */
+      const stages = [];
+      for (const width of [1151, 1180, 1401]) {
+        stages.push(await at(width, 900, async (p) => {
+          await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+          await p.locator('#apps-wrap td.app-status select').first().waitFor({ timeout: 10_000 }).catch(() => {});
+          return p.evaluate((width) => {
+            const wrap = document.querySelector('#apps-wrap');
+            const cut = [...wrap.querySelectorAll('td.app-status select')].filter((s) => {
+              const free = s.cloneNode(true);
+              free.style.cssText = 'width:auto;max-width:none;position:absolute;visibility:hidden';
+              // Beside it, so it has the cell's font.
+              s.after(free);
+              const need = free.getBoundingClientRect().width;
+              free.remove();
+              return need > s.getBoundingClientRect().width + 0.5;
+            }).length;
+            return { width, cut, over: wrap.scrollWidth - wrap.clientWidth, rows: wrap.querySelectorAll('td.app-status select').length };
+          }, width);
+        }));
+      }
+      check('the tracker shows each stage whole and never scrolls sideways', stages.every((s) => s.rows > 0 && s.cut === 0 && s.over <= 0), JSON.stringify(stages));
+
+      /*
+       * The header laid out while an error floated in the corner: the status
+       * line's room was not asked after, so a resize then left the tabs on
+       * the one row once the error went, beside a status line 68px wide at
+       * 1294px. Laid out as if no error showed, it is what a fresh fit gives.
+       */
+      const afterToast = await at(1290, 900, async (p) => {
+        const read = () =>
+          p.evaluate(() => ({
+            cls: document.querySelector('header').className,
+            sw: Math.round(document.querySelector('#status').getBoundingClientRect().width),
+          }));
+        await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          s.className = 'status';
+          s.textContent = 'Status updated';
+        });
+        await sayError(p, `${LONG_ERR} ${LONG_ERR} ${LONG_ERR}`);
+        const toast = await p.evaluate(() => document.querySelector('#status').classList.contains('toast'));
+        await p.setViewportSize({ width: 1294, height: 900 });
+        // Until the resize's refit has run: two frames.
+        await p.evaluate(() => new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go))));
+        await p.evaluate(async () => {
+          const { dismissStatus } = await import('/header.js');
+          dismissStatus();
+          document.querySelector('#status').textContent = 'Status updated';
+        });
+        await p.evaluate(() => new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go))));
+        const left = await read();
+        await p.evaluate(async () => (await import('/header.js')).fitHeader());
+        return { toast, left, fresh: await read() };
+      });
+      check(
+        'a resize while an error floats leaves the header as a fresh fit has it once the error goes',
+        afterToast.toast && afterToast.left.cls === afterToast.fresh.cls && afterToast.left.sw === afterToast.fresh.sw && afterToast.left.sw >= 120,
+        JSON.stringify(afterToast),
+      );
+
+      /*
+       * The AI chips out at once — drafting, results, the peek — on the first
+       * of two rows: at 640–805px the status line came to nothing and the "!"
+       * had a row of its own (a header 110–147px tall). And "Voice & AI" alone
+       * on a third row at 645–765px. And the "!" beside the status line in
+       * both layouts, not on the far side of the chips in one of them.
+       */
+      const chipsOut = (p) =>
+        p.evaluate(() => {
+          const d = document.getElementById('drafting-chip');
+          d.textContent = 'Drafting feedback';
+          d.classList.remove('hidden');
+          const j = document.getElementById('jobs-chip');
+          j.textContent = '1 AI result ready';
+          j.classList.remove('hidden');
+          const s = document.getElementById('status');
+          s.className = 'status';
+          s.textContent = 'Saved';
+        });
+      const chipRow = [];
+      for (const width of [775, 730, 700]) {
+        chipRow.push(await at(width, 800, async (p) => {
+          await chipsOut(p);
+          await p.evaluate(async () => (await import('/header.js')).fitHeader());
+          return p.evaluate((width) => {
+            const h = document.querySelector('header');
+            const s = document.getElementById('status').getBoundingClientRect();
+            const mark = document.getElementById('error-log-chip').getBoundingClientRect();
+            const rows = new Set([...document.querySelectorAll('#tabs button')].map((b) => Math.round(b.getBoundingClientRect().top))).size;
+            return { width, h: Math.round(h.getBoundingClientRect().height), status: Math.round(s.width), markBeside: Math.abs(mark.top - s.top) < 20 && mark.left >= s.right - 1, tabRows: rows };
+          }, width);
+        }));
+      }
+      check(
+        'with every AI chip out at 700–775px the status line keeps its room, the "!" its place, and the tabs one row',
+        chipRow.every((c) => c.h <= 90 && c.status >= 120 && c.markBeside && c.tabRows === 1),
+        JSON.stringify(chipRow),
+      );
+      const beside = [];
+      for (const width of [1500, 1250]) {
+        beside.push(await at(width, 800, async (p) => {
+          await p.evaluate(() => { const s = document.getElementById('status'); s.className = 'status'; s.textContent = 'Saved'; });
+          await p.evaluate(async () => (await import('/header.js')).fitHeader());
+          return p.evaluate(() => {
+            const order = ['ai-peek-chip', 'status', 'error-log-chip']
+              .map((id) => document.getElementById(id))
+              .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)
+              .map((e) => e.id);
+            return { rows: document.querySelector('header').classList.contains('tabs-row'), order: order.join(' ') };
+          });
+        }));
+      }
+      check(
+        'the "!" is right after the status line on one row and on two',
+        beside.some((b) => b.rows) && beside.some((b) => !b.rows) && beside.every((b) => b.order === 'ai-peek-chip status error-log-chip'),
+        JSON.stringify(beside),
+      );
+
+      /*
+       * A link into another tab lands where it points: "Open the error log"
+       * scrolled before the new tab's toolbar height was measured, with the
+       * builder's toolbar still in the scroll padding, and landed 100–140px low.
+       */
+      const jump = await at(1280, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.waitForTimeout(300);
+        return p.evaluate(() => {
+          const root = document.documentElement;
+          const was = parseFloat(root.style.getPropertyValue('--toolbar-h')) || 0;
+          document.querySelector('#tabs button[data-tab="save"]').click();
+          const bars = [...document.querySelectorAll('.sticky-toolbar')];
+          const actual = Math.max(0, ...bars.map((b) => b.offsetHeight));
+          return { was, now: parseFloat(root.style.getPropertyValue('--toolbar-h')) || 0, actual };
+        });
+      });
+      check('switching tabs measures the new tab’s toolbar before anything scrolls', jump.was > 0 && jump.now === jump.actual, JSON.stringify(jump));
+
+      /*
+       * The tracker: stacked over the record at 1151–1200px, a row clicked
+       * far down brings the record into view (the page still asked about
+       * 1150px). And no sideways scroll in the table down to a phone.
+       */
+      const seeded = [];
+      for (let i = 1; i <= 12; i++) {
+        const r = await fetch(`${server.url}/api/applications`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ company: `Reveal Probe ${i}`, role: 'Engineer', status: 'applied', url: `https://example.com/reveal/${i}` }),
+        }).then((r) => r.json()).catch(() => ({}));
+        seeded.push(r.id ?? r.application?.id);
+      }
+      try {
+        const reveal = await at(1180, 800, async (p) => {
+          await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+          await p.locator('#apps-wrap tbody tr:not(.group)').nth(10).waitFor({ timeout: 10_000 }).catch(() => {});
+          const row = p.locator('#apps-wrap tbody tr:not(.group)').nth(10);
+          await row.scrollIntoViewIfNeeded().catch(() => {});
+          await row.locator('td').nth(1).click().catch(() => {});
+          await p.waitForTimeout(800);
+          return p.evaluate(() => { const r = document.getElementById('app-detail').getBoundingClientRect(); return { top: Math.round(r.top), inView: r.top < innerHeight && r.bottom > 0 }; });
+        });
+        check('a row clicked at 1180px brings its record into view', reveal.inView, JSON.stringify(reveal));
+        const sideways = [];
+        for (const width of [776, 720, 390]) {
+          sideways.push(await at(width, 800, async (p) => {
+            await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+            await p.locator('#apps-wrap tbody tr').first().waitFor({ timeout: 10_000 }).catch(() => {});
+            return p.evaluate((width) => {
+              const wrap = document.querySelector('#apps-wrap');
+              return { width, over: wrap.scrollWidth - wrap.clientWidth, page: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+            }, width);
+          }));
+        }
+        check('the tracker does not scroll sideways at 776, 720 or 390px', sideways.every((s) => s.over <= 0 && s.page <= 0), JSON.stringify(sideways));
+      } finally {
+        for (const id of seeded) if (id) await fetch(`${server.url}/api/applications/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => undefined);
+      }
+
+      /* At 320px the save's name said "Save: …" even when it was "data". */
+      const chip = await at(320, 600, (p) =>
+        p.evaluate(() => {
+          const c = document.querySelector('#project-chip');
+          return { text: c.textContent, cut: c.scrollWidth > c.clientWidth + 1, overflow: document.documentElement.scrollWidth > innerWidth };
+        }),
+      );
+      check(
+        "a short save name shows whole at 320px, and the page doesn't scroll sideways",
+        chip.text.length > 12 || (!chip.cut && !chip.overflow),
+        JSON.stringify(chip),
+      );
+    }
 
     check('nothing threw along the way', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {

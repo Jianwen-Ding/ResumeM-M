@@ -422,9 +422,21 @@ const FURNITURE = new Set([
  * away and leaves the match offered, which is what that distinction is for.
  * This can only ever remove confidence, never grant it.
  */
+/*
+ * Except that the employer's name is only free where the stored question had
+ * something standing in for it. "Why do you want to work at Acme?" is "Why do
+ * you want to work here?"; but "Are you currently employed at Acme?" is not
+ * "Are you currently employed?", and the bank's "Yes" — true of the person,
+ * employed somewhere — was filled in confidently as a claim to work at the
+ * employer being applied to. Likewise "Have you applied to Acme before?"
+ * against "Have you applied before?", and "…relocate to Acme?" against
+ * "…relocate?". A stored question with no "here", "us", "our" or "this
+ * company" in it was never about these people, so their name is a word it
+ * did not answer.
+ */
 function unanswered(asked: string, stored: string, company?: string): string[] {
   const known = terms(stored);
-  const theirs = company ? terms(company) : new Set<string>();
+  const theirs = company && standsInForThem(stored) ? terms(company) : new Set<string>();
   return [...terms(asked)].filter(
     (t) =>
       !known.has(t) &&
@@ -436,6 +448,180 @@ function unanswered(asked: string, stored: string, company?: string): string[] {
       // is part of the question is written out: "in the last five years".
       !/^\d+$/.test(t),
   );
+}
+
+/*
+ * The words a form uses in place of the employer's name. "us" only in lower
+ * case: "the US" is a country.
+ */
+const STAND_IN = /\b(?:here|our|ours|(?:this|your|the)\s+(?:company|organi[sz]ation|employer|firm|team))\b/i;
+
+function standsInForThem(stored: string): boolean {
+  const text = tidyQuestion(stored);
+  return STAND_IN.test(text) || /\bus\b/.test(text);
+}
+
+/*
+ * Which way a question points: at a floor or at a ceiling.
+ *
+ * "min", "max", "above" and "below" were furniture, forgiven on either side
+ * as the words a length limit is written in. So "Minimum salary expectation"
+ * and "Maximum salary expectation" were one question, "Is your cumulative GPA
+ * above 3.5?" was "…below 3.5?", and the figure or the "Yes" given to one
+ * was filled confidently into the other. They are still forgiven inside a
+ * length limit — "(500 characters max)" is taken out first, as it is for
+ * `numbers` — and an age or a minimum already written as one word ("18 or
+ * over", "at least 3") has none left; anywhere else, two questions that
+ * point opposite ways are not the same question, nor is one the page points
+ * that the stored question did not. A veto, so it can only take confidence
+ * away.
+ */
+const FLOOR = new Set(['min', 'minimum', 'below', 'under', 'lowest']);
+const CEILING = new Set(['max', 'maximum', 'above', 'over', 'highest']);
+
+const directions = remembered((s: string): { floor: boolean; ceiling: boolean } => {
+  const said = normalise(String(s ?? '').replace(LENGTH_LIMIT, ' ')).split(/[^a-z0-9]+/);
+  return { floor: said.some((w) => FLOOR.has(w)), ceiling: said.some((w) => CEILING.has(w)) };
+});
+
+/*
+ * Opposite ways, or a way the page added. A stored question that said more —
+ * "available for a minimum 12 week internship?" — still answers the plainer
+ * one, as any stored qualifier the page did not repeat does.
+ */
+function sameDirection(asked: string, stored: string): boolean {
+  const a = directions(asked);
+  const s = directions(stored);
+  if ((a.floor && s.ceiling && !s.floor) || (a.ceiling && s.floor && !s.ceiling)) return false;
+  return (!a.floor || s.floor) && (!a.ceiling || s.ceiling);
+}
+
+/*
+ * The employer, or the job at it: two different things, both furniture.
+ *
+ * Forgiving "company", "employer", "position" and "role" is right where they
+ * stand in for the one being applied to — "How did you hear about this
+ * position?" is "…about us?" — and wrong where they are the thing asked for.
+ * "Most recent employer" and "Most recent role" were the same question, and a
+ * company's name was typed into the box for a job title; "Current job title"
+ * answered "Current employer". So a question naming the company and one
+ * naming the role, each not as a stand-in ("this", "our", "that"), are two
+ * questions. A veto: it can only take confidence away.
+ */
+const COMPANY_WORD = /^(?:compan(?:y|ies)|employers?|organi[sz]ations?|firms?)$/;
+const ROLE_WORD = /^(?:positions?|roles?|titles?)$/;
+const STANDING_IN = new Set(['this', 'our', 'that']);
+
+const namesWhich = remembered((s: string): { company: boolean; role: boolean } => {
+  const said = normalise(s).split(/[^a-z0-9]+/).filter(Boolean);
+  const out = { company: false, role: false };
+  said.forEach((w, i) => {
+    if (STANDING_IN.has(said[i - 1] ?? '')) return;
+    if (COMPANY_WORD.test(w)) out.company = true;
+    else if (ROLE_WORD.test(w)) out.role = true;
+  });
+  return out;
+});
+
+function sameThingNamed(a: string, b: string): boolean {
+  const na = namesWhich(a);
+  const nb = namesWhich(b);
+  if (na.company === nb.company && na.role === nb.role) return true;
+  return !((na.company && nb.role) || (na.role && nb.company));
+}
+
+/*
+ * A question that is little more than its furniture.
+ *
+ * "Current position" is {current} once "position" is forgiven, and so is
+ * "Current company", "Current team" and "Current role": scored without the
+ * furniture they were all one question, and the company's name went into the
+ * box for a position. Where the furniture is most of what is asked, it has
+ * to match. And a label that names a thing is not a yes-or-no question: a
+ * row kept from a tick box as "Is current position?" = "No" was confidently
+ * the answer to a box labelled "Current position".
+ */
+const NOUN_FURNITURE = new Set([
+  'company', 'organisation', 'organization', 'employer', 'position', 'role', 'team',
+  'job', 'opportunity', 'opening', 'vacancy', 'posting',
+]);
+
+const ASKS_YES_OR_NO =
+  /^(?:are|is|was|were|do|does|did|have|has|had|will|would|can|could|may|might|shall|should)\b/i;
+
+function asksYesOrNo(q: string): boolean {
+  return ASKS_YES_OR_NO.test(tidyQuestion(q).replace(/^[^\p{L}\p{N}]+/u, ''));
+}
+
+/*
+ * A label rather than a sentence: a word or two once the furniture is out,
+ * and nothing that asks — no question mark, no "Are you", no "Why".
+ */
+const ASKS = /^(?:why|what|how|which|who|where|when|tell|describe|explain|list|share)\b/i;
+
+function thin(q: string): boolean {
+  const said = tidyQuestion(q).replace(/^[^\p{L}\p{N}]+/u, '');
+  return bare(q).size <= 1 && !said.includes('?') && !asksYesOrNo(said) && !ASKS.test(said);
+}
+
+function sameFurnitureWhenThin(asked: string, stored: string): boolean {
+  if (!thin(asked) && !thin(stored)) return true;
+  // One name for each thing: "Current employer" is "Current Company/Employer".
+  const kind = (t: string) => (COMPANY_WORD.test(t) ? 'company' : ROLE_WORD.test(t) ? 'role' : t);
+  const furniture = (s: string) => [...new Set([...terms(s)].filter((t) => NOUN_FURNITURE.has(t)).map(kind))].sort().join(' ');
+  return furniture(asked) === furniture(stored) && asksYesOrNo(asked) === asksYesOrNo(stored);
+}
+
+/*
+ * A row whose question is one of the answers.
+ *
+ * A form whose question the extension could not find, and whose options it
+ * could, banked the first option as the question: "Yes Required" = "No",
+ * "No, I don't have an agreement Required" = "Yes, I have an agreement",
+ * "Yes, and I would require relocation assistance Required" = "Yes, but I am
+ * planning to relocate on my own" — and a tick box's own words as both,
+ * "Yes, I live in the U.S." = "Yes, I live in the U.S.". None of them is a
+ * question anybody asks; each is an option on some other form, and a form
+ * asked about it would be answered with the opposite option. So such a row
+ * is never offered, and never banked, and an option is never looked up as a
+ * question.
+ *
+ * But not the abbreviations that open a real label with the same letters: "No."
+ * for number ("No. of years of experience", "No: of direct reports", "No. 2
+ * choice") and "Y.O.E." for years of experience. Those were refused as
+ * options, unmatched and unsaveable; an option's "No" is followed by a
+ * comma, a dash or nothing, never by "of".
+ */
+const OPTION_PHRASE =
+  /^(?!no\s*[.:]+\s*(?:of\b(?!\s+course\b)|\d)|y\s*\.?\s*o\s*\.?\s*e\b)(?:yes|no|y|n|true|false)(?:\s*[,.;:!–—-](?:\s*.*)?|\s+(?:and|but|i|i'm|i am|we)\b.*)?$/i;
+
+export function isOptionPhrase(question: string): boolean {
+  const q = tidyQuestion(question).replace(/\s+(?:required|optional)$/i, '').trim();
+  return OPTION_PHRASE.test(q) && !q.includes('?');
+}
+
+function askedAsItsOwnAnswer(item: AnswerBankItem): boolean {
+  return isOptionPhrase(item.question) || item.variants.some((v) => sameQuestion(v.text, item.question));
+}
+
+/*
+ * A dropdown's prompt, kept as though it were the answer chosen.
+ *
+ * "— Please Specify —" and "— Select —" are what a select shows before
+ * anything is chosen. The extension's test for a prompt did not allow for
+ * the dashes round them, so "Willingness to Travel" and "Candidate Source"
+ * were banked with the prompt as the answer, and offered back as one. The
+ * dashes, brackets and angle brackets round it are taken off first; then
+ * only a prompt and nothing else, so "Please see my portfolio" is an answer.
+ */
+const PROMPT_ENDS = /^[\s\-–—_=*.:|[\]<>(){}]+|[\s\-–—_=*.:|[\]<>(){}]+$/g;
+const PROMPT =
+  /^(?:(?:please\s+)?(?:select|choose|pick|specify)(?:\s+(?:one|an?\s+(?:option|answer|value|item)|from\s+(?:the\s+)?list|below))?|)$/i;
+
+export function isPrompt(answer: string): boolean {
+  const said = String(answer ?? '').trim();
+  if (!said) return false;
+  return said === '…' || PROMPT.test(said.replace(PROMPT_ENDS, '').replace(/\s+/g, ' ').trim());
 }
 
 /**
@@ -897,8 +1083,28 @@ export function matchAnswer(
  * once per question, through every variant of every item, and a form of a
  * hundred questions read the whole bank for identifiers a hundred times.
  */
+/*
+ * And never a row that is not a question and an answer at all: an option
+ * banked as the question (see `isOptionPhrase`), or a dropdown's prompt
+ * banked as the answer (see `isPrompt`). The bank is older than the checks
+ * that keep these out on the way in, so they are taken out on the way back
+ * too. A prompt is taken out of the item's phrasings, and the item goes only
+ * when it had nothing else.
+ */
 function safeToOffer(bank: AnswerBankItem[]): AnswerBankItem[] {
-  return bank.filter((item) => !item.variants.some((v) => isSensitiveAnswer(v.text)));
+  const out: AnswerBankItem[] = [];
+  for (const item of bank) {
+    if (item.variants.some((v) => isSensitiveAnswer(v.text))) continue;
+    if (askedAsItsOwnAnswer(item)) continue;
+    if (!item.variants.some((v) => isPrompt(v.text))) {
+      out.push(item);
+      continue;
+    }
+    const variants = item.variants.filter((v) => !isPrompt(v.text));
+    if (variants.length === 0) continue;
+    out.push({ ...item, variants, default: variants.some((v) => v.id === item.default) ? item.default : variants[0]!.id });
+  }
+  return out;
 }
 
 /*
@@ -928,12 +1134,40 @@ function safeToOffer(bank: AnswerBankItem[]): AnswerBankItem[] {
  * have. Doubting an answer that is still true is worse than leaving one that
  * may not be, because the doubt is what stops it being offered.
  */
+/*
+ * And the months as German, French, Spanish, Portuguese and Dutch forms write
+ * them — "Juni 2025" for "Gewünschtes Startdatum" was no date at all, so a
+ * start eighteen months gone was offered as good. Whole words, keyed as
+ * written, because the first three letters no longer tell them apart: "juin"
+ * and "juillet" both open "jui", and "mai" is May in three languages while
+ * "maio" is May and "mars" is March. JobHelper's `MONTHS_ELSEWHERE` in
+ * remembering.js is the same table.
+ */
+const MONTHS_ELSEWHERE: Record<string, number> = {
+  // German
+  januar: 1, februar: 2, märz: 3, maerz: 3, april: 4, mai: 5, juni: 6, juli: 7, august: 8, september: 9, oktober: 10, november: 11, dezember: 12,
+  // French
+  janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, juin: 6, juillet: 7, août: 8, aout: 8, septembre: 9, octobre: 10, novembre: 11, décembre: 12, decembre: 12,
+  // Spanish
+  enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6, julio: 7, agosto: 8, septiembre: 9, setiembre: 9, octubre: 10, noviembre: 11, diciembre: 12,
+  // Portuguese
+  janeiro: 1, fevereiro: 2, março: 3, marco: 3, maio: 5, junho: 6, julho: 7, setembro: 9, outubro: 10, novembro: 11, dezembro: 12,
+  // Dutch
+  januari: 1, februari: 2, maart: 3, mei: 5, augustus: 8, december: 12,
+};
 const MONTH_WORD =
-  String.raw`(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)`;
+  String.raw`(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|${Object.keys(MONTHS_ELSEWHERE).join('|')})`;
 const MONTH_NUMBER: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
-const DAY_MONTH_YEAR = new RegExp(String.raw`\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?${MONTH_WORD}\.?,?\s+(\d{4})\b`, 'gi');
-const MONTH_DAY_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b`, 'gi');
-const MONTH_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?,?\s+(\d{4})\b`, 'gi');
+/** The month a word names: whole, as the other languages write it, or by its first three letters in English. */
+const monthNumber = (word: string): number =>
+  MONTHS_ELSEWHERE[word.normalize('NFC').toLowerCase()] ?? MONTH_NUMBER[word.slice(0, 3).toLowerCase()] ?? 0;
+const DAY_MONTH_YEAR = new RegExp(String.raw`\b(\d{1,2})(?:st|nd|rd|th|\.)?\s+(?:of\s+|de\s+)?${MONTH_WORD}\.?,?(?:\s+de)?\s+(\d{4})\b`, 'giu');
+const MONTH_DAY_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b`, 'giu');
+// "junio de 2025", "junho de 2025": Spanish and Portuguese put "de" between.
+const MONTH_YEAR = new RegExp(String.raw`\b${MONTH_WORD}\.?,?(?:\s+de)?\s+(\d{4})\b`, 'giu');
+// And a date as Japanese writes it: 2025年6月 is June 2025, 2025年6月15日 the fifteenth.
+const JP_DATE = /(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日/g;
+const JP_MONTH = /(\d{4})年\s*(\d{1,2})月/g;
 const ISO_DATE = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/g;
 const NUMERIC_DATE = /\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})\b/g;
 const SEASON_YEAR = /\b(spring|summer|fall|autumn|winter)\s+(?:of\s+)?(\d{4})\b/gi;
@@ -948,10 +1182,14 @@ function datesIn(text: string): string[] {
     if (month < 1 || month > 12 || date < 1 || date > 31) return;
     days.push(`${year}-${pad(month)}-${pad(date)}`);
   };
-  const monthOf = (word: string) => MONTH_NUMBER[word.slice(0, 3).toLowerCase()] ?? 0;
+  const monthOf = monthNumber;
   // Each shape takes its words out of the text, so "1 December 2026" is not
   // read a second time as "December 2026".
-  let rest = text.replace(DAY_MONTH_YEAR, (_m, d: string, mo: string, y: string) => {
+  let rest = text.replace(JP_DATE, (_m, y: string, mo: string, d: string) => {
+    day(Number(y), Number(mo), Number(d));
+    return ' ';
+  });
+  rest = rest.replace(DAY_MONTH_YEAR, (_m, d: string, mo: string, y: string) => {
     day(Number(y), monthOf(mo), Number(d));
     return ' ';
   });
@@ -963,6 +1201,10 @@ function datesIn(text: string): string[] {
   const lastOf = (year: number, month: number) => day(year, month, new Date(year, month, 0).getDate());
   rest = rest.replace(MONTH_YEAR, (_m, mo: string, y: string) => {
     lastOf(Number(y), monthOf(mo));
+    return ' ';
+  });
+  rest = rest.replace(JP_MONTH, (_m, y: string, mo: string) => {
+    lastOf(Number(y), Number(mo));
     return ' ';
   });
   rest = rest.replace(SEASON_YEAR, (_m, season: string, y: string) => {
@@ -1089,6 +1331,23 @@ const ASKS_WHEN_YOU_START = new RegExp(
     String.raw`(^|[^a-zà-ÿ])[àa]\s+partir\s+de\s+quand\b`,
     String.raw`^\s*((quelle\s+est\s+)?votre\s+)?disponibilit[ée](\s*\(\s*date\s*\)|\s*(\/|et|&)\s*pr[ée]avis)?[\s:?*]*$`,
     String.raw`\b(fecha\s+de\s+(inicio|incorporaci[óo]n|disponibilidad)|cu[áa]ndo\s+(puede|puedes|podr[íi]as?)\s+(usted\s+)?(empezar|comenzar|incorporarse|incorporarte))`,
+    /*
+     * And the rest of what German, Spanish, Portuguese, Dutch and Japanese
+     * forms write: "Startdatum" and "Gewünschtes Startdatum", "Verfügbar
+     * ab", "bei uns anfangen", "Disponibilidad para incorporarse", "Data de
+     * início", "Quando (você) pode começar?", "Beschikbaar vanaf", "Per
+     * wanneer", "Gewenste startdatum", 入社可能日 and 入社希望日. "Startdatum"
+     * on its own is read, unlike "Start date": a German work-history block
+     * asks "Von" and "Bis", not "Startdatum". No `\b` round a Japanese word,
+     * which has no word characters for one to sit between.
+     */
+    String.raw`\bstartdatum\b`,
+    String.raw`\bverf[üu]gbar\s+ab\b`,
+    String.raw`\bbei\s+uns\s+(anfangen|beginnen|starten|einsteigen)\b`,
+    String.raw`\bdisponibilidad\s+para\s+(incorporar(se|te|me)|empezar|comenzar)\b`,
+    String.raw`\b(data\s+de\s+in[íi]cio|disponibilidade\s+para\s+(come[çc]ar|iniciar)|quando\s+(voc[êe]\s+)?(pode(ria)?|poderia)\s+(come[çc]ar|iniciar))\b`,
+    String.raw`\b(beschikbaar\s+vanaf|per\s+wanneer|vanaf\s+wanneer)\b`,
+    String.raw`入社(可能|希望)日|いつから(勤務|就業|入社)?(可能|できます)`,
   ].join('|'),
   'i',
 );
@@ -1121,6 +1380,8 @@ function matchInBank(
    * Otherwise the first of equal scores still wins, which is at least the same
    * one every time.
    */
+  // An option is not a question. See `isOptionPhrase`.
+  if (isOptionPhrase(question)) return { question, score: 0, confident: false };
   let best: { item: AnswerBankItem; score: number } | undefined;
   const exact = bank.find((item) => sameQuestion(question, item.question));
   if (exact) {
@@ -1200,7 +1461,12 @@ function matchInBank(
       fullyAsked(question, best.item.question) &&
       unanswered(question, best.item.question, company).length === 0 &&
       sameShortTerms(question, best.item.question) &&
-      sameNumbers(question, best.item.question),
+      sameNumbers(question, best.item.question) &&
+      // Pointing the same way, naming the same thing, and — where that is
+      // most of the question — the same furniture. See each.
+      sameDirection(question, best.item.question) &&
+      sameThingNamed(question, best.item.question) &&
+      sameFurnitureWhenThin(question, best.item.question),
     ...(namesAnother ? { namesAnother } : {}),
   };
 }

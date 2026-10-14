@@ -5,6 +5,13 @@
  */
 
 import { redactIdentifiers } from './answers.js';
+
+/**
+ * Structured data that declares a JobPosting: `"@type": "JobPosting"`, or the
+ * same in a list (`"@type": ["JobPosting"]`, `["Thing", "JobPosting"]`), which
+ * the string-only pattern took for a page that declares nothing.
+ */
+const DECLARES_JOB_POSTING = /"@type"\s*:\s*(?:\[[^\]]*?)?"?JobPosting/i;
 import {
   cleanRole,
   employerLabel,
@@ -1426,8 +1433,15 @@ export function looksLikeCompanyName(name?: string): boolean {
   // A sentence, a URL fragment, or a list is not a name.
   if (/[.!?]\s|[|<>{}]|\S@\S|^https?:/i.test(n)) return false;
   if (n.split(' ').length > 6) return false;
-  // Nothing but punctuation or digits.
-  if (!/[a-z]/i.test(n)) return false;
+  /*
+   * Nothing but punctuation or digits. A letter in any script: the test was
+   * `[a-z]`, so 株式会社リクルート, ООО «Яндекс» and every other employer not
+   * written in Latin letters was refused, and a Japanese or Russian posting's
+   * own JSON-LD — which named the employer perfectly well — was thrown away
+   * for it. The engine's inability to *typeset* those scripts is a fact about
+   * the PDF, not about who the employer is.
+   */
+  if (!/\p{L}/u.test(n)) return false;
   /*
    * A bare hostname. `employerFallback` hands one back on purpose — it is a
    * true and recognisable label for a folder or a resume picker — but it is
@@ -1674,8 +1688,12 @@ export function looksLikeRoleTitle(role?: string): boolean {
    * A word, somewhere in it. `R-129384` and `4021_A` are requisition numbers
    * with a letter stuck to them, which is all the "has letters in it" test
    * asks for; no job is named in fewer than two letters running.
+   *
+   * Letters of any script, as `looksLikeCompanyName` reads them: with
+   * `[a-z]{2}` a role written in Japanese or Cyrillic had no letters at all,
+   * and ソフトウェアエンジニア was no job.
    */
-  if (!/[a-z]{2}/i.test(r)) return false;
+  if (!/\p{L}{2}/u.test(r)) return false;
   /*
    * A season and a year, and nothing else. "2027 Summer" is a filter somebody
    * set on a board, or the tab group they were reading in, and it filed
@@ -2348,11 +2366,42 @@ function decodeURIComponentSafe(text: string): string {
 }
 
 const ATS = /\b(greenhouse|lever|workday|myworkdayjobs|ashby|ashbyhq|workable|smartrecruiters|icims|taleo|jobvite|bamboohr|rippling|breezy|recruitee|teamtailor|jazzhr|applytojob|successfactors|brassring|pinpointhq|personio|comeet|zohorecruit|myjobs\.adp|workforcenow\.adp|recruiting\.adp)\b/i;
-const JOB_PATH = /\/(jobs?|careers?|opening|openings|position|positions|vacanc(y|ies)|apply|application|hiring|req|requisition)(\/|$|[?#])/i;
+/*
+ * And the same segment in the languages a careers site is served in — the
+ * words `ELSEWHERE_CAREERS` in names.ts already refuses as an employer's
+ * name. A German employer's own posting lives at `/karriere/…` or
+ * `/stellenangebote/…`, a French one at `/emplois/…` or `/offres/…`, a Dutch
+ * one at `/vacatures/…` or `/werken-bij/…`, a Japanese one at `/採用/…` or
+ * `/求人/…` (percent-encoded in the address, decoded here). Each was no
+ * job-shaped address at all, so a posting with no JSON-LD on one of them
+ * scored two points under its English twin and was never offered.
+ */
+const JOBS_PATH_WORD =
+  'jobs?|careers?|opening|openings|position|positions|vacanc(?:y|ies)|apply|application|hiring|req|requisition' +
+  '|karriere|stellenangebote?|stellen|bewerben|bewerbung|emplois?|offres|carri[eè]res?|empleos?|vacantes|vagas|carreiras?|vacatures|werken-bij|採用|求人';
+const JOB_PATH = new RegExp(String.raw`/(?:${JOBS_PATH_WORD})(?:/|$|[?#])`, 'iu');
+const decodedLink = (link: string) => {
+  try {
+    return decodeURIComponent(link);
+  } catch {
+    return link;
+  }
+};
 const BOARD = /\b(indeed|linkedin|glassdoor|monster|ziprecruiter|dice|wellfound|angel\.co|otta|builtin|simplyhired|seek|totaljobs|reed)\b/i;
 /** What a hiring thread calls itself: "[Hiring]", "Who is hiring?", "We're hiring". */
 const HIRING_MARKER =
   /\[\s*hiring\s*\]|\(\s*hiring\s*\)|\bwho\s*(?:is|['’]s)\s+hiring\b|\bwe\s*(?:are|['’]re)\s+hiring\b|\bnow\s+hiring\b|^\s*hiring\s*[:\-–—]/i;
+
+/*
+ * A link or a button whose text is the call to apply, in the languages
+ * postings come in other than English: "Jetzt bewerben", "Postuler",
+ * "Inscribirse", "Candidatar-se", "Solliciteer", "応募する". See
+ * `appliesInWords` in `classifyPage`. English is not here on purpose: an
+ * English posting is actionable by its title, and "Apply now" in a link is
+ * how a careers home and a board's search results invite you in as well.
+ */
+const APPLY_CALL =
+  /<(?:a|button)\b[^>]*>(?:\s*<[^>]+>)*\s*(?:jetzt\s+(?:online\s+)?bewerben|bewerben|zur\s+bewerbung|postuler(?:\s+maintenant)?|je\s+postule|candidater|inscribirse|inscr[íi]bete|postular(?:me|se)?|candidatar-se|candidate-se|solliciteer(?:\s+(?:nu|direct))?|nu\s+solliciteren|応募する|応募はこちら|エントリー)\s*(?:<[^>]+>\s*)*<\/(?:a|button)>/iu;
 
 /** A person's page on a network, which has their job title for a title. */
 const PROFILE_PAGE = /\blinkedin\.com\/(?:in|pub)\//i;
@@ -2415,6 +2464,26 @@ const DESCRIPTION_WORDS = [
   'full-time', 'part-time', 'internship', 'intern', 'new grad', 'entry level',
   'employment type', 'job id', 'requisition', 'hybrid', 'remote', 'on-site', 'onsite',
   'who you are', 'what we offer', 'your impact', 'day to day',
+  /*
+   * And the same headings in the languages postings come in. A German
+   * posting without JSON-LD — "Deine Aufgaben", "Dein Profil", "Wir bieten",
+   * "Jetzt bewerben" — had none of a posting's words by this list, so it was
+   * nothing at all while its English twin was a posting. Lower-cased, as the
+   * page text is before it is counted. The extension's `described` list in
+   * content.js carries the same words, so the chip and the server agree.
+   */
+  // German
+  'aufgaben', 'dein profil', 'ihr profil', 'wir bieten', 'jetzt bewerben', 'stellenbeschreibung', 'anforderungen', 'wir suchen', 'praktikum',
+  // French
+  'missions', 'profil recherché', 'postuler', 'vos missions', 'votre profil', 'nous recherchons',
+  // Spanish
+  'requisitos', 'ofrecemos', 'inscribirse', 'funciones', 'buscamos', 'prácticas',
+  // Portuguese
+  'benefícios', 'candidatar-se', 'responsabilidades', 'procuramos', 'estágio',
+  // Dutch
+  'functie-eisen', 'wij bieden', 'solliciteer', 'functieomschrijving', 'wij zoeken', 'stagiair',
+  // Japanese
+  '応募資格', '勤務地', '応募する', '仕事内容', '雇用形態', '募集',
 ];
 
 /** Words that mean a form is in front of you, not a description. */
@@ -2472,7 +2541,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     why.push(reason);
   };
 
-  if (/"@type"\s*:\s*"?JobPosting/i.test(html)) add(6, 'structured JobPosting data');
+  if (DECLARES_JOB_POSTING.test(html)) add(6, 'structured JobPosting data');
   /*
    * By the host, as the boards below are. Read anywhere in the address, a
    * tracker's name in a query string — `?partner=acme.icims.com`, a
@@ -2486,7 +2555,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
    * carry the source the same way.
    */
   if (BOARD.test(hostOf(url))) add(3, 'job board');
-  if (JOB_PATH.test(link)) add(2, 'job-shaped address');
+  if (JOB_PATH.test(decodedLink(link))) add(2, 'job-shaped address');
   if (companyFromUrl(url)) add(2, 'company careers page');
 
   const described = countIn(text, DESCRIPTION_WORDS);
@@ -2668,7 +2737,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   const numberedPosting =
     Boolean(jobNumberIn(url)) &&
     !careersAddress.otherPurpose &&
-    (JOB_PATH.test(link) || onATracker || BOARD.test(hostOf(url))) &&
+    (JOB_PATH.test(decodedLink(link)) || onATracker || BOARD.test(hostOf(url))) &&
     described >= 3;
   const namesARole =
     !thread &&
@@ -2835,7 +2904,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     /<(?:input|textarea)\b[^>]*\b(?:name|id|placeholder|aria-label)\s*=\s*["'][^"']*linked[\s_-]*in/i.test(html) ||
     /<label\b[^>]*>[^<]*linked\s*in\b/i.test(html);
   const forAJob =
-    /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    DECLARES_JOB_POSTING.test(html) ||
     onATracker ||
     BOARD.test(hostOf(url)) ||
     Boolean(companyFromUrl(url)) ||
@@ -2846,10 +2915,30 @@ export function classifyPage(html: string, url?: string): PageVerdict {
     countIn(text, JOB_FORM_WORDS) > 0;
   const fillsInAJobForm = formish >= 3 && hasFields && asksWhoYouAre && forAJob;
 
+  /*
+   * Or a posting in another language with its own way in.
+   *
+   * `namesARole` reads the title against an English list of role words, so
+   * "Werkstudent Softwareentwicklung (m/w/d)" over a page that says "Deine
+   * Aufgaben", "Dein Profil", "Wir bieten" and ends in a "Jetzt bewerben"
+   * link named no role and had nowhere to apply; the same page in English
+   * was a posting. What that page has is a button or a link that *is* the way
+   * in, written in its own language — and a page that both reads as a posting
+   * (three of a posting's words) and carries one is as actionable as an
+   * English one whose title names its role. Only a link's or a button's own
+   * text, not the word anywhere: a careers home says "Jetzt bewerben" in a
+   * paragraph about how to apply, and is a list of roles, not one.
+   */
+  const appliesInWords =
+    !thread &&
+    !notAPosting &&
+    described >= 3 &&
+    APPLY_CALL.test(html);
   const actionable =
-    /"@type"\s*:\s*"?JobPosting/i.test(html) ||
+    DECLARES_JOB_POSTING.test(html) ||
     (uploadsResume && !notAPosting) ||
     namesARole ||
+    appliesInWords ||
     (fillsInAJobForm && !notAPosting);
   if (namesARole) why.push('names a role');
   else if (actionable) why.push('somewhere to apply');
@@ -2860,7 +2949,7 @@ export function classifyPage(html: string, url?: string): PageVerdict {
   // in — and a page that is both is still, at this moment, the form.
   let kind: PageKind = 'none';
   if (fillsInAJobForm || uploadsResume) kind = 'application';
-  else if (described >= 3 || /"@type"\s*:\s*"?JobPosting/i.test(html)) kind = 'posting';
+  else if (described >= 3 || DECLARES_JOB_POSTING.test(html)) kind = 'posting';
   else if (listish >= 2) kind = 'listing';
   else if (forumHiring) kind = 'discussion';
   else if (score >= JOB_SHAPED) kind = 'posting';
@@ -2969,7 +3058,7 @@ function postingLinks(html: string, url?: string): number {
 
 /** A page that lists roles and declares none of its own. See the end of `classifyPage`. */
 function listsRoles(html: string, url?: string): boolean {
-  if (/"@type"\s*:\s*"?JobPosting/i.test(html)) return false;
+  if (DECLARES_JOB_POSTING.test(html)) return false;
   if (jobNumberIn(url)) return false;
   const title = readableName(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '') ?? '';
   const role = readTitle(title, { employers: [], unnamed: false, onBoard: false }).role;

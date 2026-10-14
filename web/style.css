@@ -94,6 +94,59 @@ header {
   top: 0;
   z-index: 20;
 }
+/* The tabs on a row of their own, under the rest, wherever one row would hide
+   any of them; header.js measures which. Not a fixed breakpoint, because
+   where that is depends on the save's name and on which chips are showing.
+   Anything that sticks below the header clears it by `--header-h`, which
+   header.js sets from the height it comes to. */
+header.tabs-row {
+  height: auto;
+  min-height: 56px;
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding-top: 8px;
+  padding-bottom: 6px;
+}
+header.tabs-row #tabs {
+  order: 10;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+/* The status line takes only what the row has left, and is cut short with
+   its title holding the rest: as wide as its words, a long one pushed "Log an
+   error" onto a row of its own at 641–870px, and the header grew under it.
+   It fills the gap after the AI chips, its words at its right end beside
+   the "!". */
+header.tabs-row #status { flex: 1 1 0; max-width: none; }
+/* But not an error floating in the corner: that is as wide as `.status.err.toast` says, at any width. */
+header.tabs-row #status.toast { max-width: min(560px, calc(100vw - 16px)); }
+/* In the order they are in the page, as on one row: the "!" beside the status
+   line, and Tab going through them in the order they are seen. Moved after
+   the status line here, the AI chips put themselves between it and the "!",
+   and the "!" jumped from one side of them to the other at the width the
+   tabs took a row of their own. */
+/* Where the first row is still short of room for the status line (header.js
+   folds these in turn): the peek while the drafting chip shows, which opens
+   the same run, and then the app's name, as on a phone. */
+header.tabs-row.fold-peek #drafting-chip:not(.hidden) ~ #ai-peek-chip { display: none; }
+header.tabs-row.fold-name h1 { font-size: 0; gap: 0; }
+/* Narrower tabs on their own row up to 800px: at 645–765px "Voice & AI"
+   went onto a third row by itself. */
+@media (max-width: 800px) { header.tabs-row nav button { padding: 7px 9px; } }
+/* What tailoring decided not to do, under its buttons (see `tailorDraft`); nothing when it has nothing to say. */
+.tailor-said:empty { display: none; }
+
+/*
+ * What is scrolled into view — by Tab and Shift+Tab, by a find, by a link —
+ * clears what sticks at the top: the header (`--header-h`) and the toolbar
+ * under it (`--toolbar-h`), both measured by header.js. Shift+Tab up a long
+ * resume left a third of the stops under them at 1280px.
+ */
+html { scroll-padding-top: calc(var(--header-h, 56px) + var(--toolbar-h, 0px) + 8px); }
+/* The header floats in a corner in the side panel (and scrolls away on a
+   phone, below): only the toolbar sticks. */
+html.embedded { scroll-padding-top: calc(var(--toolbar-h, 0px) + 8px); }
 
 h1 {
   font-size: var(--t-lg);
@@ -150,6 +203,11 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 .jobs-chip.ready:hover { background: #d2e3fc; }
 .jobs-chip.hidden { display: none; }
 .jobs-chip.hidden + .status { margin-left: auto; }
+/* Only the first chip showing pushes to the right; the rest sit beside it.
+   Each of them pushing spread them across the header with gaps between,
+   whenever the AI was drafting and running at once. */
+.jobs-chip:not(.hidden) ~ .jobs-chip,
+.jobs-chip:not(.hidden) ~ .status { margin-left: 0; }
 
 /* One line, cut short with an ellipsis; its title holds the rest. It gives up
    its room before the tabs give up any of theirs — it used to wrap to three
@@ -169,6 +227,60 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
   text-align: right;
 }
 .status.err { color: var(--bad); }
+/* An error is not cut short: it is the reason something did not happen. Two
+   lines in the header, a little wider than the one-line status; longer than
+   that, or squeezed too narrow to read, header.js floats it whole in the
+   corner (`toast`), as on a phone. */
+.status.err {
+  max-width: 60ch;
+  white-space: normal;
+  text-overflow: clip;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.status.err.toast {
+  position: fixed;
+  right: 8px;
+  bottom: 8px;
+  z-index: 45;
+  display: block;
+  -webkit-line-clamp: none;
+  max-width: min(560px, calc(100vw - 16px));
+  text-align: left;
+  /* Room on the right for its × (#status-dismiss). */
+  padding: 6px 36px 6px 12px;
+  border-radius: var(--radius);
+  background: var(--bad);
+  color: #fff;
+  box-shadow: var(--shadow-md);
+}
+
+/* The × on an error floating in the corner, placed over its top right by
+   header.js; nowhere else. While one shows, the page keeps room at its foot
+   for it, so the last controls can be scrolled out from under it. */
+#status-dismiss { display: none; }
+body.status-toast #status-dismiss {
+  display: grid;
+  place-items: center;
+  position: fixed;
+  z-index: 46;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+body.status-toast #status-dismiss:hover { background: rgba(255, 255, 255, .2); }
+body.status-toast #status-dismiss:focus-visible { outline: 2px solid #fff; outline-offset: 0; }
+body.status-toast { padding-bottom: var(--status-toast-h, 0px); }
 
 .tab { display: none; padding: 14px 16px 40px; }
 .tab.active { display: block; }
@@ -185,9 +297,9 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
    the full row height by default, leaving it nothing to stick within. */
 .pane-right {
   position: sticky;
-  top: 62px;
+  top: calc(var(--header-h, 56px) + 6px);
   align-self: start;
-  height: calc(100vh - 78px);
+  height: calc(100vh - var(--header-h, 56px) - 22px);
 }
 
 /* The PDF preview. Chrome's viewer chrome is hidden via URL parameters; the
@@ -258,6 +370,10 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
   place-items: center;
   color: var(--muted);
   font-size: var(--t-md);
+  /* Room from the box's edges, and centred as text too: a sentence that
+     wraps on a phone otherwise touches both sides and hangs to the left. */
+  padding: 16px;
+  text-align: center;
   pointer-events: none;
 }
 .preview-frame.loaded .preview-empty { display: none; }
@@ -269,7 +385,7 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 #resume-select, #history-resume { max-width: 260px; }
 .sticky-toolbar {
   position: sticky;
-  top: 54px;
+  top: calc(var(--header-h, 56px) - 2px);
   z-index: 10;
   background: var(--bg);
   padding: 6px 0;
@@ -278,7 +394,12 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 
 /* Material text fields: a quiet outline that thickens to the accent on focus,
    rather than a glow around it. */
-select, input[type=text], input[type=search], textarea {
+/* `input:not([type])` and number boxes too: the folder to open and the page
+   settings are both, and went out in the browser's own bevelled style. Inside
+   `:where()`, so they weigh no more than `select` or `textarea`: as
+   `input[type=number]` this rule outweighed `.date-year`'s own smaller box,
+   and every year showed as "202". */
+select, input[type=text], input[type=search], input:where(:not([type]), [type=number]), textarea {
   font: inherit;
   padding: 7px 10px;
   border: 1px solid var(--line);
@@ -287,8 +408,9 @@ select, input[type=text], input[type=search], textarea {
   color: var(--ink);
   transition: border-color .15s, box-shadow .15s;
 }
-input[type=text]:hover, input[type=search]:hover, textarea:hover, select:hover { border-color: var(--faint); }
-input[type=text]:focus-visible, input[type=search]:focus-visible, textarea:focus-visible, select:focus-visible {
+input[type=text]:hover, input[type=search]:hover, input:not([type]):hover, input[type=number]:hover, textarea:hover, select:hover { border-color: var(--faint); }
+input[type=text]:focus-visible, input[type=search]:focus-visible, input:not([type]):focus-visible, input[type=number]:focus-visible,
+textarea:focus-visible, select:focus-visible {
   outline: 0;
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
@@ -642,6 +764,8 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
   cursor: text;
 }
 .editable:hover { background: var(--state-hover); }
+/* Reached with Tab (Enter or F2 then edits it): a ring that says where the keyboard is. */
+.editable:focus-visible:not(.editing) { outline: 2px solid var(--accent); outline-offset: 1px; }
 .editable.editing {
   background: var(--panel);
   box-shadow: inset 0 0 0 2px var(--accent);
@@ -659,12 +783,15 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .profile-entry .title { font-size: var(--t-lg); font-weight: 500; }
 .profile-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  /* Wide enough for an email address or a link to sit on one line at 1024px,
+     where 210px columns broke them mid-word; never wider than the box. */
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
   gap: 2px 14px;
   margin-top: 6px;
 }
 .profile-field { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.profile-field .meta-value { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* Between words where there are any; mid-word only for one that will not fit. */
+.profile-field .meta-value { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
 .profile-extras { margin-top: 12px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
 
 /* Step through the alternates from beside the line. */
@@ -956,7 +1083,10 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 /* ---- Settings ---- */
 
 .settings { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
-.settings .row { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+/* Wrapping, so four page settings side by side on a phone take two lines
+   rather than crushing the Paper select to its arrow. */
+.settings .row { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; flex-wrap: wrap; }
+.settings .row > label.f { flex: 1 1 90px; }
 .settings .row:last-child { margin-bottom: 0; }
 .settings label.f { display: block; margin-bottom: 11px; }
 .settings .lbl { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
@@ -1103,7 +1233,9 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 /* ---- Application detail ---- */
 
 .apps-split { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .9fr); gap: 16px; align-items: start; }
-@media (max-width: 1150px) { .apps-split { grid-template-columns: 1fr; } }
+/* One column up to 1200px, not 1150: beside the record at 1151–1193px the
+   table was a few pixels wider than its half, and scrolled sideways. */
+@media (max-width: 1200px) { .apps-split { grid-template-columns: 1fr; } }
 
 /*
  * The table stays inside its half of the split.
@@ -1130,7 +1262,52 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
  * break opportunities at all — a url with no spaces is one word to the line
  * breaker, and `break-word` only helps once the box is already too small.
  */
-#apps-wrap td { overflow-wrap: anywhere; }
+#apps-wrap td { overflow-wrap: break-word; }
+#apps-wrap td.long-token { overflow-wrap: anywhere; }
+/*
+ * But only the cell with such a thing in it: with every cell allowed to break
+ * anywhere, the table squeezed Role to 74px at 1280 and broke words in the
+ * middle ("Distingui/shed"). The status dropdown gives back what it does not
+ * need, and "Enclosed" — shown again beside the table, in the record — goes
+ * where the table shares the page with it and the room is short.
+ */
+/* As wide as its longest stage: at 9em "Interviewing" read "Interviewi". */
+#apps-wrap td.app-status select { width: auto; max-width: 100%; }
+/* To 1520px, not 1400: "Enclosed" coming back at 1401 squeezed Company and
+   Role so far that the table grew by a fifth in one pixel. */
+/* And at every width below that: stacked over the record, the table had the
+   column back, and it held the table at 748px wide, scrolling sideways below
+   about 776px. The record says what was enclosed. */
+@media (max-width: 1520px) {
+  #apps-wrap th:nth-child(6), #apps-wrap td:nth-child(6) { display: none; }
+}
+/* The day it was sent is in the record too, and the history. */
+@media (max-width: 800px) {
+  #apps-wrap th:nth-child(5), #apps-wrap td:nth-child(5) { display: none; }
+}
+/* On a phone, each application as a short card rather than a row wider than
+   the screen: the company with the day it was started, the role, and the
+   stage with Edit and Remove. */
+@media (max-width: 480px) {
+  #apps-wrap thead { display: none; }
+  #apps-wrap table, #apps-wrap tbody { display: block; width: 100%; }
+  #apps-wrap tbody tr:not(.group) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 10px;
+    align-items: center;
+    padding: 8px 4px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  #apps-wrap tbody tr.group { display: block; }
+  #apps-wrap tbody tr.group td { display: block; }
+  #apps-wrap tbody tr:not(.group) td { border-bottom: 0; padding: 2px 0; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(2) { grid-column: 1; grid-row: 1; font-weight: 500; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(1) { grid-column: 2; grid-row: 1; text-align: right; color: var(--muted); font-size: 12px; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(3) { grid-column: 1 / -1; grid-row: 2; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(4) { grid-column: 1; grid-row: 3; }
+  #apps-wrap tbody tr:not(.group) td:nth-child(7) { grid-column: 2; grid-row: 3; text-align: right; white-space: nowrap; }
+}
 
 tbody tr.selected { background: var(--accent-soft); }
 tbody tr { cursor: pointer; }
@@ -1161,8 +1338,20 @@ tbody tr { cursor: pointer; }
   border-radius: var(--radius);
   padding: 16px 18px;
   box-shadow: var(--shadow-sm);
-  max-height: calc(100vh - 210px);
+  max-height: calc(100vh - var(--header-h, 56px) - 154px);
   overflow: auto;
+  /* Beside the list, it stays in view as the list scrolls: a row opened far
+     down filled a pane at the top of the page, out of sight, and the click
+     seemed to do nothing. Clears the header (56px, or taller with the tabs on
+     a row of their own) with room to spare. */
+  position: sticky;
+  top: calc(var(--header-h, 56px) + 16px);
+  /* Past the header, which the page's scroll-padding already clears. */
+  scroll-margin-top: 16px;
+}
+/* Stacked under the list, it is where it falls (the editor scrolls to it). */
+@media (max-width: 1200px) {
+  .app-detail { position: static; }
 }
 .app-detail h3 { margin: 0 0 2px; font-size: var(--t-lg); letter-spacing: -.01em; }
 .app-detail .sub { color: var(--muted); font-size: var(--t-md); margin-bottom: 14px; }
@@ -1187,6 +1376,8 @@ tbody tr { cursor: pointer; }
   padding: 11px 12px;
   max-height: 260px;
   overflow: auto;
+  /* A pasted link with no spaces in it ran off the side. */
+  overflow-wrap: anywhere;
 }
 .app-detail .qa { margin-bottom: 12px; }
 .app-detail .qa .q { font-weight: 620; font-size: var(--t-md); margin-bottom: 4px; }
@@ -1500,7 +1691,11 @@ td.when { font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* Project assets */
 .assets-layout { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 28px; max-width: 1400px; margin: 0 auto; }
 .project-panel { border-right: 1px solid var(--line); padding-right: 24px; }
-.project-panel > input, .project-panel > select { width: 100%; margin: 6px 0 12px; }
+.project-panel > input, .project-panel > select,
+.project-panel > [data-project-required] > select { width: 100%; margin: 6px 0 12px; }
+/* Nor any other: a select is as wide as its longest option, and "Name, job
+   title and document type" ran past the column. */
+.project-panel select { max-width: 100%; }
 .project-panel .mono-path { overflow-wrap: anywhere; font-size: 12px; }
 .asset-card { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper, white); }
 .asset-card h3 { margin: 0; overflow-wrap: anywhere; }
@@ -1766,7 +1961,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   font-size: 12px;
   line-height: 1;
 }
-.fold:hover { color: var(--fg); }
+.fold:hover { color: var(--ink); }
 
 /* The section's ordering, beside the heading it applies to rather than in a
    settings panel: it is a property of this list, decided while looking at it. */
@@ -1776,10 +1971,13 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 2px 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--panel);
   color: var(--muted);
 }
-.order-by:hover, .order-by:focus-visible { color: var(--fg); border-color: var(--line-strong, var(--line)); }
+.order-by:hover { color: var(--ink); border-color: var(--faint); }
+/* The accent, as every other box has it: --faint here, under the select's own
+   accent inset, drew a two-tone ring. */
+.order-by:focus-visible { color: var(--ink); border-color: var(--accent); }
 
 /* ------------------------------------------------------------------ *
  * Dates, edited as dates                                              *
@@ -1798,7 +1996,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 2px 4px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--panel);
 }
 .date-year {
   width: 5.5ch;
@@ -1806,7 +2004,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 2px 4px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--panel);
 }
 /* The spinner is noise on a year, and it makes the box wider than the number. */
 .date-year::-webkit-outer-spin-button,
@@ -1815,7 +2013,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 
 .date-switches { display: inline-flex; align-items: center; gap: 10px; }
 .date-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--t-sm); cursor: pointer; }
-.date-switch:hover { color: var(--fg); }
+.date-switch:hover { color: var(--ink); }
 
 /* An entry whose lines were arranged here rather than in the master. Stated
    quietly beside the add-line button: it is a fact about this resume, not a
@@ -2014,6 +2212,8 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 .narrow-only { display: none; }
 
 @media (max-width: 640px) {
+  /* What is scrolled into view clears only the toolbar: the header is not there. */
+  html { scroll-padding-top: calc(var(--toolbar-h, 0px) + 8px); }
   /* The header: two short rows that scroll away, rather than one wide row
      that sticks and pushes the page sideways. The tabs scroll within
      themselves. */
@@ -2024,18 +2224,29 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
     gap: 4px 8px;
     padding: 6px 10px;
   }
-  h1 { font-size: var(--t-base); }
   nav {
     order: 10;
     flex: 1 1 100%;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
+    /* All of them, on two lines if they need it: a strip that scrolled with
+       no scrollbar hid Applications onwards at 390px. */
+    flex-wrap: wrap;
     gap: 2px;
   }
   nav::-webkit-scrollbar { display: none; }
-  nav button { padding: 6px 11px; flex: none; min-height: 32px; }
-  #project-chip { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
+  nav button { padding: 6px 9px; flex: none; min-height: 32px; }
+  /* One row above the tabs: the mark, the save, the AI chip and the error
+     log's "!" (the status floats, below). The app's name gave way to the "!",
+     which had a line of its own under it; the mark stays, and the name is
+     still the heading's text. The save's name takes what is left, cut short
+     with its title holding the rest. */
+  h1 { font-size: 0; gap: 0; }
+  /* What the row leaves it beside the mark, the AI chip and the "!" (about
+     234px with the gaps): "Save: data" whole at 320px. It was 250, and said
+     "Save: …" there. */
+  #project-chip { max-width: calc(100vw - 234px); overflow: hidden; text-overflow: ellipsis; }
   .jobs-chip { padding: 4px 10px; }
   /* Floated at the bottom corner, as in the side panel, and wrapped whole:
      a row of its own in the header pushed the toolbar down each time
@@ -2054,7 +2265,15 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
     color: #fff;
     box-shadow: var(--shadow-md);
   }
-  .status.err { background: var(--bad); color: #fff; }
+  .status.err {
+    background: var(--bad);
+    color: #fff;
+    /* Already whole down here: not the header's two lines. */
+    display: block;
+    -webkit-line-clamp: none;
+    max-width: calc(100vw - 16px);
+    padding-right: 36px; /* its × */
+  }
   .status:empty { display: none; }
 
   .tab { padding: 8px 8px 32px; }
@@ -2146,7 +2365,7 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   .pdf-pages { padding: 6px; }
   .pdf-pages.zoomed { align-items: flex-start; }
   .pdf-pages.zoomed .pdf-page { max-width: none; }
-  .preview-zoom {
+  button.preview-zoom {
     position: absolute;
     top: 8px;
     right: 8px;
@@ -2154,7 +2373,7 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
     background: var(--panel);
     box-shadow: var(--shadow-sm);
   }
-  .preview-zoom:hover { background: var(--panel); }
+  button.preview-zoom:hover { background: var(--panel); }
 
   /* Focus: the entry being worked in, whole; every other one its heading. */
   body.focus-mode #editor .entry:not(.focus-active):not(.off) > :not(.entry-head):not(.head) { display: none; }
@@ -2273,6 +2492,8 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 .embedded header > * { pointer-events: auto; }
 .embedded h1, .embedded nav, .embedded #project-chip, .embedded #ai-peek-chip, .embedded #resume-select { display: none; }
 .embedded header .jobs-chip { margin-left: 0; box-shadow: var(--shadow-md); }
+/* Over the page, not see-through: its words sat on top of whatever was under them. */
+.embedded .error-log-chip { background: var(--panel); box-shadow: var(--shadow-md); }
 .embedded .status {
   /* In the floating header already, under the AI chip; not floated again. */
   position: static;
@@ -2285,11 +2506,16 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   color: #fff;
   box-shadow: var(--shadow-md);
 }
-.embedded .status.err { background: var(--bad); }
+.embedded .status.err { background: var(--bad); display: block; -webkit-line-clamp: none; max-width: 100%; padding-right: 36px; }
 .embedded .status:empty { display: none; }
 .embedded .sticky-toolbar { top: 0; }
 .embedded .pane-right { top: 8px; height: calc(100vh - 16px); }
 .embedded .tab { padding-top: 8px; }
+/* Room at the foot for the corner the header floats in, as tall as it is
+   (header.js measures it into `--float-h`), so the last controls can scroll
+   out from under "Log an error". The status's own room is in this too. */
+.embedded .tab { padding-bottom: var(--float-h, 64px); }
+.embedded body.status-toast { padding-bottom: 0; }
 
 @media (max-width: 640px) {
   /* One row: whether it saved, the view, Focus, Undo, Redo, More — with
@@ -2328,5 +2554,87 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 }
 
 /* Pair JobHelper: the code is read off the screen and typed, so it is big. */
-.pair-code { font: 600 22px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.12em; margin: 8px 0 2px; }
+.pair-code { font: 600 30px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.12em; margin: 8px 0 2px; user-select: all; }
+.pair-code-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Said while the code waits to be typed in, and once it has been. */
+.pair-waiting { font-style: italic; }
+.pair-done {
+  color: var(--good); background: var(--good-bg); border: 1px solid var(--good-line);
+  border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 13px; overflow-wrap: anywhere;
+}
 .pair-row { display: grid; gap: 2px; justify-items: start; }
+
+/* ---- Error log: the header button, its dialog, and the section under Save & Files (errorlog.js) ---- */
+
+/* Quiet, like the AI peek beside it: always there, never the news. */
+.error-log-chip {
+  font-size: var(--t-sm);
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  flex: none;
+}
+.error-log-chip:hover { color: var(--bad); border-color: var(--bad); }
+.error-log-chip { display: inline-flex; align-items: center; gap: 6px; }
+.error-log-chip-mark {
+  display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%;
+  border: 1.5px solid currentColor; font-size: 10px; font-weight: 700; line-height: 1;
+}
+/* Where its words would leave the status line too little room, just the
+   mark: the status line is the one that would give up its room (it shrinks
+   first), and it is the one saying what happened. header.js measures it; at
+   1280 with the tabs on one row there is room, and below that, with the tabs
+   on a row of their own, there is again. The words stay the button's name,
+   and its title says them. */
+header.log-mark-only .error-log-chip { padding: 5px 7px; }
+header.log-mark-only .error-log-chip-label {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.error-log-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.error-log-body { width: min(560px, 94vw); }
+.error-log-body textarea { min-height: 64px; font-family: inherit; font-size: 14px; }
+.error-log-body .lbl { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+.error-log-paste { padding: 14px; }
+.error-log-thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.error-log-thumbs:empty { display: none; }
+.error-log-thumb { margin: 0; display: grid; gap: 4px; justify-items: start; }
+.error-log-thumb img { max-width: 140px; max-height: 96px; border: 1px solid var(--line); border-radius: 6px; object-fit: contain; background: #fafafb; }
+.error-log-window { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 13px; }
+.error-log-note:empty { display: none; }
+.error-log-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+/* "Open the error log" scrolls here: the heading clears the sticky header. */
+#error-log { scroll-margin-top: 16px; }
+@media (max-width: 640px) {
+  /* The header scrolls away here, so nothing to clear. */
+  #error-log { scroll-margin-top: 8px; }
+}
+#error-log .mono-path { margin: 6px 0; }
+.error-log-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 6px; }
+/* The section sits in the Save & Files side column, which is narrow: buttons
+   wrap, and each entry is its time and source over its description. */
+#error-log-panel .row { flex-wrap: wrap; }
+#error-log-panel input[type=text] { width: 100%; }
+.error-log-list li { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; font-size: 12px; align-items: baseline; padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
+.error-log-list li:last-child { border-bottom: 0; }
+.error-log-what, .error-log-list li .hint { grid-column: 1 / -1; }
+.error-log-when { color: var(--muted); white-space: nowrap; }
+.error-log-source { color: var(--muted); font-weight: 500; }
+.error-log-what { overflow-wrap: anywhere; }
+/* "Recent entries", and how many of how many are shown. */
+.error-log-recent { display: flex; align-items: baseline; gap: 8px; }
+.error-log-count { font-size: 11px; }
+.error-log-more { margin-top: 8px; }
+/* Said beside the description as it is typed; not a refusal, so amber. */
+.error-log-contact { margin: 4px 0 0; }
+.error-log-contact[hidden] { display: none; }
+/* A paired extension: its name, with the short id after it. The full origin is the title. */
+.ext-id { font-family: var(--mono); }
+
+/* The applications a delete takes the resume from, one to a line (see `deleteVariation`). */
+.confirm-list { margin: 4px 0 10px; padding-left: 20px; }
+.confirm-list li { margin: 2px 0; }

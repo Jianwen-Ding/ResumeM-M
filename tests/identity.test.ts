@@ -660,16 +660,47 @@ describe('a sent row the names alone tie to: maybe sent', () => {
    * "Record an application" for a job sent from LinkedIn, with the
    * employer's address and a note: the person says it is the one they sent,
    * by its exact names. The row is updated — the address kept as an alias,
-   * the note added — rather than a "-2" beside it.
+   * the note added — rather than a "-2" beside it. The employer's address
+   * here names no job of its own (round 24: one that does is another job,
+   * below).
    */
   it('recorded by hand with its exact names and the employer address, updates the sent row', async () => {
     const api = serve([STRIPE]);
-    await api.post('/api/applications').send({ company: STRIPE.company, role: STRIPE.role, url: FORM, notes: 'Recruiter: Jane' }).expect(200);
+    const CAREERS = 'https://stripe.com/jobs/listing/software-engineer-intern-summer-or-winter';
+    await api.post('/api/applications').send({ company: STRIPE.company, role: STRIPE.role, url: CAREERS, notes: 'Recruiter: Jane' }).expect(200);
     expect(rows()).toHaveLength(1);
     expect(row('stripe')).toMatchObject({ status: 'applied', url: STRIPE.url, notes: 'Recruiter: Jane' });
-    expect(row('stripe')?.aliases).toEqual([{ company: STRIPE.company, role: STRIPE.role, url: FORM }]);
+    expect(row('stripe')?.aliases).toEqual([{ company: STRIPE.company, role: STRIPE.role, url: CAREERS }]);
     // And the employer's page is the row's now: already sent there.
-    expect(alreadySent(rows(), STRIPE.company, STRIPE.role, FORM)?.id).toBe('stripe');
+    expect(alreadySent(rows(), STRIPE.company, STRIPE.role, CAREERS)?.id).toBe('stripe');
+  });
+
+  /*
+   * Round 24. The typed address names a job: a LinkedIn posting's number,
+   * beside a sent row whose address carries none (or another). Merged, the
+   * posting's address became the sent row's alias, and from then on the
+   * other job read as already sent there — strong evidence, made by hand
+   * from a match by name. Two numbers are two rows.
+   */
+  it('but recorded at a posting with a job number of its own, is a new row, and the posting stays unsent', async () => {
+    const SENT = sentRow({ id: 'stripe-site', company: 'Stripe', role: 'Software Engineer Intern', url: 'https://stripe.com/jobs/listing/software-engineer-intern/5555' });
+    const LINKEDIN = 'https://www.linkedin.com/jobs/view/9999999999/';
+    const api = serve([SENT]);
+    const r = await api
+      .post('/api/applications')
+      .send({ company: SENT.company, role: SENT.role, url: LINKEDIN, status: 'applied', notes: 'Boston posting, applied via LinkedIn Easy Apply' })
+      .expect(200);
+    expect(r.body.id).not.toBe('stripe-site');
+    expect(rows()).toHaveLength(2);
+    expect(row('stripe-site')).toMatchObject({ url: SENT.url });
+    expect(row('stripe-site')?.aliases).toBeUndefined();
+    expect(row('stripe-site')?.notes).toBeUndefined();
+    expect(row(r.body.id)).toMatchObject({ url: LINKEDIN, notes: 'Boston posting, applied via LinkedIn Easy Apply' });
+    // Agreeing numbers still merge: the same Greenhouse job from its board and the employer's page.
+    const GH = sentRow({ id: 'figma', company: 'Figma', role: 'Software Engineer Intern', url: 'https://boards.greenhouse.io/figma/jobs/6143238004' });
+    t!.write('applications.yaml', [GH]);
+    await api.post('/api/applications').send({ company: GH.company, role: GH.role, url: 'https://www.figma.com/careers/job/?gh_jid=6143238004', notes: 'Same one' }).expect(200);
+    expect(rows()).toHaveLength(1);
   });
 
   it('but a posting the address says is another stays another', async () => {
@@ -677,6 +708,182 @@ describe('a sent row the names alone tie to: maybe sent', () => {
     await api.post('/api/applications').send({ company: STRIPE.company, role: STRIPE.role, url: 'https://www.linkedin.com/jobs/view/4462040000/', notes: 'The other one' }).expect(200);
     expect(rows()).toHaveLength(2);
     expect(row('stripe')?.notes).toBeUndefined();
+  });
+});
+
+/*
+ * Round 24: only a row that went, and only until the person has answered.
+ *
+ * Every status past `applying` counted as a send, so a row recorded at
+ * `applying` and closed by hand — "Decided not to apply" — was "may have
+ * applied to this already … was sent on <date>", the date being the day it
+ * was recorded (`appliedAt`, stamped on every row). And once "It's another
+ * job" had filed the new row, every later page of that application asked
+ * the same question again, since the new row matched by name only and the
+ * sent one was still there.
+ */
+describe('a sent row the names alone tie to: what counts as sent', () => {
+  const { sendOf } = applications;
+  const RALEIGH_WD = 'https://redhat.wd5.myworkdayjobs.com/jobs/job/Raleigh/Software-Engineer-Intern_R-059038';
+  const LINKEDIN = 'https://www.linkedin.com/jobs/view/4462047454/';
+  const neverSent = {
+    id: 'redhat-1',
+    company: 'Red Hat',
+    role: 'Software Engineer Intern',
+    status: 'closed',
+    url: RALEIGH_WD,
+    appliedAt: ago(12),
+    history: [
+      { at: ago(12), status: 'applying', note: 'Recorded' },
+      { at: ago(8), status: 'closed', note: 'Decided not to apply' },
+    ],
+  } as Application;
+
+  it('is not a row recorded and then closed by hand without ever going', () => {
+    expect(sendOf(neverSent)).toBeUndefined();
+    expect(maybeSent([neverSent], 'Red Hat', 'Software Engineer Intern', LINKEDIN)).toBeUndefined();
+    const interestedThenClosed = { ...neverSent, history: [{ at: ago(12), status: 'interested' as const }, { at: ago(8), status: 'closed' as const, note: 'Not for me' }] };
+    expect(maybeSent([interestedThenClosed], 'Red Hat', 'Software Engineer Intern', LINKEDIN)).toBeUndefined();
+  });
+
+  it('is a row that went and was closed after, and the date is the day it went', () => {
+    const sentThenClosed = {
+      ...neverSent,
+      id: 'redhat-2',
+      history: [
+        { at: ago(12), status: 'applying' as const, note: 'Recorded' },
+        { at: ago(9), status: 'applied' as const, note: 'The form was submitted on the page' },
+        { at: ago(2), status: 'closed' as const, note: 'Rejected' },
+      ],
+    };
+    expect(maybeSent([sentThenClosed], 'Red Hat', 'Software Engineer Intern', LINKEDIN)?.id).toBe('redhat-2');
+    const { AlreadySent, localDay } = applications;
+    const said = new AlreadySent(sentThenClosed, true).message;
+    expect(said).toContain(`was sent on ${localDay(new Date(ago(9)))}`);
+    expect(said).not.toContain(localDay(new Date(ago(12))));
+    // A row from before the history was kept still counts by its status and its date.
+    const legacy = { id: 'old', company: 'Red Hat', role: 'Software Engineer Intern', status: 'applied', appliedAt: ago(20) } as Application;
+    expect(sendOf(legacy)).toEqual({ at: legacy.appliedAt });
+    expect(maybeSent([legacy], 'Red Hat', 'Software Engineer Intern', LINKEDIN)?.id).toBe('old');
+  });
+
+  it('stands down for a live application by the same names begun after the send, and not for one begun before', () => {
+    const sent = sentRow({ id: 'figma-sent', company: 'Figma', role: 'Software Engineer Intern', url: 'https://boards.greenhouse.io/figma/jobs/6143238004' });
+    const FORM = 'https://boards.greenhouse.io/figma/jobs/7000000001';
+    const after = { id: 'figma-2', company: 'Figma', role: 'Software Engineer Intern', status: 'applying', url: 'https://www.linkedin.com/jobs/view/4300000001/', history: [{ at: ago(1), status: 'applying', note: 'Files staged' }] } as Application;
+    expect(maybeSent([sent], 'Figma', 'Software Engineer Intern', FORM)?.id).toBe('figma-sent');
+    expect(maybeSent([sent, after], 'Figma', 'Software Engineer Intern', FORM)).toBeUndefined();
+    // iCIMS's steps, begun before the send and left at applying, do not answer for it.
+    const before = { ...after, id: 'figma-steps', url: 'https://careers-figma.icims.com/jobs/1234/login', history: [{ at: ago(30), status: 'applying' as const }] };
+    expect(maybeSent([sent, before], 'Figma', 'Software Engineer Intern', FORM)?.id).toBe('figma-sent');
+  });
+
+  it('through the routes: a row recorded at applying and closed by hand does not hold a stage from LinkedIn', async () => {
+    const api = serve([]);
+    const made = await api.post('/api/applications').send({ company: 'Red Hat', role: 'Software Engineer Intern', status: 'applying', url: RALEIGH_WD }).expect(200);
+    // Not sent, so no `appliedAt` — that is the date the card read as the send.
+    expect(made.body.appliedAt).toBeUndefined();
+    await api.post(`/api/applications/${made.body.id}/status`).send({ status: 'closed', note: 'Decided not to apply' }).expect(200);
+    const seen = await api.post('/api/extension/analyze').send({ url: LINKEDIN, title: 'Software Engineer Intern - Red Hat', html: `<html><body><h1>Software Engineer Intern</h1><p>Red Hat</p><p>${'Build things in Go and Kubernetes. '.repeat(10)}</p></body></html>`, tailor: 'none', company: 'Red Hat', role: 'Software Engineer Intern' }).expect(200);
+    expect(seen.body.applied).toBeUndefined();
+    const staged = await api.post('/api/applications/bundle').send({ resumeId: 'intern', company: 'Red Hat', role: 'Software Engineer Intern', url: LINKEDIN, status: 'applying' });
+    expect(staged.status).toBe(200);
+    expect(staged.body.application.id).not.toBe(made.body.id);
+    expect(rows()).toHaveLength(2);
+    // Recorded as sent, the date is stamped as before.
+    const sentByHand = await api.post('/api/applications').send({ company: 'Globex', role: 'Dev', status: 'applied' }).expect(200);
+    expect(sentByHand.body.appliedAt).toBeTruthy();
+  });
+
+  it('through the routes: once "another job" has filed the new row, its later pages are not asked again', async () => {
+    const sent = sentRow({ id: 'figma', company: 'Figma', role: 'Software Engineer Intern', url: 'https://boards.greenhouse.io/figma/jobs/6143238004', resumeId: 'intern' });
+    const api = serve([sent]);
+    const job = { resumeId: 'intern', company: 'Figma', role: 'Software Engineer Intern', status: 'applying' };
+    const fromLinkedIn = await api.post('/api/applications/bundle').send({ ...job, url: 'https://www.linkedin.com/jobs/view/4300000001/' });
+    expect(fromLinkedIn.status).toBe(409);
+    expect(fromLinkedIn.body.maybe).toBe(true);
+    const filed = await api.post('/api/applications/bundle').send({ ...job, url: 'https://www.linkedin.com/jobs/view/4300000001/', evenIfSent: true }).expect(200);
+    expect(filed.body.application.id).not.toBe('figma');
+    // The new job's own form, another Greenhouse id: not asked again.
+    const FORM = 'https://boards.greenhouse.io/figma/jobs/7000000001';
+    const onForm = await api.post('/api/applications/bundle').send({ ...job, url: FORM });
+    expect(onForm.status).toBe(200);
+    expect(onForm.body.application.id).toBe(filed.body.application.id);
+    const seen = await api.post('/api/extension/analyze').send({ url: FORM, title: 'Software Engineer Intern', html: `<html><body><h1>Software Engineer Intern</h1><p>Figma</p><p>${'Design tools for everyone. '.repeat(10)}</p></body></html>`, tailor: 'none', company: 'Figma', role: 'Software Engineer Intern' }).expect(200);
+    expect(seen.body.applied).toBeUndefined();
+    expect(rows()).toHaveLength(2);
+    expect(row('figma')?.history).toHaveLength(1);
+  });
+});
+
+/*
+ * Round 26: a row the app filed by itself does not answer the question.
+ *
+ * The first visit to a posting by a sent row's names warned, and the
+ * workspace the extension opened behind it filed a row at `interested`
+ * ("Workspace opened, nothing sent yet") at this posting's address. On the
+ * next visit that row was a strong match, so `maybeSent` said nothing, the
+ * stage went through into it (`applying`, "Files rebuilt"), and the warning
+ * never came back.
+ */
+describe('a sent row the names alone tie to: a row nobody asked for', () => {
+  const { openedUnasked } = applications;
+  const SENT = sentRow({ id: 'figma', company: 'Figma', role: 'Software Engineer Intern', url: 'https://boards.greenhouse.io/figma/jobs/6143238004', resumeId: 'intern' });
+  const LINKEDIN = 'https://www.linkedin.com/jobs/view/4300000001/';
+  const unasked = {
+    id: 'figma-2',
+    company: 'Figma',
+    role: 'Software Engineer Intern',
+    url: LINKEDIN,
+    status: 'interested',
+    appliedAt: ago(0),
+    history: [{ at: ago(0), status: 'interested', note: 'Workspace opened, nothing sent yet' }],
+  } as Application;
+
+  it('is not an answer to "maybe sent", and refuses the stage as one', () => {
+    expect(openedUnasked(unasked)).toBe(true);
+    expect(maybeSent([SENT, unasked], 'Figma', 'Software Engineer Intern', LINKEDIN)?.id).toBe('figma');
+    // Touched by the person — a status, a stage — it is theirs, and answers for the job.
+    const touched = { ...unasked, history: [...unasked.history!, { at: ago(0), status: 'interested' as const, note: 'Noted' }] };
+    expect(openedUnasked(touched)).toBe(false);
+    expect(maybeSent([SENT, touched], 'Figma', 'Software Engineer Intern', LINKEDIN)).toBeUndefined();
+  });
+
+  it('through the routes: the second visit still asks, and nothing is filed until the person answers', async () => {
+    const api = serve([SENT]);
+    const job = { company: 'Figma', role: 'Software Engineer Intern', url: LINKEDIN };
+    const html = `<html><head><title>Software Engineer Intern | Figma</title></head><body><h1>Software Engineer Intern</h1><p>${'Figma is hiring interns to build design tools in TypeScript and C++. '.repeat(12)}</p><a>Apply</a></body></html>`;
+    const look = () => api.post('/api/extension/analyze').send({ ...job, title: 'Software Engineer Intern | Figma', html, tailor: 'none' }).expect(200);
+    const stage = (o: object = {}) => api.post('/api/applications/bundle').send({ ...job, resumeId: 'intern', status: 'applying', ...o });
+    for (const visit of [1, 2]) {
+      expect((await look()).body.applied, `visit ${visit}`).toMatchObject({ maybe: true, id: 'figma' });
+      await api.post('/api/workspace').send({ ...job, auto: true, resumeId: 'intern' }).expect(200);
+      const refused = await stage();
+      expect(refused.status, `visit ${visit}`).toBe(409);
+      expect(refused.body.maybe, `visit ${visit}`).toBe(true);
+      expect(rows().map((a) => a.id), `visit ${visit}`).toEqual(['figma']);
+    }
+    // "It's a different job": filed, and from then on that row answers.
+    const filed = await stage({ evenIfSent: true }).expect(200);
+    expect(filed.body.application.id).not.toBe('figma');
+    expect((await look()).body.applied).toBeUndefined();
+    expect((await stage()).status).toBe(200);
+    await api.post('/api/workspace').send({ ...job, auto: true, resumeId: 'intern' }).expect(200);
+    expect(rows()).toHaveLength(2);
+    expect(row('figma')?.history).toHaveLength(1);
+  });
+
+  it('through the routes: a row filed by itself before this was fixed does not hold the question either', async () => {
+    const api = serve([SENT, unasked]);
+    const refused = await api.post('/api/applications/bundle').send({ company: 'Figma', role: 'Software Engineer Intern', url: LINKEDIN, resumeId: 'intern', status: 'applying' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.maybe).toBe(true);
+    expect(row('figma-2')).toMatchObject({ status: 'interested' });
+    expect(row('figma-2')?.history).toHaveLength(1);
+    // Said to be another job, it is the row the files go into.
+    const filed = await api.post('/api/applications/bundle').send({ company: 'Figma', role: 'Software Engineer Intern', url: LINKEDIN, resumeId: 'intern', status: 'applying', evenIfSent: true }).expect(200);
+    expect(filed.body.application.id).toBe('figma-2');
+    expect(maybeSent(rows(), 'Figma', 'Software Engineer Intern', LINKEDIN)).toBeUndefined();
   });
 });
 

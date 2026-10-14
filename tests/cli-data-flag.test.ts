@@ -481,16 +481,85 @@ describe('rmm --data', () => {
    * likely of all of them to produce one, because it holds every entry in the
    * store at once.
    */
+  /*
+   * The compile's own warnings, which `master` used to throw away.
+   *
+   * This leaned on the TeX install at hand: it took whatever warning `build`
+   * happened to print — the font fallback, on a machine without lmodern —
+   * and looked for one under `master` too. With lmodern there was nothing to
+   * compare, and the test failed on a working program. A link TeX cannot
+   * break runs off the paper whatever the fonts, on the master document as on
+   * the resume, so the warning is made here rather than hoped for.
+   */
   it('says on the master document what it says on a resume', async () => {
+    const link =
+      'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz/edit?usp=sharing&ouid=1234567890';
+    fs.writeFileSync(
+      path.join(save, 'experience.yaml'),
+      [
+        '- id: exp1',
+        '  kind: experience',
+        '  title: Brightline Systems',
+        '  subtitle: Software Engineer',
+        '  location: Boston, MA',
+        '  dates: Jul. 2024 -- Dec. 2024',
+        '  bullets:',
+        '    - id: b0',
+        '      default: v1',
+        '      variants:',
+        `        - { id: v1, text: "Design doc: ${link}" }`,
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(save, 'resumes', 'linked.yaml'),
+      'id: linked\nlabel: Linked\nsections:\n  - kind: experience\n    entries: [exp1]\n',
+    );
+    const offThePaper = /^\s*! A line runs past the right-hand edge/m;
+
     const built = await rmm(['build', '--all', '--data', save]);
-    const warned = (built.stderr.match(/^\s*! /gm) ?? []).length > 0;
-    // This machine's TeX install produces one; a machine with lmodern would
-    // not, and there would then be nothing for this to compare.
-    expect(warned, 'the compile warns about something here').toBe(true);
+    expect(built.stderr).toMatch(offThePaper);
 
     const master = await rmm(['master', '--data', save]);
-    expect(master.stderr).toMatch(/^\s*! /m);
+    expect(master.stderr).toMatch(offThePaper);
   }, 120_000);
+
+  /*
+   * "✓ 1 page" was the whole of what `build` and `check` could say of a fit,
+   * including of a resume allowed two pages and set across both. The count
+   * is the PDF's, and that it was allowed is said beside it.
+   */
+  it.skipIf(!latex)('counts the pages a resume allowed two really has', async () => {
+    const bullet = (i: number) =>
+      `Led the telemetry ingestion service ${i}, cutting p99 latency from 900ms to 180ms while raising throughput ` +
+      'fourfold across three regions and documenting the rollout plan for every team';
+    fs.writeFileSync(
+      path.join(save, 'experience.yaml'),
+      [
+        '- id: exp1',
+        '  kind: experience',
+        '  title: Brightline Systems',
+        '  subtitle: Software Engineer',
+        '  dates: Jul. 2024 -- Dec. 2024',
+        '  bullets:',
+        ...Array.from({ length: 40 }, (_, i) => `    - { id: b${i}, default: v1, variants: [{ id: v1, text: "${bullet(i)}" }] }`),
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(save, 'resumes', 'long.yaml'),
+      'id: long\nlabel: Long\nsections:\n  - kind: experience\n    entries: [exp1]\n',
+    );
+    // Two pages allowed and nothing squeezing them, so what is counted is the document as written.
+    fs.appendFileSync(path.join(save, 'config.yaml'), 'layout:\n  maxPages: 2\n  autoFit: false\n');
+
+    const built = await rmm(['build', 'long', '--data', save]);
+    expect(built.stdout).toContain('✓ 2 pages (allowed 2)');
+    expect(built.stdout).not.toContain('1 page');
+
+    const checked = await rmm(['check', 'long', '--data', save]);
+    expect(checked.stdout).toContain('✓ 2 pages (allowed 2)');
+  }, 180_000);
 
   it('beats RMM_DATA', async () => {
     const other = aSave('The Folder In The Environment');

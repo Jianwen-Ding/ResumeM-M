@@ -33,6 +33,12 @@ process.env.RMM_COMPILE_CACHE ??= path.join(os.tmpdir(), 'rmm-compiled');
  * throwaway one unless a test names its own.
  */
 process.env.RMM_PROJECTS_FILE ??= path.join(os.tmpdir(), `rmm-vitest-projects-${process.pid}.json`);
+/*
+ * Nor the real error log. Every server a test starts mirrors bug reports
+ * into it, and one started without an `errorLogDir` would otherwise make
+ * `~/.resumem-m/error-log` in the home of whoever runs the suite.
+ */
+process.env.RMM_ERROR_LOG_DIR ??= path.join(os.tmpdir(), `rmm-vitest-error-log-${process.pid}`);
 
 afterAll(() => {
   sweepTempDirs();

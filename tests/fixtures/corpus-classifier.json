@@ -1730,6 +1730,108 @@
    "expect": "none",
    "round": "r17",
    "source": "r17 review 3: an accelerator batch (li=1)"
+  },
+  {
+   "id": "classifier-r24-01",
+   "input": {
+    "url": "https://www.mueller-soehne.de/karriere/werkstudent-softwareentwicklung",
+    "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Werkstudent Softwareentwicklung (m/w/d) - Müller & Söhne GmbH</title></head><body><h1>Werkstudent Softwareentwicklung (m/w/d)</h1><div>Müller & Söhne GmbH · München</div><p>Wir suchen einen Werkstudenten für die Softwareentwicklung. Deine Aufgaben: Entwicklung in Java und Python. Dein Profil: Studium der Informatik. Wir bieten flexible Arbeitszeiten. <a href=\"/bewerben\">Jetzt bewerben</a></p></body></html>"
+   },
+   "expect": "posting",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German posting with no JSON-LD under /karriere/"
+  },
+  {
+   "id": "classifier-r24-02",
+   "input": {
+    "url": "https://www.example-gmbh.de/stellenangebote/4711",
+    "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Softwareentwickler - Example GmbH</title></head><body><h1>Softwareentwickler</h1><div>Example GmbH · Berlin</div><p>Deine Aufgaben: Backend in Go. Dein Profil: drei Jahre Erfahrung. Wir bieten Homeoffice. <a href=\"/bewerbung\">Jetzt bewerben</a></p></body></html>"
+   },
+   "expect": "posting",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German posting under /stellenangebote/"
+  },
+  {
+   "id": "classifier-r24-03",
+   "input": {
+    "url": "https://www.example.fr/emplois/stagiaire-ingenieur-logiciel",
+    "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Stagiaire Ingénieur Logiciel (H/F) - Société Générale S.A.</title></head><body><h1>Stagiaire Ingénieur Logiciel (H/F)</h1><div>Société Générale S.A. · Paris</div><p>Nous recherchons un stagiaire ingénieur logiciel. Vos missions : développement en Java. Profil recherché : étudiant en informatique. <a href=\"/postuler\">Postuler</a></p></body></html>"
+   },
+   "expect": "posting",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a French posting with no JSON-LD under /emplois/"
+  },
+  {
+   "id": "classifier-r24-04",
+   "input": {
+    "url": "https://www.example.es/empleos/practicas-backend",
+    "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Prácticas Desarrollador Backend - Telefónica Innovación Digital, S.L.</title></head><body><h1>Prácticas Desarrollador Backend</h1><div>Telefónica Innovación Digital, S.L. · Madrid</div><p>Buscamos un desarrollador en prácticas. Requisitos: estudiante de ingeniería informática. Ofrecemos horario flexible. <a href=\"/inscribirse\">Inscribirse</a></p></body></html>"
+   },
+   "expect": "posting",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Spanish posting with no JSON-LD under /empleos/"
+  },
+  {
+   "id": "classifier-r24-05",
+   "input": {
+    "url": "https://www.example.com.br/vagas/estagio-engenharia",
+    "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Estágio em Engenharia de Software - Magazine Luiza S.A.</title></head><body><h1>Estágio em Engenharia de Software</h1><div>Magazine Luiza S.A. · São Paulo</div><p>Procuramos estagiário em engenharia de software. Requisitos: cursando ciência da computação. Benefícios: vale refeição. <a href=\"/candidatar\">Candidatar-se</a></p></body></html>"
+   },
+   "expect": "posting",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Portuguese posting under /vagas/"
+  },
+  {
+   "id": "classifier-r24-06",
+   "input": {
+    "url": "https://www.example.nl/vacatures/stagiair-software",
+    "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Stagiair Softwareontwikkeling - Royal FloraHolland U.A.</title></head><body><h1>Stagiair Softwareontwikkeling</h1><div>Royal FloraHolland U.A. · Aalsmeer</div><p>Wij zoeken een stagiair softwareontwikkeling. Functie-eisen: hbo-student informatica. Wij bieden een stagevergoeding. <a href=\"/solliciteer\">Solliciteer</a></p></body></html>"
+   },
+   "expect": "posting",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Dutch posting under /vacatures/"
+  },
+  {
+   "id": "classifier-r24-07",
+   "input": {
+    "url": "https://recruit-jobs.jp/jobs/12345",
+    "html": "<!doctype html><html><head><meta charset=\"utf-8\"><title>ソフトウェアエンジニア（新卒） - 株式会社リクルート</title><script type=\"application/ld+json\">{\"@context\": \"https://schema.org\", \"@type\": \"JobPosting\", \"title\": \"ソフトウェアエンジニア（新卒）\", \"hiringOrganization\": {\"@type\": \"Organization\", \"name\": \"株式会社リクルート\"}, \"description\": \"私たちはソフトウェアエンジニアを募集しています。応募資格：コンピュータサイエンスの学位。勤務地：東京。\"}</script></head><body><h1>ソフトウェアエンジニア（新卒）</h1><div>株式会社リクルート · 東京都</div><p>私たちはソフトウェアエンジニアを募集しています。応募資格：コンピュータサイエンスの学位。勤務地：東京。</p></body></html>"
+   },
+   "expect": "posting",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a Japanese posting with JSON-LD"
+  },
+  {
+   "id": "classifier-r24-08",
+   "input": {
+    "url": "https://bank.example.de/karriere/kredit-beantragen",
+    "html": "<html><head><title>Kredit beantragen</title></head><body><h1>Ihr Privatkredit</h1><form><label>Vorname<input name=\"vorname\"></label><label>Nachname<input name=\"nachname\"></label><label>E-Mail<input type=\"email\" name=\"email\"></label><label>Jahreseinkommen<input name=\"income\"></label><button>Antrag absenden</button></form></body></html>"
+   },
+   "expect": "none",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German loan form under /karriere/ is still no job"
+  },
+  {
+   "id": "classifier-r24-09",
+   "input": {
+    "url": "https://news.example.fr/emplois/le-marche-du-travail-en-2026",
+    "html": "<html><head><title>Le marché du travail en 2026</title><meta property=\"og:type\" content=\"article\"></head><body><h1>Le marché du travail en 2026</h1><p>Les recruteurs publient moins d'offres. Missions, profil recherché et postuler : les mots des annonces changent.</p></body></html>"
+   },
+   "expect": "none",
+   "round": "r24",
+   "source": "round 24 i18n hunt: a French article about postings is no posting"
+  },
+  {
+   "id": "classifier-r24-10",
+   "input": {
+    "url": "https://www.example.de/karriere/",
+    "html": "<html><head><title>Karriere bei Example</title></head><body><h1>Karriere bei Example</h1><p>Wir bieten spannende Aufgaben. Offene Stellen findest du unten.</p><ul><li><a href=\"/karriere/1\">Softwareentwickler</a></li><li><a href=\"/karriere/2\">Designer</a></li></ul></body></html>"
+   },
+   "expect": {
+    "not": "posting"
+   },
+   "round": "r24",
+   "source": "round 24 i18n hunt: a German careers home is not one posting"
   }
  ]
 }

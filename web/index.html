@@ -32,6 +32,11 @@
   <button id="ai-peek-chip" class="jobs-chip peek" title="The last few AI runs — what they were given, and what they said">What the AI is doing</button>
   <span id="jobs-chip" class="jobs-chip hidden" title="Work the AI is doing, or has finished"></span>
   <span id="status" class="status" role="status" aria-live="polite"></span>
+  <!-- Always there, beside the status line, so logging an error is one press
+       (or Ctrl+Shift+E) from anywhere, with or without a save. See errorlog.js. -->
+  <button id="error-log-chip" class="error-log-chip" type="button" title="Log an error — what went wrong, a screenshot, and the logs from the minutes before (Ctrl+Shift+E)"><span class="error-log-chip-mark" aria-hidden="true">!</span><span class="error-log-chip-label">Log an error</span></button>
+  <!-- Puts away an error floating in the corner; shown only then. Last, so the "!" stays beside the status line. See header.js. -->
+  <button id="status-dismiss" class="status-dismiss" type="button" aria-label="Dismiss error" title="Dismiss error">×</button>
 </header>
 
 <div id="project-banner" role="status"><strong id="project-status">No Save Open</strong><span id="project-banner-path">Open or create a save to access resumes, applications, and files.</span></div>
@@ -50,7 +55,7 @@
             <button id="btn-save-retry" type="button" class="tiny" title="Send the change again">Retry</button>
             <button id="btn-save-discard" type="button" class="tiny" title="Throw the change away and go back to what is saved">Discard unsaved change</button>
           </span>
-          <span id="live-state" class="live ok" title="The preview recompiles itself whenever you change something. Click to force one.">Live</span>
+          <span id="live-state" class="live ok" title="Live — the preview recompiles itself whenever you change something. Click to force one.">Live</span>
           <!-- Narrow only (a side panel): one column at a time, and the rest of
                this toolbar in a menu under More. See compact.js.
                Wide, #toolbar-more is not a box at all (display: contents) and
@@ -80,7 +85,9 @@
         <div id="way-back" class="way-back" hidden></div>
         <div id="rescue" class="way-back rescue" role="status" hidden></div>
         <p id="resume-view-note" class="hint"></p>
-        <p class="hint editor-interaction-hint">Double-click a heading field or bullet to edit and show actions, or use its … button.</p>
+        <p class="hint editor-interaction-hint">Double-click a heading field or bullet to edit and show actions, or use its … button. From the keyboard, Tab to it and press Enter or F2 to edit.</p>
+        <!-- What every line that can be edited in place is described by, to a screen reader (aria-describedby). -->
+        <span id="editable-line-hint" hidden>Press Enter or F2 to edit. Enter keeps the change, Escape puts it back.</span>
         <div id="fit" class="fit idle">Not compiled yet.</div>
         <div id="warnings" class="warnings"></div>
         <div id="editor"></div>
@@ -90,7 +97,7 @@
              page in rather than blinking. See preview.js. -->
         <div id="preview-pane" class="preview-frame">
           <div id="preview-empty" class="preview-empty">Compiling your resume…</div>
-          <button id="preview-zoom" type="button" class="tiny narrow-only preview-zoom" aria-pressed="false" title="Show the page at its real size, and scroll it">Actual size</button>
+          <button id="preview-zoom" type="button" class="tiny narrow-only preview-zoom" title="Show the page at its real size, and scroll it">Actual size</button>
         </div>
         <section id="feedback-panel" class="feedback-panel" aria-label="AI Feedback" hidden>
           <div class="toolbar">
@@ -140,6 +147,13 @@
         <select id="save-default"><option value="">Ask Me on Startup</option></select>
         <button id="save-default-current" hidden>Use This Save by Default</button>
         <p id="save-default-status" class="hint">Choose which save opens when ResumeM-M starts.</p>
+        <!-- Not in any save, so shown whether or not one is open. See errorlog.js. -->
+        <section id="error-log" aria-labelledby="error-log-heading">
+          <hr>
+          <h3 id="error-log-heading">Error Log</h3>
+          <p class="hint">What went wrong, when you log it: your words, screenshots, and what the editor, the server and JobHelper noticed in the minutes before. Kept in its own git repository, which you can push like a save.</p>
+          <div id="error-log-panel" class="settings"></div>
+        </section>
         <div data-project-required hidden>
         <hr>
         <!-- Files you attach again and again and never generate. Kept beside

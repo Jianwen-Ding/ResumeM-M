@@ -24,17 +24,30 @@ const IN_FLIGHT: ApplicationStatus[] = ['applying', 'applied'];
 export const CURRENT_DIR = 'current';
 
 /**
- * The flat folder as a line for the save's `.gitignore`, where it is inside
- * the save at all.
+ * Where the editor's previews are compiled, one folder down in the output
+ * folder; see `previewPath` in the API.
+ */
+export const PREVIEW_DIR = '.previews';
+
+/**
+ * The folders in the output folder that are rebuilt rather than written, as
+ * lines for the save's `.gitignore`, where they are inside the save at all.
  *
- * It is rebuilt from the tracker whenever anything changes, so it is nothing
- * to keep a history of — and the rebuilding is what raced the commits. `git
- * add -- .` listed a PDF, the folder was synced under it, and the stat that
- * followed failed the whole add: "unable to stat
- * 'out/current/Morgan-Testwell-Resume.pdf'", twelve times on one test server in
- * a single run, each one a save the version history silently never recorded.
- * The same race `Repo.IGNORED` closes for scratch files, in a folder whose
- * files are replaced far more often.
+ * The flat folder is rebuilt from the tracker whenever anything changes, so
+ * it is nothing to keep a history of — and the rebuilding is what raced the
+ * commits. `git add -- .` listed a PDF, the folder was synced under it, and
+ * the stat that followed failed the whole add: "unable to stat
+ * 'out/current/Morgan-Testwell-Resume.pdf'", twelve times on one test server
+ * in a single run, each one a save the version history silently never
+ * recorded. The same race `Repo.IGNORED` closes for scratch files, in a folder
+ * whose files are replaced far more often.
+ *
+ * The previews are the same thing more so. Each compile writes a PDF and its
+ * .tex under a fresh name and sweeps the oldest, so every edit added and
+ * deleted a couple of hundred kilobytes in the history: Save History listed
+ * them as the change, and every push carried them. What they are built from
+ * is in the history already; the bundles under `applications/`, which are
+ * what was actually sent, still are.
  *
  * Nothing where the output folder is outside the save, which is the default:
  * there is no history of it to spare.
@@ -46,9 +59,13 @@ export function currentIgnore(store: Store): string[] {
   } catch {
     return [];
   }
-  const rel = path.relative(store.root, path.join(out, CURRENT_DIR));
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return [];
-  return [`/${rel.split(path.sep).join('/')}/`];
+  const lines: string[] = [];
+  for (const folder of [CURRENT_DIR, PREVIEW_DIR]) {
+    const rel = path.relative(store.root, path.join(out, folder));
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+    lines.push(`/${rel.split(path.sep).join('/')}/`);
+  }
+  return lines;
 }
 
 /**

@@ -335,7 +335,17 @@ export interface ResumeSpec {
   collapsed?: string[];
   notes?: string;
   /** Set when the extension generated this for a specific posting. */
-  generatedFor?: { url?: string; company?: string; role?: string; at?: string };
+  generatedFor?: {
+    url?: string;
+    company?: string;
+    role?: string;
+    at?: string;
+    /**
+     * The copy as the workspace's Tailor last wrote it (`tailoredFingerprint`),
+     * so tailoring again can tell a copy edited since from one that was not.
+     */
+    tailored?: string;
+  };
 }
 
 /** See `ResumeSpec.tier`. */
