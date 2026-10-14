@@ -526,6 +526,18 @@ async function main() {
       if (anyDates > 0) {
         check('with a month to pick', (await dated.locator('select.date-month').count()) > 0);
         check('and a year to type', (await dated.locator('input.date-year').count()) > 0);
+        /*
+         * Every year whole in its box. The general rule for number fields
+         * once outweighed `.date-year`'s own smaller padding, and each year
+         * read "202" with its last digit scrolled out of sight.
+         */
+        const cutYears = await page.evaluate(() =>
+          [...document.querySelectorAll('#editor input.date-year')]
+            .filter((y) => y.offsetParent && y.scrollWidth > y.clientWidth)
+            .map((y) => `${y.value || y.placeholder} (${y.scrollWidth} in ${y.clientWidth})`)
+            .slice(0, 3),
+        );
+        check('and every year shows all four digits', cutYears.length === 0, cutYears.join(' | '));
 
         /*
          * The one that keeps regressing: a text input whose value looks like
@@ -2849,6 +2861,181 @@ async function main() {
       split.scrollWidth <= split.clientWidth + 1,
       `${Math.round(split.scrollWidth)} wide inside ${Math.round(split.clientWidth)}`,
     );
+
+    /*
+     * The header and what floats over the page, at the widths where each
+     * went wrong. Each on a page of its own, so nothing above is disturbed.
+     */
+    {
+      const LONG_ERR = "Could not save Experience: EACCES: permission denied, open '/home/jane/Resumes/experience.yaml' — try again.";
+      const at = async (width, height, run) => {
+        const p = await browser.newPage({ viewport: { width, height } });
+        p.on('pageerror', (e) => errors.push(e.message));
+        try {
+          await p.goto(server.url, { waitUntil: 'domcontentloaded' });
+          await p.waitForFunction(() => !document.querySelector('#tabs button[data-tab="resumes"]').disabled, null, { timeout: 15_000 }).catch(() => {});
+          await p.evaluate(() => document.fonts.ready);
+          return await run(p);
+        } finally {
+          await p.close();
+        }
+      };
+      // What `setStatus` does with an error: the words, then `fitStatus`.
+      const sayError = (p, text) =>
+        p.evaluate(async (text) => {
+          const { fitStatus } = await import('/header.js');
+          const s = document.querySelector('#status');
+          s.textContent = text;
+          s.title = text;
+          s.className = 'status err';
+          fitStatus(s);
+        }, text);
+
+      /*
+       * An error in the status line wrapped the header onto another line at
+       * 800px, and `--header-h` was not measured again: the sticky toolbar
+       * slid under the header. The header keeps its height; the error floats.
+       */
+      for (const width of [1024, 800]) {
+        const got = await at(width, 900, async (p) => {
+          await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+          await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+          await p.waitForTimeout(100);
+          const header = () => p.evaluate(() => document.querySelector('header').getBoundingClientRect().height);
+          const before = await header();
+          await sayError(p, LONG_ERR);
+          return p.evaluate((before) => {
+            const h = document.querySelector('header').getBoundingClientRect().height;
+            const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-h'));
+            return { before, h, v };
+          }, before);
+        });
+        check(
+          `an error in the status line does not move the header at ${width}px`,
+          Math.abs(got.h - got.before) < 0.5 && Math.abs(got.h - got.v) < 1,
+          `header ${got.before} → ${got.h}, --header-h ${got.v}`,
+        );
+      }
+
+      /*
+       * The error floating in the corner could not be put away, and at 390px
+       * sat over "+ Add skill group" at the foot of the page for good.
+       */
+      const toast = await at(390, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await sayError(p, LONG_ERR);
+        await p.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+        await p.waitForTimeout(100);
+        const covered = await p.evaluate(() => {
+          const st = document.querySelector('#status').getBoundingClientRect();
+          return [...document.querySelectorAll('.tab.active button')]
+            .filter((b) => b.offsetParent && b.id !== 'status-dismiss')
+            .filter((b) => {
+              const r = b.getBoundingClientRect();
+              const x = r.left + r.width / 2;
+              const y = r.top + r.height / 2;
+              return x >= st.left && x <= st.right && y >= st.top && y <= st.bottom;
+            })
+            .map((b) => b.textContent.trim().slice(0, 30));
+        });
+        const dismiss = p.locator('#status-dismiss');
+        const shown = await dismiss.isVisible().catch(() => false);
+        const label = shown ? (await dismiss.getAttribute('aria-label')) ?? '' : '';
+        if (shown) await dismiss.click({ timeout: 3_000 }).catch(() => {});
+        const after = await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          return { text: s.textContent, visible: getComputedStyle(s).display !== 'none' && s.getBoundingClientRect().height > 0 };
+        });
+        return { covered, shown, label, after };
+      });
+      check('a floating error leaves the controls at the foot of the page clear of it', toast.covered.length === 0, toast.covered.join(' | '));
+      check('and has a labelled button to put it away', toast.shown && /dismiss|close/i.test(toast.label), toast.label || 'none');
+      check('and pressing it puts the error away', toast.shown && toast.after.text === '' && !toast.after.visible, JSON.stringify(toast.after));
+
+      /*
+       * "File names" on Save & Files: a select as wide as its longest option,
+       * past the edge of its column.
+       */
+      const names = await at(1440, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="save"]').click());
+        await p.waitForTimeout(200);
+        return p.evaluate(() => {
+          const s = document.querySelector('#output-file-names');
+          const col = s?.closest('.project-panel');
+          if (!s || !col || !s.offsetParent) return null;
+          const cs = getComputedStyle(col);
+          return { right: s.getBoundingClientRect().right, edge: col.getBoundingClientRect().right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth) };
+        });
+      });
+      check('the file names picker stays inside its column', !!names && names.right <= names.edge + 1, JSON.stringify(names));
+
+      /*
+       * Two AI chips at once sat apart across the header, each pushing itself
+       * right: only the first showing does.
+       */
+      const chips = await at(1440, 600, async (p) => {
+        await p.evaluate(() => {
+          const j = document.querySelector('#jobs-chip');
+          j.textContent = 'Tailoring 2 resumes';
+          j.className = 'jobs-chip working';
+          const d = document.querySelector('#drafting-chip');
+          d.textContent = 'Drafting: a cover letter';
+          d.className = 'jobs-chip working';
+        });
+        await p.waitForTimeout(100);
+        return p.evaluate(() => {
+          const shown = [...document.querySelectorAll('header > .jobs-chip')].filter((c) => c.offsetParent);
+          const gaps = [];
+          for (let i = 1; i < shown.length; i++) {
+            if (Math.abs(shown[i].getBoundingClientRect().top - shown[i - 1].getBoundingClientRect().top) > 2) continue;
+            gaps.push(Math.round(shown[i].getBoundingClientRect().left - shown[i - 1].getBoundingClientRect().right));
+          }
+          return gaps;
+        });
+      });
+      check('the AI chips sit together in the header', chips.length > 0 && chips.every((g) => g <= 24), `gaps ${chips.join(', ')}px`);
+
+      /*
+       * In JobHelper's side panel, "Log an error" floats in the bottom corner
+       * over the page, and the last controls could not be scrolled out from
+       * under it. The panel's class is set as embed.js sets it when framed by
+       * the extension; it is CSS and header.js that decide the rest.
+       */
+      const panel = await at(360, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.evaluate(() => document.documentElement.classList.add('embedded'));
+        await p.waitForTimeout(150);
+        return p.evaluate(async () => {
+          scrollTo(0, document.documentElement.scrollHeight);
+          await new Promise((r) => setTimeout(r, 100));
+          const chip = document.querySelector('#error-log-chip').getBoundingClientRect();
+          const last = [...document.querySelectorAll('.tab.active button, .tab.active input, .tab.active select, .tab.active textarea')]
+            .filter((b) => b.offsetParent)
+            .reduce((a, b) => (b.getBoundingClientRect().bottom > (a?.getBoundingClientRect().bottom ?? -1) ? b : a), null);
+          return { chipTop: Math.round(chip.top), last: last?.textContent.trim().slice(0, 30), lastBottom: Math.round(last?.getBoundingClientRect().bottom ?? 0) };
+        });
+      });
+      check(
+        'in the side panel the last control scrolls clear of "Log an error"',
+        panel.lastBottom > 0 && panel.lastBottom <= panel.chipTop,
+        `${panel.last} ends at ${panel.lastBottom}, the button starts at ${panel.chipTop}`,
+      );
+
+      /* At 320px the save's name said "Save: …" even when it was "data". */
+      const chip = await at(320, 600, (p) =>
+        p.evaluate(() => {
+          const c = document.querySelector('#project-chip');
+          return { text: c.textContent, cut: c.scrollWidth > c.clientWidth + 1, overflow: document.documentElement.scrollWidth > innerWidth };
+        }),
+      );
+      check(
+        "a short save name shows whole at 320px, and the page doesn't scroll sideways",
+        chip.text.length > 12 || (!chip.cut && !chip.overflow),
+        JSON.stringify(chip),
+      );
+    }
 
     check('nothing threw along the way', errors.length === 0, errors.slice(0, 3).join(' | '));
   } finally {

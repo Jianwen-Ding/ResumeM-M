@@ -169,6 +169,11 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 .jobs-chip.ready:hover { background: #d2e3fc; }
 .jobs-chip.hidden { display: none; }
 .jobs-chip.hidden + .status { margin-left: auto; }
+/* Only the first chip showing pushes to the right; the rest sit beside it.
+   Each of them pushing spread them across the header with gaps between,
+   whenever the AI was drafting and running at once. */
+.jobs-chip:not(.hidden) ~ .jobs-chip,
+.jobs-chip:not(.hidden) ~ .status { margin-left: 0; }
 
 /* One line, cut short with an ellipsis; its title holds the rest. It gives up
    its room before the tabs give up any of theirs — it used to wrap to three
@@ -211,12 +216,37 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
   -webkit-line-clamp: none;
   max-width: min(560px, calc(100vw - 16px));
   text-align: left;
-  padding: 6px 12px;
+  /* Room on the right for its × (#status-dismiss). */
+  padding: 6px 36px 6px 12px;
   border-radius: var(--radius);
   background: var(--bad);
   color: #fff;
   box-shadow: var(--shadow-md);
 }
+
+/* The × on an error floating in the corner, placed over its top right by
+   header.js; nowhere else. While one shows, the page keeps room at its foot
+   for it, so the last controls can be scrolled out from under it. */
+#status-dismiss { display: none; }
+body.status-toast #status-dismiss {
+  display: grid;
+  place-items: center;
+  position: fixed;
+  z-index: 46;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+body.status-toast #status-dismiss:hover { background: rgba(255, 255, 255, .2); }
+body.status-toast #status-dismiss:focus-visible { outline: 2px solid #fff; outline-offset: 0; }
+body.status-toast { padding-bottom: var(--status-toast-h, 0px); }
 
 .tab { display: none; padding: 14px 16px 40px; }
 .tab.active { display: block; }
@@ -331,8 +361,11 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 /* Material text fields: a quiet outline that thickens to the accent on focus,
    rather than a glow around it. */
 /* `input:not([type])` and number boxes too: the folder to open and the page
-   settings are both, and went out in the browser's own bevelled style. */
-select, input[type=text], input[type=search], input:not([type]), input[type=number], textarea {
+   settings are both, and went out in the browser's own bevelled style. Inside
+   `:where()`, so they weigh no more than `select` or `textarea`: as
+   `input[type=number]` this rule outweighed `.date-year`'s own smaller box,
+   and every year showed as "202". */
+select, input[type=text], input[type=search], input:where(:not([type]), [type=number]), textarea {
   font: inherit;
   padding: 7px 10px;
   border: 1px solid var(--line);
@@ -1574,7 +1607,11 @@ td.when { font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* Project assets */
 .assets-layout { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 28px; max-width: 1400px; margin: 0 auto; }
 .project-panel { border-right: 1px solid var(--line); padding-right: 24px; }
-.project-panel > input, .project-panel > select { width: 100%; margin: 6px 0 12px; }
+.project-panel > input, .project-panel > select,
+.project-panel > [data-project-required] > select { width: 100%; margin: 6px 0 12px; }
+/* Nor any other: a select is as wide as its longest option, and "Name, job
+   title and document type" ran past the column. */
+.project-panel select { max-width: 100%; }
 .project-panel .mono-path { overflow-wrap: anywhere; font-size: 12px; }
 .asset-card { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper, white); }
 .asset-card h3 { margin: 0; overflow-wrap: anywhere; }
@@ -2117,7 +2154,10 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
      still the heading's text. The save's name takes what is left, cut short
      with its title holding the rest. */
   h1 { font-size: 0; gap: 0; }
-  #project-chip { max-width: calc(100vw - 250px); overflow: hidden; text-overflow: ellipsis; }
+  /* What the row leaves it beside the mark, the AI chip and the "!" (about
+     234px with the gaps): "Save: data" whole at 320px. It was 250, and said
+     "Save: …" there. */
+  #project-chip { max-width: calc(100vw - 234px); overflow: hidden; text-overflow: ellipsis; }
   .jobs-chip { padding: 4px 10px; }
   /* Floated at the bottom corner, as in the side panel, and wrapped whole:
      a row of its own in the header pushed the toolbar down each time
@@ -2143,6 +2183,7 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
     display: block;
     -webkit-line-clamp: none;
     max-width: calc(100vw - 16px);
+    padding-right: 36px; /* its × */
   }
   .status:empty { display: none; }
 
@@ -2374,11 +2415,16 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   color: #fff;
   box-shadow: var(--shadow-md);
 }
-.embedded .status.err { background: var(--bad); display: block; -webkit-line-clamp: none; max-width: 100%; }
+.embedded .status.err { background: var(--bad); display: block; -webkit-line-clamp: none; max-width: 100%; padding-right: 36px; }
 .embedded .status:empty { display: none; }
 .embedded .sticky-toolbar { top: 0; }
 .embedded .pane-right { top: 8px; height: calc(100vh - 16px); }
 .embedded .tab { padding-top: 8px; }
+/* Room at the foot for the corner the header floats in, as tall as it is
+   (header.js measures it into `--float-h`), so the last controls can scroll
+   out from under "Log an error". The status's own room is in this too. */
+.embedded .tab { padding-bottom: var(--float-h, 64px); }
+.embedded body.status-toast { padding-bottom: 0; }
 
 @media (max-width: 640px) {
   /* One row: whether it saved, the view, Focus, Undo, Redo, More — with

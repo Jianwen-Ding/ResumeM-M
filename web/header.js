@@ -75,14 +75,97 @@ export function statusRoom(header, beside) {
 /**
  * An error in the status line, in the header if two lines hold it and
  * otherwise in the corner. Anything else stays one line, as it was.
+ *
+ * Nor in the header where it would make the header taller: where the tabs
+ * have a row of their own the header wraps, and an error that pushed it onto
+ * another line moved everything under it — and `--header-h` was not measured
+ * again, so the sticky toolbar slid under the header. It floats instead, and
+ * the header keeps the height it had.
  */
 export function fitStatus(status) {
   if (!status) return;
   status.classList.remove('toast');
-  if (!status.classList.contains('err') || !status.textContent) return;
-  if (isFloating(status)) return; // a phone's, or the side panel's: already whole
-  const cut = status.scrollHeight > status.clientHeight + 1 || status.scrollWidth > status.clientWidth + 1;
-  if (cut || status.clientWidth < STATUS_MIN) status.classList.add('toast');
+  if (status.classList.contains('err') && status.textContent && !isFloating(status)) {
+    const cut = status.scrollHeight > status.clientHeight + 1 || status.scrollWidth > status.clientWidth + 1;
+    let toast = cut || status.clientWidth < STATUS_MIN;
+    const header = status.closest('header');
+    // The side panel's header floats in a corner (fixed): growing there moves
+    // nothing under it, and the error stays in it, above "Log an error".
+    if (!toast && header && getComputedStyle(header).position !== 'fixed') {
+      const tall = header.getBoundingClientRect().height;
+      status.classList.add('toast');
+      const without = header.getBoundingClientRect().height;
+      status.classList.remove('toast');
+      toast = tall > without + 0.01;
+    }
+    if (toast) status.classList.add('toast');
+  }
+  fitDismiss(status);
+  fitFloating(status.closest('header'));
+}
+
+/**
+ * In the side panel, what is left of the header floats in the bottom corner —
+ * "Log an error", any AI chip, the status — over the page. The page keeps that
+ * much room at its foot (`--float-h`, see `.embedded .tab`), so its last
+ * controls can be scrolled clear of it: at 360px they ended under the chip.
+ * Measured whenever the header is fitted or the status line changes.
+ */
+function fitFloating(header) {
+  const root = document.documentElement;
+  if (!header || !root.classList.contains('embedded')) {
+    root.style.removeProperty('--float-h');
+    return;
+  }
+  const top = header.getBoundingClientRect().top;
+  root.style.setProperty('--float-h', `${Math.max(0, Math.ceil(window.innerHeight - top + 8))}px`);
+}
+
+/**
+ * The ×, on an error floating in the corner. An error there never clears by
+ * itself (it is the reason something did not happen), and on a phone it sat
+ * over whatever was at the foot of the page — "+ Add skill group" at 390px —
+ * with no way to put it away. While one is showing, the page keeps room for
+ * it at the bottom (`status-toast` on the body, `--status-toast-h`), so the
+ * last controls can be scrolled clear of it.
+ *
+ * Placed from the error's own box, so it is the same in the corner on a
+ * desktop, on a phone, and in the side panel's floating header. Only the
+ * body's class and the button's own style change: the header's observer
+ * would re-fit for anything else, and so on for ever.
+ */
+function fitDismiss(status) {
+  const root = document.documentElement;
+  const body = document.body;
+  const button = document.getElementById('status-dismiss');
+  if (!body) return;
+  let on = false;
+  let box;
+  if (status.classList.contains('err') && status.textContent) {
+    const style = getComputedStyle(status);
+    box = status.getBoundingClientRect();
+    on = style.display !== 'none' && box.width > 0 &&
+      (style.position === 'fixed' || root.classList.contains('embedded'));
+  }
+  body.classList.toggle('status-toast', on);
+  if (!on) {
+    root.style.removeProperty('--status-toast-h');
+    return;
+  }
+  root.style.setProperty('--status-toast-h', `${Math.ceil(window.innerHeight - box.top + 8)}px`);
+  if (button) {
+    button.style.top = `${Math.round(box.top + 4)}px`;
+    button.style.left = `${Math.round(box.right - 4 - 26)}px`;
+  }
+}
+
+/** Put the error away: what the × does. */
+export function dismissStatus(status = document.getElementById('status')) {
+  if (!status) return;
+  status.textContent = '';
+  status.title = '';
+  status.className = 'status';
+  fitStatus(status);
 }
 
 /** Lay the header out for the width it has now. */
@@ -96,6 +179,7 @@ export function fitHeader(header = document.querySelector('header')) {
   if (root.classList.contains('embedded')) {
     header.classList.remove('tabs-row', 'log-mark-only');
     root.style.removeProperty('--header-h');
+    fitStatus(status);
     return;
   }
 
@@ -138,6 +222,7 @@ export function setupHeader(header = document.querySelector('header')) {
   fitHeader(header);
   window.addEventListener('resize', refit);
   const status = header.querySelector('#status');
+  header.querySelector('#status-dismiss')?.addEventListener('click', () => dismissStatus(status));
   const watcher = new MutationObserver((changes) => {
     // Its own classes are this function's doing, and the status line's
     // words are `setStatus`'s.

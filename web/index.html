@@ -35,6 +35,8 @@
   <!-- Always there, beside the status line, so logging an error is one press
        (or Ctrl+Shift+E) from anywhere, with or without a save. See errorlog.js. -->
   <button id="error-log-chip" class="error-log-chip" type="button" title="Log an error — what went wrong, a screenshot, and the logs from the minutes before (Ctrl+Shift+E)"><span class="error-log-chip-mark" aria-hidden="true">!</span><span class="error-log-chip-label">Log an error</span></button>
+  <!-- Puts away an error floating in the corner; shown only then. Last, so the "!" stays beside the status line. See header.js. -->
+  <button id="status-dismiss" class="status-dismiss" type="button" aria-label="Dismiss error" title="Dismiss error">×</button>
 </header>
 
 <div id="project-banner" role="status"><strong id="project-status">No Save Open</strong><span id="project-banner-path">Open or create a save to access resumes, applications, and files.</span></div>
