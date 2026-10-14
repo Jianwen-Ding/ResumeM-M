@@ -1108,8 +1108,24 @@ async function logCommand(rest: string[]): Promise<number> {
   log.repo.inTerminal = true;
   const words = positionals('log', rest);
   const [first, ...more] = words;
+  /*
+   * "remote" and one word is the remote only when the word is an address:
+   * `rmm log remote unreachable`, somebody logging that the remote could not
+   * be reached, set the remote to "unreachable" and said nothing else — the
+   * real remote gone, and the entry never written. Anything else is the
+   * description, and is logged as one.
+   */
+  const remoteAddress = (word: string) =>
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(word) || // https://…, ssh://…, file://…
+    /^[^\s@/:]+@[^\s@/:]+:\S/.test(word) || // git@github.com:me/log.git
+    /^[\w-]+(?:\.[\w-]+)+:[^\s/]\S*$/.test(word) || // github.com:me/log.git
+    /^(?:[/.~]|[A-Za-z]:[\\/])/.test(word) || // a folder: /srv/log.git, ./log, ~/log, C:\log
+    fs.existsSync(word);
   const sub =
-    first === 'remote' ? more.length <= 1 : first !== undefined && ['push', 'pull', 'status'].includes(first) && more.length === 0;
+    first === 'remote'
+      ? more.length === 0 || (more.length === 1 && remoteAddress(more[0]!))
+      : first !== undefined && ['push', 'pull', 'status'].includes(first) && more.length === 0;
+  const remoteWords = first === 'remote' && !sub;
 
   if (sub && first === 'status') {
     const status = await log.status();
@@ -1156,6 +1172,9 @@ async function logCommand(rest: string[]): Promise<number> {
   }
 
   const description = words.join(' ').trim();
+  if (remoteWords && more.length === 1) {
+    console.error(`("${more[0]}" is not an address, so this is logged as a description. To set the remote, give its address: rmm log remote <url>.)`);
+  }
   if (!description) {
     console.error('Usage: rmm log "what went wrong" [--minutes 10] [--screenshot <file>]…  (or: rmm log status | remote <url> | push | pull)');
     return 1;

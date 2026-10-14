@@ -89,7 +89,7 @@ export interface NewEntry {
 
 /** One entry as the lists show it. */
 export interface EntrySummary {
-  /** Its folder, relative to the error log: `entries/2026-10-14/170512-the-thing`. */
+  /** Its folder, relative to the error log: `entries/2026-10-14/170512-431-the-thing`. */
   id: string;
   at: string;
   description: string;
@@ -130,7 +130,7 @@ in a save is in it.
 
 Each entry was logged by hand — from the editor (Ctrl+Shift+E), from the
 JobHelper popup (Alt+Shift+E), or with \`rmm log "what happened"\` — and is a
-folder under \`entries/<date>/<time>-<what>/\`:
+folder under \`entries/<date>/<time>-<milliseconds>-<what>/\`:
 
 - \`entry.md\` — the description, when and where it was logged, the versions
   running, the page it was logged from, and which save was open (its folder
@@ -169,7 +169,12 @@ export function appVersion(): string {
 const pad = (n: number, width = 2) => String(n).padStart(width, '0');
 /** The local calendar day, `2026-10-14`. Entries are filed by the day the person was having. */
 const localDay = (at: Date) => `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
-const localClock = (at: Date) => `${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
+/*
+ * `170512-431`: the local time to the millisecond. To the second only, two
+ * entries in one second listed by their words rather than by when they were
+ * logged; see `entryFolders`, which also orders the folders made before this.
+ */
+const localClock = (at: Date) => `${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}-${pad(at.getMilliseconds(), 3)}`;
 /** `UTC-04:00`, the offset the local time in an entry was read at. */
 function utcOffset(at: Date): string {
   const minutes = -at.getTimezoneOffset();
@@ -230,7 +235,30 @@ export class ErrorLog {
    */
   async ensure(): Promise<void> {
     if (await this.repo.isRepo()) return;
-    fs.mkdirSync(this.root, { recursive: true });
+    /*
+     * A folder that cannot be made — a home that is not a folder
+     * (`HOME=/dev/null`), one that is read-only, a file where the folder
+     * should be — said as that, with what to do about it. It came out as
+     * Node's own "ENOTDIR: not a directory, mkdir …".
+     */
+    try {
+      fs.mkdirSync(this.root, { recursive: true });
+      fs.accessSync(this.root, fs.constants.W_OK);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const why =
+        code === 'ENOTDIR' || code === 'EEXIST'
+          ? 'something on the way to it is a file, not a folder'
+          : code === 'EACCES' || code === 'EPERM'
+            ? 'it is not yours to write to'
+            : code === 'EROFS'
+              ? 'it is on a read-only disk'
+              : (err as Error).message;
+      throw new ErrorLogInputError(
+        `The error log cannot be kept in ${this.root}: ${why}. Set RMM_ERROR_LOG_DIR to a folder you can write to, ` +
+          `or "dir" in ${errorLogSettingsFile()}.`,
+      );
+    }
     /*
      * `git init` before the lock, not under it. The lock lives in `.git`
      * once there is one and in the folder until then (see `SaveLock.where`),
@@ -261,7 +289,7 @@ export class ErrorLog {
    * Under the cross-process lock from the first file to the commit, so an
    * entry from `rmm log` and one from the server at the same moment are two
    * folders and two commits, neither inside the other. Two in the same
-   * second with the same words are `…-2`, not one over the other.
+   * millisecond with the same words are `…-2`, not one over the other.
    *
    * A commit that fails does not lose the entry: its files are written, and
    * the next entry's commit — or `git add` by hand — takes them. Said in the
@@ -407,8 +435,51 @@ export class ErrorLog {
     return lines.join('\n');
   }
 
-  /** Every entry's folder, newest first, relative to the error log. */
+  /**
+   * Every entry's folder, newest first, relative to the error log.
+   *
+   * Newest by the `time:` the entry was written with, not by its folder's
+   * name: a folder made before the name carried milliseconds is to the
+   * second, and two in one second sorted by their words ("zzz" over "aaa"
+   * logged after it), and `-9` over `-11`. Ties — the same millisecond — go
+   * by the number after the name, the later one first: `x-11` was made after
+   * `x-9`, and both after `x`. An entry whose time cannot be read goes by
+   * its folder's name, read as the local time it was made at.
+   */
   private entryFolders(): string[] {
+    const found = this.entryNames();
+    const keyed = found.map(({ day, name, siblings }) => {
+      const id = `entries/${day}/${name}`;
+      let time = Number.NaN;
+      try {
+        const fd = fs.openSync(path.join(this.root, id, 'entry.md'), 'r');
+        try {
+          const head = Buffer.alloc(256);
+          const n = fs.readSync(fd, head, 0, head.length, 0);
+          const field = /^time: (.*)$/m.exec(head.subarray(0, n).toString('utf8'))?.[1]?.trim();
+          if (field) time = Date.parse(field);
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        // Unreadable: by its name, below.
+      }
+      if (!Number.isFinite(time)) {
+        const clock = /^(\d{2})(\d{2})(\d{2})(?:-(\d{3}))?/.exec(name);
+        const [y, mo, d] = day.split('-').map(Number) as [number, number, number];
+        time = clock ? new Date(y, mo - 1, d, +clock[1]!, +clock[2]!, +clock[3]!, +(clock[4] ?? 0)).getTime() : new Date(y, mo - 1, d).getTime();
+      }
+      // `x-N` is the Nth made under the name `x` when `x` is there too; otherwise the number is part of the words.
+      const suffix = /^(.*)-(\d+)$/.exec(name);
+      const copy = suffix && siblings.has(suffix[1]!) ? Number(suffix[2]) : 1;
+      return { id, time, copy };
+    });
+    keyed.sort((a, b) => b.time - a.time || b.copy - a.copy || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    return keyed.map((k) => k.id);
+  }
+
+  /** Every entry's folder, by day, in no order. */
+  private entryNames(): { day: string; name: string; siblings: Set<string> }[] {
     const root = path.join(this.root, 'entries');
     let days: string[];
     try {
@@ -416,15 +487,16 @@ export class ErrorLog {
     } catch {
       return [];
     }
-    const out: string[] = [];
-    for (const day of days.sort().reverse()) {
+    const out: { day: string; name: string; siblings: Set<string> }[] = [];
+    for (const day of days) {
       let names: string[];
       try {
         names = fs.readdirSync(path.join(root, day)).filter((n) => fs.existsSync(path.join(root, day, n, 'entry.md')));
       } catch {
         continue;
       }
-      for (const name of names.sort().reverse()) out.push(`entries/${day}/${name}`);
+      const siblings = new Set(names);
+      for (const name of names) out.push({ day, name, siblings });
     }
     return out;
   }
@@ -474,7 +546,7 @@ export class ErrorLog {
 
   /** How many entries there are, pushed or not. */
   count(): number {
-    return this.entryFolders().length;
+    return this.entryNames().length;
   }
 
   /** Where it is, whether it is a repository yet, its remote and when it was last pushed. Changes nothing. */
@@ -485,7 +557,7 @@ export class ErrorLog {
     return {
       dir: this.root,
       isRepo,
-      entries: this.entryFolders().length,
+      entries: this.entryNames().length,
       remote: remote && remote.url ? remote : null,
       lastPush,
       lastCommitError: this.repo.lastCommitError ?? null,

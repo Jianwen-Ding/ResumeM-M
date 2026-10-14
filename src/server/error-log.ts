@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type RequestHandler, type Response } from 'express';
 import { format } from 'node:util';
-import { logServerEvent, serverLog, windowMinutes } from '../errorlog/buffer.js';
-import { ErrorLog, ErrorLogInputError, appVersion, type EntrySource } from '../errorlog/log.js';
+import { KEEP_EVENTS, logServerEvent, serverLog, windowMinutes } from '../errorlog/buffer.js';
+import { ErrorLog, ErrorLogInputError, MAX_SCREENSHOT_BYTES, MAX_SCREENSHOTS, appVersion, type EntrySource } from '../errorlog/log.js';
 import { mergeEvents } from '../errorlog/scrub.js';
 
 /**
@@ -101,13 +101,22 @@ function loggedAt(value: unknown): Date | undefined {
   return at;
 }
 
+/*
+ * The most an entry may be as sent, ahead of the server's 32 MB limit: as
+ * many screenshots as an entry may have, base64 and all (8 MB is 10.7 as
+ * text), and the most logs a part keeps — two thousand events of up to two
+ * thousand characters, with their time, kind and detail, 3 KB each at most —
+ * and room for the rest. 16.6 MB. It was 12 MB, which refused an entry with
+ * 8 MB of screenshots and a busy fifteen minutes (14.7 MB) and said to keep
+ * the screenshots to 8 MB, which they were.
+ */
+export const ENTRY_LIMIT = Math.ceil(MAX_SCREENSHOT_BYTES / 3) * 4 + MAX_SCREENSHOTS * 64 + KEEP_EVENTS * 3 * 1024 + 64 * 1024;
+
+const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
 export function errorLogApi({ log, build, save }: ErrorLogApiOptions): express.Router {
   const api = express.Router();
-  /*
-   * Its own limit, ahead of the server's 32 MB one: up to 8 MB of
-   * screenshots, which base64 makes nearer 11, and the events with them.
-   */
-  api.use(express.json({ limit: '12mb' }));
+  api.use(express.json({ limit: ENTRY_LIMIT }));
 
   const handle =
     (fn: (req: Request, res: Response) => Promise<unknown>): RequestHandler =>
@@ -221,7 +230,18 @@ export function errorLogApi({ log, build, save }: ErrorLogApiOptions): express.R
     }
     const e = err as { type?: string; name?: string; message?: string };
     if (e?.type === 'entity.too.large') {
-      res.status(413).json({ error: 'That entry is too large to log. Keep the screenshots to 8 MB together.' });
+      /*
+       * Said as what is too large, as far as the body says: its size and the
+       * limit. The screenshots are checked once it is read (8 MB together,
+       * said by `ErrorLog.add`), so past this limit it is the two together —
+       * or the logs sent with them, which a client can send again without.
+       */
+      const size = typeof (e as { length?: unknown }).length === 'number' ? (e as { length: number }).length : undefined;
+      res.status(413).json({
+        error:
+          `That entry is too large to log${size ? ` (${mb(size)})` : ''}: an entry may be ${mb(ENTRY_LIMIT)} as sent, ` +
+          `screenshots (8 MB together) and automatic logs included. Log it with fewer minutes of logs, or fewer screenshots.`,
+      });
     } else if (e?.type === 'entity.parse.failed') {
       res.status(400).json({ error: 'The entry was not readable JSON.' });
     } else if (err instanceof ErrorLogInputError || e?.name === 'RemoteUrlError') {

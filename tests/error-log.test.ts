@@ -108,7 +108,7 @@ describe('an entry', () => {
       resumeId: 'intern',
     });
     expect(committed).toBe(true);
-    expect(entry.id).toMatch(/^entries\/\d{4}-\d{2}-\d{2}\/\d{6}-save-button-did-nothing$/);
+    expect(entry.id).toMatch(/^entries\/\d{4}-\d{2}-\d{2}\/\d{6}-\d{3}-save-button-did-nothing$/);
     const folder = path.join(dir, entry.id);
     expect(fs.readdirSync(folder).sort()).toEqual(['entry.md', 'logs.jsonl', 'screenshot-1.png', 'screenshot-2.jpg']);
     const md = fs.readFileSync(path.join(folder, 'entry.md'), 'utf8');
@@ -421,7 +421,7 @@ describe('the server', () => {
         fetch(`${server.base}/api/error-log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       expect((await post({ description: '' })).status).toBe(400);
       expect((await post({ description: 'x', screenshots: [PNG.replace('png', 'webp')] })).status).toBe(400);
-      const huge = await post({ description: 'x', screenshots: ['data:image/png;base64,' + 'A'.repeat(13 * 1024 * 1024)] });
+      const huge = await post({ description: 'x', screenshots: ['data:image/png;base64,' + 'A'.repeat(18 * 1024 * 1024)] });
       expect(huge.status).toBe(413);
       expect(((await huge.json()) as { error: string }).error).toMatch(/too large/);
     } finally {

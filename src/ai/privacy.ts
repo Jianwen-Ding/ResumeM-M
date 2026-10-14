@@ -191,6 +191,23 @@ function isPhoneRun(text: string, found: RegExpMatchArray): boolean {
    * unbroken run it has no phone's layout to go by either.
    */
   if (groups.length === 1 && !groups[0]!.startsWith('+') && text[found.index! - 1] === '#') return false;
+  /*
+   * A date and the hour after it: "2024-10-14 12:00", "14.10.2026 12:00".
+   * The run stops at the ":" and is the date's eight digits and the hour's
+   * two, so the whole of it was a phone and came out "[phone number]:00".
+   * Only exactly that: a year, month and day joined by "-" (or a day, month
+   * and year by "."), a space, an hour of 0 to 23, and a ":" straight after
+   * the run. No phone is written that way.
+   */
+  if (groups.length === 4 && seps[2] === ' ' && text[found.index! + run.length] === ':' && /^\d{1,2}$/.test(groups[3]!) && Number(groups[3]) <= 23) {
+    const [a, b, c] = groups as [string, string, string];
+    const month = (x: string) => /^\d{1,2}$/.test(x) && Number(x) >= 1 && Number(x) <= 12;
+    const day = (x: string) => /^\d{1,2}$/.test(x) && Number(x) >= 1 && Number(x) <= 31;
+    const year = (x: string) => /^(?:19|20)\d\d$/.test(x);
+    const ymd = seps[0] === '-' && seps[1] === '-' && year(a) && month(b) && day(c);
+    const dmy = seps[0] === '.' && seps[1] === '.' && day(a) && month(b) && year(c);
+    if (ymd || dmy) return false;
+  }
   const breakable = (sep: string) => !/[.-]/.test(sep);
   for (let i = 0; i < groups.length; i++) {
     if (i > 0 && !breakable(seps[i - 1]!)) continue;

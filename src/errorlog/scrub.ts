@@ -24,7 +24,7 @@ import type { LogEvent } from './buffer.js';
  *   `signature` and the like — a sign-in callback, a signed link.
  * - **The shapes tokens come in**, for one pasted somewhere with no name in
  *   front of it: GitHub's, OpenAI's and Anthropic's, Slack's, AWS key ids,
- *   and JSON web tokens.
+ *   Stripe's, Google API keys, npm's, JSON web tokens, and private keys.
  *
  * What is not here is the bigger rule: answer text, letter bodies, resume
  * text, form field values and prompts are never put in a log line in the
@@ -35,7 +35,13 @@ const MASK = '[redacted]';
 
 const HEADER = /\b(authorization|proxy-authorization|x-rmm-pair|cookie|set-cookie)(["']?\s*[:=]\s*["']?)(?:(bearer|basic|token|digest)\s+)?[^\s"',;]+/gi;
 const BEARER = /\b(bearer)\s+[A-Za-z0-9._~+/-]+=*/gi;
-const NAMED = /\b((?:access[_-]?|refresh[_-]?|id[_-]?|api[_-]?|auth[_-]?|session[_-]?)?(?:token|secret|password|passwd|api[_-]?key|apikey|client[_-]?secret))(["']?\s*[:=]\s*["']?)(?!\[redacted\])[^\s"',;&]+/gi;
+/*
+ * The value stops at an "@": in "https://x-access-token:ghs_…@github.com/o/r.git"
+ * the name is followed by the token and then the host, and the host and the
+ * repository went with the token. A value already masked — `redactUrls`'s
+ * "•••" — is left as it is, for the same reason.
+ */
+const NAMED = /\b((?:access[_-]?|refresh[_-]?|id[_-]?|api[_-]?|auth[_-]?|session[_-]?)?(?:token|secret|password|passwd|api[_-]?key|apikey|client[_-]?secret))(["']?\s*[:=]\s*["']?)(?!\[redacted\]|•••)[^\s"',;&@]+/gi;
 const QUERY = /([?&#;][\w.-]*(?:token|key|secret|code|password|passwd|auth|sig|signature|session|pair)[\w.-]*=)[^&#\s"'<>]*/gi;
 const SHAPES: RegExp[] = [
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
@@ -45,6 +51,14 @@ const SHAPES: RegExp[] = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+  // Stripe's secret and restricted keys.
+  /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
+  // Google API keys.
+  /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g,
+  // npm access tokens.
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  // A private key, to its END line — or to the end of the line, when a log cut it off before that.
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
 ];
 
 /** The longest a single line may be once it is in the log. */
@@ -72,9 +86,46 @@ export function withoutSecrets(text: string): string {
  */
 const JOINED_PHONE = /(?<![A-Za-z0-9])(?:\+?1[-._])?\d{3}[-._]\d{3}[-._]\d{4}(?![A-Za-z0-9])/g;
 
-/** The contact-details rule, and a phone number joined into a path (`JOINED_PHONE`). */
+/*
+ * What a log line has in it that is not a phone number, however many digits
+ * it has: the contact rule reads prose, where ten digits are a phone, and a
+ * log line is about machines.
+ *
+ * - **A date and time**, ISO ("2024-10-14 12:00", "2026-10-14T08:15:30Z") or
+ *   day first ("14.10.2026 12:00"): the date's eight digits and the hour
+ *   were ten, and came out "[phone number]:00".
+ * - **A time in milliseconds**, thirteen digits from 2001 to 2033
+ *   ("timestamp 1728907200000").
+ * - **A number named as a machine's**: "job 4012345678", "pid 4123456789",
+ *   "commit 0123456789", "overflow 1234567890 pt". Only one unbroken run of
+ *   digits: written as a phone is written — "(617) 555-0134", "+1 617 555
+ *   0134", "617-555-0134" — it is still taken out, whatever is in front.
+ */
+const DAY = '(?:19|20)\\d\\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])';
+const DAY_FIRST = '(?:0?[1-9]|[12]\\d|3[01])\\.(?:0?[1-9]|1[0-2])\\.(?:19|20)\\d\\d';
+const CLOCK = '(?:[01]?\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:[.,]\\d{1,9})?)?(?:\\s?(?:Z|[+-](?:[01]\\d|2[0-3]):?[0-5]\\d))?';
+const NOT_PHONE: RegExp[] = [
+  new RegExp(`(?<![\\w.-])(?:${DAY}(?:[T ]${CLOCK})?|${DAY_FIRST}(?:,?\\s+${CLOCK})?)(?![\\w])`, 'g'),
+  /(?<![\w.+-]|\d[\s().-]{1,3})1\d{12}(?![\w]|[\s().-]{1,3}\d)/g,
+  /(?<=\b(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|count|line|row|overflow|exit|code|status|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)/gi,
+  /(?<![\w.+-]|\d[\s().-]{1,3})\d+(?=\s?(?:ms|sec|bytes|KB|MB|GB|KiB|MiB|GiB|pt|px)\b)/g,
+];
+
+/** The contact-details rule, and a phone number joined into a path (`JOINED_PHONE`), with `NOT_PHONE` kept. */
 function withoutContact(text: string): string {
-  return withoutContactDetails(text).replace(JOINED_PHONE, '[phone number]');
+  // Each kept stretch set aside as one character no rule reads as part of a number, and put back after.
+  const kept: string[] = [];
+  let out = text;
+  // A line with such characters of its own is read as it is: they would be taken for the ones set aside.
+  for (const shape of /[\ue000-\uf8ff]/.test(text) ? [] : NOT_PHONE) {
+    out = out.replace(shape, (all) => {
+      kept.push(all);
+      return String.fromCharCode(0xe000 + kept.length - 1);
+    });
+    if (kept.length > 6000) return withoutContactDetails(text).replace(JOINED_PHONE, '[phone number]');
+  }
+  out = withoutContactDetails(out).replace(JOINED_PHONE, '[phone number]');
+  return kept.length ? out.replace(/[\ue000-\uf8ff]/g, (c) => kept[c.charCodeAt(0) - 0xe000] ?? c) : out;
 }
 
 /**
