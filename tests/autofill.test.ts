@@ -49,6 +49,21 @@ describe('splitting a name into the two boxes a form has', () => {
     expect(splitName('J. R. R. Tolkien')).toEqual({ first: 'J.', last: 'Tolkien' });
   });
 
+  /*
+   * "José Antonio Núñez García" went to a form as José / García: half of a
+   * Spanish surname dropped from the Last name box.
+   */
+  it('does not guess where a surname of two words may start', () => {
+    expect(splitName('José Antonio Núñez García')).toBeUndefined();
+    expect(splitName('José Núñez García')).toBeUndefined();
+    expect(splitName('Zoë Anne Smith')).toEqual({ first: 'Zoë', last: 'Smith' });
+    expect(splitName('José García')).toEqual({ first: 'José', last: 'García' });
+    expect(splitName('María de la Cruz')).toEqual({ first: 'María', last: 'de la Cruz' });
+    // So the profile's own halves are the ones a form gets.
+    expect(derivedAutofill({ name: 'José Antonio Núñez García' }).first_name).toBeUndefined();
+    expect(preferredName('José Antonio Núñez García', 'Jose Garcia')).toEqual({ preferred_name: 'José Antonio Núñez García' });
+  });
+
   it('offers nothing for a name that is not two boxes', () => {
     expect(splitName('Cher')).toBeUndefined();
     expect(splitName('')).toBeUndefined();
@@ -226,6 +241,26 @@ describe('reading a grade out of the line it is printed on', () => {
     expect(readGpa('GPA pending')).toBeUndefined();
     expect(readGpa('Computer Science')).toBeUndefined();
   });
+
+  /*
+   * The grade was read one digit long: "GPA: 85/100" went to a form as 8,
+   * "GPA 92%" as 9 and "GPA 10/10" as 1.
+   */
+  it('gives a grade only on a four- or five-point scale, all of it', () => {
+    expect(readGpa('GPA: 85/100')).toBeUndefined();
+    expect(readGpa('GPA 92%')).toBeUndefined();
+    expect(readGpa('Bachelor of Science in Computer Science, GPA 10/10')).toBeUndefined();
+    expect(readGpa('GPA: 8.7')).toBeUndefined();
+    expect(readGpa('GPA 4.33/4.33')).toBe('4.33');
+    expect(readGpa('GPA 4.5/5.0')).toBe('4.5');
+    expect(readGpa('University of Virginia, 3.97 GPA')).toBe('3.97');
+  });
+
+  it('gives the overall grade before the major one, whichever is written first', () => {
+    expect(readGpa('Major GPA: 3.9, Cumulative GPA: 3.6')).toBe('3.6');
+    expect(readGpa('Overall GPA 3.6; Major GPA 3.9')).toBe('3.6');
+    expect(readGpa('Major GPA: 3.9')).toBe('3.9');
+  });
 });
 
 describe('what the education entries imply', () => {
@@ -257,6 +292,25 @@ describe('what the education entries imply', () => {
      * a different question, and the answer is the same either way.
      */
     expect(out.gpa).toBe('3.8');
+  });
+
+  /*
+   * With two wordings carrying two grades, the first in the list was told to
+   * the form, whichever the resume being sent printed.
+   */
+  it('takes the grade from the wording being sent before the others', () => {
+    const entry = edu({
+      subtitle: {
+        default: 'v_low',
+        variants: [
+          { id: 'v_low', label: 'Low', text: 'Bachelor of Science in Computer Science, GPA 3.4/4.0' },
+          { id: 'v_high', label: 'High', text: 'Bachelor of Science in Computer Science, GPA 3.8/4.0' },
+        ],
+      },
+    });
+    expect(derivedAutofill({}, [entry]).gpa).toBe('3.4');
+    expect(derivedAutofill({}, [{ ...entry, subtitle: { ...(entry.subtitle as object), default: 'v_high' } } as Entry]).gpa).toBe('3.8');
+    expect(derivedAutofill({}, [entry], { [`${entry.id}.subtitle`]: 'v_high' }).gpa).toBe('3.8');
   });
 
   it('takes the most recent school when there are several', () => {

@@ -1510,6 +1510,32 @@ describe('answers', () => {
     expect(t.store.load().answers).toHaveLength(2);
   });
 
+  /*
+   * As a form handed them over: a radio group's first option read as its
+   * question, a tick box's words as both, and a dropdown's prompt as the
+   * answer chosen. Each was banked, and offered back on the next form.
+   */
+  it('refuses an option kept as the question, and a prompt kept as the answer', async () => {
+    for (const [question, answer, why] of [
+      ['Yes Required', 'No', /options rather than the question/],
+      ['No, I don’t have an agreement Required', 'Yes, I have an agreement', /options rather than the question/],
+      ['Yes, and I would require relocation assistance Required', 'Yes, but I am planning to relocate on my own', /options rather than the question/],
+      ['Yes, I live in the U.S.', 'Yes, I live in the U.S.', /options rather than the question/],
+      ['CA - Irvine', 'CA - Irvine', /options rather than the question/],
+      ['Willingness to Travel', '— Please Specify —', /prompt rather than an answer/],
+      ['Candidate Source', '- Select -', /prompt rather than an answer/],
+      ['Candidate Source', '[Select]', /prompt rather than an answer/],
+      ['Candidate Source', '< Select >', /prompt rather than an answer/],
+    ] as const) {
+      const res = await request(app).post('/api/answers/save').send({ question, answer, label: 'Chosen on a form' }).expect(400);
+      expect(res.body.error, question).toMatch(why);
+    }
+    expect(t.store.load().answers).toHaveLength(2);
+    // And a question whose answer only opens like a prompt is kept.
+    await request(app).post('/api/answers/save').send({ question: 'Anything else we should know?', answer: 'Please see my portfolio.' }).expect(200);
+    expect(t.store.load().answers).toHaveLength(3);
+  });
+
   it('does not duplicate an item when the same question is saved again without its id', async () => {
     await request(app).post('/api/answers/save').send({ question: 'Brand new question?', answer: 'My answer.' }).expect(200);
     // Retyped with different case and spacing, and without the id the first

@@ -1854,3 +1854,159 @@ describe('an answer whose date has passed', () => {
     });
   });
 });
+
+const one = (id: string, question: string, text: string): AnswerBankItem => ({
+  id,
+  question,
+  default: 'v',
+  variants: [{ id: 'v', label: 'Chosen on a form', text }],
+});
+
+/*
+ * A radio group whose question the extension could not find banked its first
+ * option as the question. These are the owner's own rows, as banked.
+ */
+describe('a row whose question is one of the answers', () => {
+  const junk = [
+    one('a', 'Yes Required', 'No'),
+    one('b', "No, I don't have an agreement Required", 'Yes, I have an agreement'),
+    one('c', 'Yes, and I would require relocation assistance Required', 'Yes, but I am planning to relocate on my own'),
+    one('d', 'Yes, I live in the U.S.', 'Yes, I live in the U.S.'),
+    one('e', 'No, I opt-out Required', 'Yes, I opt-in'),
+    one('f', 'CA - Irvine', 'CA - Irvine'),
+  ];
+
+  it('is never offered, asked by its own words or by a question near them', () => {
+    for (const q of [
+      'Yes Required',
+      "No, I don't have an agreement",
+      'Yes, and I would require relocation assistance',
+      'Yes, I live in the U.S.',
+      'CA - Irvine',
+      'Do you have an agreement?',
+      'Would you require relocation assistance?',
+    ]) {
+      const m = matchAnswer(q, junk);
+      expect(m.item, q).toBeUndefined();
+      expect(m.confident, q).toBe(false);
+    }
+    expect(matchAnswers(['Yes Required', 'CA - Irvine'], junk).every((m) => !m.item)).toBe(true);
+  });
+
+  it('never looks up an option as a question, whatever the bank holds', () => {
+    const bank = [one('real', 'Yes', 'No')];
+    expect(matchAnswer('Yes', bank).item).toBeUndefined();
+    expect(matchAnswer('No, I was NEVER a government employee.', [one('g', 'No, I was NEVER a government employee.', 'Yes')]).item).toBeUndefined();
+  });
+
+  it('leaves real questions that open with an answer word alone', () => {
+    const bank = [
+      one('h', 'Yes or no: are you authorized to work in the US?', 'Yes'),
+      one('i', 'Are you willing to relocate?', 'Yes'),
+    ];
+    expect(matchAnswer('Yes or no: are you authorized to work in the US?', bank).confident).toBe(true);
+    expect(matchAnswer('Are you willing to relocate?', [...junk, ...bank]).confident).toBe(true);
+  });
+});
+
+/*
+ * "— Please Specify —" banked as the answer to "Willingness to Travel" and
+ * "Candidate Source", the prompt of a dropdown left on it.
+ */
+describe('a dropdown prompt kept as an answer', () => {
+  it('is never offered, and an item with a real answer besides keeps that one', () => {
+    const bank: AnswerBankItem[] = [
+      one('travel', 'Willingness to Travel', '— Please Specify —'),
+      one('source', 'Candidate Source', '- Select -'),
+      {
+        id: 'hear',
+        question: 'How did you hear about us?',
+        default: 'v1',
+        variants: [
+          { id: 'v1', label: 'Chosen on a form', text: '[Select]' },
+          { id: 'v2', label: 'Chosen on a form', text: 'LinkedIn' },
+        ],
+      },
+    ];
+    expect(matchAnswer('Willingness to Travel', bank).item).toBeUndefined();
+    expect(matchAnswer('Candidate Source', bank).item).toBeUndefined();
+    const hear = matchAnswer('How did you hear about us?', bank);
+    expect(hear.answer).toBe('LinkedIn');
+    expect(hear.confident).toBe(true);
+  });
+});
+
+/*
+ * Furniture — "position", "company", "min", "above" — forgiven on both sides
+ * made different questions one question.
+ */
+describe('questions the furniture made the same', () => {
+  const ask = (asked: string, stored: string, text = 'An answer', company?: string) =>
+    matchAnswer(asked, [one('s', stored, text)], { company });
+
+  it('does not answer a ceiling with a floor', () => {
+    for (const [stored, asked] of [
+      ['Minimum salary expectation', 'Maximum salary expectation'],
+      ['Desired salary (minimum)', 'Desired salary (maximum)'],
+      ['Minimum hourly rate', 'Maximum hourly rate'],
+      ['Is your cumulative GPA above 3.5?', 'Is your cumulative GPA below 3.5?'],
+      ['Are you able to lift 50 pounds or above?', 'Are you able to lift 50 pounds or below?'],
+      ['Desired salary', 'Desired salary (maximum)'],
+    ]) {
+      expect(ask(asked!, stored!).confident, `${asked} <- ${stored}`).toBe(false);
+    }
+  });
+
+  it('still forgives a length limit, and a floor the stored question said and the page did not', () => {
+    expect(ask('Why do you want to work here? (500 characters max)', 'Why do you want to work here?').confident).toBe(true);
+    expect(ask('Why do you want to work here? (Maximum 300 words)', 'Why do you want to work here?').confident).toBe(true);
+    expect(ask('Are you available for a 12 week internship?', 'Are you available for a minimum 12 week internship?', 'Yes').confident).toBe(true);
+    expect(ask('Minimum salary expectation', 'Minimum salary expectation').confident).toBe(true);
+  });
+
+  it('does not answer a role with a company, or a company with a role', () => {
+    for (const [stored, asked] of [
+      ['Most recent employer', 'Most recent role'],
+      ['Most recent company', 'Most recent position'],
+      ['Current job title', 'Current employer'],
+      ['Current position', 'Current company'],
+      ['Current company', 'Current position'],
+      ['Current company', 'Current team'],
+    ]) {
+      expect(ask(asked!, stored!, 'Storm Flag Games').confident, `${asked} <- ${stored}`).toBe(false);
+    }
+  });
+
+  it('does not take a tick box’s "No" for the answer to a label', () => {
+    expect(ask('Current position', 'Is current position?', 'No').confident).toBe(false);
+  });
+
+  it('still matches the same thing named the same way, or as a stand-in', () => {
+    expect(ask('Current employer', 'Current Company/Employer', 'Cryptic Vector').confident).toBe(true);
+    expect(ask('Company', 'Company *', 'IndieCade').confident).toBe(true);
+    expect(ask('How did you hear about this position?', 'How did you hear about our company?', 'LinkedIn').confident).toBe(true);
+    expect(ask('Why are you interested in this role at our company? (500 characters max)', 'Why are you interested in this role?').confident).toBe(true);
+  });
+});
+
+/*
+ * The employer's name was a free word wherever it was added, so a question
+ * about these people was answered with what was said about anybody.
+ */
+describe('the employer named where the stored question named nobody', () => {
+  const ask = (asked: string, stored: string, text: string) => matchAnswer(asked, [one('s', stored, text)], { company: 'Acme' });
+
+  it('is a word the stored question did not answer', () => {
+    expect(ask('Are you currently employed at Acme?', 'Are you currently employed?', 'Yes').confident).toBe(false);
+    expect(ask('Have you applied to Acme before?', 'Have you applied before?', 'No').confident).toBe(false);
+    expect(ask('Are you willing to relocate to Acme?', 'Are you willing to relocate?', 'Yes').confident).toBe(false);
+    expect(ask('Are you currently enrolled in school at Acme?', 'Are you currently enrolled in school?', 'Yes').confident).toBe(false);
+  });
+
+  it('and is still free where the stored question stood in for them', () => {
+    expect(ask('Have you worked with Acme before?', 'Have you worked with us before? (required)', 'No').confident).toBe(true);
+    expect(ask('Have you worked for Acme before?', 'Have you worked for this company before?', 'No').confident).toBe(true);
+    // "the US" is a country, not a stand-in.
+    expect(ask('Are you authorized to work at Acme?', 'Are you authorized to work in the US?', 'Yes').confident).toBe(false);
+  });
+});

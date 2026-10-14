@@ -422,9 +422,21 @@ const FURNITURE = new Set([
  * away and leaves the match offered, which is what that distinction is for.
  * This can only ever remove confidence, never grant it.
  */
+/*
+ * Except that the employer's name is only free where the stored question had
+ * something standing in for it. "Why do you want to work at Acme?" is "Why do
+ * you want to work here?"; but "Are you currently employed at Acme?" is not
+ * "Are you currently employed?", and the bank's "Yes" — true of the person,
+ * employed somewhere — was filled in confidently as a claim to work at the
+ * employer being applied to. Likewise "Have you applied to Acme before?"
+ * against "Have you applied before?", and "…relocate to Acme?" against
+ * "…relocate?". A stored question with no "here", "us", "our" or "this
+ * company" in it was never about these people, so their name is a word it
+ * did not answer.
+ */
 function unanswered(asked: string, stored: string, company?: string): string[] {
   const known = terms(stored);
-  const theirs = company ? terms(company) : new Set<string>();
+  const theirs = company && standsInForThem(stored) ? terms(company) : new Set<string>();
   return [...terms(asked)].filter(
     (t) =>
       !known.has(t) &&
@@ -436,6 +448,173 @@ function unanswered(asked: string, stored: string, company?: string): string[] {
       // is part of the question is written out: "in the last five years".
       !/^\d+$/.test(t),
   );
+}
+
+/*
+ * The words a form uses in place of the employer's name. "us" only in lower
+ * case: "the US" is a country.
+ */
+const STAND_IN = /\b(?:here|our|ours|(?:this|your|the)\s+(?:company|organi[sz]ation|employer|firm|team))\b/i;
+
+function standsInForThem(stored: string): boolean {
+  const text = tidyQuestion(stored);
+  return STAND_IN.test(text) || /\bus\b/.test(text);
+}
+
+/*
+ * Which way a question points: at a floor or at a ceiling.
+ *
+ * "min", "max", "above" and "below" were furniture, forgiven on either side
+ * as the words a length limit is written in. So "Minimum salary expectation"
+ * and "Maximum salary expectation" were one question, "Is your cumulative GPA
+ * above 3.5?" was "…below 3.5?", and the figure or the "Yes" given to one
+ * was filled confidently into the other. They are still forgiven inside a
+ * length limit — "(500 characters max)" is taken out first, as it is for
+ * `numbers` — and an age or a minimum already written as one word ("18 or
+ * over", "at least 3") has none left; anywhere else, two questions that
+ * point opposite ways are not the same question, nor is one the page points
+ * that the stored question did not. A veto, so it can only take confidence
+ * away.
+ */
+const FLOOR = new Set(['min', 'minimum', 'below', 'under', 'lowest']);
+const CEILING = new Set(['max', 'maximum', 'above', 'over', 'highest']);
+
+const directions = remembered((s: string): { floor: boolean; ceiling: boolean } => {
+  const said = normalise(String(s ?? '').replace(LENGTH_LIMIT, ' ')).split(/[^a-z0-9]+/);
+  return { floor: said.some((w) => FLOOR.has(w)), ceiling: said.some((w) => CEILING.has(w)) };
+});
+
+/*
+ * Opposite ways, or a way the page added. A stored question that said more —
+ * "available for a minimum 12 week internship?" — still answers the plainer
+ * one, as any stored qualifier the page did not repeat does.
+ */
+function sameDirection(asked: string, stored: string): boolean {
+  const a = directions(asked);
+  const s = directions(stored);
+  if ((a.floor && s.ceiling && !s.floor) || (a.ceiling && s.floor && !s.ceiling)) return false;
+  return (!a.floor || s.floor) && (!a.ceiling || s.ceiling);
+}
+
+/*
+ * The employer, or the job at it: two different things, both furniture.
+ *
+ * Forgiving "company", "employer", "position" and "role" is right where they
+ * stand in for the one being applied to — "How did you hear about this
+ * position?" is "…about us?" — and wrong where they are the thing asked for.
+ * "Most recent employer" and "Most recent role" were the same question, and a
+ * company's name was typed into the box for a job title; "Current job title"
+ * answered "Current employer". So a question naming the company and one
+ * naming the role, each not as a stand-in ("this", "our", "that"), are two
+ * questions. A veto: it can only take confidence away.
+ */
+const COMPANY_WORD = /^(?:compan(?:y|ies)|employers?|organi[sz]ations?|firms?)$/;
+const ROLE_WORD = /^(?:positions?|roles?|titles?)$/;
+const STANDING_IN = new Set(['this', 'our', 'that']);
+
+const namesWhich = remembered((s: string): { company: boolean; role: boolean } => {
+  const said = normalise(s).split(/[^a-z0-9]+/).filter(Boolean);
+  const out = { company: false, role: false };
+  said.forEach((w, i) => {
+    if (STANDING_IN.has(said[i - 1] ?? '')) return;
+    if (COMPANY_WORD.test(w)) out.company = true;
+    else if (ROLE_WORD.test(w)) out.role = true;
+  });
+  return out;
+});
+
+function sameThingNamed(a: string, b: string): boolean {
+  const na = namesWhich(a);
+  const nb = namesWhich(b);
+  if (na.company === nb.company && na.role === nb.role) return true;
+  return !((na.company && nb.role) || (na.role && nb.company));
+}
+
+/*
+ * A question that is little more than its furniture.
+ *
+ * "Current position" is {current} once "position" is forgiven, and so is
+ * "Current company", "Current team" and "Current role": scored without the
+ * furniture they were all one question, and the company's name went into the
+ * box for a position. Where the furniture is most of what is asked, it has
+ * to match. And a label that names a thing is not a yes-or-no question: a
+ * row kept from a tick box as "Is current position?" = "No" was confidently
+ * the answer to a box labelled "Current position".
+ */
+const NOUN_FURNITURE = new Set([
+  'company', 'organisation', 'organization', 'employer', 'position', 'role', 'team',
+  'job', 'opportunity', 'opening', 'vacancy', 'posting',
+]);
+
+const ASKS_YES_OR_NO =
+  /^(?:are|is|was|were|do|does|did|have|has|had|will|would|can|could|may|might|shall|should)\b/i;
+
+function asksYesOrNo(q: string): boolean {
+  return ASKS_YES_OR_NO.test(tidyQuestion(q).replace(/^[^\p{L}\p{N}]+/u, ''));
+}
+
+/*
+ * A label rather than a sentence: a word or two once the furniture is out,
+ * and nothing that asks — no question mark, no "Are you", no "Why".
+ */
+const ASKS = /^(?:why|what|how|which|who|where|when|tell|describe|explain|list|share)\b/i;
+
+function thin(q: string): boolean {
+  const said = tidyQuestion(q).replace(/^[^\p{L}\p{N}]+/u, '');
+  return bare(q).size <= 1 && !said.includes('?') && !asksYesOrNo(said) && !ASKS.test(said);
+}
+
+function sameFurnitureWhenThin(asked: string, stored: string): boolean {
+  if (!thin(asked) && !thin(stored)) return true;
+  // One name for each thing: "Current employer" is "Current Company/Employer".
+  const kind = (t: string) => (COMPANY_WORD.test(t) ? 'company' : ROLE_WORD.test(t) ? 'role' : t);
+  const furniture = (s: string) => [...new Set([...terms(s)].filter((t) => NOUN_FURNITURE.has(t)).map(kind))].sort().join(' ');
+  return furniture(asked) === furniture(stored) && asksYesOrNo(asked) === asksYesOrNo(stored);
+}
+
+/*
+ * A row whose question is one of the answers.
+ *
+ * A form whose question the extension could not find, and whose options it
+ * could, banked the first option as the question: "Yes Required" = "No",
+ * "No, I don't have an agreement Required" = "Yes, I have an agreement",
+ * "Yes, and I would require relocation assistance Required" = "Yes, but I am
+ * planning to relocate on my own" — and a tick box's own words as both,
+ * "Yes, I live in the U.S." = "Yes, I live in the U.S.". None of them is a
+ * question anybody asks; each is an option on some other form, and a form
+ * asked about it would be answered with the opposite option. So such a row
+ * is never offered, and never banked, and an option is never looked up as a
+ * question.
+ */
+const OPTION_PHRASE = /^(?:yes|no|y|n|true|false)(?:\s*[,.;:!–—-](?:\s*.*)?|\s+(?:and|but|i|i'm|i am|we)\b.*)?$/i;
+
+export function isOptionPhrase(question: string): boolean {
+  const q = tidyQuestion(question).replace(/\s+(?:required|optional)$/i, '').trim();
+  return OPTION_PHRASE.test(q) && !q.includes('?');
+}
+
+function askedAsItsOwnAnswer(item: AnswerBankItem): boolean {
+  return isOptionPhrase(item.question) || item.variants.some((v) => sameQuestion(v.text, item.question));
+}
+
+/*
+ * A dropdown's prompt, kept as though it were the answer chosen.
+ *
+ * "— Please Specify —" and "— Select —" are what a select shows before
+ * anything is chosen. The extension's test for a prompt did not allow for
+ * the dashes round them, so "Willingness to Travel" and "Candidate Source"
+ * were banked with the prompt as the answer, and offered back as one. The
+ * dashes, brackets and angle brackets round it are taken off first; then
+ * only a prompt and nothing else, so "Please see my portfolio" is an answer.
+ */
+const PROMPT_ENDS = /^[\s\-–—_=*.:|[\]<>(){}]+|[\s\-–—_=*.:|[\]<>(){}]+$/g;
+const PROMPT =
+  /^(?:(?:please\s+)?(?:select|choose|pick|specify)(?:\s+(?:one|an?\s+(?:option|answer|value|item)|from\s+(?:the\s+)?list|below))?|)$/i;
+
+export function isPrompt(answer: string): boolean {
+  const said = String(answer ?? '').trim();
+  if (!said) return false;
+  return said === '…' || PROMPT.test(said.replace(PROMPT_ENDS, '').replace(/\s+/g, ' ').trim());
 }
 
 /**
@@ -897,8 +1076,28 @@ export function matchAnswer(
  * once per question, through every variant of every item, and a form of a
  * hundred questions read the whole bank for identifiers a hundred times.
  */
+/*
+ * And never a row that is not a question and an answer at all: an option
+ * banked as the question (see `isOptionPhrase`), or a dropdown's prompt
+ * banked as the answer (see `isPrompt`). The bank is older than the checks
+ * that keep these out on the way in, so they are taken out on the way back
+ * too. A prompt is taken out of the item's phrasings, and the item goes only
+ * when it had nothing else.
+ */
 function safeToOffer(bank: AnswerBankItem[]): AnswerBankItem[] {
-  return bank.filter((item) => !item.variants.some((v) => isSensitiveAnswer(v.text)));
+  const out: AnswerBankItem[] = [];
+  for (const item of bank) {
+    if (item.variants.some((v) => isSensitiveAnswer(v.text))) continue;
+    if (askedAsItsOwnAnswer(item)) continue;
+    if (!item.variants.some((v) => isPrompt(v.text))) {
+      out.push(item);
+      continue;
+    }
+    const variants = item.variants.filter((v) => !isPrompt(v.text));
+    if (variants.length === 0) continue;
+    out.push({ ...item, variants, default: variants.some((v) => v.id === item.default) ? item.default : variants[0]!.id });
+  }
+  return out;
 }
 
 /*
@@ -1174,6 +1373,8 @@ function matchInBank(
    * Otherwise the first of equal scores still wins, which is at least the same
    * one every time.
    */
+  // An option is not a question. See `isOptionPhrase`.
+  if (isOptionPhrase(question)) return { question, score: 0, confident: false };
   let best: { item: AnswerBankItem; score: number } | undefined;
   const exact = bank.find((item) => sameQuestion(question, item.question));
   if (exact) {
@@ -1253,7 +1454,12 @@ function matchInBank(
       fullyAsked(question, best.item.question) &&
       unanswered(question, best.item.question, company).length === 0 &&
       sameShortTerms(question, best.item.question) &&
-      sameNumbers(question, best.item.question),
+      sameNumbers(question, best.item.question) &&
+      // Pointing the same way, naming the same thing, and — where that is
+      // most of the question — the same furniture. See each.
+      sameDirection(question, best.item.question) &&
+      sameThingNamed(question, best.item.question) &&
+      sameFurnitureWhenThin(question, best.item.question),
     ...(namesAnother ? { namesAnother } : {}),
   };
 }

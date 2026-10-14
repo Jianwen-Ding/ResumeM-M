@@ -38,7 +38,7 @@ import { buildVoiceContext, renderVoiceContext } from '../ai/voice.js';
 import { ingestFile } from '../ingest/index.js';
 import { GitBusyError, Repo, commitQuietly, removeWhatIsFiled, withCommit } from '../git/repo.js';
 import { saveStore } from '../git/save.js';
-import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion, fileSentAnswer, newVariantId } from '../jobs/answers.js';
+import { matchAnswer, matchAnswers, relevantLetters, letterId, isSensitiveQuestion, isSensitiveAnswer, sameQuestion, tidyQuestion, fileSentAnswer, newVariantId, isOptionPhrase, isPrompt } from '../jobs/answers.js';
 import { UNKNOWN_COMPANY, classifyPage, employerOrUnknown, extractJob, looksLikeAnApplication, mergeJobPages, unnamedRole, type PageSource } from '../jobs/extract.js';
 import { globalJobId, jobNumberIn, withRequisition } from '../jobs/names.js';
 import {
@@ -3558,6 +3558,20 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
             'birth, a passport number, a home address). The answer bank does not keep those, so ' +
             'it was not saved.',
         );
+      }
+      /*
+       * Nor a row that is no question and answer: an option kept as the
+       * question ("Yes Required" = "No"), a question that is its own answer,
+       * or a dropdown's prompt kept as the answer ("— Please Specify —").
+       * Each would be offered back as an answer on the next form. See
+       * `isOptionPhrase` and `isPrompt`; refused out loud for the reason
+       * above.
+       */
+      if (isOptionPhrase(question) || sameQuestion(question, answer)) {
+        throw new Error('That is one of the options rather than the question, so it was not saved.');
+      }
+      if (isPrompt(answer)) {
+        throw new Error('That is the dropdown’s prompt rather than an answer, so it was not saved.');
       }
 
       const answers = store.load().answers;

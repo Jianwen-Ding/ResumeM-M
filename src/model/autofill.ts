@@ -78,6 +78,7 @@ const HONORIFIC = /^(?:dr|mr|mrs|ms|mx|miss|prof|professor)\.?\s+/i;
  *   "Martin Luther King Jr."  -> Martin / King
  *   "Cher"                    -> nothing; one word is not two boxes
  *   "J. R. R. Tolkien"        -> J. / Tolkien
+ *   "José Antonio Núñez García" -> nothing; which words are the surname is not plain
  */
 export function splitName(full: string): { first: string; last: string } | undefined {
   const said = tidy(full).replace(HONORIFIC, '');
@@ -109,6 +110,23 @@ export function splitName(full: string): { first: string; last: string } | undef
   // Walk back over particles, but never all the way: a surname is at least
   // one real word and the given name has to keep one too.
   while (at > 1 && PARTICLES.has(words[at - 1]!.toLowerCase())) at -= 1;
+
+  /*
+   * Nor where the surname may be two words and nothing says which. "José
+   * Antonio Núñez García" is José Antonio, Núñez García — a Spanish name
+   * carries both surnames — and was split as José / García, dropping half the
+   * surname from the Last name box of an application. Read plainly only when
+   * the words between the first and the surname are initials ("J. R. R.
+   * Tolkien"), or nothing after the first name carries an accent — the mark
+   * of a Spanish or Portuguese name, where the last two words are very often
+   * both the surname ("Martin Luther King Jr." is still Martin / King).
+   * Otherwise nothing, so the whole name still fills a Full name box, and
+   * first and last names set in the profile (`autofill.first_name`,
+   * `autofill.last_name`) fill theirs, as they always have.
+   */
+  const middle = words.slice(1, at).filter((w) => !/^\p{L}\.?$/u.test(w));
+  const accented = words.slice(1).some((w) => /[^\x00-\x7F]/.test(w));
+  if (middle.length > 0 && accented) return undefined;
 
   const first = words[0]!;
   const last = words.slice(at).join(' ');
@@ -465,7 +483,20 @@ const DEGREE_WORD =
  * it; the box asks for one number and validates it. Only a plausible one — a
  * "GPA" followed by something that is not a grade is a sentence, not a score.
  */
-const GPA_CLAUSE = /[,;]?\s*\bGPA[:\s]+\d(?:\.\d+)?(?:\s*\/\s*\d(?:\.\d+)?)?/i;
+const GPA_CLAUSE = /[,;]?\s*\bGPA[:\s]+\d{1,3}(?:\.\d+)?%?(?:\s*\/\s*\d{1,3}(?:\.\d+)?)?/i;
+
+/*
+ * Every grade a line gives, with the word in front of it: "Major GPA: 3.9,
+ * Cumulative GPA: 3.6" is two.
+ */
+const GPA_SAID = /\b(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA[:\s]+(\d{1,3}(?:\.\d+)?)(%?)(?:\s*\/\s*(\d{1,3}(?:\.\d+)?))?/gi;
+const GPA_AFTER = /\b(\d{1,3}\.\d{1,3})(%?)(?:\s*\/\s*(\d{1,3}(?:\.\d+)?))?\s+(?:(cumulative|overall|major|in[- ]major|departmental)\s+)?GPA\b/gi;
+
+/*
+ * The highest a four- or five-point grade goes: 4.0, 4.3, 4.33, 5.0. A form's
+ * GPA box asks on that scale and checks the number against it.
+ */
+const TOP_OF_SCALE = 5;
 
 export function readGpa(line: string): string | undefined {
   /*
@@ -473,17 +504,32 @@ export function readGpa(line: string): string | undefined {
    * other, and the second is how a school line carries it — "University of
    * Virginia, 3.97 GPA" — which was read as no grade at all.
    */
+  /*
+   * And all of the number, on a four- or five-point scale only. The grade
+   * was read one digit long, so "GPA: 85/100" went to a form as 8, "GPA
+   * 92%" as 9 and "GPA 10/10" as 1 — each a grade the person never had,
+   * typed into a box an employer screens on. A grade out of 100, out of 10
+   * or as a percentage is not converted (nobody's conversion is the
+   * school's), so it is not given at all.
+   *
+   * And the overall grade before the major one: "Major GPA: 3.9, Cumulative
+   * GPA: 3.6" gave the 3.9, and a box marked GPA asks for the cumulative.
+   */
   const said = String(line ?? '');
-  const hit =
-    /\bGPA[:\s]+(\d(?:\.\d+)?)(?:\s*\/\s*(\d(?:\.\d+)?))?/i.exec(said) ??
-    /\b(\d\.\d{1,2})(?:\s*\/\s*(\d(?:\.\d+)?))?\s+(?:cumulative\s+|overall\s+)?GPA\b/i.exec(said);
-  if (!hit) return undefined;
-  const score = Number(hit[1]);
-  const scale = hit[2] === undefined ? undefined : Number(hit[2]);
-  // A score above its own scale is a misreading, not a grade.
-  if (!Number.isFinite(score) || score <= 0) return undefined;
-  if (scale !== undefined && (!Number.isFinite(scale) || score > scale)) return undefined;
-  return hit[1];
+  const found: { score: string; kind: string }[] = [];
+  const take = (score: string, percent: string, scale: string | undefined, kind: string | undefined) => {
+    const n = Number(score);
+    const out = scale === undefined ? undefined : Number(scale);
+    if (percent || !Number.isFinite(n) || n <= 0 || n > TOP_OF_SCALE) return;
+    // A score above its own scale is a misreading, not a grade; a scale past five points is another kind of grade.
+    if (out !== undefined && (!Number.isFinite(out) || n > out || out > TOP_OF_SCALE)) return;
+    found.push({ score, kind: (kind ?? '').toLowerCase() });
+  };
+  for (const m of said.matchAll(GPA_SAID)) take(m[2]!, m[3]!, m[4], m[1]);
+  if (found.length === 0) for (const m of said.matchAll(GPA_AFTER)) take(m[1]!, m[2]!, m[3], m[4]);
+  const overall = found.find((g) => g.kind === 'cumulative' || g.kind === 'overall');
+  const plain = found.find((g) => g.kind === '');
+  return (overall ?? plain ?? found[0])?.score;
 }
 
 /**
@@ -691,9 +737,16 @@ export function derivedAutofill(
      * different decision, and a box marked "GPA" is asking. The school line
      * first, where "University of Virginia, 3.97 GPA" carries it.
      */
+    /*
+     * The wording being sent before the others, which are only a fallback:
+     * with "GPA 3.4/4.0" and "GPA 3.8/4.0" as two wordings and the second
+     * chosen, the form was told 3.4 — the first in the list — while the
+     * resume attached to it said 3.8.
+     */
     const anywhere = [
       named,
-      ...(isVariantField(school.subtitle) ? school.subtitle.variants.map((v) => String(v.text)) : [line]),
+      line,
+      ...(isVariantField(school.subtitle) ? school.subtitle.variants.map((v) => String(v.text)).filter((t) => t !== line) : []),
     ];
     for (const said of anywhere) {
       const gpa = readGpa(said);
