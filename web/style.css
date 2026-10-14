@@ -2328,5 +2328,12 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
 }
 
 /* Pair JobHelper: the code is read off the screen and typed, so it is big. */
-.pair-code { font: 600 22px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.12em; margin: 8px 0 2px; }
+.pair-code { font: 600 30px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.12em; margin: 8px 0 2px; user-select: all; }
+.pair-code-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Said while the code waits to be typed in, and once it has been. */
+.pair-waiting { font-style: italic; }
+.pair-done {
+  color: var(--good); background: var(--good-bg); border: 1px solid var(--good-line);
+  border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 13px; overflow-wrap: anywhere;
+}
 .pair-row { display: grid; gap: 2px; justify-items: start; }

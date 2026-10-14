@@ -10691,35 +10691,105 @@ async function loadDocuments() {
  * to undo, and the save-switch header would only get in the way.
  */
 let pairingTimer = null;
+/*
+ * A code made here, and whether JobHelper has used it yet.
+ *
+ * Somebody sent here by JobHelper's "Get a code" reads the code, types it
+ * back on the job page, and is left with this tab open and nothing in it
+ * saying whether that worked. So once a code is made, the list of pairings
+ * is watched — it already is, every few seconds while a code shows, so the
+ * list fills in as the extension pairs — and the code's panel says "Waiting
+ * for JobHelper…" until a pairing newer than the code turns up, and then
+ * which extension it was, so the tab can be closed knowing.
+ *
+ * `before` is when the code was made: a pairing from after that is this
+ * one. Kept until the code runs out, is replaced, or is used.
+ */
+let pairingWatch = null;
+
+const pairingAsk = async (path, method = 'GET') => {
+  const res = await fetch(`/api/extension/pairings${path}`, { method, headers: { 'Content-Type': 'application/json' } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+  return body;
+};
+
+/** Make a fresh code, and watch for it to be used. See `pairingWatch`. */
+async function makePairingCode() {
+  const made = await pairingAsk('/code', 'POST');
+  pairingWatch = { since: Date.now(), code: made.code, done: null };
+  return made;
+}
+
 async function loadPairing() {
   const box = $('#pairing');
   if (!box) return;
-  const ask = async (path, method = 'GET') => {
-    const res = await fetch(`/api/extension/pairings${path}`, { method, headers: { 'Content-Type': 'application/json' } });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
-    return body;
-  };
+  const ask = pairingAsk;
   const note = el('p', { className: 'hint', id: 'pair-status' });
   const draw = (state) => {
     clearTimeout(pairingTimer);
     pairingTimer = null;
     const children = [];
+    /*
+     * Paired since the code was made: the code has gone, and a row in the
+     * list is newer than it. Said where the code was, in the same place the
+     * eye already is.
+     */
+    if (pairingWatch && !pairingWatch.done && (!state.code || state.code.code !== pairingWatch.code)) {
+      const fresh = state.paired.filter((p) => Date.parse(p.pairedAt) >= pairingWatch.since - 1000);
+      if (fresh.length > 0) pairingWatch.done = fresh[fresh.length - 1].origin;
+      else pairingWatch = null;
+    }
     if (state.code) {
       const left = Math.max(0, Math.ceil((Date.parse(state.code.expiresAt) - Date.now()) / 60000));
+      const shown = `${state.code.code.slice(0, 4)}-${state.code.code.slice(4)}`;
+      const copy = el('button', {
+        id: 'pair-copy',
+        className: 'tiny',
+        textContent: 'Copy',
+        title: 'Copy the code, to paste into JobHelper',
+        onclick: () => {
+          const done = () => { copy.textContent = 'Copied'; };
+          // The clipboard is there on loopback, which is a secure context;
+          // anywhere it is not, the code is selected for Ctrl+C instead.
+          const select = () => {
+            const range = document.createRange();
+            range.selectNodeContents($('#pair-code'));
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+          };
+          if (navigator.clipboard?.writeText) navigator.clipboard.writeText(shown).then(done, select);
+          else select();
+        },
+      });
       children.push(
-        el('div', { className: 'pair-code', id: 'pair-code', textContent: `${state.code.code.slice(0, 4)}-${state.code.code.slice(4)}` }),
-        el('p', { className: 'hint', textContent: `Type this into JobHelper’s popup. It works once, for the next ${left} ${left === 1 ? 'minute' : 'minutes'}.` }),
+        el('div', { className: 'pair-code-row' }, [
+          el('div', { className: 'pair-code', id: 'pair-code', textContent: shown }),
+          copy,
+        ]),
+        el('p', { className: 'hint', textContent: `Type this into JobHelper — the card on the job page, or its toolbar popup. It works once, for the next ${left} ${left === 1 ? 'minute' : 'minutes'}.` }),
       );
+      if (pairingWatch && pairingWatch.code === state.code.code) {
+        children.push(el('p', { className: 'hint pair-waiting', id: 'pair-waiting', 'aria-live': 'polite', textContent: 'Waiting for JobHelper…' }));
+      }
       // Looked at again until it is used or runs out, so the list below
       // gains the extension the moment it pairs.
-      pairingTimer = setTimeout(() => refresh().catch(() => {}), 3000);
+      pairingTimer = setTimeout(() => refresh().catch(() => {}), 2000);
+    }
+    if (pairingWatch?.done) {
+      children.push(el('p', {
+        className: 'pair-done',
+        id: 'pair-done',
+        'aria-live': 'polite',
+        textContent: `Paired with ${pairingWatch.done}. JobHelper can reach the save now; this tab can be closed.`,
+      }));
     }
     children.push(el('div', { className: 'toolbar' }, [
       el('button', {
         id: 'pair-make',
         textContent: state.code ? 'Make a new code' : 'Make a code',
-        onclick: () => ask('/code', 'POST').then(refresh).catch((e) => { note.textContent = e.message; }),
+        onclick: () => makePairingCode().then(refresh).catch((e) => { note.textContent = e.message; }),
       }),
     ]));
     if (state.paired.length > 0) {
@@ -10747,6 +10817,42 @@ async function loadPairing() {
   await refresh();
 }
 
+/*
+ * Arriving from JobHelper's "Get a code": `#save/pair?make=1`.
+ *
+ * JobHelper's card asks for a code where the person is standing, and the
+ * code is here. Rather than send them to find a section and press a button,
+ * the link does both: the Save & Files tab, scrolled to Pair JobHelper, with
+ * a code already made and shown large, so all that is left is reading it.
+ *
+ * Made by this page, with this page's own request — the same one the button
+ * sends — so nothing about who may make a code changes: the route still
+ * answers the editor alone (see `editorOnly` and `fromEditor` on the server),
+ * and a link only gets as far as opening the editor. A page elsewhere that
+ * links here makes a code nobody but the person looking at this tab sees,
+ * which is what pressing the button does.
+ *
+ * Once per arrival. The address is put back to `#pair` before anything is
+ * asked, with `replaceState`, which fires no `hashchange` — so a reload, or
+ * Back and Forward through this tab, shows the code that is there instead of
+ * making another and voiding the one already typed half-way.
+ */
+async function arriveToPair({ make }) {
+  window.history.replaceState(null, '', '#pair');
+  showTab('save');
+  if (!$('#pairing')) setupPairing();
+  if (make) {
+    try {
+      await makePairingCode();
+    } catch (e) {
+      const status = $('#pair-status');
+      if (status) status.textContent = e.message;
+    }
+  }
+  await loadPairing().catch((e) => { $('#pairing').textContent = e.message; });
+  ($('#pair-code') ?? $('#pair-jobhelper'))?.scrollIntoView?.({ block: 'center' });
+}
+
 function setupPairing() {
   const after = $('#save-default-status');
   if (!after || $('#pairing')) return;
@@ -10756,7 +10862,7 @@ function setupPairing() {
     el('p', {
       className: 'hint',
       textContent: 'The JobHelper browser extension can read and change this save only once it is paired with ' +
-        'ResumeM-M on this computer. Make a code here, then enter it in JobHelper’s popup. An extension ' +
+        'ResumeM-M on this computer. Make a code here, then enter it in JobHelper — on the card, or in its popup. An extension ' +
         'that is not paired is refused.',
     }),
     el('div', { id: 'pairing' }),
@@ -13534,6 +13640,13 @@ async function applyHash() {
     return true;
   }
 
+  // JobHelper's "Get a code". See `arriveToPair`.
+  const pairLink = /^#save\/pair(?:\?(.*))?$/.exec(location.hash);
+  if (pairLink) {
+    await arriveToPair({ make: new URLSearchParams(pairLink[1] ?? '').get('make') === '1' });
+    return true;
+  }
+
   // A bare `#voice` or `#applications` opens that tab. The extension links
   // here when it needs to send someone to a setting, and a link that lands on
   // the wrong tab is worse than no link.
@@ -13685,7 +13798,12 @@ async function boot() {
   setupPairing();
   const project = await assetUI.init();
   loadDocuments().catch(() => {});
-  if (!project.current) { showTab('save'); return; }
+  if (!project.current) {
+    showTab('save');
+    // Pairing needs no save, so JobHelper's "Get a code" works without one.
+    if (/^#save\/pair\b/.test(location.hash)) await applyHash().catch(() => false);
+    return;
+  }
   setupHistoryTab();
   /*
    * The tabs stay off until the store is here.
