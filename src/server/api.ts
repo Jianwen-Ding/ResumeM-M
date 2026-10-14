@@ -58,7 +58,7 @@ import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from
 import { flattenOne } from '../model/flatten.js';
 import { sweepTemporary, temporaryDays, wouldSweep } from './sweep.js';
 import { FRAME_ANCESTORS } from './guard.js';
-import { syncCurrent, currentDir, CURRENT_DIR, STANDING } from '../model/current.js';
+import { syncCurrent, currentDir, CURRENT_DIR, PREVIEW_DIR, STANDING } from '../model/current.js';
 import { diffResumes, sameDocument } from '../model/diff.js';
 import { formatPeriod, inferStyle, parsePeriod, type Period } from '../model/period.js';
 import { readSnapshot, type ParsedYaml, type StoreSnapshot } from '../model/snapshot.js';
@@ -2202,7 +2202,7 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
       res.json({
         dir: store.root,
         isRepo: await repo.isRepo(),
-        commits: (await repo.log(1)).length,
+        commits: await repo.count(),
         remote,
         pending,
         // Empty above because git refused, not because there is nothing.
@@ -7272,9 +7272,9 @@ export function createCurrentRouter(store: Store): Router {
  * produce a file meant to leave the machine. Opening the editor replaced it.
  *
  * So previews live in their own folder, under their own names, and are swept.
- * `out/` is a folder the user opens; this one is dotted and disposable.
+ * `out/` is a folder the user opens; this one is dotted and disposable — and
+ * left out of the save's history, see `currentIgnore`.
  */
-const PREVIEW_DIR = '.previews';
 const PREVIEWS_KEPT = 40;
 
 function previewPath(store: Store, name: string): string {

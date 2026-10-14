@@ -585,11 +585,13 @@ not a repository yet, auto-commit switched off — there is one command:
 Everything in the save folder is in the history, with nothing left out: the
 tracker and its whole status history, the voice notes, the writing corpus, the
 letters, the answer bank, the Workspace — including half-written applications —
-every resume, the profile, the settings, and all of `out/`. That last one means
-both the snapshot of each application, byte for byte what was sent, and the
-compiled previews beside it. Previews are rebuilt on every recompile, so they
-do make the history larger than the YAML alone would; that is the price of "a
-clone of the save is the save", and it is the right way round.
+every resume, the profile, the settings, and the snapshot of each application
+in `out/applications/`, byte for byte what was sent. Two folders in `out/` are
+left out, because they are rebuilt rather than written: `out/current/`, the
+upload folder, rebuilt from the tracker whenever anything changes, and
+`out/.previews/`, the editor's previews, written afresh on every recompile.
+Everything they are built from is in the history; a save that already has them
+in it has them taken out once, in a commit that says so.
 
 ```bash
 rmm save                              # commit everything in the store

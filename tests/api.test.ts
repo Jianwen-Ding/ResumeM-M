@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import express from 'express';
 import request from 'supertest';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { createApi, createPdfRouter, createCurrentRouter, questionsToWrite } from '../src/server/api.js';
 import { sameQuestion } from '../src/jobs/answers.js';
@@ -4492,6 +4493,24 @@ describe('the store panel when git will not answer', () => {
     await request(app).post('/api/store/save').send({}).expect(200);
     const res = await request(app).get('/api/config/store').expect(200);
     expect(res.body.pendingError).toBeUndefined();
+  });
+});
+
+/*
+ * "Its own git repository, 1 commit so far." on a save with eighty: the count
+ * was `log(1).length`, which can only ever be 0 or 1.
+ */
+describe('the store panel’s count of commits', () => {
+  it('is the whole history, and 0 before there is one', async () => {
+    expect((await request(app).get('/api/config/store').expect(200)).body.commits).toBe(0);
+    await repo.ensure();
+    for (let n = 0; n < 4; n++) {
+      fs.writeFileSync(path.join(t.dir, 'voice.md'), `# Voice\n\nTake ${n}.\n`);
+      await repo.commitAll(`Take ${n}`);
+    }
+    const { body } = await request(app).get('/api/config/store').expect(200);
+    expect(body.commits).toBe(5);
+    expect(body.commits).toBe(Number(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: t.dir, encoding: 'utf8' })));
   });
 });
 

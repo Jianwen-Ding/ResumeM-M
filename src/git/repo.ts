@@ -647,9 +647,13 @@ export class Repo {
    * most are the ones that already exist. Appending, never rewriting: this
    * file belongs to whoever opened the store.
    *
-   * Returns whether it wrote, and the rebuilt folders it has just started
-   * ignoring — which may already be in the history, and `.gitignore` says
-   * nothing about a file git already tracks.
+   * Returns whether it wrote, and the rebuilt folders to take out of the
+   * index — which may already be in the history, and `.gitignore` says nothing
+   * about a file git already tracks. All of them, the first time this process
+   * asks, rather than only those it has just written: a `.gitignore` that
+   * came from somewhere else (a clone, another process, a write whose untrack
+   * never happened) carries the line over files git still follows. Taking out
+   * nothing is a no-op, so this is safe to ask once per process.
    */
   private ensureIgnores(): { wrote: boolean; untrack: string[] } {
     const rebuilt = this.rebuilt();
@@ -662,7 +666,8 @@ export class Repo {
       const had = fs.existsSync(at) ? fs.readFileSync(at, 'utf8') : '';
       const lines = had.split('\n').map((l) => l.trim());
       const missing = wanted.filter((p) => !lines.includes(p));
-      if (missing.length === 0) return { wrote: false, untrack: [] };
+      const untrack = rebuilt.map((p) => p.replace(/^\/+|\/+$/g, '')).filter(Boolean);
+      if (missing.length === 0) return { wrote: false, untrack };
 
       const temporary = missing.filter((p) => Repo.IGNORED.includes(p));
       const derived = missing.filter((p) => !Repo.IGNORED.includes(p));
@@ -672,7 +677,7 @@ export class Repo {
       ].join('\n');
       const body = had && !had.endsWith('\n') ? `${had}\n${blocks}\n` : `${had}${blocks}\n`;
       fs.writeFileSync(at, body, 'utf8');
-      return { wrote: true, untrack: derived.map((p) => p.replace(/^\/+|\/+$/g, '')) };
+      return { wrote: true, untrack };
     } catch {
       // A store whose .gitignore cannot be written still commits; it just
       // keeps the race this was for. Not a reason to refuse the save.
@@ -742,11 +747,75 @@ export class Repo {
      * And out of the index, where a store written before the folder was
      * ignored has it already: an ignored file git tracks is still walked by
      * the add below, which is the race all over again. The files stay on
-     * disk; the next commit records only that they are no longer followed.
+     * disk; the history records only that they are no longer followed.
      */
     for (const folder of untrack) {
       await this.git(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', folder]).catch(() => undefined);
     }
+    // A failure here leaves the untracking staged, for the save's own commit
+    // to take as it always did; not a reason to lose the save.
+    const cleaned = await this.commitUntracked(untrack).catch(() => undefined);
+    return (await this.commitStaged(message, paths, auto, wroteIgnores && !cleaned, untrack)) ?? cleaned;
+  }
+
+  /**
+   * The folders just taken out of the index, committed on their own.
+   *
+   * They rode along with whatever save came next, so an edit to one bullet
+   * was recorded as that edit plus the deletion of eighty previews, under the
+   * edit's message — the change Save History showed for it was the PDFs. A
+   * commit of its own says what happened, once, and leaves the save after it
+   * to be about the save. Undefined when there was nothing to take out, which
+   * is every time after the first.
+   *
+   * Not during a merge, whose commit has to take everything that was
+   * resolved: there the untracking goes in with it, as before.
+   */
+  private async commitUntracked(untrack: string[]): Promise<string | undefined> {
+    if (untrack.length === 0) return undefined;
+    const gone = (await this.git(['diff', '--cached', '--name-only', '-z', '--diff-filter=D', '--', ...untrack]).catch(() => ''))
+      .split('\0')
+      .filter(Boolean);
+    if (gone.length === 0) return undefined;
+    const merging = await this.git(['rev-parse', '-q', '--verify', 'MERGE_HEAD']).then(
+      () => true,
+      () => false,
+    );
+    if (merging) return undefined;
+    // The ignore lines that keep them out go in the same commit, or the next
+    // add would put the files straight back.
+    const ignore = fs.existsSync(path.join(this.root, '.gitignore')) ? ['.gitignore'] : [];
+    if (ignore.length) await this.git(['add', '--', ...ignore]).catch(() => undefined);
+    const files = [...ignore, ...gone];
+    const scoped = await this.indexOf(files);
+    try {
+      await this.git(
+        [
+          '-c',
+          'user.name=ResumeM-M',
+          '-c',
+          'user.email=resumem-m@localhost',
+          'commit',
+          '-q',
+          '-m',
+          `Stop keeping a history of rebuilt files (${untrack.map((f) => `${f}/`).join(', ')})`,
+        ],
+        scoped.env,
+      );
+    } finally {
+      fs.rmSync(scoped.file, { force: true });
+    }
+    return (await this.git(['rev-parse', 'HEAD'])).trim();
+  }
+
+  /** The rest of `commitHeld`: this save's own commit. */
+  private async commitStaged(
+    message: string,
+    paths: string[] | undefined,
+    auto: boolean,
+    wroteIgnores: boolean,
+    untrack: string[],
+  ): Promise<string | undefined> {
     /*
      * Only paths there is something at — on disk, or in the index as a file
      * that has since been removed.
@@ -1030,6 +1099,18 @@ export class Repo {
       changes.push({ path: file, state: stateOf(code, () => fs.existsSync(path.join(this.root, file))) });
     }
     return changes.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  /**
+   * How many commits the history holds — 0 for a repository with none yet,
+   * or no repository at all. `log(1).length` was asked for this and could
+   * only ever answer 0 or 1: "1 commit so far" on a save with eighty.
+   */
+  async count(): Promise<number> {
+    if (!(await this.isRepo())) return 0;
+    const out = await this.git(['rev-list', '--count', 'HEAD']).catch(() => '0');
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : 0;
   }
 
   async log(limit = 30): Promise<{ hash: string; date: string; message: string }[]> {

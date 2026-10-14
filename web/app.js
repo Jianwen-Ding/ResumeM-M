@@ -2095,6 +2095,8 @@ function setSaveState(mode, detail) {
     mode = 'failed';
     detail = 'can’t reach the server. Retrying…';
   }
+  // Nor about one still on its way; the last of those to land says so.
+  if (mode === 'saved' && inlineSaves.size > 0) mode = 'saving';
   chip.className = `save ${mode}`;
   chip.textContent =
     mode === 'saving'
@@ -2788,6 +2790,14 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     if (commit && next && next !== raw) {
       const save = Promise.resolve().then(() => onCommit(next));
       inlineSaves.add(save);
+      /*
+       * And the chip says it is going. It went on saying "All changes saved"
+       * for the whole round trip, which is the one moment that is not true:
+       * close the tab on it and the wording is gone. Not over a failure the
+       * chip is already showing, which stays until something clears it.
+       */
+      const chip = $('#save-state');
+      if (chip && !chip.classList.contains('failed') && !chip.classList.contains('unsaved')) setSaveState('saving');
       save
         .then(() => {
           // Landed, and no other line is still waiting: the chip can say so again.
@@ -2818,6 +2828,8 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
               : `${err.message} The wording is still in the line — press Enter to try again.`,
             true,
           );
+          // Not "Saving…" for ever, and not "All changes saved" either.
+          if (!offline) setSaveState('failed', 'an edited line was not accepted');
           if (!node.isConnected) return;
           editing = true;
           node.contentEditable = 'plaintext-only';
@@ -2851,7 +2863,20 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
           };
           retryTimer = setTimeout(retry, UNREACHABLE_RETRY_MS);
         })
-        .finally(() => inlineSaves.delete(save));
+        .finally(() => {
+          inlineSaves.delete(save);
+          // The last one in: "Saving…" was this, and it is done. Not while the
+          // resume itself has a save of its own still to say.
+          if (
+            inlineSaves.size === 0 &&
+            $('#save-state')?.classList.contains('saving') &&
+            !state.dirty &&
+            !autoSaveTimer &&
+            !autoSaving
+          ) {
+            setSaveState('saved');
+          }
+        });
     } else {
       // Put the markup back: the raw text is what gets edited, the rendered
       // form is what gets shown.
@@ -7028,6 +7053,9 @@ async function renderPreview() {
     if (!unreachable(err)) {
       setLive('bad');
       fit.textContent = err.message;
+      // Not "Compiling your resume…" for ever over a compile that has ended.
+      // The next one that works puts the usual words back, above.
+      $('#preview-empty').textContent = 'Couldn’t compile — see the message on the left.';
       return;
     }
     /*
@@ -8117,7 +8145,14 @@ function drawApplications({ applications, stats, current }) {
 
     // Clicking the row opens the full record; the status dropdown and the
     // remove button stop the event so they still work on their own.
-    row.onclick = () => openApplication(a.id);
+    row.onclick = () => {
+      revealApplicationDetail();
+      // And again once it is filled: the placeholder is short, and at the foot
+      // of the page there was not yet room to bring it all the way up.
+      openApplication(a.id).then(() => {
+        if (openApplicationId === a.id) revealApplicationDetail();
+      }, () => undefined);
+    };
     sel.onclick = (ev) => ev.stopPropagation();
     return row;
   };
@@ -8207,6 +8242,20 @@ function drawApplications({ applications, stats, current }) {
       el('tbody', {}, rows),
     ]),
   );
+}
+
+/**
+ * Bring the detail pane to a row just opened, where it is not already beside it.
+ *
+ * Below the width where the list and the pane stack, the pane is under the
+ * whole list: a row clicked forty rows down filled it a long scroll away, and
+ * the click looked like it had done nothing. Beside the list the pane is
+ * sticky and already in view (see `.app-detail` in the stylesheet). Only on a
+ * click, not on the re-opens a reload does, which must not move the page.
+ */
+function revealApplicationDetail() {
+  if (!window.matchMedia?.('(max-width: 1150px)').matches) return;
+  $('#app-detail')?.scrollIntoView?.({ block: 'start' });
 }
 
 /** Everything that was actually submitted for one application. */

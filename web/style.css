@@ -258,6 +258,10 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
   place-items: center;
   color: var(--muted);
   font-size: var(--t-md);
+  /* Room from the box's edges, and centred as text too: a sentence that
+     wraps on a phone otherwise touches both sides and hangs to the left. */
+  padding: 16px;
+  text-align: center;
   pointer-events: none;
 }
 .preview-frame.loaded .preview-empty { display: none; }
@@ -278,7 +282,9 @@ nav button.active { background: var(--accent-soft); color: #174ea6; }
 
 /* Material text fields: a quiet outline that thickens to the accent on focus,
    rather than a glow around it. */
-select, input[type=text], input[type=search], textarea {
+/* `input:not([type])` and number boxes too: the folder to open and the page
+   settings are both, and went out in the browser's own bevelled style. */
+select, input[type=text], input[type=search], input:not([type]), input[type=number], textarea {
   font: inherit;
   padding: 7px 10px;
   border: 1px solid var(--line);
@@ -287,8 +293,9 @@ select, input[type=text], input[type=search], textarea {
   color: var(--ink);
   transition: border-color .15s, box-shadow .15s;
 }
-input[type=text]:hover, input[type=search]:hover, textarea:hover, select:hover { border-color: var(--faint); }
-input[type=text]:focus-visible, input[type=search]:focus-visible, textarea:focus-visible, select:focus-visible {
+input[type=text]:hover, input[type=search]:hover, input:not([type]):hover, input[type=number]:hover, textarea:hover, select:hover { border-color: var(--faint); }
+input[type=text]:focus-visible, input[type=search]:focus-visible, input:not([type]):focus-visible, input[type=number]:focus-visible,
+textarea:focus-visible, select:focus-visible {
   outline: 0;
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
@@ -659,12 +666,15 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
 .profile-entry .title { font-size: var(--t-lg); font-weight: 500; }
 .profile-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  /* Wide enough for an email address or a link to sit on one line at 1024px,
+     where 210px columns broke them mid-word; never wider than the box. */
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
   gap: 2px 14px;
   margin-top: 6px;
 }
 .profile-field { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.profile-field .meta-value { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* Between words where there are any; mid-word only for one that will not fit. */
+.profile-field .meta-value { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
 .profile-extras { margin-top: 12px; border-top: 1px solid var(--line-soft); padding-top: 9px; }
 
 /* Step through the alternates from beside the line. */
@@ -956,7 +966,10 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
 /* ---- Settings ---- */
 
 .settings { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
-.settings .row { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+/* Wrapping, so four page settings side by side on a phone take two lines
+   rather than crushing the Paper select to its arrow. */
+.settings .row { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; flex-wrap: wrap; }
+.settings .row > label.f { flex: 1 1 90px; }
 .settings .row:last-child { margin-bottom: 0; }
 .settings label.f { display: block; margin-bottom: 11px; }
 .settings .lbl { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
@@ -1163,6 +1176,16 @@ tbody tr { cursor: pointer; }
   box-shadow: var(--shadow-sm);
   max-height: calc(100vh - 210px);
   overflow: auto;
+  /* Beside the list, it stays in view as the list scrolls: a row opened far
+     down filled a pane at the top of the page, out of sight, and the click
+     seemed to do nothing. Clears the 56px header with room to spare. */
+  position: sticky;
+  top: 72px;
+  scroll-margin-top: 72px;
+}
+/* Stacked under the list, it is where it falls (the editor scrolls to it). */
+@media (max-width: 1150px) {
+  .app-detail { position: static; }
 }
 .app-detail h3 { margin: 0 0 2px; font-size: var(--t-lg); letter-spacing: -.01em; }
 .app-detail .sub { color: var(--muted); font-size: var(--t-md); margin-bottom: 14px; }
@@ -1187,6 +1210,8 @@ tbody tr { cursor: pointer; }
   padding: 11px 12px;
   max-height: 260px;
   overflow: auto;
+  /* A pasted link with no spaces in it ran off the side. */
+  overflow-wrap: anywhere;
 }
 .app-detail .qa { margin-bottom: 12px; }
 .app-detail .qa .q { font-weight: 620; font-size: var(--t-md); margin-bottom: 4px; }

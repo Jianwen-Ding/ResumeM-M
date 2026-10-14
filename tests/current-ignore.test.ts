@@ -11,10 +11,10 @@ describe('the flat folder, as a line for the save’s .gitignore', () => {
   const store = (output: Record<string, unknown>) =>
     makeTempStore({ config: { ai: { enabled: false }, git: { autoCommit: false }, output } });
 
-  it('is named where the output folder is inside the save', () => {
+  it('is named, with the previews beside it, where the output folder is inside the save', () => {
     const t = store({ dir: 'out', withinProject: true });
     try {
-      expect(currentIgnore(t.store)).toEqual(['/out/current/']);
+      expect(currentIgnore(t.store)).toEqual(['/out/current/', '/out/.previews/']);
     } finally {
       t.cleanup();
     }

@@ -740,8 +740,43 @@ describe('a folder that is rebuilt rather than written', () => {
     expect(git(['ls-files']).split('\n').some((f) => f.startsWith('out/current/'))).toBe(false);
     expect(fs.existsSync(path.join(current(), 'Test-Person-Resume.pdf'))).toBe(true);
     expect(repo.lastCommitError).toBeUndefined();
-    // The rename is in the same commit, as a save with nothing else to say.
-    expect(git(['show', '--stat', '--format=%s', 'HEAD'])).toContain('profile.yaml');
+    // The rename is a commit of its own, and the untracking is the one before
+    // it, saying what it was — not eighty PDFs under the rename's message.
+    const head = git(['show', '--stat', '--format=%s', 'HEAD']);
+    expect(head).toContain('Rename');
+    expect(head).toContain('profile.yaml');
+    expect(head).not.toContain('out/current');
+    const cleanup = git(['show', '--stat', '--format=%s', 'HEAD~1']);
+    expect(cleanup).toMatch(/^Stop keeping a history of rebuilt files \(out\/current\/\)/);
+    expect(cleanup).toContain('out/current/Test-Person-Resume.pdf');
+    expect(cleanup).toContain('.gitignore');
+    expect(cleanup).not.toContain('profile.yaml');
+
+    // Once: the next save is only the save.
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Third Person\n');
+    await new Repo(root, ['.'], () => ['/out/current/']).commitAll('Again');
+    expect(git(['log', '--format=%s']).split('\n').filter((l) => l.startsWith('Stop keeping')).length).toBe(1);
+    expect(git(['status', '--porcelain'])).toBe('');
+  });
+
+  /*
+   * A `.gitignore` that already carries the line — a clone, another process —
+   * over files git still follows. Taken out all the same, once.
+   */
+  it('is taken out of the history when the ignore line was already there', async () => {
+    const before = new Repo(root);
+    await before.ensure();
+    fs.writeFileSync(path.join(root, '.gitignore'), '/out/current/\n');
+    git(['add', '-f', '--', 'out/current/Test-Person-Resume.pdf']);
+    await before.commitAll('Tracked by hand');
+    expect(git(['ls-files']).split('\n')).toContain('out/current/Test-Person-Resume.pdf');
+
+    fs.writeFileSync(path.join(root, 'profile.yaml'), 'name: Someone Else\n');
+    const repo = new Repo(root, ['.'], () => ['/out/current/']);
+    await repo.commitAll('Rename');
+    expect(git(['ls-files']).split('\n').some((f) => f.startsWith('out/current/'))).toBe(false);
+    expect(git(['show', '--format=%s', '-s', 'HEAD~1'])).toMatch(/^Stop keeping a history/);
+    expect(git(['status', '--porcelain'])).toBe('');
   });
 
   it('follows the output folder when it moves', async () => {
