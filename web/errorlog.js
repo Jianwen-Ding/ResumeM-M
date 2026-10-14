@@ -307,12 +307,21 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
     }
   }
 
+  /*
+   * Where the person was when the dialog opened, to go back to when it
+   * closes. Ctrl+Shift+E opens it from anywhere, and closing it sent the
+   * focus to the "!" in the header rather than back to the field they were in.
+   */
+  let openedFrom = null;
+
   function open() {
     dialog ??= build();
     if (!dialog.overlay.classList.contains('hidden')) {
       dialog.description.focus();
       return;
     }
+    const at = document.activeElement;
+    openedFrom = at && at !== document.body && !dialog.overlay.contains(at) ? at : null;
     dialog.overlay.classList.remove('hidden');
     dialog.note.textContent = '';
     dialog.note.className = 'hint error-log-note';
@@ -322,7 +331,10 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
   function close() {
     if (!dialog || busy) return;
     dialog.overlay.classList.add('hidden');
-    $('#error-log-chip')?.focus();
+    const back = openedFrom;
+    openedFrom = null;
+    const usable = back && back.isConnected && !back.disabled && !back.closest('[hidden], .hidden, [inert]') && back.getClientRects().length > 0;
+    (usable ? back : $('#error-log-chip'))?.focus();
   }
 
   async function submit() {

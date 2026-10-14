@@ -2954,6 +2954,217 @@ async function main() {
       check('and pressing it puts the error away', toast.shown && toast.after.text === '' && !toast.after.visible, JSON.stringify(toast.after));
 
       /*
+       * And the focus went to <body> with it: the × hides itself as it is
+       * pressed. It goes back to where the person was before the error, or,
+       * when that is gone, to "Log an error".
+       */
+      const refocus = await at(390, 800, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        const field = p.locator('#editor input:visible, #editor textarea:visible').first();
+        await field.focus().catch(() => {});
+        const before = await p.evaluate(() => document.activeElement?.outerHTML.slice(0, 80) ?? '');
+        await p.evaluate(() => document.activeElement?.setAttribute('data-refocus', '1'));
+        await sayError(p, LONG_ERR);
+        await p.locator('#status-dismiss').click({ timeout: 3_000 }).catch(() => {});
+        const back = await p.evaluate(() => document.activeElement?.getAttribute('data-refocus') === '1');
+        // A button that is gone by the time the error is put away, pressed by keyboard.
+        await p.evaluate(() => {
+          const b = document.createElement('button');
+          b.id = 'refocus-gone';
+          b.textContent = 'gone';
+          document.querySelector('#editor').prepend(b);
+          b.focus();
+        });
+        await sayError(p, LONG_ERR);
+        await p.evaluate(() => document.getElementById('refocus-gone').remove());
+        await p.locator('#status-dismiss').focus().catch(() => {});
+        await p.keyboard.press('Enter');
+        const chip = await p.evaluate(() => document.activeElement?.id ?? '');
+        return { before, back, chip };
+      });
+      check('and putting it away sends the focus back to where it was', refocus.back, refocus.before);
+      check('or, when that is gone, to "Log an error"', refocus.chip === 'error-log-chip', refocus.chip || 'body');
+
+      /*
+       * The error log's announcement puts a longer link in the status line
+       * after `setStatus` has fitted it, and nothing fitted it again: at 1024
+       * the error stayed in the header and wrapped it past `--header-h`, and
+       * at 1280 the × and the room kept at the foot stayed where the shorter
+       * words had them.
+       */
+      const announced = await at(1024, 800, async (p) => {
+        await sayError(p, 'That folder is not a resume save. Choose Create Save for a new folder.');
+        await p.evaluate(() => {
+          const s = document.querySelector('#status');
+          const a = document.createElement('a');
+          a.href = '#save';
+          a.className = 'error-log-link';
+          a.textContent = `${s.textContent} · Open the error log`;
+          s.replaceChildren(a);
+        });
+        await p.evaluate(() => new Promise((go) => requestAnimationFrame(() => requestAnimationFrame(go))));
+        return p.evaluate(() => {
+          const s = document.querySelector('#status');
+          const box = s.getBoundingClientRect();
+          const dismiss = document.querySelector('#status-dismiss');
+          return {
+            h: document.querySelector('header').getBoundingClientRect().height,
+            v: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-h')),
+            toast: s.classList.contains('toast'),
+            dismissShown: getComputedStyle(dismiss).display !== 'none',
+            room: parseFloat(document.documentElement.style.getPropertyValue('--status-toast-h')) || 0,
+            need: Math.ceil(innerHeight - box.top),
+          };
+        });
+      });
+      check(
+        'an error made longer after it was shown is fitted again: the header keeps its height',
+        Math.abs(announced.h - announced.v) < 1,
+        `header ${announced.h}, --header-h ${announced.v}`,
+      );
+      check(
+        'and floating, it has its × and the room at the foot it needs',
+        !announced.toast || (announced.dismissShown && announced.room >= announced.need),
+        JSON.stringify(announced),
+      );
+
+      /*
+       * "Log an error" kept its words where the "!" alone had already gone
+       * onto a row of its own (both AI chips showing): the words had that row
+       * to themselves, and the header grew by a row at 800px.
+       */
+      const crowded = await at(800, 700, async (p) => {
+        await p.evaluate(() => {
+          const d = document.getElementById('drafting-chip');
+          d.classList.remove('hidden');
+          d.textContent = '✦ Drafting a cover letter…';
+          const j = document.getElementById('jobs-chip');
+          j.classList.remove('hidden');
+          j.classList.add('ready');
+          j.textContent = '2 AI jobs running';
+        });
+        await p.waitForTimeout(300);
+        return p.evaluate(() => {
+          const header = document.querySelector('header');
+          const label = document.querySelector('#error-log-chip .error-log-chip-label');
+          const first = header.querySelector('h1').getBoundingClientRect();
+          const chip = document.querySelector('#error-log-chip').getBoundingClientRect();
+          return { words: label.getBoundingClientRect().width > 2, offFirstRow: chip.top >= first.bottom - 1 };
+        });
+      });
+      check('"Log an error" off the first row shows only its "!"', !(crowded.words && crowded.offFirstRow), JSON.stringify(crowded));
+
+      // The side panel's "Actual size" over the page: a background of its own, not the words alone over the PDF.
+      const pill = await at(520, 760, (p) =>
+        p.evaluate(() => {
+          const z = document.querySelector('#preview-zoom');
+          return z ? getComputedStyle(z).backgroundColor : 'missing';
+        }),
+      );
+      check('"Actual size" has a background over the page', !/^(rgba\(0, 0, 0, 0\)|transparent|missing)$/.test(pill), pill);
+
+      /*
+       * The profile fields, the dates and Ctrl+Shift+E, on the Resumes tab.
+       */
+      const resumes = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="resumes"]').click());
+        await p.locator('#editor .entry').first().waitFor({ timeout: 10_000 }).catch(() => {});
+        await p.waitForTimeout(200);
+        // Undefined colours: the year and month boxes and the order picker were see-through.
+        const backgrounds = await p.evaluate(() =>
+          ['.date-year', '.date-month', '.order-by']
+            .map((sel) => document.querySelector(sel))
+            .filter(Boolean)
+            .map((node) => getComputedStyle(node).backgroundColor),
+        );
+        // A profile field, reached and edited from the keyboard.
+        const field = p.locator('.profile-field .meta-value.editable').first();
+        await field.focus().catch(() => {});
+        const focused = await p.evaluate(() => document.activeElement?.classList.contains('meta-value') ?? false);
+        if (focused) await p.keyboard.press('F2');
+        const editing = await p.evaluate(() => document.activeElement?.classList.contains('editing') ?? false);
+        if (editing) await p.keyboard.press('Escape');
+        // "/ location" kept together, however narrow the label is made.
+        const slash = await p.evaluate(() => {
+          const label = [...document.querySelectorAll('.profile-field .meta-label')].find((l) => /address/i.test(l.textContent));
+          if (!label) return 'missing';
+          label.style.display = 'inline-block';
+          label.style.width = '9ch';
+          const text = label.firstChild;
+          const at = text.textContent.indexOf('/');
+          const top = (from, to) => {
+            const r = document.createRange();
+            r.setStart(text, from);
+            r.setEnd(text, to);
+            return Math.round(r.getClientRects()[0]?.top ?? -1);
+          };
+          const out = { slash: top(at, at + 1), next: top(at + 2, at + 3) };
+          label.style.display = label.style.width = '';
+          return out;
+        });
+        // Ctrl+Shift+E from a field, and Cancel: the focus goes back to that field.
+        const name = p.locator('#editor input:visible, #editor textarea:visible').first();
+        await name.focus().catch(() => {});
+        await p.evaluate(() => document.activeElement?.setAttribute('data-before-log', '1'));
+        await p.keyboard.press('Control+Shift+E');
+        await p.locator('#error-log-dialog:not(.hidden)').waitFor({ timeout: 5_000 }).catch(() => {});
+        await p.locator('#error-log-dialog button', { hasText: 'Cancel' }).click({ timeout: 3_000 }).catch(() => {});
+        const back = await p.evaluate(() => document.activeElement?.getAttribute('data-before-log') === '1');
+        return { backgrounds, focused, editing, slash, back };
+      });
+      check(
+        'the year, month and order boxes have a background',
+        resumes.backgrounds.length > 0 && resumes.backgrounds.every((b) => b !== 'rgba(0, 0, 0, 0)'),
+        resumes.backgrounds.join(', '),
+      );
+      check('a profile field can be reached from the keyboard', resumes.focused);
+      check('and F2 edits it', resumes.editing);
+      check('"/ location" is not split at the "/"', resumes.slash !== 'missing' && resumes.slash.slash === resumes.slash.next, JSON.stringify(resumes.slash));
+      check('closing "Log an error" puts the focus back where it was', resumes.back);
+
+      /*
+       * The tracker at 1280, beside the detail panel: every cell could break
+       * anywhere, and Role went to 74px with "Distinguished" broken in two.
+       */
+      await fetch(`${server.url}/api/applications`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          company: 'Globex Interplanetary Logistics',
+          role: 'Senior Staff Principal Distinguished Machine Learning Infrastructure Platform Engineer',
+          url: 'https://example.invalid/long-role',
+        }),
+      });
+      const tracker = await at(1280, 900, async (p) => {
+        await p.evaluate(() => document.querySelector('#tabs button[data-tab="applications"]').click());
+        await p.locator('#apps-wrap tbody tr', { hasText: 'Distinguished' }).first().waitFor({ timeout: 15_000 }).catch(() => {});
+        return p.evaluate(() => {
+          const wrap = document.querySelector('#apps-wrap');
+          const row = [...wrap.querySelectorAll('tbody tr')].find((r) => r.textContent.includes('Distinguished'));
+          if (!row) return { missing: true };
+          const broken = [];
+          for (const cell of [row.children[1], row.children[2]]) {
+            const text = cell.firstChild;
+            if (!text) continue;
+            for (const m of text.textContent.matchAll(/\S+/g)) {
+              const r = document.createRange();
+              r.setStart(text, m.index);
+              r.setEnd(text, m.index + m[0].length);
+              const tops = new Set([...r.getClientRects()].map((b) => Math.round(b.top)));
+              if (tops.size > 1) broken.push(m[0]);
+            }
+          }
+          return { broken, over: wrap.scrollWidth - wrap.clientWidth, page: document.documentElement.scrollWidth - innerWidth };
+        });
+      });
+      check(
+        'the tracker breaks no word in the middle at 1280, and runs past nothing',
+        !tracker.missing && tracker.broken.length === 0 && tracker.over <= 1 && tracker.page <= 0,
+        JSON.stringify(tracker),
+      );
+
+      /*
        * "File names" on Save & Files: a select as wide as its longest option,
        * past the edge of its column.
        */

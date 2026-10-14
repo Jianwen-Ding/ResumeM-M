@@ -2801,6 +2801,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     if (!editing) return;
     editing = false;
     node.contentEditable = 'false';
+    node.tabIndex = 0;
     node.classList.remove('editing');
     const next = node.textContent.trim();
     if (commit && next && next !== raw) {
@@ -2849,6 +2850,7 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
           if (!node.isConnected) return;
           editing = true;
           node.contentEditable = 'plaintext-only';
+          node.removeAttribute('tabindex');
           node.classList.add('editing');
           node.textContent = next;
           if (!offline) {
@@ -2900,20 +2902,43 @@ function editableLine(text, { onCommit, className = 'text', title } = {}) {
     }
   };
 
-  node.ondblclick = () => {
+  const start = (fromKeyboard = false) => {
     if (editing) return;
     editing = true;
     node.contentEditable = 'plaintext-only';
+    // Being edited, it is focusable as any text is; the tab stop is for the line at rest.
+    node.removeAttribute('tabindex');
     node.classList.add('editing');
     // The sentence as written, markup and all: what is saved is what is shown
     // here, so there is nothing to lose in translation.
     node.textContent = raw;
     node.focus();
-    // Put the caret where the pointer was, rather than at the start.
     const sel = window.getSelection();
-    if (sel && sel.rangeCount === 0) node.textContent = node.textContent;
+    if (fromKeyboard && sel) {
+      // From the keyboard there is no pointer: the caret goes at the end.
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } else if (sel && sel.rangeCount === 0) {
+      // Put the caret where the pointer was, rather than at the start.
+      node.textContent = node.textContent;
+    }
   };
+  node.ondblclick = () => start();
+  /*
+   * And from the keyboard: a line only a double-click could edit was out of
+   * reach without a mouse. Tab to it, then Enter or F2.
+   */
+  node.tabIndex = 0;
+  node.setAttribute('aria-keyshortcuts', 'Enter F2');
   node.onkeydown = (e) => {
+    if (!editing && (e.key === 'Enter' || e.key === 'F2')) {
+      e.preventDefault();
+      start(true);
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
       stop(true);
@@ -4098,7 +4123,8 @@ function profileBlock() {
     const value = profile[key];
     grid.append(
       el('div', { className: 'profile-field' }, [
-        el('span', { className: 'meta-label', textContent: label }),
+        // "Address /" and "location" break as words, not "/" on a line of its own (390px).
+        el('span', { className: 'meta-label', textContent: label.replace(' / ', ' /\u00a0') }),
         value
           ? editableLine(String(value), {
               className: 'meta-value',
@@ -7998,6 +8024,13 @@ function drawApplications({ applications, stats, current }) {
     ),
   );
 
+  /*
+   * A cell with a run of characters too long for any column — a url a page
+   * called itself — may break inside it (`long-token`, style.css). Words do
+   * not: "Distinguished" broke as "Distingui/shed" when every cell could.
+   */
+  const unbroken = (text) => (/\S{24,}/.test(String(text ?? '')) ? 'long-token' : '');
+
   const wrap = $('#apps-wrap');
   if (applications.length === 0) {
     wrap.replaceChildren(
@@ -8085,9 +8118,9 @@ function drawApplications({ applications, stats, current }) {
       // date, and wrapping the narrowest column steals two lines of height
       // from every row to save nothing.
       el('td', { className: 'when', textContent: localDate(a.appliedAt) }),
-      el('td', { textContent: a.company }),
-      el('td', { textContent: a.role }),
-      el('td', {}, [sel]),
+      el('td', { className: unbroken(a.company), textContent: a.company }),
+      el('td', { className: unbroken(a.role), textContent: a.role }),
+      el('td', { className: 'app-status' }, [sel]),
       // Blank, not a dash: an em-dash in a date column reads as a date that
       // failed to load rather than as one that has not happened.
       el('td', { className: 'when', textContent: sentOn(a) }),

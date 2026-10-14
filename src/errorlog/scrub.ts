@@ -100,14 +100,29 @@ const JOINED_PHONE = /(?<![A-Za-z0-9])(?:\+?1[-._])?\d{3}[-._]\d{3}[-._]\d{4}(?!
  *   "commit 0123456789", "overflow 1234567890 pt". Only one unbroken run of
  *   digits: written as a phone is written — "(617) 555-0134", "+1 617 555
  *   0134", "617-555-0134" — it is still taken out, whatever is in front.
+ *   Not after "line", "code", "status", "count" or "row": those are words a
+ *   person writes about a phone too ("phone line 6175550134"), and a line
+ *   number or a status is never ten digits. Nor with "phone", "tel",
+ *   "mobile", "cell", "call", "SMS" or "WhatsApp" a few words before —
+ *   "Phone (ID 6175550134)" is a phone number whatever word is next to it.
  */
+const PHONE_SAID = String.raw`\b(?:phones?|tel|telephone|mobile|cell(?:phone)?|call|sms|whatsapp)\b\W*(?:\w+\W+){0,3}`;
+/*
+ * One unbroken run of a phone's digits with "phone" or its like a few words
+ * before: the contact rule lets "Phone (ID 6175550134)" through as an ID, and
+ * here it is a phone number whatever word is next to it.
+ */
+const PHONE_NAMED = new RegExp(String.raw`(?<=${PHONE_SAID})(?<![\w.+-])\+?1?\d{10}(?![\w]|[.-]\w)`, 'gi');
 const DAY = '(?:19|20)\\d\\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])';
 const DAY_FIRST = '(?:0?[1-9]|[12]\\d|3[01])\\.(?:0?[1-9]|1[0-2])\\.(?:19|20)\\d\\d';
 const CLOCK = '(?:[01]?\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:[.,]\\d{1,9})?)?(?:\\s?(?:Z|[+-](?:[01]\\d|2[0-3]):?[0-5]\\d))?';
 const NOT_PHONE: RegExp[] = [
   new RegExp(`(?<![\\w.-])(?:${DAY}(?:[T ]${CLOCK})?|${DAY_FIRST}(?:,?\\s+${CLOCK})?)(?![\\w])`, 'g'),
   /(?<![\w.+-]|\d[\s().-]{1,3})1\d{12}(?![\w]|[\s().-]{1,3}\d)/g,
-  /(?<=\b(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|count|line|row|overflow|exit|code|status|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)/gi,
+  new RegExp(
+    String.raw`(?<!${PHONE_SAID})(?<=\b(?:jobs?|pids?|ppid|tid|thread|process|commit|sha|ids?|uid|gid|build|run|req|request|task|seq|offset|port|epoch|timestamp|ts|bytes|size|overflow|exit|errno)\s{0,3}(?:[:=#]\s{0,3})?)\d+(?![\w]|[.-]\w|[\s().-]{1,3}\d)`,
+    'gi',
+  ),
   /(?<![\w.+-]|\d[\s().-]{1,3})\d+(?=\s?(?:ms|sec|bytes|KB|MB|GB|KiB|MiB|GiB|pt|px)\b)/g,
 ];
 
@@ -124,7 +139,7 @@ function withoutContact(text: string): string {
     });
     if (kept.length > 6000) return withoutContactDetails(text).replace(JOINED_PHONE, '[phone number]');
   }
-  out = withoutContactDetails(out).replace(JOINED_PHONE, '[phone number]');
+  out = withoutContactDetails(out).replace(JOINED_PHONE, '[phone number]').replace(PHONE_NAMED, '[phone number]');
   return kept.length ? out.replace(/[\ue000-\uf8ff]/g, (c) => kept[c.charCodeAt(0) - 0xe000] ?? c) : out;
 }
 

@@ -2509,7 +2509,7 @@ export function checkRemoteUrl(url: string): void {
   const refuse = (why: string): never => {
     throw new RemoteUrlError(`That remote address is not allowed: ${why}. Use an https://, ssh://, git@host:path, or local path address.`);
   };
-  if (/[\0\r\n]/.test(u)) refuse('it has a line break or control character in it');
+  if (/[\x00-\x1f\x7f]/.test(u)) refuse('it has a line break or control character in it');
   if (u.startsWith('-')) refuse('it starts with "-"');
   if (/^[A-Za-z][A-Za-z0-9+.-]*::/.test(u)) refuse('git would hand it to a helper program');
   const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(u)?.[1]?.toLowerCase();

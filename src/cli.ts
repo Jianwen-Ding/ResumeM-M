@@ -1118,7 +1118,9 @@ async function logCommand(rest: string[]): Promise<number> {
   const remoteAddress = (word: string) =>
     /^[a-z][a-z0-9+.-]*:\/\//i.test(word) || // https://…, ssh://…, file://…
     /^[^\s@/:]+@[^\s@/:]+:\S/.test(word) || // git@github.com:me/log.git
-    /^[\w-]+(?:\.[\w-]+)+:[^\s/]\S*$/.test(word) || // github.com:me/log.git
+    // github.com:me/log.git, and a host with no dot: myserver:repos/log.git,
+    // localhost:/srv/log.git. Not C:log — one letter is a Windows drive.
+    /^(?![A-Za-z]:)[\w.-]+:\S+$/.test(word) ||
     /^(?:[/.~]|[A-Za-z]:[\\/])/.test(word) || // a folder: /srv/log.git, ./log, ~/log, C:\log
     fs.existsSync(word);
   const sub =

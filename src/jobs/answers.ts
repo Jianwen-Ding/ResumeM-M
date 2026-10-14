@@ -593,7 +593,7 @@ function sameFurnitureWhenThin(asked: string, stored: string): boolean {
  * comma, a dash or nothing, never by "of".
  */
 const OPTION_PHRASE =
-  /^(?!no\s*[.:]+\s*(?:of\b|\d)|y\s*\.?\s*o\s*\.?\s*e\b)(?:yes|no|y|n|true|false)(?:\s*[,.;:!–—-](?:\s*.*)?|\s+(?:and|but|i|i'm|i am|we)\b.*)?$/i;
+  /^(?!no\s*[.:]+\s*(?:of\b(?!\s+course\b)|\d)|y\s*\.?\s*o\s*\.?\s*e\b)(?:yes|no|y|n|true|false)(?:\s*[,.;:!–—-](?:\s*.*)?|\s+(?:and|but|i|i'm|i am|we)\b.*)?$/i;
 
 export function isOptionPhrase(question: string): boolean {
   const q = tidyQuestion(question).replace(/\s+(?:required|optional)$/i, '').trim();

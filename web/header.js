@@ -84,6 +84,7 @@ export function statusRoom(header, beside) {
  */
 export function fitStatus(status) {
   if (!status) return;
+  noteFocusBefore(status);
   status.classList.remove('toast');
   if (status.classList.contains('err') && status.textContent && !isFloating(status)) {
     const cut = status.scrollHeight > status.clientHeight + 1 || status.scrollWidth > status.clientWidth + 1;
@@ -159,13 +160,39 @@ function fitDismiss(status) {
   }
 }
 
+/*
+ * Where the person was when an error appeared, to go back to when they put it
+ * away. The × hides itself as it is pressed, and focus fell to <body>: a
+ * keyboard or screen-reader user was sent back to the top of the page.
+ */
+let focusBefore = null;
+let errorShowing = false;
+
+function noteFocusBefore(status) {
+  const showing = status.classList.contains('err') && Boolean(status.textContent);
+  if (showing && !errorShowing) {
+    const at = document.activeElement;
+    focusBefore = at && at !== document.body && at.id !== 'status-dismiss' ? at : null;
+  }
+  errorShowing = showing;
+}
+
 /** Put the error away: what the × does. */
 export function dismissStatus(status = document.getElementById('status')) {
   if (!status) return;
+  const at = document.activeElement;
+  // Only when the focus would be lost with the ×: not taken from where the person has gone since.
+  const lost = !at || at === document.body || at.id === 'status-dismiss';
+  const back = focusBefore;
+  focusBefore = null;
   status.textContent = '';
   status.title = '';
   status.className = 'status';
   fitStatus(status);
+  if (!lost) return;
+  const usable = (el) => el && el.isConnected && !el.disabled && !el.closest('[hidden], [inert]') && el.getClientRects().length > 0;
+  const target = usable(back) ? back : document.getElementById('error-log-chip');
+  target?.focus();
 }
 
 /** Lay the header out for the width it has now. */
@@ -193,8 +220,12 @@ export function fitHeader(header = document.querySelector('header')) {
     const before = chip.getBoundingClientRect();
     header.classList.remove('log-mark-only');
     const tabsCut = !header.classList.contains('tabs-row') && tabs && tabs.scrollWidth > tabs.clientWidth + 1;
-    // Nor where its words would push it onto a line of its own (a phone's).
-    const wrapped = chip.getBoundingClientRect().top >= before.bottom - 1;
+    // Nor where its words would push it onto a line of its own (a phone's),
+    // nor anywhere off the first row: where the "!" alone has wrapped already
+    // (both AI chips showing), the words had a row to themselves.
+    const first = header.querySelector('h1')?.getBoundingClientRect();
+    const top = chip.getBoundingClientRect().top;
+    const wrapped = top >= before.bottom - 1 || (first !== undefined && first.height > 0 && top >= first.bottom - 1);
     if (tabsCut || wrapped || statusRoom(header, chip) < STATUS_ROOM) header.classList.add('log-mark-only');
   }
 
@@ -222,6 +253,13 @@ export function setupHeader(header = document.querySelector('header')) {
   fitHeader(header);
   window.addEventListener('resize', refit);
   const status = header.querySelector('#status');
+  /*
+   * And the status line again when what is in it changes after `setStatus`:
+   * the error log's announcement puts a longer link in its place, and the ×
+   * and the room kept at the foot of the page stayed fitted to the shorter
+   * words. Only its words are watched; `fitStatus` changes its classes.
+   */
+  if (status) new MutationObserver(() => fitStatus(status)).observe(status, { childList: true, characterData: true, subtree: true });
   header.querySelector('#status-dismiss')?.addEventListener('click', () => dismissStatus(status));
   const watcher = new MutationObserver((changes) => {
     // Its own classes are this function's doing, and the status line's

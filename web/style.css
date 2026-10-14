@@ -730,6 +730,8 @@ code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; 
   cursor: text;
 }
 .editable:hover { background: var(--state-hover); }
+/* Reached with Tab (Enter or F2 then edits it): a ring that says where the keyboard is. */
+.editable:focus-visible:not(.editing) { outline: 2px solid var(--accent); outline-offset: 1px; }
 .editable.editing {
   background: var(--panel);
   box-shadow: inset 0 0 0 2px var(--accent);
@@ -1224,7 +1226,19 @@ textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, Menlo, mono
  * break opportunities at all — a url with no spaces is one word to the line
  * breaker, and `break-word` only helps once the box is already too small.
  */
-#apps-wrap td { overflow-wrap: anywhere; }
+#apps-wrap td { overflow-wrap: break-word; }
+#apps-wrap td.long-token { overflow-wrap: anywhere; }
+/*
+ * But only the cell with such a thing in it: with every cell allowed to break
+ * anywhere, the table squeezed Role to 74px at 1280 and broke words in the
+ * middle ("Distingui/shed"). The status dropdown gives back what it does not
+ * need, and "Enclosed" — shown again beside the table, in the record — goes
+ * where the table shares the page with it and the room is short.
+ */
+#apps-wrap td.app-status select { width: 9em; max-width: 100%; }
+@media (min-width: 1151px) and (max-width: 1400px) {
+  #apps-wrap th:nth-child(6), #apps-wrap td:nth-child(6) { display: none; }
+}
 
 tbody tr.selected { background: var(--accent-soft); }
 tbody tr { cursor: pointer; }
@@ -1877,7 +1891,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   font-size: 12px;
   line-height: 1;
 }
-.fold:hover { color: var(--fg); }
+.fold:hover { color: var(--ink); }
 
 /* The section's ordering, beside the heading it applies to rather than in a
    settings panel: it is a property of this list, decided while looking at it. */
@@ -1887,10 +1901,10 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 2px 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--panel);
   color: var(--muted);
 }
-.order-by:hover, .order-by:focus-visible { color: var(--fg); border-color: var(--line-strong, var(--line)); }
+.order-by:hover, .order-by:focus-visible { color: var(--ink); border-color: var(--faint); }
 
 /* ------------------------------------------------------------------ *
  * Dates, edited as dates                                              *
@@ -1909,7 +1923,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 2px 4px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--panel);
 }
 .date-year {
   width: 5.5ch;
@@ -1917,7 +1931,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
   padding: 2px 4px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--panel);
 }
 /* The spinner is noise on a year, and it makes the box wider than the number. */
 .date-year::-webkit-outer-spin-button,
@@ -1926,7 +1940,7 @@ button.ai-action:disabled .ai-mark { color: inherit; opacity: 0.5; }
 
 .date-switches { display: inline-flex; align-items: center; gap: 10px; }
 .date-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--t-sm); cursor: pointer; }
-.date-switch:hover { color: var(--fg); }
+.date-switch:hover { color: var(--ink); }
 
 /* An entry whose lines were arranged here rather than in the master. Stated
    quietly beside the add-line button: it is a fact about this resume, not a
@@ -2276,7 +2290,7 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
   .pdf-pages { padding: 6px; }
   .pdf-pages.zoomed { align-items: flex-start; }
   .pdf-pages.zoomed .pdf-page { max-width: none; }
-  .preview-zoom {
+  button.preview-zoom {
     position: absolute;
     top: 8px;
     right: 8px;
@@ -2284,7 +2298,7 @@ button.tiny[aria-pressed="true"] { background: var(--accent-soft); color: #174ea
     background: var(--panel);
     box-shadow: var(--shadow-sm);
   }
-  .preview-zoom:hover { background: var(--panel); }
+  button.preview-zoom:hover { background: var(--panel); }
 
   /* Focus: the entry being worked in, whole; every other one its heading. */
   body.focus-mode #editor .entry:not(.focus-active):not(.off) > :not(.entry-head):not(.head) { display: none; }

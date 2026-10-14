@@ -481,9 +481,11 @@ const DEGREE_WORD =
  * writes it: "GPA: 3,8" was read as 3, a grade the person never had. A comma
  * with a digit straight after it is a decimal one ("GPA 3.8, Dean's list"
  * has a space); and a number that runs on past what is read — "3,800" — is
- * not read at all, rather than cut short.
+ * not read at all, rather than cut short. But a comma before a number with a
+ * decimal point of its own — "GPA 3.9,4.0 scale" — is between two numbers,
+ * the grade and its scale, and the grade is read.
  */
-const GPA_NUMBER = String.raw`\d{1,3}(?:\.\d+|,\d{1,2})?(?![.,]?\d)`;
+const GPA_NUMBER = String.raw`\d{1,3}(?:\.\d+|,\d{1,2})?(?!\.?\d|,\d(?!\.\d))`;
 
 /**
  * A grade point average, as a form wants it: the number alone.
