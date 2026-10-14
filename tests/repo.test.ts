@@ -792,3 +792,53 @@ describe('a folder that is rebuilt rather than written', () => {
     expect(ignores).toContain('/built/current/');
   });
 });
+
+describe('remote addresses', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rmm-remote-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses an address git would run a command for, and one read as an option', async () => {
+    const repo = new Repo(dir);
+    await repo.ensure();
+    const marker = path.join(dir, 'ran');
+    for (const url of [`ext::sh -c touch% ${marker}`, 'EXT::sh -c id', 'fd::3', '--upload-pack=touch /tmp/x', 'javascript://x', 'a\nb']) {
+      await expect(repo.setRemote(url), url).rejects.toThrow(/not allowed/);
+    }
+    expect(await repo.getRemote()).toBeUndefined();
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('keeps https, ssh, scp-form, file:// and local-path remotes', async () => {
+    const repo = new Repo(dir);
+    await repo.ensure();
+    for (const url of [
+      'https://example.com/a.git',
+      'http://example.com/a.git',
+      'ssh://git@example.com/a.git',
+      'git@example.com:alice/a.git',
+      'git://example.com/a.git',
+      `file://${path.join(dir, 'b.git')}`,
+      path.join(dir, 'b.git'),
+      'C:\\backups\\resumes.git',
+    ]) {
+      await repo.setRemote(url);
+      expect(await repo.getRemote()).toBe(url);
+    }
+  });
+
+  it('will not push over ext:: even when it was put in by hand and git config allows it', async () => {
+    const repo = new Repo(dir);
+    await repo.ensure();
+    const marker = path.join(dir, 'ran');
+    execFileSync('git', ['remote', 'add', 'origin', `ext::sh -c touch% ${marker}`], { cwd: dir });
+    execFileSync('git', ['config', 'protocol.ext.allow', 'always'], { cwd: dir });
+    const result = await repo.push(15_000);
+    expect(result.ok).toBe(false);
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+});

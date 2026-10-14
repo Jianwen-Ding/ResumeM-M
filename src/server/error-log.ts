@@ -224,8 +224,8 @@ export function errorLogApi({ log, build, save }: ErrorLogApiOptions): express.R
       res.status(413).json({ error: 'That entry is too large to log. Keep the screenshots to 8 MB together.' });
     } else if (e?.type === 'entity.parse.failed') {
       res.status(400).json({ error: 'The entry was not readable JSON.' });
-    } else if (err instanceof ErrorLogInputError) {
-      res.status(400).json({ error: err.message });
+    } else if (err instanceof ErrorLogInputError || e?.name === 'RemoteUrlError') {
+      res.status(400).json({ error: (err as Error).message });
     } else if (e?.name === 'SaveBusyError') {
       res.status(409).json({ error: e.message });
     } else {

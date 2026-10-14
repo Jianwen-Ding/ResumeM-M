@@ -1256,6 +1256,7 @@ export class Repo {
       await this.git(['remote', 'remove', 'origin']).catch(() => undefined);
       return;
     }
+    checkRemoteUrl(url);
     const existing = await this.getRemote();
     /*
      * The address as it is shown has its token masked (see `redactUrl`), and
@@ -2389,9 +2390,47 @@ export function redactUrls(text: string): string {
   return text.replace(USERINFO_IN_TEXT, maskUserinfo);
 }
 
+/**
+ * The ways a remote may be reached. `ext::` runs a command of the address's
+ * choosing, and other `<helper>::` forms hand the address to a program; a
+ * remote is somewhere to push, so they are refused here whatever the user's
+ * git config allows. Local paths and `file://` stay, for a backup on a disk.
+ */
+const ALLOWED_PROTOCOLS = 'file:git:http:https:ssh';
+
+/**
+ * Refuse a remote address git would treat as something other than a place:
+ * a `<helper>::` address (`ext::sh -c …` runs a command on push), an address
+ * starting with `-` (read as an option), or a scheme outside the ones above.
+ * `user@host:path`, `host:path` and local paths are plain places and pass.
+ */
+export class RemoteUrlError extends Error {
+  override name = 'RemoteUrlError';
+}
+
+export function checkRemoteUrl(url: string): void {
+  const u = url.trim();
+  const refuse = (why: string): never => {
+    throw new RemoteUrlError(`That remote address is not allowed: ${why}. Use an https://, ssh://, git@host:path, or local path address.`);
+  };
+  if (/[\0\r\n]/.test(u)) refuse('it has a line break or control character in it');
+  if (u.startsWith('-')) refuse('it starts with "-"');
+  if (/^[A-Za-z][A-Za-z0-9+.-]*::/.test(u)) refuse('git would hand it to a helper program');
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(u)?.[1]?.toLowerCase();
+  if (scheme && !ALLOWED_PROTOCOLS.split(':').includes(scheme) && scheme !== 'git+ssh' && scheme !== 'ssh+git') {
+    refuse(`git cannot push to ${scheme}:// here`);
+  }
+}
+
 /** Git with nobody to answer it: a missing credential is refused, not asked for. */
 function noPrompt(): NodeJS.ProcessEnv {
-  return { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo' };
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: 'echo',
+    SSH_ASKPASS: 'echo',
+    GIT_ALLOW_PROTOCOL: ALLOWED_PROTOCOLS,
+  };
 }
 
 /**
