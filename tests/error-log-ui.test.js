@@ -25,7 +25,7 @@ afterEach(() => {
  * before — a request that failed, a red status line — sent with it.
  */
 describe('the Log an error dialog', () => {
-  async function boot() {
+  async function boot(many) {
     vi.resetModules();
     document.documentElement.innerHTML = fs.readFileSync('web/index.html', 'utf8');
     window.location.hash = '#resumes/intern';
@@ -34,7 +34,9 @@ describe('the Log an error dialog', () => {
     const data = fixture.store.load();
     fixture.cleanup();
 
-    const server = { asked: [], posted: null };
+    const server = { asked: [], posted: null, many: many ?? 0 };
+    const entries = (from, to) =>
+      Array.from({ length: to - from }, (_, i) => ({ id: `entries/2026-10-14/1200${from + i}-x`, at: new Date().toISOString(), description: `Entry ${from + i + 1}`, source: 'CLI', screenshots: 0, events: 0, pushed: false }));
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url, options = {}) => {
@@ -52,7 +54,12 @@ describe('the Log an error dialog', () => {
         else if (url === '/api/error-log/status') {
           result = { dir: '/home/me/.resumem-m/error-log', isRepo: true, entries: 1, remote: null, lastPush: null, lastCommitError: null };
         } else if (url === '/api/error-log?limit=10') {
-          result = { entries: [{ id: 'entries/2026-10-14/120000-x', at: new Date().toISOString(), description: 'Earlier one', source: 'CLI', screenshots: 0, events: 0, pushed: false }] };
+          result = server.many
+            ? { entries: entries(0, 10), total: server.many, offset: 0 }
+            : { entries: [{ id: 'entries/2026-10-14/120000-x', at: new Date().toISOString(), description: 'Earlier one', source: 'CLI', screenshots: 0, events: 0, pushed: false }], total: 1 };
+        } else if (/^\/api\/error-log\?limit=20&offset=\d+$/.test(url)) {
+          const offset = Number(/offset=(\d+)/.exec(url)[1]);
+          result = { entries: entries(offset, Math.min(offset + 20, server.many)), total: server.many, offset };
         } else if (url === '/api/error-log' && method === 'POST') {
           server.posted = JSON.parse(options.body);
           return { ok: true, status: 201, json: async () => ({ committed: true, message: 'Logged to the error log (not pushed yet).', entry: { id: 'entries/x' } }) };
@@ -143,6 +150,58 @@ describe('the Log an error dialog', () => {
     expect(document.querySelector('#tab-save').classList.contains('active')).toBe(true);
     await vi.waitFor(() => expect(document.querySelector('#error-log-panel .error-log-list')?.textContent).toMatch(/Earlier one/));
     expect(document.querySelector('#error-log-panel .mono-path').textContent).toBe('/home/me/.resumem-m/error-log');
+  });
+
+  /*
+   * Round 26. The hint said contact details are taken out, and the
+   * description kept them: it is the person's own words, so it is kept as
+   * written, and the hint says what is really taken out. Typing one in says
+   * so, without stopping the save.
+   */
+  it('says exactly what is taken out, and warns about an email or phone in the description without refusing it', async () => {
+    const { server } = await boot();
+    document.querySelector('#error-log-chip').click();
+    expect(dialog().textContent).toContain(
+      'Contact details and tokens are taken out of the automatic logs; tokens are also taken out of your description.',
+    );
+    const description = document.querySelector('#error-log-description');
+    const warning = document.querySelector('#error-log-contact');
+    expect(warning.hidden).toBe(true);
+    const type = (text) => {
+      description.value = text;
+      description.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    type('Mail jane.doe@example.com bounced');
+    expect(warning.hidden).toBe(false);
+    expect(warning.textContent).toBe('Your description has an email in it — it will be kept as written.');
+    type('Call 617-555-0134 and jane.doe@example.com');
+    expect(warning.textContent).toBe('Your description has an email and a phone number in it — it will be kept as written.');
+    type('Call (617) 555-0134');
+    expect(warning.textContent).toBe('Your description has a phone number in it — it will be kept as written.');
+    type('Build 2024-10-14 failed on job 4462047454');
+    expect(warning.hidden).toBe(true);
+    type('Mail jane.doe@example.com bounced');
+    document.querySelector('#error-log-dialog .modal-actions button.primary').click();
+    await vi.waitFor(() => expect(server.posted).not.toBeNull());
+    expect(server.posted.description).toBe('Mail jane.doe@example.com bounced');
+  });
+
+  // Round 26: ten entries, and nothing to say there were more.
+  it('says how many of how many entries it shows, and shows twenty more at a time', async () => {
+    const { server } = await boot(35);
+    document.querySelector('#tabs button[data-tab="save"]').click();
+    const panel = () => document.querySelector('#error-log-panel');
+    await vi.waitFor(() => expect(panel().querySelectorAll('.error-log-list li')).toHaveLength(10));
+    expect(panel().querySelector('.error-log-count').textContent).toBe('10 of 35');
+    panel().querySelector('.error-log-more').click();
+    await vi.waitFor(() => expect(panel().querySelectorAll('.error-log-list li')).toHaveLength(30));
+    expect(server.asked).toContain('GET /api/error-log?limit=20&offset=10');
+    expect(panel().querySelector('.error-log-count').textContent).toBe('30 of 35');
+    expect(panel().querySelectorAll('.error-log-what')[10].textContent).toBe('Entry 11');
+    panel().querySelector('.error-log-more').click();
+    await vi.waitFor(() => expect(panel().querySelectorAll('.error-log-list li')).toHaveLength(35));
+    expect(panel().querySelector('.error-log-count').textContent).toBe('35 of 35');
+    expect(panel().querySelector('.error-log-more')).toBeNull();
   });
 
   it('will not save without a description, and keeps the red lines the person saw', async () => {

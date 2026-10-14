@@ -20,6 +20,9 @@ const KEEP_EVENTS = 2000;
 const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
 const MAX_SCREENSHOTS = 10;
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+/** How many recent entries the section shows at first, and how many more each "Show more" adds. */
+const FIRST_PAGE = 10;
+const NEXT_PAGE = 20;
 
 const held = [];
 
@@ -89,6 +92,23 @@ function asDataUrl(file) {
 /** How many bytes a base64 data URL holds, without decoding it. */
 const bytesIn = (dataUrl) => Math.floor(((dataUrl.length - dataUrl.indexOf(',') - 1) * 3) / 4);
 
+/**
+ * What the error log takes out, said the same way wherever it is offered
+ * (JobHelper's popup says it too). The automatic logs lose contact details
+ * and tokens; the description is the person's own words and loses tokens
+ * only.
+ */
+export const SCRUB_HINT = 'Contact details and tokens are taken out of the automatic logs; tokens are also taken out of your description.';
+
+const EMAIL_IN = /[^\s@<>()[\],;:"']+@[^\s@<>()[\],;:"']+\.[A-Za-z]{2,}/;
+const PHONE_IN = /(?<![\w])(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?![\w])/;
+
+/** "an email", "a phone number", "an email and a phone number" — or '' when the text has neither. */
+export function contactIn(text) {
+  const found = [EMAIL_IN.test(text) && 'an email', PHONE_IN.test(text) && 'a phone number'].filter(Boolean);
+  return found.join(' and ');
+}
+
 /** Ctrl+Shift+E, or Cmd+Shift+E on a Mac. */
 const isShortcut = (e) => (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === 'E' || e.key === 'e' || e.code === 'KeyE');
 
@@ -143,6 +163,17 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
       el('option', { value: '30', textContent: 'the last 30 minutes' }),
     ]);
     const note = el('p', { className: 'hint error-log-note', role: 'status' });
+    /*
+     * The description is kept as it was written — it is the person's own, in
+     * their own log — so an email or a phone number in it stays. Said as it is
+     * typed, beside the box, and not in the way of saving.
+     */
+    const contact = el('p', { className: 'hint error-log-contact warn', id: 'error-log-contact', hidden: true, 'aria-live': 'polite' });
+    description.addEventListener('input', () => {
+      const what = contactIn(description.value);
+      contact.hidden = !what;
+      contact.textContent = what ? `Your description has ${what} in it — it will be kept as written.` : '';
+    });
     const save = el('button', { className: 'primary', textContent: 'Save to error log', onclick: () => submit() });
     const cancel = el('button', { textContent: 'Cancel', onclick: () => close() });
 
@@ -159,8 +190,9 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
         el('p', {
           className: 'hint',
           textContent:
-            'Saved to the error log — a git repository of its own, apart from your saves — with what the editor and the server noticed in that time. Contact details and tokens are taken out; nothing from your resumes or letters goes in.',
+            `Saved to the error log — a git repository of its own, apart from your saves — with what the editor and the server noticed in that time. ${SCRUB_HINT} Nothing from your resumes or letters goes in.`,
         }),
+        contact,
         note,
       ]),
       el('div', { className: 'modal-actions' }, [el('span', { className: 'hint', textContent: 'Ctrl+Enter saves' }), el('span', { className: 'grow' }), cancel, save]),
@@ -224,7 +256,7 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
       if (e.target === overlay) close();
     });
     document.body.append(overlay);
-    return { overlay, description, thumbs, minutes, note, save };
+    return { overlay, description, thumbs, minutes, note, contact, save };
   }
 
   function drawThumbs() {
@@ -331,6 +363,7 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
       dialog.save.disabled = false;
     }
     dialog.description.value = '';
+    dialog.contact.hidden = true;
     shots = [];
     drawThumbs();
     close();
@@ -394,7 +427,7 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
     let status;
     let listed;
     try {
-      [status, listed] = await Promise.all([request('/status'), request('?limit=10')]);
+      [status, listed] = await Promise.all([request('/status'), request(`?limit=${FIRST_PAGE}`)]);
     } catch (err) {
       setChildren(box, el('div', { className: 'result bad', textContent: `The error log could not be read: ${err.message}` }));
       return;
@@ -414,7 +447,7 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
         try {
           const res = await request('/push', { method: 'POST' });
           setResult(res.ok ? `${res.output}\n${describeRemote(res.status)}` : res.output, res.ok ? 'ok' : 'bad');
-          if (res.ok) drawEntries(await request('?limit=10').catch(() => listed));
+          if (res.ok) drawEntries(await request(`?limit=${FIRST_PAGE}`).catch(() => listed));
         } catch (err) {
           setResult(err.message, 'bad');
         }
@@ -429,15 +462,40 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
         try {
           const res = await request('/pull', { method: 'POST' });
           setResult(res.message, res.ok ? 'ok' : 'bad');
-          drawEntries(await request('?limit=10').catch(() => listed));
+          drawEntries(await request(`?limit=${FIRST_PAGE}`).catch(() => listed));
         } catch (err) {
           setResult(err.message, 'bad');
         }
       },
     });
     const entries = el('div', { className: 'error-log-entries' });
-    const drawEntries = (list) => {
-      const items = list?.entries ?? [];
+    const count = el('span', { className: 'hint error-log-count' });
+    /*
+     * The newest ten, then twenty more at a time. Said how many of how many,
+     * so ten is not taken for all there are.
+     */
+    let shown = [];
+    const drawEntries = (list, more = false) => {
+      shown = more ? [...shown, ...(list?.entries ?? [])] : (list?.entries ?? []);
+      const items = shown;
+      const total = Math.max(Number(list?.total) || 0, items.length);
+      count.textContent = items.length ? `${items.length} of ${total}` : '';
+      const showMore =
+        items.length < total
+          ? el('button', {
+              className: 'tiny error-log-more',
+              textContent: 'Show more',
+              onclick: async (e) => {
+                e.currentTarget.disabled = true;
+                try {
+                  drawEntries(await request(`?limit=${NEXT_PAGE}&offset=${items.length}`), true);
+                } catch (err) {
+                  setResult(err.message, 'bad');
+                  e.currentTarget.disabled = false;
+                }
+              },
+            })
+          : null;
       setChildren(
         entries,
         items.length === 0
@@ -462,6 +520,7 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
                 ]),
               ),
             ),
+        showMore,
       );
     };
     drawEntries(listed);
@@ -498,7 +557,7 @@ export function setupErrorLog({ el, setChildren, setStatus, showTab, context = (
         push,
       ]),
       result,
-      el('div', { className: 'lbl', textContent: 'Recent entries' }),
+      el('div', { className: 'lbl error-log-recent' }, [el('span', { textContent: 'Recent entries' }), count]),
       entries,
     );
   }

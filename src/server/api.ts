@@ -53,7 +53,7 @@ import {
 import { fitResumes, forgetPrintedText, recommend } from '../jobs/fit.js';
 import { detectLevel } from '../jobs/level.js';
 import { deriveSpec, matchVariants, withYourTerms } from '../jobs/match.js';
-import { AlreadySent, advance, localDay, alreadySent, maybeSent, sendOf, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
+import { AlreadySent, OPENED_UNASKED_NOTE, advance, localDay, alreadySent, maybeSent, sendOf, aliasesWith, applicationToWrite, buildBundle, forWriting, refusedAsSent, closedAsStale, sameAddress, draftForJob, findApplicationMatch, findDraft, fingerprint, freshApplicationId, identity, liveOneSent, sameIdentity, slug, stats, tailoredResumeId } from '../model/applications.js';
 import { derivedAutofill, educationHistory, preferredName, workHistory } from '../model/autofill.js';
 import { baseForCopy, byBaseFirst, copyIdFor, defaultBaseId, standingBase } from '../model/bases.js';
 import { flattenOne } from '../model/flatten.js';
@@ -5623,9 +5623,19 @@ export function createApi({ store, repo, jobs = new Jobs(), afterPull }: ApiDeps
          * carries no `auto`, and somebody pressing it is applying.
          */
         const started: Application['status'] = body.auto && !body.actedOnForm ? 'interested' : 'applying';
-        const note = started === 'applying' ? 'Workspace opened' : 'Workspace opened, nothing sent yet';
+        const note = started === 'applying' ? 'Workspace opened' : OPENED_UNASKED_NOTE;
 
-        const tracked = applicationToWrite(store.load().applications, draft.company, draft.role, draft.url);
+        const apps = store.load().applications;
+        /*
+         * Not while this may be a job already sent (`maybeSent`), on the
+         * automatic route. A row filed here is this posting's by its address,
+         * and on the next visit it answered the question the card had only
+         * just asked: the warning did not come back and the automatic stage
+         * went through. The row is filed once the person says it is another
+         * job — the stage that comes with `evenIfSent` files it.
+         */
+        if (body.auto && maybeSent(apps, draft.company, draft.role, draft.url)) return;
+        const tracked = applicationToWrite(apps, draft.company, draft.role, draft.url);
         /*
          * In the draft's commit, not after it.
          *

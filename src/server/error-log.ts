@@ -126,7 +126,9 @@ export function errorLogApi({ log, build, save }: ErrorLogApiOptions): express.R
     '/',
     handle(async (req, res) => {
       const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
-      res.json({ dir: log().root, entries: await log().list(limit) });
+      // From `offset` on, newest first; `total` is every entry, so a list can say "10 of 37".
+      const offset = Math.max(0, Math.floor(Number(req.query.offset)) || 0);
+      res.json({ dir: log().root, entries: await log().list(limit, offset), offset, total: log().count() });
     }),
   );
 

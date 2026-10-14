@@ -61,9 +61,59 @@ export function withoutSecrets(text: string): string {
   return out;
 }
 
+/*
+ * A phone number written into an address or an id: "617-555-0134" between a
+ * "-" and a "/", "jane_617.555.0134". The contact-details rule reads prose,
+ * and in a path it leaves digit runs alone on purpose ("/api/v2/1234567890"
+ * is an id), so a number joined to its neighbours went into the log whole.
+ * Only one written as a phone is — three, three and four digits with a
+ * separator between each, a country code allowed — so a LinkedIn job number
+ * (ten digits, no separators) stays readable.
+ */
+const JOINED_PHONE = /(?<![A-Za-z0-9])(?:\+?1[-._])?\d{3}[-._]\d{3}[-._]\d{4}(?![A-Za-z0-9])/g;
+
+/** The contact-details rule, and a phone number joined into a path (`JOINED_PHONE`). */
+function withoutContact(text: string): string {
+  return withoutContactDetails(text).replace(JOINED_PHONE, '[phone number]');
+}
+
+/**
+ * `text` with its percent-escapes undone, as far as they undo: a request
+ * line names `jane.doe%40example.com`, which no rule reads as an email. Up to
+ * three times, for an address escaped twice; a run that is not valid UTF-8 is
+ * left as it was.
+ */
+function decoded(text: string): string {
+  let out = text;
+  for (let i = 0; i < 3; i++) {
+    const next = out.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run;
+      }
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 /** A line fit for the error log: no secrets, no contact details, not too long. */
+/*
+ * Read decoded as well. When the decoded line has something to take out, it
+ * is the decoded line, scrubbed, that is kept — the escaped one would keep
+ * the email the rules cannot see in it. Otherwise the line stays as it was
+ * written, escapes and all.
+ */
 export function scrubText(text: string, max = MAX_LINE): string {
-  const clean = withoutContactDetails(withoutSecrets(String(text ?? '')));
+  const raw = String(text ?? '');
+  let clean = withoutContact(withoutSecrets(raw));
+  const plain = decoded(raw);
+  if (plain !== raw) {
+    const scrubbedPlain = withoutContact(withoutSecrets(plain));
+    if (scrubbedPlain !== plain) clean = scrubbedPlain;
+  }
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
 

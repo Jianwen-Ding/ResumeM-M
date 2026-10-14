@@ -370,7 +370,15 @@ export class ErrorLog {
     const url = short(input.page?.url, 2000);
     const title = short(input.page?.title);
     const errors = events.filter((e) => e.level === 'error').length;
-    const rest = said.split(/\r?\n/).slice(1).join('\n').trim();
+    /*
+     * The heading is the first line, cut to fit; what is under it is the rest.
+     * A first line longer than the heading is all of it in the body, or the
+     * part past the cut was nowhere in the entry — a long one-line description
+     * kept its first 199 characters and lost the others.
+     */
+    const heading = firstLine(said, 200);
+    const [first = '', ...after] = said.trim().split(/\r?\n/);
+    const rest = first.trim().length > 200 ? said.trim() : after.join('\n').trim();
     const lines = [
       '---',
       `time: ${at.toISOString()}`,
@@ -380,7 +388,7 @@ export class ErrorLog {
       `events: ${events.length}`,
       '---',
       '',
-      `# ${firstLine(said, 200)}`,
+      `# ${heading}`,
       '',
       ...(rest ? [rest, ''] : []),
       `- **Logged:** ${local} · ${at.toISOString()} (UTC)`,
@@ -444,8 +452,8 @@ export class ErrorLog {
   }
 
   /** The newest entries, as the editor's list and `rmm log status` show them. */
-  async list(limit = 50): Promise<EntrySummary[]> {
-    const folders = this.entryFolders().slice(0, limit);
+  async list(limit = 50, offset = 0): Promise<EntrySummary[]> {
+    const folders = this.entryFolders().slice(offset, offset + limit);
     if (folders.length === 0) return [];
     const unpushed = (await this.repo.isRepo()) ? await this.unpushed() : 'all';
     return folders.map((id) => {
@@ -462,6 +470,11 @@ export class ErrorLog {
         pushed: unpushed !== 'all' && !unpushed.has(id),
       };
     });
+  }
+
+  /** How many entries there are, pushed or not. */
+  count(): number {
+    return this.entryFolders().length;
   }
 
   /** Where it is, whether it is a repository yet, its remote and when it was last pushed. Changes nothing. */

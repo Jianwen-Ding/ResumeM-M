@@ -2488,3 +2488,12 @@ header.log-mark-only .error-log-chip-label {
 .error-log-when { color: var(--muted); white-space: nowrap; }
 .error-log-source { color: var(--muted); font-weight: 500; }
 .error-log-what { overflow-wrap: anywhere; }
+/* "Recent entries", and how many of how many are shown. */
+.error-log-recent { display: flex; align-items: baseline; gap: 8px; }
+.error-log-count { font-size: 11px; }
+.error-log-more { margin-top: 8px; }
+/* Said beside the description as it is typed; not a refusal, so amber. */
+.error-log-contact { margin: 4px 0 0; }
+.error-log-contact[hidden] { display: none; }
+/* A paired extension: its name, with the short id after it. The full origin is the title. */
+.ext-id { font-family: var(--mono); }

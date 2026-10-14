@@ -10816,6 +10816,19 @@ const pairingAsk = async (path, method = 'GET') => {
   return body;
 };
 
+/**
+ * A paired origin, as a person reads it: "JobHelper" and the start of its id
+ * for an extension's origin, which is otherwise thirty-two letters nobody
+ * recognises; anything else as it is. The whole origin is the title.
+ */
+const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/([a-p]{32})\/?$/;
+function originLabel(origin, className) {
+  const id = EXTENSION_ORIGIN_RE.exec(String(origin))?.[1];
+  return el('span', { className, title: String(origin) }, id
+    ? ['JobHelper ', el('small', { className: 'faint ext-id', textContent: `${id.slice(0, 6)}…` })]
+    : [String(origin)]);
+}
+
 /** Make a fresh code, and watch for it to be used. See `pairingWatch`. */
 async function makePairingCode() {
   const made = await pairingAsk('/code', 'POST');
@@ -10884,8 +10897,7 @@ async function loadPairing() {
         className: 'pair-done',
         id: 'pair-done',
         'aria-live': 'polite',
-        textContent: `Paired with ${pairingWatch.done}. JobHelper can reach the save now; this tab can be closed.`,
-      }));
+      }, ['Paired with ', originLabel(pairingWatch.done), '. JobHelper can reach the save now; this tab can be closed.']));
     }
     children.push(el('div', { className: 'toolbar' }, [
       el('button', {
@@ -10898,7 +10910,7 @@ async function loadPairing() {
       children.push(el('div', { className: 'lbl', textContent: 'Paired extensions' }));
       children.push(el('div', { className: 'card-list', id: 'pair-list' }, state.paired.map((p) =>
         el('div', { className: 'card pair-row' }, [
-          el('div', { className: 'mono-path', textContent: p.origin }),
+          originLabel(p.origin, 'pair-origin'),
           el('div', { className: 'hint', textContent: `Paired ${new Date(p.pairedAt).toLocaleString()}` }),
           el('button', {
             className: 'tiny',

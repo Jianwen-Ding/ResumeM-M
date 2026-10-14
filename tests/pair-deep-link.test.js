@@ -100,11 +100,29 @@ describe('arriving from JobHelper to pair it', () => {
       code: null,
       paired: [{ origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop', id: 'abcdefghijklmnopabcdefghijklmnop', pairedAt: new Date().toISOString() }],
     };
+    /*
+     * Round 26: by name. "Paired with chrome-extension://kfdjd…" was thirty-two
+     * letters nobody recognises; the origin is still the title, and the start
+     * of the id is there to tell two apart.
+     */
     await vi.waitFor(
-      () => expect(document.querySelector('#pair-done')?.textContent).toMatch(/Paired with chrome-extension:\/\/abcdefghijklmnop/),
+      () => expect(document.querySelector('#pair-done')?.textContent).toMatch(/^Paired with JobHelper abcdef…\. JobHelper can reach/),
       { timeout: 5000 },
     );
+    const named = document.querySelector('#pair-done span[title]');
+    expect(named.title).toBe('chrome-extension://abcdefghijklmnopabcdefghijklmnop');
+    expect(named.querySelector('small.ext-id').textContent).toBe('abcdef…');
+    const listed = document.querySelector('#pair-list .pair-origin');
+    expect(listed.textContent).toBe('JobHelper abcdef…');
+    expect(listed.title).toBe('chrome-extension://abcdefghijklmnopabcdefghijklmnop');
+    expect(document.querySelector('#pair-list').textContent).not.toContain('chrome-extension://');
     expect(document.querySelector('#pair-code')).toBeNull();
     expect(document.querySelector('#pair-waiting')).toBeNull();
+  });
+
+  it('shows an origin that is not an extension as it is', async () => {
+    pairings = { code: null, paired: [{ origin: 'http://localhost:9999', id: 'x', pairedAt: new Date().toISOString() }] };
+    await boot('#save/pair');
+    await vi.waitFor(() => expect(document.querySelector('#pair-list .pair-origin')?.textContent).toBe('http://localhost:9999'));
   });
 });

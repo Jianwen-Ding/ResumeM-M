@@ -1164,8 +1164,17 @@ export function alreadySent(apps: Application[], company: string, role: string, 
  * answers for the question; one that began before the send does not (iCIMS's
  * steps sit beside the sent row under its names, and hid it).
  */
+/*
+ * Nor a row the app filed by itself that nobody has touched (`openedUnasked`).
+ * The first visit to the posting opened a workspace and filed it at
+ * `interested`; on the next visit that row was this posting's by its address,
+ * a strong match, and it answered the question nobody had answered — the
+ * warning never came back and the automatic stage went through, rebuilding
+ * files for what may be a job already applied for.
+ */
 export function maybeSent(apps: Application[], company: string, role: string, url?: string): Application | undefined {
-  if (alreadySent(apps, company, role, url) || findApplicationMatch(apps, company, role, url)?.strength === 'strong') return undefined;
+  const asked = apps.filter((a) => !openedUnasked(a));
+  if (alreadySent(apps, company, role, url) || findApplicationMatch(asked, company, role, url)?.strength === 'strong') return undefined;
   const byName = sameNamesAs(company, role);
   const named = apps.filter((a) => byName(a) && !tooOldForAWeakMatch(a));
   const sent = named
@@ -1175,6 +1184,25 @@ export function maybeSent(apps: Application[], company: string, role: string, ur
   const went = Date.parse(sentAt(sent) ?? '');
   const answered = named.some((a) => a.status === 'applying' && Number.isFinite(went) && beganAt(a) > went);
   return answered ? undefined : sent;
+}
+
+/** What the tracker says about a row it filed itself on opening a workspace, with nobody asking. */
+export const OPENED_UNASKED_NOTE = 'Workspace opened, nothing sent yet';
+
+/**
+ * A row the app filed by itself — the workspace opened automatically, at
+ * `interested` — that the person has done nothing with since: no stage, no
+ * status, no "It's a different job". It holds a place; it is not an answer to
+ * anything, and in particular not to whether this posting is a job already
+ * sent (`maybeSent`).
+ */
+export function openedUnasked(app: Application): boolean {
+  const history = app.history ?? [];
+  return (
+    app.status === 'interested' &&
+    history.length > 0 &&
+    history.every((h) => h.status === 'interested' && h.note === OPENED_UNASKED_NOTE)
+  );
 }
 
 /** When a row went out, as `sendOf` reads it. */
@@ -1388,8 +1416,14 @@ export function refusedAsSent(
 ): { application: Application; maybe: boolean } | null {
   if (req.status !== 'applying' || req.evenIfSent) return null;
   const apps = store.load().applications;
-  // Only a row this job is surely: see `forWriting`.
-  const app = applicationToWrite(apps, req.company, req.role, req.url);
+  // Only a row this job is surely: see `forWriting`. Never one the app filed
+  // by itself and nobody has touched, which says nothing (`openedUnasked`).
+  const app = applicationToWrite(
+    apps.filter((a) => !openedUnasked(a)),
+    req.company,
+    req.role,
+    req.url,
+  );
   if (app && sentAlready(app)) return { application: app, maybe: false };
   // Or a sent row it may be, which is asked about: see `maybeSent`.
   const maybe = maybeSent(apps, req.company, req.role, req.url);

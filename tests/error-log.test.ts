@@ -133,6 +133,25 @@ describe('an entry', () => {
     expect(listed).toMatchObject({ id: entry.id, source: 'editor', description: 'Save button did nothing', screenshots: 2, events: 1, pushed: false });
   });
 
+  // Round 26: a one-line description past the heading's length kept 199 characters of it.
+  it('keeps the whole of a long one-line description, and the lines after a long first line', async () => {
+    const log = new ErrorLog(tempDir('rmm-el-'));
+    const long = `The preview went blank ${'after I changed the template and pressed save again, '.repeat(6)}and the END OF IT is here.`;
+    expect(long.length).toBeGreaterThan(300);
+    const one = await log.add({ description: long, source: 'editor' });
+    const md = fs.readFileSync(path.join(log.root, one.entry.id, 'entry.md'), 'utf8');
+    expect(md).toMatch(/^# The preview went blank .{150,}…$/m);
+    expect(md).toContain(long);
+    const two = await log.add({ description: `${long}\nAnd a second line.`, source: 'editor' });
+    const md2 = fs.readFileSync(path.join(log.root, two.entry.id, 'entry.md'), 'utf8');
+    expect(md2).toContain(`${long}\nAnd a second line.`);
+    // A short first line is the heading and is not said twice.
+    const three = await log.add({ description: 'Short\nMore here.', source: 'editor' });
+    const md3 = fs.readFileSync(path.join(log.root, three.entry.id, 'entry.md'), 'utf8');
+    expect(md3.match(/Short/g)).toHaveLength(1);
+    expect(md3).toMatch(/^More here\.$/m);
+  });
+
   it('two in the same second with the same words are two folders', async () => {
     const log = new ErrorLog(tempDir('rmm-el-'));
     const when = new Date();
@@ -244,6 +263,39 @@ describe('what never reaches logs.jsonl', () => {
       'PUT /api/resumes/intern → 409: written against another save (812 ms)',
     );
     expect(withoutSecrets(`Authorization: Basic ${QUERY_TOKEN}`)).toBe('Authorization: Basic [redacted]');
+  });
+});
+
+/*
+ * Round 26: an email escaped into an address, and a phone joined into a
+ * path, went into the log whole — the rules read the line as it was written.
+ */
+describe('an email or a phone written into a path', () => {
+  it('is taken out when escaped, and when joined to its neighbours by "-", "_" or "/"', () => {
+    const line = 'POST /api/applications/jane.doe%40example.com-617-555-0134/status';
+    const scrubbed = scrubText(line);
+    expect(scrubbed).not.toMatch(/jane|doe|example\.com|617|555|0134/);
+    expect(scrubbed).toContain('[email address]');
+    expect(scrubbed).toMatch(/^POST \/api\/applications\/.*\/status$/);
+    expect(scrubText('/api/x/jane%2Edoe%40example%2Ecom')).toBe('/api/x/[email address]');
+    // Escaped twice.
+    expect(scrubText('GET /a/jane.doe%2540example.com')).toBe('GET /a/[email address]');
+    expect(scrubText('POST /api/applications/jane-617-555-0134/status')).toBe('POST /api/applications/jane-[phone number]/status');
+    expect(scrubText('id x-617-555-0134-y')).toBe('id x-[phone number]-y');
+    expect(scrubText('a_617.555.0134_b/c')).toBe('a_[phone number]_b/c');
+    expect(scrubText('/p/617-555-0134/q')).toBe('/p/[phone number]/q');
+  });
+
+  it('leaves an escaped line with nothing in it as it was, and an id that is only digits', () => {
+    for (const ok of [
+      'GET /search?q=software%20engineer&page=2',
+      'GET /x/%E0%A4%A broken escape',
+      'https://www.linkedin.com/jobs/view/4462047454/',
+      'job-6175550134',
+      '/api/v2/1234567890',
+    ]) {
+      expect(scrubText(ok), ok).toBe(ok);
+    }
   });
 });
 
@@ -375,6 +427,38 @@ describe('the server', () => {
     } finally {
       await server.close();
     }
+  });
+
+  // Round 26: the editor showed ten with nothing to say there were more.
+  it('lists a page of entries from an offset, and says how many there are in all', async () => {
+    const dir = tempDir('rmm-el-');
+    const log = new ErrorLog(dir);
+    for (const n of [1, 2, 3]) await log.add({ description: `Entry ${n}`, source: 'CLI', at: new Date(Date.now() - (4 - n) * 1000) });
+    const server = await aServer(dir);
+    try {
+      type Listed = { entries: { description: string }[]; total: number; offset: number };
+      const first = (await (await fetch(`${server.base}/api/error-log?limit=2`)).json()) as Listed;
+      expect(first.entries.map((e) => e.description)).toEqual(['Entry 3', 'Entry 2']);
+      expect(first).toMatchObject({ total: 3, offset: 0 });
+      const next = (await (await fetch(`${server.base}/api/error-log?limit=20&offset=2`)).json()) as Listed;
+      expect(next.entries.map((e) => e.description)).toEqual(['Entry 1']);
+      expect(next).toMatchObject({ total: 3, offset: 2 });
+    } finally {
+      await server.close();
+    }
+  });
+
+  /*
+   * Round 26: the description is the person's own, and is kept as written —
+   * an email in it stays — but a token in it is still taken out. What the
+   * dialogs say (`SCRUB_HINT`) is exactly that.
+   */
+  it('keeps an email in the description as written, and takes a token out of it', async () => {
+    const dir = tempDir('rmm-el-');
+    const { entry } = await new ErrorLog(dir).add({ description: `Mail to ${EMAIL} failed\nThe token was ${GITHUB_TOKEN}`, source: 'editor' });
+    const md = fs.readFileSync(path.join(dir, entry.id, 'entry.md'), 'utf8');
+    expect(md).toContain(`# Mail to ${EMAIL} failed`);
+    expect(md).not.toContain(GITHUB_TOKEN);
   });
 
   it('answers an unpaired extension as every other route does', async () => {
